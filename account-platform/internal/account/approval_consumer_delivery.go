@@ -32,6 +32,25 @@ type ApprovalAuthorizationBinding struct {
 	ExecutorIdentity       string    `json:"executor_identity"`
 }
 
+// ApprovalAuthorizationRoute authenticates a shared-subject message and names
+// its single registry-owned target. It is read-only and does not confer the
+// target-specific Observe/Begin/CAS authority represented by a binding.
+type ApprovalAuthorizationRoute struct {
+	EventID                uuid.UUID `json:"event_id"`
+	ApprovalRequestID      uuid.UUID `json:"approval_request_id"`
+	ApprovedRequestVersion int64     `json:"approved_request_version"`
+	ApprovalEpoch          int64     `json:"approval_epoch"`
+	SerializationVersion   string    `json:"serialization_version"`
+	Provenance             string    `json:"provenance"`
+	EventDigest            string    `json:"event_digest"`
+	DigestKind             string    `json:"digest_kind"`
+	CommandType            string    `json:"command_type"`
+	PolicyVersion          int64     `json:"policy_version"`
+	ExecutorIdentity       string    `json:"executor_identity"`
+	CanonicalWorkload      string    `json:"canonical_workload"`
+	CanonicalDurable       string    `json:"canonical_durable"`
+}
+
 type ApprovalDeliveryObservation struct {
 	Binding        ApprovalAuthorizationBinding `json:"binding"`
 	Stream         string                       `json:"stream"`
@@ -81,6 +100,27 @@ FROM public.resolve_approval_authorization_binding($1,$2,$3)`, binding.EventID, 
 		return ApprovalAuthorizationBinding{}, ErrApprovalConsumerBindingInvalid
 	}
 	return binding, nil
+}
+
+func (r *PostgresRepository) ResolveApprovalAuthorizationRoute(ctx context.Context, eventID uuid.UUID, callerWorkload string) (ApprovalAuthorizationRoute, error) {
+	route := ApprovalAuthorizationRoute{EventID: eventID}
+	if eventID == uuid.Nil || callerWorkload != "billing-command-executor" && callerWorkload != "token-command-executor" {
+		return ApprovalAuthorizationRoute{}, ErrApprovalConsumerBindingInvalid
+	}
+	err := r.pool.QueryRow(ctx, `SELECT approval_request_id,approved_request_version,approval_epoch,serialization_version,
+provenance,event_digest,digest_kind,command_type,policy_version,executor_identity,canonical_workload,canonical_durable
+FROM public.resolve_approval_authorization_route($1,$2)`, eventID, callerWorkload).Scan(
+		&route.ApprovalRequestID, &route.ApprovedRequestVersion, &route.ApprovalEpoch, &route.SerializationVersion,
+		&route.Provenance, &route.EventDigest, &route.DigestKind, &route.CommandType, &route.PolicyVersion,
+		&route.ExecutorIdentity, &route.CanonicalWorkload, &route.CanonicalDurable,
+	)
+	if err != nil {
+		return ApprovalAuthorizationRoute{}, approvalConsumerError(ctx, err)
+	}
+	if !validApprovalAuthorizationRoute(route) {
+		return ApprovalAuthorizationRoute{}, ErrApprovalConsumerBindingInvalid
+	}
+	return route, nil
 }
 
 func (r *PostgresRepository) ObserveApprovalAuthorizationDelivery(ctx context.Context, observation ApprovalDeliveryObservation) (ApprovalDeliveryState, error) {
@@ -185,6 +225,20 @@ func validApprovalAuthorizationBinding(binding ApprovalAuthorizationBinding) boo
 		return binding.Provenance == "FROZEN_AT_APPROVAL" || binding.Provenance == "RECONSTRUCTED_FOR_DELIVERY"
 	}
 	return binding.DigestKind == "LEGACY_SEMANTIC" && binding.SerializationVersion == "LEGACY_TYPED_V1" && binding.Provenance == "RECONSTRUCTED_AFTER_PUBLISH"
+}
+
+func validApprovalAuthorizationRoute(route ApprovalAuthorizationRoute) bool {
+	binding := ApprovalAuthorizationBinding{EventID: route.EventID, Durable: route.CanonicalDurable, Workload: route.CanonicalWorkload,
+		ApprovalRequestID: route.ApprovalRequestID, ApprovedRequestVersion: route.ApprovedRequestVersion, ApprovalEpoch: route.ApprovalEpoch,
+		SerializationVersion: route.SerializationVersion, Provenance: route.Provenance, EventDigest: route.EventDigest,
+		DigestKind: route.DigestKind, CommandType: route.CommandType, PolicyVersion: route.PolicyVersion, ExecutorIdentity: route.ExecutorIdentity}
+	if !validApprovalAuthorizationBinding(binding) {
+		return false
+	}
+	descriptor, ok := approvalconsumer.LookupDurable(route.CanonicalDurable)
+	return ok && descriptor.Workload == route.CanonicalWorkload && approvalconsumer.MatchRoute(descriptor, route.CommandType, route.PolicyVersion, route.ExecutorIdentity) &&
+		(route.SerializationVersion == "LEGACY_TYPED_V1" && (route.CanonicalWorkload == approvalconsumer.TokenWorkload || route.CanonicalDurable == "billing-command-executor-v1") ||
+			route.SerializationVersion == "APPROVAL_RFC8785_DECIMAL_V1" && (route.CanonicalWorkload == approvalconsumer.TokenWorkload || route.CanonicalDurable != "billing-command-executor-v1"))
 }
 
 func boundedApprovalConsumerString(value string, maximum int) bool {

@@ -63,6 +63,14 @@ type tokenApprovalLease struct {
 	ExecutionIdempotencyKey       string          `json:"execution_idempotency_key"`
 	ExecutorIdentity              string          `json:"executor_identity"`
 	Status                        string          `json:"status"`
+	AuthorizationEventID          *uuid.UUID      `json:"authorization_event_id,omitempty"`
+	AuthorizationDurable          string          `json:"authorization_durable,omitempty"`
+	AuthorizationApprovedVersion  int64           `json:"authorization_approved_request_version,omitempty"`
+	AuthorizationEventDigest      string          `json:"authorization_event_digest,omitempty"`
+	AuthorizationDigestKind       string          `json:"authorization_digest_kind,omitempty"`
+	AuthorizationSerialization    string          `json:"authorization_serialization_version,omitempty"`
+	AuthorizationProvenance       string          `json:"authorization_provenance,omitempty"`
+	AuthorizationApprovalEpoch    int64           `json:"authorization_approval_epoch,omitempty"`
 }
 
 // TokenApprovalConsumer is an HTTP-only executor. It owns no Token database
@@ -189,7 +197,7 @@ func (c *TokenApprovalConsumer) Handle(ctx context.Context, event events.Event) 
 }
 
 func validTokenApprovalLease(event tokenAuthorizedEvent, lease tokenApprovalLease) bool {
-	return lease.ApprovalRequestID == event.ApprovalRequestID && lease.CommandType == event.CommandType && lease.PolicyVersion == event.PolicyVersion && lease.CommandFingerprint == event.CommandFingerprint && lease.ExecutorIdentity == "token-command-executor" && lease.TargetResourceType == event.TargetResourceType && lease.TargetResourceID == event.TargetResourceID && lease.RequesterUserID != uuid.Nil && lease.ApproverUserID != uuid.Nil && lease.RequesterUserID != lease.ApproverUserID && lease.RequesterAuthorizationVersion > 0 && strings.TrimSpace(lease.RequesterReason) != "" && (lease.Status == "EXECUTING" || lease.Status == "EXECUTED") && lease.ExecutionIdempotencyKey == fmt.Sprintf("approval:%s:%s:%s", event.ApprovalRequestID, event.CommandType, event.CommandFingerprint) && equalTokenApprovalJSONObjects(lease.NormalizedCommand, event.NormalizedCommand) && equalTokenApprovalJSONObjects(lease.CriticalResourceVersions, event.CriticalResourceVersions) && equalTokenApprovalJSONObjects(lease.FinancialSnapshot, event.FinancialSnapshot)
+	return lease.ApprovalRequestID == event.ApprovalRequestID && lease.CommandType == event.CommandType && lease.PolicyVersion == event.PolicyVersion && lease.CommandFingerprint == event.CommandFingerprint && lease.ExecutorIdentity == "token-command-executor" && lease.TargetResourceType == event.TargetResourceType && lease.TargetResourceID == event.TargetResourceID && lease.RequesterUserID != uuid.Nil && lease.ApproverUserID != uuid.Nil && lease.RequesterUserID != lease.ApproverUserID && lease.RequesterAuthorizationVersion > 0 && strings.TrimSpace(lease.RequesterReason) != "" && (lease.Status == "EXECUTING" || lease.Status == "EXECUTED" || lease.Status == "EXECUTION_FAILED") && lease.ExecutionIdempotencyKey == fmt.Sprintf("approval:%s:%s:%s", event.ApprovalRequestID, event.CommandType, event.CommandFingerprint) && equalTokenApprovalJSONObjects(lease.NormalizedCommand, event.NormalizedCommand) && equalTokenApprovalJSONObjects(lease.CriticalResourceVersions, event.CriticalResourceVersions) && equalTokenApprovalJSONObjects(lease.FinancialSnapshot, event.FinancialSnapshot)
 }
 
 // Frozen execution facts contain int64 versions. Converting JSON numbers to

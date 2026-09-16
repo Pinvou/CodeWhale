@@ -75,7 +75,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 - **05**：按 §8/§9.1.1 交付独立窄编码包，重复键、整数精度、Unicode/转义、null 与封闭结构拒绝、大小边界及跨实现 golden；LEGACY_TYPED_V1 精确使用 Event.Marshal，历史重构 provenance 不证明原 broker bytes。
 - **06**：epoch/sidecar/additive migrations、原事件不变、旧 writer trigger FOR SHARE、完整事务重试及最终验证；覆盖迁移前 DLQ、并发写、maintenance version3 兼容、错误 epoch、不可重构数据失败关闭，不修改已发布迁移。
 - **07**：仅 Account 授权 subject 的 Relay control 接线及 SAFE_DRAIN；同一原行自动至少一次恢复、永久禁止人工 replay（Portal/HTTP/workload/DB），其他事件合同不变。PubAck-close 崩溃及超过去重窗的重复投递不产生重复业务效果；验证 FENCE/Claim 锁竞争和旧权限撤销。
-- **08**：三 Billing/三 Token 唯一 durable 映射、MaxDeliver=-1、应用层持久最多 12 次领域尝试、DLQ PubAck→ACK_PENDING→DoubleAck，崩溃只恢复确认；receipt/权限/资源 manifest 一致。真实隔离 NATS 和 PG 验证；生产 Q 与资源迁移由38～40执行。
+- **08**：三 Billing/三 Token 唯一 durable 映射且均固定 MaxDeliver=-1；仅 Billing 使用应用层持久最多 12 次领域尝试与 DLQ PubAck→ACK_PENDING→DoubleAck，Token 保持 result-first、同一消息无限显式 NAK 且不进入 Billing 尝试/DLQ，崩溃后都只按各自权威结果恢复。receipt/权限/资源 manifest 一致，真实隔离 NATS 和 PG 验证；生产 Q 与资源迁移由38～40执行。
 - **09**：按 §8.6/§8.7/§9 实现 Begin 同库线性化、5分钟 deadline、历史状态清零、无效果才失效、合法 DLQ exclusion、未知效果阻断及 SAFE 恢复。不得另造授权事件、把消息 receipt 当业务效果或让旧 epoch 越过 gate。只实现受控工具和验证，不运行生产切换。
 
 ### GSA-10～20：服务端读写合同与界面

@@ -10,7 +10,7 @@ import (
 )
 
 type approvalEventBroker interface {
-	ConsumeUntilResolved(context.Context, string, string, events.ConsumerHandler) (func(), error)
+	ConsumeAuthorization(context.Context, string, events.AuthorizationRawHandler) (func(), error)
 }
 
 // RunTokenApprovalConsumers registers exactly the three approved descriptors
@@ -20,24 +20,27 @@ func RunTokenApprovalConsumers(ctx context.Context, broker approvalEventBroker, 
 	if broker == nil || reader == nil {
 		return errors.New("approval consumer supervisor is not configured")
 	}
-	commands := []string{"TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE"}
-	consumers := make([]*TokenApprovalConsumer, 0, len(commands))
-	for _, command := range commands {
-		consumer, err := NewTokenApprovalConsumer(command, tokenURL, accountURL, serviceToken, reader)
-		if err != nil {
-			return err
-		}
-		consumers = append(consumers, consumer)
+	lifecycle, err := NewTokenAuthorizationCommandConsumer("TOKEN_MODEL_LIFECYCLE_CHANGE", "token-model-lifecycle-executor-v1", tokenURL, accountURL, serviceToken, reader)
+	if err != nil {
+		return err
+	}
+	catalogRollback, err := NewTokenAuthorizationCommandConsumer("TOKEN_MODEL_CATALOG_ROLLBACK", "token-catalog-rollback-executor-v1", tokenURL, accountURL, serviceToken, reader)
+	if err != nil {
+		return err
+	}
+	credentialRevoke, err := NewTokenAuthorizationCommandConsumer("TOKEN_CREDENTIAL_REVOKE", "token-credential-revoke-executor-v1", tokenURL, accountURL, serviceToken, reader)
+	if err != nil {
+		return err
 	}
 	registrations := []func(context.Context) (func(), error){
 		func(ctx context.Context) (func(), error) {
-			return broker.ConsumeUntilResolved(ctx, "token-model-lifecycle-executor-v1", "account.approval-command.authorized.v1", consumers[0].Handle)
+			return broker.ConsumeAuthorization(ctx, "token-model-lifecycle-executor-v1", lifecycle.Handle)
 		},
 		func(ctx context.Context) (func(), error) {
-			return broker.ConsumeUntilResolved(ctx, "token-catalog-rollback-executor-v1", "account.approval-command.authorized.v1", consumers[1].Handle)
+			return broker.ConsumeAuthorization(ctx, "token-catalog-rollback-executor-v1", catalogRollback.Handle)
 		},
 		func(ctx context.Context) (func(), error) {
-			return broker.ConsumeUntilResolved(ctx, "token-credential-revoke-executor-v1", "account.approval-command.authorized.v1", consumers[2].Handle)
+			return broker.ConsumeAuthorization(ctx, "token-credential-revoke-executor-v1", credentialRevoke.Handle)
 		},
 	}
 	var generation *tokenGovernanceEpoch

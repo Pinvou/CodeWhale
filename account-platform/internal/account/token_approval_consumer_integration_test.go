@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -34,6 +35,33 @@ type consumerChainActivation struct {
 	mu    sync.Mutex
 	state string
 	epoch int64
+}
+
+type consumerChainRawDelivery struct {
+	body []byte
+	id   string
+	seq  uint64
+	ack  int
+	nak  int
+}
+
+func (delivery *consumerChainRawDelivery) DeliveryBytes() []byte {
+	return append([]byte(nil), delivery.body...)
+}
+func (delivery *consumerChainRawDelivery) MessageID() string { return delivery.id }
+func (delivery *consumerChainRawDelivery) Metadata() events.AuthorizationDeliveryMetadata {
+	return events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: delivery.seq, NumDelivered: 1}
+}
+func (delivery *consumerChainRawDelivery) DoubleAck(context.Context) error {
+	delivery.ack++
+	return nil
+}
+func (delivery *consumerChainRawDelivery) NakWithDelay(time.Duration) error {
+	delivery.nak++
+	return nil
+}
+func (delivery *consumerChainRawDelivery) PublishDeadLetter(context.Context) (events.AuthorizationDLQPubAck, error) {
+	return events.AuthorizationDLQPubAck{}, fmt.Errorf("Token authorization delivery has no DLQ capability")
 }
 
 func (a *consumerChainActivation) set(state string, epoch int64) {
@@ -74,8 +102,7 @@ func TestTokenApprovalConsumersPostgresIntegration(t *testing.T) {
 			// Current approval producers require the dedicated authorization
 			// writer. Use the complete real Account database chain, not the old
 			// random-schema fixture which predates migration 51.
-			accountDatabase, _ := newApprovalRelayIntegrationDatabase(t)
-			accountRepository := &PostgresRepository{pool: accountDatabase.runtimePool, approvalWriterPool: accountDatabase.writerPool, now: func() time.Time { return time.Now().UTC() }}
+			accountDatabase, accountRepository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 			tokenRepository, connection := newApprovalSnapshotTokenRepository(t, ctx, tokenURL)
 			activation := &consumerChainActivation{state: "ACTIVE", epoch: 1}
 			accountRepository.WithTokenGovernanceActivation(activation)
@@ -100,7 +127,7 @@ func TestTokenApprovalConsumersPostgresIntegration(t *testing.T) {
 			}
 			accountRepository.WithApprovalSnapshotSource(source)
 			_, executorJWT, _ := newApprovalExecutorTokenHandler(t, tokenApp, requester.ID)
-			rules, _ := json.Marshal([]map[string]any{{"subject": requester.ID.String(), "service": "token-command-executor", "permissions": []string{"internal.authorization.check", "internal.approval-execution.begin", "internal.approval-execution.complete", "internal.token.model-lifecycle.execute", "internal.token.catalog-rollback.execute", "internal.token.credential-revoke.execute"}}})
+			rules, _ := json.Marshal([]map[string]any{{"subject": requester.ID.String(), "service": "token-command-executor", "permissions": []string{"internal.authorization.check", "internal.approval-authorization.consume", "internal.approval-execution.begin", "internal.approval-execution.complete", "internal.token.model-lifecycle.execute", "internal.token.catalog-rollback.execute", "internal.token.credential-revoke.execute"}}})
 			t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(rules))
 			accountApp := NewService(accountRepository, nil)
 			verify := func(_ context.Context, raw string) (identity.Principal, error) {
@@ -173,29 +200,41 @@ func TestTokenApprovalConsumersPostgresIntegration(t *testing.T) {
 				tokenHandler.ServeHTTP(w, r)
 			}))
 			defer tokenServer.Close()
-			consumer, err := tokenservice.NewTokenApprovalConsumer(commandType, tokenServer.URL, accountServer.URL, executorJWT, activation)
+			var descriptor approvalconsumer.Descriptor
+			for _, candidate := range approvalconsumer.TokenCommands() {
+				if candidate.CommandType == commandType {
+					descriptor = candidate
+					break
+				}
+			}
+			consumer, err := tokenservice.NewTokenAuthorizationCommandConsumer(commandType, descriptor.Durable, tokenServer.URL, accountServer.URL, executorJWT, activation)
 			if err != nil {
 				t.Fatal(err)
 			}
 			draft := seedConsumerChainDraft(t, ctx, connection, requester.ID, modelID, commandType)
 			approved, event := createConsumerChainApproval(t, ctx, accountRepository, accountServer.URL, draft)
+			raw := publishConsumerChainAuthorization(t, ctx, relay, event)
+			delivery := &consumerChainRawDelivery{body: raw, id: event.ID.String(), seq: 1}
 			// Deliberately discard the committed domain response. The production
 			// consumer must GET that original result, complete Account and ACK.
 			lock.Lock()
 			mode = "lose_domain"
 			lock.Unlock()
-			if err = consumer.Handle(ctx, event); err != nil {
+			consumer.Handle(ctx, delivery)
+			if delivery.ack != 1 || delivery.nak != 0 {
 				lock.Lock()
 				stages := append([]string(nil), trace...)
 				counts := fmt.Sprintf("begin=%d domain=%d complete=%d", beginPosts, executePosts, completePosts)
 				checks := consumerLeaseBindingChecks(event, observedLease)
 				lock.Unlock()
-				t.Fatalf("first delivery: %v; %s; lease_checks=%v; HTTP stages=%v", err, counts, checks, stages)
+				t.Fatalf("first delivery ack=%d nak=%d; %s; lease_checks=%v; HTTP stages=%v", delivery.ack, delivery.nak, counts, checks, stages)
 			}
 			assertConsumerChainCompleted(t, ctx, accountRepository, connection, approved, 1)
 			before := consumerChainEvidence(t, ctx, accountRepository, connection, approved.ID)
-			if err = consumer.Handle(ctx, event); err != nil {
-				t.Fatalf("duplicate delivery: %v", err)
+			duplicate := &consumerChainRawDelivery{body: raw, id: event.ID.String(), seq: 2}
+			consumer.Handle(ctx, duplicate)
+			if duplicate.ack != 1 || duplicate.nak != 0 {
+				t.Fatalf("duplicate delivery ack=%d nak=%d", duplicate.ack, duplicate.nak)
 			}
 			if after := consumerChainEvidence(t, ctx, accountRepository, connection, approved.ID); before != after {
 				t.Fatal("duplicate changed durable approval/domain/audit/outbox facts")
@@ -213,16 +252,17 @@ func TestTokenApprovalConsumersPostgresIntegration(t *testing.T) {
 				activation.set("ACTIVE", 1)
 				failedDraft := seedConsumerChainDraft(t, ctx, connection, requester.ID, modelID, commandType)
 				pending, pendingEvent := createConsumerChainApproval(t, ctx, accountRepository, accountServer.URL, failedDraft)
+				pendingRaw := publishConsumerChainAuthorization(t, ctx, relay, pendingEvent)
+				pendingDelivery := &consumerChainRawDelivery{body: pendingRaw, id: pendingEvent.ID.String(), seq: 3}
 				beforeFailure := consumerChainDomainEvidence(t, ctx, connection)
 				lock.Lock()
 				mode = failure
 				beforePosts := executePosts
 				lock.Unlock()
-				if err = consumer.Handle(ctx, pendingEvent); err == nil {
-					t.Fatalf("%s unexpectedly acknowledged", failure)
-				}
-				if err = consumer.Handle(ctx, pendingEvent); err == nil {
-					t.Fatalf("%s repeat unexpectedly acknowledged", failure)
+				consumer.Handle(ctx, pendingDelivery)
+				consumer.Handle(ctx, pendingDelivery)
+				if pendingDelivery.ack != 0 || pendingDelivery.nak != 2 {
+					t.Fatalf("%s ack=%d nak=%d", failure, pendingDelivery.ack, pendingDelivery.nak)
 				}
 				var commands, executions int
 				var status string
@@ -381,6 +421,24 @@ func createConsumerChainApproval(t *testing.T, ctx context.Context, repo *Postgr
 		t.Fatal(err)
 	}
 	return item, event
+}
+
+func publishConsumerChainAuthorization(t *testing.T, ctx context.Context, relay *ApprovalRelayStore, event events.Event) []byte {
+	t.Helper()
+	worker := "token-consumer-chain-" + uuid.NewString()
+	claims, err := relay.ClaimFrozen(ctx, worker, 1, 30*time.Second)
+	if err != nil || len(claims) != 1 || claims[0].EventID != event.ID {
+		t.Fatalf("authorization claim event=%s claims=%+v err=%v", event.ID, claims, err)
+	}
+	var body []byte
+	disposition, err := relay.ProcessFrozen(ctx, worker, claims[0], 12, time.Now().UTC(), func(_ context.Context, message events.FrozenMessage) events.FrozenPublishResult {
+		body = append([]byte(nil), message.Body...)
+		return events.FrozenPublishResult{Disposition: events.FrozenPublished}
+	})
+	if err != nil || disposition != events.FrozenPublished || len(body) == 0 {
+		t.Fatalf("authorization publish event=%s disposition=%s body=%d err=%v", event.ID, disposition, len(body), err)
+	}
+	return body
 }
 
 func seedConsumerChainDraft(t *testing.T, ctx context.Context, c *pgx.Conn, actor, model uuid.UUID, command string) ApprovalDraft {

@@ -17,12 +17,45 @@ import (
 
 type authorizationAccountStub struct {
 	binding                                      ApprovalAuthorizationBinding
+	route                                        *ApprovalAuthorizationRoute
 	state                                        ApprovalAuthorizationDeliveryState
 	read                                         ApprovalAuthorizationDeliveryState
 	command                                      ApprovedCommand
 	order                                        []string
 	begin, grant, failure, result, dlq, terminal int
 	errAt, terminalState                         string
+}
+
+func (s *authorizationAccountStub) ResolveAuthorizationRoute(context.Context, uuid.UUID) (ApprovalAuthorizationRoute, error) {
+	if s.route != nil {
+		return *s.route, s.fail("route")
+	}
+	binding, err := s.binding, s.fail("route")
+	if err != nil {
+		return ApprovalAuthorizationRoute{}, err
+	}
+	return ApprovalAuthorizationRoute{EventID: binding.EventID, ApprovalRequestID: binding.ApprovalRequestID,
+		ApprovedRequestVersion: binding.ApprovedRequestVersion, ApprovalEpoch: binding.ApprovalEpoch,
+		SerializationVersion: binding.SerializationVersion, Provenance: binding.Provenance, EventDigest: binding.EventDigest,
+		DigestKind: binding.DigestKind, CommandType: binding.CommandType, PolicyVersion: binding.PolicyVersion,
+		ExecutorIdentity: binding.ExecutorIdentity, CanonicalWorkload: binding.Workload, CanonicalDurable: binding.Durable}, nil
+}
+
+func TestAuthorizationCommandConsumerAcknowledgesAuthenticatedNonTargetWithoutStateOrDomain(t *testing.T) {
+	consumer, account, domain, delivery := authorizationConsumerFixture(t, "READY", 0)
+	consumer.durable = "billing-wallet-adjustment-executor-p1-v1"
+	binding := account.binding
+	account.route = &ApprovalAuthorizationRoute{EventID: binding.EventID, ApprovalRequestID: binding.ApprovalRequestID,
+		ApprovedRequestVersion: binding.ApprovedRequestVersion, ApprovalEpoch: binding.ApprovalEpoch,
+		SerializationVersion: binding.SerializationVersion, Provenance: binding.Provenance, EventDigest: binding.EventDigest,
+		DigestKind: binding.DigestKind, CommandType: binding.CommandType, PolicyVersion: binding.PolicyVersion,
+		ExecutorIdentity: binding.ExecutorIdentity, CanonicalWorkload: binding.Workload, CanonicalDurable: binding.Durable}
+	consumer.Handle(context.Background(), delivery)
+	if delivery.ack != 1 || delivery.nak != 0 || delivery.publish != 0 || domain.calls != 0 || account.begin != 0 ||
+		account.grant != 0 || !equalStrings(account.order, []string{"ack"}) {
+		t.Fatalf("non-target outcome ack=%d nak=%d publish=%d domain=%d begin=%d grant=%d order=%v",
+			delivery.ack, delivery.nak, delivery.publish, domain.calls, account.begin, account.grant, account.order)
+	}
 }
 
 func (s *authorizationAccountStub) fail(name string) error {
@@ -406,7 +439,7 @@ func TestAuthorizationCommandConsumerRejectsCrossedSerializationBeforeDomain(t *
 			account.binding.Durable = test.durable
 			account.binding.SerializationVersion = test.serialization
 			consumer.Handle(context.Background(), delivery)
-			if domain.calls != 0 || account.begin != 0 || account.grant != 0 || delivery.ack != 0 || delivery.nak != 1 || !equalStrings(account.order, []string{"resolve", "nak"}) {
+			if domain.calls != 0 || account.begin != 0 || account.grant != 0 || delivery.ack != 0 || delivery.nak != 1 || !equalStrings(account.order, []string{"nak"}) {
 				t.Fatalf("crossed serialization reached execution order=%v domain=%d begin=%d grant=%d ack=%d nak=%d", account.order, domain.calls, account.begin, account.grant, delivery.ack, delivery.nak)
 			}
 		})

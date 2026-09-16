@@ -135,6 +135,83 @@ func TestFrozenGoldenVectors(t *testing.T) {
 	}
 }
 
+func TestLegacyExecutionInputIsClosedAndLossless(t *testing.T) {
+	for _, item := range frozenLegacyInputs() {
+		t.Run(item.name, func(t *testing.T) {
+			proof, err := ConvertLegacyProofInput(item.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var projection struct {
+				Normalized json.RawMessage `json:"normalized_command"`
+				Critical   json.RawMessage `json:"critical_resource_versions"`
+				Financial  json.RawMessage `json:"financial_snapshot"`
+			}
+			if err := json.Unmarshal(proof.ProofInputJSON, &projection); err != nil {
+				t.Fatal(err)
+			}
+			decoded := DecodedAuthorizationEvent{SerializationVersion: ApprovalSerializationVersion, Payload: AuthorizationEvent{
+				CommandType: item.input.CommandType, PolicyVersion: item.input.PolicyVersion,
+				TargetResourceType: item.input.TargetResourceType, TargetResourceID: item.input.TargetResourceID,
+				NormalizedCommand: projection.Normalized, CriticalResourceVersions: projection.Critical, FinancialSnapshot: projection.Financial,
+				CommandDigest: proof.CommandDigest, SnapshotDigest: proof.SnapshotDigest,
+			}}
+			execution, err := LegacyExecutionInput(decoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, err := ConvertLegacyProofInput(execution)
+			if err != nil || roundTrip.CommandDigest != proof.CommandDigest || roundTrip.SnapshotDigest != proof.SnapshotDigest {
+				t.Fatalf("execution projection changed proof facts: %v", err)
+			}
+			for _, raw := range []json.RawMessage{execution.NormalizedCommand, execution.CriticalResourceVersions, execution.FinancialSnapshot} {
+				if bytes.Contains(raw, []byte(`"9223372036854775807"`)) || bytes.Contains(raw, []byte(`"9007199254740993"`)) {
+					t.Fatal("int64 execution value remained a JSON string")
+				}
+			}
+		})
+	}
+
+	proof, err := ConvertLegacyProofInput(frozenLegacyInputs()[0].input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projection struct {
+		Normalized json.RawMessage `json:"normalized_command"`
+		Critical   json.RawMessage `json:"critical_resource_versions"`
+		Financial  json.RawMessage `json:"financial_snapshot"`
+	}
+	if err := json.Unmarshal(proof.ProofInputJSON, &projection); err != nil {
+		t.Fatal(err)
+	}
+	valid := DecodedAuthorizationEvent{SerializationVersion: ApprovalSerializationVersion, Payload: AuthorizationEvent{
+		CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, TargetResourceType: "MANUAL_ADJUSTMENT", TargetResourceID: "11111111-1111-4111-8111-111111111111",
+		NormalizedCommand: projection.Normalized, CriticalResourceVersions: projection.Critical, FinancialSnapshot: projection.Financial,
+		CommandDigest: proof.CommandDigest, SnapshotDigest: proof.SnapshotDigest,
+	}}
+	for name, mutate := range map[string]func(*DecodedAuthorizationEvent){
+		"legacy input":    func(value *DecodedAuthorizationEvent) { value.SerializationVersion = LegacySerializationVersion },
+		"unknown command": func(value *DecodedAuthorizationEvent) { value.Payload.CommandType = "UNKNOWN" },
+		"extra field": func(value *DecodedAuthorizationEvent) {
+			value.Payload.NormalizedCommand = append(bytes.TrimSuffix(value.Payload.NormalizedCommand, []byte("}")), []byte(`,"extra":true}`)...)
+		},
+		"overflow": func(value *DecodedAuthorizationEvent) {
+			value.Payload.NormalizedCommand = bytes.Replace(value.Payload.NormalizedCommand, []byte(`"9223372036854775807"`), []byte(`"9223372036854775808"`), 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			changed.Payload.NormalizedCommand = bytes.Clone(valid.Payload.NormalizedCommand)
+			changed.Payload.CriticalResourceVersions = bytes.Clone(valid.Payload.CriticalResourceVersions)
+			changed.Payload.FinancialSnapshot = bytes.Clone(valid.Payload.FinancialSnapshot)
+			mutate(&changed)
+			if _, err := LegacyExecutionInput(changed); err == nil {
+				t.Fatal("invalid execution projection was accepted")
+			}
+		})
+	}
+}
+
 func TestAuthorizationWireAndProofResponseGolden(t *testing.T) {
 	fixture := readGolden(t)
 	if len(fixture.AuthorizationVectors) != 2 || len(fixture.ProofResponseVectors) != 1 {

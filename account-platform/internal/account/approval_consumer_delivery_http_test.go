@@ -16,9 +16,17 @@ import (
 type approvalConsumerDeliveryRepositoryStub struct {
 	Repository
 	resolved     ApprovalAuthorizationBinding
+	route        ApprovalAuthorizationRoute
+	routeCaller  string
 	observation  ApprovalDeliveryObservation
 	beginBinding ApprovalAuthorizationBinding
 	state        ApprovalDeliveryState
+}
+
+func (stub *approvalConsumerDeliveryRepositoryStub) ResolveApprovalAuthorizationRoute(_ context.Context, eventID uuid.UUID, workload string) (ApprovalAuthorizationRoute, error) {
+	stub.route.EventID = eventID
+	stub.routeCaller = workload
+	return stub.route, nil
 }
 
 func (stub *approvalConsumerDeliveryRepositoryStub) BeginApprovalExecution(_ context.Context, requestID uuid.UUID, executorIdentity, _ string, _, _ json.RawMessage) (ApprovalExecution, error) {
@@ -89,6 +97,23 @@ func TestApprovalConsumerDeliveryStateHTTPUsesOnlyTrustedIdentity(t *testing.T) 
 	var body ApprovalDeliveryState
 	if json.Unmarshal(response.Body.Bytes(), &body) != nil || body.LastErrorCode == nil || *body.LastErrorCode != errorCode {
 		t.Fatalf("closed state response=%+v body=%s", body, response.Body.String())
+	}
+}
+
+func TestApprovalConsumerRouteHTTPUsesTrustedWorkloadAndNoStore(t *testing.T) {
+	eventID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	stub := &approvalConsumerDeliveryRepositoryStub{route: ApprovalAuthorizationRoute{CanonicalWorkload: "token-command-executor", CanonicalDurable: "token-credential-revoke-executor-v1"}}
+	ctx, err := serviceauth.ContextForJob(context.Background(), "billing-service", "APPROVAL_AUTHORIZATION_CONSUME", uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/?workload=token-command-executor&durable=forged", nil).WithContext(ctx)
+	request.SetPathValue("event_id", eventID.String())
+	response := httptest.NewRecorder()
+	NewService(stub, nil).resolveApprovalAuthorizationRoute(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" ||
+		stub.route.EventID != eventID || stub.routeCaller != "billing-command-executor" || stub.route.CanonicalWorkload != "token-command-executor" {
+		t.Fatalf("status=%d route=%+v headers=%v body=%s", response.Code, stub.route, response.Header(), response.Body.String())
 	}
 }
 

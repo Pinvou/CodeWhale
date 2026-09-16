@@ -125,8 +125,8 @@ func TestApprovalConsumerSerializationBindingDownForbiddenIntegration(t *testing
 	}
 	before := approvalConsumerSecuritySnapshot(t, ctx, db)
 	err := migrations.DownOne(ctx, connection.Conn(), loaded)
-	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000057 approval consumer serialization binding is forward-only; database down is forbidden" {
-		t.Fatalf("unexpected 000057 down result state=%s message=%s err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
+	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000058 approval consumer route binding is forward-only; database down is forbidden" {
+		t.Fatalf("unexpected 000058 down result state=%s message=%s err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
 	}
 	after := approvalConsumerSecuritySnapshot(t, ctx, db)
 	if before != after {

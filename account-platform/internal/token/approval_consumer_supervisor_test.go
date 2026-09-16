@@ -15,7 +15,7 @@ type failingApprovalRegistrationBroker struct {
 	stoppedBeforeCancellation bool
 }
 
-func (b *failingApprovalRegistrationBroker) ConsumeUntilResolved(ctx context.Context, _, _ string, _ events.ConsumerHandler) (func(), error) {
+func (b *failingApprovalRegistrationBroker) ConsumeAuthorization(ctx context.Context, _ string, _ events.AuthorizationRawHandler) (func(), error) {
 	b.contexts = append(b.contexts, ctx)
 	if len(b.contexts) == 2 {
 		return nil, errors.New("fixture second registration failure")

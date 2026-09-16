@@ -572,6 +572,16 @@
         "file": "000057_approval_consumer_serialization_binding.up.sql",
         "version": 57,
         "sha256": "c75c9746bc8fc80adf77c14ecbd9c327a83f03ea3cd4066cab12b103cb597393"
+      },
+      {
+        "file": "000058_approval_consumer_route_binding.down.sql",
+        "version": 58,
+        "sha256": "b5fa997de35315f823f238e72828baa357702b58a19200c37a8e5464fe12759c"
+      },
+      {
+        "file": "000058_approval_consumer_route_binding.up.sql",
+        "version": 58,
+        "sha256": "8ade04ba8119e531c631990543088193acd61ff3ab6a5207a3d513788740ce78"
       }
     ],
     "billing": [

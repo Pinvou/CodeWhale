@@ -66,6 +66,29 @@ type ApprovalAuthorizationBinding struct {
 	ExecutorIdentity       string    `json:"executor_identity"`
 }
 
+type ApprovalAuthorizationRoute struct {
+	EventID                uuid.UUID `json:"event_id"`
+	ApprovalRequestID      uuid.UUID `json:"approval_request_id"`
+	ApprovedRequestVersion int64     `json:"approved_request_version"`
+	ApprovalEpoch          int64     `json:"approval_epoch"`
+	SerializationVersion   string    `json:"serialization_version"`
+	Provenance             string    `json:"provenance"`
+	EventDigest            string    `json:"event_digest"`
+	DigestKind             string    `json:"digest_kind"`
+	CommandType            string    `json:"command_type"`
+	PolicyVersion          int64     `json:"policy_version"`
+	ExecutorIdentity       string    `json:"executor_identity"`
+	CanonicalWorkload      string    `json:"canonical_workload"`
+	CanonicalDurable       string    `json:"canonical_durable"`
+}
+
+func (route ApprovalAuthorizationRoute) binding() ApprovalAuthorizationBinding {
+	return ApprovalAuthorizationBinding{EventID: route.EventID, Durable: route.CanonicalDurable, Workload: route.CanonicalWorkload,
+		ApprovalRequestID: route.ApprovalRequestID, ApprovedRequestVersion: route.ApprovedRequestVersion, ApprovalEpoch: route.ApprovalEpoch,
+		SerializationVersion: route.SerializationVersion, Provenance: route.Provenance, EventDigest: route.EventDigest,
+		DigestKind: route.DigestKind, CommandType: route.CommandType, PolicyVersion: route.PolicyVersion, ExecutorIdentity: route.ExecutorIdentity}
+}
+
 type ApprovalAuthorizationDeliveryState struct {
 	DomainAttemptCount  int16   `json:"domain_attempt_count"`
 	State               string  `json:"state"`
@@ -128,6 +151,15 @@ func (gate *HTTPApprovalExecutionGate) ResolveAuthorizationBinding(ctx context.C
 		return ApprovalAuthorizationBinding{}, err
 	}
 	return binding, nil
+}
+
+func (gate *HTTPApprovalExecutionGate) ResolveAuthorizationRoute(ctx context.Context, eventID uuid.UUID) (ApprovalAuthorizationRoute, error) {
+	var route ApprovalAuthorizationRoute
+	path := fmt.Sprintf("/internal/v1/approval-authorization/events/%s/route", eventID)
+	if err := gate.request(ctx, http.MethodGet, path, nil, &route); err != nil {
+		return ApprovalAuthorizationRoute{}, err
+	}
+	return route, nil
 }
 
 func (gate *HTTPApprovalExecutionGate) ObserveAuthorizationDelivery(ctx context.Context, binding ApprovalAuthorizationBinding, stream string, sequence approvalconsumer.Sequence) (ApprovalAuthorizationDeliveryState, error) {

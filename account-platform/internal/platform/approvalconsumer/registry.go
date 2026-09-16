@@ -63,6 +63,21 @@ func Match(descriptor Descriptor, commandType string, policyVersion int64, execu
 		descriptor.PolicyVersion == policyVersion && descriptor.ExecutorIdentity == executorIdentity
 }
 
+// MatchRoute accepts the historical shared Billing durable's three frozen
+// command mappings in addition to the one-command physical durables. It is for
+// read-only shared-subject routing only; Match remains the execution mapping.
+func MatchRoute(descriptor Descriptor, commandType string, policyVersion int64, executorIdentity string) bool {
+	if descriptor == legacyBilling {
+		for _, candidate := range BillingCommands() {
+			if candidate.CommandType == commandType && candidate.PolicyVersion == policyVersion && candidate.ExecutorIdentity == executorIdentity {
+				return true
+			}
+		}
+		return false
+	}
+	return Match(descriptor, commandType, policyVersion, executorIdentity)
+}
+
 func BillingCommands() []Descriptor {
 	result := make([]Descriptor, 0, 3)
 	for _, descriptor := range descriptors {

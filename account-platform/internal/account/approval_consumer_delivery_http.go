@@ -20,6 +20,33 @@ type approvalConsumerDeliveryRepository interface {
 	RecordApprovalAuthorizationTerminal(context.Context, uuid.UUID, string, string, int64) (ApprovalDeliveryState, error)
 }
 
+type approvalConsumerRouteRepository interface {
+	ResolveApprovalAuthorizationRoute(context.Context, uuid.UUID, string) (ApprovalAuthorizationRoute, error)
+}
+
+func (s *Service) resolveApprovalAuthorizationRoute(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(approvalConsumerRouteRepository)
+	if !ok {
+		s.writeError(w, r, ErrApprovalConsumerBindingUnavailable)
+		return
+	}
+	eventID, ok := pathUUID(w, r, "event_id")
+	if !ok {
+		return
+	}
+	workload, ok := approvalExecutorFromContext(w, r)
+	if !ok {
+		return
+	}
+	route, err := repository.ResolveApprovalAuthorizationRoute(r.Context(), eventID, workload)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, route)
+}
+
 type approvalConsumerDeliveryStateRepository interface {
 	ApprovalAuthorizationDeliveryState(context.Context, uuid.UUID, string, string) (ApprovalDeliveryState, error)
 }

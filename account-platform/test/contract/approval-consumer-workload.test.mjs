@@ -55,11 +55,11 @@ test('approval consumer grants target only existing Billing and Token workload i
   }
 });
 
-test('all eight consumer HTTP operations require the exact service permission', async () => {
+test('all nine consumer HTTP operations require the exact service permission', async () => {
   const source = await read('internal/account/service.go');
   const routes = source.split('\n').filter(line => /internal\.(GET|POST)\("\/approval-authorization\//.test(line));
-  assert.equal(routes.length, 8);
+  assert.equal(routes.length, 9);
   for (const line of routes) assert.ok(line.includes(`serviceauth.Require("${consume}")`));
-  const suffixes = ['binding', 'deliveries/:durable', 'observe', 'attempts/grant', 'attempts/failure', 'result', 'dlq-puback', 'terminal'];
+  const suffixes = ['route', 'binding', 'deliveries/:durable', 'observe', 'attempts/grant', 'attempts/failure', 'result', 'dlq-puback', 'terminal'];
   for (const suffix of suffixes) assert.equal(routes.filter(line => line.includes(`/${suffix}"`)).length, 1);
 });

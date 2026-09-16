@@ -102,6 +102,95 @@ func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
 	return buildProofArtifacts(input.CommandType, input.PolicyVersion, input.SnapshotSchemaVersion, input.TargetResourceType, input.TargetResourceID, normalized, critical, financial)
 }
 
+// LegacyExecutionInput converts a fully validated authorization event back to
+// the existing domain-command JSON representation. The proof wire represents
+// every int64 as a canonical decimal string; domain command handlers still own
+// the original JSON-number contract. This conversion is closed by commandSpec
+// and never guesses fields from their runtime shape.
+
+func LegacyExecutionInput(decoded DecodedAuthorizationEvent) (LegacyProofInput, error) {
+	if decoded.SerializationVersion != ApprovalSerializationVersion {
+		return LegacyProofInput{}, ErrUnsupportedVersion
+	}
+	event := decoded.Payload
+	spec, ok := commandSpecs[event.CommandType]
+	if !ok || event.PolicyVersion != spec.policyVersion {
+		return LegacyProofInput{}, ErrUnsupportedCommand
+	}
+	normalized, err := parseDocument(event.NormalizedCommand)
+	if err != nil {
+		return LegacyProofInput{}, err
+	}
+	critical, err := parseDocument(event.CriticalResourceVersions)
+	if err != nil {
+		return LegacyProofInput{}, err
+	}
+	financial, err := parseDocument(event.FinancialSnapshot)
+	if err != nil {
+		return LegacyProofInput{}, err
+	}
+	artifacts, err := buildProofArtifacts(event.CommandType, event.PolicyVersion, spec.snapshotVersion, event.TargetResourceType, event.TargetResourceID, normalized, critical, financial)
+	if err != nil || artifacts.CommandDigest != event.CommandDigest || artifacts.SnapshotDigest != event.SnapshotDigest {
+		return LegacyProofInput{}, ErrInvalidDocument
+	}
+	if err := convertProofIntegers(spec, normalized, critical, financial); err != nil {
+		return LegacyProofInput{}, err
+	}
+	return LegacyProofInput{CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: spec.snapshotVersion,
+		TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,
+		NormalizedCommand: rawCanonical(normalized), CriticalResourceVersions: rawCanonical(critical), FinancialSnapshot: rawCanonical(financial)}, nil
+}
+
+func convertProofIntegers(spec commandSpec, normalized, critical, financial *jsonValue) error {
+	normalizedObject, err := objectValue(normalized)
+	if err != nil {
+		return err
+	}
+	criticalObject, err := objectValue(critical)
+	if err != nil {
+		return err
+	}
+	financialObject, err := objectValue(financial)
+	if err != nil {
+		return err
+	}
+	for _, fields := range []struct {
+		object map[string]*jsonValue
+		names  []string
+	}{{normalizedObject, spec.normalizedInts}, {criticalObject, spec.criticalInts}, {financialObject, spec.financialInts}} {
+		for _, field := range fields.names {
+			if err := proofIntegerToLegacy(fields.object, field); err != nil {
+				return err
+			}
+		}
+	}
+	for _, field := range spec.nullableCriticalInts {
+		value, present := criticalObject[field]
+		if !present {
+			return ErrInvalidDocument
+		}
+		if value.kind != jsonNull {
+			if err := proofIntegerToLegacy(criticalObject, field); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func proofIntegerToLegacy(object map[string]*jsonValue, field string) error {
+	value, present := object[field]
+	if !present {
+		return ErrInvalidDocument
+	}
+	integer, err := decimalString(value)
+	if err != nil {
+		return err
+	}
+	*value = *jsonInteger(integer)
+	return nil
+}
+
 func deriveLegacyLifecyclePlan(normalized, critical *jsonValue) error {
 	normalizedObject, err := objectValue(normalized)
 	if err != nil {

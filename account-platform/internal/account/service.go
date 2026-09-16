@@ -110,6 +110,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/approval-requests/:approval_request_id/executions", serviceauth.Require("internal.approval-execution.begin"), approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
 	internal.POST("/approval-requests/:approval_request_id/executions/complete", serviceauth.Require("internal.approval-execution.complete"), approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
+	internal.GET("/approval-authorization/events/:event_id/route", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationRoute))
 	internal.GET("/approval-authorization/events/:event_id/binding", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationBinding))
 	internal.GET("/approval-authorization/events/:event_id/deliveries/:durable", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.approvalAuthorizationDeliveryState))
 	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/observe", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.observeApprovalAuthorizationDelivery))

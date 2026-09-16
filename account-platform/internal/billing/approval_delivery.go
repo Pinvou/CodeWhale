@@ -24,6 +24,7 @@ const authorizationRetryMaximumExponent = 9
 var errAuthorizationDeliveryAlreadyAcknowledged = errors.New("authorization delivery was acknowledged before terminal state persistence")
 
 type approvalAuthorizationAccount interface {
+	ResolveAuthorizationRoute(context.Context, uuid.UUID) (ApprovalAuthorizationRoute, error)
 	ResolveAuthorizationBinding(context.Context, uuid.UUID, string) (ApprovalAuthorizationBinding, error)
 	ObserveAuthorizationDelivery(context.Context, ApprovalAuthorizationBinding, string, approvalconsumer.Sequence) (ApprovalAuthorizationDeliveryState, error)
 	AuthorizationDeliveryState(context.Context, ApprovalAuthorizationBinding) (ApprovalAuthorizationDeliveryState, error)
@@ -84,14 +85,15 @@ func (consumer *AuthorizationCommandConsumer) handle(ctx context.Context, delive
 	if err != nil || eventID == uuid.Nil || eventID.String() != delivery.MessageID() {
 		return errors.New("invalid authorization message identity")
 	}
-	binding, err := consumer.account.ResolveAuthorizationBinding(ctx, eventID, consumer.durable)
-	if err != nil || !consumer.validBinding(binding) {
-		return errors.New("authorization binding unavailable")
+	route, err := consumer.account.ResolveAuthorizationRoute(ctx, eventID)
+	if err != nil || !validAuthorizationRoute(route) {
+		return errors.New("authorization route unavailable")
 	}
+	routeBinding := route.binding()
 	decoded, err := approvalencoding.DecodeAuthorizationEvent(delivery.DeliveryBytes(), approvalencoding.ExpectedAuthorizationBinding{
-		ApprovedRequestVersion: binding.ApprovedRequestVersion, ApprovalEpoch: binding.ApprovalEpoch,
+		ApprovedRequestVersion: route.ApprovedRequestVersion, ApprovalEpoch: route.ApprovalEpoch,
 	})
-	if err != nil || !consumer.validDecoded(binding, decoded, delivery.DeliveryBytes()) {
+	if err != nil || !consumer.validDecoded(routeBinding, decoded, delivery.DeliveryBytes()) {
 		return errors.New("authorization wire does not match binding")
 	}
 	metadata := delivery.Metadata()
@@ -99,11 +101,35 @@ func (consumer *AuthorizationCommandConsumer) handle(ctx context.Context, delive
 	if metadata.Stream != "ACCOUNT_PLATFORM" || sequence == 0 || metadata.NumDelivered == 0 {
 		return errors.New("invalid authorization delivery metadata")
 	}
+	if route.CanonicalWorkload != consumer.workload || route.CanonicalDurable != consumer.durable {
+		return delivery.DoubleAck(ctx)
+	}
+	binding, err := consumer.account.ResolveAuthorizationBinding(ctx, eventID, consumer.durable)
+	if err != nil || !consumer.validBinding(binding) || binding != routeBinding {
+		return errors.New("authorization binding unavailable")
+	}
 	state, err := consumer.account.ObserveAuthorizationDelivery(ctx, binding, metadata.Stream, sequence)
 	if err != nil || !validAuthorizationDeliveryState(state) {
 		return errors.New("authorization delivery observation unavailable")
 	}
 	return consumer.advance(ctx, delivery, binding, decoded.Payload, state)
+}
+
+func validAuthorizationRoute(route ApprovalAuthorizationRoute) bool {
+	binding := route.binding()
+	descriptor, ok := approvalconsumer.LookupDurable(route.CanonicalDurable)
+	if !ok || binding.EventID == uuid.Nil || binding.ApprovalRequestID == uuid.Nil || binding.ApprovedRequestVersion <= 0 || binding.ApprovalEpoch <= 0 ||
+		binding.Workload != binding.ExecutorIdentity || !approvalconsumer.MatchRoute(descriptor, binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity) {
+		return false
+	}
+	if descriptor.StartSource == approvalconsumer.StartLegacySharedPreFenceCompatibility {
+		return binding.SerializationVersion == approvalencoding.LegacySerializationVersion
+	}
+	if descriptor.Workload == approvalconsumer.BillingWorkload {
+		return binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion
+	}
+	return descriptor.Workload == approvalconsumer.TokenWorkload &&
+		(binding.SerializationVersion == approvalencoding.LegacySerializationVersion || binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion)
 }
 
 func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, delivery events.AuthorizationRawDelivery, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, state ApprovalAuthorizationDeliveryState) error {
