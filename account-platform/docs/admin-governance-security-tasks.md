@@ -203,6 +203,8 @@ GSA-19 支付控制替代申请边界（仍PARTIAL / REVIEW_PENDING）：新建�
 GSA-19 财务审批发现列表受控读取（仍PARTIAL / REVIEW_PENDING）：钱包调整、支付服务商及商品恢复的审批列表均经Session锁BFF读取；同时兼容v1平面目标与v2封闭目标，仅展示同一目标的最新申请。列表不再承载`allowed_actions`，DRAFT的继续按钮只作入口，写入前仍须重读受控详情校验SUBMIT动作和版本；历史页遗漏或读取失败不得作为无申请事实，支付控制真正创建前仍重读目标列表并在不完整时失败关闭。定向测试与Portal构建通过；业务DRAFT编辑、其他命令替代申请、生产等价联调仍待完成。
 
 GSA-19 支付恢复业务草稿编辑（仍PARTIAL / REVIEW_PENDING）：Provider/Product恢复的DRAFT现在可在所属业务页输入新原因；重读当前Billing控制事实后重建领域草稿，再经受控详情确认原申请仍为可编辑DRAFT，按当前版本CAS更新同一申请，重读新版本及SUBMIT动作后提交并再次读取结果。任一写入结果不确定时保留原申请ID且不自动重试；未经编辑的继续提交仍走原受控详情校验。三语文案、定向状态/写入顺序测试及Portal构建通过；钱包与Token业务DRAFT编辑和跨域生产等价验收尚未完成。
+
+GSA-19 Token终态替代申请边界（仍PARTIAL / REVIEW_PENDING）：三个Token业务申请入口在领域impact/precheck后、创建Account审批前，按命令及精确目标经Session锁BFF读取历史；分页不完整、未知状态、DRAFT/SUBMITTED/APPROVED/EXECUTING/EXECUTION_FAILED均失败关闭。仅REJECTED/WITHDRAWN/EXPIRED/INVALIDATED把最新申请ID作为`supersedes_request_id`，EXECUTED允许基于当前领域事实发起新的业务命令但不继承旧授权。支付控制复用相同资格函数并补挡更早的在途记录。定向状态测试、Portal构建与架构检查通过；Token业务DRAFT编辑、钱包调整及完整跨域E2E仍未交付。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

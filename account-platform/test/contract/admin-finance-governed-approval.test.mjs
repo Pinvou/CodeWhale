@@ -16,6 +16,8 @@ test('payment control replacement is allowed only after an eligible terminal req
     assert.throws(() => paymentControlSupersedesRequest(page(status), 'PAYMENT_PROVIDER_RESUME', 'provider'));
   }
   assert.throws(() => paymentControlSupersedesRequest({ ...page('REJECTED'), has_more: true }, 'PAYMENT_PROVIDER_RESUME', 'provider'));
+  assert.throws(() => paymentControlSupersedesRequest({ items: [page('REJECTED').items[0], page('DRAFT').items[0]] },
+    'PAYMENT_PROVIDER_RESUME', 'provider'), { code: 'APPROVAL_ALREADY_ACTIVE' });
   assert.equal(paymentControlApprovalAction({ status: 'EXECUTION_FAILED' }, { canRequest: true }), 'view');
   assert.equal(paymentControlApprovalAction({ status: 'DRAFT', allowed_actions: [] }, { canRequest: true }), 'submit');
 });

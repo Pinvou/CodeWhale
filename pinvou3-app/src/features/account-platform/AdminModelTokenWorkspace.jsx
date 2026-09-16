@@ -11,7 +11,7 @@ import { AdminTokenAccountDetailWorkspace } from './AdminTokenAccountDetailWorks
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact } from './admin-high-risk-action-state.js';
-import { createAndSubmitGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
+import { createAndSubmitFreshGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
 
 function tokenApprovalDraft(commandType, targetResourceType, targetResourceID, reason, impact, idempotencyKey, normalizedCommand) {
   return {
@@ -25,7 +25,7 @@ function tokenApprovalDraft(commandType, targetResourceType, targetResourceID, r
 }
 
 async function createAndSubmitTokenApproval(client, draft, signal) {
-  return createAndSubmitGovernedApproval(client, draft, signal);
+  return createAndSubmitFreshGovernedApproval(client, draft, signal);
 }
 
 async function recoverTokenApproval(client, reference, draft, signal) {

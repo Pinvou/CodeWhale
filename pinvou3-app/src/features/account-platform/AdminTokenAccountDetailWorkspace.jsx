@@ -4,7 +4,7 @@ import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-n
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact } from './admin-high-risk-action-state.js';
-import { createAndSubmitGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
+import { createAndSubmitFreshGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
 import { openCredentialHandoff } from './admin-credential-handoff.js';
 import { settleCredentialLaunch } from './admin-credential-launch-state.js';
 import { serverRouteHealth } from './admin-token-resource-state.js';
@@ -56,7 +56,7 @@ function trapCredentialDialogFocus(event, root) {
 }
 
 async function createAndSubmitCredentialApproval(client, draft, signal) {
-  return createAndSubmitGovernedApproval(client, draft, signal);
+  return createAndSubmitFreshGovernedApproval(client, draft, signal);
 }
 
 async function recoverCredentialApproval(client, reference, draft, signal) {

@@ -47,6 +47,29 @@ export async function createAndSubmitGovernedApproval(client, draft, signal) {
   }
 }
 
+export function supersedesEligibleApproval(page, commandType, targetID) {
+  if (!page || !Array.isArray(page.items) || page.has_more === true || page.next_cursor || page.items.length >= 200) {
+    throw Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+  }
+  const matching = page.items.filter((item) => item.command_type === commandType &&
+    (item.target?.resource_id || item.target_resource_id) === targetID);
+  if (matching.some((item) => ['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED'].includes(item.status))) {
+    throw Object.assign(new Error('an approval is already open or awaiting recovery'), { code: 'APPROVAL_ALREADY_ACTIVE' });
+  }
+  const latest = matching[0];
+  if (!latest || latest.status === 'EXECUTED') return '';
+  if (terminalStatuses.has(latest.status) && latest.approval_request_id) return latest.approval_request_id;
+  throw Object.assign(new Error('approval state is not eligible for replacement'), { code: 'APPROVAL_REPLACEMENT_UNAVAILABLE' });
+}
+
+export async function createAndSubmitFreshGovernedApproval(client, draft, signal) {
+  const page = await client.governedApprovalRequests({ command_type: draft.command_type,
+    target: draft.target_resource_id, limit: 200 }, signal);
+  const supersedesID = supersedesEligibleApproval(page, draft.command_type, draft.target_resource_id);
+  return createAndSubmitGovernedApproval(client, supersedesID
+    ? { ...draft, supersedes_request_id: supersedesID } : draft, signal);
+}
+
 export async function submitExistingGovernedApproval(client, existing, signal) {
   const requestID = existing?.approval_request_id;
   const draft = {

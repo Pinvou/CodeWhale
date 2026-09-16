@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createAndSubmitGovernedApproval, recoverGovernedApproval, submitExistingGovernedApproval, updateAndSubmitGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
+import { createAndSubmitFreshGovernedApproval, createAndSubmitGovernedApproval, recoverGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval, updateAndSubmitGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
 
 const requestID = '0199a300-0001-7000-8000-000000000017';
 const draft = { command_type: 'TOKEN_MODEL_CATALOG_ROLLBACK', target_resource_type: 'MODEL_CATALOG', target_resource_id: '12' };
@@ -70,10 +70,35 @@ test('legacy wire still requires the complete original draft contract', async ()
 test('all Token business approval entry points use the session-governed workflow', () => {
   for (const name of ['AdminModelTokenWorkspace.jsx', 'AdminModelDetailWorkspace.jsx', 'AdminTokenAccountDetailWorkspace.jsx']) {
     const source = readFileSync(new URL(`../../../pinvou3-app/src/features/account-platform/${name}`, import.meta.url), 'utf8');
-    assert.match(source, /createAndSubmitGovernedApproval\(client, draft, signal\)/, name);
+    assert.match(source, /createAndSubmitFreshGovernedApproval\(client, draft, signal\)/, name);
     assert.match(source, /recoverGovernedApproval\(client, reference, draft, signal\)/, name);
     assert.doesNotMatch(source, /client\.createApprovalDraft\(|client\.submitApprovalRequest\(/, name);
   }
+});
+
+test('fresh Token approval refuses incomplete or active history and links an eligible terminal request', async () => {
+  const oldID = '0199a300-0001-7000-8000-000000000018';
+  const old = (status) => ({ approval_request_id: oldID, command_type: draft.command_type,
+    target: { resource_id: draft.target_resource_id }, status });
+  for (const status of ['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED']) {
+    assert.throws(() => supersedesEligibleApproval({ items: [old(status)] }, draft.command_type, draft.target_resource_id),
+      { code: 'APPROVAL_ALREADY_ACTIVE' });
+  }
+  assert.equal(supersedesEligibleApproval({ items: [old('REJECTED')] }, draft.command_type, draft.target_resource_id), oldID);
+  assert.equal(supersedesEligibleApproval({ items: [old('EXECUTED')] }, draft.command_type, draft.target_resource_id), '');
+  assert.throws(() => supersedesEligibleApproval({ items: [old('REJECTED')], has_more: true }, draft.command_type, draft.target_resource_id),
+    { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+  assert.throws(() => supersedesEligibleApproval({ items: [old('REJECTED')], next_cursor: 'more' }, draft.command_type, draft.target_resource_id),
+    { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+  let created;
+  const client = { governedApprovalRequests: async () => ({ items: [old('WITHDRAWN')] }),
+    createGovernedApprovalDraft: async (value) => { created = value; return requestID; },
+    governedApprovalRequest: async () => detail('SUBMITTED', 2) };
+  await createAndSubmitFreshGovernedApproval(client, draft);
+  assert.equal(created.supersedes_request_id, oldID);
+  client.governedApprovalRequests = async () => ({ items: [old('SUBMITTED')] });
+  client.createGovernedApprovalDraft = async () => assert.fail('must not create while prior approval is active');
+  await assert.rejects(createAndSubmitFreshGovernedApproval(client, draft), { code: 'APPROVAL_ALREADY_ACTIVE' });
 });
 
 test('existing business draft is re-read and never submitted from a stale list version', async () => {

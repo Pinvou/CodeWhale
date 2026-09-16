@@ -1,4 +1,4 @@
-import { createAndSubmitGovernedApproval, submitExistingGovernedApproval } from './admin-governed-approval-workflow.js';
+import { createAndSubmitGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval } from './admin-governed-approval-workflow.js';
 
 export function adjustmentApprovalAction(adjustment, approval, { canRequest = false, canApprove = false } = {}) {
   const recoverable = Boolean(adjustment?.request_idempotency_key) && adjustment?.status === 'PENDING_APPROVAL';
@@ -44,21 +44,7 @@ export function latestApprovalByTarget(items = []) {
 }
 
 export function paymentControlSupersedesRequest(page, commandType, targetID) {
-  if (!page || !Array.isArray(page.items) || page.has_more === true || page.items.length >= 200) {
-    throw Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' });
-  }
-  const matching = page.items.filter((item) => item.command_type === commandType &&
-    (item.target?.resource_id || item.target_resource_id) === targetID);
-  const current = matching[0]; // The Account list is ordered by updated_at DESC, id DESC.
-  if (!current) return '';
-  if (['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED'].includes(current.status)) {
-    throw Object.assign(new Error('an approval is already open or awaiting recovery'), { code: 'APPROVAL_ALREADY_ACTIVE' });
-  }
-  if (current.status === 'EXECUTED') return '';
-  if (['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED'].includes(current.status) && current.approval_request_id) {
-    return current.approval_request_id;
-  }
-  throw Object.assign(new Error('approval state is not eligible for replacement'), { code: 'APPROVAL_REPLACEMENT_UNAVAILABLE' });
+  return supersedesEligibleApproval(page, commandType, targetID);
 }
 
 export async function submitPaymentControlApproval(client, draftInput, existingApproval = null) {

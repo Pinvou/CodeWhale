@@ -4,7 +4,7 @@ import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-n
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact } from './admin-high-risk-action-state.js';
-import { createAndSubmitGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
+import { createAndSubmitFreshGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 
 const MODEL_DETAIL_TABS = Object.freeze(['overview', 'capabilities', 'operations', 'pricing', 'lifecycle', 'audit']);
@@ -183,7 +183,7 @@ function lifecycleApprovalDraft(plan, reason, impact, idempotencyKey) {
 }
 
 async function submitLifecycleApproval(client, draft, signal) {
-  return createAndSubmitGovernedApproval(client, draft, signal);
+  return createAndSubmitFreshGovernedApproval(client, draft, signal);
 }
 
 async function recoverLifecycleApproval(client, reference, draft, signal) {
