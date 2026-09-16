@@ -707,11 +707,26 @@ AES-256-GCM, Ed25519 verification, an OS CSPRNG, and zeroizing secret owners.
 These primitives are not registered with the live Relay or Tauri command path
 in DEV-05. Production Relay JavaScript receives no A/B handshake private key,
 HKDF output, Finished key, business key, resume secret, or business plaintext.
-At this stage its helpers recompute and constant-time compare the receipt
-commitment and validate the frozen sealed-code structure/vector. The actual
-one-shot Relay sealed-code encryptor and its connection-code state integration
-are owned by DEV-03; the Node vector test is independent interoperability
-verification, not a live sealer.
+Its helpers recompute and constant-time compare the receipt commitment and
+validate the frozen sealed-code structure/vector. DEV-03 now provides the
+disconnected one-shot Relay sealed-code encryptor, persistent pairing store and
+registration handler. They remain outside the live dispatcher until DEV-06.
+The handler first runs the injected authenticated-endpoint gate. A successful
+allocation atomically persists the stable registration result and a code-digest
+tombstone before returning the code to the handler; persistence failure returns
+no code. Stable registration retries echo the new transport request ID while
+reusing the byte-identical sealed-code value and terminal fields. Collision
+exhaustion is also a durable terminal result.
+
+The pairing store uses exactly
+`23456789ABCDEFGHJKMNPQRSTUVWXYZ`, rejection sampling from the OS CSPRNG and at
+most 32 collision retries. It compares a candidate under every retained digest
+key. A code is quarantined for ten minutes after issue and at least two minutes
+after a terminal transition. Pairing IDs remain tombstoned permanently; expired
+code digests and registration results are compacted so an old digest key may be
+removed only after its last reference expires. Active claim records are memory
+only and are reconstructed from still-valid sealed registration rows after a
+Relay restart.
 
 `code_wrap_keypair` and `handshake_keypair` are distinct Rust types and are
 generated independently; their public-key wrapper types are also distinct, and
