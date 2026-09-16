@@ -159,6 +159,15 @@ func TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration(t *test
 	if err := db.adminPool.QueryRow(ctx, `SELECT rolcanlogin,has_table_privilege('account_approval_recovery','public.approval_recovery_query_leases','INSERT,UPDATE,DELETE') FROM pg_roles WHERE rolname='account_approval_recovery'`).Scan(&canLogin, &canWrite); err != nil || canLogin || canWrite {
 		t.Fatalf("recovery role enabled or has direct DML: login=%t write=%t err=%v", canLogin, canWrite, err)
 	}
+	var definerRoutines string
+	if err := db.adminPool.QueryRow(ctx, `SELECT coalesce(string_agg(p.proname,',' ORDER BY p.proname),'') FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','release_approval_recovery_query')
+  AND p.prosecdef AND has_function_privilege('account_approval_recovery',p.oid,'EXECUTE')`).Scan(&definerRoutines); err != nil {
+		t.Fatal(err)
+	}
+	if definerRoutines != "" {
+		t.Fatalf("recovery role inherited privileged routines: %s", definerRoutines)
+	}
 	connection, err := db.adminPool.Acquire(ctx)
 	if err != nil {
 		t.Fatal(err)
