@@ -575,10 +575,12 @@ test("log projection excludes routing, keys, tokens, model credentials and conte
   assert.deepEqual(controllerLogProjection({ v: 1, type: "controller_joined", ...allSensitive }), { v: 1, type: "controller_joined" });
 });
 
-test("controller v1 schema is not wired into the live v2 Relay dispatcher", async () => {
+test("controller v1 is explicitly gated beside the unchanged live v2 dispatcher", async () => {
   const server = await readFile(new URL("../server.js", import.meta.url), "utf8");
-  assert.equal(server.includes("protocol-controller"), false);
-  assert.equal(server.includes("controller_pairing_claim"), false);
+  assert.equal(server.includes("protocol-controller"), true);
+  assert.equal(server.includes("PINVOU_DESKTOP_CONTROLLER_ENABLED"), true);
+  assert.equal(server.includes("msg.v === 1 && controllerRuntime"), true);
+  assert.equal(server.includes("msg.v !== 2"), true);
   for (const type of ["desktop_endpoint_register", "desktop_endpoint_registered", "web_client_join", "web_client_joined"]) {
     assert.equal(server.includes(`\"${type}\"`), true, `live v2 contains ${type}`);
   }

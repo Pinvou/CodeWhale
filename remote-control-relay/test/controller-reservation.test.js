@@ -307,3 +307,26 @@ test("slot CAS rejects stale revisions and preserves Web-to-Web takeover", () =>
     (error) => error?.code === "interaction_slot_revision_conflict");
   assert.equal(slots.releaseWeb({ endpointId: "endpoint-0001", leaseId: "web-lease-0002" }), true);
 });
+
+test("a pending reservation promotes to a controller lease without terminating pairing", () => {
+  const pairings = pairingStore();
+  const slots = new EndpointInteractionSlots();
+  const manager = new ControllerReservationManager({
+    pairingStore: pairings, interactionSlots: slots, clock: () => 1000,
+  });
+  const reservation = claim(manager);
+  manager.beginHandshake({
+    reservationId: reservation.reservation_id, socketIdentity: "socket-0001",
+  });
+  const promoted = manager.promoteToLease({
+    reservationId: reservation.reservation_id,
+    socketIdentity: "socket-0001",
+    controllerLeaseId: "controller-lease-0001",
+  });
+  assert.equal(promoted.state, "controller_connected");
+  assert.equal(slots.read("endpoint-0001").owner.kind, "controller_lease");
+  assert.equal(pairings.terminal.length, 0);
+  assert.throws(() => manager.beginHandshake({
+    reservationId: reservation.reservation_id, socketIdentity: "socket-0001",
+  }), (error) => error?.code === "reservation_owner_invalid");
+});

@@ -13,6 +13,9 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | Required: `official`, `self_hosted`, or `development`. |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` | Absolute path for the new controller state file. It must not equal the existing `PINVOU_REMOTE_STATE_PATH`. The caller passes this value to `RelayStateStore.open`. |
 | `PINVOU_REMOTE_STATE_PATH` | Required absolute path of the legacy Web v2 state. It is used only for alias detection; this module never reads or changes it. |
+| `PINVOU_DESKTOP_CONTROLLER_ENABLED` | Set to `1` only when enabling the controller-v1 dispatcher. Any other value preserves legacy Web v2-only behavior. |
+| `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | Stable independent HMAC key used for pairing-code digests and quarantine lookup. Do not reuse the enrollment key. |
+| `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Pinned key ID and canonical base64 Ed25519 PKCS#8 DER private key used to sign pairing transcripts. The private value is deployment-only and must never enter logs or repository files. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` | Stable identifier for the active credential-digest key. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |

@@ -295,3 +295,80 @@ test("registration handler authorizes B before allocation and returns a strict i
   assert.equal(terminal.terminal_at_ms, "1000");
   assert.equal(store.activePairing(first.pairing_id), null);
 });
+
+test("controller lease consumption has one durable winner and never revives pairing", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(5),
+  });
+  const request = registration();
+  const allocated = await store.register({
+    request, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  const common = {
+    pairingId: allocated.result.pairing_id,
+    endpointId: request.endpoint_id,
+    remoteControlGeneration: request.remote_control_generation,
+    reservationId: "reservation-0001",
+  };
+  const outcomes = await Promise.allSettled([
+    store.consumeForControllerLease({ ...common, controllerLeaseId: "controller-lease-0001" }),
+    store.consumeForControllerLease({ ...common, controllerLeaseId: "controller-lease-0002" }),
+  ]);
+  assert.equal(outcomes.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter((result) => result.status === "rejected"
+    && result.reason?.code === "pairing_not_active").length, 1);
+  assert.equal(stateStore.value.tombstones[0].terminal_at_ms, "1000");
+  assert.equal(store.activePairing(allocated.result.pairing_id), null);
+
+  const restarted = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 2000,
+  });
+  assert.equal(restarted.activePairing(allocated.result.pairing_id), null);
+  await assert.rejects(restarted.consumeForControllerLease({
+    ...common, controllerLeaseId: "controller-lease-0003",
+  }), (error) => error?.code === "pairing_not_active");
+});
+
+test("failed controller lease consumption keeps pairing active", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(6),
+  });
+  const request = registration();
+  const allocated = await store.register({
+    request, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  stateStore.failWrites = true;
+  await assert.rejects(store.consumeForControllerLease({
+    pairingId: allocated.result.pairing_id,
+    endpointId: request.endpoint_id,
+    remoteControlGeneration: request.remote_control_generation,
+    reservationId: "reservation-0001",
+    controllerLeaseId: "controller-lease-0001",
+  }), (error) => error?.code === "pairing_persist_failed");
+  assert.equal(store.activePairing(allocated.result.pairing_id).endpoint_id, request.endpoint_id);
+  assert.equal(stateStore.value.tombstones[0].terminal_at_ms, null);
+});
+
+test("Relay restart invalidation terminates old codes and rejects old-epoch registration replay", async () => {
+  const stateStore = new MemoryStateStore();
+  const request = registration();
+  const first = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(7),
+  });
+  const allocated = await first.register({
+    request, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  const restarted = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 2000,
+  });
+  assert.equal(await restarted.invalidateForRelayRestart(), 1);
+  assert.equal(restarted.activePairing(allocated.result.pairing_id), null);
+  assert.equal(stateStore.value.tombstones[0].terminal_at_ms, "2000");
+  await assert.rejects(restarted.register({
+    request: { ...request, request_id: "transport-request-after-restart" },
+    relayEpoch: "relay-epoch-0002",
+    sealCode: sealPairingCode,
+  }), (error) => error?.code === "pairing_registration_stale_relay_epoch");
+});
