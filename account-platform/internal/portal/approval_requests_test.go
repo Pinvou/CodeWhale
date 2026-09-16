@@ -168,7 +168,7 @@ func TestApprovalBFFDraftLifecycleUsesLockedWire(t *testing.T) {
 		forwardedControl = r.Header.Get("X-Pinvou-Approval-Action-Control-Version")
 		if r.Method == http.MethodPost && r.URL.Path == "/admin/v1/approval-requests" {
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"id":"` + id + `","status":"DRAFT"}`))
+			_, _ = w.Write([]byte(`{"approval_request_id":"` + id + `","status":"DRAFT"}`))
 			return
 		}
 		if r.Method == http.MethodPost && r.URL.Path == "/admin/v2/approval-requests" {

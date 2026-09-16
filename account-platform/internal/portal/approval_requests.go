@@ -272,16 +272,12 @@ func rejectDisabledBFFTokenDraft(w http.ResponseWriter, r *http.Request, raw []b
 
 func approvalCreatedID(raw []byte, wire int) (uuid.UUID, bool) {
 	var envelope struct {
-		ID                uuid.UUID `json:"id"`
 		ApprovalRequestID uuid.UUID `json:"approval_request_id"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return uuid.Nil, false
 	}
-	if wire == 1 && envelope.ID != uuid.Nil {
-		return envelope.ID, true
-	}
-	if wire == 2 && envelope.ApprovalRequestID != uuid.Nil {
+	if (wire == 1 || wire == 2) && envelope.ApprovalRequestID != uuid.Nil {
 		return envelope.ApprovalRequestID, true
 	}
 	return uuid.Nil, false
