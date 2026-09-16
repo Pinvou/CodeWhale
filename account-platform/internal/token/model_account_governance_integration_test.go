@@ -30,6 +30,32 @@ type modelAccountWalletResolver struct {
 	calls    atomic.Int32
 }
 
+// pauseCatalogAfterPrecheck makes the domain fact change deterministic between
+// the HTTP precheck and the serializable local transaction.
+type pauseCatalogAfterPrecheck struct {
+	*PostgresApprovedCredentialExecutor
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (e *pauseCatalogAfterPrecheck) PrecheckApprovedTokenCommand(ctx context.Context, commandType string, envelope TokenCommandEnvelope) (json.RawMessage, error) {
+	before, err := e.PostgresApprovedCredentialExecutor.PrecheckApprovedTokenCommand(ctx, commandType, envelope)
+	if err != nil {
+		return nil, err
+	}
+	close(e.entered)
+	select {
+	case <-e.release:
+		return before, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (e *pauseCatalogAfterPrecheck) ExecuteApprovedCatalogRollbackCommand(ctx context.Context, input runtimeTokenCommandBegin, capabilities []GatewayProtocolCapability) (TokenCommandResult, bool, error) {
+	return e.PostgresApprovedCredentialExecutor.ExecuteApprovedCatalogRollbackCommand(ctx, input, capabilities)
+}
+
 type modelAccountProvisioningClient struct {
 	walletID uuid.UUID
 	calls    atomic.Int32
@@ -323,6 +349,66 @@ VALUES($1,$2,'rollback-current-only-session',$3,$4,$5,'rollback-current-only',$6
 		t.Fatalf("v2 drift produced a Token claim=%d err=%v", prematureResult, err)
 	}
 	pricing.result.FinancialFactRevision--
+	paused := &pauseCatalogAfterPrecheck{PostgresApprovedCredentialExecutor: executor, entered: make(chan struct{}), release: make(chan struct{})}
+	service.approvedCommandExecutor = paused
+	raceResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() { raceResult <- perform() }()
+	select {
+	case <-paused.entered:
+	case <-time.After(5 * time.Second):
+		close(paused.release)
+		t.Fatal("catalog execution did not reach the post-precheck boundary")
+	}
+	// The HTTP proof and precheck have both succeeded. A concurrent route
+	// change must still be detected inside the Token transaction, before claim.
+	if _, err = repository.pool.Exec(ctx, `UPDATE routing_policies SET priority=priority+1,route_version=route_version+1 WHERE id=$1`, routeID); err != nil {
+		close(paused.release)
+		t.Fatal(err)
+	}
+	close(paused.release)
+	select {
+	case raced := <-raceResult:
+		if raced.Code != http.StatusConflict || !strings.Contains(raced.Body.String(), "PRECHECK_CHANGED") {
+			t.Fatalf("post-precheck race=%d/%s", raced.Code, raced.Body.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("catalog execution stalled after releasing precheck")
+	}
+	service.approvedCommandExecutor = executor
+	var racedCommands, racedCatalogs, racedAudits, racedOutbox int
+	if err = repository.pool.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM token_command_results WHERE approval_request_id=$1),
+ (SELECT count(*) FROM model_catalog_versions WHERE version>$2),
+ (SELECT count(*) FROM token_audit_logs WHERE summary->>'approval_request_id'=$1::text),
+ (SELECT count(*) FROM outbox_events WHERE payload->>'approval_request_id'=$1::text)`, approvalID, currentVersion).Scan(&racedCommands, &racedCatalogs, &racedAudits, &racedOutbox); err != nil || racedCommands != 0 || racedCatalogs != 0 || racedAudits != 0 || racedOutbox != 0 {
+		t.Fatalf("post-precheck race facts command/catalog/audit/outbox=%d/%d/%d/%d err=%v", racedCommands, racedCatalogs, racedAudits, racedOutbox, err)
+	}
+	projection, err = service.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{CommandType: envelope.CommandType, TargetResourceType: envelope.TargetResourceType, TargetResourceID: envelope.TargetResourceID, NormalizedCommand: command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.ExpectedVersions, envelope.PrecheckFingerprint = projection.CriticalResourceVersions, projection.PrecheckFingerprint
+	approvalID = uuid.New()
+	body = approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 12, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_CATALOG_ROLLBACK:" + fingerprint, CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot, Envelope: envelope}
+	artifacts, err = approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: envelope.CommandType, PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: envelope.TargetResourceType, TargetResourceID: envelope.TargetResourceID,
+		NormalizedCommand: command, CriticalResourceVersions: projection.CriticalResourceVersions,
+		FinancialSnapshot: projection.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err = service.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: approvalID, Artifacts: artifacts})
+	if err != nil || proof.Verdict != "ALLOW" {
+		t.Fatalf("post-race refreshed proof=%+v err=%v", proof, err)
+	}
+	proofDigest, err = approvalencoding.DeriveProofDigest(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.ProofSchemaVersion, body.CommandDigest, body.SnapshotDigest = proof.ProofSchemaVersion, proof.CommandDigest, proof.SnapshotDigest
+	body.DomainRevision, body.ProofDigest, body.ApprovalControlEpoch = proof.DomainRevision, hex.EncodeToString(proofDigest[:]), 1
 	first, second := perform(), perform()
 	var firstResult, replayResult TokenCommandResult
 	if first.Code != http.StatusOK || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &replayResult) != nil || firstResult.Status != "SUCCEEDED" || firstResult.CommandReference != replayResult.CommandReference {
