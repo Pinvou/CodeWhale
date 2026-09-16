@@ -18,8 +18,10 @@
 //! `Running`，之后每次连接都重放一张没人轮询的死二维码。
 //!
 //! 每个门闩持有者带一个 `epoch`（代次）：
-//! - 抢占：`Running`/`Cancelling` 超过 [`STALL_LIMIT`] 无心跳（子进程僵死，
-//!   `cmd.output()` 可无限阻塞）时 `begin` 直接回收门闩交给新流程自愈；
+//! - 抢占：`Running`/`Cancelling` 超过 [`STALL_LIMIT`] 无心跳时 `begin` 直接回收
+//!   门闩交给新流程自愈。子进程调用已由 [`super::connector_cli::run_captured_with_timeout`]
+//!   钳在 [`super::connector_cli::CLI_RUN_TIMEOUT`] 内，正常不会触达该上限——抢占是兜底，防未来
+//!   新增不受限的阻塞调用或线程在别处卡死；
 //! - 隔离：被抢占的僵尸流程醒来后 epoch 已过期，其 `release`/`arm_payload`/
 //!   心跳全部失效，不会污染新持有者的状态。
 //!
@@ -80,8 +82,10 @@ enum Phase {
 }
 
 impl State {
-    /// 门闩被非 Idle 流程占着且久无心跳 = 子进程僵死。判据是 [`STALL_LIMIT`]，
-    /// 而流程在每个阻塞调用前都刷心跳，所以该值只需覆盖**单次**调用的最坏耗时。
+    /// 门闩被非 Idle 流程占着且久无心跳 = 流程卡死。判据是 [`STALL_LIMIT`]。
+    /// 子进程调用已被 [`super::connector_cli::CLI_RUN_TIMEOUT`] 钳住，正常每拍心跳间隔远小于
+    /// 该值；触达它意味着流程在别处（或某个绕过超时封装的调用）卡死，抢占是
+    /// 兜底自愈而非日常路径。
     fn is_stalled(&self) -> bool {
         self.phase != Phase::Idle
             && self
@@ -90,9 +94,9 @@ impl State {
     }
 }
 
-/// 判定流程"卡死"的无心跳上限。流程在每个阻塞型 CLI 调用前刷心跳，故只需覆盖
-/// 单次调用的最坏耗时：HTTP 客户端超时 60s（见 linux-src/main.go `httpClient`），
-/// `auth poll` 自带 30s 轮询窗口、末次请求可能再耗 60s ≈ 90s，取 2 倍留余量。
+/// 判定流程"卡死"的无心跳上限。子进程调用已由 [`super::connector_cli::CLI_RUN_TIMEOUT`]（120s）
+/// 兜底，单次调用不会再无限阻塞；该值只需继续大于单次调用的最坏耗时（120s），
+/// 作为"流程在超时封装之外卡死"的最后防线。
 const STALL_LIMIT: Duration = Duration::from_secs(180);
 
 /// 调用方等待旧流程归还门闩的上限。必须**大于** [`STALL_LIMIT`]，好让"卡死"
@@ -130,9 +134,9 @@ impl SsoFlow {
     pub(crate) fn begin(&self) -> Begin {
         let mut s = self.lock();
         if s.is_stalled() {
-            // 自愈：子进程僵死时流程内的 300s 总超时到不了，门闩会永久压在
-            // Running。直接回收转交新流程；旧流程 epoch 随即过期，它即使醒来
-            // 也无法再写状态、发事件。
+            // 自愈：流程在超时封装之外卡死时，其内部的 300s 总超时到不了，门闩
+            // 会永久压在 Running。直接回收转交新流程；旧流程 epoch 随即过期，
+            // 它即使醒来也无法再写状态、发事件。
             log::warn!(
                 "[flow_gate] 抢占无心跳流程 phase={:?} epoch={} 已 {:?} 无进展",
                 s.phase,
@@ -226,24 +230,60 @@ const SSO_LOGIN_MIN_INTERVAL: Duration = Duration::from_secs(65);
 /// 节流等待的分片粒度：等待期间按此间隔醒来检查一次取消，保证"取消"及时生效。
 const THROTTLE_TICK: Duration = Duration::from_millis(250);
 
-/// 进程内最近一次 SSO login 的发起时间（EIP / 知道共用——同源网关，限流按设备算）。
-static LAST_SSO_LOGIN: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+/// 进程内在途的 SSO login 预约槽位（EIP / 知道共用——同源网关，限流按设备算）。
+///
+/// 每个元素是"该调用方计划发起 login 的时刻"；放行后（确认真的发过请求）槽位
+/// 留存为最近一次 login 的时刻，继续约束后来者。用 **槽位集合**而非单个
+/// `Option<Instant>`：等待者可以非 LIFO 退出（先预约的先中止），单个值回滚时
+/// 只能整链还原，会把别人（或自己）已作废的"幽灵槽位"留在未来时刻，让之后的
+/// 重连平白多等一个 65s 窗口（issue #1097）；集合可以精确摘除自己的槽位。
+static LAST_SSO_LOGIN: LazyLock<Mutex<Vec<Instant>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// 放行凭证：throttle 放行只代表"轮到本次 login 发请求了"，请求是否真的发出
+/// 由调用方认领——
+/// - 已发（无论 CLI 退出码如何，网关都收到了请求）：[`LoginPermit::confirm`]，
+///   槽位留作最近一次 login 时刻约束后来者；
+/// - 未发（如 spawn 失败、放行与 run 之间新增了放弃路径）：直接丢弃，Drop 回
+///   滚自己的预约槽位，不让一次没发生的 login 白占 65s 窗口。认领是显式的、
+///   回滚是默认的，新增失败路径漏写归还也不会占窗口。
+pub(crate) struct LoginPermit<'a> {
+    last: &'a Mutex<Vec<Instant>>,
+    slot: Instant,
+    confirmed: bool,
+}
+
+impl LoginPermit<'_> {
+    /// 本次 login 请求已真实发出：窗口已被消耗，保留预约。
+    pub(crate) fn confirm(mut self) {
+        self.confirmed = true;
+    }
+}
+
+impl Drop for LoginPermit<'_> {
+    fn drop(&mut self) {
+        if !self.confirmed {
+            rollback(self.last, self.slot);
+        }
+    }
+}
 
 /// 发起 SSO login（`auth login` / `login`）前调用：距上次不足间隔则等待补齐，
 /// 然后登记本次发起时间。在 spawn_blocking 上下文中调用（阻塞 sleep 安全）。
 ///
-/// - `on_wait`：需要等待时回调一次剩余时长，供调用方给前端出进度提示；
+/// - `on_wait`：需要等待时回调剩余时长（整秒变化时持续回调），供调用方给前端
+///   出可递减的倒计时；至少回调一次；
 /// - `aborted`：每个分片检查一次，返回 true 则放弃本次登录并回滚预约。
 ///
-/// 返回 `false` = 已被中止，调用方应放弃本次 login（静默退出，不要报错）。
+/// 返回 `None` = 已被中止，调用方应放弃本次 login（静默退出，不要报错）；
+/// 返回 [`LoginPermit`] 后**必须**在请求真实发出时 [`LoginPermit::confirm`]。
 pub(crate) fn throttle_sso_login(
-    on_wait: impl FnOnce(Duration),
+    mut on_wait: impl FnMut(Duration),
     mut aborted: impl FnMut() -> bool,
-) -> bool {
+) -> Option<LoginPermit<'static>> {
     throttle_at(
         &LAST_SSO_LOGIN,
         SSO_LOGIN_MIN_INTERVAL,
-        on_wait,
+        &mut on_wait,
         &mut aborted,
     )
 }
@@ -251,41 +291,46 @@ pub(crate) fn throttle_sso_login(
 /// 节流实现：**锁内只做预约、不睡眠**。旧写法持锁 sleep，EIP 与知道并发发起时
 /// 第二家会在 mutex 上排队等满第一家的剩余窗口（最坏累计 ~130s）且全程无反馈。
 /// 现在两家各自算出"我该等多久"，睡眠在锁外分片进行。
-fn throttle_at(
-    last: &Mutex<Option<Instant>>,
+fn throttle_at<'a>(
+    last: &'a Mutex<Vec<Instant>>,
     min_interval: Duration,
-    on_wait: impl FnOnce(Duration),
+    on_wait: &mut impl FnMut(Duration),
     aborted: &mut impl FnMut() -> bool,
-) -> bool {
+) -> Option<LoginPermit<'a>> {
     let now = Instant::now();
-    // 预约：`*last` 存的是"下一次允许发起的时刻"，故本家排在上一个预约之后。
-    // 同时记下被自己覆盖的前值，供中止时回滚。
-    let (slot, previous) = {
+    // 预约：槽位集合里最晚的时刻 + 间隔即自己的槽位（排在上一个预约之后）；
+    // 集合为空或全部过期则立即放行。过期的槽位（窗口已过，要么已放行、要么
+    // 已回滚失败路径）顺手清掉，集合大小只与并发等待者数相关。
+    let slot = {
         let mut guard = last.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = *guard;
-        let slot = match previous {
-            Some(prev) if prev + min_interval > now => prev + min_interval,
-            _ => now,
-        };
-        *guard = Some(slot);
-        (slot, previous)
+        guard.retain(|s| s.checked_add(min_interval).is_some_and(|t| t > now));
+        let slot = guard
+            .last()
+            .and_then(|prev| prev.checked_add(min_interval))
+            .filter(|t| *t > now)
+            .unwrap_or(now);
+        guard.push(slot);
+        slot
     };
 
+    // 各放弃点直接返回 None：本函数内未构造凭证的路径手工回滚，已构造的交给
+    // Drop（见 LoginPermit）。
     if slot <= now {
         // 无需等待也要最后看一眼：否则"取消"之后紧跟着的这次 login 仍会真的发出去
         // （流程拿到门闩 → 取消落在 throttle 与 run 之间）。同理被抢占的僵尸流程
-        // 也不该再发请求。已预约的槽位要回滚，别让一次没发生的 login 占掉窗口。
+        // 也不该再发请求。
         if aborted() {
-            rollback(last, slot, previous);
-            return false;
+            rollback(last, slot);
+            return None;
         }
-        return true;
+        return Some(LoginPermit { last, slot, confirmed: false });
     }
     if aborted() {
-        rollback(last, slot, previous);
-        return false;
+        rollback(last, slot);
+        return None;
     }
     on_wait(slot - now);
+    let mut reported_secs = (slot - now).as_secs();
 
     loop {
         let remaining = slot.saturating_duration_since(Instant::now());
@@ -293,27 +338,34 @@ fn throttle_at(
             // 窗口耗尽的最后一次出队也要监票：取消/抢占落在最后一个分片内时，
             // 这次 login 同样不能真的发出去——与免等待路径同一标准。
             if aborted() {
-                rollback(last, slot, previous);
-                return false;
+                rollback(last, slot);
+                return None;
             }
-            return true;
+            return Some(LoginPermit { last, slot, confirmed: false });
         }
         if aborted() {
-            rollback(last, slot, previous);
-            return false;
+            rollback(last, slot);
+            return None;
         }
         std::thread::sleep(THROTTLE_TICK.min(remaining));
+        // 剩余秒数变化时续报：前端拿到可递减的倒计时，而不是一锤子近似值
+        // （issue #1097：sso_wait 秒数不递减）。整秒才报，避免 250ms 分片刷屏。
+        let remaining = slot.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() && remaining.as_secs() != reported_secs {
+            reported_secs = remaining.as_secs();
+            on_wait(remaining);
+        }
     }
 }
 
-/// 中止时回滚预约：本次没有真的发请求，不该白白占掉下一个窗口（否则取消后
-/// 立刻重连还要再等满一个 65s）。只在没人排在我们后面时才回滚——否则会把
-/// 后来者的预约一起抹掉。
-fn rollback(last: &Mutex<Option<Instant>>, slot: Instant, previous: Option<Instant>) {
-    let mut guard = last.lock().unwrap_or_else(|e| e.into_inner());
-    if *guard == Some(slot) {
-        *guard = previous;
-    }
+/// 中止 / 未确认放行时回滚预约：摘除**自己的**槽位，动不了别人的——先预约的
+/// 等待者非 LIFO 中止时，后来者的预约原样保留；后来者再中止也不会把前者已
+/// 作废的幽灵槽位还原回未来时刻（旧 `Option<Instant>` 整值还原的缺陷，
+/// issue #1097）。没发生的 login 不占窗口。
+fn rollback(last: &Mutex<Vec<Instant>>, slot: Instant) {
+    last.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|s| *s != slot);
 }
 
 #[cfg(test)]
@@ -478,22 +530,33 @@ mod tests {
         assert!(matches!(f.begin(), Begin::Start { .. }));
     }
 
+    /// 放行并确认（模拟请求真的发出）：窗口被消耗，供后续时序断言。
+    fn throttle_ok(last: &Mutex<Vec<Instant>>, window_ms: u64) -> bool {
+        match throttle_at(
+            last,
+            Duration::from_millis(window_ms),
+            &mut |_| {},
+            &mut || false,
+        ) {
+            Some(permit) => {
+                permit.confirm();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 取消后紧接着的放行不能把 login 漏出去：throttle 的免等待路径也要看 abort。
     #[test]
     fn throttle_fast_path_does_not_let_an_aborted_login_through() {
-        let last = Mutex::new(None);
+        let last = Mutex::new(Vec::new());
         assert!(
-            !throttle_at(&last, Duration::from_millis(120), |_| {}, &mut || true),
+            throttle_at(&last, Duration::from_millis(120), &mut |_| {}, &mut || true).is_none(),
             "已取消的调用方不该被放行（否则仍会真的发出一次 login）"
         );
         // 且不该占掉窗口：下一个调用方应立即放行。
         let t0 = Instant::now();
-        assert!(throttle_at(
-            &last,
-            Duration::from_millis(120),
-            |_| {},
-            &mut || false
-        ));
+        assert!(throttle_ok(&last, 120));
         assert!(
             t0.elapsed() < Duration::from_millis(60),
             "未发生的 login 不该占掉节流窗口，等了 {:?}",
@@ -505,19 +568,15 @@ mod tests {
     /// 同样不能被放出去，预约也要回滚。
     #[test]
     fn throttle_final_dequeue_does_not_let_an_aborted_login_through() {
-        let last = Mutex::new(None);
-        assert!(throttle_at(
-            &last,
-            Duration::from_millis(80),
-            |_| {},
-            &mut || false
-        ));
-        let previous = *last.lock().unwrap();
+        let last = Mutex::new(Vec::new());
+        assert!(throttle_ok(&last, 80));
+        let previous = last.lock().unwrap().clone();
         // abort 在窗口过半后翻真：模拟"取消落在最后一个分片内"。
         let t0 = Instant::now();
         let mut abort_midway = || t0.elapsed() >= Duration::from_millis(40);
         assert!(
-            !throttle_at(&last, Duration::from_millis(80), |_| {}, &mut abort_midway),
+            throttle_at(&last, Duration::from_millis(80), &mut |_| {}, &mut abort_midway)
+                .is_none(),
             "最后一次出队已察觉取消，不该把这次 login 放出去"
         );
         assert_eq!(
@@ -529,44 +588,29 @@ mod tests {
 
     #[test]
     fn throttle_enforces_min_interval_between_logins() {
-        let last = Mutex::new(None);
+        let last = Mutex::new(Vec::new());
         // 从首次调用之前起计量：第二次调用起步前可能已消耗部分窗口（CI 调度
         // 停顿甚至可能已越过整个窗口——此时立即放行是正确行为），断言的语义
         // 是"不得早于自己的预约槽位放行"，扣掉起步前已消耗的量，另留 2ms
         // 裕量吸收时钟与调度精度；仍能拦住"完全没等"的回归。
         let t0 = Instant::now();
-        assert!(throttle_at(
-            &last,
-            Duration::from_millis(80),
-            |_| {},
-            &mut || false
-        ));
+        assert!(throttle_ok(&last, 80));
         let entry = Instant::now();
-        assert!(throttle_at(
-            &last,
-            Duration::from_millis(80),
-            |_| {},
-            &mut || false
-        ));
+        assert!(throttle_ok(&last, 80));
         let waited = entry.elapsed();
         let floor = Duration::from_millis(78).saturating_sub(entry.duration_since(t0));
         assert!(
             waited >= floor,
             "second login must not pass before its reserved slot (waited {waited:?})"
         );
-        assert!(last.lock().unwrap().is_some());
+        assert!(!last.lock().unwrap().is_empty());
     }
 
     #[test]
     fn throttle_passes_immediately_after_interval() {
-        let stale = Mutex::new(Some(Instant::now() - Duration::from_secs(10)));
+        let stale = Mutex::new(vec![Instant::now() - Duration::from_secs(10)]);
         let t0 = Instant::now();
-        assert!(throttle_at(
-            &stale,
-            Duration::from_millis(80),
-            |_| {},
-            &mut || false
-        ));
+        assert!(throttle_ok(&stale, 80));
         assert!(
             t0.elapsed() < Duration::from_millis(80),
             "login outside the window must not be delayed"
@@ -576,11 +620,16 @@ mod tests {
     /// m4 回归：等待期间不持锁——第一家还在窗口里时，第二家必须能立刻取到锁。
     #[test]
     fn throttle_waits_without_holding_the_lock() {
-        let last = Mutex::new(Some(Instant::now())); // 窗口刚过 0s，第二家要等满
+        let last = Mutex::new(vec![Instant::now()]); // 窗口刚过 0s，第二家要等满
         let waiting = std::thread::scope(|scope| {
             let last = &last;
             scope.spawn(move || {
-                throttle_at(last, Duration::from_millis(120), |_| {}, &mut || false)
+                throttle_at(
+                    last,
+                    Duration::from_millis(120),
+                    &mut |_| {},
+                    &mut || false,
+                )
             });
             // 第一家睡在等待里时，主线程必须能马上拿到锁（旧写法会卡满 120ms）。
             let t0 = Instant::now();
@@ -599,28 +648,19 @@ mod tests {
     /// 还要再白等一个完整窗口。
     #[test]
     fn aborted_throttle_wait_rolls_back_the_reservation() {
-        let last = Mutex::new(None);
+        let last = Mutex::new(Vec::new());
+        assert!(throttle_ok(&last, 120));
+        // 第二家预约成功但立刻被中止。
         assert!(throttle_at(
             &last,
             Duration::from_millis(120),
-            |_| {},
-            &mut || false
-        ));
-        // 第二家预约成功但立刻被中止。
-        assert!(!throttle_at(
-            &last,
-            Duration::from_millis(120),
-            |_| {},
+            &mut |_| {},
             &mut || true
-        ));
+        )
+        .is_none());
         // 回滚后剩下的窗口应约等于第一家的 120ms，而不是再叠加一个。
         let t0 = Instant::now();
-        assert!(throttle_at(
-            &last,
-            Duration::from_millis(120),
-            |_| {},
-            &mut || false
-        ));
+        assert!(throttle_ok(&last, 120));
         let waited = t0.elapsed();
         assert!(
             waited < Duration::from_millis(180),
@@ -628,16 +668,143 @@ mod tests {
         );
     }
 
+    /// 非 LIFO 中止不留幽灵槽位（issue #1097）：先占槽的 A 中止时，后来者 B 的
+    /// 预约挡住了旧整值还原；B 随后也中止时，旧写法会把 A 已作废的槽位还原回
+    /// 未来时刻——两笔预约都已作废，下一个调用方却还要多等一个窗口。精确摘除
+    /// 自己的槽位后不应有任何残留。
+    #[test]
+    fn non_lifo_aborts_leave_no_ghost_slot() {
+        let last = Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            let last = &last;
+            let (a_reserved, reserved_rx) = std::sync::mpsc::channel::<()>();
+            let (b_done, done_rx) = std::sync::mpsc::channel::<()>();
+            // A:免等待放行,持有**未确认**凭证(模拟"轮到了但请求还没发出")。
+            // 等 B 中止回滚后才丢弃凭证,保证 B 回滚时 A 的槽位还在集合里(非 LIFO)。
+            let a = scope.spawn(move || {
+                let permit = throttle_at(
+                    last,
+                    Duration::from_millis(200),
+                    &mut |_| {},
+                    &mut || false,
+                )
+                .expect("A fast path must pass");
+                a_reserved.send(()).expect("notify A reserved");
+                done_rx.recv().expect("wait for B");
+                permit // 线程结束时 drop → 回滚 A 自己的槽位
+            });
+            reserved_rx.recv().expect("A must have reserved first");
+            // B:排在 A 之后进入等待,窗口过半被中止 → 摘除 B 自己的槽位。
+            let b = scope.spawn(move || {
+                let t0 = Instant::now();
+                throttle_at(
+                    last,
+                    Duration::from_millis(200),
+                    &mut |_| {},
+                    &mut || t0.elapsed() >= Duration::from_millis(60),
+                )
+            });
+            assert!(b.join().unwrap().is_none(), "B 必须在窗口过半后被中止");
+            b_done.send(()).expect("notify B done");
+            // A 憋到 B 回滚后才丢凭证(见上);join 拿回凭证,drop 即回滚 A 的槽位。
+            drop(a.join().unwrap());
+        });
+        // 两笔预约都已作废:谁都不该再占窗口,下一个调用方必须立即放行。
+        let t0 = Instant::now();
+        assert!(throttle_ok(&last, 120));
+        assert!(
+            t0.elapsed() < Duration::from_millis(60),
+            "非 LIFO 中止不得留下幽灵槽位，多等了 {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// 放行后调用方放弃（如 spawn 失败）必须回滚：未确认即丢弃凭证，自动摘除
+    /// 自己的槽位，下一个调用方不被白占窗口（issue #1097）。
+    #[test]
+    fn unconfirmed_permit_rolls_back_the_slot() {
+        let last = Mutex::new(Vec::new());
+        let permit = throttle_at(
+            &last,
+            Duration::from_millis(120),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("first caller must pass");
+        drop(permit); // 调用方没能发出请求
+        let t0 = Instant::now();
+        assert!(throttle_ok(&last, 120), "下一个调用方必须立即放行");
+        assert!(
+            t0.elapsed() < Duration::from_millis(60),
+            "没发出的 login 不得占窗口，等了 {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// confirm 保留窗口：确认已真实发出的 login 必须继续约束后来的调用方，
+    /// 否则连续两次 login 会撞网关限流。
+    #[test]
+    fn confirmed_permit_keeps_the_window() {
+        let last = Mutex::new(Vec::new());
+        let permit = throttle_at(
+            &last,
+            Duration::from_millis(120),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("first caller must pass");
+        permit.confirm();
+        let t0 = Instant::now();
+        assert!(throttle_ok(&last, 120));
+        assert!(
+            t0.elapsed() >= Duration::from_millis(100),
+            "confirmed login 必须继续占据节流窗口，第二个调用方只等了 {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// 等待期间剩余秒数递减续报（issue #1097：sso_wait 秒数不递减）：调用方
+    /// 拿到持续更新的剩余量，前端出可递减的倒计时；整秒才报，250ms 分片不刷屏。
+    /// 首个调用方免等待（无可报），等待的是排在其后的第二个。
+    #[test]
+    fn throttle_reports_decreasing_seconds_while_waiting() {
+        let last = Mutex::new(Vec::new());
+        assert!(throttle_ok(&last, 1200), "第一个调用方免等待放行");
+        let reports = std::cell::RefCell::new(Vec::new());
+        let permit = {
+            let reports = &reports;
+            throttle_at(
+                &last,
+                Duration::from_millis(1200),
+                &mut |wait| reports.borrow_mut().push(wait),
+                &mut || false,
+            )
+            .expect("second caller must pass after waiting")
+        };
+        permit.confirm();
+        let reports = reports.into_inner();
+        assert!(
+            reports.len() >= 2,
+            "等待期间必须续报剩余时长，只报了 {reports:?}"
+        );
+        assert!(
+            reports.windows(2).all(|w| w[0] > w[1]),
+            "剩余时长必须严格递减，得到 {reports:?}"
+        );
+    }
+
     #[test]
     fn throttle_reports_the_wait_before_sleeping() {
-        let last = Mutex::new(Some(Instant::now()));
+        let last = Mutex::new(vec![Instant::now()]);
         let reported = std::cell::Cell::new(None);
-        assert!(throttle_at(
+        let permit = throttle_at(
             &last,
             Duration::from_millis(100),
-            |wait| reported.set(Some(wait)),
-            &mut || false
-        ));
+            &mut |wait| reported.set(Some(wait)),
+            &mut || false,
+        )
+        .expect("on_wait must fire when delayed");
+        permit.confirm();
         let reported = reported.get().expect("on_wait must fire when delayed");
         assert!(
             reported <= Duration::from_millis(100) && !reported.is_zero(),

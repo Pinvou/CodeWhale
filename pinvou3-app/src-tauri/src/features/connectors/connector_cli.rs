@@ -167,6 +167,82 @@ pub(crate) fn reap_after_kill(child: &mut Child) {
     let _ = reap_killed_child(child, REAP_GRACE);
 }
 
+/// 连接器 CLI 单次调用的兜底上限。CLI 自带 HTTP 客户端超时 60s(见 eip
+/// linux-src/main.go `httpClient`),`auth poll` 自带 30s 轮询窗口,单次合法
+/// 最坏 ≈ 90s;超过视为进程挂死。须小于门闩抢占阈值 `flow_gate::STALL_LIMIT`
+/// (180s),让卡死先在调用点以本超时自愈,抢占只作兜底。
+pub(crate) const CLI_RUN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 跑命令并**捕获输出**、带超时兜底(EIP / 知道 SSO 编排用)。
+///
+/// 旧实现直接 `cmd.output()`:CLI 真挂死(网络半开、内网网关黑洞)时会无限
+/// 阻塞,spawn_blocking 线程与子进程都不回收,反复触发会耗尽线程池(issue
+/// #1097)。这里 spawn + 轮询 `try_wait`,超时 kill 并 `wait()` 收尸;stdout/
+/// stderr 由独立线程排空——等待循环里不读管道的话,输出一旦超过管道缓冲
+/// (64KB)子进程就写阻塞造成假死,把正常调用误判成超时。
+pub(crate) fn run_captured_with_timeout(
+    mut cmd: Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<(bool, i32, String, String), String> {
+    fn drain<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 {label} 失败: {e}"))?;
+    let stdout_t = drain(child.stdout.take());
+    let stderr_t = drain(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // 进程已退出,管道随之关闭,排空线程立刻到 EOF。
+                let stdout =
+                    String::from_utf8_lossy(&stdout_t.join().unwrap_or_default()).into_owned();
+                let stderr =
+                    String::from_utf8_lossy(&stderr_t.join().unwrap_or_default()).into_owned();
+                return Ok((
+                    status.success(),
+                    status.code().unwrap_or(-1),
+                    stdout,
+                    stderr,
+                ));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // 挂死进程的管道可能仍被孙进程握着,join 会卡住——直接脱管,
+                    // 排空线程随管道关闭自然结束,不占 spawn_blocking 池。
+                    return Err(format!(
+                        "{label} 无响应超过 {}s,已终止",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = stdout_t.join();
+                let _ = stderr_t.join();
+                return Err(format!("{label} 执行失败: {e}"));
+            }
+        }
+    }
+}
+
 /// 标准 base64 编码(避免引新依赖)。
 pub fn b64(data: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -610,5 +686,48 @@ mod tests {
             }
         }
         out
+    }
+
+    /// run_captured_with_timeout 正常路径:退出码与 stdout/stderr 都被完整捕获。
+    #[test]
+    fn run_captured_collects_output_and_status() {
+        let mut cmd = Command::new(if cfg!(target_family = "windows") { "cmd" } else { "echo" });
+        if cfg!(target_family = "windows") {
+            cmd.args(["/C", "echo captured-ok 1>&2"]);
+        } else {
+            cmd.arg("captured-stdout-ok");
+        }
+        let (ok, _code, so, se) = run_captured_with_timeout(cmd, "test-cli", CLI_RUN_TIMEOUT)
+            .expect("fast command must succeed");
+        assert!(ok);
+        if cfg!(target_family = "windows") {
+            assert!(se.contains("captured-ok"), "stderr captured, got {se:?}");
+        } else {
+            assert!(so.contains("captured-stdout-ok"), "stdout captured, got {so:?}");
+        }
+    }
+
+    /// run_captured_with_timeout 超时路径:挂死的子进程被 kill 并收尸,调用在
+    /// 超时后很快返回错误,而不是无限阻塞(issue #1097:僵尸流程资源不回收)。
+    #[test]
+    fn run_captured_kills_a_hung_child_at_the_deadline() {
+        let mut cmd = Command::new(if cfg!(target_family = "windows") { "cmd" } else { "sleep" });
+        if cfg!(target_family = "windows") {
+            cmd.args(["/C", "ping -n 30 127.0.0.1"]);
+        } else {
+            cmd.arg("30");
+        }
+        let t0 = Instant::now();
+        let err = run_captured_with_timeout(cmd, "test-cli", Duration::from_secs(1))
+            .expect_err("hung command must be killed");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "kill must return promptly, took {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            err.contains("无响应超过 1s"),
+            "error must report the timeout, got {err:?}"
+        );
     }
 }

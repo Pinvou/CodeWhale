@@ -149,16 +149,14 @@ fn eip(args: &[&str]) -> Result<Command, String> {
 }
 
 /// 跑命令,收 (success, exit_code, stdout, stderr)。`exit_code==3` = 需登录。
-fn run(mut cmd: Command) -> Result<(bool, i32, String, String), String> {
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动 eip-cli 失败: {e}"))?;
-    Ok((
-        out.status.success(),
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
+/// 带超时兜底:CLI 真挂死时 kill 并收尸,而不是无限阻塞 spawn_blocking 线程
+/// (issue #1097:僵尸流程资源不回收)。
+fn run(cmd: Command) -> Result<(bool, i32, String, String), String> {
+    super::connector_cli::run_captured_with_timeout(
+        cmd,
+        "eip-cli",
+        super::connector_cli::CLI_RUN_TIMEOUT,
+    )
 }
 
 /// 从一段输出里抓第一个 JSON 对象(CLI 可能夹带提示行)。
@@ -424,8 +422,9 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
 /// 返回 `Ok(None)` = 节流等待期间被取消/抢占,本次登录作废。
 fn get_sso_url(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<String>, String> {
     let cmd = eip(&["auth", "login", "--no-poll", "--output", "json"])?;
-    // 同源网关限流:与知道的 login 至少间隔 65s。等待期间给前端出进度,可被取消。
-    let proceed = super::flow_gate::throttle_sso_login(
+    // 同源网关限流:与知道的 login 至少间隔 65s。等待期间给前端出**可递减**的
+    // 倒计时(整秒续报),可被取消。
+    let permit = super::flow_gate::throttle_sso_login(
         |wait| {
             emit(
                 app,
@@ -435,10 +434,17 @@ fn get_sso_url(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<Str
         },
         || !flow.is_active(epoch),
     );
-    if !proceed {
+    let Some(permit) = permit else {
         return Ok(None);
+    };
+    // 放行 ≠ 请求已发出:spawn 失败(Err)时丢弃凭证自动回滚预约,不白占 65s
+    // 窗口;进程真的跑起来后无论退出码如何,网关都收到了请求,confirm 保留窗口
+    // (issue #1097:throttle 放行后 run(cmd) spawn 失败无法回滚预约)。
+    let out = run(cmd);
+    if out.is_ok() {
+        permit.confirm();
     }
-    let (_ok, _code, so, se) = run(cmd)?;
+    let (_ok, _code, so, se) = out?;
     let p = parse_json(&so)
         .or_else(|| parse_json(&se))
         .unwrap_or(Value::Null);
