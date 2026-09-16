@@ -4,7 +4,7 @@
 
 ## 当前安全基线
 
-- Account `000065` 将 proof-era Billing 确定失败保留为 `DOMAIN_INFLIGHT`；`000066` 栅栏化旧版本留下的 `READY + last_error_code`，并使 grant 拒绝该组合。Billing consumer 自身也拒绝 proof-era 第二次 Begin/Grant。legacy Billing 的既有 12 次上限不在这两次迁移中改变。
+- Account `000065` 将 proof-era Billing 确定失败保留为 `DOMAIN_INFLIGHT`；`000066` 栅栏化旧版本留下的 `READY + last_error_code`；`000067` 进一步把 `READY + 已有attempt`（即使错误码丢失）迁入只查证态，并使直接 grant 对 proof-era 仅允许第 0 次到第 1 次。Billing consumer 本地也拒绝第二次 Begin/Grant。legacy Billing 的既有 12 次上限不变。
 - `EXECUTION_FAILED` 不由通用过期 worker 直接标记 INVALIDATED；已有执行记录的结果必须先经领域权威查证。未 Begin 的 APPROVED 仍按原五分钟执行窗口过期。
 - 任何已提交 Billing proof claim、已进入 Provider 探测、Token 本地命令已开始、数据库提交结果不明、权威结果读超时或未知错误码，均按 UNKNOWN 处理。一次“未查到结果”不是“没有产生效果”的证明。
 
