@@ -1056,15 +1056,15 @@ mod tests {
         // Clamping full-access down to workspace-write must land on the same
         // restricted posture an ordinary Agent turn gets, not on a wider one.
         assert!(matches!(
-                    full_access.sandbox_policy(
-        workspace,
-        &[],
-                        Some("workspace-write"),
-                        SandboxNetworkAccess::Restricted
-                    ),
-                    SandboxPolicy::WorkspaceWrite { writable_roots, network_access, .. }
-                        if writable_roots == vec![workspace.to_path_buf()] && !network_access
-                ));
+        full_access.sandbox_policy(
+            workspace,
+            &[],
+            Some("workspace-write"),
+            SandboxNetworkAccess::Restricted
+        ),
+        SandboxPolicy::WorkspaceWrite { writable_roots, network_access, .. }
+                    if writable_roots == vec![workspace.to_path_buf()] && !network_access
+            ));
         assert_eq!(
             full_access.sandbox_policy(
                 workspace,

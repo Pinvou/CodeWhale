@@ -1189,11 +1189,6 @@ pub(crate) async fn apply_command_result(
                         return Ok(false);
                     }
                 };
-                // The persisted metadata is the only roots source in the
-                // TUI (no multi-root UI): carry it into the app state so the
-                // respawned engine, every re-sync, and the next autosave
-                // preserve the set instead of laundering it to single-root.
-                app.workspace_roots = session.metadata.workspace_roots.clone();
                 let fresh_config =
                     match Config::load(app.config_path.clone(), app.config_profile.as_deref()) {
                         Ok(config) => config,
@@ -1217,6 +1212,12 @@ pub(crate) async fn apply_command_result(
                         return Ok(false);
                     }
                 };
+                // The persisted metadata is the only roots source in the TUI
+                // (no multi-root UI): seed the app state only after every
+                // fallible restore step has succeeded, so a failed load
+                // cannot leave the *current* session's engine inheriting a
+                // foreign root set through the next routine re-sync.
+                app.workspace_roots = session.metadata.workspace_roots.clone();
                 sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                 if respawn {
                     let _ = engine_handle.send(Op::Shutdown).await;

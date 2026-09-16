@@ -147,6 +147,11 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
     forked.artifacts = source_session.artifacts.clone();
     forked.work_state = source_session.work_state.clone();
     forked.last_auto_route = source_session.last_auto_route.clone();
+    // The fork continues the same conversation over the same accessible
+    // set: stamp the source's roots before the save, or the freshly
+    // constructed (empty) metadata persists and the disk-authority
+    // lifecycle merge keeps re-erasing any later correction.
+    forked.metadata.workspace_roots = source_session.metadata.workspace_roots.clone();
     if let Err(err) = manager.save_session(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
     }
@@ -224,7 +229,15 @@ pub fn fork(app: &mut App) -> CommandResult {
             .parent_session_id
             .clone_from(&cached.parent_session_id);
         parent.metadata.forked_from_message_count = cached.forked_from_message_count;
+        parent
+            .metadata
+            .workspace_roots
+            .clone_from(&cached.workspace_roots);
     }
+    // The freshly constructed metadata has empty roots; the live App state
+    // is the current set for this session. Stamp it before the save for the
+    // same durable-erasure reason as above.
+    parent.metadata.workspace_roots = app.workspace_roots.clone();
     app.sync_cost_to_metadata(&mut parent.metadata);
     parent.context_references = app.session_context_references.clone();
     parent.artifacts = app.session_artifacts.clone();
@@ -260,6 +273,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         j.spawn_depth = parent.metadata.spawn_depth;
     }
     forked.metadata.mark_forked_from(&parent.metadata);
+    forked.metadata.workspace_roots = parent.metadata.workspace_roots.clone();
     forked.context_references = app.session_context_references.clone();
     forked.artifacts = app.session_artifacts.clone();
     forked.work_state = work_state;

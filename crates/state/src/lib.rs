@@ -656,6 +656,11 @@ impl StateStore {
                 "#
             ))
             .context("failed to initialize thread workspace roots schema")?;
+            // Deliberately no local `user_version` mirror here: this is the
+            // terminal migration step, so the stale pre-migration value is
+            // never read again (an unused assignment fails -D warnings).
+            // A future v6 step re-reads PRAGMA user_version first, and the
+            // column_exists guard keeps re-entry into this block harmless.
         }
         Ok(())
     }
@@ -2048,8 +2053,23 @@ fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadMetadata> {
 }
 
 fn workspace_roots_from_json(raw: Option<String>) -> Vec<PathBuf> {
-    raw.and_then(|value| serde_json::from_str::<Vec<PathBuf>>(&value).ok())
-        .unwrap_or_default()
+    let Some(value) = raw else {
+        return Vec::new();
+    };
+    // The fallback direction is safe (empty = single-root legacy), but a
+    // writer-side serialization bug must not present as silent degradation;
+    // tolerance with visibility, as for the other legacy-shaped columns.
+    match serde_json::from_str::<Vec<PathBuf>>(&value) {
+        Ok(roots) => roots,
+        Err(error) => {
+            tracing::warn!(
+                target: "codewhale_state",
+                %error,
+                "invalid workspace_roots JSON on threads row; treating as empty"
+            );
+            Vec::new()
+        }
+    }
 }
 
 fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRecord> {

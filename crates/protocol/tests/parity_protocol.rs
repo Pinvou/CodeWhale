@@ -111,7 +111,10 @@ fn thread_resume_params_round_trip() {
         base_instructions: Some("base".to_string()),
         developer_instructions: Some("dev".to_string()),
         personality: Some("default".to_string()),
-        workspace_roots: Vec::new(),
+        workspace_roots: Some(vec![
+            PathBuf::from("/repo/main"),
+            PathBuf::from("/repo/shared"),
+        ]),
         persist_extended_history: true,
     });
 
@@ -121,6 +124,14 @@ fn thread_resume_params_round_trip() {
         ThreadRequest::Resume(params) => {
             assert_eq!(params.thread_id, "thread-123");
             assert_eq!(params.model.as_deref(), Some("deepseek-v4-pro"));
+            assert_eq!(
+                params.workspace_roots,
+                Some(vec![
+                    PathBuf::from("/repo/main"),
+                    PathBuf::from("/repo/shared"),
+                ]),
+                "an explicit root set round-trips, and is serialized (non-empty)"
+            );
             assert!(params.persist_extended_history);
         }
         other => panic!("unexpected request: {other:?}"),
@@ -175,7 +186,7 @@ fn thread_params_without_workspace_roots_deserialize_to_empty() {
     let decoded: ThreadRequest =
         serde_json::from_str(legacy_resume).expect("deserialize legacy resume request");
     match decoded {
-        ThreadRequest::Resume(params) => assert!(params.workspace_roots.is_empty()),
+        ThreadRequest::Resume(params) => assert!(params.workspace_roots.is_none()),
         other => panic!("unexpected request: {other:?}"),
     }
 
@@ -211,7 +222,12 @@ fn thread_dto_workspace_roots_default_for_legacy_payloads() {
     // frame byte-identical.
     let encoded_single_root =
         serde_json::to_string(&decoded).expect("serialize single-root thread");
-    assert!(!encoded_single_root.contains("workspace_roots"));
+    let frame: serde_json::Value =
+        serde_json::from_str(&encoded_single_root).expect("single-root frame parses");
+    assert!(
+        frame.get("workspace_roots").is_none(),
+        "a single-root thread frame must omit the key entirely: {frame}"
+    );
 
     let mut current = decoded;
     current.workspace_roots = vec![PathBuf::from("/repo"), PathBuf::from("/repo/lib")];

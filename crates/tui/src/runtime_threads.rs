@@ -2150,7 +2150,7 @@ pub struct CreateThreadRequest {
     /// Additional accessible roots for the thread; `workspace` stays the
     /// primary root and the set is normalized on create (workspace first,
     /// deduped). Empty or omitted preserves the single-root default.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_roots: Vec<PathBuf>,
     pub mode: Option<String>,
     #[serde(default)]
