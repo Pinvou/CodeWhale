@@ -1,6 +1,11 @@
 package account
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -8,6 +13,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/google/uuid"
 )
 
 type approvalRecoveryControlView struct {
@@ -29,6 +35,67 @@ type approvalRecoveryPlanView struct {
 	Control        approvalRecoveryControlView `json:"control"`
 	Candidates     []ApprovalRecoveryCandidate `json:"candidates"`
 	MoreCandidates bool                        `json:"more_candidates"`
+}
+
+type approvalRecoveryConfirmation struct {
+	Candidate ApprovalRecoveryCandidate `json:"candidate"`
+	Lease     RecoveryQueryLease        `json:"lease"`
+}
+
+type approvalRecoverySuccessConfirmer interface {
+	ConfirmOriginalApprovalSuccess(context.Context, ApprovalRecoveryCandidate, RecoveryQueryLease, RecoveryResultObservation) error
+}
+
+// The worker supplies only the original Account binding and its live query
+// lease. Account re-reads the positive result with its own domain credential;
+// a worker-supplied result is never accepted as terminal authority.
+func (s *Service) internalConfirmApprovalRecovery(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	workload, ok := serviceauth.FromContext(r.Context())
+	if !ok || workload.ActorType != "SERVICE" || workload.Service != "account-approval-recovery" {
+		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "recovery service identity is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	confirmer, ok := s.repository.(approvalRecoverySuccessConfirmer)
+	if !ok || s.recoveryResults == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_RECOVERY_UNAVAILABLE", "approval recovery is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if r.URL.RawQuery != "" || r.URL.ForceQuery || r.Header.Get("Content-Type") != "application/json" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_RECOVERY_CONFIRMATION", "invalid recovery confirmation", httpserver.RequestID(r.Context()))
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, (16<<10)+1))
+	if err != nil || len(raw) > 16<<10 || !uniqueRecoveryJSONKeys(raw) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_RECOVERY_CONFIRMATION", "invalid recovery confirmation", httpserver.RequestID(r.Context()))
+		return
+	}
+	var body approvalRecoveryConfirmation
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil || decoder.Decode(new(any)) != io.EOF || !validRecoveryInspectionCandidate(body.Candidate) ||
+		body.Candidate.OriginalKey == "" || body.Lease.RequestID != body.Candidate.RequestID || body.Lease.Token == uuid.Nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_RECOVERY_CONFIRMATION", "invalid recovery confirmation", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.recoveryResults.ObserveRecoveryResult(r.Context(), body.Candidate)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_RECOVERY_UNAVAILABLE", "approval recovery is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if result.State != "SUCCEEDED" {
+		api.WriteError(w, http.StatusConflict, "APPROVAL_RECOVERY_UNCONFIRMED", "original result remains unconfirmed", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err := confirmer.ConfirmOriginalApprovalSuccess(r.Context(), body.Candidate, body.Lease, result); err != nil {
+		if errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
+			api.WriteError(w, http.StatusConflict, "APPROVAL_RECOVERY_CONFLICT", "original recovery binding changed", httpserver.RequestID(r.Context()))
+			return
+		}
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_RECOVERY_UNAVAILABLE", "approval recovery is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Only the dedicated recovery workload may read the original execution

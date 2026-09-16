@@ -10,6 +10,39 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/approval-recovery/confirm:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: confirmOriginalApprovalRecoverySuccess
+      summary: Recheck and atomically converge a persisted original domain success
+      description: Requires internal.approval-recovery.confirm and the dedicated account-approval-recovery workload identity. The body contains only an original Account candidate and live read-query lease. Account independently re-reads the domain authority before its serializable same-execution CAS; worker-provided domain results are forbidden. Never starts a second domain attempt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [candidate, lease]
+              properties:
+                candidate: { $ref: "#/components/schemas/ApprovalRecoveryCandidate" }
+                lease:
+                  type: object
+                  additionalProperties: false
+                  required: [approval_request_id, lease_token, lease_until, query_count, version]
+                  properties:
+                    approval_request_id: { type: string, format: uuid }
+                    lease_token: { type: string, format: uuid }
+                    lease_until: { type: string, format: date-time }
+                    query_count: { type: integer, minimum: 1 }
+                    version: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "204": { description: Original positive result converged; no second domain execution, headers: { Cache-Control: { schema: { type: string, const: no-store } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/approval-recovery/plan:
     get:
       servers: [{ url: / }]

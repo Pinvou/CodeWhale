@@ -16,11 +16,11 @@ var ErrApprovalRecoveryLeaseUnavailable = errors.New("approval recovery query le
 // original execution. It never grants another domain attempt or a terminal
 // Account transition. Token and version must remain private to the worker.
 type RecoveryQueryLease struct {
-	RequestID  uuid.UUID
-	Token      uuid.UUID
-	Until      time.Time
-	QueryCount int
-	Version    int64
+	RequestID  uuid.UUID `json:"approval_request_id"`
+	Token      uuid.UUID `json:"lease_token"`
+	Until      time.Time `json:"lease_until"`
+	QueryCount int       `json:"query_count"`
+	Version    int64     `json:"version"`
 }
 
 type recoveryLeaseQuerier interface {
