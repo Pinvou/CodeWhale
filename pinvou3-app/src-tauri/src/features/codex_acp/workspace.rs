@@ -1708,10 +1708,25 @@ mod tests {
         run_git(&linked, &["add", "main.py"]);
         assert_ne!(baseline, diff_fingerprint(&linked, "main.py"));
 
-        // worktree 内移动 HEAD（空提交只改写 commondir 里的分支 ref，不碰
-        // worktree 文件）→ 经解析出的 HEAD ref 路径让指纹变化。
-        run_git(&linked, &["commit", "--allow-empty", "-m", "second"]);
-        assert_ne!(baseline, diff_fingerprint(&linked, "main.py"));
+        // 先提交暂存改动，再用真·空提交移动一次 HEAD。下面的快照恰好夹住
+        // 空提交：它只改写 commondir 里的分支 ref，不碰 worktree 文件与
+        // index，因此断言能把差异唯一归因于解析出的 HEAD ref 追踪，而不是
+        // 上面暂存步骤留下的文件/index 噪声。
+        run_git(&linked, &["commit", "-m", "second"]);
+        let after_commit = diff_fingerprint(&linked, "main.py");
+        run_git(&linked, &["commit", "--allow-empty", "-m", "third"]);
+        let moved = diff_fingerprint(&linked, "main.py");
+        // 同一 worktree 文件、同一 index 内容、ref 仍为 41 字节格式……
+        assert_eq!(after_commit.file_size, moved.file_size);
+        assert_eq!(after_commit.file_modified, moved.file_modified);
+        assert_eq!(after_commit.head_tail_hash, moved.head_tail_hash);
+        assert_eq!(after_commit.index_size, moved.index_size);
+        assert_eq!(after_commit.index_hash, moved.index_hash);
+        assert_eq!(after_commit.head_ref_size, moved.head_ref_size);
+        // ……只有解析出的 ref 内容变化，指纹必须经 HEAD-ref 字段失效。
+        // 若解析失效，head_ref_* 恒 0、两次指纹全同——与暂存前的原始
+        // baseline 比较是发现不了这种破坏的。
+        assert_ne!(after_commit.head_ref_hash, moved.head_ref_hash);
     }
 
     #[test]
