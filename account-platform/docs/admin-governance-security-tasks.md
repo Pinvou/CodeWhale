@@ -121,6 +121,8 @@ GSA-16 查询租约阶段（仍PARTIAL）：前向Account`000068`新增原execut
 GSA-16 查询租约客户端阶段（仍PARTIAL / REVIEW_PENDING）：新增仅调用上述claim/release函数的Go封装，将租约冲突封闭映射为不可用；真实隔离PG以独立角色会话验证首抢、租约竞争、错误token和退避，另断言角色未通过`PUBLIC`继承其他`SECURITY DEFINER`函数。没有凭据启用、独立worker调度、领域结果权威或终态CAS，不能据此标记CODE_COMPLETE。
 
 GSA-16 有租约查证阶段（仍PARTIAL / REVIEW_PENDING）：逐候选先核对原执行绑定并获取短租约，再限时调用现有只读效果权威，取消后仍尝试有界释放；占用中、ABSENT、已观测及权威不可用都保持`UNKNOWN_QUERY_ONLY`，不产生领域重试或终态写入。定向单测覆盖租约占用跳过、查询失败释放、过期租约与伪造候选拒绝。当前仍需独立worker身份/调度、六命令结果权威、零效果与窗口终态CAS；完整GSA-16未完成。
+
+GSA-16 本批提交/推送证据：`0ed2ca78`、`0edd4fe8`、`5c072e4f`已推送至当前跟踪分支，均为`REVIEW_PENDING`。真实隔离PostgreSQL定向`TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration`通过；全量`node scripts/account-platform.mjs verify`退出码0（Node 592项：590 PASS、0 FAIL、2既有环境SKIP；Go全包test/vet、OpenAPI含既有warning、三语、观测、架构及迁移不可变门禁通过）。这仅证明本批只读功能，不证明GSA-16完成或生产等价验收。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
