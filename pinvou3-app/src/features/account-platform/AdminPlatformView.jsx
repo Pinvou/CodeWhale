@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, editWalletAdjustmentApproval, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState, walletAdjustmentApprovalDraft, walletAdjustmentReplacementReference, walletReplacementEligible } from './admin-finance.js';
 import { createAndSubmitGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
-import { newAuditExportAttempt, submitAuditExportAttempt } from './admin-audit-export.js';
+import { acquireAuditExportTicket, newAuditExportAttempt, submitAuditExportAttempt } from './admin-audit-export.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
@@ -5909,7 +5909,9 @@ function Audit({ copy, data, client, setData, permissions }) {
   const [exportKey, setExportKey] = useState('');
   const [exportReason, setExportReason] = useState('');
   const [exportAttempted, setExportAttempted] = useState(false);
+  const [ticketIssueUnknown, setTicketIssueUnknown] = useState(false);
   const exportAttemptRef = useRef(null);
+  const exportTicketRef = useRef(null);
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
   const items = data.audits || [];
@@ -5969,7 +5971,9 @@ function Audit({ copy, data, client, setData, permissions }) {
     setBusy(true);
     setError('');
     try {
-      setExportJob(await client.auditExport(exportJob.export_id));
+      const job = await client.auditExport(exportJob.export_id);
+      setExportJob(job);
+      if (!job.download_ticket_issued_at) setTicketIssueUnknown(false);
     } catch {
       setError(copy.audit.exportFailed);
     } finally {
@@ -5977,17 +5981,30 @@ function Audit({ copy, data, client, setData, permissions }) {
     }
   };
   const downloadExport = async () => {
+    if (!exportJob || (exportJob.download_ticket_issued_at && !exportTicketRef.current) || ticketIssueUnknown) return;
     setBusy(true);
     setError('');
     try {
-      const ticket = await client.issueAuditExportDownloadTicket(exportJob.export_id);
-      const blob = await client.downloadAuditExport(exportJob.export_id, ticket.download_token);
+      if (!exportTicketRef.current) {
+        try {
+          exportTicketRef.current = await acquireAuditExportTicket(client, exportJob.export_id, null);
+        } catch (error) {
+          setTicketIssueUnknown(true);
+          throw error;
+        }
+      }
+      const blob = await client.downloadAuditExport(exportJob.export_id, exportTicketRef.current.download_token);
       const href = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = href;
       link.download = exportJob.filename || `pinvou-audit-${exportJob.export_id}.pae`;
-      link.click();
-      URL.revokeObjectURL(href);
+      document.body.append(link);
+      try {
+        link.click();
+      } finally {
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(href), 60_000);
+      }
       setExportJob((current) => ({ ...current, status: 'DOWNLOADED' }));
     } catch {
       setError(copy.audit.exportFailed);
@@ -6128,11 +6145,13 @@ function Audit({ copy, data, client, setData, permissions }) {
             {copy.refresh}
           </button>
           {exportJob.status === 'READY' && (
-            <button disabled={busy} onClick={downloadExport}>
+            <button disabled={busy || ticketIssueUnknown || (Boolean(exportJob.download_ticket_issued_at) && !exportTicketRef.current)} onClick={downloadExport}>
               {copy.audit.download}
             </button>
           )}
-          <button type="button" disabled={busy} onClick={() => { exportAttemptRef.current = null; setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); }}>{copy.audit.newExport}</button>
+          {ticketIssueUnknown && <small role="status">{copy.audit.ticketIssueUnknown}</small>}
+          {exportJob.download_ticket_issued_at && !exportTicketRef.current && <small role="status">{copy.audit.ticketUnavailable}</small>}
+          <button type="button" disabled={busy} onClick={() => { exportAttemptRef.current = null; exportTicketRef.current = null; setTicketIssueUnknown(false); setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); }}>{copy.audit.newExport}</button>
         </div>
       )}
       {error && <div className="adm-inline-message error" role="alert">{error}</div>}

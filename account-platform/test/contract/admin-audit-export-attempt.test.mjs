@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { newAuditExportAttempt, submitAuditExportAttempt } from '../../../pinvou3-app/src/features/account-platform/admin-audit-export.js';
+import { acquireAuditExportTicket, newAuditExportAttempt, submitAuditExportAttempt } from '../../../pinvou3-app/src/features/account-platform/admin-audit-export.js';
 
 test('audit export retry preserves one frozen filter, reason, PII choice, and idempotency key', async () => {
   const filter = { action: 'admin.role.update', from: '2026-09-01T00:00:00.000Z', to: '2026-09-02T00:00:00.000Z' };
@@ -26,4 +26,15 @@ test('admin audit export collects reason in the page and forwards the frozen key
   assert.match(view, /submitAuditExportAttempt\(client, exportAttemptRef\.current\)/);
   assert.match(client, /createAuditExport\(filter, reason, includePII = false, idempotencyKey/);
   assert.match(client, /idempotency_key: idempotencyKey/);
+});
+
+test('one-time audit download ticket is reused after an uncertain download', async () => {
+  let issued = 0;
+  const client = { issueAuditExportDownloadTicket: async () => { issued += 1; return { download_token: 'one-time-token' }; } };
+  const ticket = await acquireAuditExportTicket(client, 'export-1', null);
+  assert.equal((await acquireAuditExportTicket(client, 'export-1', ticket)).download_token, 'one-time-token');
+  assert.equal(issued, 1);
+  const view = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /downloadAuditExport\(exportJob\.export_id, exportTicketRef\.current\.download_token\)/);
+  assert.match(view, /download_ticket_issued_at && !exportTicketRef\.current/);
 });

@@ -13,3 +13,7 @@ export function newAuditExportAttempt(filter, reason, includePII, idempotencyKey
 export function submitAuditExportAttempt(client, attempt) {
   return client.createAuditExport(attempt.filter, attempt.reason, attempt.includePII, attempt.idempotencyKey);
 }
+
+export async function acquireAuditExportTicket(client, exportID, existingTicket) {
+  return existingTicket || client.issueAuditExportDownloadTicket(exportID);
+}
