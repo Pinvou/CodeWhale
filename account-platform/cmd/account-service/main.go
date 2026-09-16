@@ -108,6 +108,10 @@ func main() {
 		log.Fatal(err)
 	}
 	repository.WithApprovalSnapshotSource(approvalSnapshots)
+	recoveryResults, err := account.NewApprovalRecoveryResultClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal("Approval recovery result reader configuration is invalid: ", err)
+	}
 	wallets, err := account.NewHTTPWalletProvisioner(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
@@ -134,6 +138,7 @@ func main() {
 	}
 	service := account.NewService(repository, wallets).
 		WithServiceToken(serviceCredential).
+		WithApprovalRecoveryResults(recoveryResults).
 		WithClientCompatibility(valueOrDefault("ACCOUNT_SERVICE_VERSION", "development"), valueOrDefault("ACCOUNT_CLIENT_CONTRACT_VERSION", "account-client-v1")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).

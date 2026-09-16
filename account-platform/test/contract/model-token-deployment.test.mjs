@@ -382,12 +382,14 @@ test('workload roles preserve existing permissions and narrowly register credent
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-snapshot.read'));
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-proof.read'));
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-effect.read'));
+  assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-result.read'));
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.authorization.check'));
   assert.ok(!token.find(rule => rule.service === 'token-command-executor').permissions.includes('internal.token.approval-effect.read'));
   assert.ok(!token.find(rule => rule.service === 'token-command-executor').permissions.includes('internal.token.approval-proof.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-activation.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-proof.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-effect.read'));
+  assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-result.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-activation.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-proof.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-effect.read'));
@@ -402,7 +404,7 @@ const billingWorkloadPermissions = {
     'internal.billing.wallet.ensure', 'internal.billing.account-closure-assessment.read',
     'internal.billing.account-closure-grants.isolate', 'internal.billing.organization.lifecycle',
     'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
-    'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read',
+    'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read', 'internal.billing.approval-result.read',
   ],
   'account-approval-recovery': ['internal.billing.approval-effect.read', 'internal.billing.approval-result.read'],
   'token-gateway': [

@@ -74,8 +74,8 @@ func (r *PostgresRepository) ObserveBillingApprovalResult(ctx context.Context, r
 func (s *Service) billingApprovalRecoveryResult(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	workload, ok := serviceauth.FromContext(r.Context())
-	if !ok || workload.ActorType != "SERVICE" || workload.Service != "account-approval-recovery" {
-		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "recovery identity is required", httpserver.RequestID(r.Context()))
+	if !ok || workload.ActorType != "SERVICE" || (workload.Service != "account-approval-recovery" && workload.Service != "account-service") {
+		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "Account or recovery identity is required", httpserver.RequestID(r.Context()))
 		return
 	}
 	requestID, requestErr := uuid.Parse(r.PathValue("approval_request_id"))

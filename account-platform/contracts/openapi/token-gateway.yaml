@@ -39,7 +39,7 @@ paths:
       security: [{ serviceToken: [] }]
       operationId: observeTokenApprovalRecoveryResult
       summary: Read the original Token command result by frozen approval and idempotency digest
-      description: Dedicated account-approval-recovery workload only, requiring internal.token.approval-result.read. UNCONFIRMED never proves zero effect and this route cannot retry, complete, or invalidate an approval.
+      description: Dedicated recovery workload or Account-service independent confirmation, requiring internal.token.approval-result.read. UNCONFIRMED never proves zero effect and this route cannot retry, complete, or invalidate an approval.
       parameters:
         - { name: approval_request_id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: command_type, in: query, required: true, schema: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] } }

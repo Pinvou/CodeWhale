@@ -37,10 +37,11 @@ func TestBillingRecoveryResultRequiresDedicatedIdentityAndFrozenEvent(t *testing
 		status, calls          int
 	}{
 		{"dedicated", "account-approval-recovery", base, http.StatusOK, 1},
-		{"account service refused", "account-service", base, http.StatusForbidden, 1},
-		{"duplicate epoch", "account-approval-recovery", base + "&approval_epoch=2", http.StatusBadRequest, 1},
-		{"epoch alias", "account-approval-recovery", strings.Replace(base, "approval_epoch=2", "approval_epoch=02", 1), http.StatusBadRequest, 1},
-		{"cross domain", "account-approval-recovery", strings.Replace(base, "PAYMENT_PROVIDER_RESUME", "TOKEN_CREDENTIAL_REVOKE", 1), http.StatusBadRequest, 1},
+		{"independent Account recheck", "account-service", base, http.StatusOK, 2},
+		{"executor refused", "billing-command-executor", base, http.StatusForbidden, 2},
+		{"duplicate epoch", "account-approval-recovery", base + "&approval_epoch=2", http.StatusBadRequest, 2},
+		{"epoch alias", "account-approval-recovery", strings.Replace(base, "approval_epoch=2", "approval_epoch=02", 1), http.StatusBadRequest, 2},
+		{"cross domain", "account-approval-recovery", strings.Replace(base, "PAYMENT_PROVIDER_RESUME", "TOKEN_CREDENTIAL_REVOKE", 1), http.StatusBadRequest, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, err := serviceauth.ContextForJob(context.Background(), tc.identity, "APPROVAL_RECOVERY_QUERY", uuid.NewString())

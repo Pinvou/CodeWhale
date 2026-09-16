@@ -37,6 +37,7 @@ type Service struct {
 	auditExports                *AuditExportService
 	humanDelegations            *humandelegation.Signer
 	ownerCandidateCursorKey     []byte
+	recoveryResults             ApprovalRecoveryResultReader
 }
 
 func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
@@ -80,6 +81,11 @@ func (s *Service) WithMobileAuth(auth *MobileAuthService, serviceToken string) *
 
 func (s *Service) WithServiceToken(serviceToken string) *Service {
 	s.serviceToken = strings.TrimSpace(serviceToken)
+	return s
+}
+
+func (s *Service) WithApprovalRecoveryResults(reader ApprovalRecoveryResultReader) *Service {
+	s.recoveryResults = reader
 	return s
 }
 

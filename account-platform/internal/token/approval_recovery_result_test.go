@@ -36,10 +36,11 @@ func TestTokenRecoveryResultRequiresDedicatedIdentityAndOriginalDigest(t *testin
 		status, calls          int
 	}{
 		{"dedicated", "account-approval-recovery", base, http.StatusOK, 1},
-		{"executor refused", "token-command-executor", base, http.StatusForbidden, 1},
-		{"duplicate digest", "account-approval-recovery", base + "&original_key_digest=" + digest, http.StatusBadRequest, 1},
-		{"wrong digest", "account-approval-recovery", strings.Replace(base, digest, "invalid", 1), http.StatusBadRequest, 1},
-		{"cross domain", "account-approval-recovery", strings.Replace(base, "TOKEN_CREDENTIAL_REVOKE", "WALLET_ADJUSTMENT", 1), http.StatusBadRequest, 1},
+		{"independent Account recheck", "account-service", base, http.StatusOK, 2},
+		{"executor refused", "token-command-executor", base, http.StatusForbidden, 2},
+		{"duplicate digest", "account-approval-recovery", base + "&original_key_digest=" + digest, http.StatusBadRequest, 2},
+		{"wrong digest", "account-approval-recovery", strings.Replace(base, digest, "invalid", 1), http.StatusBadRequest, 2},
+		{"cross domain", "account-approval-recovery", strings.Replace(base, "TOKEN_CREDENTIAL_REVOKE", "WALLET_ADJUSTMENT", 1), http.StatusBadRequest, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, err := serviceauth.ContextForJob(context.Background(), tc.identity, "APPROVAL_RECOVERY_QUERY", uuid.NewString())

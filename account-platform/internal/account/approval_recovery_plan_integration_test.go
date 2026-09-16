@@ -202,6 +202,42 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	if _, err := store.Release(ctx, wrong); !errors.Is(err, ErrApprovalRecoveryLeaseUnavailable) {
 		t.Fatalf("wrong token released lease: %v", err)
 	}
+	result := RecoveryResultObservation{State: "SUCCEEDED", ObservedAt: time.Now().UTC(),
+		DomainResult:     json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`),
+		LedgerReferences: json.RawMessage(`{"journal_entry_id":"` + uuid.NewString() + `"}`)}
+	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, wrong, result); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
+		t.Fatalf("wrong recovery lease confirmed result: %v", err)
+	}
+	stale := item
+	stale.RequestVersion++
+	if err := repository.ConfirmOriginalApprovalSuccess(ctx, stale, lease, result); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
+		t.Fatalf("stale request version confirmed result: %v", err)
+	}
+	stale = item
+	stale.CommandFingerprint = "bad-fingerprint"
+	if err := repository.ConfirmOriginalApprovalSuccess(ctx, stale, lease, result); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
+		t.Fatalf("wrong fingerprint confirmed result: %v", err)
+	}
+	badResult := result
+	badResult.LedgerReferences = json.RawMessage(`{}`)
+	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, lease, badResult); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
+		t.Fatalf("incomplete billing positive result confirmed: %v", err)
+	}
+	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, lease, result); err != nil {
+		t.Fatalf("original result could not converge without a new domain call: %v", err)
+	}
+	var requestStatus, executionStatus string
+	var domainResult json.RawMessage
+	if err := db.adminPool.QueryRow(ctx, `SELECT r.status,e.status,e.domain_result FROM approval_requests r JOIN approval_executions e ON e.approval_request_id=r.id WHERE r.id=$1`, request.ID).
+		Scan(&requestStatus, &executionStatus, &domainResult); err != nil || requestStatus != "EXECUTED" || executionStatus != "EXECUTED" || len(domainResult) == 0 {
+		t.Fatalf("positive result did not converge atomically: request=%s execution=%s result=%s err=%v", requestStatus, executionStatus, domainResult, err)
+	}
+	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, lease, result); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
+		t.Fatalf("stale original candidate confirmed twice: %v", err)
+	}
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM approval_executions WHERE approval_request_id=$1`, request.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("positive confirmation created another execution: count=%d err=%v", count, err)
+	}
 	next, err := store.Release(ctx, lease)
 	if err != nil || !next.After(time.Now()) {
 		t.Fatalf("query lease release/backoff invalid: next=%v err=%v", next, err)

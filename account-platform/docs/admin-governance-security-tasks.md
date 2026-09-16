@@ -137,6 +137,10 @@ GSA-16 同租约六命令结果查证（仍PARTIAL / REVIEW_PENDING）：独立C
 GSA-16 Token正向结果引用（仍PARTIAL / REVIEW_PENDING）：Token原结果接口对`SUCCEEDED`额外返回原持久`command_reference`，其他状态严禁携带；恢复客户端校验该关联，避免仅凭字符串状态推断可用于终态CAS的结果。此引用不由CLI输出，不构成Account终态写入授权。
 
 GSA-16 Billing正向结果投影（仍PARTIAL / REVIEW_PENDING）：原结果接口对已确认`SUCCEEDED`返回由现有领域持久行重建的封闭`domain_result`与`ledger_references`，Wallet额外要求journal entry；`UNCONFIRMED`不得附带结果。恢复客户端逐命令校验字段及ID，CLI仍仅输出计数，不泄露领域结果。正向投影是后续Account安全终态CAS的输入候选，而非目前的写入授权。
+
+GSA-16 Account独立复核准备（仍PARTIAL / REVIEW_PENDING）：Billing/Token原结果GET在保留恢复身份只读权限的同时，额外仅授予Account-service相同精确read权限；既有领域executor继续不能读该恢复投影。Account服务启动时构造自己的结果客户端，不使用worker提交的结果载荷作唯一真相；本阶段仅配置只读依赖，尚未开放Account恢复写入接口或状态迁移。
+
+GSA-16 Account原执行正向CAS准备（仍PARTIAL / REVIEW_PENDING）：新增仅供内部调用的Serializable仓储方法，核对请求版本/状态、原执行指纹与幂等键、授权事件/epoch/durable、当前查询租约及唯一领域attempt后，才将已独立确认的正向领域结果写回同一条Account执行；失败态经同一事务内部合法状态迁移，所有UPDATE须恰好命中一行。隔离PG覆盖错误租约、过期版本、错误指纹、缺失账本引用、成功收敛、重复收敛拒绝及零第二次执行；全量`node scripts/account-platform.mjs verify`退出码0（Node 592项：590 PASS/0 FAIL/2既有环境SKIP）。目前尚无对外确认入口、Account实时独立复查或worker写回调用，不能把此仓储方法当作已启用的恢复能力；零效果权威和安全失效仍未交付。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。

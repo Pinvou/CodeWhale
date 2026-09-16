@@ -37,7 +37,7 @@ paths:
       servers: [{ url: / }]
       operationId: observeBillingApprovalRecoveryResult
       summary: Read a positive Billing command result bound to the original immutable proof claim
-      description: Dedicated account-approval-recovery workload only, requiring internal.billing.approval-result.read. UNCONFIRMED never proves zero effect; this route cannot probe a Provider, retry, complete, or invalidate an approval.
+      description: Dedicated recovery workload or Account-service independent confirmation, requiring internal.billing.approval-result.read. UNCONFIRMED never proves zero effect; this route cannot probe a Provider, retry, complete, or invalidate an approval.
       parameters:
         - { name: approval_request_id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: command_type, in: query, required: true, schema: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] } }
