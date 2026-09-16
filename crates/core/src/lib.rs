@@ -79,20 +79,23 @@ pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> 
 }
 
 /// Resolves the cwd and workspace roots for a resume request, aligned with
-/// codex semantics: explicit roots replace the whole set; an explicit cwd
-/// alone takes over the primary slot while additional roots are preserved;
-/// neither falls back to the persisted values.
+/// codex semantics: an explicit root set replaces the whole set (`Some([])`
+/// clears back to the bare cwd); an explicit cwd alone takes over the
+/// primary slot while additional roots are preserved; neither falls back to
+/// the persisted values.
 fn resolve_resume_roots(
     persisted_cwd: &Path,
     persisted_roots: &[PathBuf],
     params_cwd: Option<&PathBuf>,
-    params_roots: &[PathBuf],
+    params_roots: Option<&[PathBuf]>,
 ) -> (PathBuf, Vec<PathBuf>) {
-    if !params_roots.is_empty() {
+    if let Some(roots) = params_roots {
         let cwd = params_cwd
             .cloned()
             .unwrap_or_else(|| persisted_cwd.to_path_buf());
-        let roots = normalize_workspace_roots(&cwd, params_roots);
+        // An explicit set replaces the persisted one wholesale — including
+        // the explicit empty set, which clears back to the bare cwd.
+        let roots = normalize_workspace_roots(&cwd, roots);
         return (cwd, roots);
     }
     if let Some(new_cwd) = params_cwd {
@@ -670,10 +673,16 @@ impl ThreadManager {
                 &thread.cwd,
                 &thread.workspace_roots,
                 params.cwd.as_ref(),
-                &params.workspace_roots,
+                params.workspace_roots.as_deref(),
             );
             thread.cwd = cwd;
             thread.workspace_roots = workspace_roots;
+            // Write the override back to the cache: a later parameterless
+            // resume reads this entry, so returning the override only
+            // through the return value would let the stale set win.
+            // (Persistence aligns with the autosave path, as for cwd.)
+            self.running_threads
+                .insert(params.thread_id.clone(), thread.clone());
             return Ok(Some(NewThread {
                 model: params.model.clone().unwrap_or_else(|| "auto".to_string()),
                 model_provider: params.model_provider.clone().unwrap_or(model_provider),
@@ -695,7 +704,7 @@ impl ThreadManager {
             &thread.cwd,
             &thread.workspace_roots,
             params.cwd.as_ref(),
-            &params.workspace_roots,
+            params.workspace_roots.as_deref(),
         );
         thread.cwd = cwd;
         thread.workspace_roots = workspace_roots;
@@ -3066,7 +3075,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
-            workspace_roots: Vec::new(),
+            workspace_roots: None,
             persist_extended_history: false,
         };
 
@@ -3130,7 +3139,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
-            workspace_roots: Vec::new(),
+            workspace_roots: None,
             persist_extended_history: false,
         };
 
@@ -3188,7 +3197,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
-            workspace_roots: Vec::new(),
+            workspace_roots: None,
             persist_extended_history: false,
         };
         manager
@@ -3221,7 +3230,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
-            workspace_roots: Vec::new(),
+            workspace_roots: None,
             persist_extended_history: false,
         }
     }
@@ -3285,7 +3294,7 @@ mod tests {
         // A fresh manager forces the persisted path.
         let mut manager = ThreadManager::new(store);
         let mut params = resume_params("thread-roots");
-        params.workspace_roots = vec![PathBuf::from("/new-a"), PathBuf::from("/new-b")];
+        params.workspace_roots = Some(vec![PathBuf::from("/new-a"), PathBuf::from("/new-b")]);
         let resumed = manager
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect("resume thread")
@@ -3307,6 +3316,29 @@ mod tests {
             .expect("read thread")
             .expect("thread persisted");
         assert_eq!(persisted.workspace_roots, resumed.thread.workspace_roots);
+    }
+
+    #[test]
+    fn resume_with_empty_roots_clears_back_to_bare_cwd() {
+        let store = temp_core_state("resume-roots-clear");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = PathBuf::from("/old");
+        metadata.workspace_roots = vec![PathBuf::from("/old"), PathBuf::from("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.workspace_roots = Some(Vec::new());
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/old"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/old")],
+            "Some([]) is an explicit clear, distinct from None (inherit)"
+        );
     }
 
     #[test]

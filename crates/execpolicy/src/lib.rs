@@ -2417,6 +2417,7 @@ mod tests {
             Ruleset::user(vec![], vec![])
                 .with_ask_rules(vec![ToolAskRule::file_path("edit_file", "src/a.rs")]),
         ]);
+
         let decision = engine
             .check(ExecPolicyContext {
                 command: "",
@@ -2574,6 +2575,57 @@ mod tests {
             })
             .unwrap();
         assert_eq!(unscoped.matched_rule, None);
+    }
+
+    #[test]
+    fn allow_relative_path_rule_does_not_auto_approve_under_attached_root() {
+        // The Allow narrowing covers rooted path matching, not just the
+        // workspace scope: an allow rule whose relative path resolves only
+        // under an attached root must not auto-approve a call landing
+        // there. Without this, a refactor could silently regress the path
+        // direction while the scope direction stays pinned.
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "edit_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("src/a.rs".into()),
+                    workspace: None,
+                    action: PermissionAction::Allow,
+                }],
+            )]);
+
+        // Control: the same relative rule auto-approves under the primary.
+        let under_primary = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/workspace/src/a.rs"),
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert!(under_primary.allow && !under_primary.requires_approval);
+
+        // Negative: attached root must not widen the auto-approval.
+        let under_attached = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/src/a.rs"),
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(
+            under_attached.matched_rule, None,
+            "the Allow rule must not match via the attached root"
+        );
     }
 
     #[test]

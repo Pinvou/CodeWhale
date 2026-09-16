@@ -5841,6 +5841,74 @@ async fn update_thread_workspace_rejects_empty_path() -> Result<()> {
 }
 
 #[tokio::test]
+async fn update_thread_roots_rejects_active_turn() -> Result<()> {
+    // The fence covers `workspace_changed || roots_changed`; this pins the
+    // roots leg on its own: a mid-turn root-set replacement is deferred
+    // exactly like a mid-turn workspace swap.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-roots-active");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(workspace.clone()),
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+    {
+        let mut active = manager.active.lock().await;
+        let state = active.engines.get_mut(&thread.id).expect("mock engine");
+        state.active_turn = Some(ActiveTurnState {
+            turn_id: "turn_live_roots".to_string(),
+            interrupt_requested: false,
+            compaction_id: None,
+        });
+    }
+
+    let roots_before = thread.workspace_roots.clone();
+    let err = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(vec![std::path::PathBuf::from("/shared")]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await
+        .expect_err("roots update during active turn must fail");
+
+    assert!(format!("{err:#}").contains("active turn"));
+    let persisted = manager.store.load_thread(&thread.id)?;
+    assert_eq!(
+        persisted.workspace_roots, roots_before,
+        "rejected update must not touch the persisted root set"
+    );
+    {
+        let active = manager.active.lock().await;
+        assert!(
+            active.engines.contains_key(&thread.id),
+            "active engine should stay cached after rejected update"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx_op.recv())
+            .await
+            .is_err(),
+        "a rejected roots update must not reach the engine"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let old_workspace = std::env::temp_dir().join("codewhale-runtime-active-old");
