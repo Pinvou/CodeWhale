@@ -52,6 +52,31 @@ func TestRedisStoreProductionTLS(t *testing.T) {
 	if got, err := s.GetSession(ctx, session.ID); err != nil || got.AccessToken != session.AccessToken {
 		t.Fatal("get session failed")
 	}
+	if wire, err := s.LockApprovalWireVersion(ctx, session, 2); err != nil || wire != 1 {
+		t.Fatal("pre-upgrade session did not lock to v1")
+	}
+	session.ApprovalV2Eligible = true
+	if wire, err := s.LockApprovalWireVersion(ctx, session, 2); err != nil || wire != 1 {
+		t.Fatal("pre-upgrade session changed protocol after lock")
+	}
+	newSession := Session{ID: "fixture-new", ApprovalV2Eligible: true, RefreshExpiresAt: time.Now().Add(time.Minute)}
+	if err := s.SaveSession(ctx, newSession); err != nil {
+		t.Fatal("save new session failed")
+	}
+	if wire, err := s.LockApprovalWireVersion(ctx, newSession, 2); err != nil || wire != 2 {
+		t.Fatal("new session did not lock to v2")
+	}
+	peer, err := NewRedisStoreWithCA(cfg.PortalURL, cfg.CAFile)
+	if err != nil {
+		t.Fatal("second portal replica store construction failed")
+	}
+	defer peer.Close()
+	if wire, err := peer.LockApprovalWireVersion(ctx, newSession, 1); err != nil || wire != 2 {
+		t.Fatal("new session changed protocol after gate downgrade")
+	}
+	if err := s.DeleteSession(ctx, newSession.ID); err != nil {
+		t.Fatal("delete new session failed")
+	}
 	proof := ApprovalClassification{SessionID: session.ID, ApprovalRequestID: "approval", CommandType: "fixture", ExpiresAt: time.Now().Add(time.Minute)}
 	if err := s.SaveApprovalClassification(ctx, proof); err != nil {
 		t.Fatal("save classification failed")

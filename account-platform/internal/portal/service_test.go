@@ -22,6 +22,7 @@ type memoryStore struct {
 	flows                   map[string]LoginFlow
 	sessions                map[string]Session
 	approvalClassifications map[string]ApprovalClassification
+	approvalWires           map[string]int
 }
 
 type unavailableSessionStore struct{ *memoryStore }
@@ -31,7 +32,7 @@ func (s *unavailableSessionStore) GetSession(context.Context, string) (Session, 
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}}
+	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}, approvalWires: map[string]int{}}
 }
 func (s *memoryStore) SaveFlow(_ context.Context, key string, value LoginFlow) error {
 	s.mu.Lock()
@@ -68,7 +69,24 @@ func (s *memoryStore) DeleteSession(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, key)
+	delete(s.approvalWires, key)
 	return nil
+}
+
+func (s *memoryStore) LockApprovalWireVersion(_ context.Context, session Session, preferred int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if preferred != 1 && preferred != 2 {
+		return 0, ErrApprovalWireUnavailable
+	}
+	if selected, ok := s.approvalWires[session.ID]; ok {
+		return selected, nil
+	}
+	if !session.ApprovalV2Eligible {
+		preferred = 1
+	}
+	s.approvalWires[session.ID] = preferred
+	return preferred, nil
 }
 func (s *memoryStore) SaveApprovalClassification(_ context.Context, proof ApprovalClassification) error {
 	s.mu.Lock()

@@ -148,6 +148,8 @@ GSA-16 正向收敛调用阶段（仍PARTIAL / REVIEW_PENDING）：独立一次�
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 
 GSA-17 Account capability 起步（仍PARTIAL / REVIEW_PENDING）：新增仅认证用户可读的`GET /admin/v2/approval-capability`，从唯一持久control行返回九字段封闭快照，`epoch`明确对应approval epoch、带服务端request ID且`no-store`；未接受浏览器自报协议或控制状态。定向Go HTTP、授权路径登记与OpenAPI门禁通过。Portal BFF、Redis会话锁定、动作代次比较及迟到响应处理尚未交付，不能标记CODE_COMPLETE。
+
+GSA-17 Portal会话协议持久锁基础（仍PARTIAL / REVIEW_PENDING）：新登录Session标记允许在首次进入审批流程时选择v2；既有无字段Session必须锁v1。Redis以独立key和`SETNX`竞争只允许一次选定，后续同一Session无论副本/标签或capability回退都返回原版本；锁TTL长于Session并在删除Session时一起清理。40标签内存并发定向测试通过；真实多副本TLS Redis用例已补充但当前缺隔离fixture而SKIP，明确保留`ENV_PENDING`。尚未接入BFF的capability读取与路由，不能宣称Portal已实际锁定协议。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。

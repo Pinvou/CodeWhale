@@ -18,6 +18,8 @@ type Session struct {
 	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
 	CSRFToken        string    `json:"csrf_token"`
 	CreatedAt        time.Time `json:"created_at"`
+	// Absent on pre-upgrade sessions: those always remain on approval wire v1.
+	ApprovalV2Eligible bool `json:"approval_v2_eligible,omitempty"`
 }
 
 // ApprovalClassification is a short-lived, server-authenticated proof used by

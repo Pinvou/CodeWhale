@@ -13,6 +13,11 @@ import (
 )
 
 var ErrSessionNotFound = errors.New("portal session not found")
+var ErrApprovalWireUnavailable = errors.New("approval wire selection unavailable")
+
+type ApprovalWireLocker interface {
+	LockApprovalWireVersion(context.Context, Session, int) (int, error)
+}
 
 type Store interface {
 	SaveFlow(context.Context, string, LoginFlow) error
@@ -87,7 +92,43 @@ func (s *RedisStore) GetSession(ctx context.Context, id string) (Session, error)
 }
 
 func (s *RedisStore) DeleteSession(ctx context.Context, id string) error {
-	return s.client.Del(ctx, "portal:session:"+id).Err()
+	return s.client.Del(ctx, "portal:session:"+id, approvalWireKey(id)).Err()
+}
+
+func approvalWireKey(id string) string { return "portal:approval-wire:" + id }
+
+// SETNX selects exactly once across Portal replicas and browser tabs. A lock
+// survives slightly longer than the Session so TTL rounding or refresh cannot
+// change protocol mid-session; deletion removes both keys together.
+func (s *RedisStore) LockApprovalWireVersion(ctx context.Context, session Session, preferred int) (int, error) {
+	if s == nil || s.client == nil || session.ID == "" || !session.RefreshExpiresAt.After(time.Now()) ||
+		(preferred != 1 && preferred != 2) {
+		return 0, ErrApprovalWireUnavailable
+	}
+	if !session.ApprovalV2Eligible {
+		preferred = 1
+	}
+	key := approvalWireKey(session.ID)
+	ttl := time.Until(session.RefreshExpiresAt) + time.Hour
+	selected, err := s.client.SetNX(ctx, key, preferred, ttl).Result()
+	if err != nil {
+		return 0, ErrApprovalWireUnavailable
+	}
+	if selected {
+		return preferred, nil
+	}
+	locked, err := s.client.Get(ctx, key).Result()
+	if err != nil {
+		return 0, ErrApprovalWireUnavailable
+	}
+	switch locked {
+	case "1":
+		return 1, nil
+	case "2":
+		return 2, nil
+	default:
+		return 0, ErrApprovalWireUnavailable
+	}
 }
 
 func (s *RedisStore) SaveApprovalClassification(ctx context.Context, proof ApprovalClassification) error {
