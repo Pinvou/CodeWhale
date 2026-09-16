@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::protocol::{PROTOCOL_VERSION, WebAccessConfig};
 
-const RECONNECT_BASE_DELAY_MS: u64 = 500;
-const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+pub(crate) const RECONNECT_BASE_DELAY_MS: u64 = 500;
+pub(crate) const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const REVOKE_ACK_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_PENDING_MESSAGES: usize = 2_048;
@@ -26,7 +26,7 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 2_048;
 // bound retained wire payload to roughly 64 MiB. Only the current frame is
 // parsed at either side of the queue.
 const INBOUND_CHANNEL_CAPACITY: usize = 32;
-const MAX_INBOUND_TEXT_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_INBOUND_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const OUTBOUND_BYTE_BUDGET: usize = 128 * 1024 * 1024;
 // Stream resets are tiny control messages. Keeping at most one in-flight and
 // one latest replacement outside the saturated data budget adds a hard 128 KiB
@@ -37,12 +37,12 @@ pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_RELAY_FRAME_BYTES: usize = (4 * 1024 * 1024) - (64 * 1024);
 
 #[derive(Debug, Default)]
-struct ReconnectBackoff {
+pub(crate) struct ReconnectBackoff {
     attempt: u32,
 }
 
 impl ReconnectBackoff {
-    fn next_delay(&mut self) -> Duration {
+    pub(crate) fn next_delay(&mut self) -> Duration {
         let jitter_per_mille = rand::rng().random_range(800_u64..=1_200);
         self.next_delay_with_jitter(jitter_per_mille)
     }
@@ -56,7 +56,7 @@ impl ReconnectBackoff {
         Duration::from_millis(base_ms.saturating_mul(jitter_per_mille) / 1_000)
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.attempt = 0;
     }
 }
@@ -331,10 +331,10 @@ pub fn spawn_revocation(
     rx_in
 }
 
-fn relay_websocket_config() -> WebSocketConfig {
+pub(crate) fn relay_websocket_config(max_inbound_text_bytes: usize) -> WebSocketConfig {
     let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(MAX_INBOUND_TEXT_BYTES);
-    config.max_frame_size = Some(MAX_INBOUND_TEXT_BYTES);
+    config.max_message_size = Some(max_inbound_text_bytes);
+    config.max_frame_size = Some(max_inbound_text_bytes);
     config
 }
 
@@ -346,8 +346,11 @@ async fn run_revocation_loop(
 ) {
     let mut reconnect_backoff = ReconnectBackoff::default();
     loop {
-        let connection =
-            connect_async_with_config(&relay_url, Some(relay_websocket_config()), false);
+        let connection = connect_async_with_config(
+            &relay_url,
+            Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
+            false,
+        );
         tokio::pin!(connection);
         let connected = tokio::select! {
             result = &mut connection => result,
@@ -509,8 +512,11 @@ async fn run_loop(
     let mut reconnect_backoff = ReconnectBackoff::default();
 
     'reconnect: loop {
-        let connection =
-            connect_async_with_config(&config.relay_url, Some(relay_websocket_config()), false);
+        let connection = connect_async_with_config(
+            &config.relay_url,
+            Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
+            false,
+        );
         tokio::pin!(connection);
 
         // Remain responsive to disable/rotate while the network connection is
@@ -1114,7 +1120,7 @@ mod tests {
 
     #[test]
     fn inbound_channel_and_text_frames_have_hard_bounds() {
-        let websocket = relay_websocket_config();
+        let websocket = relay_websocket_config(MAX_INBOUND_TEXT_BYTES);
         assert_eq!(websocket.max_message_size, Some(MAX_INBOUND_TEXT_BYTES));
         assert_eq!(websocket.max_frame_size, Some(MAX_INBOUND_TEXT_BYTES));
 
