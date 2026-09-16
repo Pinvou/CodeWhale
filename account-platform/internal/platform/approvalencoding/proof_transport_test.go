@@ -61,6 +61,14 @@ func TestProofRequestSixClosedVariants(t *testing.T) {
 				decoded.Artifacts.CommandDigest != artifacts.CommandDigest || decoded.Artifacts.SnapshotDigest != artifacts.SnapshotDigest {
 				t.Fatalf("closed proof request changed: %v", err)
 			}
+			legacy, err := LegacyProofInputFromArtifacts(decoded.Artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, err := ConvertLegacyProofInput(legacy)
+			if err != nil || roundTrip.CommandDigest != artifacts.CommandDigest || roundTrip.SnapshotDigest != artifacts.SnapshotDigest {
+				t.Fatalf("owner-domain read adapter changed proof facts: %v", err)
+			}
 			for _, invalid := range [][]byte{
 				bytes.Replace(encoded, []byte(`"command_digest":`), []byte(`"command_digest":"wrong","command_digest":`), 1),
 				bytes.Replace(encoded, []byte(`"command_digest":`), []byte(`"secret":"untrusted","command_digest":`), 1),

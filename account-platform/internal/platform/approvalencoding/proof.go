@@ -141,6 +141,49 @@ func LegacyExecutionInput(decoded DecodedAuthorizationEvent) (LegacyProofInput, 
 		NormalizedCommand: rawCanonical(normalized), CriticalResourceVersions: rawCanonical(critical), FinancialSnapshot: rawCanonical(financial)}, nil
 }
 
+// LegacyProofInputFromArtifacts converts a validated proof request to the
+// existing owner-domain precheck representation. It is only an adapter for
+// reading authoritative facts; it must never substitute the supplied snapshot
+// for an owner-domain query or bypass the later execution revision check.
+func LegacyProofInputFromArtifacts(artifacts ProofArtifacts) (LegacyProofInput, error) {
+	verified, err := DecodeProofInput(artifacts.CommandType, artifacts.PolicyVersion, artifacts.ProofInputJSON)
+	if err != nil || !sameArtifactDigests(verified, artifacts) || verified.SnapshotSchemaVersion != artifacts.SnapshotSchemaVersion {
+		return LegacyProofInput{}, ErrInvalidDocument
+	}
+	spec := commandSpecs[artifacts.CommandType]
+	root, err := parseDocument(verified.ProofInputJSON)
+	if err != nil {
+		return LegacyProofInput{}, err
+	}
+	object, err := requireObject(root, "snapshot_schema_version", "target", "normalized_command", "critical_resource_versions", "financial_snapshot")
+	if err != nil {
+		return LegacyProofInput{}, err
+	}
+	target, err := requireObject(object["target"], "resource_type", "resource_id")
+	if err != nil {
+		return LegacyProofInput{}, err
+	}
+	targetType, typeErr := stringValue(target["resource_type"])
+	targetID, idErr := stringValue(target["resource_id"])
+	if typeErr != nil || idErr != nil {
+		return LegacyProofInput{}, ErrInvalidDocument
+	}
+	normalized, critical, financial := object["normalized_command"], object["critical_resource_versions"], object["financial_snapshot"]
+	if err := convertProofIntegers(spec, normalized, critical, financial); err != nil {
+		return LegacyProofInput{}, err
+	}
+	return LegacyProofInput{
+		CommandType: artifacts.CommandType, PolicyVersion: artifacts.PolicyVersion, SnapshotSchemaVersion: artifacts.SnapshotSchemaVersion,
+		TargetResourceType: targetType, TargetResourceID: targetID,
+		NormalizedCommand: rawCanonical(normalized), CriticalResourceVersions: rawCanonical(critical), FinancialSnapshot: rawCanonical(financial),
+	}, nil
+}
+
+func sameArtifactDigests(left, right ProofArtifacts) bool {
+	return left.CommandType == right.CommandType && left.PolicyVersion == right.PolicyVersion &&
+		left.CommandDigest == right.CommandDigest && left.SnapshotDigest == right.SnapshotDigest
+}
+
 func convertProofIntegers(spec commandSpec, normalized, critical, financial *jsonValue) error {
 	normalizedObject, err := objectValue(normalized)
 	if err != nil {
