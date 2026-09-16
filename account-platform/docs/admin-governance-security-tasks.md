@@ -199,6 +199,8 @@ GSA-19 支付控制受控写切片（仍PARTIAL / REVIEW_PENDING）：Provider/P
 GSA-19 钱包调整受控写切片（仍PARTIAL / REVIEW_PENDING）：保留Billing原生调整单创建与原请求幂等键，Account审批创建/详情重读/提交改走会话锁BFF；已有调整单的显式“继续审批”仍用同一申请幂等键，未知结果不会自动产生第二次写入。定向合同及Portal构建通过。钱包/支付控制的发现列表尚未迁移到受控读取，草稿编辑/替代申请和生产等价验收仍待完成。
 
 GSA-19 支付控制替代申请边界（仍PARTIAL / REVIEW_PENDING）：新建前重读Billing控制事实与该目标的受控审批列表；有DRAFT/SUBMITTED/APPROVED/EXECUTING或待恢复EXECUTION_FAILED时拒绝创建，列表不完整或未知状态也失败关闭。REJECTED/WITHDRAWN/EXPIRED/INVALIDATED只在重新构造当前控制的resume_draft后以新幂等键和`supersedes_request_id`创建；EXECUTED后若领域再次暂停，只能基于新事实创建新业务命令而非重开旧执行。状态矩阵、领域草稿及Portal构建定向通过；完整跨域E2E、其他五命令替代流程和业务草稿编辑仍未交付。
+
+GSA-19 财务审批发现列表受控读取（仍PARTIAL / REVIEW_PENDING）：钱包调整、支付服务商及商品恢复的审批列表均经Session锁BFF读取；同时兼容v1平面目标与v2封闭目标，仅展示同一目标的最新申请。列表不再承载`allowed_actions`，DRAFT的继续按钮只作入口，写入前仍须重读受控详情校验SUBMIT动作和版本；历史页遗漏或读取失败不得作为无申请事实，支付控制真正创建前仍重读目标列表并在不完整时失败关闭。定向测试与Portal构建通过；业务DRAFT编辑、其他命令替代申请、生产等价联调仍待完成。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

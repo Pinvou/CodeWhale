@@ -1,7 +1,7 @@
 import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { createAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
@@ -2493,12 +2493,9 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
   const [error, setError] = useState('');
   const requestKeysRef = useRef(new Map());
   const approvals = data.paymentControlApprovals || [];
-  const activeApprovalStatuses = new Set(['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING']);
   const approvalFor = (commandType, targetID) => {
-    const matching = approvals.filter((item) => item.command_type === commandType && item.target_resource_id === targetID);
-    return matching.find((item) => item.status === 'DRAFT' && (item.allowed_actions || []).includes('SUBMIT'))
-      || matching.find((item) => activeApprovalStatuses.has(item.status))
-      || matching[0];
+    return approvals.find((item) => item.command_type === commandType &&
+      (item.target?.resource_id || item.target_resource_id) === targetID);
   };
   const reload = async () => {
     const result = await onReload?.();
@@ -2758,7 +2755,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       } else if (targetTab === 'adjustments' && canReadWallets) {
         const [adjustments, approvals] = await Promise.all([
           client.adjustments(querySnapshot),
-          canRequestAdjustment || canApproveAdjustment ? client.approvalRequests({ command_type: 'WALLET_ADJUSTMENT' }) : Promise.resolve({ items: [] }),
+          canRequestAdjustment || canApproveAdjustment ? client.governedApprovalRequests({ command_type: 'WALLET_ADJUSTMENT', limit: 200 }) : Promise.resolve({ items: [] }),
         ]);
         const collection = normalizeFinanceCollection(adjustments, querySnapshot);
         next = { adjustments: collection.items, adjustmentApprovals: approvals.items || [] };
@@ -2791,8 +2788,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         const canReadControlApprovals = canRequestControlResume || canApproveControlResume;
         const [paymentControls, providerApprovals, productApprovals] = await Promise.all([
           client.paymentProviderControls(),
-          canReadControlApprovals ? client.approvalRequests({ command_type: 'PAYMENT_PROVIDER_RESUME' }) : Promise.resolve({ items: [] }),
-          canReadControlApprovals ? client.approvalRequests({ command_type: 'PAYMENT_PRODUCT_RESUME' }) : Promise.resolve({ items: [] }),
+          canReadControlApprovals ? client.governedApprovalRequests({ command_type: 'PAYMENT_PROVIDER_RESUME', limit: 200 }) : Promise.resolve({ items: [] }),
+          canReadControlApprovals ? client.governedApprovalRequests({ command_type: 'PAYMENT_PRODUCT_RESUME', limit: 200 }) : Promise.resolve({ items: [] }),
         ]);
         next = { paymentControls, paymentControlApprovals: [...(providerApprovals.items || []), ...(productApprovals.items || [])] };
       } else if (targetTab === 'prices' && canReadPricing) {
@@ -3456,7 +3453,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       await client.importProviderBill(reconciliation.channel, reconciliation.businessDate, rows);
     });
   };
-  const adjustmentApprovalByTarget = new Map((data.adjustmentApprovals || []).map((item) => [item.target_resource_id, item]));
+  const adjustmentApprovalByTarget = latestApprovalByTarget(data.adjustmentApprovals || []);
   const columns = useMemo(
     () => ({
       wallets: [

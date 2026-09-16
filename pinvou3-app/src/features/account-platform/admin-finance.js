@@ -25,11 +25,22 @@ export function buildPaymentControlApprovalDraft(control, product, reason, idemp
 
 export function paymentControlApprovalAction(approval, { canRequest = false } = {}) {
   if (!approval) return canRequest ? 'create' : 'none';
-  if (approval.status === 'DRAFT' && canRequest && (approval.allowed_actions || []).includes('SUBMIT')) return 'submit';
+  // List summaries intentionally omit actions. The write path re-reads the detail before submission.
+  if (approval.status === 'DRAFT' && canRequest) return 'submit';
   if (['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING'].includes(approval.status)) return 'view';
   if (approval.status === 'EXECUTION_FAILED') return 'view';
   if (['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTED'].includes(approval.status)) return canRequest ? 'create' : 'view';
   return 'view';
+}
+
+export function latestApprovalByTarget(items = []) {
+  const byTarget = new Map();
+  // The Account list is ordered newest first; never let older history replace its current row.
+  for (const item of items) {
+    const targetID = item.target?.resource_id || item.target_resource_id;
+    if (targetID && !byTarget.has(targetID)) byTarget.set(targetID, item);
+  }
+  return byTarget;
 }
 
 export function paymentControlSupersedesRequest(page, commandType, targetID) {
