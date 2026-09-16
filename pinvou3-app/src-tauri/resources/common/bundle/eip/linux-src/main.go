@@ -854,7 +854,7 @@ var allowedFlags = map[string][]string{
 	"attendance calc-days":              []string{"apply-type", "beg-date", "end-date", "beg-time", "end-time"},
 	"attendance get-annual-calc":        []string{"date"},
 	"attendance get-person-summary":     nil,
-	"attendance get-effectived-summary": []string{"date", "page", "page-size"},
+	"attendance get-effectived-summary": []string{"date", "page"},
 	"attendance list-abnormal":          []string{"date", "page", "page-size"},
 	"attendance list-forget-card":       []string{"date", "page", "page-size"},
 	"attendance list-forget-badge":      []string{"date", "page", "page-size"},
@@ -1042,6 +1042,18 @@ func runBusiness(args []string) int {
 		return 3
 	}
 	flags := parseFlags(rest)
+	// --help:打印该命令的 flag 面(allowedFlags 即命令契约)后退出。须在
+	// 白名单之前特判,否则 --help 自身会被当未知 flag 拒绝,SKILL.md 教的
+	// 「不确定参数时 --help」就成了死路。
+	if _, ok := flags["help"]; ok {
+		fmt.Printf("eip %s [flags]\n", key)
+		if allowed := allowedFlags[key]; len(allowed) > 0 {
+			for _, fl := range allowed {
+				fmt.Printf("  --%s\n", fl)
+			}
+		}
+		return 0
+	}
 	// 官方命令面存在、但黄金报文未覆盖其线上键名的 flag：显式拒绝而非静默吞。
 	// 静默吞会让「已审批」查询拿回「待审批」缺省数据且无任何报错；拒绝让调用方
 	// 大声失败。补抓报文证实键名后按 todo --type 的方式逐个转正（见黄金表 §19）。

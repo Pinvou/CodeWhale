@@ -595,11 +595,12 @@ pub fn run() {
     ensure_release_env();
     startup_process_env();
     // GUI 宿主同样必须给 tokio worker 大栈:底座 engine 一次 dispatch 在 debug
-    // 构建下实测栈高水位 2.25–2.5MiB(见 CodeWhale/crates/tui/src/lib.rs:1888
-    // 的说明),tokio 默认 2MiB worker 栈会被顶穿——栈溢出不是 panic,
-    // catch_unwind 看不到,进程直接 0xc00000fd/SIGABRT。headless 路径已同款修复
-    // (headless_bridge.rs run_windowless_host),此处补齐 GUI 路径;勿"优化"回
-    // 默认 runtime。runtime 本体绑定在本函数作用域,随 run() 活到进程退出。
+    // 构建下实测栈高水位 2.25–2.5MiB(见 CodeWhale/crates/tui/src/lib.rs 的
+    // headless 同款修复说明),tokio 默认 2MiB worker 栈会被顶穿——栈溢出不是
+    // panic,catch_unwind 看不到,进程直接 0xc00000fd/SIGABRT。headless 路径
+    // 已同款修复(headless_bridge.rs run_windowless_host),此处补齐 GUI 路径;
+    // 勿"优化"回默认 runtime。runtime 本体绑定在本函数作用域,随 run() 活到
+    // 进程退出。
     // A runtime build failure (outside OOM-killed process death) leaves the
     // app without async execution — no degradation path, fail fast.
     #[allow(clippy::expect_used)]

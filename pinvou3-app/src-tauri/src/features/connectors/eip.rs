@@ -518,9 +518,11 @@ mod tests {
                     out.insert(key);
                 } else if !domain.is_empty()
                     && !span.is_empty()
-                    // flag 说明段（如行内的 `--type`）不是命令：拼成「域 + flag」
-                    // 会得到路由表必然不存在的伪命令，契约测试误报缺失。
+                    // flag 说明段不是命令:以 `-` 开头(如行内 `--type`)或内含
+                    // `--`(如裸前括号 `[--keyword`)的段拼成「域 + flag」都会
+                    // 得到路由表必然不存在的伪命令,契约测试误报缺失。
                     && !span.starts_with('-')
+                    && !span.contains("--")
                     && span
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c == '-' || c == '[')
@@ -583,6 +585,11 @@ mod tests {
             "{cmds:?}"
         );
         assert!(!cmds.contains("todo-count --type"), "{cmds:?}");
+        // 裸前括号形态(`[--keyword`)同样不是命令:以 `[` 开头但内含 `--`,
+        // 六轮评审解析器推演实测的另一误捕形态。
+        let bracket = "| 资讯 | `eip news` `[--keyword` 补充说明 |";
+        let cmds = collect_skill_commands(bracket);
+        assert!(!cmds.contains("news [--keyword"), "{cmds:?}");
         // 续写命令语法糖本身不受影响：不带 eip 前缀的裸命令段仍继承本行域。
         let legacy = "| 各类假期余额 | `eip leave get-balance` / `get-sick-balance` |";
         let cmds = collect_skill_commands(legacy);

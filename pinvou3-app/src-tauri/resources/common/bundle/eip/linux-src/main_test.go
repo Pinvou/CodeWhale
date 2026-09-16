@@ -500,8 +500,6 @@ func TestTodoSubmitFlowListFileAndValidation(t *testing.T) {
 	}
 }
 
-// token 过期重试语义（评审二轮 #2）:过期信号只认 Code==51 / HTTP 401;
-// 读命令 exchange 后自动重试一次,写命令绝不自动重放。
 // 过期重试语义(评审二轮 #2 + 三轮 #P1):过期信号只认 Code==51 / HTTP 401;
 // 读命令 exchange 后自动重试一次,写命令绝不自动重放。刷新失败、原 token、
 // 重试仍过期都不把过期信封当成功输出(exit 0)——统一 exit 3 交还调用方。
@@ -1054,5 +1052,37 @@ func TestExpiryReportDistinguishesRefreshFailure(t *testing.T) {
 	}
 	if strings.Contains(out, "and refreshed") {
 		t.Errorf("output = %q must not claim refresh succeeded", out)
+	}
+}
+
+// --help 打印该命令 flag 面并退出(六轮评审 P2.2):白名单若先拦会把 SKILL.md
+// 教的「不确定参数时 --help」变成死路。
+func TestCommandHelpPrintsFlagSurface(t *testing.T) {
+	rs := newRecordingServer(t)
+	out := captureStdout(t, func() {
+		if got := runBusiness([]string{"todo", "--help"}); got != 0 {
+			t.Errorf("todo --help exit = %d, want 0", got)
+		}
+	})
+	for _, want := range []string{"eip todo [flags]", "--type", "--page", "--page-size"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help output missing %q:\n%s", want, out)
+		}
+	}
+	if rs.remaining(t) != 0 {
+		t.Fatalf("%d requests leaked past --help", rs.remaining(t))
+	}
+}
+
+// get-effectived-summary 的 page-size 官方固定 100(六轮评审 P2.1):白名单放行
+// 却被 pagedBody100 硬编码静默忽略,正是白名单要消灭的「allow 侧静默吞」——
+// 收紧为拒绝,让调用方大声失败。
+func TestEffectivedSummaryPageSizeRejected(t *testing.T) {
+	newRecordingServer(t)
+	if got := runBusiness([]string{"attendance", "get-effectived-summary", "--page-size", "50"}); got != 2 {
+		t.Errorf("--page-size exit = %d, want 2", got)
+	}
+	if got := runBusiness([]string{"attendance", "get-effectived-summary", "--page", "2"}); got != 0 {
+		t.Errorf("--page exit = %d, want 0", got)
 	}
 }
