@@ -3,7 +3,10 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,6 +96,65 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type approvalV2ListRepository interface {
+	ListApprovalRequestsV2(context.Context, identity.Principal, ApprovalFilter, string, int, string) (ApprovalV2Page, error)
+}
+
+func (s *Service) adminApprovalRequestsV2(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	repository, ok := s.repository.(approvalV2ListRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "approval pagination is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	query := r.URL.Query()
+	for name, values := range query {
+		switch name {
+		case "command_type", "status", "risk_class", "requester_user_id", "target", "submitted_from", "submitted_to", "expires_from", "expires_to", "limit", "cursor":
+		default:
+			api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "approval filter is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		if len(values) != 1 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "approval filter is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
+	filter, err := approvalFilterFromRequest(r)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "approval filter is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	limit := 0
+	if raw := query.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || raw != strconv.Itoa(limit) || limit < 1 || limit > 200 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_LIMIT", "approval page limit is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
+	filter.Limit = 0
+	sourceIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || net.ParseIP(sourceIP) == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "approval pagination is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	page, err := repository.ListApprovalRequestsV2(r.Context(), mustPrincipal(r.Context()), filter, query.Get("cursor"), limit, sourceIP)
+	if err != nil {
+		if errors.Is(err, ErrForbidden) {
+			s.writeError(w, r, err)
+			return
+		}
+		classification := ClassifyApprovalPaginationError(err)
+		if classification.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(classification.RetryAfter))
+		}
+		api.WriteError(w, classification.Status, classification.Code, "approval pagination is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, page)
 }
 
 func approvalFilterFromRequest(r *http.Request) (ApprovalFilter, error) {
