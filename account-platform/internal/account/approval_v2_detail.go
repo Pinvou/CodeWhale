@@ -88,7 +88,8 @@ func (r *PostgresRepository) approvalV2Execution(ctx context.Context, item Appro
 	var version int64
 	var status, failure *string
 	err := r.pool.QueryRow(ctx, `SELECT ar.version,e.status,e.error_class
-FROM approval_requests ar LEFT JOIN approval_executions e ON e.approval_request_id=ar.id
+FROM approval_requests ar LEFT JOIN approval_executions e
+  ON e.approval_request_id=ar.id AND e.command_type=ar.command_type
 WHERE ar.id=$1`, item.ID).Scan(&version, &status, &failure)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrApprovalRequestNotFound

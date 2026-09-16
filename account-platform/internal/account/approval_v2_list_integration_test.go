@@ -28,10 +28,28 @@ func TestApprovalV2ListPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var seeded []uuid.UUID
 	for i := 0; i < 3; i++ {
-		seedAdvancementRequest(t, ctx, repository, actor.ID, policy, "SUBMITTED")
+		seeded = append(seeded, seedAdvancementRequest(t, ctx, repository, actor.ID, policy, "SUBMITTED"))
 	}
 	principal := approvalIntegrationPrincipal(actor)
+	item, err := repository.ApprovalRequest(ctx, principal, seeded[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection, err := repository.approvalV2Execution(ctx, item); err != nil || projection != nil {
+		t.Fatalf("execution absent projection=%+v err=%v", projection, err)
+	}
+	// A malformed historical execution for another command must not be
+	// attached to this request's closed detail.
+	if _, err := database.adminPool.Exec(ctx, `INSERT INTO approval_executions
+ (id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,job_run_id,status,authorization_snapshot,started_at)
+	 VALUES($1,$2,'PAYMENT_PRODUCT_RESUME',decode(repeat('ab',32),'hex'),$3,'billing-command-executor','foreign-command','EXECUTING','{}',now())`, uuid.New(), seeded[0], uuid.NewString()); err == nil {
+		t.Fatal("database accepted an unrelated execution")
+	}
+	if projection, err := repository.approvalV2Execution(ctx, item); err != nil || projection != nil {
+		t.Fatalf("foreign execution leaked projection=%+v err=%v", projection, err)
+	}
 	page, err := repository.ListApprovalRequestsV2(ctx, principal, ApprovalFilter{}, "", 2, "127.0.0.1")
 	if err != nil || len(page.Items) != 2 || page.NextCursor == nil || !page.HasMore {
 		t.Fatalf("first page=%+v err=%v", page, err)
