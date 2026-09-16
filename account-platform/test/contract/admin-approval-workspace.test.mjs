@@ -19,6 +19,9 @@ test('approval center mounts one governed four-view reader without the legacy di
   assert.match(workspace, /client\.governedApprovalDirectory/);
   assert.match(workspace, /client\.governedApprovalRequests/);
   assert.match(workspace, /client\.governedApprovalRequest/);
+  assert.match(workspace, /client\.decideGovernedApproval/);
+  assert.match(workspace, /client\.withdrawGovernedApprovalRequest/);
+  assert.match(workspace, /client\.submitGovernedApprovalRequest/);
   assert.doesNotMatch(workspace, /client\.approvalRequests\(/);
   assert.doesNotMatch(workspace, /allowed_actions/);
   assert.match(built, /approval_view/);

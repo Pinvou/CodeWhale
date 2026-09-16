@@ -19,5 +19,16 @@
 .adm-approval-detail dl>div{min-width:0}
 .adm-approval-detail dt{font-size:11px;color:var(--adm-muted)}
 .adm-approval-detail dd{margin:5px 0;overflow-wrap:anywhere}
+.adm-approval-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.adm-approval-uncertain{margin-top:16px;padding:12px;border:1px solid #e6b45c;background:#fff8e9;border-radius:9px}
+.adm-approval-dialog{width:min(520px,calc(100vw - 24px));border:1px solid var(--adm-line);border-radius:14px;padding:20px;color:var(--adm-text)}
+.adm-approval-dialog::backdrop{background:#10182799}
+.adm-approval-dialog form{display:grid;gap:14px}
+.adm-approval-dialog h3,.adm-approval-dialog p{margin:0}
+.adm-approval-dialog label{display:grid;gap:6px}
+.adm-approval-dialog textarea{min-height:96px;resize:vertical;border:1px solid var(--adm-line);border-radius:8px;padding:10px}
+.adm-approval-dialog form>div:last-child{display:flex;justify-content:flex-end;gap:8px}
+.adm-approval-dialog button{min-height:40px;border:1px solid var(--adm-line);border-radius:8px;padding:8px 12px;background:var(--adm-surface);color:var(--adm-text)}
+.adm-approval-dialog button[type="submit"]{color:#fff;border-color:var(--adm-primary);background:var(--adm-primary)}
 @media(max-width:768px){.adm-approval-detail dl{grid-template-columns:1fr}}
 @media(max-width:360px){.adm-approval-toolbar label{min-width:100%}.adm-approval-tabs button{flex:1}}

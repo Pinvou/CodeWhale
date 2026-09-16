@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { approvalActionsForDetail } from './admin-approval-actions.js';
 import './admin-approval-workspace.css';
 
 const views = ['mine', 'pending', 'execution', 'directory'];
@@ -44,6 +45,13 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
   const [loading, setLoading] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [previous, setPrevious] = useState([]);
+  const [action, setAction] = useState('');
+  const [reason, setReason] = useState('');
+  const [acting, setActing] = useState(false);
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false);
+  const [actionError, setActionError] = useState(false);
+  const dialogRef = useRef(null);
+  const actionSourceRef = useRef(null);
 
   useEffect(() => { setRoute(readRoute()); setPrevious([]); }, [routeVersion]);
   useEffect(() => { setCommandInput(route.commandType); setTargetInput(route.target); }, [route.commandType, route.target]);
@@ -101,10 +109,55 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     setDetailError(false);
     if (route.view === 'directory' || !route.requestID) return () => controller.abort();
     void client.governedApprovalRequest(route.requestID, controller.signal).then((result) => {
-      if (!controller.signal.aborted) setDetail(result);
+      if (!controller.signal.aborted) { setDetail(result); setOutcomeUnknown(false); }
     }).catch(() => { if (!controller.signal.aborted) setDetailError(true); });
     return () => controller.abort();
   }, [client, route.view, route.requestID, refresh]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!action || !dialog) return undefined;
+    dialog.showModal();
+    dialog.querySelector('textarea, button')?.focus();
+    return () => { if (dialog.open) dialog.close(); actionSourceRef.current?.focus?.(); };
+  }, [action]);
+
+  const closeAction = () => {
+    if (acting || outcomeUnknown) return;
+    setAction('');
+    setReason('');
+    setActionError(false);
+  };
+
+  const submitAction = async (event) => {
+    event.preventDefault();
+    if (!detail || !action || acting || outcomeUnknown) return;
+    if ((action === 'APPROVED' || action === 'REJECTED') && [...reason.trim()].length < 3) {
+      setActionError(true);
+      return;
+    }
+    setActing(true);
+    setActionError(false);
+    try {
+      if (action === 'APPROVED' || action === 'REJECTED') {
+        await client.decideGovernedApproval(route.requestID, detail, action, reason.trim());
+      } else if (action === 'WITHDRAW') {
+        await client.withdrawGovernedApprovalRequest(route.requestID, detail);
+      } else {
+        await client.submitGovernedApprovalRequest(route.requestID, detail);
+      }
+      setAction('');
+      setReason('');
+      setRefresh((value) => value + 1);
+    } catch {
+      setOutcomeUnknown(true);
+      setActionError(true);
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const offeredActions = approvalActionsForDetail(detail, currentUserID);
 
   const rows = (page?.items || []).filter((item) => route.view !== 'pending' || requesterOf(item) !== currentUserID);
   const nextCursor = page?.next_cursor || '';
@@ -159,6 +212,22 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
         <div><dt>{c.updated}</dt><dd>{date(detail.updated_at, language)}</dd></div>
       </dl>}
       {detail?.detail_availability === 'DETAIL_PRESENTATION_UNAVAILABLE' && <p>{c.historicalMinimum}</p>}
+      {outcomeUnknown && <div className="adm-approval-uncertain" role="alert"><p>{c.actionUnknown}</p><button type="button" onClick={() => setRefresh((value) => value + 1)}>{c.refreshDetail}</button></div>}
+      {!outcomeUnknown && offeredActions.length > 0 && <div className="adm-approval-actions">{offeredActions.map((name) => <button key={name} type="button" onClick={(event) => {
+        actionSourceRef.current = event.currentTarget;
+        setReason(''); setActionError(false); setAction(name);
+      }}>{c.actionNames[name]}</button>)}</div>}
     </aside>}
+    {action && <dialog ref={dialogRef} className="adm-approval-dialog" aria-labelledby="approval-action-title" onCancel={(event) => { event.preventDefault(); closeAction(); }}>
+      <form onSubmit={submitAction}>
+        <h3 id="approval-action-title">{c.actionNames[action]}</h3>
+        <p>{c.actionConfirm}</p>
+        {(action === 'APPROVED' || action === 'REJECTED') && <label>{c.actionReason}<textarea required minLength="3" maxLength="2000" value={reason} onChange={(event) => setReason(event.target.value)} /></label>}
+        {actionError && <p role="alert">{outcomeUnknown ? c.actionUnknown : c.actionFailed}</p>}
+        <div><button type="button" disabled={acting || outcomeUnknown} onClick={closeAction}>{c.cancel}</button>
+          {outcomeUnknown ? <button type="button" onClick={() => { setAction(''); setRefresh((value) => value + 1); }}>{c.refreshDetail}</button>
+            : <button type="submit" disabled={acting}>{acting ? c.submitting : c.confirm}</button>}</div>
+      </form>
+    </dialog>}
   </section>;
 }
