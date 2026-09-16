@@ -436,7 +436,15 @@ func TestTokenOwnerCandidateCursorBindsFilterAndAuthorizationVersion(t *testing.
 	if _, err := decodeTokenOwnerCandidateCursor(cursor, key, TokenOwnerCandidateActor{Issuer: actor.Issuer, Subject: "other", CallerService: actor.CallerService, CallerSubject: actor.CallerSubject}, TokenOwnerCandidateFilter{OwnerType: "USER", Limit: 20}, now); !errors.Is(err, ErrInvalidTokenOwnerCandidateCursor) {
 		t.Fatalf("cross-subject cursor error=%v", err)
 	}
-	forged := cursor[:len(cursor)-1] + "A"
+	parts := strings.Split(cursor, ".")
+	if len(parts) != 2 || len(parts[1]) == 0 {
+		t.Fatalf("unexpected cursor shape: %q", cursor)
+	}
+	replacement := "A"
+	if parts[1][0] == 'A' {
+		replacement = "B"
+	}
+	forged := parts[0] + "." + replacement + parts[1][1:]
 	if _, err := decodeTokenOwnerCandidateCursor(forged, key, actor, TokenOwnerCandidateFilter{OwnerType: "USER", Limit: 20}, now); !errors.Is(err, ErrInvalidTokenOwnerCandidateCursor) {
 		t.Fatalf("tampered cursor error=%v", err)
 	}
