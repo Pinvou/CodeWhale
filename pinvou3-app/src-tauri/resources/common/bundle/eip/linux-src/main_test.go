@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // 逐命令线上契约测试：以 docs/eip-official-api-golden.md 为唯一事实来源，
@@ -27,6 +28,7 @@ type recordedRequest struct {
 	path   string
 	query  url.Values
 	body   []byte
+	header http.Header
 }
 
 type recordingServer struct {
@@ -44,7 +46,7 @@ func newRecordingServer(t *testing.T) *recordingServer {
 	rs.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		rs.mu.Lock()
-		rs.req = append(rs.req, recordedRequest{r.Method, r.URL.Path, r.URL.Query(), b})
+		rs.req = append(rs.req, recordedRequest{r.Method, r.URL.Path, r.URL.Query(), b, r.Header.Clone()})
 		rs.mu.Unlock()
 		// 祝福语配置返回可提取文案，其余统一回黄金表 §20 的固定信封。
 		if strings.Contains(r.URL.Path, "/config/statement/") {
@@ -150,7 +152,10 @@ func runCase(t *testing.T, rs *recordingServer, tc routeCase) {
 
 func TestBusinessRoutesMatchGoldenReference(t *testing.T) {
 	rs := newRecordingServer(t)
-	today, month, year := todayNow(), monthNow(), yearNow()
+	// 时间期望用本地内联 layout,不复用 main.go 的 todayNow/monthNow/yearNow:
+	// 实现的格式串漂移(如 "2006-1")不能带着期望一起漂。
+	now := time.Now()
+	today, month, year := now.Format("2006-01-02"), now.Format("2006-01"), now.Format("2006")
 
 	cases := map[string]routeCase{
 		// ---- §4 attendance（15 条；get-summary/get-calendar 含 RSA date，见下方专项测试）----
@@ -318,18 +323,51 @@ func TestBusinessRoutesMatchGoldenReference(t *testing.T) {
 	if n := rs.remaining(t); n != 0 {
 		t.Fatalf("%d requests left over", n)
 	}
+	// 路由全覆盖守卫:每个路由 key 都必须有契约 case(RSA 两命令由
+	// TestRSADateQueries 覆盖),防止新增路由不带契约静默合入。
+	tested := map[string]bool{}
+	for _, tc := range cases {
+		key := tc.args[0]
+		if len(tc.args) > 1 && !strings.HasPrefix(tc.args[1], "-") {
+			key = key + " " + tc.args[1]
+		}
+		tested[key] = true
+	}
+	for key := range routes {
+		if tested[key] || key == "attendance get-summary" || key == "attendance get-calendar" {
+			continue
+		}
+		t.Errorf("route %q has no contract case", key)
+	}
 }
 
+// 黄金表 §2 的官方内嵌公钥字面量:与实现常量逐字比对,防"任意 1024 位钥"式
+// 漂移(密文形态断言对换钥不敏感)。
+const goldenRSAPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCghu4j7NRaPkuotWUs/n5adIvOs19GpAfwhs/nTaaYp/paheKNc00Ns7xGbUAJli+Qog8x1iuv/MBoTx7WbjVCz8ZgpqFBb4OkVtG2FRWMkiC1qEsr0Vm1ljHxEW61oDQcI/L66i/BzlMUBIzWC6ogzgqnz5RTGPZKzncofzpqjQIDAQAB
+-----END PUBLIC KEY-----`
+
 // get-summary / get-calendar 的 date 是 RSA(PKCS#1 v1.5)+base64（黄金表 §2），
-// 密文每次随机，只断言形态：128 字节密文、标准 base64、不含明文月份。
+// 密文每次随机，只断言形态：128 字节密文、标准 base64、不含明文月份、
+// query 仅 date 一个键;端点与命令一一对应(summary↔calendar 互换必须 fail)。
 func TestRSADateQueries(t *testing.T) {
 	rs := newRecordingServer(t)
-	for _, cmd := range []string{"get-summary", "get-calendar"} {
+	if rsaPublicKeyPEM != goldenRSAPublicKeyPEM {
+		t.Error("embedded RSA public key drifted from golden §2 literal")
+	}
+	wantPath := map[string]string{
+		"get-summary":  "/hrss/api/ApiAttendance/GetEmpCalendarSummaryInfo",
+		"get-calendar": "/hrss/api/ApiAttendance/GetEmpCalendarDetailInfo",
+	}
+	for cmd, path := range wantPath {
 		args := []string{"attendance", cmd, "--date", monthNow()}
 		if got := runBusiness(args); got != 0 {
 			t.Fatalf("runBusiness(%v) = %d", args, got)
 		}
 		rec := rs.take(t)
+		if len(rec.query) != 1 {
+			t.Errorf("%s: query = %v, want exactly {date}", cmd, rec.query)
+		}
 		enc := rec.query.Get("date")
 		raw, err := base64.StdEncoding.DecodeString(enc)
 		if err != nil {
@@ -341,9 +379,12 @@ func TestRSADateQueries(t *testing.T) {
 		if strings.Contains(enc, monthNow()) {
 			t.Errorf("%s: date leaked plaintext month", cmd)
 		}
-		if rec.method != "GET" || rec.path != "/hrss/api/ApiAttendance/GetEmpCalendarSummaryInfo" && rec.path != "/hrss/api/ApiAttendance/GetEmpCalendarDetailInfo" {
-			t.Errorf("%s: unexpected %s %s", cmd, rec.method, rec.path)
+		if rec.method != "GET" || rec.path != path {
+			t.Errorf("%s: got %s %s, want GET %s", cmd, rec.method, rec.path, path)
 		}
+	}
+	if n := rs.remaining(t); n != 0 {
+		t.Fatalf("%d requests left over", n)
 	}
 }
 
@@ -415,6 +456,13 @@ func TestTodoSubmitFlowListFileAndValidation(t *testing.T) {
 	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "../flows.json"}); err == nil {
 		t.Error("parent-escaping path: want error, got nil")
 	}
+	// 符号链接不跟随:cwd 内指向 cwd 外任意常规文件的 symlink 不能成为读取面。
+	if err := os.Symlink("/etc/hosts", "escape.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "escape.json"}); err == nil {
+		t.Error("symlink path: want error, got nil")
+	}
 	// 目录不是常规文件（顺带覆盖 FIFO/设备文件分支）。
 	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "."}); err == nil {
 		t.Error("directory path: want error, got nil")
@@ -426,6 +474,26 @@ func TestTodoSubmitFlowListFileAndValidation(t *testing.T) {
 	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": `[]`}); err == nil {
 		t.Error("empty array: want error, got nil")
 	}
+	// nodeId 为 null/空串同样拒绝,不只查键存在。
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": `[{"nodeId":null}]`}); err == nil {
+		t.Error("null nodeId: want error, got nil")
+	}
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": `[{"nodeId":""}]`}); err == nil {
+		t.Error("empty nodeId: want error, got nil")
+	}
+	// action 白名单:官方仅 agree/reject/transfer;未知值不产生脏 buttonType 照发。
+	// (带尾随空格的 "Transfer " 经 TrimSpace 归一为合法 transfer,并恢复必填校验;
+	// 空串按官方缺省 agree。)
+	for _, bad := range []string{"forward", "同意"} {
+		if _, err := todoSubmitBody(map[string]string{"action": bad, "flow-list": list}); err == nil {
+			t.Errorf("action %q: want error, got nil", bad)
+		}
+	}
+	if body, err := todoSubmitBody(map[string]string{"action": "Transfer ", "flow-list": list}); err == nil {
+		t.Error("transfer with trailing space must still require receivers, got nil error")
+	} else {
+		_ = body
+	}
 	// transfer 缺接收人参数必须显式报错,不得空串照发。
 	if _, err := todoSubmitBody(map[string]string{"action": "transfer", "flow-list": list}); err == nil {
 		t.Error("transfer without receiver: want error, got nil")
@@ -434,61 +502,102 @@ func TestTodoSubmitFlowListFileAndValidation(t *testing.T) {
 
 // token 过期重试语义（评审二轮 #2）:过期信号只认 Code==51 / HTTP 401;
 // 读命令 exchange 后自动重试一次,写命令绝不自动重放。
+// 过期重试语义(评审二轮 #2 + 三轮 #P1):过期信号只认 Code==51 / HTTP 401;
+// 读命令 exchange 后自动重试一次,写命令绝不自动重放。刷新失败、原 token、
+// 重试仍过期都不把过期信封当成功输出(exit 0)——统一 exit 3 交还调用方。
 func TestTokenExpiryRetrySemantics(t *testing.T) {
-	var mu sync.Mutex
-	var business, exchanged int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/token/exchange") {
-			mu.Lock()
-			exchanged++
-			mu.Unlock()
-			_, _ = io.WriteString(w, `{"code":0,"data":{"token":"fresh-at"}}`)
-			return
+	type counters struct {
+		mu                  sync.Mutex
+		business, exchanged int
+	}
+	// newEnv 起一个业务/刷新行为可定制的假服务端并备好隔离凭证。
+	newEnv := func(t *testing.T, exchangeOK bool, businessBody func(n int) string) *counters {
+		t.Helper()
+		c := &counters{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/token/exchange") {
+				c.mu.Lock()
+				c.exchanged++
+				c.mu.Unlock()
+				if !exchangeOK {
+					http.Error(w, "exchange backend down", http.StatusInternalServerError)
+					return
+				}
+				_, _ = io.WriteString(w, `{"code":0,"data":{"token":"fresh-at"}}`)
+				return
+			}
+			c.mu.Lock()
+			n := c.business + 1
+			c.business = n
+			c.mu.Unlock()
+			_, _ = io.WriteString(w, businessBody(n))
+		}))
+		t.Cleanup(srv.Close)
+		t.Setenv("EIP_BASE_URL", srv.URL)
+		t.Setenv("EIP_AUTH_BASE_URL", srv.URL+"/auth/v1.0")
+		t.Setenv("AGENT_DEVICE_ID", "contract-test-device")
+		t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+		if err := saveAT("test-token"); err != nil {
+			t.Fatal(err)
 		}
-		mu.Lock()
-		business++
-		mu.Unlock()
-		_, _ = io.WriteString(w, `{"Code":51,"Msg":"Token已失效"}`)
-	}))
-	t.Cleanup(srv.Close)
-	t.Setenv("EIP_BASE_URL", srv.URL)
-	t.Setenv("EIP_AUTH_BASE_URL", srv.URL+"/auth/v1.0")
-	t.Setenv("AGENT_DEVICE_ID", "contract-test-device")
-	t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
-	if err := saveAT("test-token"); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveAIT("test-ait"); err != nil {
-		t.Fatal(err)
+		if err := saveAIT("test-ait"); err != nil {
+			t.Fatal(err)
+		}
+		return c
 	}
 
-	// 读命令:Code 51 → 删 AT、exchange 换新、重试一次;第二次仍 51 则原样输出。
-	if got := runBusiness([]string{"todo"}); got != 0 {
-		t.Fatalf("read retry exit = %d, want 0", got)
-	}
-	mu.Lock()
-	b, e := business, exchanged
-	mu.Unlock()
-	if b != 2 || e != 1 {
-		t.Fatalf("read: business=%d exchanged=%d, want 2/1", b, e)
-	}
+	t.Run("read retry still expired exits 3", func(t *testing.T) {
+		c := newEnv(t, true, func(int) string { return `{"Code":51,"Msg":"Token已失效"}` })
+		if got := runBusiness([]string{"todo"}); got != 3 {
+			t.Fatalf("read retry-still-expired exit = %d, want 3 (not 0: expired envelope must not pass as success)", got)
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.business != 2 || c.exchanged != 1 {
+			t.Fatalf("business=%d exchanged=%d, want 2/1", c.business, c.exchanged)
+		}
+	})
 
-	// 写命令:Code 51 → exchange 后不重放,显式要求重试(exit 3)。
-	mu.Lock()
-	business, exchanged = 0, 0
-	mu.Unlock()
-	if err := saveAT("test-token"); err != nil {
-		t.Fatal(err)
-	}
-	if got := runBusiness([]string{"todo-submit", "--flow-list", `[{"nodeId":"N1"}]`}); got != 3 {
-		t.Fatalf("write no-replay exit = %d, want 3", got)
-	}
-	mu.Lock()
-	b, e = business, exchanged
-	mu.Unlock()
-	if b != 1 || e != 1 {
-		t.Fatalf("write: business=%d exchanged=%d, want 1/1", b, e)
-	}
+	t.Run("read retry succeeds exits 0", func(t *testing.T) {
+		c := newEnv(t, true, func(n int) string {
+			if n == 1 {
+				return `{"Code":51,"Msg":"Token已失效"}`
+			}
+			return `{"Code":1,"Msg":"ok","Data":{}}`
+		})
+		if got := runBusiness([]string{"todo"}); got != 0 {
+			t.Fatalf("read retry-success exit = %d, want 0", got)
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.business != 2 || c.exchanged != 1 {
+			t.Fatalf("business=%d exchanged=%d, want 2/1", c.business, c.exchanged)
+		}
+	})
+
+	t.Run("read with failed refresh exits 3", func(t *testing.T) {
+		c := newEnv(t, false, func(int) string { return `{"Code":51,"Msg":"Token已失效"}` })
+		if got := runBusiness([]string{"todo"}); got != 3 {
+			t.Fatalf("read refresh-failed exit = %d, want 3", got)
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.business != 1 || c.exchanged != 1 {
+			t.Fatalf("business=%d exchanged=%d, want 1/1", c.business, c.exchanged)
+		}
+	})
+
+	t.Run("write never replays", func(t *testing.T) {
+		c := newEnv(t, true, func(int) string { return `{"Code":51,"Msg":"Token已失效"}` })
+		if got := runBusiness([]string{"todo-submit", "--flow-list", `[{"nodeId":"N1"}]`}); got != 3 {
+			t.Fatalf("write no-replay exit = %d, want 3", got)
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.business != 1 || c.exchanged != 1 {
+			t.Fatalf("business=%d exchanged=%d, want 1/1", c.business, c.exchanged)
+		}
+	})
 }
 
 // authExpired 只认显式过期信号:业务文案含「失效」但 Code≠51 时不判过期
@@ -500,8 +609,16 @@ func TestAuthExpiredOnlyTrustsExplicitExpiry(t *testing.T) {
 	if !authExpired([]byte(`{"Code":51,"Msg":"Token已失效"}`), nil) {
 		t.Error("Code=51 must count as expired")
 	}
-	if !authExpired(nil, fmt.Errorf("EIP API /x returned HTTP 401: denied")) {
-		t.Error("HTTP 401 must count as expired")
+	// HTTP 401 必须经 statusedError 结构化识别:500 排错页正文碰巧含"HTTP 401"
+	// 字样的普通错误不得再误判(此前按 err.Error() 子串匹配)。
+	if !authExpired(nil, &statusedError{path: "/x", status: 401, body: "denied"}) {
+		t.Error("statused HTTP 401 must count as expired")
+	}
+	if authExpired(nil, &statusedError{path: "/x", status: 500, body: `gateway page mentions HTTP 401`}) {
+		t.Error("HTTP 500 must not count as expired even if body mentions 401")
+	}
+	if authExpired(nil, fmt.Errorf("plain network error")) {
+		t.Error("non-statused error must not count as expired")
 	}
 	if authExpired([]byte(`{"Code":404,"Msg":"not found"}`), nil) {
 		t.Error("Code=404 must not count as expired")
@@ -570,6 +687,83 @@ func TestCmdPollTimeoutRange(t *testing.T) {
 	}
 }
 
+// send-bless 属写命令:最终 bless POST 返回 51 时只刷新不重放(exit 3);
+// 返回其他业务错误码时显式报错(exit 1)——发送未发生不得以 exit 0 假冒成功。
+func TestSendBlessExpiryAndReject(t *testing.T) {
+	newEnv := func(t *testing.T, blessBody string) *int {
+		t.Helper()
+		bless := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/bless") {
+				bless++
+				_, _ = io.WriteString(w, blessBody)
+				return
+			}
+			if strings.HasSuffix(r.URL.Path, "/token/exchange") {
+				_, _ = io.WriteString(w, `{"code":0,"data":{"token":"fresh-at"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"Code":1,"Msg":"ok","Data":{}}`)
+		}))
+		t.Cleanup(srv.Close)
+		t.Setenv("EIP_BASE_URL", srv.URL)
+		t.Setenv("EIP_AUTH_BASE_URL", srv.URL+"/auth/v1.0")
+		t.Setenv("AGENT_DEVICE_ID", "contract-test-device")
+		t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+		if err := saveAT("test-token"); err != nil {
+			t.Fatal(err)
+		}
+		if err := saveAIT("test-ait"); err != nil {
+			t.Fatal(err)
+		}
+		return &bless
+	}
+
+	t.Run("expired bless refreshes without replay", func(t *testing.T) {
+		bless := newEnv(t, `{"Code":51,"Msg":"Token已失效"}`)
+		if got := runBusiness([]string{"message", "send-bless", "--id", "M1", "--content", "生日快乐"}); got != 3 {
+			t.Fatalf("expired bless exit = %d, want 3", got)
+		}
+		if *bless != 1 {
+			t.Fatalf("bless sent %d times, want exactly 1 (no replay)", *bless)
+		}
+	})
+
+	t.Run("rejected bless surfaces business error", func(t *testing.T) {
+		bless := newEnv(t, `{"Code":7,"Msg":"祝福语包含敏感词"}`)
+		if got := runBusiness([]string{"message", "send-bless", "--id", "M1", "--content", "生日快乐"}); got != 1 {
+			t.Fatalf("rejected bless exit = %d, want 1", got)
+		}
+		if *bless != 1 {
+			t.Fatalf("bless sent %d times, want exactly 1", *bless)
+		}
+	})
+}
+
+// auth save 拒绝退化输入:剥 Bearer 后为空(或只剩字面量 Bearer)的 token 会
+// 「报 ok 却没存上」,含控制字符的 token 会让后续业务命令死在非法 header 上。
+func TestCmdSaveRejectsDegenerateTokens(t *testing.T) {
+	t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+	for _, tok := range []string{"", "   ", "Bearer ", "Bearer   ", "a\nb"} {
+		if got := cmdSave(map[string]string{"token": tok}); got != 2 {
+			t.Errorf("cmdSave(token=%q) = %d, want 2", tok, got)
+		}
+	}
+	if got := cmdSave(map[string]string{"ait": "a\tb"}); got != 2 {
+		t.Errorf("cmdSave(ait with tab) = %d, want 2", got)
+	}
+	// 合法形态仍可保存(剥 Bearer 归一化)。
+	if got := cmdSave(map[string]string{"token": "Bearer ok-token", "ait": "ok-ait"}); got != 0 {
+		t.Errorf("cmdSave(valid) = %d, want 0", got)
+	}
+	if got := loadAT(); got != "ok-token" {
+		t.Errorf("loadAT = %q, want ok-token", got)
+	}
+	if got := loadAIT(); got != "ok-ait" {
+		t.Errorf("loadAIT = %q, want ok-ait", got)
+	}
+}
+
 // poll 的凭证落盘失败必须上抛:否则 poll 报 connected 但凭证未持久化,
 // 后续业务命令全部 not authenticated。
 func TestCmdPollSurfacesCredentialWriteFailure(t *testing.T) {
@@ -608,6 +802,63 @@ func TestSurveySubmitExtraKeys(t *testing.T) {
 	}
 }
 
+// flag 接线政策(黄金表 §19):todo --type 映射官方 flowType 1-4(键名已由缺省
+// 报文证实、语义由官方 help 证实);线上键名无报文证据的 flag(todo --keyword、
+// apply list --type/--status)显式拒绝且不发任何请求——静默吞会拿缺省数据冒充
+// 用户要的数据;union-welfare --search-text 映射已证实的 SearchText。
+func TestFlagWiringPolicy(t *testing.T) {
+	rs := newRecordingServer(t)
+
+	if got := runBusiness([]string{"todo", "--type", "2"}); got != 0 {
+		t.Fatalf("todo --type 2 exit = %d, want 0", got)
+	}
+	rec := rs.take(t)
+	// 请求头契约(黄金表 §1):Content-Type 恒为 application/json;
+	// Authorization 为「Bearer <保存的裸 token>」——黄金 §1 记录的官方行为是
+	// 「存什么发什么」,此处加前缀为已声明有意偏差(存量凭证已 stripBearer 归一,
+	// 两种形态上线报文一致),见 PR 已知风险。
+	if got := rec.header.Get("Authorization"); got != "Bearer test-token" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer test-token")
+	}
+	if got := rec.header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	cond, _ := body["condition"].(map[string]any)
+	if cond["flowType"] != float64(2) {
+		t.Errorf("todo --type 2 flowType = %v, want 2", cond["flowType"])
+	}
+
+	for _, tc := range [][]string{
+		{"todo", "--type", "9"},
+		{"todo", "--type", "abc"},
+		{"todo", "--keyword", "报销"},
+		{"apply", "list", "--type", "overtime"},
+		{"apply", "list", "--status", "pending"},
+	} {
+		if got := runBusiness(tc); got != 2 {
+			t.Errorf("runBusiness(%v) = %d, want 2 (rejected)", tc, got)
+		}
+	}
+	if n := rs.remaining(t); n != 0 {
+		t.Fatalf("%d requests leaked by rejected flags", n)
+	}
+
+	if got := runBusiness([]string{"union-welfare", "list", "--search-text", "年货"}); got != 0 {
+		t.Fatalf("union-welfare --search-text exit = %d, want 0", got)
+	}
+	rec = rs.take(t)
+	if err := json.Unmarshal(rec.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["SearchText"] != "年货" {
+		t.Errorf("SearchText = %v, want 年货", body["SearchText"])
+	}
+}
+
 // calc-days 班次时间可用 --beg-time/--end-time 覆盖(缺省仍为官方 08:30/18:00)。
 func TestCalcDaysShiftOverride(t *testing.T) {
 	rs := newRecordingServer(t)
@@ -627,12 +878,20 @@ func TestCalcDaysShiftOverride(t *testing.T) {
 
 // RSA 加密的 date 参数本地先校验 YYYY-MM,非法输入直接报错不发包。
 func TestRSADateRejectsBadFormat(t *testing.T) {
-	newRecordingServer(t)
-	if got := runBusiness([]string{"attendance", "get-summary", "--date", "2026-13-01"}); got != 1 {
-		t.Fatalf("exit = %d, want 1", got)
+	rs := newRecordingServer(t)
+	// 用法类错误一律 exit 2(query 构造器报错路径),且一个包都不发。
+	if got := runBusiness([]string{"attendance", "get-summary", "--date", "2026-13-01"}); got != 2 {
+		t.Fatalf("exit = %d, want 2", got)
 	}
-	if got := runBusiness([]string{"attendance", "get-calendar", "--date", "2026/09"}); got != 1 {
-		t.Fatalf("slash format exit = %d, want 1", got)
+	if got := runBusiness([]string{"attendance", "get-calendar", "--date", "2026/09"}); got != 2 {
+		t.Fatalf("slash format exit = %d, want 2", got)
+	}
+	// 非法 scope 显式报错,不静默按 personal 降级(大小写归一后 All 合法,company 才是拼错)。
+	if got := runBusiness([]string{"apply", "list-month-flow", "--scope", "company"}); got != 2 {
+		t.Fatalf("bad scope exit = %d, want 2", got)
+	}
+	if n := rs.remaining(t); n != 0 {
+		t.Fatalf("%d requests leaked by rejected inputs", n)
 	}
 }
 

@@ -572,7 +572,13 @@ async function visibilityBox(page, cardText, modeLabel, click) {
         {timeout:8000},
       ).then(()=>true).catch(()=>false);
       await page.evaluate(()=>{const el=document.querySelector('[data-nav="toolstore"]');if(!el)throw new Error('toolstore nav not found');el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));});
-      await sleep(400);
+      // 等工具商店搜索框真正回来再搜索:固定 sleep 在慢机上可能早于重挂,
+      // search() 的兜底会命中 KnowledgeView 的搜索框、把关键词打进错误视图。
+      await page.waitForFunction(
+        (sel)=>!!document.querySelector(sel),
+        {timeout:8000},
+        TOOL_STORE_SEARCH_SELECTOR,
+      ).catch(()=>{});
       await search(page,query);
       const eipRestore=await page.evaluate(({before,unmounted})=>{
         const btns=[...document.querySelectorAll('button')].filter(b=>b.getAttribute('data-tool-id')==='eip');

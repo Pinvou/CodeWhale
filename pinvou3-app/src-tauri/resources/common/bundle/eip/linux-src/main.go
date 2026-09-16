@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,6 +70,8 @@ type route struct {
 // 路由表：每行一个字面量，格式 "key": {"<METHOD>", "<path>", <query 构造器>, <body 构造器>}。
 // key 集合是公开命令契约（eip.rs 的契约测试按行解析本表），逐条对齐
 // docs/eip-official-api-golden.md §4-§18 的 Method/路径/Query/Body 列。
+// 解析器硬约束:条目必须单行书写、key 仅含小写字母/空格/连字符——条目换行、
+// 值改命名字段、key 引入其他字符都会静默掉出契约集合。
 // 与官方命令名不同的既有 key（如 survey→survey list）保留为兼容别名，并补官方名别名，
 // 使本 CLI 与官方 eip-cli 命令面完整对齐（黄金表全部 87 条业务命令）。
 var routes = map[string]route{
@@ -281,12 +284,17 @@ func optionalDateQuery(f map[string]string) (url.Values, error) {
 }
 
 // queryType=0(personal)/1(all)（apply list-month-flow，缺省 personal）。
+// 非法值显式报错而非静默按 personal 降级——拼错的 scope 会把「全公司」当成
+// 「仅本人」的数据陈述出去,属数据正确性误导。
 func scopeQueryTypeQuery(f map[string]string) (url.Values, error) {
-	queryType := "0"
-	if f["scope"] == "all" {
-		queryType = "1"
+	switch strings.ToLower(f["scope"]) {
+	case "", "personal":
+		return q("queryType", "0")
+	case "all":
+		return q("queryType", "1")
+	default:
+		return nil, fmt.Errorf("apply list-month-flow: --scope must be personal or all, got %q", f["scope"])
 	}
-	return q("queryType", queryType)
 }
 
 // ApplyId=<--apply-id>&ApproverNo=<--approver-no>（condolence urge）。
@@ -326,8 +334,14 @@ func calcDaysBody(f map[string]string) map[string]any {
 }
 
 func todoBody(f map[string]string) map[string]any {
+	// flowType 1-4（官方 help：1=待审批 2=已审批 3=我的申请 4=我的委托）；
+	// runBusiness 已拒绝 1-4 之外与非法值，这里缺省 1 与官方一致。
+	flowType := 1
+	if n, err := strconv.Atoi(f["type"]); err == nil && n >= 1 && n <= 4 {
+		flowType = n
+	}
 	return map[string]any{
-		"condition": map[string]any{"flowType": 1},
+		"condition": map[string]any{"flowType": flowType},
 		"pageNum":   atoiDefault(f["page"], 1),
 		"pageSize":  atoiDefault(f["page-size"], 10),
 	}
@@ -377,10 +391,11 @@ func announcementBody(f map[string]string) map[string]any {
 	}
 }
 
-// union-welfare 对应黄金表 union-welfare list：SearchText 固定空串。
+// union-welfare 对应黄金表 union-welfare list：SearchText 为 --search-text
+// （键名与空串缺省已由黄金报文证实；官方 help：按福利名称搜索）。
 func unionWelfareBody(f map[string]string) map[string]any {
 	return map[string]any{
-		"SearchText": "",
+		"SearchText": f["search-text"],
 		"pageNum":    atoiDefault(f["page"], 1),
 		"pageSize":   atoiDefault(f["page-size"], 10),
 	}
@@ -433,23 +448,34 @@ func todoSubmitBody(f map[string]string) (map[string]any, error) {
 	// 路径仅限当前目录下的相对常规文件——CLI 运行在模型工具上下文，不能给它
 	// 任意文件读取面（绝对路径、.. 越界、FIFO/设备文件都在拒绝之列）。
 	if !strings.HasPrefix(listRaw, "[") {
-		if filepath.IsAbs(listRaw) {
+		if filepath.IsAbs(listRaw) || filepath.VolumeName(listRaw) != "" {
+			// VolumeName 兜 Windows 盘符相对路径("C:foo" 非 IsAbs,却按 C: 盘
+			// 自己的 cwd 解析,会绕开当前目录约束)。
 			return nil, fmt.Errorf("todo-submit: --flow-list file must be a relative path under the current directory")
 		}
 		clean := filepath.Clean(listRaw)
 		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("todo-submit: --flow-list file must stay under the current directory")
 		}
-		fi, err := os.Stat(clean)
+		// Lstat 不跟符号链接:cwd 内指向任意路径的 symlink 不能成为读取面。
+		fi, err := os.Lstat(clean)
 		if err != nil {
 			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
 		}
 		if !fi.Mode().IsRegular() {
 			return nil, fmt.Errorf("todo-submit: --flow-list file is not a regular file")
 		}
-		b, err := os.ReadFile(clean)
+		fh, err := os.Open(clean)
 		if err != nil {
 			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
+		}
+		defer fh.Close()
+		b, err := io.ReadAll(io.LimitReader(fh, maxRespBytes))
+		if err != nil {
+			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
+		}
+		if len(b) >= maxRespBytes {
+			return nil, fmt.Errorf("todo-submit: --flow-list file exceeds %d bytes limit", maxRespBytes)
 		}
 		listRaw = string(b)
 	}
@@ -461,11 +487,19 @@ func todoSubmitBody(f map[string]string) (map[string]any, error) {
 		return nil, fmt.Errorf("todo-submit: --flow-list is empty (null or [])")
 	}
 	for i, item := range flowList {
-		if _, ok := item["nodeId"]; !ok {
+		if v, ok := item["nodeId"]; !ok || v == nil || v == "" {
+			// null/空串同样拒绝:官方要求每个元素携带 nodeId,空值提交没有意义。
 			return nil, fmt.Errorf("todo-submit: flow-list[%d] missing nodeId", i)
 		}
 	}
-	action := strings.ToLower(firstNonEmpty(f["action"], "agree"))
+	// action 白名单:官方仅 agree/reject/transfer。不设白名单时多字节/带尾随
+	// 空格的值会拼出脏 buttonType 照发服务端,且 transfer 的必填校验被绕过。
+	action := strings.ToLower(strings.TrimSpace(firstNonEmpty(f["action"], "agree")))
+	switch action {
+	case "agree", "reject", "transfer":
+	default:
+		return nil, fmt.Errorf("todo-submit: --action must be agree, reject or transfer")
+	}
 	buttonType := strings.ToUpper(action[:1]) + action[1:]
 	body := map[string]any{"buttonType": buttonType, "flowInfoList": flowList}
 	switch action {
@@ -695,7 +729,8 @@ func cmdPoll(flags map[string]string) int {
 		return 2
 	}
 	// range 校验：超大值会让 time.Duration 乘法回绕、deadline 失效，轮询永不退出。
-	timeout := atoiDefault(flags["timeout"], 5)
+	// 缺省 30s 与官方 eip-cli 一致（官方 help：auth poll [--timeout 30]）。
+	timeout := atoiDefault(flags["timeout"], 30)
 	if timeout < 1 || timeout > 300 {
 		emitJSON(map[string]any{"error": "--timeout must be 1-300 seconds"})
 		return 2
@@ -743,13 +778,28 @@ func cmdSave(flags map[string]string) int {
 		emitJSON(map[string]any{"error": "missing --token or --ait"})
 		return 2
 	}
+	// 退化输入显式拒绝:剥掉 Bearer 后为空的 token 会「报 ok 却没存上」,含控制
+	// 字符的 token 会让之后每条业务命令死在非法 header 上——都远比保存失败难排查。
 	if flags["token"] != "" {
-		if err := saveAT(stripBearer(flags["token"])); err != nil {
+		tok := stripBearer(flags["token"])
+		if tok == "" || strings.EqualFold(tok, "bearer") {
+			emitJSON(map[string]any{"error": "auth save: --token is empty after stripping Bearer prefix"})
+			return 2
+		}
+		if strings.ContainsFunc(tok, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			emitJSON(map[string]any{"error": "auth save: --token contains control characters"})
+			return 2
+		}
+		if err := saveAT(tok); err != nil {
 			emitJSON(map[string]any{"error": err.Error()})
 			return 1
 		}
 	}
 	if flags["ait"] != "" {
+		if strings.ContainsFunc(flags["ait"], func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			emitJSON(map[string]any{"error": "auth save: --ait contains control characters"})
+			return 2
+		}
 		if err := saveAIT(flags["ait"]); err != nil {
 			emitJSON(map[string]any{"error": err.Error()})
 			return 1
@@ -757,6 +807,14 @@ func cmdSave(flags map[string]string) int {
 	}
 	emitJSON(map[string]any{"ok": true})
 	return 0
+}
+
+// unverifiedFlags：官方命令面有、但黄金报文尚未覆盖其线上键名的 flag（runBusiness
+// 对其显式拒绝）。todo --type 走的是已证实映射，不在此列。值用 []string 字面量
+// 而非复合字面量，避免 eip.rs collect_fallback_routes 把本表误解析成路由行。
+var unverifiedFlags = map[string][]string{
+	"todo":       []string{"keyword"},
+	"apply list": []string{"type", "status"},
 }
 
 // writeCommands：会改变服务端状态的命令（与 SKILL.md 护栏同款清单）。
@@ -775,13 +833,26 @@ var writeCommands = map[string]bool{
 	"employee-handbook sign":    true,
 }
 
+// statusedError 携带 HTTP 状态码的错误：过期判定据此精确识别 401，
+// 不对错误字符串做子串匹配（排错页正文里出现"HTTP 401"字样的 500 不再误判）。
+type statusedError struct {
+	path   string
+	status int
+	body   string
+}
+
+func (e *statusedError) Error() string {
+	return fmt.Sprintf("EIP API %s returned HTTP %d: %s", e.path, e.status, e.body)
+}
+
 // authExpired 判定响应是否为 token 失效，需刷新凭证。
-// 仅认服务端明确的过期信号：业务信封 Code==51，或 HTTP 401。
-// 不按 Msg 子串猜测：业务文案（如「该申请已失效，请勿重复操作」）命中
-// 子串时请求实际已成功处理，自动重放会构成重复提交面。
+// 仅认服务端明确的过期信号：业务信封 Code==51，或 HTTP 401（经 statusedError
+// 结构化携带）。不按 Msg 子串猜测：业务文案（如「该申请已失效，请勿重复操作」）
+// 命中子串时请求实际已成功处理，自动重放会构成重复提交面。
 func authExpired(raw []byte, err error) bool {
+	var se *statusedError
 	if err != nil {
-		return strings.Contains(err.Error(), "HTTP 401")
+		return errors.As(err, &se) && se.status == http.StatusUnauthorized
 	}
 	return envelopeCode(raw) == "51"
 }
@@ -820,13 +891,33 @@ func runBusiness(args []string) int {
 		return 3
 	}
 	flags := parseFlags(rest)
+	// 官方命令面存在、但黄金报文未覆盖其线上键名的 flag：显式拒绝而非静默吞。
+	// 静默吞会让「已审批」查询拿回「待审批」缺省数据且无任何报错；拒绝让调用方
+	// 大声失败。补抓报文证实键名后按 todo --type 的方式逐个转正（见黄金表 §19）。
+	if banned, ok := unverifiedFlags[key]; ok {
+		for _, flag := range banned {
+			if flags[flag] != "" {
+				emitJSON(map[string]any{"error": key + ": --" + flag + " is not wired in this fallback build (official wire format not captured yet); omit it"})
+				return 2
+			}
+		}
+	}
+	// todo --type：官方 help 即以线上键名描述语义（flowType 1=待审批 2=已审批
+	// 3=我的申请 4=我的委托），键名与 body 结构已由黄金缺省报文证实，可直接映射；
+	// 1-4 之外显式拒绝，不外推。
+	if key == "todo" && flags["type"] != "" {
+		if n, err := strconv.Atoi(flags["type"]); err != nil || n < 1 || n > 4 {
+			emitJSON(map[string]any{"error": "todo: --type must be 1-4 (1=pending, 2=approved, 3=mine, 4=delegated)"})
+			return 2
+		}
+	}
 	var query url.Values
 	if r.query != nil {
 		var err error
 		query, err = r.query(flags)
 		if err != nil {
 			emitJSON(map[string]any{"error": err.Error()})
-			return 1
+			return 2
 		}
 	}
 	var body map[string]any
@@ -873,16 +964,21 @@ func runBusiness(args []string) int {
 		path = fmt.Sprintf(path, url.PathEscape(fill))
 	}
 	raw, err := callEIP(r.method, path, query, body, token)
-	// token 过期(服务端 Code 51 / 个别接口 HTTP 401)→ 清 AT、用 AIT 换新。
+	// token 过期(服务端 Code 51 / HTTP 401)→ 清 AT、用 AIT 换新。
 	// 读命令直接重试一次;写命令绝不自动重放(重复受理风险),刷新后提示重试。
+	// 刷新失败、拿回原 token、重试仍过期,都不能把过期信封当成功输出(exit 0
+	// 会让模型把「未提交/未查询到」转告成已成功)——统一 exit 3 交还调用方。
 	if authExpired(raw, err) {
 		_ = os.Remove(atFile())
-		if nt := ensureToken(); nt != "" && nt != token {
-			if writeCommands[key] {
-				emitJSON(map[string]any{"error": "token expired and refreshed", "message": "please retry this command"})
-				return 3
-			}
-			raw, err = callEIP(r.method, path, query, body, nt)
+		nt := ensureToken()
+		if writeCommands[key] || nt == "" || nt == token {
+			emitJSON(map[string]any{"error": "token expired and refreshed", "message": "please retry this command"})
+			return 3
+		}
+		raw, err = callEIP(r.method, path, query, body, nt)
+		if authExpired(raw, err) {
+			emitJSON(map[string]any{"error": "token expired after refresh and retry", "message": "please reconnect EIP"})
+			return 3
 		}
 	}
 	if err != nil {
@@ -901,8 +997,21 @@ func runBusiness(args []string) int {
 //     取官方祝福语文案 → POST /message/message/bless 发送；
 //   - --content：直接 POST /message/message/bless，body 为 {"id":..,"message":..}。
 //
-// 前两步是读操作，但业务错误（HTTP 200 + Code≠1，如消息不存在）必须中止，
-// 否则祝福会照发；整个编排属写命令，token 过期不自动重放（见 writeCommands）。
+// 已知限制：官方 --statement 会按消息类型选祝福语池（生日/周年/新员工鼓励语，
+// 段号运行期计算），黄金抓包只覆盖了段 1 的报文，这里固定取 1——非生日消息
+// 可能取到生日池文案（发送本身仍需用户确认，见 SKILL.md 护栏）；补抓各段报文
+// 后再对齐。前两步是读操作，但业务错误（HTTP 200 + Code≠1，如消息不存在）
+// 必须中止，否则祝福会照发；整个编排属写命令，token 过期不自动重放（见
+// writeCommands）。
+// expireRefreshAndReport 处理写编排(message send-bless)路径上的 token 过期:
+// 刷新凭证但不重放(重复受理风险),统一 exit 3 交还调用方。
+func expireRefreshAndReport() int {
+	_ = os.Remove(atFile())
+	ensureToken()
+	emitJSON(map[string]any{"error": "token expired and refreshed", "message": "please retry this command"})
+	return 3
+}
+
 func runSendBless(flags map[string]string, token string) int {
 	id := flags["id"]
 	if id == "" {
@@ -912,6 +1021,9 @@ func runSendBless(flags map[string]string, token string) int {
 	content := flags["content"]
 	if content == "" && boolFlag(flags, "statement") {
 		detail, err := callEIP("GET", "/message/message/"+url.PathEscape(id), nil, nil, token)
+		if authExpired(detail, err) {
+			return expireRefreshAndReport()
+		}
 		if err != nil {
 			emitJSON(map[string]any{"error": "fetch message detail: " + err.Error()})
 			return 1
@@ -921,6 +1033,9 @@ func runSendBless(flags map[string]string, token string) int {
 			return 1
 		}
 		cfg, err := callEIP("GET", "/message/message/config/statement/1", nil, nil, token)
+		if authExpired(cfg, err) {
+			return expireRefreshAndReport()
+		}
 		if err != nil {
 			emitJSON(map[string]any{"error": "fetch statement config: " + err.Error()})
 			return 1
@@ -938,8 +1053,17 @@ func runSendBless(flags map[string]string, token string) int {
 	}
 	raw, err := callEIP("POST", "/message/message/bless", nil,
 		map[string]any{"id": id, "message": content}, token)
+	// 编排属写命令:过期只刷新不重放(exit 3),业务拒绝(Code≠1)显式报错——
+	// 都不得让「发送未发生」以 exit 0 假冒成功。
+	if authExpired(raw, err) {
+		return expireRefreshAndReport()
+	}
 	if err != nil {
 		emitJSON(map[string]any{"error": err.Error()})
+		return 1
+	}
+	if code := envelopeCode(raw); code != "" && code != "1" {
+		emitJSON(map[string]any{"error": "bless rejected: business error", "code": code})
 		return 1
 	}
 	os.Stdout.Write(raw)
@@ -1001,9 +1125,12 @@ func callEIP(method, path string, query url.Values, body map[string]any, token s
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+	raw, err := readBodyCapped(resp)
+	if err != nil {
+		return raw, err
+	}
 	if resp.StatusCode >= 400 {
-		return raw, fmt.Errorf("EIP API %s returned HTTP %d: %s", path, resp.StatusCode, truncateForError(raw))
+		return raw, &statusedError{path: path, status: resp.StatusCode, body: truncateForError(raw)}
 	}
 	return raw, nil
 }
@@ -1011,9 +1138,11 @@ func callEIP(method, path string, query url.Values, body map[string]any, token s
 func authBase() string { return firstNonEmpty(os.Getenv("EIP_AUTH_BASE_URL"), authBaseDefault) }
 func eipBase() string  { return firstNonEmpty(os.Getenv("EIP_BASE_URL"), eipBaseDefault) }
 
-func httpClient() *http.Client {
-	return &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil}}
-}
+// 共享的 http.Client/Transport：复用连接池。每次请求新建 Transport 会把空闲
+// 连接遗留给 GC/idle timeout，poll 长轮询（最长 300s / 2s 一次）可持续累积 fd。
+var sharedHTTPClient = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil}}
+
+func httpClient() *http.Client { return sharedHTTPClient }
 
 // maxRespBytes 响应体读取上限（2MiB）：EIP JSON 响应远小于此量级，仅防
 // 异常服务端返回超大 body。
@@ -1028,6 +1157,19 @@ func truncateForError(b []byte) string {
 	return string(b[:max]) + "...(truncated)"
 }
 
+// readBodyCapped 读取响应体并防静默截断：恰好读满上限视为超限报错，而不是把
+// 半截 JSON 当完整数据输出（截断的列表/表单会污染模型上下文且被当真）。
+func readBodyCapped(resp *http.Response) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+	if err != nil {
+		return raw, err
+	}
+	if len(raw) >= maxRespBytes {
+		return raw, fmt.Errorf("response body exceeds %d bytes limit", maxRespBytes)
+	}
+	return raw, nil
+}
+
 func postJSON(uri string, body any) (*envelope, []byte, error) {
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequest("POST", uri, bytes.NewReader(b))
@@ -1040,7 +1182,10 @@ func postJSON(uri string, body any) (*envelope, []byte, error) {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+	raw, err := readBodyCapped(resp)
+	if err != nil {
+		return nil, raw, err
+	}
 	var env envelope
 	_ = json.Unmarshal(raw, &env)
 	return &env, raw, nil
@@ -1057,7 +1202,10 @@ func getURL(uri string) (*envelope, []byte, error) {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+	raw, err := readBodyCapped(resp)
+	if err != nil {
+		return nil, raw, err
+	}
 	var env envelope
 	_ = json.Unmarshal(raw, &env)
 	return &env, raw, nil

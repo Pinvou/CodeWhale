@@ -17,7 +17,7 @@
 | 业务 base URL(test) | `http://apineweip-ts.h3c.com/eip`(注意是 **new** eip,提示存在新版网关) |
 | 认证 base URL(prod) | `http://api.eos.h3c.com/auth/v1.0` |
 | 认证 base URL(test) | `http://api.eos-ts.h3c.com/auth/v1.0` |
-| Authorization | 直接发保存的原始 token 字符串,**不主动加 `Bearer ` 前缀**(`auth save --token` 存什么发什么;官方示例保存的就是 `Bearer eyJ...`) |
+| Authorization | 直接发保存的原始 token 字符串,**不主动加 `Bearer ` 前缀**(`auth save --token` 存什么发什么;官方示例保存的就是 `Bearer eyJ...`)。**fallback 的有意偏差**:保存时 stripBearer 归一、发送时统一加 `Bearer ` 前缀——存量两种形态上线报文一致;改为原样透传需在真实网关分别验证,出现真实 401 个例前维持现状 |
 | Content-Type | `application/json`(GET 也带) |
 | 认证域额外头 | `Auth-Type: SSO_NEXT`(仅 auth base 上的登录/轮询/换 token) |
 | 可配置前缀 | `attendance_prefix`(prod `/hrss`,test `/hrss-ts`)、`hr_prefix`(`/hr`);其余前缀硬编码 |
@@ -222,7 +222,7 @@ fallback 的 `GetOvertimeApplyExtraHours` 等 5 个 `ApiAttendance/GetOvertime*`
 | `message list [--type SYSTEM]` | POST | `/eip/message/message/page` | — | `{"condition":{"typeList":["SYSTEM"]},"pageNum":1,"pageSize":10,"sortList":[{"asc":false,"column":"notice_time"}]}` | 无 type 时 condition 为 `{}` |
 | `message get --id M1` | GET | `/eip/message/message/M1` | — | — | |
 | `message read-all` | POST | `/eip/message/message/read/all` | — | (空) | **写操作** |
-| `message send-bless --id M1 [--statement/--content]` | GET×2 或 POST | `--statement`:GET `/eip/message/message/M1` + GET `/eip/message/message/config/statement/1`;`--content`:POST `/eip/message/message/bless` | — | POST 时 `{"id":"M1","message":"生日快乐"}` | **写操作**;--statement 先自动取祝福语再发 |
+| `message send-bless --id M1 [--statement/--content]` | GET×2 或 POST | `--statement`:GET `/eip/message/message/M1` + GET `/eip/message/message/config/statement/1`;`--content`:POST `/eip/message/message/bless` | — | POST 时 `{"id":"M1","message":"生日快乐"}` | **写操作**;--statement 先自动取祝福语再发。抓包只覆盖段 1;官方按消息类型选祝福语池(生日/周年/新员工鼓励语,段号运行期计算),fallback 固定段 1,补抓后再对齐 |
 
 ## 18. 慰问申报 condolence(5 条,均为写/敏感操作)
 
@@ -253,6 +253,11 @@ fallback 的 `GetOvertimeApplyExtraHours` 等 5 个 `ApiAttendance/GetOvertime*`
 5. **缺 RSA 加密**:get-summary/get-calendar 的 date 必须按 §2 加密,否则改对方法也会失败。
 6. **分页/日期键**:按各表 Query/Body 列对齐(pageNum vs PageIndex/PageCount;Date vs calcDate vs
    caclDate;consumption list 的 `YYYY/MM/DD`)。
+7. **黄金报文未覆盖的官方 flag**:本文件只抓了各命令的缺省调用,官方 help 里有而报文无证据的
+   flag(todo `--keyword`、apply list `--status/--type`)fallback 一律显式拒绝(`unverifiedFlags`),
+   不静默吞——吞掉会拿缺省数据冒充用户要的数据;线上键名已被缺省报文或官方 help 直接证实的除外
+   (todo `--type`→`condition.flowType`、union-welfare list `--search-text`→`SearchText`)。
+   补抓报文补入本文件后逐个转正。
 
 ## 20. 复现方法
 

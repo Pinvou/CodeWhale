@@ -37,12 +37,12 @@ eip <子命令> [参数]
 | 班次 / 班车 | `eip attendance get-schedule` / `eip attendance list-shuttle-bus` |
 | 弹性考勤 | `eip attendance list-flex --date YYYY-MM` |
 | 还有几天年假 | `eip attendance get-annual-days` |
-| 请假天数测算 | `eip attendance calc-days --beg-date DD --end-date DD --apply-type CODE` |
+| 请假天数测算 | `eip attendance calc-days --beg-date DD --end-date DD --apply-type CODE`(CODE 取自 `eip attendance list-leave-types`) |
 | 各类假期余额 | `eip leave get-balance` / `get-sick-balance` / `get-other-balance` |
 | 假期列表 | `eip vacation list-annual` / `list-sick` / `list-compensatory` |
 | 剩余工时 | `eip vacation get-remaining-hours --year YYYY` |
 | 加班时数 | `eip overtime get-extra-hours` / `get-approving-hours` / `get-approved-hours` / `get-effectived-hours` |
-| 有没有待办 | `eip todo` / `eip todo-count` |
+| 有没有待办 | `eip todo` / `eip todo-count`;审批状态加 `--type`:`2` 已审批、`3` 我的申请、`4` 我的委托 |
 | 待办详情 / 批量待办 | `eip todo-detail --system-id XXX --process-id XXX --docun-id XXX` / `eip todo-batch-list` / `eip todo-category` |
 | 我的申请 / 本月申请流水 | `eip apply list` / `eip apply list-month-flow` |
 | 个人信息 / 特殊纪念日 | `eip employee-profile` / `eip employee-special-day` |
@@ -53,7 +53,7 @@ eip <子命令> [参数]
 | 课程 / 会议 / 社区 | `eip course` / `eip meeting` / `eip community-hot` |
 | 站内消息 | `eip message count` / `eip message list` / `eip message get --id XXX` |
 | 食堂消费 / 报销 / 油卡 | `eip consumption monthly` / `eip expense recent` / `eip expense monthly` / `eip fuel-card list` |
-| 合同 / 保险年份 / 工会福利 / 调研 | `eip contract list` / `eip commercial-insurance list-years` / `eip union-welfare list` / `eip survey list` |
+| 合同 / 保险年份 / 工会福利 / 调研 | `eip contract list` / `eip commercial-insurance list-years` / `eip union-welfare list --search-text XXX` / `eip survey list` |
 | 远程办公 | `eip remote-work list-records` / `eip remote-work get-detail --doc-no XXX` |
 
 ## 输出规范

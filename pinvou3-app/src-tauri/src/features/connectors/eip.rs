@@ -247,7 +247,8 @@ fn emit(app: &AppHandle, event: &str, payload: Value) {
 
 /// 查询 EIP 连接状态:`auth status --output json`。connected = 有有效 token。
 /// 只读 CLI 凭证态,但会把结果对账进持久连接标记(自愈后端标记漂移;技能目录
-/// 与 Engine 回收不动——可见性变更由 connector_visibility 在回合边界应用)。
+/// 与 Engine 回收不动——可见性变更经 connector_visibility 应用:空闲时立即,
+/// 有活跃 turn 时延至回合边界)。
 pub async fn eip_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let cmd = eip(&["auth", "status", "--output", "json"])?;
