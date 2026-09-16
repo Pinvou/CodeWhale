@@ -2,6 +2,7 @@ import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
+import { createAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
@@ -3030,7 +3031,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     }
   };
   const ensureAdjustmentApproval = async (item, reason, requestKey) => {
-    const draft = await client.createApprovalDraft({
+    const draft = {
       command_type: 'WALLET_ADJUSTMENT',
       idempotency_key: `approval:${requestKey}`,
       normalized_command: {
@@ -3046,10 +3047,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       expected_impact: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
       critical_resource_versions: { adjustment_version: item.version },
       financial_snapshot: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
-    });
-    if (draft.status === 'DRAFT') return client.submitApprovalRequest(draft.approval_request_id, draft.version);
-    if (['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(draft.status)) return draft;
-    throw new Error(`APPROVAL_${draft.status || 'UNKNOWN'}`);
+    };
+    return createAndSubmitGovernedApproval(client, draft);
   };
   const submitAdjustment = async (event) => {
     event.preventDefault();

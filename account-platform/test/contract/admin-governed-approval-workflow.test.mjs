@@ -90,3 +90,10 @@ test('existing business draft is re-read and never submitted from a stale list v
   await assert.rejects(submitExistingGovernedApproval(client, existing), { code: 'COMMAND_RESULT_UNKNOWN', commandReference: requestID });
   assert.equal(submits, 1);
 });
+
+test('wallet adjustment approval keeps its existing Billing creation but uses governed Account writes', () => {
+  const source = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(source, /const ensureAdjustmentApproval = async[\s\S]*?return createAndSubmitGovernedApproval\(client, draft\)/);
+  assert.doesNotMatch(source, /client\.createApprovalDraft\(|client\.submitApprovalRequest\(/);
+  assert.match(source, /created = await client\.createAdjustment\(/);
+});
