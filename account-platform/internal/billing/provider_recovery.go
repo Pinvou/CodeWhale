@@ -219,28 +219,32 @@ func (r *PostgresRepository) hasObservationGap(ctx context.Context, q recoveryQu
 }
 
 func (r *PostgresRepository) providerResumeVersions(ctx context.Context, requested ProviderResumeVersions) (ProviderResumeVersions, error) {
+	return r.providerResumeVersionsFrom(ctx, r.pool, requested)
+}
+
+func (r *PostgresRepository) providerResumeVersionsFrom(ctx context.Context, source recoveryQuerier, requested ProviderResumeVersions) (ProviderResumeVersions, error) {
 	actual := ProviderResumeVersions{ProviderID: strings.TrimSpace(requested.ProviderID), ProviderVersion: strings.TrimSpace(requested.ProviderVersion), ProbeOrderID: requested.ProbeOrderID, PolicyVersion: paymentStopLossPolicyVersion}
 	if actual.ProviderID == "" || actual.ProviderVersion == "" || actual.ProbeOrderID == uuid.Nil {
 		return ProviderResumeVersions{}, ErrConflict
 	}
 	var enabled bool
-	if err := r.pool.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2`, actual.ProviderID, actual.ProviderVersion).Scan(&enabled, &actual.ProviderControlVersion); err != nil {
+	if err := source.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2`, actual.ProviderID, actual.ProviderVersion).Scan(&enabled, &actual.ProviderControlVersion); err != nil {
 		return ProviderResumeVersions{}, err
 	}
 	if enabled {
 		return ProviderResumeVersions{}, ErrConflict
 	}
 	var err error
-	if actual.ObservationHighWatermark, err = latestObservationHighWatermark(ctx, r.pool, actual.ProviderID, actual.ProviderVersion, ""); err != nil {
+	if actual.ObservationHighWatermark, err = latestObservationHighWatermark(ctx, source, actual.ProviderID, actual.ProviderVersion, ""); err != nil {
 		return ProviderResumeVersions{}, err
 	}
-	if actual.EvaluationHighWatermark, err = latestEvaluationHighWatermark(ctx, r.pool, actual.ProviderID, actual.ProviderVersion, ""); err != nil {
+	if actual.EvaluationHighWatermark, err = latestEvaluationHighWatermark(ctx, source, actual.ProviderID, actual.ProviderVersion, ""); err != nil {
 		return ProviderResumeVersions{}, err
 	}
-	if actual.ActiveMappingSetFingerprint, err = r.providerMappingFingerprint(ctx, r.pool, actual.ProviderID, actual.ProviderVersion); err != nil {
+	if actual.ActiveMappingSetFingerprint, err = r.providerMappingFingerprint(ctx, source, actual.ProviderID, actual.ProviderVersion); err != nil {
 		return ProviderResumeVersions{}, err
 	}
-	gap, err := r.hasObservationGap(ctx, r.pool, actual.ProviderID, actual.ProviderVersion, "")
+	gap, err := r.hasObservationGap(ctx, source, actual.ProviderID, actual.ProviderVersion, "")
 	if err != nil || gap {
 		return ProviderResumeVersions{}, ErrConflict
 	}
@@ -248,28 +252,32 @@ func (r *PostgresRepository) providerResumeVersions(ctx context.Context, request
 }
 
 func (r *PostgresRepository) productResumeVersions(ctx context.Context, requested ProductResumeVersions) (ProductResumeVersions, error) {
+	return r.productResumeVersionsFrom(ctx, r.pool, requested)
+}
+
+func (r *PostgresRepository) productResumeVersionsFrom(ctx context.Context, source recoveryQuerier, requested ProductResumeVersions) (ProductResumeVersions, error) {
 	actual := ProductResumeVersions{ProviderID: strings.TrimSpace(requested.ProviderID), ProviderVersion: strings.TrimSpace(requested.ProviderVersion), ProductID: strings.TrimSpace(requested.ProductID), ProbeOrderID: requested.ProbeOrderID, PolicyVersion: paymentStopLossPolicyVersion}
 	if actual.ProviderID == "" || actual.ProviderVersion == "" || actual.ProductID == "" || actual.ProbeOrderID == uuid.Nil {
 		return ProductResumeVersions{}, ErrConflict
 	}
 	var providerEnabled, productEnabled bool
-	if err := r.pool.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2`, actual.ProviderID, actual.ProviderVersion).Scan(&providerEnabled, &actual.ProviderControlVersion); err != nil || !providerEnabled {
+	if err := source.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2`, actual.ProviderID, actual.ProviderVersion).Scan(&providerEnabled, &actual.ProviderControlVersion); err != nil || !providerEnabled {
 		return ProductResumeVersions{}, ErrConflict
 	}
-	if err := r.pool.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_product_controls WHERE provider_id=$1 AND provider_version=$2 AND product_id=$3`, actual.ProviderID, actual.ProviderVersion, actual.ProductID).Scan(&productEnabled, &actual.ProductControlVersion); err != nil || productEnabled {
+	if err := source.QueryRow(ctx, `SELECT new_orders_enabled,version FROM payment_product_controls WHERE provider_id=$1 AND provider_version=$2 AND product_id=$3`, actual.ProviderID, actual.ProviderVersion, actual.ProductID).Scan(&productEnabled, &actual.ProductControlVersion); err != nil || productEnabled {
 		return ProductResumeVersions{}, ErrConflict
 	}
-	if err := r.pool.QueryRow(ctx, `SELECT item.catalog_item_id,item.version,item.admission_version,mapping.id,mapping.mapping_version FROM recharge_product_catalog_items item JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id AND binding.effective_to IS NULL JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id JOIN payment_product_mappings mapping ON mapping.id=binding.mapping_id WHERE item.product_id=$1 AND item.lifecycle_status='ON_SALE' AND mapping.provider_id=$2 AND mapping.provider_version=$3 AND mapping.status='FROZEN' AND mapping.effective_from<=now() AND (mapping.effective_to IS NULL OR mapping.effective_to>now()) AND evidence.expires_at>now() AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id)`, actual.ProductID, actual.ProviderID, actual.ProviderVersion).Scan(&actual.CatalogItemID, &actual.CatalogVersion, &actual.AdmissionVersion, &actual.MappingID, &actual.MappingVersion); err != nil {
+	if err := source.QueryRow(ctx, `SELECT item.catalog_item_id,item.version,item.admission_version,mapping.id,mapping.mapping_version FROM recharge_product_catalog_items item JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id AND binding.effective_to IS NULL JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id JOIN payment_product_mappings mapping ON mapping.id=binding.mapping_id WHERE item.product_id=$1 AND item.lifecycle_status='ON_SALE' AND mapping.provider_id=$2 AND mapping.provider_version=$3 AND mapping.status='FROZEN' AND mapping.effective_from<=now() AND (mapping.effective_to IS NULL OR mapping.effective_to>now()) AND evidence.expires_at>now() AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id)`, actual.ProductID, actual.ProviderID, actual.ProviderVersion).Scan(&actual.CatalogItemID, &actual.CatalogVersion, &actual.AdmissionVersion, &actual.MappingID, &actual.MappingVersion); err != nil {
 		return ProductResumeVersions{}, err
 	}
 	var err error
-	if actual.ObservationHighWatermark, err = latestObservationHighWatermark(ctx, r.pool, actual.ProviderID, actual.ProviderVersion, actual.ProductID); err != nil {
+	if actual.ObservationHighWatermark, err = latestObservationHighWatermark(ctx, source, actual.ProviderID, actual.ProviderVersion, actual.ProductID); err != nil {
 		return ProductResumeVersions{}, err
 	}
-	if actual.EvaluationHighWatermark, err = latestEvaluationHighWatermark(ctx, r.pool, actual.ProviderID, actual.ProviderVersion, actual.ProductID); err != nil {
+	if actual.EvaluationHighWatermark, err = latestEvaluationHighWatermark(ctx, source, actual.ProviderID, actual.ProviderVersion, actual.ProductID); err != nil {
 		return ProductResumeVersions{}, err
 	}
-	gap, err := r.hasObservationGap(ctx, r.pool, actual.ProviderID, actual.ProviderVersion, actual.ProductID)
+	gap, err := r.hasObservationGap(ctx, source, actual.ProviderID, actual.ProviderVersion, actual.ProductID)
 	if err != nil || gap {
 		return ProductResumeVersions{}, ErrConflict
 	}
