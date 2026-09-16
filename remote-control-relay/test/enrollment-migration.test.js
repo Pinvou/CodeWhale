@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -111,17 +112,16 @@ test("official claim is socket-bound, stable, conflicting-safe and keeps the Web
 });
 
 test("self-hosted batch dry-run, apply, re-enroll and backup restore are explicit", async (t) => {
-  const { store, registry } = await fixture(t, "self_hosted");
+  const { registry } = await fixture(t, "self_hosted");
   const allowlist = [{ operation: "allowlist", endpoint_id: "self-hosted-1", credential: ACCESS_A }];
-  const dryRun = await runEnrollmentBatch({ registry, stateStore: store, operations: allowlist, dryRun: true });
+  const dryRun = await runEnrollmentBatch({ registry, operations: allowlist, dryRun: true });
   assert.equal(dryRun.applied, 0);
   assert.equal(registry.getStatus("self-hosted-1"), null);
-  const applied = await runEnrollmentBatch({ registry, stateStore: store, operations: allowlist, dryRun: false });
+  const applied = await runEnrollmentBatch({ registry, operations: allowlist, dryRun: false });
   assert.equal(applied.results[0].legacy_web_link, "preserved");
   const revision = registry.getStatus("self-hosted-1").revision;
   const reenrolled = await runEnrollmentBatch({
     registry,
-    stateStore: store,
     operations: [{
       operation: "re_enroll",
       endpoint_id: "self-hosted-1",
@@ -139,48 +139,64 @@ test("self-hosted batch dry-run, apply, re-enroll and backup restore are explici
     endpointId: "self-hosted-1", credential: ACCESS_B, purpose: "web_v2_reregister",
   });
 
-  const backup = createEnrollmentBackup(store);
+  const backup = createEnrollmentBackup(registry);
   const tampered = structuredClone(backup);
   tampered.registry_sha256 = "0".repeat(64);
   await rejectsCode(restoreEnrollmentBackup({
-    stateStore: store,
+    registry,
     backup: tampered,
-    expectedCurrentRevision: store.readNamespace("endpoint_enrollment").namespace_revision,
   }), "migration_backup_invalid");
   await registry.enroll({ endpointId: "temporary-endpoint", credential: ACCESS_C });
-  const current = store.readNamespace("endpoint_enrollment");
-  await restoreEnrollmentBackup({ stateStore: store, backup, expectedCurrentRevision: current.namespace_revision });
+  await restoreEnrollmentBackup({ registry, backup, requestId: "restore-self-hosted-0001" });
   assert.equal(registry.getStatus("temporary-endpoint"), null);
 });
 
-test("partial batch failure restores the registry atomically", async (t) => {
-  const { store, registry } = await fixture(t, "self_hosted");
-  let writes = 0;
-  const failingRegistry = {
-    getStatus: registry.getStatus.bind(registry),
-    authorizeRegistration: registry.authorizeRegistration.bind(registry),
-    rotateCredential: registry.rotateCredential.bind(registry),
-    async enroll(input) {
-      writes += 1;
-      if (writes === 2) {
-        const error = new Error("injected");
-        error.code = "injected_failure";
-        throw error;
-      }
-      return registry.enroll(input);
-    },
-  };
+test("a failing batch performs no prefix write", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  await registry.enroll({ endpointId: "batch-endpoint-2", credential: ACCESS_C });
+  const before = registry.exportSnapshot();
   await rejectsCode(runEnrollmentBatch({
-    registry: failingRegistry,
-    stateStore: store,
+    registry,
     dryRun: false,
     operations: [
       { operation: "allowlist", endpoint_id: "batch-endpoint-1", credential: ACCESS_A },
       { operation: "allowlist", endpoint_id: "batch-endpoint-2", credential: ACCESS_B },
     ],
-  }), "migration_batch_rolled_back");
+  }), "migration_batch_failed");
   assert.equal(registry.getStatus("batch-endpoint-1"), null);
-  assert.equal(registry.getStatus("batch-endpoint-2"), null);
+  assert.equal(registry.getStatus("batch-endpoint-2").revision, "1");
+  assert.equal(registry.exportSnapshot().namespace_revision, before.namespace_revision);
+});
+
+test("backup restore accepts canonical v1 and rejects malformed v2", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  await registry.enroll({ endpointId: "backup-endpoint", credential: ACCESS_A });
+  const current = createEnrollmentBackup(registry);
+  const v1Registry = {
+    schema: current.registry.schema,
+    version: 1,
+    entries: structuredClone(current.registry.entries),
+  };
+  const v1Backup = {
+    ...current,
+    registry: v1Registry,
+    registry_sha256: crypto.createHash("sha256").update(JSON.stringify(v1Registry), "utf8").digest("hex"),
+  };
+  await registry.enroll({ endpointId: "temporary-v1-endpoint", credential: ACCESS_B });
+  await restoreEnrollmentBackup({ registry, backup: v1Backup, requestId: "restore-v1-backup-0001" });
+  assert.equal(registry.getStatus("backup-endpoint").status, "active");
+  assert.equal(registry.getStatus("temporary-v1-endpoint"), null);
+
+  const malformed = structuredClone(createEnrollmentBackup(registry));
+  malformed.registry.entries = [{}];
+  malformed.registry_sha256 = crypto.createHash("sha256")
+    .update(JSON.stringify(malformed.registry), "utf8").digest("hex");
+  await rejectsCode(restoreEnrollmentBackup({
+    registry,
+    backup: malformed,
+    requestId: "restore-malformed-0001",
+  }), "migration_backup_invalid");
+  assert.equal(registry.getStatus("backup-endpoint").status, "active");
 });
 
 test("self-hosted CLI is machine-readable, private-file only, and never prints credentials", async (t) => {

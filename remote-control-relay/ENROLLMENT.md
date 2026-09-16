@@ -188,7 +188,9 @@ Callers use:
 - `rotateCredential` with the current credential and expected endpoint revision;
 - `revoke` with the expected endpoint revision.
 - `exportSnapshot`, public `validateEnrollmentRegistrySnapshot`, and
-  `importSnapshot` for strict backup validation and one-CAS restoration;
+  `importSnapshot` for strict backup validation and one-CAS restoration.
+  Restoring endpoint records always preserves the current migration ledger;
+  snapshot data can never erase or roll back stable request IDs;
 - `applyAtomicBatch` for a fully prevalidated allowlist/re-enroll batch or an
   exclusive restore operation. It makes at most one namespace CAS, so no prefix
   of a failed batch becomes durable;
@@ -273,7 +275,11 @@ rejected. No credential is returned or logged.
 Self-hosted operators use `scripts/enrollment-migrate.js`. Credentials must be
 provided in a private input file and are never accepted as command-line values.
 `--dry-run` validates the whole batch without mutation. `--apply` preflights the
-whole batch and restores a registry backup by CAS if a later mutation fails.
+whole batch in memory and commits all endpoint changes with one namespace CAS;
+there is no durable partial prefix to roll back. Backup restore accepts strict
+version 1 or version 2 registry snapshots, normalizes them through the same
+validator, and executes as a stable migration request while preserving the
+monotonic request ledger.
 `re_enroll` rotates the access token and therefore explicitly invalidates old
 Web links. Backup files contain keyed digests, not credentials, and still need
 mode 0600/private ACL storage.
