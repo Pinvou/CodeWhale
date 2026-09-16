@@ -25,6 +25,12 @@ func (p oneRecoveryCandidate) PlanProofApprovalRecovery(context.Context, int) (A
 // ABSENT observation leaves UNKNOWN_QUERY_ONLY: it cannot prove zero effect.
 // This is not a terminal recovery worker or a retry authorization.
 func InspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	return InspectProofRecoveryLeasedWithResults(ctx, planner, leaser, effects, nil, limit)
+}
+
+// Result observations are gathered under the same short query lease as the
+// effect check. Neither a positive result nor an absent effect changes state.
+func InspectProofRecoveryLeasedWithResults(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, limit int) (ApprovalRecoveryInspectionBatch, error) {
 	if planner == nil || leaser == nil || effects == nil || limit < 1 || limit > 200 {
 		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 	}
@@ -70,11 +76,40 @@ func InspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPla
 		var inspectionErr error
 		if deadline.After(time.Now()) {
 			queryCtx, stop := context.WithDeadline(ctx, deadline)
-			one, err := InspectProofRecovery(queryCtx, oneRecoveryCandidate{candidate}, effects, 1)
+			resultState := ""
+			var resultAt *time.Time
+			if results != nil {
+				resultStarted := time.Now().UTC()
+				result, resultErr := results.ObserveRecoveryResult(queryCtx, candidate)
+				resultState = "UNAVAILABLE"
+				if resultErr == nil {
+					if !validRecoveryResultState(candidate, result.State) || result.ObservedAt.Before(resultStarted.Add(-30*time.Second)) ||
+						result.ObservedAt.After(time.Now().UTC().Add(30*time.Second)) {
+						stop()
+						inspectionErr = ErrApprovalRecoveryPlanInvalid
+					} else {
+						resultState = result.State
+						observed := result.ObservedAt
+						resultAt = &observed
+					}
+				}
+			}
+			var one ApprovalRecoveryInspectionBatch
+			var err error
+			if inspectionErr == nil {
+				one, err = InspectProofRecovery(queryCtx, oneRecoveryCandidate{candidate}, effects, 1)
+			}
 			stop()
-			inspectionErr = err
-			if err == nil {
+			if inspectionErr == nil {
+				inspectionErr = err
+			}
+			if inspectionErr == nil {
 				observation = one.Inspections[0]
+				observation.ResultObservation = resultState
+				observation.ResultObservedAt = resultAt
+				if resultState == "SUCCEEDED" && observation.EffectObservation == approvaleffect.StateAbsent {
+					inspectionErr = ErrApprovalRecoveryPlanInvalid
+				}
 			}
 		} else {
 			inspectionErr = ErrApprovalRecoveryLeaseUnavailable
@@ -93,4 +128,17 @@ func InspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPla
 		batch.Inspections = append(batch.Inspections, observation)
 	}
 	return batch, nil
+}
+
+func validRecoveryResultState(candidate ApprovalRecoveryCandidate, state string) bool {
+	if candidate.Workload == "billing-command-executor" {
+		return state == "UNCONFIRMED" || state == "SUCCEEDED"
+	}
+	if candidate.Workload == "token-command-executor" {
+		switch state {
+		case "UNCONFIRMED", "PENDING", "SUCCEEDED", "REJECTED", "FAILED", "UNKNOWN":
+			return true
+		}
+	}
+	return false
 }

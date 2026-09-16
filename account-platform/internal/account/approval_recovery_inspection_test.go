@@ -148,3 +148,49 @@ func TestProofRecoveryLeasedInspectionOnlyQueriesUnderLease(t *testing.T) {
 		t.Fatalf("forged candidate reached lease/effect: %v, %d, %d", err, leaser.claimCalls, effects.calls)
 	}
 }
+
+type recoveryResultStub struct {
+	state string
+	err   error
+	calls int
+}
+
+func (stub *recoveryResultStub) ObserveRecoveryResult(_ context.Context, _ ApprovalRecoveryCandidate) (RecoveryResultObservation, error) {
+	stub.calls++
+	if stub.err != nil {
+		return RecoveryResultObservation{}, stub.err
+	}
+	return RecoveryResultObservation{State: stub.state, ObservedAt: time.Now().UTC()}, nil
+}
+
+func TestProofRecoveryResultAndEffectStayUnderOneLeaseAndNeverAuthorizeMutation(t *testing.T) {
+	descriptor := approvalconsumer.BillingCommands()[0]
+	item := ApprovalRecoveryCandidate{RequestID: uuid.New(), ExecutionID: uuid.New(), OriginalEventID: uuid.New(), OriginalKey: "original-key",
+		Durable: descriptor.Durable, Workload: descriptor.Workload, CommandType: descriptor.CommandType,
+		PolicyVersion: descriptor.PolicyVersion, CommandFingerprint: "a1" + "00000000000000000000000000000000000000000000000000000000000000",
+		ApprovalEpoch: 1, RequestVersion: 1, Investigation: approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, "")}
+	for _, tc := range []struct {
+		name, result, effect string
+		resultErr            error
+		wantErr              error
+		wantResult           string
+	}{
+		{"confirmed", "SUCCEEDED", approvaleffect.StateObserved, nil, nil, "SUCCEEDED"},
+		{"unconfirmed", "UNCONFIRMED", approvaleffect.StateAbsent, nil, nil, "UNCONFIRMED"},
+		{"result unavailable", "", approvaleffect.StateAbsent, errors.New("down"), nil, "UNAVAILABLE"},
+		{"contradictory success", "SUCCEEDED", approvaleffect.StateAbsent, nil, ErrApprovalRecoveryPlanInvalid, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leaser := &recoveryLeaserStub{}
+			effects := &recoveryEffectStub{state: tc.effect}
+			results := &recoveryResultStub{state: tc.result, err: tc.resultErr}
+			batch, err := InspectProofRecoveryLeasedWithResults(context.Background(), &recoveryPlannerStub{plan: ApprovalRecoveryPlan{Candidates: []ApprovalRecoveryCandidate{item}}}, leaser, effects, results, 1)
+			if !errors.Is(err, tc.wantErr) || leaser.claimCalls != 1 || leaser.releaseCalls != 1 || results.calls != 1 || effects.calls != 1 {
+				t.Fatalf("batch=%+v err=%v claim=%d release=%d result=%d effect=%d", batch, err, leaser.claimCalls, leaser.releaseCalls, results.calls, effects.calls)
+			}
+			if err == nil && (batch.Inspections[0].ResultObservation != tc.wantResult || batch.Inspections[0].Disposition != "UNKNOWN_QUERY_ONLY") {
+				t.Fatalf("result observation was promoted to recovery: %+v", batch.Inspections[0])
+			}
+		})
+	}
+}

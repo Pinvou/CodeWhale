@@ -18,6 +18,8 @@ type ApprovalRecoveryInspection struct {
 	EffectAuthority   string                    `json:"effect_authority,omitempty"`
 	EffectObservation string                    `json:"effect_observation"`
 	EffectObservedAt  *time.Time                `json:"effect_observed_at,omitempty"`
+	ResultObservation string                    `json:"result_observation,omitempty"`
+	ResultObservedAt  *time.Time                `json:"result_observed_at,omitempty"`
 	// ABSENT is only a point-in-time negative observation, never proof that
 	// an original attempt cannot still commit or an external probe had no effect.
 	Disposition string `json:"disposition"`

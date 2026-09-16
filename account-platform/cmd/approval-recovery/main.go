@@ -30,6 +30,7 @@ type commandSummary struct {
 	Reason         string `json:"reason"`
 	Candidates     int    `json:"candidates,omitempty"`
 	Observed       int    `json:"observed,omitempty"`
+	Confirmed      int    `json:"confirmed,omitempty"`
 	Unavailable    int    `json:"unavailable,omitempty"`
 	MoreCandidates bool   `json:"more_candidates,omitempty"`
 }
@@ -111,7 +112,11 @@ func investigate(ctx context.Context, config commandConfig) (commandSummary, err
 	if err != nil {
 		return commandSummary{}, err
 	}
-	batch, err := account.InspectProofRecoveryLeased(ctx, planner, leaser, effects, config.Limit)
+	results, err := account.NewApprovalRecoveryResultClient(config.BillingURL, config.TokenURL, config.Credential)
+	if err != nil {
+		return commandSummary{}, err
+	}
+	batch, err := account.InspectProofRecoveryLeasedWithResults(ctx, planner, leaser, effects, results, config.Limit)
 	if err != nil {
 		return commandSummary{}, err
 	}
@@ -121,6 +126,9 @@ func investigate(ctx context.Context, config commandConfig) (commandSummary, err
 			summary.Unavailable++
 		} else {
 			summary.Observed++
+		}
+		if inspection.ResultObservation == "SUCCEEDED" {
+			summary.Confirmed++
 		}
 	}
 	return summary, nil
