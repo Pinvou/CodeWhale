@@ -39,7 +39,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
-| GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | IN_PROGRESS / CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
+| GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | PENDING |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | PENDING |
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | PENDING |
@@ -162,6 +162,8 @@ GSA-17 客户端控制代次基础（仍PARTIAL / REVIEW_PENDING）：Account v2
 GSA-17 Portal既有Token操作开关兼容修订（仍PARTIAL / REVIEW_PENDING）：版本中立BFF的决定入口复用旧Portal同会话、同访问令牌指纹、两分钟有效的申请分类证明；v2 detail只在服务端动作代次验证通过后存分类，关闭模型与Token操作开关时精确拒绝Token申请决定，分类缺失/过期也失败关闭。HTTP定向测试覆盖非Token正常决定及Token详情可读但决定404，避免新BFF绕过原有功能开关。
 
 GSA-17 仓库代码范围收口（CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED）：本轮Signed-off并推送`5fc028cf`、`d2ff39dd`、`92e1e4a6`、`8520b669`、`2f1970a1`、`a3bf3898`、`251410e4`，覆盖Account closed capability、Portal Redis原子会话锁、版本中立BFF、v1/v2详情动作代次、决定CAS、迟到响应、旧Token操作开关。最后修订的`node scripts/account-platform.mjs verify`退出码0，定向隔离PostgreSQL审批决定、Portal HTTP及Node竞态合同PASS；真实多副本TLS Redis fixture未具备，GSA-04隔离Linux欠账及生产切换仍待GSA-38～40。静态审批中心尚未使用新客户端、四视图与业务页流转归GSA-18/19；本状态仅说明GSA-17范围内代码完成，不构成审核、部署或端到端验收。
+
+GSA-17 状态纠正（仍PARTIAL / REVIEW_PENDING）：后续依赖检查发现v2线目前缺create/update/submit/withdraw四个Account写入口及对应Portal精确路由；v2 Session不得借v1写入口完成这些动作。前一段`CODE_COMPLETE`是当时检查点，不能作为当前任务结论。设计§5.4的v2 decide三字段旧描述同步纠正为与§5.4动作代次和现行闭合合同一致的四字段。补齐v2写入口、BFF、合同与真实PG测试后才可重新评估CODE_COMPLETE；已提交的各独立检查点与验证记录保留。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
