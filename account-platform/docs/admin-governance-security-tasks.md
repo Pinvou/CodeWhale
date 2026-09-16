@@ -38,7 +38,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-13 | APT-141 | Account proof 客户端、批准检查点与版本化动作 | GSA-04, GSA-05, GSA-12 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | PENDING |
+| GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / NOT_DEPLOYED |
 | GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | PENDING |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | PENDING |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | PENDING |
@@ -101,6 +101,8 @@ GSA-14补充提交：`99d9e7e6`、`e492adb6`、`832c6ed9`、`c70eba3f`、`aa42f6
 
 GSA-15 本地代码证据（2026-09-16，提交级自审PASS）：`a064c043`、`c69f5f51`、`e7b498a7`、`5d9c5bc9`、`41d9e27e`、`33792309`、`ac7e490b`、`38de7b0b`、`5674e788`、`2c120332`、`f7049cba`、`2b752dc3`、`9d3f6149`、`59a4b338`、`4625848b`、`6916779c`、`ec7f40d0`。每次修改分别Signed-off提交、自审，后续修订没有amend抹除。Billing三命令的Account专用、2秒/合计64KiB的closed proof endpoint重读持久owner事实与activation，独立权限及Compose/Helm绑定；旧wire不吞v2事件。执行前以真实SERIALIZABLE事务重读冻结事实与activation，唯一不可变claim提交后才允许Wallet领域写或Provider探测；重复claim、提交未知、查证未完成均不二次探测，旧wire维持既有行为。`000055`为前向独立owner迁移，runtime仅SELECT/INSERT，拒绝修改或TRUNCATE。真实隔离PG覆盖Wallet ALLOW、冻结漂移零claim、重复认领、Provider/Product ALLOW及claim；Account身份经Billing HTTP、Portal/旧身份拒绝、三命令Golden合同通过。完整`node scripts/account-platform.mjs verify` exit0，Node 592项590 PASS/0 FAIL/2既有环境SKIP，Go全包test/vet、OpenAPI（9既有warning）、i18n、observability、architecture通过；最后的重复claim修订与Provider/Product PG新增后定向PG/单测再次PASS。尚无真实生产Provider调用或跨域批准→consumer→恢复全链验收，逐命令UNKNOWN查证/安全恢复属于GSA-16，生产等价证据与控制面activation属于GSA-38～40；GSA-04 Linux欠账传递，因此保持IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，不宣称上线。
 - **16**：逐命令 TRANSIENT_SAFE/UNKNOWN/PERMANENT/失效分类，原执行ID、有界退避/次数/窗口、独立worker身份与lease；未知错误默认查询，禁止通用重试。六命令的崩溃、并发、窗口结束及幂等验证。
+
+GSA-16 阶段证据（2026-09-16，尚未完成整项审核）：`a0be32ab`新增Account前向`000065`，proof-era Billing确定失败保留`DOMAIN_INFLIGHT`及稳定错误，不由通用失败CAS回到`READY`；legacy 12次路径保持不变。隔离PG覆盖新wire首次失败、第二次grant拒绝和旧wire仍有界；迁移临时owner公用模式CREATE在同一事务内撤销，由`c89d83c3`补充负向权限验证。`589e6c04`使审批过期worker不直接失效`EXECUTION_FAILED`，隔离PG覆盖已存在执行且到期仍保留待查状态。`node scripts/account-platform.mjs verify`在`a0be32ab`后exit0，Node 592项590 PASS/0 FAIL/2既有环境SKIP、Go全包test/vet及静态门禁通过；过期修订后定向真实PG PASS。此阶段只是保守关闸，尚未实现六命令独立分类/查证worker、租约与安全恢复，不能标记CODE_COMPLETE或启动proof-era生产流量。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
