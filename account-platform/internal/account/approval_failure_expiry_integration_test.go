@@ -43,3 +43,21 @@ func TestFailedApprovalExpiryRetainsUnresolvedExecutionIntegration(t *testing.T)
 		t.Fatalf("unresolved execution changed: request=%s execution=%s err=%v", requestStatus, executionStatus, err)
 	}
 }
+
+func TestApprovedWithoutExecutionStillExpiresIntegration(t *testing.T) {
+	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
+	if _, err := db.adminPool.Exec(ctx, `UPDATE approval_requests SET execution_deadline=now()-interval '1 second' WHERE id=$1`, binding.ApprovalRequestID); err != nil {
+		t.Fatal(err)
+	}
+	count, err := repository.ExpireApprovalRequests(ctx, 100)
+	if err != nil || count != 1 {
+		t.Fatalf("unstarted approved request did not expire: count=%d err=%v", count, err)
+	}
+	var status, code string
+	if err := db.adminPool.QueryRow(ctx, `SELECT status,invalidation_code FROM approval_requests WHERE id=$1`, binding.ApprovalRequestID).Scan(&status, &code); err != nil || status != "INVALIDATED" || code != "EXECUTION_WINDOW_EXPIRED" {
+		t.Fatalf("approved expiry status=%s code=%s err=%v", status, code, err)
+	}
+}
