@@ -8400,6 +8400,12 @@ fn fork_session(
     );
     forked.metadata.copy_cost_from(&saved.metadata);
     forked.metadata.mark_forked_from(&saved.metadata);
+    // The fork continues the same conversation over the same accessible
+    // set: stamp the source's roots before the save. Without it the freshly
+    // constructed (empty) metadata persists, and the disk-authority
+    // lifecycle merge keeps re-erasing any later correction - the same
+    // sticky erasure the in-app `/fork` stamp prevents.
+    forked.metadata.workspace_roots = saved.metadata.workspace_roots.clone();
     manager.save_session(&forked)?;
 
     let source_title = saved.metadata.title.trim();

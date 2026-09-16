@@ -1275,11 +1275,6 @@ pub(crate) async fn apply_command_result(
                 workspace_roots,
                 mode,
             } => {
-                // The action is the roots authority for this transition (a
-                // fork carries the parent's set, a new session carries an
-                // empty one): record it so later re-syncs and autosaves
-                // forward the same set.
-                app.workspace_roots = workspace_roots.clone();
                 let mut session_id = session_id;
                 let is_full_reset = messages.is_empty() && system_prompt.is_none();
                 if is_full_reset && session_id.is_none() {
@@ -1315,6 +1310,12 @@ pub(crate) async fn apply_command_result(
                 // provider overrides.
                 resolve_loaded_session_route(app, config);
                 app.update_model_compaction_budget();
+                // The action is the roots authority for this transition (a
+                // fork carries the parent's set, a new session carries an
+                // empty one): record it only after the fallible restore
+                // steps above succeeded, so a failed load cannot leave the
+                // app carrying a set that belongs to no live session.
+                app.workspace_roots = workspace_roots.clone();
                 if provider_changed || workspace_changed {
                     let _ = engine_handle.send(Op::Shutdown).await;
                     *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);
