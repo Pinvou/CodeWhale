@@ -79,3 +79,23 @@ func TestTokenApprovalProofRouteDoesNotTrustLegacyTokenOrBrowser(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenProofSnapshotIgnoresOnlyPriceObservationClock(t *testing.T) {
+	critical := json.RawMessage(`{"catalog_version":7}`)
+	financial := json.RawMessage(`{"billing_price_revision":11,"price_set_fingerprint":"` + strings.Repeat("a", 64) + `","models_checked":2,"models_covered":2,"fully_covered":true,"billing_as_of":"2026-09-16T01:00:00Z"}`)
+	frozen := approvalencoding.LegacyProofInput{CriticalResourceVersions: critical, FinancialSnapshot: financial}
+	current := ApprovalSnapshotProjection{CriticalResourceVersions: critical,
+		FinancialSnapshot: json.RawMessage(strings.Replace(string(financial), "01:00:00Z", "01:01:00Z", 1))}
+	if !tokenProofSnapshotMatches("TOKEN_MODEL_CATALOG_ROLLBACK", frozen, current) {
+		t.Fatal("observation clock was mistaken for domain drift")
+	}
+	current.FinancialSnapshot = json.RawMessage(strings.Replace(string(current.FinancialSnapshot), `"billing_price_revision":11`, `"billing_price_revision":12`, 1))
+	if tokenProofSnapshotMatches("TOKEN_MODEL_CATALOG_ROLLBACK", frozen, current) {
+		t.Fatal("price revision drift was ignored")
+	}
+	current.FinancialSnapshot = financial
+	current.CriticalResourceVersions = json.RawMessage(`{"catalog_version":8}`)
+	if tokenProofSnapshotMatches("TOKEN_MODEL_CATALOG_ROLLBACK", frozen, current) {
+		t.Fatal("Token catalog drift was ignored")
+	}
+}

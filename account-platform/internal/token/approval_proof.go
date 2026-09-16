@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
@@ -101,11 +102,24 @@ func (s *Service) tokenApprovalProof(ctx context.Context, request approvalencodi
 		DomainRevision: strconv.FormatInt(last.Epoch, 10) + ":" + current.PrecheckFingerprint,
 		Verdict:        "ALLOW", ReasonCode: "PROOF_VALID", IssuedAt: now, ExpiresAt: now.Add(time.Minute),
 	}
-	if fresh.SnapshotDigest != artifacts.SnapshotDigest {
+	// billing_as_of is observation metadata and advances on every independent
+	// Billing read. It is frozen in the original proof digest, but a new read
+	// must compare the price facts rather than falsely deny elapsed time.
+	if !tokenProofSnapshotMatches(artifacts.CommandType, input, current) {
 		response.Verdict, response.ReasonCode = "DENY", "SNAPSHOT_MISMATCH"
 	}
 	if _, err := approvalencoding.EncodeProofResponse(response); err != nil {
 		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
 	}
 	return response, nil
+}
+
+func tokenProofSnapshotMatches(command string, frozen approvalencoding.LegacyProofInput, current ApprovalSnapshotProjection) bool {
+	if !jsonSemanticEqual(frozen.CriticalResourceVersions, current.CriticalResourceVersions) {
+		return false
+	}
+	if command == "TOKEN_CREDENTIAL_REVOKE" {
+		return jsonSemanticEqual(frozen.FinancialSnapshot, current.FinancialSnapshot)
+	}
+	return approvalpolicy.SameTokenModelFinancialFacts(frozen.FinancialSnapshot, current.FinancialSnapshot)
 }
