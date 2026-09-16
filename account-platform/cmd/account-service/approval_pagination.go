@@ -24,7 +24,12 @@ func approvalPaginationConfigFromEnv(getenv func(string) string) (account.Approv
 	if err != nil {
 		return config, false, err
 	}
-	config.Enabled, config.HardDisabled = enabled, hardDisabled
+	if hardDisabled {
+		// Emergency containment must work even when the old signing material
+		// or rotation metadata is corrupt. No cursor is read or signed.
+		return account.ApprovalPaginationConfig{HardDisabled: true}, true, nil
+	}
+	config.Enabled = enabled
 	config.CurrentKeyID = strings.TrimSpace(getenv("APPROVAL_PAGINATION_CURRENT_KID"))
 	config.PreviousKeyID = strings.TrimSpace(getenv("APPROVAL_PAGINATION_PREVIOUS_KID"))
 	currentEncoded := strings.TrimSpace(getenv("APPROVAL_PAGINATION_CURRENT_KEY_B64"))
@@ -58,9 +63,6 @@ func approvalPaginationConfigFromEnv(getenv func(string) string) (account.Approv
 		if err != nil || config.MaximumStorageBytes <= 0 {
 			return config, true, errors.New("invalid approval pagination storage budget")
 		}
-	}
-	if hardDisabled && enabled {
-		return config, true, errors.New("approval pagination cannot be both enabled and hard-disabled")
 	}
 	return config, true, nil
 }
