@@ -198,6 +198,71 @@ func TestProofEraHistoricalReadyFailureIsFencedByMigrationIntegration(t *testing
 	}
 }
 
+func TestProofEraHistoricalAttemptWithoutErrorIsFencedByMigrationIntegration(t *testing.T) {
+	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := -1
+	for index, item := range loaded {
+		if item.Version == 66 {
+			boundary = index + 1
+			break
+		}
+	}
+	if boundary < 1 || boundary == len(loaded) || loaded[boundary].Version != 67 {
+		t.Fatal("proof-era single-attempt migration boundary is incomplete")
+	}
+	connection := authorizationTestConnection(t, ctx, db.migratorPool)
+	if _, err := connection.Exec(ctx, `SET ROLE account_service`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Up(ctx, connection.Conn(), loaded[:boundary]); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection.Conn())
+	legacy := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
+	observeApprovalDelivery(t, ctx, repository, legacy, 81)
+	proofDurable := "billing-wallet-adjustment-executor-p1-v1"
+	_, err = db.adminPool.Exec(ctx, `INSERT INTO account_approval_authorization.approval_delivery_states
+	(schema_version,original_event_id,durable,approval_request_id,approved_request_version,event_digest,digest_kind,serialization_version,provenance,approval_epoch,stream,stream_sequence,command_type,policy_version,executor_identity,state,domain_attempt_count)
+	SELECT schema_version,original_event_id,$2,approval_request_id,approved_request_version,event_digest,digest_kind,'APPROVAL_RFC8785_DECIMAL_V1',provenance,approval_epoch,stream,stream_sequence,command_type,policy_version,executor_identity,'READY',1
+	FROM account_approval_authorization.approval_delivery_states WHERE original_event_id=$1 AND durable=$3`, legacy.EventID, proofDurable, legacy.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Up(ctx, connection.Conn(), loaded); err != nil {
+		t.Fatalf("apply proof single-attempt fence: %v", err)
+	}
+	migrations.Unlock(ctx, connection.Conn())
+	read, err := repository.ApprovalAuthorizationDeliveryState(ctx, legacy.EventID, proofDurable, legacy.Workload)
+	if err != nil || read.State != "DOMAIN_INFLIGHT" || read.DomainAttemptCount != 1 || read.Version != 2 || read.LastErrorCode != nil {
+		t.Fatalf("historical attempt without error was not fenced: %+v err=%v", read, err)
+	}
+	if _, err := repository.GrantApprovalAuthorizationDomainAttempt(ctx, legacy.EventID, proofDurable, legacy.Workload, read.Version); !errors.Is(err, ErrApprovalConsumerBindingInvalid) {
+		t.Fatalf("historical attempt was retried: %v", err)
+	}
+	// Even a later mixed-version writer putting the row back into READY cannot
+	// obtain another grant from Account, independent of Billing's local guard.
+	if _, err := db.adminPool.Exec(ctx, `UPDATE account_approval_authorization.approval_delivery_states SET state='READY',version=version+1,updated_at=now() WHERE original_event_id=$1 AND durable=$2`, legacy.EventID, proofDurable); err != nil {
+		t.Fatal(err)
+	}
+	read, err = repository.ApprovalAuthorizationDeliveryState(ctx, legacy.EventID, proofDurable, legacy.Workload)
+	if err != nil || read.State != "READY" {
+		t.Fatalf("synthetic mixed-version state: %+v err=%v", read, err)
+	}
+	if _, err := repository.GrantApprovalAuthorizationDomainAttempt(ctx, legacy.EventID, proofDurable, legacy.Workload, read.Version); !errors.Is(err, ErrApprovalConsumerBindingInvalid) {
+		t.Fatalf("direct proof regrant was accepted: %v", err)
+	}
+	legacyState, err := repository.ApprovalAuthorizationDeliveryState(ctx, legacy.EventID, legacy.Durable, legacy.Workload)
+	if err != nil || legacyState.State != "READY" || legacyState.DomainAttemptCount != 0 {
+		t.Fatalf("legacy delivery changed: %+v err=%v", legacyState, err)
+	}
+}
+
 func TestApprovalConsumerLegacyReadyResultRecoveryIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

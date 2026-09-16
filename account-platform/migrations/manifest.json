@@ -662,6 +662,16 @@
         "file": "000066_approval_proof_retry_grant_fence.up.sql",
         "version": 66,
         "sha256": "e0a1c084f8a0e8b19b42f4a90d4fa69b606dc4a7b6604c275dbb91434efa8c7b"
+      },
+      {
+        "file": "000067_approval_proof_single_attempt_fence.down.sql",
+        "version": 67,
+        "sha256": "06adc17f64cb17a520634b1d7d11c2a46670870ed05ee2a1a2d38f0fb6caab23"
+      },
+      {
+        "file": "000067_approval_proof_single_attempt_fence.up.sql",
+        "version": 67,
+        "sha256": "bbb2828f46746f0241f65287d059c49b61bbf0af4f4de82a93b59f17864230bb"
       }
     ],
     "billing": [
