@@ -179,7 +179,10 @@ func TestImpactPrecheckUsesOneAbsoluteDeadlineAndFailsClosed(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/admin/v1/models/"+modelID.String()+"/impact/lifecycle?target_status=REMOVED", nil)
 	request.Header.Set("Authorization", "Bearer impact-test")
 	request.Header.Set(requestdeadline.DeadlineClassHeader, string(requestdeadline.Precheck))
-	request.Header.Set(requestdeadline.AbsoluteDeadlineHeader, time.Now().Add(15*time.Millisecond).UTC().Format(time.RFC3339Nano))
+	// The absolute deadline covers authorization as well as the impact read.
+	// Leave enough time for the loopback authorization request so this test
+	// measures the blocking repository instead of scheduler latency.
+	request.Header.Set(requestdeadline.AbsoluteDeadlineHeader, time.Now().Add(500*time.Millisecond).UTC().Format(time.RFC3339Nano))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), "PRECHECK_TIMEOUT") {
