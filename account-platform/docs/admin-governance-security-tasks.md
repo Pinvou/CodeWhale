@@ -43,7 +43,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | PENDING |
+| GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | IN_PROGRESS / DECISION_PENDING / REVIEW_PENDING |
 | GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | PENDING |
 | GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | PENDING |
 | GSA-24 | APT-141 | 账本修复实现与领域 E2E | GSA-23 | CODE | PENDING |
@@ -219,6 +219,8 @@ GSA-20 审计导出幂等及表单切片（IN_PROGRESS / PARTIAL / REVIEW_PENDIN
 GSA-20 单次下载票据续接切片（仍PARTIAL / REVIEW_PENDING）：下载失败但已拿到票据时，仅复用该票据重试，不再调用仅允许一次的签发接口。签发响应不明时先刷新任务状态；若服务端显示已签发但本页没有原票据，停止再次签发并明确要求新导出。下载链接的Blob URL延时释放，避免点击后立即撤销；新导出清理本页票据状态。定向票据测试、Portal构建、三语和架构检查通过；网络中断发生在服务端消费票据后且文件未到达浏览器时，按服务端单次下载约束不能原任务恢复，仍需真实环境验收。
 
 GSA-20 审计搜索可访问性切片（仍PARTIAL / REVIEW_PENDING）：审计筛选的操作者、操作名、资源、结果字段补显式可访问名称，不再只依赖占位提示；无效日期不会在创建导出入口抛出未捕获异常，而是展示表单错误。偏好页仅保留真实的本地语言设置；系统页仅展示现有服务健康、只读运行手册及受权限保护的Keycloak本机隧道入口，没有增加无API的写入按钮。定向合同测试、Portal构建及架构检查通过；真实读屏/缩放、系统页的环境权限与全分区UI验收仍待进行。
+
+GSA-21 事实与决策门禁切片（IN_PROGRESS / DECISION_PENDING / REVIEW_PENDING）：[独立领域文档](entitlement-component-adjustment-design.md)已核对Billing组件守恒、BASE可退款与BONUS不可退款、成员配额/预留/退款引用及消费顺序；列出“仅未动用额度纠错”与“包含历史影响补偿”的范围差异。用户账务选择前不冻结写入协议、不开始GSA-22、不开启activation。本文仅事实记录，不算设计完成。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
