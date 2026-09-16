@@ -64,6 +64,11 @@ func TestBillingWalletApprovalClaimPostgresIntegration(t *testing.T) {
 	if err := repository.ClaimBillingApprovalProof(ctx, binding, event); err != nil {
 		t.Fatalf("claim current wallet facts: %v", err)
 	}
+	mismatched := binding
+	mismatched.ApprovalRequestID = uuid.New()
+	if err := repository.ClaimBillingApprovalProof(ctx, mismatched, event); !errors.Is(err, ErrApprovalSnapshotMismatch) {
+		t.Fatalf("claim accepted a foreign approval request: %v", err)
+	}
 	if err := repository.ClaimBillingApprovalProof(ctx, binding, event); err == nil || errors.Is(err, ErrApprovalSnapshotMismatch) {
 		t.Fatalf("repeat claim must be unknown, not grant another effect: %v", err)
 	}

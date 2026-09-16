@@ -41,7 +41,7 @@ func (f billingTxProofFacts) confirmedResumeProbe(ctx context.Context, providerI
 // Once committed, a crash or provider failure is an unknown outcome, never
 // permission to run a second probe under a newly issued proof.
 func (r *PostgresRepository) ClaimBillingApprovalProof(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent) error {
-	if binding.ApprovalRequestID == uuid.Nil || binding.EventID == uuid.Nil || binding.EventID != event.EventID ||
+	if binding.ApprovalRequestID == uuid.Nil || binding.ApprovalRequestID != event.ApprovalRequestID || binding.EventID == uuid.Nil || binding.EventID != event.EventID ||
 		binding.CommandType != event.CommandType || binding.PolicyVersion != event.PolicyVersion ||
 		binding.ApprovalEpoch <= 0 || binding.ApprovalEpoch != event.ApprovalControlEpoch {
 		return ErrApprovalSnapshotMismatch

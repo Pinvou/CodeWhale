@@ -298,6 +298,23 @@ func TestBillingProofEraExecutionRejectsRevisionBeforeDomainEffect(t *testing.T)
 	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_REVISION_CHANGED" || probeCalls != 0 {
 		t.Fatalf("provider drift reached probe: %+v probes=%d", attempt, probeCalls)
 	}
+	domain.proof = func(_ context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
+		return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: providerEvent.DomainRevision, CommandDigest: request.Artifacts.CommandDigest, SnapshotDigest: request.Artifacts.SnapshotDigest}, nil
+	}
+	domain.claim = func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error {
+		return ErrApprovalSnapshotMismatch
+	}
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), providerBinding, providerEvent, providerCommand)
+	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_REVISION_CHANGED" || probeCalls != 0 {
+		t.Fatalf("provider claim drift reached probe: %+v probes=%d", attempt, probeCalls)
+	}
+	domain.claim = func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error {
+		return errors.New("unknown commit")
+	}
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), providerBinding, providerEvent, providerCommand)
+	if attempt.FailureIsDefinite || probeCalls != 0 {
+		t.Fatalf("unknown provider claim reached probe: %+v probes=%d", attempt, probeCalls)
+	}
 }
 
 func TestBillingAuthorizationDomainProviderAndProductProbeBoundary(t *testing.T) {
