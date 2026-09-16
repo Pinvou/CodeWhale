@@ -87,6 +87,7 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /internal/v1/commands/model-lifecycle/execute:
     post:
       servers: [{ url: / }]

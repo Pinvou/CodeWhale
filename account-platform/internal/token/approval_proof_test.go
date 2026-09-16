@@ -3,13 +3,16 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -143,5 +146,35 @@ func TestTokenHistoricalImmediateLifecycleCannotReceiveExecutableProof(t *testin
 	}
 	if !tokenLifecyclePlanExecutable(json.RawMessage(`{"lifecycle_plan_id":"` + plan + `","lifecycle_plan_version":1}`)) {
 		t.Fatal("persisted plan rejected")
+	}
+}
+
+type blockedProofBody struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (body *blockedProofBody) Read([]byte) (int, error) {
+	<-body.closed
+	return 0, io.ErrClosedPipe
+}
+func (body *blockedProofBody) Close() error {
+	body.once.Do(func() { close(body.closed) })
+	return nil
+}
+
+func TestTokenProofDeadlineInterruptsSlowRequestBody(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ctx, err := serviceauth.ContextForJob(ctx, "account-service", "APPROVAL_PROOF", uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &blockedProofBody{closed: make(chan struct{})}
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/approval-command-proofs", body).WithContext(ctx)
+	response := httptest.NewRecorder()
+	(&Service{}).internalTokenApprovalProof(response, request)
+	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), "TOKEN_APPROVAL_PROOF_TIMEOUT") {
+		t.Fatalf("slow request status=%d body=%s", response.Code, response.Body.String())
 	}
 }

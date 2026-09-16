@@ -29,8 +29,14 @@ func (s *Service) internalTokenApprovalProof(w http.ResponseWriter, r *http.Requ
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	stopClose := context.AfterFunc(ctx, func() { _ = r.Body.Close() })
+	defer stopClose()
 	body, err := io.ReadAll(io.LimitReader(r.Body, approvalencoding.MaximumDocumentBytes+1))
-	if err != nil || len(body) > approvalencoding.MaximumDocumentBytes || ctx.Err() != nil {
+	if ctx.Err() != nil {
+		api.WriteError(w, http.StatusGatewayTimeout, "TOKEN_APPROVAL_PROOF_TIMEOUT", "proof deadline expired", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err != nil || len(body) > approvalencoding.MaximumDocumentBytes {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_PROOF_REQUEST", "proof request exceeds the closed transport bound", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -40,12 +46,20 @@ func (s *Service) internalTokenApprovalProof(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	response, err := s.tokenApprovalProof(ctx, request)
-	if err != nil || ctx.Err() != nil {
+	if ctx.Err() != nil {
+		api.WriteError(w, http.StatusGatewayTimeout, "TOKEN_APPROVAL_PROOF_TIMEOUT", "proof deadline expired", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_APPROVAL_PROOF_UNAVAILABLE", "authoritative proof cannot be established", httpserver.RequestID(r.Context()))
 		return
 	}
 	encoded, err := approvalencoding.EncodeProofResponse(response)
-	if err != nil || !approvalencoding.ProofTransportWithinBudget(body, encoded) || ctx.Err() != nil {
+	if ctx.Err() != nil {
+		api.WriteError(w, http.StatusGatewayTimeout, "TOKEN_APPROVAL_PROOF_TIMEOUT", "proof deadline expired", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err != nil || !approvalencoding.ProofTransportWithinBudget(body, encoded) {
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_APPROVAL_PROOF_UNAVAILABLE", "authoritative proof cannot be established", httpserver.RequestID(r.Context()))
 		return
 	}
