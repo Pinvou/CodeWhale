@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createAndSubmitFreshGovernedApproval, createAndSubmitGovernedApproval, recoverGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval, updateAndSubmitGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
+import { editWalletAdjustmentApproval } from '../../../pinvou3-app/src/features/account-platform/admin-finance.js';
 
 const requestID = '0199a300-0001-7000-8000-000000000017';
 const draft = { command_type: 'TOKEN_MODEL_CATALOG_ROLLBACK', target_resource_type: 'MODEL_CATALOG', target_resource_id: '12' };
@@ -158,7 +159,32 @@ test('business edit never retries an uncertain update or submits an unconfirmed 
 
 test('wallet adjustment approval keeps its existing Billing creation but uses governed Account writes', () => {
   const source = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
-  assert.match(source, /const ensureAdjustmentApproval = async[\s\S]*?return createAndSubmitGovernedApproval\(client, draft\)/);
+  assert.match(source, /const ensureAdjustmentApproval = async[\s\S]*?createAndSubmitGovernedApproval\(client, walletAdjustmentApprovalDraft\(item, reason, requestKey\)\)/);
   assert.doesNotMatch(source, /client\.createApprovalDraft\(|client\.submitApprovalRequest\(/);
   assert.match(source, /created = await client\.createAdjustment\(/);
+  assert.match(source, /await editWalletAdjustmentApproval\(client, item, approval, reason\)/);
+});
+
+test('wallet draft edit uses a fresh pending Billing adjustment and never updates after status drift', async () => {
+  const adjustment = { adjustment_id: requestID, wallet_id: 'wallet', status: 'PENDING_APPROVAL',
+    amount_microcredits: 1200, requested_by: 'requester', version: 3, request_idempotency_key: 'original-key' };
+  const approval = { approval_request_id: 'approval-id', command_type: 'WALLET_ADJUSTMENT', status: 'DRAFT',
+    target: { resource_type: 'MANUAL_ADJUSTMENT', resource_id: requestID } };
+  const calls = [];
+  const detailFor = (status, version, actions) => ({ approval_request_id: 'approval-id', command_type: 'WALLET_ADJUSTMENT',
+    target: approval.target, status, version, allowed_actions: actions, action_control_version: 9,
+    detail_availability: 'AVAILABLE' });
+  const client = { adjustments: async (filters) => { assert.equal(filters.wallet_id, 'wallet'); calls.push('billing'); return { items: [adjustment] }; },
+    governedApprovalRequest: async () => { calls.push('read'); return calls.length === 2
+      ? detailFor('DRAFT', 1, ['EDIT']) : calls.length === 4
+        ? detailFor('DRAFT', 2, ['SUBMIT']) : detailFor('SUBMITTED', 3, []); },
+    updateGovernedApprovalDraft: async (_id, value, edited) => { assert.equal(value.version, 1);
+      assert.equal(edited.critical_resource_versions.adjustment_version, 3);
+      assert.equal(edited.idempotency_key, 'approval:original-key'); calls.push('update'); },
+    submitGovernedApprovalRequest: async (_id, value) => { assert.equal(value.version, 2); calls.push('submit'); } };
+  assert.equal((await editWalletAdjustmentApproval(client, adjustment, approval, 'a new safe reason')).status, 'SUBMITTED');
+  assert.deepEqual(calls, ['billing', 'read', 'update', 'read', 'submit', 'read']);
+  client.adjustments = async () => ({ items: [{ ...adjustment, status: 'POSTED' }] });
+  client.updateGovernedApprovalDraft = async () => assert.fail('must not update after Billing drift');
+  await assert.rejects(editWalletAdjustmentApproval(client, adjustment, approval, 'a new safe reason'), { code: 'ADJUSTMENT_FACTS_CHANGED' });
 });

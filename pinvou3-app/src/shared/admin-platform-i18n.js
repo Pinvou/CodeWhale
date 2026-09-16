@@ -2425,6 +2425,7 @@ Object.assign(adminPlatformCopy.zh.billing, {
   approvalStatus: '审批状态 / 申请 ID',
   viewApproval: '查看审批',
   resumeApproval: '恢复审批提交',
+  updateAndSubmitAdjustment: '更新调账草稿并提交',
 });
 Object.assign(adminPlatformCopy.en.billing, {
   adjustmentWallet: 'Target wallet ID',
@@ -2439,6 +2440,7 @@ Object.assign(adminPlatformCopy.en.billing, {
   approvalStatus: 'Approval status / request ID',
   viewApproval: 'View approval',
   resumeApproval: 'Resume approval submission',
+  updateAndSubmitAdjustment: 'Update adjustment draft and submit',
 });
 Object.assign(adminPlatformCopy.ja.billing, {
   adjustmentWallet: '対象ウォレット ID',
@@ -2453,6 +2455,7 @@ Object.assign(adminPlatformCopy.ja.billing, {
   approvalStatus: '承認状態 / 申請 ID',
   viewApproval: '承認を表示',
   resumeApproval: '承認申請を再開',
+  updateAndSubmitAdjustment: '調整の下書きを更新して送信',
 });
 
 Object.assign(adminPlatformCopy.zh.billing, {

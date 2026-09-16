@@ -1,7 +1,7 @@
 import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, editWalletAdjustmentApproval, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState, walletAdjustmentApprovalDraft } from './admin-finance.js';
 import { createAndSubmitGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
@@ -2651,6 +2651,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     businessDate: new Date().toISOString().slice(0, 10),
   });
   const [adjustment, setAdjustment] = useState({ walletID: '', amount: '', reason: '' });
+  const [adjustmentEditReasons, setAdjustmentEditReasons] = useState({});
   const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => secureRequestID());
   const [walletFilter, setWalletFilter] = useState(() => initialFilter('wallets', {}));
   const [receivableFilter, setReceivableFilter] = useState(() => initialFilter('receivables', {}));
@@ -3044,26 +3045,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setBusy(false);
     }
   };
-  const ensureAdjustmentApproval = async (item, reason, requestKey) => {
-    const draft = {
-      command_type: 'WALLET_ADJUSTMENT',
-      idempotency_key: `approval:${requestKey}`,
-      normalized_command: {
-        adjustment_id: item.adjustment_id,
-        wallet_id: item.wallet_id,
-        amount_microcredits: item.amount_microcredits,
-        requested_by: item.requested_by,
-      },
-      target_resource_type: 'MANUAL_ADJUSTMENT',
-      target_resource_id: item.adjustment_id,
-      reason,
-      redacted_evidence: [],
-      expected_impact: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
-      critical_resource_versions: { adjustment_version: item.version },
-      financial_snapshot: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
-    };
-    return createAndSubmitGovernedApproval(client, draft);
-  };
+  const ensureAdjustmentApproval = async (item, reason, requestKey) =>
+    createAndSubmitGovernedApproval(client, walletAdjustmentApprovalDraft(item, reason, requestKey));
   const submitAdjustment = async (event) => {
     event.preventDefault();
     const amountMicrocredits = parsePointsInputToMicrocredits(adjustment.amount);
@@ -3096,6 +3079,14 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     const requestKey = item.request_idempotency_key;
     if (!requestKey) return;
     void perform(() => ensureAdjustmentApproval(item, item.reason, requestKey));
+  };
+  const editAdjustmentApproval = (item, approval) => {
+    const reason = String(adjustmentEditReasons[item.adjustment_id] || '').trim();
+    if (!approval || approval.status !== 'DRAFT' || reason.length < 10 || reason.length > 2000) return;
+    void perform(async () => {
+      await editWalletAdjustmentApproval(client, item, approval, reason);
+      setAdjustmentEditReasons((current) => ({ ...current, [item.adjustment_id]: '' }));
+    });
   };
   const openAdjustmentApproval = (item) => {
     onNavigate?.('approvals', { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item.adjustment_id,
@@ -3737,7 +3728,14 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           render: (item) => {
             const approval = adjustmentApprovalByTarget.get(item.adjustment_id);
             const action = adjustmentApprovalAction(item, approval, { canRequest: canRequestAdjustment, canApprove: canApproveAdjustment });
-            if (action === 'resume') return <button disabled={busy} onClick={() => recoverAdjustmentApproval(item)}>{copy.billing.resumeApproval}</button>;
+            if (action === 'resume') return <div className="adm-row-actions">
+              <button disabled={busy} onClick={() => recoverAdjustmentApproval(item)}>{copy.billing.resumeApproval}</button>
+              {approval?.status === 'DRAFT' && <>
+                <input aria-label={`${copy.billing.adjustmentReason} · ${item.adjustment_id}`} minLength="10" maxLength="2000" value={adjustmentEditReasons[item.adjustment_id] || ''} onChange={(event) => setAdjustmentEditReasons((current) => ({ ...current, [item.adjustment_id]: event.target.value }))} />
+                <button disabled={busy || String(adjustmentEditReasons[item.adjustment_id] || '').trim().length < 10} onClick={() => editAdjustmentApproval(item, approval)}>{copy.billing.updateAndSubmitAdjustment}</button>
+                <button onClick={() => openAdjustmentApproval(item)}>{copy.billing.viewApproval}</button>
+              </>}
+            </div>;
             if (action === 'view') return <button onClick={() => openAdjustmentApproval(item)}>{copy.billing.viewApproval}</button>;
             return '—';
           },

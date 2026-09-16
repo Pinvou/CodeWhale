@@ -1,4 +1,32 @@
-import { createAndSubmitGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval } from './admin-governed-approval-workflow.js';
+import { createAndSubmitGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
+
+export function walletAdjustmentApprovalDraft(item, reason, requestKey) {
+  return {
+    command_type: 'WALLET_ADJUSTMENT', idempotency_key: `approval:${requestKey}`,
+    normalized_command: { adjustment_id: item.adjustment_id, wallet_id: item.wallet_id,
+      amount_microcredits: item.amount_microcredits, requested_by: item.requested_by },
+    target_resource_type: 'MANUAL_ADJUSTMENT', target_resource_id: item.adjustment_id,
+    reason, redacted_evidence: [],
+    expected_impact: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
+    critical_resource_versions: { adjustment_version: item.version },
+    financial_snapshot: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
+  };
+}
+
+export async function editWalletAdjustmentApproval(client, item, approval, reason) {
+  const trimmed = String(reason || '').trim();
+  if (!approval || approval.status !== 'DRAFT' || trimmed.length < 10 || trimmed.length > 2000) {
+    throw Object.assign(new Error('adjustment approval is not editable'), { code: 'APPROVAL_DRAFT_NOT_EDITABLE' });
+  }
+  const page = await client.adjustments({ wallet_id: item.wallet_id, status: 'PENDING_APPROVAL', limit: 200 });
+  const fresh = (page?.items || []).find((value) => value.adjustment_id === item.adjustment_id);
+  if (!fresh || fresh.status !== 'PENDING_APPROVAL' || fresh.wallet_id !== item.wallet_id ||
+    !Number.isSafeInteger(fresh.version) || fresh.version < 1 || !fresh.request_idempotency_key) {
+    throw Object.assign(new Error('adjustment facts are no longer editable'), { code: 'ADJUSTMENT_FACTS_CHANGED' });
+  }
+  return updateAndSubmitGovernedApproval(client, approval,
+    walletAdjustmentApprovalDraft(fresh, trimmed, fresh.request_idempotency_key));
+}
 
 export function adjustmentApprovalAction(adjustment, approval, { canRequest = false, canApprove = false } = {}) {
   const recoverable = Boolean(adjustment?.request_idempotency_key) && adjustment?.status === 'PENDING_APPROVAL';
