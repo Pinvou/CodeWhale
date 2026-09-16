@@ -4227,7 +4227,7 @@ impl SubAgentManager {
     /// [`governor::DynamicGate`], so the new launch concurrency applies to
     /// the live capacity immediately — children already holding permits keep
     /// running, and no admission above the new capacity is granted until the
-    /// active count drains.
+    /// outstanding count drains.
     pub fn update_runtime_limits(
         &mut self,
         max_agents: usize,
