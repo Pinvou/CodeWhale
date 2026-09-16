@@ -57,7 +57,7 @@ JOIN public.approval_request_snapshots s ON s.approval_request_id=r.id WHERE r.i
 	}
 	setApprovalConsumerControl(t, ctx, db, "QUIESCING", "RUNNING", 1, false, 2)
 	plan, err := repository.PlanApprovalReconciliation(ctx, 20)
-	if err != nil || len(plan.Candidates) != 4 || plan.MoreCandidates {
+	if err != nil || len(plan.Candidates) != 4 || plan.MoreCandidates || plan.ApprovedCount != 4 || plan.OldEpochNonterminalExecCount != 1 {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 	var pendingBefore []byte

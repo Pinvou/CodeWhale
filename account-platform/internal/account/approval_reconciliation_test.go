@@ -102,6 +102,17 @@ func TestRunApprovalReconciliationNeverClaimsATruncatedBatchComplete(t *testing.
 	}
 }
 
+func TestRunApprovalReconciliationRequiresEveryHistoricalStateToConverge(t *testing.T) {
+	control := validAdminApprovalControl(AdminApprovalModeQuiescing, AdminApprovalRelayFenced)
+	store := &reconciliationStoreStub{plan: ApprovalReconciliationPlan{Control: control, ApprovedCount: 1,
+		ExecutingCount: 2, ExecutionFailedCount: 3, OldEpochNonterminalExecCount: 4}}
+	summary, err := RunApprovalReconciliation(context.Background(), store, reconciliationEffectStub{}, 20, false)
+	if err != nil || summary.CompleteWithoutBlocker || summary.RemainingApprovedCount != 1 ||
+		summary.RemainingExecutingCount != 2 || summary.RemainingFailedCount != 3 || summary.OldEpochNonterminalExecCount != 4 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+}
+
 func TestReconcileExpiredApprovalRejectsUnboundObservationBeforeDatabaseAccess(t *testing.T) {
 	candidate := ApprovalReconciliationCandidate{RequestID: uuid.New(), CommandType: "WALLET_ADJUSTMENT",
 		CommandFingerprint: strings.Repeat("a", 64)}

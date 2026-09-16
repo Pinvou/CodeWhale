@@ -30,9 +30,13 @@ type ApprovalReconciliationCandidate struct {
 }
 
 type ApprovalReconciliationPlan struct {
-	Control        AdminApprovalControl
-	Candidates     []ApprovalReconciliationCandidate
-	MoreCandidates bool
+	Control                      AdminApprovalControl
+	Candidates                   []ApprovalReconciliationCandidate
+	ApprovedCount                int
+	ExecutingCount               int
+	ExecutionFailedCount         int
+	OldEpochNonterminalExecCount int
+	MoreCandidates               bool
 }
 
 type ApprovalReconciliationResult string
@@ -49,23 +53,27 @@ const (
 )
 
 type ApprovalReconciliationSummary struct {
-	Mode                   AdminApprovalMode `json:"mode"`
-	ApprovalEpoch          int64             `json:"approval_epoch"`
-	ControlVersion         int64             `json:"control_version"`
-	CandidateCount         int               `json:"candidate_count"`
-	EligibleCount          int               `json:"eligible_count"`
-	ExpiredCandidateCount  int               `json:"expired_candidate_count"`
-	SafeCandidateCount     int               `json:"safe_candidate_count"`
-	InvalidatedCount       int               `json:"invalidated_count"`
-	SealedExclusionCount   int               `json:"sealed_exclusion_count"`
-	ObservedEffectCount    int               `json:"observed_effect_count"`
-	UnknownEffectCount     int               `json:"unknown_effect_count"`
-	ExecutionBlockedCount  int               `json:"execution_blocked_count"`
-	HistoryBlockedCount    int               `json:"history_blocked_count"`
-	StaleCount             int               `json:"stale_count"`
-	MoreCandidates         bool              `json:"more_candidates"`
-	DryRun                 bool              `json:"dry_run"`
-	CompleteWithoutBlocker bool              `json:"complete_without_blocker"`
+	Mode                         AdminApprovalMode `json:"mode"`
+	ApprovalEpoch                int64             `json:"approval_epoch"`
+	ControlVersion               int64             `json:"control_version"`
+	CandidateCount               int               `json:"candidate_count"`
+	EligibleCount                int               `json:"eligible_count"`
+	ExpiredCandidateCount        int               `json:"expired_candidate_count"`
+	SafeCandidateCount           int               `json:"safe_candidate_count"`
+	InvalidatedCount             int               `json:"invalidated_count"`
+	SealedExclusionCount         int               `json:"sealed_exclusion_count"`
+	ObservedEffectCount          int               `json:"observed_effect_count"`
+	UnknownEffectCount           int               `json:"unknown_effect_count"`
+	ExecutionBlockedCount        int               `json:"execution_blocked_count"`
+	HistoryBlockedCount          int               `json:"history_blocked_count"`
+	StaleCount                   int               `json:"stale_count"`
+	RemainingApprovedCount       int               `json:"remaining_approved_count"`
+	RemainingExecutingCount      int               `json:"remaining_executing_count"`
+	RemainingFailedCount         int               `json:"remaining_execution_failed_count"`
+	OldEpochNonterminalExecCount int               `json:"old_epoch_nonterminal_execution_count"`
+	MoreCandidates               bool              `json:"more_candidates"`
+	DryRun                       bool              `json:"dry_run"`
+	CompleteWithoutBlocker       bool              `json:"complete_without_blocker"`
 }
 
 type ApprovalReconciliationStore interface {
@@ -94,6 +102,23 @@ func (r *PostgresRepository) PlanApprovalReconciliation(ctx context.Context, lim
 	for _, descriptor := range descriptors {
 		commands = append(commands, descriptor.CommandType)
 	}
+	plan := ApprovalReconciliationPlan{Control: control, Candidates: make([]ApprovalReconciliationCandidate, 0)}
+	if err := tx.QueryRow(ctx, `SELECT
+  count(*) FILTER(WHERE status='APPROVED'),
+  count(*) FILTER(WHERE status='EXECUTING'),
+  count(*) FILTER(WHERE status='EXECUTION_FAILED')
+FROM approval_requests WHERE command_type=ANY($1)`, commands).Scan(
+		&plan.ApprovedCount, &plan.ExecutingCount, &plan.ExecutionFailedCount); err != nil {
+		return ApprovalReconciliationPlan{}, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*)
+FROM approval_executions e
+JOIN approval_requests r ON r.id=e.approval_request_id
+WHERE r.command_type=ANY($1) AND e.status IN ('EXECUTING','FAILED')
+  AND (e.authorization_approval_epoch IS NULL OR e.authorization_approval_epoch<$2)`, commands, control.ApprovalEpoch).Scan(
+		&plan.OldEpochNonterminalExecCount); err != nil {
+		return ApprovalReconciliationPlan{}, err
+	}
 	rows, err := tx.Query(ctx, `SELECT r.id,r.command_type,encode(r.command_fingerprint,'hex'),r.policy_version,p.executor_identity,
   r.status,r.version,r.execution_deadline,
   CASE WHEN r.execution_deadline<=transaction_timestamp() THEN 'EXECUTION_WINDOW_EXPIRED'
@@ -108,7 +133,6 @@ ORDER BY r.execution_deadline,r.id LIMIT $3`, commands, control.Mode == AdminApp
 		return ApprovalReconciliationPlan{}, err
 	}
 	defer rows.Close()
-	plan := ApprovalReconciliationPlan{Control: control, Candidates: make([]ApprovalReconciliationCandidate, 0)}
 	for rows.Next() {
 		var candidate ApprovalReconciliationCandidate
 		if err := rows.Scan(&candidate.RequestID, &candidate.CommandType, &candidate.CommandFingerprint, &candidate.PolicyVersion,
@@ -340,6 +364,7 @@ func RunApprovalReconciliation(ctx context.Context, store ApprovalReconciliation
 	}
 	summary := ApprovalReconciliationSummary{Mode: plan.Control.Mode, ApprovalEpoch: plan.Control.ApprovalEpoch,
 		ControlVersion: plan.Control.Version, CandidateCount: len(plan.Candidates), MoreCandidates: plan.MoreCandidates, DryRun: !apply}
+	eligibleApproved, eligibleFailed := 0, 0
 	for _, candidate := range plan.Candidates {
 		switch candidate.InvalidationCode {
 		case "EXECUTION_WINDOW_EXPIRED":
@@ -378,6 +403,11 @@ func RunApprovalReconciliation(ctx context.Context, store ApprovalReconciliation
 				return summary, ErrApprovalReconciliationBlocked
 			}
 			summary.EligibleCount++
+			if candidate.Status == "APPROVED" {
+				eligibleApproved++
+			} else {
+				eligibleFailed++
+			}
 		case ApprovalReconciliationInvalidated:
 			summary.EligibleCount++
 			summary.InvalidatedCount++
@@ -399,8 +429,26 @@ func RunApprovalReconciliation(ctx context.Context, store ApprovalReconciliation
 			return summary, ErrApprovalReconciliationBlocked
 		}
 	}
+	finalPlan, err := store.PlanApprovalReconciliation(ctx, limit)
+	if err != nil {
+		return summary, err
+	}
+	if !sameApprovalReconciliationControl(finalPlan.Control, plan.Control) {
+		return summary, ErrApprovalReconciliationControlChanged
+	}
+	summary.MoreCandidates = summary.MoreCandidates || finalPlan.MoreCandidates
+	summary.RemainingApprovedCount = finalPlan.ApprovedCount
+	summary.RemainingExecutingCount = finalPlan.ExecutingCount
+	summary.RemainingFailedCount = finalPlan.ExecutionFailedCount
+	summary.OldEpochNonterminalExecCount = finalPlan.OldEpochNonterminalExecCount
+	if !apply {
+		summary.RemainingApprovedCount = max(0, summary.RemainingApprovedCount-eligibleApproved)
+		summary.RemainingFailedCount = max(0, summary.RemainingFailedCount-eligibleFailed)
+	}
 	summary.CompleteWithoutBlocker = summary.UnknownEffectCount == 0 && summary.ObservedEffectCount == 0 &&
 		summary.ExecutionBlockedCount == 0 && summary.HistoryBlockedCount == 0 && summary.StaleCount == 0 &&
+		summary.RemainingApprovedCount == 0 && summary.RemainingExecutingCount == 0 && summary.RemainingFailedCount == 0 &&
+		summary.OldEpochNonterminalExecCount == 0 &&
 		!summary.MoreCandidates && (!apply || summary.InvalidatedCount == summary.EligibleCount)
 	return summary, nil
 }
