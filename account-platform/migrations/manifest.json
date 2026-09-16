@@ -642,6 +642,16 @@
         "file": "000064_approval_pagination_forward_only.up.sql",
         "version": 64,
         "sha256": "83da5454f0b6495473ec04d9f7028f1a5150c1546f3f4a11a067c55a335530fe"
+      },
+      {
+        "file": "000065_approval_proof_failure_default_unknown.down.sql",
+        "version": 65,
+        "sha256": "4cbc26373987345dc43c37df7440a88d9130d2529f81214ceac605baef61aaf0"
+      },
+      {
+        "file": "000065_approval_proof_failure_default_unknown.up.sql",
+        "version": 65,
+        "sha256": "e904deea873fcbb552f679ba33f016d8c4920b29c2359152d4f82bdbae8861d9"
       }
     ],
     "billing": [

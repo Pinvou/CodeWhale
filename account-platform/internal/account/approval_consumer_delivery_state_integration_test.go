@@ -73,6 +73,57 @@ func TestApprovalConsumerDeliveryStateReaderIntegration(t *testing.T) {
 	}
 }
 
+func TestProofEraBillingFailureRemainsQueryOnlyIntegration(t *testing.T) {
+	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := authorizationTestConnection(t, ctx, db.migratorPool)
+	if _, err := connection.Exec(ctx, `SET ROLE account_service`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Up(ctx, connection.Conn(), loaded); err != nil {
+		t.Fatalf("apply forward-only recovery default: %v", err)
+	}
+	migrations.Unlock(ctx, connection.Conn())
+	legacy := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
+	observeApprovalDelivery(t, ctx, repository, legacy, 71)
+	// Exercise the DB transition in isolation, with the same event identity but
+	// a second test-only proof-era delivery row. This is not a claim that the
+	// legacy outbox message itself was converted to proof-era wire.
+	proof := legacy
+	proof.Durable = "billing-wallet-adjustment-executor-p1-v1"
+	proof.SerializationVersion = "APPROVAL_RFC8785_DECIMAL_V1"
+	_, err = db.adminPool.Exec(ctx, `INSERT INTO account_approval_authorization.approval_delivery_states
+	(schema_version,original_event_id,durable,approval_request_id,approved_request_version,event_digest,digest_kind,serialization_version,provenance,approval_epoch,stream,stream_sequence,command_type,policy_version,executor_identity,state)
+	SELECT schema_version,original_event_id,$2,approval_request_id,approved_request_version,event_digest,digest_kind,$3,provenance,approval_epoch,stream,stream_sequence,command_type,policy_version,executor_identity,'READY'
+	FROM account_approval_authorization.approval_delivery_states WHERE original_event_id=$1 AND durable=$4`, legacy.EventID, proof.Durable, proof.SerializationVersion, legacy.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := repository.ApprovalAuthorizationDeliveryState(ctx, proof.EventID, proof.Durable, proof.Workload)
+	if err != nil || state.State != "READY" {
+		t.Fatalf("proof delivery fixture=%+v err=%v", state, err)
+	}
+	state, err = repository.GrantApprovalAuthorizationDomainAttempt(ctx, proof.EventID, proof.Durable, proof.Workload, state.Version)
+	if err != nil || state.DomainAttemptCount != 1 || state.State != "DOMAIN_INFLIGHT" {
+		t.Fatalf("first proof attempt=%+v err=%v", state, err)
+	}
+	state, err = repository.RecordApprovalAuthorizationDomainFailure(ctx, proof.EventID, proof.Durable, proof.Workload, state.Version, "DOMAIN_REVISION_CHANGED")
+	if err != nil || state.State != "DOMAIN_INFLIGHT" || state.DomainAttemptCount != 1 {
+		t.Fatalf("proof failure became retryable: %+v err=%v", state, err)
+	}
+	if _, err := repository.GrantApprovalAuthorizationDomainAttempt(ctx, proof.EventID, proof.Durable, proof.Workload, state.Version); !errors.Is(err, ErrApprovalConsumerBindingInvalid) {
+		t.Fatalf("proof failure permitted a second domain call: %v", err)
+	}
+	if read, err := repository.ApprovalAuthorizationDeliveryState(ctx, proof.EventID, proof.Durable, proof.Workload); err != nil || read.State != "DOMAIN_INFLIGHT" || read.LastErrorCode == nil || *read.LastErrorCode != "DOMAIN_REVISION_CHANGED" {
+		t.Fatalf("proof failure lost query-only evidence: %+v err=%v", read, err)
+	}
+}
+
 func TestApprovalConsumerLegacyReadyResultRecoveryIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
