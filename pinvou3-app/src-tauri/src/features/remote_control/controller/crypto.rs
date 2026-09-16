@@ -1044,17 +1044,15 @@ pub(crate) struct SensitiveString {
 #[derive(Default)]
 struct SensitiveDropProbe {
     drops: AtomicUsize,
-    original_bytes: AtomicUsize,
-    remaining_bytes: AtomicUsize,
+    owned_bytes_at_drop: AtomicUsize,
 }
 
 #[cfg(test)]
 impl SensitiveDropProbe {
-    fn observation(&self) -> (usize, usize, usize) {
+    fn observation(&self) -> (usize, usize) {
         (
             self.drops.load(Ordering::SeqCst),
-            self.original_bytes.load(Ordering::SeqCst),
-            self.remaining_bytes.load(Ordering::SeqCst),
+            self.owned_bytes_at_drop.load(Ordering::SeqCst),
         )
     }
 }
@@ -1098,11 +1096,8 @@ impl SensitiveString {
 impl Drop for SensitiveString {
     fn drop(&mut self) {
         if let Some(probe) = &self.drop_probe {
-            let original_bytes = self.value.len();
-            self.value.zeroize();
-            probe.original_bytes.store(original_bytes, Ordering::SeqCst);
             probe
-                .remaining_bytes
+                .owned_bytes_at_drop
                 .store(self.value.len(), Ordering::SeqCst);
             probe.drops.fetch_add(1, Ordering::SeqCst);
         }
@@ -1936,7 +1931,10 @@ mod tests {
 
     #[test]
     fn sensitive_strings_never_debug_display_or_serialize_the_secret() {
+        fn require_zeroizing_string(_: &Zeroizing<String>) {}
+
         let secret = SensitiveString::new("top-secret-value").unwrap();
+        require_zeroizing_string(&secret.value);
         assert_eq!(secret.expose(), "top-secret-value");
         assert_eq!(format!("{secret}"), "[REDACTED]");
         assert_eq!(format!("{secret:?}"), "SensitiveString([REDACTED])");
@@ -1955,8 +1953,8 @@ mod tests {
             );
             assert_eq!(
                 empty_probe.observation(),
-                (1, 0, 0),
-                "this empty rejected candidate ran exactly one zeroizing drop"
+                (1, 0),
+                "this empty rejected candidate ran exactly one instance drop"
             );
 
             let oversized = "界".repeat(MAX_SENSITIVE_STRING_BYTES / 3 + 1);
@@ -1970,8 +1968,8 @@ mod tests {
             );
             assert_eq!(
                 oversized_probe.observation(),
-                (1, oversized_bytes, 0),
-                "this over-limit rejected candidate was cleared by its own drop"
+                (1, oversized_bytes),
+                "this over-limit rejected candidate ran exactly one instance drop"
             );
         }
     }
