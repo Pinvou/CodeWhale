@@ -148,9 +148,20 @@ function forgetComputer(id) {
 }
 
 /**
+ * Connection identity of a registry entry: the fields whose change means the
+ * id now names a different computer. A re-register may change only the port,
+ * user, or hdc target while transport and host stay equal, and hdc entries
+ * have no host at all — so the whole connection is compared, not just the
+ * host. label/platform cosmetics do not count.
+ */
+function connectionKey(entry) {
+  return JSON.stringify([entry.transport, entry.host ?? null, entry.port ?? null, entry.user ?? null, entry.target ?? null]);
+}
+
+/**
  * A racing computer_remove/computer_register can repoint an id at another
- * host while a call is in flight; remembering the result then would tag the
- * old host's observation with the new host's id. Fail closed instead.
+ * computer while a call is in flight; remembering the result then would tag
+ * the old computer's observation with the new id. Fail closed instead.
  */
 function assertComputerUnchanged(computer) {
   let now;
@@ -159,7 +170,7 @@ function assertComputerUnchanged(computer) {
   } catch {
     throw new ServerError("computer_repointed", `computer "${computer.id}" was removed while the call was in flight — observe again on the current computer`);
   }
-  if (now.transport !== computer.transport || now.host !== computer.host) {
+  if (connectionKey(now) !== connectionKey(computer)) {
     throw new ServerError("computer_repointed", `computer "${computer.id}" now points at a different computer, so the in-flight result is not its — observe again`);
   }
 }
@@ -198,12 +209,14 @@ async function callTool(params) {
 
   if (name === "computer_register") {
     try {
-      // Re-registering an existing id may repoint it at another host — the
-      // update merges in place, so any state observed under the id before
-      // this call must go with the old host.
-      const existed = registry.list().computers[args.computer] != null;
+      // Re-registering an existing id may repoint it at another computer —
+      // the update merges in place, so state observed under the old
+      // connection must go when the connection changes. A byte-identical
+      // re-register keeps runtime state: a display choice or a running
+      // recorder must not be lost to a no-op.
+      const before = registry.list().computers[args.computer] ?? null;
       const entry = registry.register({ id: args.computer, transport: args.transport, label: args.label, host: args.host, port: args.port, user: args.user, target: args.target });
-      if (existed) forgetComputer(args.computer);
+      if (before && connectionKey(before) !== connectionKey(entry)) forgetComputer(args.computer);
       let installed = null;
       if (entry.transport === "ssh" && args.installAgent !== false) {
         installed = await installRemoteAgent(entry);
