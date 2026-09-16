@@ -186,27 +186,27 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	if _, err := connection.Exec(ctx, `SELECT * FROM public.approval_recovery_query_leases`); postgresSQLState(err) != "42501" {
 		t.Fatalf("recovery role directly read private leases: SQLSTATE=%s err=%v", postgresSQLState(err), err)
 	}
-	var token uuid.UUID
-	var until time.Time
-	var queries int
-	var version int64
-	claim := `SELECT lease_token,lease_until,query_count,version FROM public.claim_approval_recovery_query($1,$2,$3,$4,$5,$6)`
-	args := []any{item.RequestID, item.ExecutionID, item.OriginalEventID, item.Durable, item.ApprovalEpoch, item.RequestVersion}
-	if err := connection.QueryRow(ctx, claim, args...).Scan(&token, &until, &queries, &version); err != nil || token == uuid.Nil || queries != 1 || version != 1 || !until.After(time.Now()) {
-		t.Fatalf("original query lease invalid: token=%s until=%v count=%d version=%d err=%v", token, until, queries, version, err)
+	store, err := NewRecoveryQueryLeaseStore(connection)
+	if err != nil {
+		t.Fatal(err)
 	}
-	claimedToken, claimedVersion := token, version
-	if err := connection.QueryRow(ctx, claim, args...).Scan(&token, &until, &queries, &version); postgresSQLState(err) != "55000" {
-		t.Fatalf("active lease was stolen: SQLSTATE=%s err=%v", postgresSQLState(err), err)
+	lease, err := store.Claim(ctx, item)
+	if err != nil || lease.Token == uuid.Nil || lease.QueryCount != 1 || lease.Version != 1 || !lease.Until.After(time.Now()) {
+		t.Fatalf("original query lease invalid: lease=%+v err=%v", lease, err)
 	}
-	var next time.Time
-	if err := connection.QueryRow(ctx, `SELECT next_query_at,version FROM public.release_approval_recovery_query($1,$2,$3)`, item.RequestID, uuid.New(), claimedVersion).Scan(&next, &version); postgresSQLState(err) != "55000" {
-		t.Fatalf("wrong token released lease: SQLSTATE=%s err=%v", postgresSQLState(err), err)
+	if _, err := store.Claim(ctx, item); !errors.Is(err, ErrApprovalRecoveryLeaseUnavailable) {
+		t.Fatalf("active lease was stolen: %v", err)
 	}
-	if err := connection.QueryRow(ctx, `SELECT next_query_at,version FROM public.release_approval_recovery_query($1,$2,$3)`, item.RequestID, claimedToken, claimedVersion).Scan(&next, &version); err != nil || version != 2 || !next.After(time.Now()) {
-		t.Fatalf("query lease release/backoff invalid: next=%v version=%d err=%v", next, version, err)
+	wrong := lease
+	wrong.Token = uuid.New()
+	if _, err := store.Release(ctx, wrong); !errors.Is(err, ErrApprovalRecoveryLeaseUnavailable) {
+		t.Fatalf("wrong token released lease: %v", err)
 	}
-	if err := connection.QueryRow(ctx, claim, args...).Scan(&token, &until, &queries, &version); postgresSQLState(err) != "55000" {
-		t.Fatalf("backoff was bypassed: SQLSTATE=%s err=%v", postgresSQLState(err), err)
+	next, err := store.Release(ctx, lease)
+	if err != nil || !next.After(time.Now()) {
+		t.Fatalf("query lease release/backoff invalid: next=%v err=%v", next, err)
+	}
+	if _, err := store.Claim(ctx, item); !errors.Is(err, ErrApprovalRecoveryLeaseUnavailable) {
+		t.Fatalf("backoff was bypassed: %v", err)
 	}
 }
