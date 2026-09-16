@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -13,26 +14,38 @@ import (
 )
 
 func TestApprovalPresenterClosedSixCommands(t *testing.T) {
-	id := uuid.New()
-	for _, test := range []struct {
-		command, targetType, targetID, key string
-		policy                             int64
-		snapshot                           int
-	}{
-		{"WALLET_ADJUSTMENT", "MANUAL_ADJUSTMENT", id.String(), "adjustment_id", 1, 1},
-		{"PAYMENT_PROVIDER_RESUME", "PAYMENT_PROVIDER_CONTROL", "provider-one", "provider_id", 2, 1},
-		{"PAYMENT_PRODUCT_RESUME", "PAYMENT_PRODUCT_CONTROL", "product-one", "product_id", 1, 1},
-		{"TOKEN_MODEL_LIFECYCLE_CHANGE", "MODEL", id.String(), "model_id", 2, 2},
-		{"TOKEN_MODEL_CATALOG_ROLLBACK", "MODEL_CATALOG", "123", "source_catalog_version", 2, 2},
-		{"TOKEN_CREDENTIAL_REVOKE", "PROVIDER_CREDENTIAL", id.String(), "credential_id", 1, 1},
-	} {
-		t.Run(test.command, func(t *testing.T) {
-			item := ApprovalRequest{ID: uuid.New(), CommandType: test.command, PolicyVersion: test.policy,
-				SnapshotSchemaVersion: test.snapshot, TargetResourceType: test.targetType,
-				TargetResourceID: test.targetID, RequesterUserID: uuid.New(), ExpiresAt: time.Now(), UpdatedAt: time.Now(),
-				NormalizedCommand:        json.RawMessage(`{"secret":"leak-marker"}`),
-				CriticalResourceVersions: json.RawMessage(`{"secret":"leak-marker"}`),
-				FinancialSnapshot:        json.RawMessage(`{"secret":"leak-marker"}`),
+	data, err := os.ReadFile("../platform/approvalencoding/testdata/golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		ProofVectors []struct {
+			CommandType           string `json:"command_type"`
+			PolicyVersion         int64  `json:"policy_version"`
+			SnapshotSchemaVersion int    `json:"snapshot_schema_version"`
+			Legacy                struct {
+				TargetResourceType string `json:"target_resource_type"`
+				TargetResourceID   string `json:"target_resource_id"`
+				NormalizedJSON     string `json:"normalized_json"`
+				CriticalJSON       string `json:"critical_json"`
+				FinancialJSON      string `json:"financial_json"`
+			} `json:"legacy"`
+		} `json:"proof_vectors"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.ProofVectors) != 6 {
+		t.Fatalf("expected six golden commands, got %d", len(fixture.ProofVectors))
+	}
+	for _, vector := range fixture.ProofVectors {
+		t.Run(vector.CommandType, func(t *testing.T) {
+			item := ApprovalRequest{ID: uuid.New(), CommandType: vector.CommandType, PolicyVersion: vector.PolicyVersion,
+				SnapshotSchemaVersion: vector.SnapshotSchemaVersion, TargetResourceType: vector.Legacy.TargetResourceType,
+				TargetResourceID: vector.Legacy.TargetResourceID, RequesterUserID: uuid.New(), ExpiresAt: time.Now(), UpdatedAt: time.Now(),
+				NormalizedCommand:        json.RawMessage(vector.Legacy.NormalizedJSON),
+				CriticalResourceVersions: json.RawMessage(vector.Legacy.CriticalJSON),
+				FinancialSnapshot:        json.RawMessage(vector.Legacy.FinancialJSON),
 				AllowedActions:           []string{"APPROVE"},
 			}
 			projection, err := approvalV2Detail(item, 5)
@@ -43,19 +56,24 @@ func TestApprovalPresenterClosedSixCommands(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if bytes.Contains(encoded, []byte("leak-marker")) || !bytes.Contains(encoded, []byte(`"`+test.key+`"`)) || !bytes.Contains(encoded, []byte(`"action_control_version":5`)) {
+			if bytes.Contains(encoded, []byte("critical_resource_versions")) || bytes.Contains(encoded, []byte("normalized_command")) || !bytes.Contains(encoded, []byte(`"action_control_version":5`)) {
 				t.Fatalf("unexpected projection: %s", encoded)
 			}
 			listed, err := json.Marshal(approvalV2Summary(item))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if bytes.Contains(listed, []byte("allowed_actions")) || bytes.Contains(listed, []byte("leak-marker")) || bytes.Contains(listed, []byte("critical_resource_versions")) {
+			if bytes.Contains(listed, []byte("allowed_actions")) || bytes.Contains(listed, []byte("critical_resource_versions")) {
 				t.Fatalf("list leaked detail fields: %s", listed)
 			}
 			item.PolicyVersion++
 			if approvalV2Summary(item).DetailAvailability != "DETAIL_PRESENTATION_UNAVAILABLE" || !errors.Is(func() error { _, err := approvalV2Detail(item, 5); return err }(), ErrApprovalDetailPresentationUnavailable) {
 				t.Fatal("unknown historical version must not fall back to raw JSON")
+			}
+			item.PolicyVersion--
+			item.NormalizedCommand = json.RawMessage(`{"secret":"leak-marker"}`)
+			if _, err := approvalV2Detail(item, 5); !errors.Is(err, ErrApprovalDetailPresentationUnavailable) {
+				t.Fatalf("malformed history accepted: %v", err)
 			}
 		})
 	}

@@ -68,12 +68,11 @@ func (r *PostgresRepository) ApprovalRequestV2(ctx context.Context, principal id
 	if err != nil {
 		return nil, err
 	}
-	if approvalV2Command(item) == nil {
-		return approvalV2Summary(item), nil
-	}
 	detail, err := approvalV2Detail(item, control.Version)
 	if errors.Is(err, ErrApprovalDetailPresentationUnavailable) {
-		return approvalV2Summary(item), nil
+		summary := approvalV2Summary(item)
+		summary.DetailAvailability = "DETAIL_PRESENTATION_UNAVAILABLE"
+		return summary, nil
 	}
 	return detail, err
 }

@@ -1,11 +1,13 @@
 package account
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/google/uuid"
 )
@@ -50,22 +52,30 @@ type ApprovalV2Detail struct {
 // Each variant has a distinct closed JSON shape. Never pass arbitrary
 // normalized_command, financial_snapshot or evidence to a presenter.
 type approvalWalletSummary struct {
-	AdjustmentID uuid.UUID `json:"adjustment_id"`
+	AdjustmentID       uuid.UUID `json:"adjustment_id"`
+	WalletID           uuid.UUID `json:"wallet_id"`
+	AmountMicrocredits string    `json:"amount_microcredits"`
 }
 type approvalProviderSummary struct {
-	ProviderID string `json:"provider_id"`
+	ProviderID             string `json:"provider_id"`
+	ProviderControlVersion string `json:"provider_control_version"`
 }
 type approvalProductSummary struct {
-	ProductID string `json:"product_id"`
+	ProductID             string `json:"product_id"`
+	ProviderID            string `json:"provider_id"`
+	ProductControlVersion string `json:"product_control_version"`
 }
 type approvalLifecycleSummary struct {
-	ModelID uuid.UUID `json:"model_id"`
+	ModelID         uuid.UUID `json:"model_id"`
+	TargetLifecycle string    `json:"target_lifecycle"`
+	EffectiveAt     *string   `json:"effective_at"`
 }
 type approvalCatalogSummary struct {
 	SourceCatalogVersion string `json:"source_catalog_version"`
 }
 type approvalCredentialSummary struct {
-	CredentialID uuid.UUID `json:"credential_id"`
+	CredentialID   uuid.UUID `json:"credential_id"`
+	TokenAccountID uuid.UUID `json:"token_account_id"`
 }
 
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
@@ -136,17 +146,17 @@ func approvalV2Command(item ApprovalRequest) any {
 		if err != nil || id.String() != value {
 			return nil
 		}
-		return approvalWalletSummary{id}
+		return approvalWalletSummary{AdjustmentID: id}
 	case "PAYMENT_PROVIDER_RESUME":
 		if item.TargetResourceType != "PAYMENT_PROVIDER_CONTROL" {
 			return nil
 		}
-		return approvalProviderSummary{value}
+		return approvalProviderSummary{ProviderID: value}
 	case "PAYMENT_PRODUCT_RESUME":
 		if item.TargetResourceType != "PAYMENT_PRODUCT_CONTROL" {
 			return nil
 		}
-		return approvalProductSummary{value}
+		return approvalProductSummary{ProductID: value}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -155,7 +165,7 @@ func approvalV2Command(item ApprovalRequest) any {
 		if err != nil || id.String() != value {
 			return nil
 		}
-		return approvalLifecycleSummary{id}
+		return approvalLifecycleSummary{ModelID: id}
 	case "TOKEN_MODEL_CATALOG_ROLLBACK":
 		if item.TargetResourceType != "MODEL_CATALOG" {
 			return nil
@@ -175,14 +185,63 @@ func approvalV2Command(item ApprovalRequest) any {
 		if err != nil || id.String() != value {
 			return nil
 		}
-		return approvalCredentialSummary{id}
+		return approvalCredentialSummary{CredentialID: id}
 	}
 	return nil
 }
 
 func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Detail, error) {
-	command := approvalV2Command(item)
-	if command == nil || controlVersion <= 0 {
+	if approvalV2Command(item) == nil || controlVersion <= 0 {
+		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: item.CommandType, PolicyVersion: item.PolicyVersion,
+		SnapshotSchemaVersion: item.SnapshotSchemaVersion,
+		TargetResourceType:    item.TargetResourceType, TargetResourceID: item.TargetResourceID,
+		NormalizedCommand: item.NormalizedCommand, CriticalResourceVersions: item.CriticalResourceVersions,
+		FinancialSnapshot: item.FinancialSnapshot,
+	})
+	if err != nil {
+		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+	}
+	var proof struct {
+		Normalized struct {
+			WalletID               uuid.UUID `json:"wallet_id"`
+			AmountMicrocredits     string    `json:"amount_microcredits"`
+			ProviderID             string    `json:"provider_id"`
+			ProviderControlVersion string    `json:"provider_control_version"`
+			ProductControlVersion  string    `json:"product_control_version"`
+			TargetLifecycle        string    `json:"target_lifecycle"`
+			EffectiveAt            *string   `json:"effective_at"`
+			TokenAccountID         uuid.UUID `json:"token_account_id"`
+		} `json:"normalized_command"`
+	}
+	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
+		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+	}
+	var command any
+	switch target := approvalV2Command(item).(type) {
+	case approvalWalletSummary:
+		target.WalletID = proof.Normalized.WalletID
+		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
+		command = target
+	case approvalProviderSummary:
+		target.ProviderControlVersion = proof.Normalized.ProviderControlVersion
+		command = target
+	case approvalProductSummary:
+		target.ProviderID = proof.Normalized.ProviderID
+		target.ProductControlVersion = proof.Normalized.ProductControlVersion
+		command = target
+	case approvalLifecycleSummary:
+		target.TargetLifecycle = proof.Normalized.TargetLifecycle
+		target.EffectiveAt = proof.Normalized.EffectiveAt
+		command = target
+	case approvalCatalogSummary:
+		command = target
+	case approvalCredentialSummary:
+		target.TokenAccountID = proof.Normalized.TokenAccountID
+		command = target
+	default:
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
 	}
 	actions := append([]string{}, item.AllowedActions...)
