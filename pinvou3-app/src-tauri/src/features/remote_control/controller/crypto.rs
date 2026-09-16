@@ -69,10 +69,10 @@ fn lp(output: &mut Vec<u8>, bytes: &[u8]) -> CryptoResult<()> {
     Ok(())
 }
 
-fn random_32() -> CryptoResult<[u8; 32]> {
-    let mut value = [0_u8; 32];
+fn random_32() -> CryptoResult<Zeroizing<[u8; 32]>> {
+    let mut value = Zeroizing::new([0_u8; 32]);
     SystemRandom::new()
-        .fill(&mut value)
+        .fill(&mut value[..])
         .map_err(|_| ControllerCryptoError::new("random_unavailable", "csprng"))?;
     Ok(value)
 }
@@ -131,7 +131,7 @@ fn hkdf_expand(
     }
     let hkdf = Hkdf::<Sha256V10>::new(Some(salt), input_key_material);
     let mut output = Zeroizing::new([0_u8; 32]);
-    hkdf.expand(&info, output.as_mut())
+    hkdf.expand(&info, &mut output[..])
         .map_err(|_| ControllerCryptoError::new("key_derivation_failed", "hkdf"))?;
     info.zeroize();
     Ok(output)
@@ -158,9 +158,8 @@ impl Drop for CodeWrapKeyPair {
 
 impl CodeWrapKeyPair {
     pub(crate) fn generate() -> CryptoResult<Self> {
-        let mut bytes = random_32()?;
-        let secret = StaticSecret::from(bytes);
-        bytes.zeroize();
+        let bytes = random_32()?;
+        let secret = StaticSecret::from(*bytes);
         Ok(Self {
             public: CodeWrapPublicKey(PublicKey::from(&secret).to_bytes()),
             secret,
@@ -179,7 +178,7 @@ impl CodeWrapKeyPair {
         let shared = shared_secret(&self.secret, peer_public_key.to_bytes())?;
         let expires = binding.expires_at_ms_decimal();
         hkdf_expand(
-            shared.as_ref(),
+            &shared[..],
             b"pinvou-code-wrap-salt-v1",
             b"pinvou-code-wrap-key-v1",
             &[
@@ -369,9 +368,8 @@ impl Drop for HandshakeKeyPair {
 
 impl HandshakeKeyPair {
     pub(crate) fn generate() -> CryptoResult<Self> {
-        let mut bytes = random_32()?;
-        let secret = StaticSecret::from(bytes);
-        bytes.zeroize();
+        let bytes = random_32()?;
+        let secret = StaticSecret::from(*bytes);
         Ok(Self {
             public: HandshakePublicKey(PublicKey::from(&secret).to_bytes()),
             secret,
@@ -392,7 +390,7 @@ impl HandshakeKeyPair {
         let derive = |purpose: &'static [u8]| {
             let fields = [info[0], info[1], info[2], info[3], purpose];
             hkdf_expand(
-                shared.as_ref(),
+                &shared[..],
                 &binding.transcript_hash,
                 b"pinvou-controller-handshake-kdf-v1",
                 &fields,
@@ -504,7 +502,7 @@ impl fmt::Debug for ReceiptSecret {
 
 impl ReceiptSecret {
     pub(crate) fn generate() -> CryptoResult<Self> {
-        Ok(Self(Zeroizing::new(random_32()?)))
+        Ok(Self(random_32()?))
     }
 
     pub(crate) fn commitment(
@@ -519,7 +517,7 @@ impl ReceiptSecret {
             &binding.reservation_id,
             &transcript_hash,
             std::str::from_utf8(sender.wire()).expect("role is ASCII"),
-            self.0.as_ref(),
+            &self.0[..],
         )
         .map_err(|_| ControllerCryptoError::new("invalid_binding", "receipt"))?;
         let commitment = Sha256::digest(&preimage).into();
@@ -679,13 +677,12 @@ impl FinishedSender {
         receipt: &ReceiptSecret,
         nonce: [u8; AEAD_NONCE_BYTES],
     ) -> CryptoResult<Vec<u8>> {
-        let mut plaintext = b"pinvou-controller-finished-v1".to_vec();
+        let mut plaintext = Zeroizing::new(b"pinvou-controller-finished-v1".to_vec());
         lp(&mut plaintext, &self.transcript_hash)?;
         lp(&mut plaintext, self.sender.wire())?;
-        lp(&mut plaintext, receipt.0.as_ref())?;
+        lp(&mut plaintext, &receipt.0[..])?;
         let aad = finished_aad(&self.transcript_hash, self.sender)?;
-        let ciphertext = seal_aead(&self.key, nonce, &aad, &plaintext, 1024)?;
-        plaintext.zeroize();
+        let ciphertext = seal_aead(&self.key, nonce, &aad, &plaintext[..], 1024)?;
         let mut output = nonce.to_vec();
         output.extend_from_slice(&ciphertext);
         Ok(output)
@@ -1062,14 +1059,14 @@ pub(crate) struct SensitiveString(Zeroizing<String>);
 
 impl SensitiveString {
     pub(crate) fn new(value: impl Into<String>) -> CryptoResult<Self> {
-        let value = value.into();
-        if value.is_empty() || value.len() > MAX_SENSITIVE_STRING_BYTES {
+        let candidate = Self(Zeroizing::new(value.into()));
+        if candidate.0.is_empty() || candidate.0.len() > MAX_SENSITIVE_STRING_BYTES {
             return Err(ControllerCryptoError::new(
                 "invalid_sensitive_value",
                 "sensitive_string",
             ));
         }
-        Ok(Self(Zeroizing::new(value)))
+        Ok(candidate)
     }
 
     pub(crate) fn expose(&self) -> &str {
@@ -1336,32 +1333,26 @@ mod tests {
             hex_lower(&b.public_key().to_bytes()),
             vector["public_b_hex"]
         );
-        assert_eq!(
-            hex_lower(
-                shared_secret(&a.secret, b.public_key().to_bytes())
-                    .unwrap()
-                    .as_ref()
-            ),
-            vector["shared_secret_hex"]
-        );
+        let shared = shared_secret(&a.secret, b.public_key().to_bytes()).unwrap();
+        assert_eq!(hex_lower(&shared[..]), vector["shared_secret_hex"]);
         let binding = binding();
         let keys = a.into_session_keys(b.public_key(), &binding).unwrap();
         assert_eq!(
-            hex_lower(keys.finished_a.as_ref()),
+            hex_lower(&keys.finished_a[..]),
             vector["finished"]["derived_key_hex"]
         );
         assert_eq!(
-            hex_lower(keys.business_a_to_b.as_ref()),
+            hex_lower(&keys.business_a_to_b[..]),
             vector["business"]["derived_root_hex"]
         );
         assert_eq!(
-            hex_lower(keys.resume_secret.as_ref()),
+            hex_lower(&keys.resume_secret[..]),
             vector["resume_secret_hex"]
         );
-        assert_ne!(keys.resume_secret.as_ref(), keys.finished_a.as_ref());
-        assert_ne!(keys.resume_secret.as_ref(), keys.finished_b.as_ref());
-        assert_ne!(keys.resume_secret.as_ref(), keys.business_a_to_b.as_ref());
-        assert_ne!(keys.resume_secret.as_ref(), keys.business_b_to_a.as_ref());
+        assert_ne!(&keys.resume_secret[..], &keys.finished_a[..]);
+        assert_ne!(&keys.resume_secret[..], &keys.finished_b[..]);
+        assert_ne!(&keys.resume_secret[..], &keys.business_a_to_b[..]);
+        assert_ne!(&keys.resume_secret[..], &keys.business_b_to_a[..]);
         let receipt = ReceiptSecret::from_test_bytes([5_u8; 32]);
         let mut ciphers = keys.into_role_ciphers(ControllerRole::A, lease(7)).unwrap();
         let finished = ciphers
@@ -1373,7 +1364,7 @@ mod tests {
             vector["finished"]["ciphertext_with_nonce_hex"]
         );
         assert_eq!(
-            hex_lower(ciphers.send.key.as_ref()),
+            hex_lower(&ciphers.send.key[..]),
             vector["business"]["derived_key_hex"]
         );
         assert_eq!(
@@ -1420,14 +1411,8 @@ mod tests {
             hex_lower(&relay.public_key().to_bytes()),
             vector["relay_public_hex"]
         );
-        assert_eq!(
-            hex_lower(
-                shared_secret(&relay.secret, receiver.public_key().to_bytes())
-                    .unwrap()
-                    .as_ref()
-            ),
-            vector["shared_secret_hex"]
-        );
+        let shared = shared_secret(&relay.secret, receiver.public_key().to_bytes()).unwrap();
+        assert_eq!(hex_lower(&shared[..]), vector["shared_secret_hex"]);
         let binding = CodeWrapBinding::new(
             vector["binding"]["registration_request_id"]
                 .as_str()
@@ -1447,10 +1432,9 @@ mod tests {
         assert_eq!(hex_lower(&binding.aad().unwrap()), vector["aad_hex"]);
         assert_eq!(
             hex_lower(
-                relay
+                &relay
                     .derive_wrapping_key(receiver.public_key(), &binding)
-                    .unwrap()
-                    .as_ref()
+                    .unwrap()[..],
             ),
             vector["derived_key_hex"]
         );
@@ -1603,8 +1587,12 @@ mod tests {
 
     #[test]
     fn generated_secret_owners_run_zeroizing_drop_paths() {
+        fn require_zeroizing_array(_: &Zeroizing<[u8; 32]>) {}
+
         let before = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
         {
+            let random_owner = random_32().unwrap();
+            require_zeroizing_array(&random_owner);
             let _wrap = CodeWrapKeyPair::generate().unwrap();
             let _handshake = HandshakeKeyPair::generate().unwrap();
             let _receipt = ReceiptSecret::generate().unwrap();
@@ -1873,7 +1861,7 @@ mod tests {
             .into_role_ciphers(ControllerRole::A, lease(8))
             .unwrap()
             .send;
-        assert_ne!(first_sender.key.as_ref(), replacement.key.as_ref());
+        assert_ne!(&first_sender.key[..], &replacement.key[..]);
         assert!(replacement.seal(8, 1, "task_submit", b"new").is_ok());
 
         let source = include_str!("crypto.rs");
@@ -1923,16 +1911,28 @@ mod tests {
         let error = serde_json::to_string(&secret).unwrap_err().to_string();
         assert!(!error.contains("top-secret-value"));
         assert!(error.contains("serialization forbidden"));
+        let before_empty_rejection = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
         assert_eq!(
             SensitiveString::new("").unwrap_err().code,
             "invalid_sensitive_value"
         );
+        assert_eq!(
+            SECRET_OWNER_DROPS.load(Ordering::Relaxed),
+            before_empty_rejection + 1,
+            "even an invalid candidate is owned by Zeroizing before validation"
+        );
         assert!(SensitiveString::new("界".repeat(MAX_SENSITIVE_STRING_BYTES / 3)).is_ok());
+        let before_oversize_rejection = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
         assert_eq!(
             SensitiveString::new("界".repeat(MAX_SENSITIVE_STRING_BYTES / 3 + 1))
                 .unwrap_err()
                 .code,
             "invalid_sensitive_value"
+        );
+        assert_eq!(
+            SECRET_OWNER_DROPS.load(Ordering::Relaxed),
+            before_oversize_rejection + 1,
+            "the over-limit secret follows the same zeroizing drop path"
         );
         drop(secret);
         assert!(SECRET_OWNER_DROPS.load(Ordering::Relaxed) > before);
