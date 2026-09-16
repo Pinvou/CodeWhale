@@ -15,6 +15,7 @@ func TestApprovalBFFLocksPathAndRejectsBrowserProof(t *testing.T) {
 	version, wire := int64(9), 2
 	bumpAfterDetail := false
 	staleDetailHeader := false
+	historical := false
 	var upstreamPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -28,6 +29,10 @@ func TestApprovalBFFLocksPathAndRejectsBrowserProof(t *testing.T) {
 			return
 		}
 		upstreamPath = r.URL.Path
+		if historical {
+			_, _ = w.Write([]byte(`{"detail_availability":"DETAIL_PRESENTATION_UNAVAILABLE","status":"SUBMITTED"}`))
+			return
+		}
 		if strings.Contains(r.URL.Path, "/actions/decide") {
 			_, _ = w.Write([]byte(`{"status":"APPROVED"}`))
 			return
@@ -119,5 +124,17 @@ func TestApprovalBFFLocksPathAndRejectsBrowserProof(t *testing.T) {
 	service.Handler(nil).ServeHTTP(response, legacy)
 	if response.Code != http.StatusConflict || strings.Contains(response.Body.String(), "allowed_actions") {
 		t.Fatalf("late control change exposed actions: %d %s", response.Code, response.Body.String())
+	}
+	bumpAfterDetail, historical, wire = false, true, 2
+	version++
+	historySession := session
+	historySession.ID = "historical"
+	_ = store.SaveSession(context.Background(), historySession)
+	historyRequest := request(http.MethodGet, resource, "")
+	historyRequest.Header.Set("Cookie", service.sessionCookieName()+"="+historySession.ID)
+	response = httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, historyRequest)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "allowed_actions") {
+		t.Fatalf("historical minimum was not readable without actions: %d %s", response.Code, response.Body.String())
 	}
 }

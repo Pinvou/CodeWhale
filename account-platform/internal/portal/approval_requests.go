@@ -109,10 +109,15 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 			version, err = strconv.ParseInt(response.Header.Get("X-Pinvou-Approval-Action-Control-Version"), 10, 64)
 		} else {
 			var envelope struct {
-				ActionControlVersion int64 `json:"action_control_version"`
+				ActionControlVersion int64           `json:"action_control_version"`
+				DetailAvailability   string          `json:"detail_availability"`
+				AllowedActions       json.RawMessage `json:"allowed_actions"`
 			}
 			err = json.Unmarshal(data, &envelope)
 			version = envelope.ActionControlVersion
+			if err == nil && version == 0 && envelope.DetailAvailability == "DETAIL_PRESENTATION_UNAVAILABLE" && len(envelope.AllowedActions) == 0 {
+				version = capability.Version // Historical minimum has no action-bearing generation.
+			}
 		}
 		if err != nil || version != capability.Version {
 			api.WriteError(w, http.StatusConflict, "APPROVAL_ACTION_CONTROL_CHANGED", "approval actions changed; reload the approval detail", httpserver.RequestID(r.Context()))

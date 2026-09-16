@@ -156,6 +156,8 @@ GSA-17 Portal可信capability入口（仍PARTIAL / REVIEW_PENDING）：`GET /api
 GSA-17 Account v2决定动作代次（仍PARTIAL / REVIEW_PENDING）：v2闭合请求体新增必填正整数`action_control_version`；批准在领域proof调用前比对控制版本，并在最终Serializable写事务内重验，驳回在可见性检查后的Serializable事务内持有控制共享锁并重验。旧v1请求体不变。版本失配返回409 `APPROVAL_ACTION_CONTROL_CHANGED`、`no-store`，零领域proof及决定副作用。真实隔离PG覆盖批准/驳回过期版本与零领域调用；Portal BFF的路由和迟到响应处理仍未完成。
 
 GSA-17 Portal审批路径BFF（仍PARTIAL / REVIEW_PENDING）：新增版本中立的`/api/admin/approvals/requests`列表、详情和决定入口，只按服务端受信capability及Redis Session不可变协议锁选择Account v1/v2精确路径；v2会话遇gate回退固定503且不走v1。决定要求浏览器携带所见动作版本，v2闭合body还须与其一致；任何proof-like请求头或未知决定字段在BFF拒绝。读写响应发给浏览器前再次读取受信capability，变化即409并不返回旧动作；详情另检查v1响应header/v2 body动作版本，成功决定只返回204并要求重新获取详情。定向Portal HTTP覆盖锁定路由、过期/未知输入、v1兼容、gate回退和迟到响应；审批中心UI尚未接线，Redis真实多副本及生产灰度仍待环境验证。
+
+GSA-17 客户端控制代次基础（仍PARTIAL / REVIEW_PENDING）：Account v2 summary/detail补齐决定CAS需要的正整数request `version`，历史无presenter的最小投影继续只读且不带动作。Admin客户端新增独立governed审批读取/决定方法，不改变既有业务页v1调用；每次读取服务端capability，对mode、Relay状态、两个epoch及version变化中止在途响应，v1校验详情header、v2校验详情body，列表动作一律清空，决定使用详情锁定的动作版本且成功后必须重新读取详情。定向测试覆盖RUNNING→FENCED→RUNNING与迟到APPROVE响应；静态审批页与完整四视图仍属GSA-18，不能据此宣布GSA-17/18交付完毕。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。

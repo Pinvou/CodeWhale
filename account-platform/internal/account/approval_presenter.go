@@ -26,6 +26,7 @@ type ApprovalV2Summary struct {
 	Target                ApprovalV2Target    `json:"target"`
 	Requester             ApprovalV2Requester `json:"requester"`
 	Status                string              `json:"status"`
+	Version               int64               `json:"version"`
 	SubmittedAt           *time.Time          `json:"submitted_at"`
 	ExpiresAt             time.Time           `json:"expires_at"`
 	UpdatedAt             time.Time           `json:"updated_at"`
@@ -120,7 +121,7 @@ func approvalV2Summary(item ApprovalRequest) ApprovalV2Summary {
 		RiskClass: item.RiskClass,
 		Target:    target,
 		Requester: ApprovalV2Requester{UserID: item.RequesterUserID},
-		Status:    item.Status, SubmittedAt: item.SubmittedAt, ExpiresAt: item.ExpiresAt,
+		Status:    item.Status, Version: item.Version, SubmittedAt: item.SubmittedAt, ExpiresAt: item.ExpiresAt,
 		UpdatedAt: item.UpdatedAt, SupersedesRequestID: item.SupersedesRequestID,
 		DetailAvailability: availability,
 	}

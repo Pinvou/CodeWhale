@@ -5324,7 +5324,7 @@ components:
     ApprovalV2Summary:
       type: object
       additionalProperties: false
-      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability]
+      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, version, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability]
       properties:
         approval_request_id: { type: string, format: uuid }
         command_type: { type: string }
@@ -5344,6 +5344,7 @@ components:
           required: [user_id]
           properties: { user_id: { type: string, format: uuid } }
         status: { $ref: "#/components/schemas/ApprovalStatus" }
+        version: { type: integer, format: int64, minimum: 1 }
         submitted_at: { type: [string, "null"], format: date-time }
         expires_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -5356,7 +5357,7 @@ components:
     ApprovalV2KnownDetail:
       type: object
       additionalProperties: false
-      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability, allowed_actions, action_control_version, command, execution]
+      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, version, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability, allowed_actions, action_control_version, command, execution]
       properties:
         approval_request_id: { type: string, format: uuid }
         command_type: { type: string }
@@ -5366,6 +5367,7 @@ components:
         target: { $ref: "#/components/schemas/ApprovalV2Summary/properties/target" }
         requester: { $ref: "#/components/schemas/ApprovalV2Summary/properties/requester" }
         status: { $ref: "#/components/schemas/ApprovalStatus" }
+        version: { type: integer, format: int64, minimum: 1 }
         submitted_at: { type: [string, "null"], format: date-time }
         expires_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }

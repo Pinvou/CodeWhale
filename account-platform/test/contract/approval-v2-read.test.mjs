@@ -44,7 +44,7 @@ test('closed v2 detail schema accepts six presenters but rejects raw or mismatch
   const valid = ajv.compile({ $ref: '#/components/schemas/ApprovalV2Detail', components: { schemas } });
   const id = '11111111-1111-4111-8111-111111111111';
   const base = { approval_request_id: id, risk_class: 'HIGH', target: { resource_type: 'MODEL', resource_id: id },
-    requester: { user_id: id }, status: 'SUBMITTED', submitted_at: null, expires_at: '2026-09-16T12:00:00Z',
+    requester: { user_id: id }, status: 'SUBMITTED', version: 3, submitted_at: null, expires_at: '2026-09-16T12:00:00Z',
     updated_at: '2026-09-16T11:00:00Z', supersedes_request_id: null, detail_availability: 'AVAILABLE',
     allowed_actions: ['APPROVE'], action_control_version: 1, execution: null };
   const cases = [

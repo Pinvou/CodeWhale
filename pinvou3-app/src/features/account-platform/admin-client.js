@@ -69,6 +69,21 @@ function abortRequestError() {
   return error;
 }
 
+function approvalControlChanged() {
+  const error = new Error('APPROVAL_ACTION_CONTROL_CHANGED');
+  error.code = 'APPROVAL_ACTION_CONTROL_CHANGED';
+  error.status = 409;
+  return error;
+}
+
+function approvalControlKey(payload) {
+  if (!payload?.control) return '';
+  const { mode, approval_wire_version, proof_required, epoch,
+    authorization_relay_state, authorization_relay_epoch, version } = payload.control;
+  return JSON.stringify([payload.session_approval_wire_version, mode, approval_wire_version,
+    proof_required, epoch, authorization_relay_state, authorization_relay_epoch, version]);
+}
+
 function waitForSharedRead(entry, signal) {
   if (signal?.aborted) return Promise.reject(abortRequestError());
   entry.consumers += 1;
@@ -105,6 +120,8 @@ export class AdminPlatformClient {
     this.authorizationVersions = {};
     this.authorizationVersionListeners = new Set();
     this.inflightReads = new Map();
+    this.approvalControl = null;
+    this.approvalControllers = new Set();
   }
 
   onAuthorizationVersion(listener) {
@@ -493,6 +510,122 @@ export class AdminPlatformClient {
   }
   approvalRequest(requestID, signal) {
     return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal);
+  }
+  async governedApprovalCapability(signal) {
+    const response = await fetch(`${this.baseURL}/api/admin/approvals/capability`, {
+      headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE' || payload?.code === 'APPROVAL_CAPABILITY_UNAVAILABLE') {
+        this.approvalControl = null;
+        for (const controller of this.approvalControllers) controller.abort();
+        this.approvalControllers.clear();
+      }
+      throw errorFromResponse(response, payload);
+    }
+    const control = payload?.control;
+    if (!Number.isSafeInteger(control?.version) || control.version < 1 ||
+      !Number.isSafeInteger(control?.epoch) || control.epoch < 1 ||
+      !Number.isSafeInteger(control?.authorization_relay_epoch) || control.authorization_relay_epoch < 1 ||
+      ![1, 2].includes(payload?.session_approval_wire_version)) throw approvalControlChanged();
+    const current = this.approvalControl;
+    if (current && control.version < current.control.version) {
+      throw approvalControlChanged();
+    }
+    if (current && control.version === current.control.version && approvalControlKey(payload) !== approvalControlKey(current)) {
+      this.approvalControl = null;
+      for (const controller of this.approvalControllers) controller.abort();
+      this.approvalControllers.clear();
+      throw approvalControlChanged();
+    }
+    if (!current || approvalControlKey(payload) !== approvalControlKey(current)) {
+      this.approvalControl = payload;
+      for (const controller of this.approvalControllers) controller.abort();
+      this.approvalControllers.clear();
+    }
+    return payload;
+  }
+  async governedApprovalRead(path, { detail = false, signal } = {}) {
+    const capability = await this.governedApprovalCapability(signal);
+    const key = approvalControlKey(capability);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    this.approvalControllers.add(controller);
+    try {
+      const response = await fetch(`${this.baseURL}/api/admin/approvals/requests${path}`, {
+        headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
+          this.approvalControl = null;
+          for (const active of this.approvalControllers) active.abort();
+        }
+        throw errorFromResponse(response, payload);
+      }
+      if (approvalControlKey(this.approvalControl) !== key) throw approvalControlChanged();
+      if (!detail) {
+        return { ...payload, items: (payload.items || []).map(item => ({ ...item, allowed_actions: [] })) };
+      }
+      if (capability.session_approval_wire_version === 2 &&
+        payload.detail_availability === 'DETAIL_PRESENTATION_UNAVAILABLE' && !('allowed_actions' in payload)) {
+        return { ...payload, allowed_actions: [] };
+      }
+      const rawVersion = capability.session_approval_wire_version === 2
+        ? payload.action_control_version : response.headers.get('X-Pinvou-Approval-Action-Control-Version');
+      const version = capability.session_approval_wire_version === 1 && !/^[1-9][0-9]*$/.test(rawVersion || '')
+        ? NaN : Number(rawVersion);
+      if (!Number.isSafeInteger(version) || version !== capability.control.version) throw approvalControlChanged();
+      return { ...payload, action_control_version: version };
+    } finally {
+      this.approvalControllers.delete(controller);
+      signal?.removeEventListener('abort', abort);
+    }
+  }
+  governedApprovalRequests(filters = {}, signal) {
+    const query = new URLSearchParams({ limit: String(filters.limit || 50) });
+    for (const [key, value] of Object.entries(filters)) if (key !== 'limit' && value) query.set(key, value);
+    return this.governedApprovalRead(`?${query}`, { signal });
+  }
+  governedApprovalRequest(requestID, signal) {
+    return this.governedApprovalRead(`/${encodeURIComponent(requestID)}`, { detail: true, signal });
+  }
+  async decideGovernedApproval(requestID, detail, decision, reason, signal) {
+    const capability = await this.governedApprovalCapability(signal);
+    const version = detail?.action_control_version;
+    if (detail?.approval_request_id !== requestID || !Number.isSafeInteger(version) || version !== capability.control.version ||
+      !Number.isSafeInteger(detail?.version) || detail.version < 1) throw approvalControlChanged();
+    const body = { expected_version: detail.version, decision, reason };
+    if (capability.session_approval_wire_version === 2) body.action_control_version = version;
+    else body.observed_versions = detail.critical_resource_versions || {};
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    this.approvalControllers.add(controller);
+    try {
+      const response = await fetch(`${this.baseURL}/api/admin/approvals/requests/${encodeURIComponent(requestID)}/actions/decide`, {
+        method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json',
+          'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },
+        credentials: 'same-origin', cache: 'no-store', body: JSON.stringify(body), signal: controller.signal,
+      });
+      const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
+          this.approvalControl = null;
+          for (const active of this.approvalControllers) active.abort();
+        }
+        throw errorFromResponse(response, payload);
+      }
+      if (approvalControlKey(this.approvalControl) !== approvalControlKey(capability)) throw approvalControlChanged();
+      return null; // A successful decision must be followed by a fresh detail read.
+    } finally {
+      this.approvalControllers.delete(controller);
+      signal?.removeEventListener('abort', abort);
+    }
   }
   createApprovalDraft(input, signal) {
     return this.mutate('account', '/admin/v1/approval-requests', 'POST', input, '', signal);
