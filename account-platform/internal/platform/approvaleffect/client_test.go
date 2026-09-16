@@ -82,6 +82,13 @@ func TestClientFailsClosedOnTransportAndShapeDrift(t *testing.T) {
 			other.ApprovalRequestID = uuid.New()
 			_ = json.NewEncoder(w).Encode(other)
 		},
+		"stale": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "application/json")
+			other := valid
+			other.ObservedAt = time.Now().UTC().Add(-time.Minute)
+			_ = json.NewEncoder(w).Encode(other)
+		},
 	}
 	for name, handler := range tests {
 		t.Run(name, func(t *testing.T) {

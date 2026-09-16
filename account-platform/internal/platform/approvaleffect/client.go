@@ -86,6 +86,7 @@ func (c *Client) Observe(ctx context.Context, requestID uuid.UUID, commandType, 
 		return Observation{}, ErrUnavailable
 	}
 	request.Header.Set("Cache-Control", "no-cache")
+	startedAt := time.Now().UTC()
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return Observation{}, ErrUnavailable
@@ -108,7 +109,8 @@ func (c *Client) Observe(ctx context.Context, requestID uuid.UUID, commandType, 
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&observation) != nil || decoder.Decode(new(any)) != io.EOF || observation.Validate() != nil ||
 		observation.Authority != authority || observation.ApprovalRequestID != requestID || observation.CommandType != commandType ||
-		observation.CommandFingerprint != commandFingerprint {
+		observation.CommandFingerprint != commandFingerprint || observation.ObservedAt.Before(startedAt.Add(-30*time.Second)) ||
+		observation.ObservedAt.After(time.Now().UTC().Add(30*time.Second)) {
 		return Observation{}, ErrUnavailable
 	}
 	return observation, nil
