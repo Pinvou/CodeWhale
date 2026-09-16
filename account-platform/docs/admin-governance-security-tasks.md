@@ -41,7 +41,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
 | GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | PENDING |
+| GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | PENDING |
 | GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | PENDING |
 | GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | PENDING |
@@ -181,6 +181,8 @@ GSA-18 详情动作交互（仍PARTIAL / REVIEW_PENDING）：仅从当前服务�
 GSA-18 URL与游标恢复切片（仍PARTIAL / REVIEW_PENDING）：审批中心现在响应浏览器返回/前进的`popstate`，保留原页面hash；非首页游标读取失败时提供显式回第一页操作，不自动重试或猜测失效原因。三语文案、定向合同、Portal构建及架构门禁通过。真实浏览器和权限撤销验收仍待执行，不据此关闭GSA-18。
 
 GSA-18 决定动作映射修正（仍PARTIAL / REVIEW_PENDING）：详情允许动作`APPROVE/REJECT`显式映射为Account决定body的`APPROVED/REJECTED`；仅`SUBMIT`进入提交接口，未知动作失败关闭。此前UI误把批准/拒绝交给提交接口，现已用动作矩阵回归和Portal构建验证。尚未部署，先前环境是否触发过此UI错误不能由代码测试推断。
+
+GSA-19 业务页到中心的精确申请入口（PARTIAL / REVIEW_PENDING）：充值控制的Provider/Product及钱包调整行若已有申请ID，跳转审批中心时同时携带目标筛选与`approval_request_id`，直接由受控详情BFF读取对应申请；跨分区导航清除旧视图/游标/申请ID，避免复用上一条申请。未取得申请ID时保留既有目标筛选行为。定向导航合同及Portal构建通过。业务页DRAFT编辑、终态替代申请和中心返回领域页仍未实现，不据此宣称双向闭环。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

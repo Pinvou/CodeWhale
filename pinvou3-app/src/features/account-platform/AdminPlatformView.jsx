@@ -715,6 +715,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       product_include_deleted: null,
       approval_command_type: null,
       approval_target: null,
+      approval_view: null,
+      approval_status: null,
+      approval_cursor: null,
+      approval_request_id: null,
       ...clearAdminModelTokenUpdates({ includeLegacy: key !== 'tokens' }),
       ...modelTokenQuery,
     });
@@ -2529,7 +2533,10 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
       setBusyTarget('');
     }
   };
-  const openApproval = (commandType, targetID) => onNavigate?.('approvals', { approval_command_type: commandType, approval_target: targetID });
+  const openApproval = (commandType, targetID, approval) => onNavigate?.('approvals', {
+    approval_command_type: commandType, approval_target: targetID,
+    approval_request_id: approval?.approval_request_id || null,
+  });
   if (!control) return <div className="adm-inline-message error">{copy.billing.controlsUnavailable}</div>;
   const providerApproval = approvalFor('PAYMENT_PROVIDER_RESUME', control.provider_id);
   const providerAction = paymentControlApprovalAction(providerApproval, { canRequest });
@@ -2553,7 +2560,7 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
           {providerAction === 'create' && <button type="button" disabled={!control.resume_draft || busyTarget === 'provider' || String(reasons.provider || '').trim().length < 10} title={!control.resume_draft ? copy.billing.resumeDraftUnavailable : undefined} onClick={() => requestResume()}>{copy.billing.requestProviderResume}</button>}
           {providerAction === 'submit' && <button type="button" disabled={busyTarget === 'provider'} onClick={() => requestResume(null, providerApproval)}>{copy.billing.continueControlResume}</button>}
           {providerAction === 'create' && !control.resume_draft && <small>{copy.billing.resumeDraftUnavailable}</small>}
-          {providerApproval && (canRequest || canApprove) && <button type="button" onClick={() => openApproval('PAYMENT_PROVIDER_RESUME', control.provider_id)}>{copy.billing.viewApproval} · {providerApproval.status}</button>}
+          {providerApproval && (canRequest || canApprove) && <button type="button" onClick={() => openApproval('PAYMENT_PROVIDER_RESUME', control.provider_id, providerApproval)}>{copy.billing.viewApproval} · {providerApproval.status}</button>}
         </div>
       )}
       <h3>{copy.billing.productControls}</h3>
@@ -2574,7 +2581,7 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
                     {action === 'create' && <button disabled={!product.resume_draft || busyTarget === product.product_id || String(reasons[product.product_id] || '').trim().length < 10} title={!product.resume_draft ? copy.billing.resumeDraftUnavailable : undefined} onClick={() => requestResume(product)}>{copy.billing.requestProductResume}</button>}
                     {action === 'submit' && <button disabled={busyTarget === product.product_id} onClick={() => requestResume(product, approval)}>{copy.billing.continueControlResume}</button>}
                     {action === 'create' && !product.resume_draft && <small>{copy.billing.resumeDraftUnavailable}</small>}
-                    {approval && (canRequest || canApprove) && <button onClick={() => openApproval('PAYMENT_PRODUCT_RESUME', product.product_id)}>{copy.billing.viewApproval} · {approval.status}</button>}
+                    {approval && (canRequest || canApprove) && <button onClick={() => openApproval('PAYMENT_PRODUCT_RESUME', product.product_id, approval)}>{copy.billing.viewApproval} · {approval.status}</button>}
                   </div>
                 ) : '—'}</td>
               </tr>
@@ -3078,7 +3085,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     void perform(() => ensureAdjustmentApproval(item, item.reason, requestKey));
   };
   const openAdjustmentApproval = (item) => {
-    onNavigate?.('approvals', { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item.adjustment_id });
+    onNavigate?.('approvals', { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item.adjustment_id,
+      approval_request_id: adjustmentApprovalByTarget.get(item.adjustment_id)?.approval_request_id || item.approval_request_id || null });
   };
   const refund = (item) => {
     if (!orderDetail) return;
