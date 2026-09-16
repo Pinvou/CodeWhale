@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/google/uuid"
 )
 
 var errTokenApprovalProofUnavailable = errors.New("authoritative Token proof unavailable")
@@ -108,11 +110,27 @@ func (s *Service) tokenApprovalProof(ctx context.Context, request approvalencodi
 	// must compare the price facts rather than falsely deny elapsed time.
 	if !tokenProofSnapshotMatches(artifacts.CommandType, input, current) {
 		response.Verdict, response.ReasonCode = "DENY", "SNAPSHOT_MISMATCH"
+	} else if artifacts.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && !tokenLifecyclePlanExecutable(input.NormalizedCommand) {
+		// Frozen historical immediate requests remain decodable for audit, but
+		// the owner executor can only schedule an immutable persisted plan.
+		response.Verdict, response.ReasonCode = "DENY", "DOMAIN_INVARIANT_FAILED"
 	}
 	if _, err := approvalencoding.EncodeProofResponse(response); err != nil {
 		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
 	}
 	return response, nil
+}
+
+func tokenLifecyclePlanExecutable(command json.RawMessage) bool {
+	var plan struct {
+		ID      *string `json:"lifecycle_plan_id"`
+		Version *int64  `json:"lifecycle_plan_version"`
+	}
+	if json.Unmarshal(command, &plan) != nil || plan.ID == nil || plan.Version == nil || *plan.Version < 1 {
+		return false
+	}
+	id, err := uuid.Parse(*plan.ID)
+	return err == nil && id != uuid.Nil && id.String() == *plan.ID
 }
 
 func tokenProofSnapshotMatches(command string, frozen approvalencoding.LegacyProofInput, current ApprovalSnapshotProjection) bool {
@@ -155,6 +173,9 @@ func (s *Service) tokenExecutionProof(ctx context.Context, command string, body 
 	}
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(frozen)
 	if err != nil || artifacts.CommandDigest != body.CommandDigest || artifacts.SnapshotDigest != body.SnapshotDigest {
+		return errTokenApprovalProofUnavailable
+	}
+	if command == "TOKEN_MODEL_LIFECYCLE_CHANGE" && !tokenLifecyclePlanExecutable(frozen.NormalizedCommand) {
 		return errTokenApprovalProofUnavailable
 	}
 	current, err := s.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{

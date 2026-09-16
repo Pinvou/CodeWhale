@@ -128,3 +128,20 @@ func TestTokenProofSnapshotIgnoresOnlyPriceObservationClock(t *testing.T) {
 		t.Fatal("adjacent int64 versions collapsed to the same float64")
 	}
 }
+
+func TestTokenHistoricalImmediateLifecycleCannotReceiveExecutableProof(t *testing.T) {
+	plan := uuid.NewString()
+	for _, command := range []string{
+		`{"model_id":"` + uuid.NewString() + `","target_lifecycle":"DEPRECATED"}`,
+		`{"lifecycle_plan_id":null,"lifecycle_plan_version":0}`,
+		`{"lifecycle_plan_id":"` + plan + `","lifecycle_plan_version":0}`,
+		`{"lifecycle_plan_id":"00000000-0000-0000-0000-000000000000","lifecycle_plan_version":1}`,
+	} {
+		if tokenLifecyclePlanExecutable(json.RawMessage(command)) {
+			t.Fatalf("historical or invalid plan was executable: %s", command)
+		}
+	}
+	if !tokenLifecyclePlanExecutable(json.RawMessage(`{"lifecycle_plan_id":"` + plan + `","lifecycle_plan_version":1}`)) {
+		t.Fatal("persisted plan rejected")
+	}
+}
