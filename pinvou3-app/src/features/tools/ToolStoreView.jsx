@@ -1260,8 +1260,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // 不再弹 SSO 弹窗(收起弹窗后立即重连恰逢旧流程完成的窄窗口,issue #1097)。
       const eipConnectedRef = useRef(false);
       const zhidaoConnectedRef = useRef(false);
-      const markEipConnected = (v) => { eipConnectedRef.current = v; setEipConnected(v); };
-      const markZhidaoConnected = (v) => { zhidaoConnectedRef.current = v; setZhidaoConnected(v); };
+      // 挂载探测(eip_status/zhidao_status)与在途 SSO 事件之间没有到达顺序保证:
+      // 事件先到、探测响应后到时,陈旧的 connected 值会把事件刚写入的连接态
+      // (含 ref 镜像)打回旧值。给 mark* 记代际,探测只在其发出后没有任何
+      // mark* 写入过(代际未变)时才允许落盘——事件永远是更新的一方。
+      const eipConnEpochRef = useRef(0);
+      const zhidaoConnEpochRef = useRef(0);
+      const markEipConnected = (v) => { eipConnEpochRef.current += 1; eipConnectedRef.current = v; setEipConnected(v); };
+      const markZhidaoConnected = (v) => { zhidaoConnEpochRef.current += 1; zhidaoConnectedRef.current = v; setZhidaoConnected(v); };
 
       // 从后端加载已安装状态 + 统一 readiness（Phase 2 第八刀：逐连接器 status
       // 命令退役，installed/ready/actions 统一经 bundle_readiness 取数）。
@@ -1351,8 +1357,15 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         // 监听只在本页挂载期间在场——离开插件中心后完成的 SSO 连接没人听见,
         // 回来若不主动问后端,卡面会一直显示未连接(issue #1097 窄窗口②)。
         // 挂载时按后端真相校准一次;status 的副作用(set_connected)与查询同源,幂等。
-        invokeTauri('eip_status').then(res => markEipConnected(!!(res && res.connected))).catch(() => {});
-        invokeTauri('zhidao_status').then(res => markZhidaoConnected(!!(res && res.connected))).catch(() => {});
+        // 探测在途期间若收到任何连接态事件(代际已变),说明探测结果已过时,丢弃。
+        const eipProbeEpoch = eipConnEpochRef.current;
+        invokeTauri('eip_status').then(res => {
+          if (eipConnEpochRef.current === eipProbeEpoch) markEipConnected(!!(res && res.connected));
+        }).catch(() => {});
+        const zhidaoProbeEpoch = zhidaoConnEpochRef.current;
+        invokeTauri('zhidao_status').then(res => {
+          if (zhidaoConnEpochRef.current === zhidaoProbeEpoch) markZhidaoConnected(!!(res && res.connected));
+        }).catch(() => {});
       }, []);
 
       // EIP/知道(SSO 路线)连接态挂载回填:两者未接入 bundle_readiness,连接态是
