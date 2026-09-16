@@ -21,8 +21,11 @@ func (stub *reconciliationStoreStub) PlanApprovalReconciliation(context.Context,
 	return stub.plan, nil
 }
 
-func (stub *reconciliationStoreStub) ReconcileApproval(_ context.Context, _ AdminApprovalControl, candidate ApprovalReconciliationCandidate, _ approvaleffect.Observation) (ApprovalReconciliationResult, error) {
+func (stub *reconciliationStoreStub) ReconcileApproval(_ context.Context, _ AdminApprovalControl, candidate ApprovalReconciliationCandidate, _ approvaleffect.Observation, apply bool) (ApprovalReconciliationResult, error) {
 	stub.calls++
+	if !apply {
+		return ApprovalReconciliationEligible, nil
+	}
 	return stub.results[candidate.RequestID], nil
 }
 
@@ -70,7 +73,7 @@ func TestRunApprovalReconciliationClassifiesEveryFailClosedOutcome(t *testing.T)
 	}
 	store.calls = 0
 	dryRun, err := RunApprovalReconciliation(context.Background(), store, reconciliationEffectStub{}, 20, false)
-	if err != nil || dryRun.EligibleCount != len(ids) || dryRun.InvalidatedCount != 0 || !dryRun.DryRun || store.calls != 0 {
+	if err != nil || dryRun.EligibleCount != len(ids) || dryRun.InvalidatedCount != 0 || !dryRun.DryRun || store.calls != len(ids) {
 		t.Fatalf("dry-run summary=%+v calls=%d err=%v", dryRun, store.calls, err)
 	}
 }
@@ -105,7 +108,7 @@ func TestReconcileExpiredApprovalRejectsUnboundObservationBeforeDatabaseAccess(t
 	observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
 		ApprovalRequestID: uuid.New(), CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
 		State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-	result, err := (&PostgresRepository{}).ReconcileApproval(context.Background(), AdminApprovalControl{}, candidate, observation)
+	result, err := (&PostgresRepository{}).ReconcileApproval(context.Background(), AdminApprovalControl{}, candidate, observation, true)
 	if err != nil || result != ApprovalReconciliationBlockedEffectAuthority {
 		t.Fatalf("result=%s err=%v", result, err)
 	}

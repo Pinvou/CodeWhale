@@ -40,6 +40,7 @@ type ApprovalReconciliationResult string
 const (
 	ApprovalReconciliationInvalidated            ApprovalReconciliationResult = "INVALIDATED"
 	ApprovalReconciliationExclusionSealed        ApprovalReconciliationResult = "INVALIDATED_EXCLUSION_SEALED"
+	ApprovalReconciliationEligible               ApprovalReconciliationResult = "ELIGIBLE"
 	ApprovalReconciliationStale                  ApprovalReconciliationResult = "STALE"
 	ApprovalReconciliationBlockedExecution       ApprovalReconciliationResult = "BLOCKED_EXECUTION"
 	ApprovalReconciliationBlockedHistory         ApprovalReconciliationResult = "BLOCKED_HISTORY"
@@ -69,7 +70,7 @@ type ApprovalReconciliationSummary struct {
 
 type ApprovalReconciliationStore interface {
 	PlanApprovalReconciliation(context.Context, int) (ApprovalReconciliationPlan, error)
-	ReconcileApproval(context.Context, AdminApprovalControl, ApprovalReconciliationCandidate, approvaleffect.Observation) (ApprovalReconciliationResult, error)
+	ReconcileApproval(context.Context, AdminApprovalControl, ApprovalReconciliationCandidate, approvaleffect.Observation, bool) (ApprovalReconciliationResult, error)
 }
 
 func (r *PostgresRepository) PlanApprovalReconciliation(ctx context.Context, limit int) (ApprovalReconciliationPlan, error) {
@@ -157,7 +158,7 @@ type reconciliationOutbox struct {
 	lockedUntil    *time.Time
 }
 
-func (r *PostgresRepository) ReconcileApproval(ctx context.Context, expectedControl AdminApprovalControl, candidate ApprovalReconciliationCandidate, observation approvaleffect.Observation) (ApprovalReconciliationResult, error) {
+func (r *PostgresRepository) ReconcileApproval(ctx context.Context, expectedControl AdminApprovalControl, candidate ApprovalReconciliationCandidate, observation approvaleffect.Observation, apply bool) (ApprovalReconciliationResult, error) {
 	now := time.Now().UTC()
 	if r.now != nil {
 		now = r.now()
@@ -237,6 +238,12 @@ WHERE r.id=$1 FOR UPDATE OF r`, candidate.RequestID).Scan(
 	}
 	if executionExists {
 		return ApprovalReconciliationBlockedExecution, nil
+	}
+	if !apply {
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return ApprovalReconciliationEligible, nil
 	}
 	command, err := tx.Exec(ctx, `UPDATE approval_requests
 SET status='INVALIDATED',invalidation_code=$9,invalidation_details='{}',version=version+1,updated_at=$2
@@ -361,18 +368,21 @@ func RunApprovalReconciliation(ctx context.Context, store ApprovalReconciliation
 			summary.ObservedEffectCount++
 			continue
 		}
-		summary.EligibleCount++
-		if !apply {
-			continue
-		}
-		result, reconcileErr := store.ReconcileApproval(ctx, plan.Control, candidate, observation)
+		result, reconcileErr := store.ReconcileApproval(ctx, plan.Control, candidate, observation, apply)
 		if reconcileErr != nil {
 			return summary, reconcileErr
 		}
 		switch result {
+		case ApprovalReconciliationEligible:
+			if apply {
+				return summary, ErrApprovalReconciliationBlocked
+			}
+			summary.EligibleCount++
 		case ApprovalReconciliationInvalidated:
+			summary.EligibleCount++
 			summary.InvalidatedCount++
 		case ApprovalReconciliationExclusionSealed:
+			summary.EligibleCount++
 			summary.InvalidatedCount++
 			summary.SealedExclusionCount++
 		case ApprovalReconciliationBlockedEffect:

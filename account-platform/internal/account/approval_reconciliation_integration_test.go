@@ -72,7 +72,7 @@ JOIN public.approval_request_snapshots s ON s.approval_request_id=r.id WHERE r.i
 		observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
 			ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
 			State: state, ObservedAt: time.Now().UTC()}
-		result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation)
+		result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +146,7 @@ FROM public.approval_requests r WHERE r.id=$1`, requestByEvent[eventID]).Scan(&s
 	}
 	absent := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling, ApprovalRequestID: candidate.RequestID,
 		CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint, State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-	if _, err := repository.ReconcileApproval(ctx, changed, candidate, absent); !errors.Is(err, ErrApprovalReconciliationControlChanged) {
+	if _, err := repository.ReconcileApproval(ctx, changed, candidate, absent, true); !errors.Is(err, ErrApprovalReconciliationControlChanged) {
 		t.Fatalf("control drift err=%v", err)
 	}
 }
@@ -183,7 +183,7 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 	observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
 		ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
 		State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-	result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation)
+	result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation, true)
 	if err != nil || result != ApprovalReconciliationExclusionSealed {
 		t.Fatalf("result=%s err=%v", result, err)
 	}
@@ -200,11 +200,13 @@ func TestSafeRollbackApprovalReconciliationPostgresIntegration(t *testing.T) {
 		wantResult   ApprovalReconciliationResult
 		wantStatus   string
 		wantCode     *string
+		wantEligible int
+		wantHistory  int
 	}{
 		{name: "previous epoch is invalidated inside execution window", controlEpoch: 2, wantResult: ApprovalReconciliationInvalidated,
-			wantStatus: "INVALIDATED", wantCode: stringPointer("APPROVAL_SAFE_ROLLBACK_INVALIDATED")},
+			wantStatus: "INVALIDATED", wantCode: stringPointer("APPROVAL_SAFE_ROLLBACK_INVALIDATED"), wantEligible: 1},
 		{name: "older epoch remains a hard history blocker", controlEpoch: 3, wantResult: ApprovalReconciliationBlockedHistory,
-			wantStatus: "APPROVED"},
+			wantStatus: "APPROVED", wantHistory: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, repository, _, _ := newApprovalDeliveryIntegrationDatabase(t)
@@ -221,6 +223,11 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 				t.Fatal(err)
 			}
 			setApprovalConsumerControl(t, ctx, db, "SAFE_ROLLBACK", "RUNNING", 1, true, test.controlEpoch)
+			dryRun, err := RunApprovalReconciliation(ctx, repository, reconciliationEffectStub{}, 20, false)
+			if err != nil || dryRun.EligibleCount != test.wantEligible || dryRun.HistoryBlockedCount != test.wantHistory ||
+				dryRun.CompleteWithoutBlocker != (test.wantHistory == 0) {
+				t.Fatalf("dry-run=%+v err=%v", dryRun, err)
+			}
 			plan, err := repository.PlanApprovalReconciliation(ctx, 20)
 			if err != nil || len(plan.Candidates) != 1 || plan.Candidates[0].InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED" {
 				t.Fatalf("plan=%+v err=%v", plan, err)
@@ -229,7 +236,7 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 			observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
 				ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
 				State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-			result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation)
+			result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation, true)
 			if err != nil || result != test.wantResult {
 				t.Fatalf("result=%s err=%v", result, err)
 			}
