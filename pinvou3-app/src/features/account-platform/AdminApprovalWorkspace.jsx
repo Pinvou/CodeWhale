@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { approvalActionsForDetail } from './admin-approval-actions.js';
+import { approvalActionsForDetail, approvalDecisionForAction } from './admin-approval-actions.js';
 import './admin-approval-workspace.css';
 
 const views = ['mine', 'pending', 'execution', 'directory'];
@@ -139,19 +139,22 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
   const submitAction = async (event) => {
     event.preventDefault();
     if (!detail || !action || acting || outcomeUnknown) return;
-    if ((action === 'APPROVED' || action === 'REJECTED') && [...reason.trim()].length < 3) {
+    const decision = approvalDecisionForAction(action);
+    if (decision && [...reason.trim()].length < 3) {
       setActionError(true);
       return;
     }
     setActing(true);
     setActionError(false);
     try {
-      if (action === 'APPROVED' || action === 'REJECTED') {
-        await client.decideGovernedApproval(route.requestID, detail, action, reason.trim());
+      if (decision) {
+        await client.decideGovernedApproval(route.requestID, detail, decision, reason.trim());
       } else if (action === 'WITHDRAW') {
         await client.withdrawGovernedApprovalRequest(route.requestID, detail);
-      } else {
+      } else if (action === 'SUBMIT') {
         await client.submitGovernedApprovalRequest(route.requestID, detail);
+      } else {
+        throw new Error('unsupported approval action');
       }
       setAction('');
       setReason('');
@@ -231,7 +234,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
       <form onSubmit={submitAction}>
         <h3 id="approval-action-title">{c.actionNames[action]}</h3>
         <p>{c.actionConfirm}</p>
-        {(action === 'APPROVED' || action === 'REJECTED') && <label>{c.actionReason}<textarea required minLength="3" maxLength="2000" value={reason} onChange={(event) => setReason(event.target.value)} /></label>}
+        {approvalDecisionForAction(action) && <label>{c.actionReason}<textarea required minLength="3" maxLength="2000" value={reason} onChange={(event) => setReason(event.target.value)} /></label>}
         {actionError && <p role="alert">{outcomeUnknown ? c.actionUnknown : c.actionFailed}</p>}
         <div><button type="button" disabled={acting || outcomeUnknown} onClick={closeAction}>{c.cancel}</button>
           {outcomeUnknown ? <button type="button" onClick={() => { setAction(''); setRefresh((value) => value + 1); }}>{c.refreshDetail}</button>

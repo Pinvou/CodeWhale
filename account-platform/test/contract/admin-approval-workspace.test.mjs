@@ -20,6 +20,9 @@ test('approval center mounts one governed four-view reader without the legacy di
   assert.match(workspace, /client\.governedApprovalRequests/);
   assert.match(workspace, /client\.governedApprovalRequest/);
   assert.match(workspace, /client\.decideGovernedApproval/);
+  assert.match(workspace, /const decision = approvalDecisionForAction\(action\)/);
+  assert.match(workspace, /client\.decideGovernedApproval\(route\.requestID, detail, decision, reason\.trim\(\)\)/);
+  assert.match(workspace, /else if \(action === 'SUBMIT'\)/);
   assert.match(workspace, /client\.withdrawGovernedApprovalRequest/);
   assert.match(workspace, /client\.submitGovernedApprovalRequest/);
   assert.match(workspace, /addEventListener\?\.\('popstate'/);

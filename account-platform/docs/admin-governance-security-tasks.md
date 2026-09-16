@@ -179,6 +179,8 @@ GSA-18 四视图只读页面（仍PARTIAL / REVIEW_PENDING）：新增React审�
 GSA-18 详情动作交互（仍PARTIAL / REVIEW_PENDING）：仅从当前服务端详情`allowed_actions`生成批准、拒绝、撤回和快捷提交，额外屏蔽申请人自审以及已编辑DRAFT（version>1）的中心快捷提交；历史最小详情不提供动作。决定理由走带焦点的原生dialog，所有写入调用受控客户端、成功后重读，错误/未知结果不自动重发且只能刷新详情后再操作。三语动作与不确定状态、定向动作矩阵测试和Portal构建通过。尚缺真实浏览器下的URL/游标、权限撤销、320/768/1440px与200%缩放及GSA-16恢复状态联调，仍为PARTIAL。
 
 GSA-18 URL与游标恢复切片（仍PARTIAL / REVIEW_PENDING）：审批中心现在响应浏览器返回/前进的`popstate`，保留原页面hash；非首页游标读取失败时提供显式回第一页操作，不自动重试或猜测失效原因。三语文案、定向合同、Portal构建及架构门禁通过。真实浏览器和权限撤销验收仍待执行，不据此关闭GSA-18。
+
+GSA-18 决定动作映射修正（仍PARTIAL / REVIEW_PENDING）：详情允许动作`APPROVE/REJECT`显式映射为Account决定body的`APPROVED/REJECTED`；仅`SUBMIT`进入提交接口，未知动作失败关闭。此前UI误把批准/拒绝交给提交接口，现已用动作矩阵回归和Portal构建验证。尚未部署，先前环境是否触发过此UI错误不能由代码测试推断。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

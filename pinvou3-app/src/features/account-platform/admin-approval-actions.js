@@ -10,3 +10,9 @@ export function approvalActionsForDetail(detail, currentUserID) {
     return false;
   });
 }
+
+export function approvalDecisionForAction(action) {
+  if (action === 'APPROVE') return 'APPROVED';
+  if (action === 'REJECT') return 'REJECTED';
+  return null;
+}
