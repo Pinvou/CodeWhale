@@ -41,14 +41,17 @@ func TestRecoveryResultClientBindsOriginalReferencesAndRejectsCacheableResponses
 					if r.URL.Query().Get("original_key_digest") != hex.EncodeToString(digest[:]) {
 						t.Error("original digest missing")
 					}
+					reference := uuid.New()
 					body = tokenRecoveryResultView{SchemaVersion: 1, ApprovalRequestID: id, CommandType: candidate.CommandType,
-						CommandFingerprint: candidate.CommandFingerprint, OriginalKeyDigest: hex.EncodeToString(digest[:]), State: "SUCCEEDED", ObservedAt: time.Now().UTC()}
+						CommandFingerprint: candidate.CommandFingerprint, OriginalKeyDigest: hex.EncodeToString(digest[:]), State: "SUCCEEDED", CommandReference: &reference, ObservedAt: time.Now().UTC()}
 				} else {
 					if r.URL.Query().Get("original_event_id") != candidate.OriginalEventID.String() || r.URL.Query().Get("approval_epoch") != "2" {
 						t.Error("original Billing binding missing")
 					}
 					body = billingRecoveryResultView{SchemaVersion: 1, ApprovalRequestID: id, OriginalEventID: candidate.OriginalEventID,
-						ApprovalEpoch: 2, CommandType: candidate.CommandType, State: "SUCCEEDED", ObservedAt: time.Now().UTC()}
+						ApprovalEpoch: 2, CommandType: candidate.CommandType, State: "SUCCEEDED",
+						DomainResult:     json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`),
+						LedgerReferences: json.RawMessage(`{"journal_entry_id":"` + uuid.NewString() + `"}`), ObservedAt: time.Now().UTC()}
 				}
 				_ = json.NewEncoder(w).Encode(body)
 			}))

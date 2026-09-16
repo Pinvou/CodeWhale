@@ -1076,6 +1076,7 @@ components:
         command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         original_key_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
         state: { type: string, enum: [UNCONFIRMED, PENDING, SUCCEEDED, REJECTED, FAILED, UNKNOWN] }
+        command_reference: { type: string, format: uuid, description: Present only for a confirmed SUCCEEDED result }
         observed_at: { type: string, format: date-time }
     TokenGovernanceActivation:
       type: object

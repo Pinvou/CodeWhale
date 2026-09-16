@@ -607,7 +607,45 @@ components:
         approval_epoch: { type: integer, minimum: 1 }
         command_type: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] }
         state: { type: string, enum: [UNCONFIRMED, SUCCEEDED] }
+        domain_result:
+          oneOf:
+            - { $ref: "#/components/schemas/RecoveredWalletAdjustmentResult" }
+            - { $ref: "#/components/schemas/RecoveredProviderResumeResult" }
+            - { $ref: "#/components/schemas/RecoveredProductResumeResult" }
+          description: Present only for SUCCEEDED; generated from persisted domain rows.
+        ledger_references:
+          type: object
+          additionalProperties: false
+          properties:
+            journal_entry_id: { type: string, format: uuid }
+          description: Present only for SUCCEEDED; Wallet has the persisted journal entry.
         observed_at: { type: string, format: date-time }
+    RecoveredWalletAdjustmentResult:
+      type: object
+      additionalProperties: false
+      required: [adjustment_id, wallet_id, status, version]
+      properties:
+        adjustment_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        status: { type: string, const: POSTED }
+        version: { type: integer, minimum: 1 }
+    RecoveredProviderResumeResult:
+      type: object
+      additionalProperties: false
+      required: [execution_id, provider_id, status]
+      properties:
+        execution_id: { type: string, format: uuid }
+        provider_id: { type: string, minLength: 1 }
+        status: { type: string, const: RESUMED }
+    RecoveredProductResumeResult:
+      type: object
+      additionalProperties: false
+      required: [execution_id, provider_id, product_id, status]
+      properties:
+        execution_id: { type: string, format: uuid }
+        provider_id: { type: string, minLength: 1 }
+        product_id: { type: string, minLength: 1 }
+        status: { type: string, const: RESUMED }
     BillingApprovalProofRequest:
       type: object
       additionalProperties: false

@@ -164,17 +164,18 @@ VALUES($1,$2,'provider-a','v1','product-a',$3,$4,$5,'approved product recovery',
 VALUES($1,$2,$3,$4,$5,$6,1)`, requestID, eventID, command, strings.Repeat("a", 64), strings.Repeat("b", 64), "1:"+strings.Repeat("c", 64)); err != nil {
 			t.Fatal(err)
 		}
-		state, resultAt, err := repository.ObserveBillingApprovalResult(ctx, requestID, eventID, 1, command)
+		observation, err := repository.ObserveBillingApprovalResult(ctx, requestID, eventID, 1, command)
 		expected := "SUCCEEDED"
 		if command == "WALLET_ADJUSTMENT" {
 			expected = "UNCONFIRMED"
 		} // This legacy fixture has no journal entry.
-		if err != nil || state != expected || resultAt.IsZero() {
-			t.Fatalf("%s original result state=%s at=%s err=%v", command, state, resultAt, err)
+		if err != nil || observation.State != expected || observation.ObservedAt.IsZero() ||
+			(expected == "SUCCEEDED" && (len(observation.DomainResult) == 0 || len(observation.LedgerReferences) == 0)) {
+			t.Fatalf("%s original result=%+v err=%v", command, observation, err)
 		}
-		state, _, err = repository.ObserveBillingApprovalResult(ctx, requestID, uuid.New(), 1, command)
-		if err != nil || state != "UNCONFIRMED" {
-			t.Fatalf("%s mismatched event was accepted: %s %v", command, state, err)
+		observation, err = repository.ObserveBillingApprovalResult(ctx, requestID, uuid.New(), 1, command)
+		if err != nil || observation.State != "UNCONFIRMED" {
+			t.Fatalf("%s mismatched event was accepted: %+v %v", command, observation, err)
 		}
 	}
 	missing, found, err := domain.LookupAuthorizationResult(ctx, ApprovalAuthorizationBinding{ApprovalRequestID: uuid.New(), CommandType: "PAYMENT_PROVIDER_RESUME"}, approvalencoding.AuthorizationEvent{})

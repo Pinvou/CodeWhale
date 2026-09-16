@@ -133,6 +133,10 @@ GSA-16 Token原结果查证入口（仍PARTIAL / REVIEW_PENDING）：以专属`i
 GSA-16 Billing原结果查证入口（仍PARTIAL / REVIEW_PENDING）：以专属`internal.billing.approval-result.read`权限和原event/epoch/命令绑定不可变Billing proof claim，再只读检查三命令已持久化的正向领域结果。Wallet必须有POSTED且journal entry，Provider/Product只确认领域结果行；缺claim、结果尚未持久化或信息不一致统一`UNCONFIRMED`，不视为零效果。接口不主动探测Provider，也不执行重试或终态写入；Account原执行CAS及安全失效证明仍待实现。
 
 GSA-16 同租约六命令结果查证（仍PARTIAL / REVIEW_PENDING）：独立CLI现按命令所有权查询Billing/Token原结果权威，使用原event/epoch或原幂等键摘要校验封闭响应，在同一短租约中接着观察领域效果；正向`SUCCEEDED`与后续效果`ABSENT`矛盾时失败闭锁。结果不可用只计为不可用，正向成功也仍保持`UNKNOWN_QUERY_ONLY`，输出仅额外的`confirmed`计数。尚不具备可证明零效果的负向权威、Account终态CAS或第二次领域调用授权，未启用生产worker。
+
+GSA-16 Token正向结果引用（仍PARTIAL / REVIEW_PENDING）：Token原结果接口对`SUCCEEDED`额外返回原持久`command_reference`，其他状态严禁携带；恢复客户端校验该关联，避免仅凭字符串状态推断可用于终态CAS的结果。此引用不由CLI输出，不构成Account终态写入授权。
+
+GSA-16 Billing正向结果投影（仍PARTIAL / REVIEW_PENDING）：原结果接口对已确认`SUCCEEDED`返回由现有领域持久行重建的封闭`domain_result`与`ledger_references`，Wallet额外要求journal entry；`UNCONFIRMED`不得附带结果。恢复客户端逐命令校验字段及ID，CLI仍仅输出计数，不泄露领域结果。正向投影是后续Account安全终态CAS的输入候选，而非目前的写入授权。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。

@@ -15,19 +15,20 @@ import (
 
 type recoveryTokenRepositoryStub struct {
 	Repository
-	state string
-	calls int
+	state     string
+	reference uuid.UUID
+	calls     int
 }
 
-func (stub *recoveryTokenRepositoryStub) ObserveTokenApprovalResult(_ context.Context, _ uuid.UUID, _, _, _ string) (string, time.Time, error) {
+func (stub *recoveryTokenRepositoryStub) ObserveTokenApprovalResult(_ context.Context, _ uuid.UUID, _, _, _ string) (string, *uuid.UUID, time.Time, error) {
 	stub.calls++
-	return stub.state, time.Now().UTC(), nil
+	return stub.state, &stub.reference, time.Now().UTC(), nil
 }
 
 func TestTokenRecoveryResultRequiresDedicatedIdentityAndOriginalDigest(t *testing.T) {
 	requestID := uuid.New()
 	fingerprint, digest := strings.Repeat("a", 64), strings.Repeat("b", 64)
-	stub := &recoveryTokenRepositoryStub{state: "SUCCEEDED"}
+	stub := &recoveryTokenRepositoryStub{state: "SUCCEEDED", reference: uuid.New()}
 	service := &Service{repository: stub}
 	base := "/internal/v1/approval-recovery/results/" + requestID.String() + "?command_type=TOKEN_CREDENTIAL_REVOKE&command_fingerprint=" + fingerprint + "&original_key_digest=" + digest
 	for _, tc := range []struct {
@@ -54,7 +55,7 @@ func TestTokenRecoveryResultRequiresDedicatedIdentityAndOriginalDigest(t *testin
 			}
 			if response.Code == http.StatusOK {
 				var result tokenRecoveryResult
-				if json.Unmarshal(response.Body.Bytes(), &result) != nil || result.State != "SUCCEEDED" || result.OriginalKeyDigest != digest {
+				if json.Unmarshal(response.Body.Bytes(), &result) != nil || result.State != "SUCCEEDED" || result.OriginalKeyDigest != digest || result.CommandReference == nil || *result.CommandReference != stub.reference {
 					t.Fatalf("invalid result: %s", response.Body.String())
 				}
 			}
@@ -79,20 +80,20 @@ VALUES($1,'TOKEN_CREDENTIAL_REVOKE',1,$2,'admin.token-accounts.manage',1,$3,$3,$
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, observedAt, err := repository.ObserveTokenApprovalResult(ctx, requestID, "TOKEN_CREDENTIAL_REVOKE", fingerprint, digest)
-	if err != nil || state != "PENDING" || observedAt.IsZero() {
+	state, reference, observedAt, err := repository.ObserveTokenApprovalResult(ctx, requestID, "TOKEN_CREDENTIAL_REVOKE", fingerprint, digest)
+	if err != nil || state != "PENDING" || reference != nil || observedAt.IsZero() {
 		t.Fatalf("pending result not found: %s %v", state, err)
 	}
-	state, _, err = repository.ObserveTokenApprovalResult(ctx, requestID, "TOKEN_CREDENTIAL_REVOKE", fingerprint, strings.Repeat("c", 64))
-	if err != nil || state != "UNCONFIRMED" {
+	state, reference, _, err = repository.ObserveTokenApprovalResult(ctx, requestID, "TOKEN_CREDENTIAL_REVOKE", fingerprint, strings.Repeat("c", 64))
+	if err != nil || state != "UNCONFIRMED" || reference != nil {
 		t.Fatalf("wrong original key matched: %s %v", state, err)
 	}
 	_, err = repository.pool.Exec(ctx, `UPDATE token_command_results SET status='SUCCEEDED',completed_at=transaction_timestamp() WHERE command_reference=$1`, commandReference)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, _, err = repository.ObserveTokenApprovalResult(ctx, requestID, "TOKEN_CREDENTIAL_REVOKE", fingerprint, digest)
-	if err != nil || state != "SUCCEEDED" {
+	state, reference, _, err = repository.ObserveTokenApprovalResult(ctx, requestID, "TOKEN_CREDENTIAL_REVOKE", fingerprint, digest)
+	if err != nil || state != "SUCCEEDED" || reference == nil || *reference != commandReference {
 		t.Fatalf("terminal result not found: %s %v", state, err)
 	}
 }

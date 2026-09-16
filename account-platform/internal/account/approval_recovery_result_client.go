@@ -25,8 +25,11 @@ import (
 var ErrApprovalRecoveryResultUnavailable = errors.New("approval recovery result authority is unavailable")
 
 type RecoveryResultObservation struct {
-	State      string
-	ObservedAt time.Time
+	State            string
+	ObservedAt       time.Time
+	CommandReference *uuid.UUID
+	DomainResult     json.RawMessage
+	LedgerReferences json.RawMessage
 }
 
 type ApprovalRecoveryResultReader interface {
@@ -66,23 +69,26 @@ func recoveryResultEndpoint(base string) (*url.URL, error) {
 }
 
 type tokenRecoveryResultView struct {
-	SchemaVersion      int       `json:"schema_version"`
-	ApprovalRequestID  uuid.UUID `json:"approval_request_id"`
-	CommandType        string    `json:"command_type"`
-	CommandFingerprint string    `json:"command_fingerprint"`
-	OriginalKeyDigest  string    `json:"original_key_digest"`
-	State              string    `json:"state"`
-	ObservedAt         time.Time `json:"observed_at"`
+	SchemaVersion      int        `json:"schema_version"`
+	ApprovalRequestID  uuid.UUID  `json:"approval_request_id"`
+	CommandType        string     `json:"command_type"`
+	CommandFingerprint string     `json:"command_fingerprint"`
+	OriginalKeyDigest  string     `json:"original_key_digest"`
+	State              string     `json:"state"`
+	CommandReference   *uuid.UUID `json:"command_reference,omitempty"`
+	ObservedAt         time.Time  `json:"observed_at"`
 }
 
 type billingRecoveryResultView struct {
-	SchemaVersion     int       `json:"schema_version"`
-	ApprovalRequestID uuid.UUID `json:"approval_request_id"`
-	OriginalEventID   uuid.UUID `json:"original_event_id"`
-	ApprovalEpoch     int64     `json:"approval_epoch"`
-	CommandType       string    `json:"command_type"`
-	State             string    `json:"state"`
-	ObservedAt        time.Time `json:"observed_at"`
+	SchemaVersion     int             `json:"schema_version"`
+	ApprovalRequestID uuid.UUID       `json:"approval_request_id"`
+	OriginalEventID   uuid.UUID       `json:"original_event_id"`
+	ApprovalEpoch     int64           `json:"approval_epoch"`
+	CommandType       string          `json:"command_type"`
+	State             string          `json:"state"`
+	DomainResult      json.RawMessage `json:"domain_result,omitempty"`
+	LedgerReferences  json.RawMessage `json:"ledger_references,omitempty"`
+	ObservedAt        time.Time       `json:"observed_at"`
 }
 
 func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context, candidate ApprovalRecoveryCandidate) (RecoveryResultObservation, error) {
@@ -140,6 +146,8 @@ func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context
 	decoder.DisallowUnknownFields()
 	var state string
 	var observedAt time.Time
+	var reference *uuid.UUID
+	var domainResult, ledgerReferences json.RawMessage
 	if descriptor.Workload == approvalconsumer.TokenWorkload {
 		var view tokenRecoveryResultView
 		if decoder.Decode(&view) != nil || decoder.Decode(new(any)) != io.EOF || view.SchemaVersion != 1 ||
@@ -148,6 +156,10 @@ func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context
 			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 		}
 		state, observedAt = view.State, view.ObservedAt
+		reference = view.CommandReference
+		if (state == "SUCCEEDED" && (reference == nil || *reference == uuid.Nil)) || (state != "SUCCEEDED" && reference != nil) {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
 		if state != "UNCONFIRMED" && state != "PENDING" && state != "SUCCEEDED" && state != "REJECTED" && state != "FAILED" && state != "UNKNOWN" {
 			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 		}
@@ -162,9 +174,63 @@ func (c *ApprovalRecoveryResultClient) ObserveRecoveryResult(ctx context.Context
 		if state != "UNCONFIRMED" && state != "SUCCEEDED" {
 			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 		}
+		if state == "SUCCEEDED" {
+			if !validBillingRecoveryPayload(candidate.CommandType, view.DomainResult, view.LedgerReferences) {
+				return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+			}
+			domainResult, ledgerReferences = view.DomainResult, view.LedgerReferences
+		} else if len(view.DomainResult) != 0 || len(view.LedgerReferences) != 0 {
+			return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
+		}
 	}
 	if observedAt.Before(startedAt.Add(-30*time.Second)) || observedAt.After(time.Now().UTC().Add(30*time.Second)) {
 		return RecoveryResultObservation{}, ErrApprovalRecoveryResultUnavailable
 	}
-	return RecoveryResultObservation{State: state, ObservedAt: observedAt}, nil
+	return RecoveryResultObservation{State: state, ObservedAt: observedAt, CommandReference: reference,
+		DomainResult: domainResult, LedgerReferences: ledgerReferences}, nil
+}
+
+func validBillingRecoveryPayload(command string, domainResult, ledgerReferences json.RawMessage) bool {
+	if len(domainResult) == 0 || len(ledgerReferences) == 0 {
+		return false
+	}
+	decode := func(raw json.RawMessage, target any) bool {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		return decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
+	}
+	switch command {
+	case "WALLET_ADJUSTMENT":
+		var result struct {
+			AdjustmentID uuid.UUID `json:"adjustment_id"`
+			WalletID     uuid.UUID `json:"wallet_id"`
+			Status       string    `json:"status"`
+			Version      int64     `json:"version"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) && result.AdjustmentID != uuid.Nil &&
+			result.WalletID != uuid.Nil && result.Status == "POSTED" && result.Version > 0 && ledger.JournalEntryID != uuid.Nil
+	case "PAYMENT_PROVIDER_RESUME":
+		var result struct {
+			ExecutionID uuid.UUID `json:"execution_id"`
+			ProviderID  string    `json:"provider_id"`
+			Status      string    `json:"status"`
+		}
+		var ledger map[string]any
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) && ledger != nil && len(ledger) == 0 &&
+			result.ExecutionID != uuid.Nil && result.ProviderID != "" && result.Status == "RESUMED"
+	case "PAYMENT_PRODUCT_RESUME":
+		var result struct {
+			ExecutionID uuid.UUID `json:"execution_id"`
+			ProviderID  string    `json:"provider_id"`
+			ProductID   string    `json:"product_id"`
+			Status      string    `json:"status"`
+		}
+		var ledger map[string]any
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) && ledger != nil && len(ledger) == 0 &&
+			result.ExecutionID != uuid.Nil && result.ProviderID != "" && result.ProductID != "" && result.Status == "RESUMED"
+	}
+	return false
 }

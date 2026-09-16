@@ -16,26 +16,36 @@ import (
 // A missing row is deliberately UNCONFIRMED, never proof of zero effect. The
 // original idempotency key is sent only as a digest, not in a URL or log.
 type tokenRecoveryResult struct {
-	SchemaVersion      int       `json:"schema_version"`
-	ApprovalRequestID  uuid.UUID `json:"approval_request_id"`
-	CommandType        string    `json:"command_type"`
-	CommandFingerprint string    `json:"command_fingerprint"`
-	OriginalKeyDigest  string    `json:"original_key_digest"`
-	State              string    `json:"state"`
-	ObservedAt         time.Time `json:"observed_at"`
+	SchemaVersion      int        `json:"schema_version"`
+	ApprovalRequestID  uuid.UUID  `json:"approval_request_id"`
+	CommandType        string     `json:"command_type"`
+	CommandFingerprint string     `json:"command_fingerprint"`
+	OriginalKeyDigest  string     `json:"original_key_digest"`
+	State              string     `json:"state"`
+	CommandReference   *uuid.UUID `json:"command_reference,omitempty"`
+	ObservedAt         time.Time  `json:"observed_at"`
 }
 
 type tokenRecoveryResultReader interface {
-	ObserveTokenApprovalResult(context.Context, uuid.UUID, string, string, string) (string, time.Time, error)
+	ObserveTokenApprovalResult(context.Context, uuid.UUID, string, string, string) (string, *uuid.UUID, time.Time, error)
 }
 
-func (r *PostgresRepository) ObserveTokenApprovalResult(ctx context.Context, requestID uuid.UUID, commandType, fingerprint, keyDigest string) (string, time.Time, error) {
+func (r *PostgresRepository) ObserveTokenApprovalResult(ctx context.Context, requestID uuid.UUID, commandType, fingerprint, keyDigest string) (string, *uuid.UUID, time.Time, error) {
 	var state string
+	var reference *uuid.UUID
 	var observedAt time.Time
 	err := r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT status FROM token_command_results
-WHERE approval_request_id=$1 AND command_type=$2 AND approval_command_fingerprint=$3 AND idempotency_key_digest=$4), 'UNCONFIRMED'), transaction_timestamp()`,
-		requestID, commandType, fingerprint, keyDigest).Scan(&state, &observedAt)
-	return state, observedAt.UTC(), err
+WHERE approval_request_id=$1 AND command_type=$2 AND approval_command_fingerprint=$3 AND idempotency_key_digest=$4),'UNCONFIRMED'),
+(SELECT command_reference FROM token_command_results WHERE approval_request_id=$1 AND command_type=$2
+AND approval_command_fingerprint=$3 AND idempotency_key_digest=$4),transaction_timestamp()`,
+		requestID, commandType, fingerprint, keyDigest).Scan(&state, &reference, &observedAt)
+	if err != nil {
+		return "", nil, time.Time{}, err
+	}
+	if state != "SUCCEEDED" {
+		reference = nil
+	}
+	return state, reference, observedAt.UTC(), nil
 }
 
 func (s *Service) tokenApprovalRecoveryResult(w http.ResponseWriter, r *http.Request) {
@@ -60,12 +70,14 @@ func (s *Service) tokenApprovalRecoveryResult(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_RECOVERY_RESULT_UNAVAILABLE", "recovery result unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	state, observedAt, err := reader.ObserveTokenApprovalResult(r.Context(), requestID, commandType, fingerprint, keyDigest)
+	state, reference, observedAt, err := reader.ObserveTokenApprovalResult(r.Context(), requestID, commandType, fingerprint, keyDigest)
 	if err != nil || observedAt.IsZero() || observedAt.After(time.Now().Add(time.Second)) ||
+		(state == "SUCCEEDED" && (reference == nil || *reference == uuid.Nil)) || (state != "SUCCEEDED" && reference != nil) ||
 		!strings.Contains("|UNCONFIRMED|PENDING|SUCCEEDED|REJECTED|FAILED|UNKNOWN|", "|"+state+"|") {
 		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_RECOVERY_RESULT_UNAVAILABLE", "recovery result unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, tokenRecoveryResult{SchemaVersion: 1, ApprovalRequestID: requestID,
-		CommandType: commandType, CommandFingerprint: fingerprint, OriginalKeyDigest: keyDigest, State: state, ObservedAt: observedAt})
+		CommandType: commandType, CommandFingerprint: fingerprint, OriginalKeyDigest: keyDigest, State: state,
+		CommandReference: reference, ObservedAt: observedAt})
 }

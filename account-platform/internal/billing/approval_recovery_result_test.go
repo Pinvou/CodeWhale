@@ -15,13 +15,16 @@ import (
 
 type billingRecoveryResultStub struct {
 	Repository
-	state string
-	calls int
+	state            string
+	domainResult     json.RawMessage
+	ledgerReferences json.RawMessage
+	calls            int
 }
 
-func (stub *billingRecoveryResultStub) ObserveBillingApprovalResult(_ context.Context, _, _ uuid.UUID, _ int64, _ string) (string, time.Time, error) {
+func (stub *billingRecoveryResultStub) ObserveBillingApprovalResult(_ context.Context, _, _ uuid.UUID, _ int64, _ string) (billingRecoveryResultObservation, error) {
 	stub.calls++
-	return stub.state, time.Now().UTC(), nil
+	return billingRecoveryResultObservation{State: stub.state, DomainResult: stub.domainResult,
+		LedgerReferences: stub.ledgerReferences, ObservedAt: time.Now().UTC()}, nil
 }
 
 func TestBillingRecoveryResultRequiresDedicatedIdentityAndFrozenEvent(t *testing.T) {
@@ -58,5 +61,18 @@ func TestBillingRecoveryResultRequiresDedicatedIdentityAndFrozenEvent(t *testing
 				}
 			}
 		})
+	}
+	stub.state = "SUCCEEDED"
+	stub.domainResult = json.RawMessage(`{"execution_id":"` + uuid.NewString() + `","provider_id":"provider-a","status":"RESUMED"}`)
+	stub.ledgerReferences = json.RawMessage(`{}`)
+	ctx, _ := serviceauth.ContextForJob(context.Background(), "account-approval-recovery", "APPROVAL_RECOVERY_QUERY", uuid.NewString())
+	request := httptest.NewRequest(http.MethodGet, base, nil).WithContext(ctx)
+	request.SetPathValue("approval_request_id", requestID.String())
+	response := httptest.NewRecorder()
+	service.billingApprovalRecoveryResult(response, request)
+	var confirmed billingRecoveryResult
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &confirmed) != nil ||
+		confirmed.State != "SUCCEEDED" || len(confirmed.DomainResult) == 0 || string(confirmed.LedgerReferences) != "{}" {
+		t.Fatalf("positive domain result missing: %s", response.Body.String())
 	}
 }
