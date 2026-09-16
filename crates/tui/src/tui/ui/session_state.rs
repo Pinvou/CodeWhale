@@ -635,6 +635,20 @@ pub(crate) async fn switch_workspace(
         return;
     }
 
+    // Primary-swap semantics, matching the runtime PATCH workspace-only
+    // branch and `resolve_resume_roots`: the previous directory leaves the
+    // root set (it stopped being the session's directory), the new
+    // workspace takes the primary slot, and additional roots survive
+    // re-normalized against the new primary.
+    let old_workspace = std::mem::replace(&mut app.workspace, workspace.clone());
+    let additional: Vec<PathBuf> = app
+        .workspace_roots
+        .iter()
+        .filter(|root| **root != old_workspace)
+        .cloned()
+        .collect();
+    app.workspace_roots = codewhale_core::normalize_workspace_roots(&workspace, &additional);
+
     apply_workspace_runtime_state(app, config, workspace.clone());
     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
 
