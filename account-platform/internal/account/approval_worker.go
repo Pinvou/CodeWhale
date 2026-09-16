@@ -13,7 +13,7 @@ func (r *PostgresRepository) ExpireApprovalRequests(ctx context.Context, limit i
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id FROM approval_requests WHERE (status='SUBMITTED' AND expires_at<=now()) OR (status IN ('APPROVED','EXECUTION_FAILED') AND execution_deadline<=now()) ORDER BY COALESCE(execution_deadline,expires_at),id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id FROM approval_requests WHERE (status='SUBMITTED' AND expires_at<=now()) OR (status='APPROVED' AND execution_deadline<=now()) ORDER BY COALESCE(execution_deadline,expires_at),id LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -63,7 +63,7 @@ func (r *PostgresRepository) expireApprovalRequest(ctx context.Context, id uuid.
 	to, code := "", ""
 	if status == "SUBMITTED" && !expiresAt.After(now) {
 		to, code = "EXPIRED", "REQUEST_EXPIRED"
-	} else if (status == "APPROVED" || status == "EXECUTION_FAILED") && executionDeadline != nil && !executionDeadline.After(now) {
+	} else if status == "APPROVED" && executionDeadline != nil && !executionDeadline.After(now) {
 		to, code = "INVALIDATED", "EXECUTION_WINDOW_EXPIRED"
 	} else {
 		return false, nil
