@@ -393,7 +393,7 @@ test('workload roles preserve existing permissions and narrowly register credent
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-effect.read'));
   assert.deepEqual(account.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.approval-recovery.plan']);
   assert.deepEqual(billing.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.billing.approval-effect.read']);
-  assert.deepEqual(token.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.token.approval-effect.read']);
+  assert.deepEqual(token.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.token.approval-effect.read', 'internal.token.approval-result.read']);
   for (const rules of [account, billing, token]) assert.ok(rules.every(rule => rule.subject === `pinvou:service:${rule.service}` && rule.permissions.every(permission => !permission.includes('*'))));
 });
 

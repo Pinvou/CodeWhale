@@ -220,6 +220,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal.GET("/commands/model-lifecycle/result", serviceauth.Require("internal.token.model-lifecycle.execute"), s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.approvedTokenCommandResult("TOKEN_MODEL_LIFECYCLE_CHANGE")))
 	internal.GET("/commands/catalog-rollback/result", serviceauth.Require("internal.token.catalog-rollback.execute"), s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.approvedTokenCommandResult("TOKEN_MODEL_CATALOG_ROLLBACK")))
 	internal.GET("/commands/credential-revoke/result", serviceauth.Require("internal.token.credential-revoke.execute"), s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.approvedTokenCommandResult("TOKEN_CREDENTIAL_REVOKE")))
+	internal.GET("/approval-recovery/results/:approval_request_id", serviceauth.Require("internal.token.approval-result.read"), httpserver.AdaptFunc(s.tokenApprovalRecoveryResult))
 	internal.POST("/approval-command-prechecks", serviceauth.Require("internal.token.approval-snapshot.read"), httpserver.AdaptFunc(s.internalApprovalCommandPrecheck))
 	internal.POST("/approval-command-proofs", serviceauth.Require("internal.token.approval-proof.read"), httpserver.AdaptFunc(s.internalTokenApprovalProof))
 	router.GET("/v1/client-compatibility", httpserver.AdaptFunc(s.clientCompatibility))
