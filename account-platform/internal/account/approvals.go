@@ -254,9 +254,12 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if err != nil || actorID == nil {
 		return ApprovalRequest{}, ErrForbidden
 	}
+	if _, err := approvalRequestVisibilityForActor(ctx, tx, *actorID, requestID); err != nil {
+		return ApprovalRequest{}, err
+	}
 	current, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
-		return ApprovalRequest{}, err
+		return ApprovalRequest{}, approvalVisibleRequestReadError(err)
 	}
 	if current.RequesterUserID != *actorID || current.Status != "DRAFT" || current.Version != expectedVersion || current.CommandType != policy.CommandType {
 		return ApprovalRequest{}, ErrConflict
@@ -318,9 +321,12 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 	if err != nil || actorID == nil {
 		return ApprovalRequest{}, ErrForbidden
 	}
+	if _, err := approvalRequestVisibilityForActor(ctx, tx, *actorID, requestID); err != nil {
+		return ApprovalRequest{}, err
+	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
-		return ApprovalRequest{}, err
+		return ApprovalRequest{}, approvalVisibleRequestReadError(err)
 	}
 	if item.RequesterUserID != *actorID {
 		return ApprovalRequest{}, ErrForbidden
@@ -412,9 +418,12 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 	if err != nil || actorID == nil {
 		return ApprovalRequest{}, ErrForbidden
 	}
+	if _, err := approvalRequestVisibilityForActor(ctx, tx, *actorID, requestID); err != nil {
+		return ApprovalRequest{}, err
+	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
-		return ApprovalRequest{}, err
+		return ApprovalRequest{}, approvalVisibleRequestReadError(err)
 	}
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
 		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
@@ -426,6 +435,10 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 				if err := tx.Commit(ctx); err != nil {
 					return ApprovalRequest{}, err
 				}
+			} else if errors.Is(authErr, ErrForbidden) {
+				return ApprovalRequest{}, ErrApprovalRequestNotFound
+			} else {
+				return ApprovalRequest{}, authErr
 			}
 		}
 		return ApprovalRequest{}, ErrConflict
@@ -453,6 +466,9 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 	}
 	bindingID, authorizationVersion, validUntil, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
 	if err != nil {
+		if errors.Is(err, ErrForbidden) {
+			return ApprovalRequest{}, ErrApprovalRequestNotFound
+		}
 		return ApprovalRequest{}, err
 	}
 	authSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
@@ -479,6 +495,13 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 	reason = strings.TrimSpace(reason)
 	if len(reason) < 3 || len(reason) > 2000 || requestID == uuid.Nil || expectedVersion < 1 {
 		return ApprovalRequest{}, ErrConflict
+	}
+	actorID, err := r.userIDByPrincipal(ctx, principal)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if _, err := approvalRequestVisibilityForActor(ctx, r.pool, actorID, requestID); err != nil {
+		return ApprovalRequest{}, err
 	}
 	// A missing or already-known unusable writer must not take the request row
 	// lock or fall back to the broad runtime credential.
@@ -544,7 +567,7 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
-		return rollback(ApprovalRequest{}, err)
+		return rollback(ApprovalRequest{}, approvalVisibleRequestReadError(err))
 	}
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
 		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
@@ -557,6 +580,10 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 					return ApprovalRequest{}, committed, rolledBack, commitErr
 				}
 				return ApprovalRequest{}, true, false, ErrConflict
+			} else if errors.Is(authErr, ErrForbidden) {
+				return rollback(ApprovalRequest{}, ErrApprovalRequestNotFound)
+			} else {
+				return rollback(ApprovalRequest{}, authErr)
 			}
 		}
 		return rollback(ApprovalRequest{}, ErrConflict)
@@ -607,6 +634,9 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	}
 	bindingID, authorizationVersion, validUntil, err := strongApprovalWriterAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
 	if err != nil {
+		if errors.Is(err, ErrForbidden) {
+			return rollback(ApprovalRequest{}, ErrApprovalRequestNotFound)
+		}
 		return rollback(ApprovalRequest{}, err)
 	}
 	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
@@ -736,6 +766,10 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 	if err != nil {
 		return nil, err
 	}
+	authorizationVersion, err := platformAuthorizationVersionForActor(ctx, r.pool, actorID)
+	if err != nil {
+		return nil, err
+	}
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -757,11 +791,28 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 		if err != nil {
 			return nil, err
 		}
+		// A permission can be revoked after the set-based visibility query but
+		// before projection. Never append a non-owned row that fails the fresh
+		// authorization check.
+		if item.RequesterUserID != actorID && !canApprove {
+			continue
+		}
 		policy, policyErr := approvalPolicyForItem(item)
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, policyErr == nil && canAdvance(policy), writerReady)
+		advanceAllowed := false
+		if policyErr == nil && (canRequest || canApprove) {
+			advanceAllowed = canAdvance(policy)
+		}
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, advanceAllowed, writerReady)
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := ensureApprovalAuthorizationVersion(ctx, r.pool, actorID, authorizationVersion); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal identity.Principal, requestID uuid.UUID) (ApprovalRequest, error) {
@@ -769,17 +820,31 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
-	item, err := approvalRequestByID(ctx, r.pool, requestID)
+	visibility, err := approvalRequestVisibilityForActor(ctx, r.pool, actorID, requestID)
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
-	if item.RequesterUserID == actorID {
+	item, err := approvalRequestByID(ctx, r.pool, requestID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ApprovalRequest{}, ErrApprovalRequestNotFound
+		}
+		return ApprovalRequest{}, err
+	}
+	if visibility.Owned {
 		canRequest, _, err := r.approvalCapabilities(ctx, actorID, item)
 		if err != nil {
 			return ApprovalRequest{}, err
 		}
 		policy, policyErr := approvalPolicyForItem(item)
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy), false)
+		advanceAllowed := false
+		if canRequest && policyErr == nil {
+			advanceAllowed = r.approvalAdvancementProjection(ctx)(policy)
+		}
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, advanceAllowed, false)
+		if err := ensureApprovalAuthorizationVersion(ctx, r.pool, actorID, visibility.AuthorizationVersion); err != nil {
+			return ApprovalRequest{}, err
+		}
 		return item, nil
 	}
 	_, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
@@ -787,10 +852,13 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 		return ApprovalRequest{}, err
 	}
 	if !canApprove {
-		return ApprovalRequest{}, ErrForbidden
+		return ApprovalRequest{}, ErrApprovalRequestNotFound
 	}
 	policy, policyErr := approvalPolicyForItem(item)
 	item.AllowedActions = approvalAllowedActions(item, actorID, false, true, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy), r.ApprovalWriterReady(ctx) == nil)
+	if err := ensureApprovalAuthorizationVersion(ctx, r.pool, actorID, visibility.AuthorizationVersion); err != nil {
+		return ApprovalRequest{}, err
+	}
 	return item, nil
 }
 

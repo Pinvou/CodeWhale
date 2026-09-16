@@ -206,6 +206,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequest))
 	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
 	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
+	adminV2 := protected.Group("/admin/v2")
+	adminV2.GET("/approval-directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
 	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryRegistration))
 	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_COMPENSATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCompensateRegistration))
@@ -669,6 +671,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusGone, "APPROVAL_REQUEST_EXPIRED", "the approval request has expired"
 	case errors.Is(err, ErrApprovalInvalidated):
 		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_INVALIDATED", "the approval request no longer matches current policy, authorization, or resource facts"
+	case errors.Is(err, ErrApprovalRequestNotFound):
+		status, code, message = http.StatusNotFound, "APPROVAL_REQUEST_NOT_FOUND", "the approval request was not found"
+	case errors.Is(err, ErrApprovalAuthorizationChanged):
+		status, code, message = http.StatusConflict, "APPROVAL_AUTHORIZATION_CHANGED", "approval authorization changed while the response was being prepared"
 	case errors.Is(err, ErrApprovalSnapshotTimeout):
 		status, code, message = http.StatusGatewayTimeout, "APPROVAL_SNAPSHOT_TIMEOUT", "the authoritative approval snapshot timed out"
 	case errors.Is(err, ErrApprovalSnapshotUnavailable):

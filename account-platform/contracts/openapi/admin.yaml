@@ -2359,6 +2359,22 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v2/approval-directory:
+    get:
+      operationId: getAdminApprovalDirectoryV2
+      summary: Read the current actor's safe approval command directory
+      description: Returns only exact command versions that have a synchronized closed presenter and for which the current actor still owns requester or approver permission. requestable additionally requires current requester permission and active domain governance. The response never exposes permission names or an approvable flag; approval remains detail-scoped and is rechecked at decision time.
+      responses:
+        "200":
+          description: Authorization-version-bound safe directory
+          headers:
+            X-Platform-Authorization-Version:
+              schema: { type: integer, format: int64, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalDirectoryProjection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
     get:
       operationId: listAdminApprovalPolicies
@@ -2462,6 +2478,7 @@ paths:
       responses:
         "200": { description: Submitted approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
         "504": { $ref: "#/components/responses/Error" }
@@ -2475,6 +2492,7 @@ paths:
       responses:
         "200": { description: Withdrawn approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-requests/{approval_request_id}/actions/decide:
     post:
@@ -2491,6 +2509,7 @@ paths:
         "200": { description: Decided approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503":
           description: Approval authorization writer or command activation unavailable; APPROVAL_WRITER_UNAVAILABLE includes the headers below.
@@ -5229,6 +5248,27 @@ components:
     ApprovalStatus:
       type: string
       enum: [DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED]
+    ApprovalDirectoryProjection:
+      type: object
+      additionalProperties: false
+      required: [schema_version, platform_authorization_version, items]
+      properties:
+        schema_version: { type: integer, enum: [1] }
+        platform_authorization_version: { type: integer, format: int64, minimum: 1 }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalDirectoryItem" }
+    ApprovalDirectoryItem:
+      type: object
+      additionalProperties: false
+      required: [command_type, policy_version, snapshot_schema_version, risk_class, visible, requestable]
+      properties:
+        command_type: { type: string, minLength: 1 }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        risk_class: { type: string, minLength: 1 }
+        visible: { type: boolean, enum: [true] }
+        requestable: { type: boolean }
     ApprovalPolicy:
       type: object
       additionalProperties: false

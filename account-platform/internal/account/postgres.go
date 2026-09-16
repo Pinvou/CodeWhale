@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -38,6 +39,10 @@ type PostgresRepository struct {
 	tokenApprovalCreateGate     func(string) bool
 	tokenGovernanceActivation   tokengovernance.Reader
 	billingGovernanceActivation billinggovernance.Reader
+	// approvalPresenterReady remains nil until GSA-12 installs the closed
+	// command presenters. Directory entries fail closed instead of advertising
+	// a command whose versioned detail cannot yet be rendered safely.
+	approvalPresenterReady func(approvalpolicy.Policy) bool
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {

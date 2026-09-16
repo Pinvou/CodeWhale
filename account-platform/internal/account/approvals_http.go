@@ -16,6 +16,7 @@ import (
 
 type approvalRepository interface {
 	ApprovalPolicies(context.Context) []approvalpolicy.Policy
+	ApprovalDirectory(context.Context, identity.Principal) (ApprovalDirectoryProjection, error)
 	CreateApprovalDraft(context.Context, identity.Principal, ApprovalDraft) (ApprovalRequest, error)
 	UpdateApprovalDraft(context.Context, identity.Principal, uuid.UUID, int64, ApprovalDraft) (ApprovalRequest, error)
 	SubmitApprovalRequest(context.Context, identity.Principal, uuid.UUID, int64) (ApprovalRequest, error)
@@ -23,6 +24,21 @@ type approvalRepository interface {
 	DecideApprovalRequest(context.Context, identity.Principal, uuid.UUID, int64, string, string, json.RawMessage) (ApprovalRequest, error)
 	ListApprovalRequests(context.Context, identity.Principal, ApprovalFilter) ([]ApprovalRequest, error)
 	ApprovalRequest(context.Context, identity.Principal, uuid.UUID) (ApprovalRequest, error)
+}
+
+func (s *Service) adminApprovalDirectory(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireApprovalRepository(w, r)
+	if !ok {
+		return
+	}
+	projection, err := repository.ApprovalDirectory(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("X-Platform-Authorization-Version", stringInt64(projection.PlatformAuthorizationVersion))
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, projection)
 }
 
 func (s *Service) requireApprovalRepository(w http.ResponseWriter, r *http.Request) (approvalRepository, bool) {
