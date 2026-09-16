@@ -172,6 +172,19 @@ func LegacyProofInputFromArtifacts(artifacts ProofArtifacts) (LegacyProofInput, 
 	if err := convertProofIntegers(spec, normalized, critical, financial); err != nil {
 		return LegacyProofInput{}, err
 	}
+	if artifacts.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+		// The existing instantaneous precheck represents no plan by omitted
+		// fields; proof schema 1 represents the same state by explicit null/0.
+		values, err := objectValue(normalized)
+		if err != nil {
+			return LegacyProofInput{}, err
+		}
+		if values["lifecycle_plan_id"].kind == jsonNull {
+			delete(values, "lifecycle_plan_id")
+			delete(values, "lifecycle_plan_version")
+			normalized = newObject(values)
+		}
+	}
 	return LegacyProofInput{
 		CommandType: artifacts.CommandType, PolicyVersion: artifacts.PolicyVersion, SnapshotSchemaVersion: artifacts.SnapshotSchemaVersion,
 		TargetResourceType: targetType, TargetResourceID: targetID,
