@@ -54,6 +54,11 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
   const actionSourceRef = useRef(null);
 
   useEffect(() => { setRoute(readRoute()); setPrevious([]); }, [routeVersion]);
+  useEffect(() => {
+    const onHistoryChange = () => { setRoute(readRoute()); setPrevious([]); };
+    globalThis.addEventListener?.('popstate', onHistoryChange);
+    return () => globalThis.removeEventListener?.('popstate', onHistoryChange);
+  }, []);
   useEffect(() => { setCommandInput(route.commandType); setTargetInput(route.target); }, [route.commandType, route.target]);
 
   const changeRoute = (patch, { replace = false } = {}) => {
@@ -65,7 +70,9 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
       if (value) query.set(key, value);
       else query.delete(key);
     }
-    globalThis.history?.[replace ? 'replaceState' : 'pushState']?.(null, '', `${globalThis.location?.pathname || ''}?${query}`);
+    const suffix = query.toString();
+    globalThis.history?.[replace ? 'replaceState' : 'pushState']?.(null, '',
+      `${globalThis.location?.pathname || ''}${suffix ? `?${suffix}` : ''}${globalThis.location?.hash || ''}`);
     setRoute(next);
   };
 
@@ -189,7 +196,9 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
       <button type="button" onClick={() => setRefresh((value) => value + 1)}>{c.refresh}</button>
     </form>
     {loading && <p role="status">{c.loading}</p>}
-    {listError && <p role="alert">{c.listUnavailable}</p>}
+    {listError && <div role="alert"><p>{c.listUnavailable}</p>
+      {route.cursor && <button type="button" onClick={() => { setPrevious([]); changeRoute({ cursor: '', requestID: '' }); }}>{c.firstPage}</button>}
+    </div>}
     {route.view === 'directory' && directory && <div className="adm-approval-table"><table><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>
       {directory.items.map((item) => <tr key={`${item.command_type}-${item.policy_version}`}><td>{item.command_type} · v{item.policy_version}</td><td>{item.risk_class}</td><td>{item.requestable ? c.yes : c.no}</td></tr>)}
     </tbody></table>{directory.items.length === 0 && <p>{c.empty}</p>}</div>}

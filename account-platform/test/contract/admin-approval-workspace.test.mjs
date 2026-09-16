@@ -22,6 +22,8 @@ test('approval center mounts one governed four-view reader without the legacy di
   assert.match(workspace, /client\.decideGovernedApproval/);
   assert.match(workspace, /client\.withdrawGovernedApprovalRequest/);
   assert.match(workspace, /client\.submitGovernedApprovalRequest/);
+  assert.match(workspace, /addEventListener\?\.\('popstate'/);
+  assert.match(workspace, /route\.cursor && <button[^>]+/);
   assert.doesNotMatch(workspace, /client\.approvalRequests\(/);
   assert.doesNotMatch(workspace, /allowed_actions/);
   assert.match(built, /approval_view/);
@@ -29,7 +31,7 @@ test('approval center mounts one governed four-view reader without the legacy di
 
 test('approval center labels and error states exist in all three management locales', () => {
   for (const locale of ['zh', 'en', 'ja']) {
-    for (const key of ['mine', 'pending', 'execution', 'directory', 'listUnavailable', 'detailUnavailable', 'historicalMinimum']) {
+    for (const key of ['mine', 'pending', 'execution', 'directory', 'listUnavailable', 'detailUnavailable', 'historicalMinimum', 'firstPage']) {
       assert.ok(adminPlatformCopy[locale].approvalCenter[key], `${locale}.${key}`);
     }
   }
