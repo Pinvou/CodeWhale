@@ -3,6 +3,7 @@ package token
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -351,6 +353,41 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	expectedJSON, _ := json.Marshal(critical)
 	revokeEnvelope := TokenCommandEnvelope{CommandType: "TOKEN_CREDENTIAL_REVOKE", Reason: "revoke the superseded provider credential", TargetResourceType: "PROVIDER_CREDENTIAL", TargetResourceID: result.CredentialID.String(), ExpectedVersions: expectedJSON, PrecheckFingerprint: strings.Repeat("9", 64), Command: json.RawMessage(`{"token_account_id":"` + accountID.String() + `","expected_account_version":2,"credential_id":"` + result.CredentialID.String() + `","credential_version":2}`)}
 	approvalID := uuid.New()
+	proofService := NewService(repository, nil, nil, nil, ProviderURLPolicy{}, nil, nil, 0).
+		WithImpactPrechecks(true, repository, nil).
+		WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}})
+	proofProjection, err := proofService.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{CommandType: revokeEnvelope.CommandType, TargetResourceType: revokeEnvelope.TargetResourceType, TargetResourceID: revokeEnvelope.TargetResourceID, NormalizedCommand: revokeEnvelope.Command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: revokeEnvelope.CommandType, PolicyVersion: 1, SnapshotSchemaVersion: 1,
+		TargetResourceType: revokeEnvelope.TargetResourceType, TargetResourceID: revokeEnvelope.TargetResourceID,
+		NormalizedCommand: revokeEnvelope.Command, CriticalResourceVersions: proofProjection.CriticalResourceVersions,
+		FinancialSnapshot: proofProjection.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := proofService.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: approvalID, Artifacts: artifacts})
+	if err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "1:"+proofProjection.PrecheckFingerprint {
+		t.Fatalf("real credential proof=%+v err=%v", proof, err)
+	}
+	proofDigest, err := approvalencoding.DeriveProofDigest(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofBody := approvedTokenCommandBody{
+		ActivationEpoch: 1, ProofSchemaVersion: proof.ProofSchemaVersion, CommandDigest: proof.CommandDigest,
+		SnapshotDigest: proof.SnapshotDigest, DomainRevision: proof.DomainRevision, ProofDigest: hex.EncodeToString(proofDigest[:]), ApprovalControlEpoch: 1,
+		CriticalResourceVersions: proofProjection.CriticalResourceVersions, FinancialSnapshot: proofProjection.FinancialSnapshot,
+		Envelope: TokenCommandEnvelope{CommandType: revokeEnvelope.CommandType, TargetResourceType: revokeEnvelope.TargetResourceType,
+			TargetResourceID: revokeEnvelope.TargetResourceID, Command: revokeEnvelope.Command},
+	}
+	selection := tokenRouteActivationSelection{TokenCommandGovernanceActivation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}, transactional: true}
+	if err := proofService.tokenExecutionProof(ctx, revokeEnvelope.CommandType, proofBody, selection); err != nil {
+		t.Fatalf("real credential execution proof=%v", err)
+	}
 	executor := NewPostgresApprovedCredentialExecutor(repository)
 	var governanceRowsBefore int
 	if err = repository.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM token_command_results)+(SELECT count(*) FROM token_audit_logs)+(SELECT count(*) FROM outbox_events)`).Scan(&governanceRowsBefore); err != nil {
