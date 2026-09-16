@@ -248,9 +248,28 @@ func TestBillingProofEraExecutionRejectsRevisionBeforeDomainEffect(t *testing.T)
 	domain.proof = func(_ context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
 		return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: event.DomainRevision, CommandDigest: request.Artifacts.CommandDigest, SnapshotDigest: request.Artifacts.SnapshotDigest}, nil
 	}
+	claims := 0
+	domain.claim = func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error {
+		claims++
+		return nil
+	}
 	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
-	if len(attempt.Result.DomainResult) == 0 || repository.adjustmentRuns != 1 {
-		t.Fatalf("matching owner proof should reach existing local CAS: %+v runs=%d", attempt, repository.adjustmentRuns)
+	if len(attempt.Result.DomainResult) == 0 || repository.adjustmentRuns != 1 || claims != 1 {
+		t.Fatalf("matching owner proof should claim before local CAS: %+v runs=%d claims=%d", attempt, repository.adjustmentRuns, claims)
+	}
+	domain.claim = func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error {
+		return ErrApprovalSnapshotMismatch
+	}
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_REVISION_CHANGED" || repository.adjustmentRuns != 1 {
+		t.Fatalf("claim-time drift reached wallet effect: %+v runs=%d", attempt, repository.adjustmentRuns)
+	}
+	domain.claim = func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error {
+		return errors.New("claim outcome unknown")
+	}
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if attempt.FailureIsDefinite || repository.adjustmentRuns != 1 {
+		t.Fatalf("uncertain claim outcome reached wallet effect: %+v runs=%d", attempt, repository.adjustmentRuns)
 	}
 	provider := ProviderResumeVersions{ProviderID: "provider-a", ProviderVersion: "v1", ProviderControlVersion: 3, ProbeOrderID: uuid.New(), PolicyVersion: "p1", ActiveMappingSetFingerprint: strings.Repeat("a", 32)}
 	providerRaw, _ := json.Marshal(provider)

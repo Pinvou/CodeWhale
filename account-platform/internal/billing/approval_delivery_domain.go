@@ -16,6 +16,7 @@ type billingAuthorizationDomain struct {
 	database   queryable
 	probe      func(context.Context, uuid.UUID) (PaymentOrder, ProviderOrder, uuid.UUID, error)
 	proof      func(context.Context, approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error)
+	claim      func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error
 }
 
 type billingAuthorizationExecutionRepository interface {
@@ -40,6 +41,7 @@ func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain
 	domain.proof = service.billingApprovalProof
 	if repository != nil {
 		domain.database = repository.pool
+		domain.claim = repository.ClaimBillingApprovalProof
 	}
 	if service.payments != nil {
 		domain.probe = service.payments.probeProviderRecovery
@@ -101,6 +103,15 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
 		if result, valid := domain.executionProof(ctx, binding, event, command); !valid {
 			return result
+		}
+		if domain.claim == nil {
+			return authorizationDomainAttempt{}
+		}
+		if err := domain.claim(ctx, binding, event); err != nil {
+			if errors.Is(err, ErrApprovalSnapshotMismatch) {
+				return definiteAuthorizationFailure("DOMAIN_REVISION_CHANGED")
+			}
+			return authorizationDomainAttempt{}
 		}
 	}
 	switch binding.CommandType {
