@@ -77,20 +77,12 @@ func (s *Service) billingApprovalProof(ctx context.Context, request approvalenco
 	if err != nil || unchanged.Version != active.Version {
 		return approvalencoding.ProofResponse{}, errBillingApprovalProofUnavailable
 	}
-	// The owner status/evidence participates even if the typed snapshot has
-	// no corresponding field. The request-specific DENY reason does not:
-	// domain_revision must be a function of current domain facts only.
-	hash := sha256.New()
-	for _, part := range []string{command, strconv.FormatInt(active.Version, 10), string(current.CriticalResourceVersions), string(current.FinancialSnapshot), ownerState} {
-		_, _ = hash.Write([]byte(part))
-		_, _ = hash.Write([]byte{0})
-	}
 	now := s.now().UTC()
 	response := approvalencoding.ProofResponse{
 		ApprovalRequestID: request.ApprovalRequestID, CommandType: command,
 		CommandDigest: request.Artifacts.CommandDigest, SnapshotDigest: request.Artifacts.SnapshotDigest,
 		PolicyVersion: request.Artifacts.PolicyVersion, ProofSchemaVersion: approvalencoding.ProofSchemaVersion,
-		DomainRevision: strconv.FormatInt(active.Version, 10) + ":" + hex.EncodeToString(hash.Sum(nil)),
+		DomainRevision: billingProofRevision(command, active.Version, current, ownerState),
 		Verdict:        "ALLOW", ReasonCode: "PROOF_VALID", IssuedAt: now, ExpiresAt: now.Add(time.Minute),
 	}
 	if reason != "" {
@@ -100,6 +92,17 @@ func (s *Service) billingApprovalProof(ctx context.Context, request approvalenco
 		return approvalencoding.ProofResponse{}, errBillingApprovalProofUnavailable
 	}
 	return response, nil
+}
+
+// A revision is exclusively derived from owner facts and activation; a
+// request-specific DENY reason must not change it.
+func billingProofRevision(command string, activationVersion int64, current approvalencoding.LegacyProofInput, ownerState string) string {
+	hash := sha256.New()
+	for _, part := range []string{command, strconv.FormatInt(activationVersion, 10), string(current.CriticalResourceVersions), string(current.FinancialSnapshot), ownerState} {
+		_, _ = hash.Write([]byte(part))
+		_, _ = hash.Write([]byte{0})
+	}
+	return strconv.FormatInt(activationVersion, 10) + ":" + hex.EncodeToString(hash.Sum(nil))
 }
 
 func (s *Service) internalBillingApprovalProof(w http.ResponseWriter, r *http.Request) {
