@@ -358,8 +358,9 @@ fn get_sso_login(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<S
     let Some(permit) = permit else {
         return Ok(None);
     };
-    // 放行 ≠ 请求已发出:spawn 失败(Err)时丢弃凭证自动回滚预约,不白占 65s
-    // 窗口;进程真的跑起来后无论退出码如何,confirm 保留窗口(同 eip.rs)。
+    // 放行 ≠ 请求已发出:Err(spawn 失败或 120s 兜底击杀)丢弃凭证自动回滚,
+    // 不白占 65s 窗口;Ok 时无论退出码如何,confirm 保留窗口(同 eip.rs,含
+    // 超时回滚的取舍说明)。
     let out = run(cmd);
     if out.is_ok() {
         permit.confirm();

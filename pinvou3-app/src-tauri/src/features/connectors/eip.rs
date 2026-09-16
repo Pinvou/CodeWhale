@@ -437,9 +437,12 @@ fn get_sso_url(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<Str
     let Some(permit) = permit else {
         return Ok(None);
     };
-    // 放行 ≠ 请求已发出:spawn 失败(Err)时丢弃凭证自动回滚预约,不白占 65s
-    // 窗口;进程真的跑起来后无论退出码如何,网关都收到了请求,confirm 保留窗口
-    // (issue #1097:throttle 放行后 run(cmd) spawn 失败无法回滚预约)。
+    // 放行 ≠ 请求已发出:Err(spawn 失败或 120s 兜底击杀)丢弃凭证自动回滚,
+    // 不白占 65s 窗口;Ok 时无论退出码如何,网关都收到了请求,confirm 保留
+    // 窗口(issue #1097:throttle 放行后 run(cmd) spawn 失败无法回滚预约)。
+    // 超时击杀的请求理论上可能已到达网关,回滚后立刻重试存在撞 429 的窄窗口;
+    // 但 CLI 自带 60s HTTP 超时,能拖到 120s 的基本是进程级挂死(请求未完成),
+    // 回滚不给失败重试强加 65s 等待。
     let out = run(cmd);
     if out.is_ok() {
         permit.confirm();

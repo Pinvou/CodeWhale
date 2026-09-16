@@ -167,75 +167,36 @@ pub(crate) fn reap_after_kill(child: &mut Child) {
     let _ = reap_killed_child(child, REAP_GRACE);
 }
 
-/// 连接器 CLI 单次调用的兜底上限。CLI 自带 HTTP 客户端超时 60s(见 eip
-/// linux-src/main.go `httpClient`),`auth poll` 自带 30s 轮询窗口,单次合法
-/// 最坏 ≈ 90s;超过视为进程挂死。须小于门闩抢占阈值 `flow_gate::STALL_LIMIT`
-/// (180s),让卡死先在调用点以本超时自愈,抢占只作兜底。
+/// 连接器 CLI 单次调用的兜底上限。Rust 侧全部单次调用(eip `auth login
+/// --no-poll` / `auth poll`(服务端窗口默认 5s)/ status / load / logout)
+/// 受 CLI 自带 HTTP 客户端超时 60s 约束(见 eip linux-src/main.go
+/// `httpClient`),合法最坏 ≈ 60s + 启动开销;超过视为进程级挂死。须小于
+/// 门闩抢占阈值 `flow_gate::STALL_LIMIT`(180s),让卡死先在调用点以本超时
+/// 自愈,抢占只作兜底。
 pub(crate) const CLI_RUN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 跑命令并**捕获输出**、带超时兜底(EIP / 知道 SSO 编排用)。
 ///
 /// 旧实现直接 `cmd.output()`:CLI 真挂死(网络半开、内网网关黑洞)时会无限
 /// 阻塞,spawn_blocking 线程与子进程都不回收,反复触发会耗尽线程池(issue
-/// #1097)。这里 spawn + 轮询 `try_wait`,超时 kill 并 `wait()` 收尸;stdout/
-/// stderr 由独立线程排空——等待循环里不读管道的话,输出一旦超过管道缓冲
-/// (64KB)子进程就写阻塞造成假死,把正常调用误判成超时。
+/// #1097)。委托 `platform::process::output_with_timeout` 而非自管进程:临时
+/// 文件捕获输出(无管道写满死锁,孙进程继承句柄也不影响超时生效),超时
+/// kill 并 wait() 收尸,超过捕获上限同样终止,防失控输出拖垮调用方。
 pub(crate) fn run_captured_with_timeout(
-    mut cmd: Command,
+    cmd: Command,
     label: &str,
     timeout: Duration,
 ) -> Result<(bool, i32, String, String), String> {
-    fn drain<R: std::io::Read + Send + 'static>(
-        pipe: Option<R>,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
-            }
-            buf
+    crate::platform::process::output_with_timeout(cmd, timeout)
+        .map(|out| {
+            (
+                out.status.success(),
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
         })
-    }
-
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("启动 {label} 失败: {e}"))?;
-    let stdout_t = drain(child.stdout.take());
-    let stderr_t = drain(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // 进程已退出,管道随之关闭,排空线程立刻到 EOF。
-                let stdout =
-                    String::from_utf8_lossy(&stdout_t.join().unwrap_or_default()).into_owned();
-                let stderr =
-                    String::from_utf8_lossy(&stderr_t.join().unwrap_or_default()).into_owned();
-                return Ok((
-                    status.success(),
-                    status.code().unwrap_or(-1),
-                    stdout,
-                    stderr,
-                ));
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // 挂死进程的管道可能仍被孙进程握着,join 会卡住——直接脱管,
-                    // 排空线程随管道关闭自然结束,不占 spawn_blocking 池。
-                    return Err(format!("{label} 无响应超过 {}s,已终止", timeout.as_secs()));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                let _ = stdout_t.join();
-                let _ = stderr_t.join();
-                return Err(format!("{label} 执行失败: {e}"));
-            }
-        }
-    }
+        .map_err(|e| format!("{label}: {e}"))
 }
 
 /// 标准 base64 编码(避免引新依赖)。
@@ -728,7 +689,7 @@ mod tests {
             t0.elapsed()
         );
         assert!(
-            err.contains("无响应超过 1s"),
+            err.contains("timed out after 1s"),
             "error must report the timeout, got {err:?}"
         );
     }
