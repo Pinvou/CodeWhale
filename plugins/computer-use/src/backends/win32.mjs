@@ -218,6 +218,9 @@ Write-Output '{"ok": true, "w": ' + $bounds.Width + ', "h": ' + $bounds.Height +
       return { ...lastRaster };
     },
     zoom: async ({ source, region, path: outPath }) => {
+      if (!Array.isArray(region) || ![region[0], region[1], region[2], region[3]].every((n) => Number.isFinite(n) && n >= 0)) {
+        throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
+      }
       const src = source ?? lastRaster?.file;
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
       const out = outPath || path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`);

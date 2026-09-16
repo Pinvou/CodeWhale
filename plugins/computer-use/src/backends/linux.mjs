@@ -345,6 +345,9 @@ except Exception as e:
       return { ...lastRaster };
     },
     zoom: async ({ source, region, path: outPath }) => {
+      if (!Array.isArray(region) || ![region[0], region[1], region[2], region[3]].every((n) => Number.isFinite(n) && n >= 0)) {
+        throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
+      }
       need("ffmpeg", "zoom/crop");
       const src = source ?? lastRaster?.file;
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
