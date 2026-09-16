@@ -89,6 +89,10 @@ func TestProofEraBillingFailureRemainsQueryOnlyIntegration(t *testing.T) {
 		t.Fatalf("apply forward-only recovery default: %v", err)
 	}
 	migrations.Unlock(ctx, connection.Conn())
+	var ownerCanCreate bool
+	if err := db.adminPool.QueryRow(ctx, `SELECT has_schema_privilege('account_approval_authorization_owner','public','CREATE')`).Scan(&ownerCanCreate); err != nil || ownerCanCreate {
+		t.Fatalf("migration leaked public CREATE to approval owner: granted=%v err=%v", ownerCanCreate, err)
+	}
 	legacy := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	observeApprovalDelivery(t, ctx, repository, legacy, 71)
 	// Exercise the DB transition in isolation, with the same event identity but
