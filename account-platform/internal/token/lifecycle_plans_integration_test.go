@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	accountdomain "github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -155,6 +156,19 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	if err != nil || planProof.Verdict != "ALLOW" || planProof.DomainRevision != "1:"+planProjection.PrecheckFingerprint {
 		t.Fatalf("real lifecycle plan proof=%+v err=%v", planProof, err)
 	}
+	t.Run("signed Account to real lifecycle proof", func(t *testing.T) {
+		_, sign := tokenProofWorkloadIssuer(t)
+		server := httptest.NewServer(service.Handler("", nil))
+		defer server.Close()
+		source, err := accountdomain.NewHTTPApprovalProofSource(server.URL, server.URL, sign("account-subject"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := source.Proof(ctx, uuid.New(), planArtifacts)
+		if err != nil || result.Response.Verdict != "ALLOW" || result.Response.DomainRevision != planProof.DomainRevision {
+			t.Fatalf("real lifecycle HTTP proof=%+v err=%v", result, err)
+		}
+	})
 	planBody := approvedTokenCommandBody{ActivationEpoch: 1, ProofSchemaVersion: planProof.ProofSchemaVersion,
 		CommandDigest: planProof.CommandDigest, SnapshotDigest: planProof.SnapshotDigest,
 		DomainRevision: planProof.DomainRevision, ProofDigest: strings.Repeat("a", 64), ApprovalControlEpoch: 1,
