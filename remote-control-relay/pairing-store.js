@@ -273,6 +273,31 @@ export class PairingStore {
     return active ?? null;
   }
 
+  findActiveByCode(code) {
+    if (typeof code !== "string" || !/^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u.test(code)) return null;
+    const candidates = this.#keyring.ids.map((keyId) => ({
+      key_id: keyId,
+      digest_hex: codeDigest(this.#keyring.keys.get(keyId), code),
+    }));
+    const now = this.#clock();
+    if (!Number.isSafeInteger(now) || now < 0) fail("pairing_clock_invalid");
+    let match = null;
+    for (const active of this.#active.values()) {
+      if (Number(active.expires_at_ms) <= now) continue;
+      let matched = false;
+      for (const stored of active.code_digests) {
+        const candidate = candidates.find((item) => item.key_id === stored.key_id);
+        if (candidate) {
+          matched = crypto.timingSafeEqual(
+            Buffer.from(candidate.digest_hex, "hex"), Buffer.from(stored.digest_hex, "hex"),
+          ) || matched;
+        }
+      }
+      if (matched) match = active;
+    }
+    return match;
+  }
+
   async terminate({ pairingId } = {}) {
     pairingId = id(pairingId, "pairing_id");
     for (let attempt = 0; attempt < 8; attempt += 1) {
