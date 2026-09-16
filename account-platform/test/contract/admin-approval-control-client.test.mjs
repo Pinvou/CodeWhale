@@ -109,3 +109,35 @@ test('governed approval draft lifecycle uses one control generation and refetch-
     globalThis.fetch = original;
   }
 });
+
+test('governed approval directory rejects stale authorization version and late control', async () => {
+  const original = globalThis.fetch;
+  const client = new AdminPlatformClient('https://portal.example');
+  let version = 5;
+  let header = '3';
+  let lateChange = false;
+  globalThis.fetch = async (url) => {
+    if (new URL(url).pathname.endsWith('/capability')) return Response.json({
+      control: { schema_version: 1, mode: 'PROOF_REQUIRED', approval_wire_version: 2, proof_required: true,
+        epoch: 1, authorization_relay_state: 'RUNNING', authorization_relay_epoch: 1, version, request_id: 'request' },
+      session_approval_wire_version: 2,
+    });
+    if (lateChange) {
+      lateChange = false;
+      version = 6;
+      await client.governedApprovalCapability();
+    }
+    return Response.json({ schema_version: 1, platform_authorization_version: 3, items: [] },
+      { headers: { 'X-Platform-Authorization-Version': header } });
+  };
+  try {
+    assert.deepEqual((await client.governedApprovalDirectory()).items, []);
+    header = '2';
+    await assert.rejects(client.governedApprovalDirectory(), { code: 'APPROVAL_ACTION_CONTROL_CHANGED' });
+    header = '3';
+    lateChange = true;
+    await assert.rejects(client.governedApprovalDirectory(), { code: 'APPROVAL_ACTION_CONTROL_CHANGED' });
+  } finally {
+    globalThis.fetch = original;
+  }
+});

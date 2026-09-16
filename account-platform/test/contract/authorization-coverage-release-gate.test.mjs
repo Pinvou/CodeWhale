@@ -21,7 +21,7 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 373, tasks: 28, events: 7, cli: 23 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 374, tasks: 28, events: 7, cli: 23 });
 });
 
 test('Token proof endpoint requires a dedicated Account-only permission', async () => {

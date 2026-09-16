@@ -97,6 +97,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.GET("/auth/callback", httpserver.AdaptFunc(s.callback))
 	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
 	router.GET("/api/admin/approvals/capability", httpserver.AdaptFunc(s.adminApprovalCapability))
+	router.GET("/api/admin/approvals/directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	router.GET("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.POST("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.Any("/api/admin/approvals/requests/*resource", httpserver.AdaptFunc(s.adminApprovalRequests))

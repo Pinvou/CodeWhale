@@ -593,6 +593,31 @@ export class AdminPlatformClient {
   governedApprovalRequest(requestID, signal) {
     return this.governedApprovalRead(`/${encodeURIComponent(requestID)}`, { detail: true, signal });
   }
+  async governedApprovalDirectory(signal) {
+    const capability = await this.governedApprovalCapability(signal);
+    const key = approvalControlKey(capability);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    this.approvalControllers.add(controller);
+    try {
+      const response = await fetch(`${this.baseURL}/api/admin/approvals/directory`, {
+        headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw errorFromResponse(response, payload);
+      const header = response.headers.get('X-Platform-Authorization-Version');
+      if (approvalControlKey(this.approvalControl) !== key || payload?.schema_version !== 1 ||
+        !Number.isSafeInteger(payload?.platform_authorization_version) || payload.platform_authorization_version < 1 ||
+        !Array.isArray(payload?.items) || !/^[1-9][0-9]*$/.test(header || '') ||
+        Number(header) !== payload.platform_authorization_version) throw approvalControlChanged();
+      return payload;
+    } finally {
+      this.approvalControllers.delete(controller);
+      signal?.removeEventListener('abort', abort);
+    }
+  }
   async decideGovernedApproval(requestID, detail, decision, reason, signal) {
     const capability = await this.governedApprovalCapability(signal);
     const version = detail?.action_control_version;
