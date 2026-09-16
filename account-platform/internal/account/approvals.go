@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -503,6 +504,33 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 	if _, err := approvalRequestVisibilityForActor(ctx, r.pool, actorID, requestID); err != nil {
 		return ApprovalRequest{}, err
 	}
+	control, err := r.ApprovalActionControl(ctx)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	var checkpoint *approvalProofCheckpoint
+	var proofResult *ApprovalProofResult
+	if control.Mode == AdminApprovalModeProofRequired {
+		observed, err := r.readApprovalProofCheckpoint(ctx, principal, requestID, expectedVersion)
+		if err != nil {
+			return ApprovalRequest{}, err
+		}
+		if r.approvalProofSource == nil {
+			return ApprovalRequest{}, ErrApprovalProofUnavailable
+		}
+		policy, err := approvalPolicyForItem(observed.Request)
+		if err != nil {
+			return ApprovalRequest{}, ErrApprovalInvalidated
+		}
+		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
+			return ApprovalRequest{}, err
+		}
+		result, err := r.approvalProofSource.Proof(ctx, requestID, observed.Artifacts)
+		if err != nil {
+			return ApprovalRequest{}, err
+		}
+		checkpoint, proofResult = &observed, &result
+	}
 	// A missing or already-known unusable writer must not take the request row
 	// lock or fall back to the broad runtime credential.
 	if err := r.ApprovalWriterReady(ctx); err != nil {
@@ -514,7 +542,7 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 	for attempt := 1; attempt <= 3; attempt++ {
 		item, committed, rolledBack, err := r.approveApprovalRequestAttempt(
 			ctx, principal, requestID, expectedVersion, reason, observedVersions,
-			decisionID, stateEventID, authorizationEventID,
+			decisionID, stateEventID, authorizationEventID, checkpoint, proofResult,
 		)
 		if err == nil || committed {
 			return item, err
@@ -539,6 +567,8 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	decisionID uuid.UUID,
 	stateEventID uuid.UUID,
 	authorizationEventID uuid.UUID,
+	checkpoint *approvalProofCheckpoint,
+	proofResult *ApprovalProofResult,
 ) (ApprovalRequest, bool, bool, error) {
 	tx, err := r.approvalWriterPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -554,6 +584,15 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	if err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
+	if checkpoint == nil {
+		if control.Mode != AdminApprovalModeLegacy {
+			return rollback(ApprovalRequest{}, ErrApprovalAuthorizationControlChanged)
+		}
+	} else if proofResult == nil || control.Mode != AdminApprovalModeProofRequired ||
+		control.ApprovalEpoch != checkpoint.Control.ApprovalEpoch ||
+		control.ApprovalWireVersion != checkpoint.Control.ApprovalWireVersion || !control.ProofRequired {
+		return rollback(ApprovalRequest{}, ErrApprovalAuthorizationControlChanged)
+	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return rollback(ApprovalRequest{}, err)
@@ -564,6 +603,9 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	}
 	if actorID == nil {
 		return rollback(ApprovalRequest{}, ErrForbidden)
+	}
+	if checkpoint != nil && *actorID != checkpoint.ActorID {
+		return rollback(ApprovalRequest{}, ErrApprovalAuthorizationChanged)
 	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
@@ -639,10 +681,31 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		}
 		return rollback(ApprovalRequest{}, err)
 	}
+	if checkpoint != nil {
+		if bindingID != checkpoint.BindingID || authorizationVersion != checkpoint.AuthorizationVersion ||
+			approvalProofNeedsRecentAuthentication(item.CommandType) && !recentlyAuthenticated(principal.AuthenticatedAt, now) {
+			return rollback(ApprovalRequest{}, ErrApprovalAuthorizationChanged)
+		}
+		artifacts, conversionErr := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+			CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, SnapshotSchemaVersion: item.SnapshotSchemaVersion,
+			TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID,
+			NormalizedCommand: item.NormalizedCommand, CriticalResourceVersions: item.CriticalResourceVersions,
+			FinancialSnapshot: item.FinancialSnapshot,
+		})
+		if conversionErr != nil || !sameProofArtifacts(artifacts, checkpoint.Artifacts) ||
+			!approvalencoding.ProofResponseBound(proofResult.Response, requestID, artifacts) ||
+			!approvalencoding.ProofResponseFresh(proofResult.Response, now.UTC()) || proofResult.Response.Verdict != "ALLOW" {
+			return rollback(ApprovalRequest{}, ErrApprovalProofInvalid)
+		}
+		derived, deriveErr := approvalencoding.DeriveProofDigest(proofResult.Response)
+		if deriveErr != nil || hex.EncodeToString(derived[:]) != proofResult.Digest {
+			return rollback(ApprovalRequest{}, ErrApprovalProofInvalid)
+		}
+	}
 	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
-	if !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
+	if checkpoint == nil && !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
 		invalidated, invalidationErr := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "INVALIDATED", "RESOURCE_VERSION_CHANGED", map[string]any{"observed": jsonOrDefault(observedVersions, `{}`)}, now, stateEventID)
 		if invalidationErr != nil {
 			return rollback(ApprovalRequest{}, invalidationErr)
@@ -672,7 +735,13 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	if err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
-	authorizationRecord, err := appendLegacyApprovalAuthorization(ctx, tx, control, requestID, authorizationEventID)
+	var authorizationRecord ApprovalAuthorizationRecord
+	if checkpoint != nil {
+		authorizationRecord, err = appendProofApprovalAuthorization(ctx, tx, control, requestID, authorizationEventID,
+			ApprovalAuthorizationProof{Artifacts: checkpoint.Artifacts, Response: proofResult.Response})
+	} else {
+		authorizationRecord, err = appendLegacyApprovalAuthorization(ctx, tx, control, requestID, authorizationEventID)
+	}
 	if err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}

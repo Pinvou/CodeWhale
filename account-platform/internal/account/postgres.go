@@ -32,6 +32,9 @@ type PostgresRepository struct {
 	commerceProviderID     string
 	commerceAdapterVersion string
 	approvalSnapshots      ApprovalSnapshotSource
+	// Nil until the owner-domain proof endpoints are configured and verified.
+	// A proof-required control must fail closed when this source is absent.
+	approvalProofSource ApprovalProofSource
 	// tokenApprovalCreateGate is nil in every production constructor. APT-138
 	// owns the eventual activation source; the package integration gate injects
 	// an in-memory decision only to exercise the otherwise dormant transaction

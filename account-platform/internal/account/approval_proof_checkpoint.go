@@ -16,6 +16,7 @@ import (
 type approvalProofCheckpoint struct {
 	Request              ApprovalRequest
 	ActorID              uuid.UUID
+	BindingID            uuid.UUID
 	AuthorizationVersion int64
 	Control              AdminApprovalControl
 	Artifacts            approvalencoding.ProofArtifacts
@@ -61,7 +62,7 @@ func (r *PostgresRepository) readApprovalProofCheckpoint(ctx context.Context, pr
 	if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {
 		return approvalProofCheckpoint{}, ErrApprovalInvalidated
 	}
-	_, authorizationVersion, _, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
+	bindingID, authorizationVersion, _, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
 	if errors.Is(err, ErrForbidden) {
 		return approvalProofCheckpoint{}, ErrApprovalRequestNotFound
 	}
@@ -90,7 +91,7 @@ func (r *PostgresRepository) readApprovalProofCheckpoint(ctx context.Context, pr
 	if err := tx.Commit(ctx); err != nil {
 		return approvalProofCheckpoint{}, err
 	}
-	return approvalProofCheckpoint{Request: item, ActorID: *actorID, AuthorizationVersion: authorizationVersion, Control: control, Artifacts: artifacts}, nil
+	return approvalProofCheckpoint{Request: item, ActorID: *actorID, BindingID: bindingID, AuthorizationVersion: authorizationVersion, Control: control, Artifacts: artifacts}, nil
 }
 
 func approvalProofNeedsRecentAuthentication(command string) bool {
