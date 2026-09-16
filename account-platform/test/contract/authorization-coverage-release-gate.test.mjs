@@ -21,7 +21,18 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 353, tasks: 27, events: 7, cli: 21 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 355, tasks: 27, events: 7, cli: 22 });
+});
+
+test('approval reconciliation has an exact bounded workload entry', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'approval-reconciliation'), [{
+    name: 'approval-reconciliation', source: 'account-platform/cmd/approval-reconciliation/main.go',
+    strategy: 'workload.bounded-effect-verified-approval-reconciliation',
+  }]);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'approval-reconciliation');
+  }, /unclassified_cli:approval-reconciliation/);
 });
 
 test('Billing approval activation projection requires its exact workload permission', async () => {
