@@ -627,6 +627,60 @@ export class AdminPlatformClient {
       signal?.removeEventListener('abort', abort);
     }
   }
+  async writeGovernedApproval(kind, requestID, detail, draft, signal) {
+    const capability = await this.governedApprovalCapability(signal);
+    const version = capability.control.version;
+    if (kind !== 'create' && (detail?.approval_request_id !== requestID ||
+      !Number.isSafeInteger(detail?.action_control_version) || detail.action_control_version !== version ||
+      !Number.isSafeInteger(detail?.version) || detail.version < 1)) throw approvalControlChanged();
+    const body = kind === 'create' ? { ...draft } : kind === 'update'
+      ? { ...draft, expected_version: detail.version } : { expected_version: detail.version };
+    const suffix = kind === 'create' ? '' : kind === 'update' ? `/${encodeURIComponent(requestID)}`
+      : `/${encodeURIComponent(requestID)}/actions/${kind}`;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    this.approvalControllers.add(controller);
+    try {
+      const response = await fetch(`${this.baseURL}/api/admin/approvals/requests${suffix}`, {
+        method: kind === 'update' ? 'PUT' : 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json',
+          'X-CSRF-Token': this.csrfToken, 'X-Pinvou-Approval-Action-Control-Version': String(version) },
+        credentials: 'same-origin', cache: 'no-store', body: JSON.stringify(body), signal: controller.signal,
+      });
+      const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (payload?.code === 'APPROVAL_ACTION_CONTROL_CHANGED' || payload?.code === 'APPROVAL_PROTOCOL_UNAVAILABLE') {
+          this.approvalControl = null;
+          for (const active of this.approvalControllers) active.abort();
+        }
+        throw errorFromResponse(response, payload);
+      }
+      if (approvalControlKey(this.approvalControl) !== approvalControlKey(capability)) throw approvalControlChanged();
+      if (kind === 'create') {
+        if (response.status !== 201 || typeof payload.approval_request_id !== 'string' || !payload.approval_request_id) throw approvalControlChanged();
+        return payload.approval_request_id;
+      }
+      if (response.status !== 204) throw approvalControlChanged();
+      return null; // Any successful write requires a fresh detail read before another action.
+    } finally {
+      this.approvalControllers.delete(controller);
+      signal?.removeEventListener('abort', abort);
+    }
+  }
+  createGovernedApprovalDraft(draft, signal) {
+    return this.writeGovernedApproval('create', '', null, draft, signal);
+  }
+  updateGovernedApprovalDraft(requestID, detail, draft, signal) {
+    return this.writeGovernedApproval('update', requestID, detail, draft, signal);
+  }
+  submitGovernedApprovalRequest(requestID, detail, signal) {
+    return this.writeGovernedApproval('submit', requestID, detail, null, signal);
+  }
+  withdrawGovernedApprovalRequest(requestID, detail, signal) {
+    return this.writeGovernedApproval('withdraw', requestID, detail, null, signal);
+  }
   createApprovalDraft(input, signal) {
     return this.mutate('account', '/admin/v1/approval-requests', 'POST', input, '', signal);
   }

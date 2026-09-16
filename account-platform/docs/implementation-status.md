@@ -9,7 +9,7 @@
 | 目标编号 | 实现状态 | 任务与审核 | 证据 | 部署状态 | 已知差距 |
 |---|---|---|---|---|---|
 | ADM-67 | 部分实现 | APT-141-IN_PROGRESS; GSA-01～07既有状态保留; GSA-08～15-IN_PROGRESS/CODE_COMPLETE/SELF_REVIEW_PASS/DEPENDENCY_ENV_PENDING; GSA-16-IN_PROGRESS/PARTIAL/REVIEW_PENDING | GSA-01～11既有提交与审核证据保持。GSA-12有界列表/六命令closed详情和v1版本头已提交；GSA-13提交链见任务文档，Account proof检查点、原子写入、v2决定及六命令PG竞态测试通过。GSA-14 Token专用proof权限、三命令closed合同、执行前revision/epoch检查、真实Account身份到Token HTTP/PG的三命令proof及目录回滚事务竞态证据见任务文档。GSA-15 Billing专用proof权限、三命令closed合同、SERIALIZABLE执行前事实认领与未知结果零重探测，隔离PG三命令proof/claim及钱包漂移证据见任务文档；尚非完整Account批准→consumer→恢复链或生产验收。Account schema已追加前向000065～000068，Billing新增前向000055。GSA-16新增只读查询租约客户端及租约下效果查证，真实隔离PG和完整产品门禁通过；本阶段提交`0ed2ca78`、`0edd4fe8`、`5c072e4f`均已推送但待统一审核。 | NOT_DEPLOYED | GSA-04三项Linux验收仍待补，环境欠账继续传递。v2读取尚未部署或开启生产分页gate/密钥；无独立授权聚合时不展示统计。GSA-16缺独立worker身份/调度、六命令权威结果与终态CAS，不能启用恢复或标记CODE_COMPLETE；21～36负责八财务家族；真实Q/receipt、生产资源/ACL、控制面切换、activation和部署归GSA-38～40。 |
-| UI-60 | 未实现 | APT-142-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | v1/v2会话兼容、目录/列表/详情、业务编辑替代与治理分区交互尚未整改，见GSA-17～20及37。 |
+| UI-60 | 部分实现 | APT-142-IN_PROGRESS; GSA-17_CODE_COMPLETE_REVIEW_PENDING | e15fe698需求审核PASS | NOT_DEPLOYED | 审批v1/v2会话兼容、BFF与动作代次代码已完成，真实多副本TLS Redis与GSA-04环境待验；导航、目录/列表/详情、业务编辑替代和治理分区交互仍待GSA-18～20及37。 |
 | NFR-57 | 未实现 | APT-143-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | 逐项发布工具、生产等价故障/性能/兼容证据及实际授权部署尚未完成，见GSA-38～40；不得以代码测试替代生产证据。 |
 
 本批需求提交前`node scripts/account-platform.mjs verify`已通过：Go test/vet、OpenAPI、550项Node合同通过（另2项SKIP）、三语、observability及architecture。该结果只证明现有代码基线，不证明新增需求已实现；新数据库/消息队列行为验收须按子任务取得真实隔离环境证据。

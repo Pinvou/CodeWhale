@@ -39,7 +39,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
-| GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
+| GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | PENDING |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | PENDING |
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | PENDING |
@@ -168,6 +168,8 @@ GSA-17 状态纠正（仍PARTIAL / REVIEW_PENDING）：后续依赖检查发现v
 GSA-17 Account v2草稿生命周期入口（仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：补齐create/update/submit/withdraw四条独立v2路径，复用既有申请和事务状态机，要求受信动作控制代次并在事务内持共享锁重验；闭合顶层请求字段并拒绝浏览器proof，响应只返回v2投影而非v1原始申请。隔离PostgreSQL验证同一申请从DRAFT创建、编辑、提交到撤回，另验证过期代次零写入和非法输入拒绝。Portal BFF和客户端尚未接入这四条路径，不能据此标记GSA-17完成。
 
 GSA-17 Portal草稿生命周期BFF（仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：版本中立入口新增create/update/submit/withdraw，服务端根据当前Session不可变协议锁选择精确Account v1/v2路径；所有写入要求CSRF和浏览器所见动作代次，v2向Account传受信控制头，闭合请求字段并拒绝proof，操作后仅返回不含动作的最小创建ID或204，要求客户端重读详情。Token操作开关关闭时新建Token草稿拒绝，既有申请修改/提交/撤回沿用同会话分类证明。Portal HTTP定向验证v2完整路径、旧Session固定v1、过期代次与非法字段零上游、Token关闭拒绝。客户端四动作尚未接线，真实Redis多副本TLS fixture仍待环境验证。
+
+GSA-17 客户端写链路收口（CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED）：新增独立governed create/update/submit/withdraw方法，不改变业务页现存v1直接调用；写前取得同一Session的受信capability并要求详情版本/动作代次匹配，所有写入携带CSRF及控制头，成功创建只返回申请ID，其余只返回需要重新取详情的空结果。控制代次变化abort在途请求，迟到成功不得复活动作。Portal v1创建响应字段修正为实际`approval_request_id`，旧Session仍锁v1。代码与合同测试完成；本状态只代表GSA-17范围代码完成，尚未独立审核，真实多副本TLS Redis隔离验证和GSA-04 Linux环境欠账仍保留，GSA-18/19 UI与生产灰度并未完成。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
