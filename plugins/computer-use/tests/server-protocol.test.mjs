@@ -49,6 +49,11 @@ const CANNED = {
 };
 
 if (process.env.FAKE_AGENT_CANNED === "1" && CANNED[req.tool]) {
+  if (req.tool === "get_app_state" && req.args?.app_ref?.name === "slow-app") {
+    // Sentinel for the repoint-guard tests: keep the observation in flight
+    // while the test removes or re-registers the computer under it.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
   console.log(JSON.stringify({ ok: true, platform: process.platform, tool: req.tool, data: CANNED[req.tool](req) }));
   process.exit(0);
 }
@@ -356,6 +361,49 @@ test("re-registering an id in place forgets the old host's runtime state", { ski
   const zoom = await tool("zoom", { computer: "box", region: [0, 0, 10, 10] });
   assert.equal(zoom.ok, false);
   assert.equal(zoom.error.code, "no_raster");
+});
+
+test("a computer removed mid-call fails the in-flight result closed (computer_repointed)", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // app_ref "slow-app" is the canned endpoint's sentinel: the observation
+  // stays in flight for 700ms while the remove lands underneath it.
+  const [removed, st] = await Promise.all([
+    new Promise((resolve) => setTimeout(resolve, 150)).then(() => tool("computer_remove", { computer: "box" })),
+    tool("get_app_state", { computer: "box", app_ref: { name: "slow-app" } }),
+  ]);
+  assert.equal(removed.ok, true, JSON.stringify(removed.error ?? {}));
+  assert.equal(st.ok, false, "an in-flight result must not be remembered for a removed computer");
+  assert.equal(st.error.code, "computer_repointed");
+  // Leave the registry as later tests expect it.
+  assert.equal((await tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", user: "me" })).ok, true);
+});
+
+test("a port-only repoint mid-call fails closed too — the guard compares the whole connection", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // Same transport, same host, different port: host:22 and host:2222 can be
+  // different machines, so the in-flight observation must not be remembered.
+  const [re, st] = await Promise.all([
+    new Promise((resolve) => setTimeout(resolve, 150)).then(() => tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", port: 2222, user: "me" })),
+    tool("get_app_state", { computer: "box", app_ref: { name: "slow-app" } }),
+  ]);
+  assert.equal(re.ok, true, JSON.stringify(re.error ?? {}));
+  assert.equal(st.ok, false, "an in-flight result must not be remembered for a repointed computer");
+  assert.equal(st.error.code, "computer_repointed");
+  // Leave the registry as later tests expect it.
+  assert.equal((await tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", user: "me" })).ok, true);
+});
+
+test("a byte-identical re-register keeps the computer's runtime state", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
+  assert.equal(st.ok, true, JSON.stringify(st.error ?? {}));
+  // No connection field changes: eviction is for repoints, not no-ops.
+  assert.equal((await tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", user: "me" })).ok, true);
+  const act = await tool("set_value", { computer: "box", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+  assert.equal(act.ok, true, JSON.stringify(act.error ?? {}));
+});
+
+test("switch_display over ssh fails closed instead of silently evaporating", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const sw = await tool("switch_display", { computer: "box", index: 1 });
+  assert.equal(sw.ok, false);
+  assert.equal(sw.error.code, "persistent_session_required");
 });
 
 test("kill switch refuses mutating tools but keeps read-only probes", async () => {

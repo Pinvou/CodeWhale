@@ -135,13 +135,18 @@ test("win32: module loads with the full backend surface", async () => {
 
 test("remote agent refuses tools outside the allow-list", async () => {
   const { run } = await import("../src/exec.mjs");
-  const sentinel = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cu-agent-deny-")), "x");
-  const payload = Buffer.from(JSON.stringify({ tool: "write_file", args: { path: sentinel } })).toString("base64");
-  const r = await run("node", [new URL("../agent.mjs", import.meta.url).pathname, payload]);
-  const reply = JSON.parse(r.stdout.trim());
-  assert.equal(reply.ok, false);
-  assert.equal(reply.error.code, "tool_not_allowed");
-  assert.ok(!fs.existsSync(sentinel));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-agent-deny-"));
+  try {
+    const sentinel = path.join(dir, "x");
+    const payload = Buffer.from(JSON.stringify({ tool: "write_file", args: { path: sentinel } })).toString("base64");
+    const r = await run("node", [new URL("../agent.mjs", import.meta.url).pathname, payload]);
+    const reply = JSON.parse(r.stdout.trim());
+    assert.equal(reply.ok, false);
+    assert.equal(reply.error.code, "tool_not_allowed");
+    assert.ok(!fs.existsSync(sentinel));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("remote agent answers the platform probe", async () => {
@@ -308,3 +313,16 @@ test("linux: zoom crops 1:1 in raster pixels and advances the last raster so cha
   const img2 = decodePNG(fs.readFileSync(two.file));
   assert.deepEqual(img2.px(0, 0), grad(30, 16));
 });
+
+// Region validation runs before any tool probe or exec, so these run on
+// every platform and pin the named error instead of a NaN-driven failure.
+for (const [platform, module] of [["linux", "../src/backends/linux.mjs"], ["win32", "../src/backends/win32.mjs"]]) {
+  test(`${platform}: zoom refuses a malformed region with a named error`, async () => {
+    const { create } = await import(module);
+    const backend = create({ exec: {} });
+    for (const region of [undefined, ["a", 0, 10, 10], [10, 0, 10], [-1, 0, 10, 10]]) {
+      await assert.rejects(() => backend.zoom({ source: "/tmp/cu-unused.png", region }), /region must be \[x, y, w, h\] in last-raster pixels/u);
+    }
+  });
+}
+
