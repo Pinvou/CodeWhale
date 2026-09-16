@@ -118,11 +118,19 @@ it.
 
 ## Enrollment data and API
 
-The `endpoint_enrollment` namespace stores sorted endpoint records with status
-(`active` or terminal `revoked`), endpoint revision, timestamps, a keyed
-HMAC-SHA-256 digest, and only the audit source/last action. Raw credentials and
-the HMAC key are never persisted or returned. Credential checks use a constant-
-time digest comparison.
+The `endpoint_enrollment` namespace schema is version 2. It stores sorted
+endpoint records with status (`active` or terminal `revoked`), endpoint
+revision, ordered timestamps, a keyed HMAC-SHA-256 digest, and only the audit
+source/last action. It also stores a sorted migration request ledger. Version 1
+snapshots are strictly validated and normalized to version 2 with an empty
+ledger on read; the next successful mutation persists the upgrade. Unknown or
+malformed versions fail closed.
+
+Raw credentials, migration parameters, and the HMAC key are never persisted or
+returned. Credential and request-parameter checks use constant-time digest
+comparison. A ledger row contains only the stable request ID, operation class,
+sorted endpoint IDs, keyed parameter digest, timestamps, state, and a bounded
+secret-free outcome.
 
 Callers use:
 
@@ -131,6 +139,23 @@ Callers use:
   `desktop_pairing_register` before accepting a registration;
 - `rotateCredential` with the current credential and expected endpoint revision;
 - `revoke` with the expected endpoint revision.
+- `exportSnapshot`, public `validateEnrollmentRegistrySnapshot`, and
+  `importSnapshot` for strict backup validation and one-CAS restoration;
+- `applyAtomicBatch` for a fully prevalidated allowlist/re-enroll batch or an
+  exclusive restore operation. It makes at most one namespace CAS, so no prefix
+  of a failed batch becomes durable;
+- `beginMigrationRequest` and `completeMigrationRequest` for explicit crash
+  boundaries, or `executeMigrationRequest` for the normal composed path.
+
+Migration begin durably creates `pending`. Completion recomputes and verifies
+the keyed parameter digest, builds the entire new registry in memory, then
+persists endpoint changes and the terminal sealed outcome in the same namespace
+CAS. A crash before that CAS leaves only `pending`; a crash after it leaves both
+the full endpoint result and terminal outcome. A retry after restart resumes a
+matching pending row or returns the original terminal result. The same request
+ID with another operation, endpoint set, credential, revision, or snapshot is a
+conflict. Concurrent handlers converge through namespace CAS; a storage error
+never reports an unpersisted success.
 
 State CAS conflicts and endpoint revision conflicts are explicit. Registry,
 storage, digest-key, corruption, and persistence failures reject authorization;

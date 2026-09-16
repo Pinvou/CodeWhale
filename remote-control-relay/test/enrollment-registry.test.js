@@ -10,8 +10,11 @@ import { promisify } from "node:util";
 
 import {
   ENROLLMENT_NAMESPACE,
+  ENROLLMENT_REGISTRY_SCHEMA,
+  ENROLLMENT_REGISTRY_VERSION,
   EnrollmentRegistry,
   loadEnrollmentRegistryConfig,
+  validateEnrollmentRegistrySnapshot,
 } from "../enrollment-registry.js";
 import {
   RELAY_CONTROLLER_STATE_SCHEMA,
@@ -21,6 +24,7 @@ import {
 const HMAC_KEY = "test-only-hmac-key-material-32-bytes-minimum";
 const FIRST_CREDENTIAL = "endpoint-credential-one-at-least-32-bytes";
 const SECOND_CREDENTIAL = "endpoint-credential-two-at-least-32-bytes";
+const THIRD_CREDENTIAL = "endpoint-credential-three-at-least-32-bytes";
 const execFileAsync = promisify(execFile);
 const TEST_RESOURCES = new WeakMap();
 
@@ -1142,4 +1146,259 @@ test("persisted registry contains only digest and minimal non-secret audit field
   assert.deepEqual(Object.keys(value.entries[0].audit).sort(), ["last_action", "source"]);
   assert.equal(value.entries[0].credential.digest_hex.length, 64);
   assert.notEqual(value.entries[0].credential.digest_hex, FIRST_CREDENTIAL);
+});
+
+test("atomic batch validates everything before one namespace CAS", async (t) => {
+  const { statePath, store } = await openRegistry(t);
+  let writes = 0;
+  const countingStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (name) => store.readNamespace(name),
+    compareAndSwap: async (...args) => {
+      writes += 1;
+      return store.compareAndSwap(...args);
+    },
+  };
+  const registry = EnrollmentRegistry.open({ stateStore: countingStore, config: configForState(statePath) });
+  const initial = registry.exportSnapshot();
+  const applied = await registry.applyAtomicBatch({
+    expectedNamespaceRevision: initial.namespace_revision,
+    operations: [
+      { operation: "allowlist", endpoint_id: "batch-a", credential: FIRST_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "batch-b", credential: SECOND_CREDENTIAL },
+    ],
+  });
+  assert.equal(writes, 1);
+  assert.deepEqual(applied.results.map((result) => result.action), ["allowlisted", "allowlisted"]);
+  assert.equal(registry.getStatus("batch-a").status, "active");
+  assert.equal(registry.getStatus("batch-b").status, "active");
+
+  const beforeFailure = registry.exportSnapshot();
+  await rejectsCode(registry.applyAtomicBatch({
+    expectedNamespaceRevision: beforeFailure.namespace_revision,
+    operations: [
+      { operation: "re_enroll", endpoint_id: "batch-a", current_credential: FIRST_CREDENTIAL,
+        new_credential: THIRD_CREDENTIAL, expected_revision: "1" },
+      { operation: "re_enroll", endpoint_id: "batch-b", current_credential: THIRD_CREDENTIAL,
+        new_credential: FIRST_CREDENTIAL, expected_revision: "1" },
+    ],
+  }), "invalid_enrollment_credential");
+  assert.equal(writes, 1, "a failed preflight must not persist a partial first operation");
+  assert.equal(registry.getStatus("batch-a").revision, "1");
+
+  const beforeRotation = registry.exportSnapshot();
+  const rotated = await registry.applyAtomicBatch({
+    expectedNamespaceRevision: beforeRotation.namespace_revision,
+    operations: [
+      { operation: "re_enroll", endpoint_id: "batch-a", current_credential: FIRST_CREDENTIAL,
+        new_credential: THIRD_CREDENTIAL, expected_revision: "1" },
+      { operation: "re_enroll", endpoint_id: "batch-b", current_credential: SECOND_CREDENTIAL,
+        new_credential: FIRST_CREDENTIAL, expected_revision: "1" },
+    ],
+  });
+  assert.equal(writes, 2);
+  assert.deepEqual(rotated.results.map((result) => result.action), ["re_enrolled", "re_enrolled"]);
+});
+
+test("public snapshot validation and import are strict, versioned, and one-CAS", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "snapshot-b", credential: FIRST_CREDENTIAL });
+  await registry.enroll({ endpointId: "snapshot-c", credential: SECOND_CREDENTIAL });
+  const exported = registry.exportSnapshot();
+  assert.equal(exported.registry.version, ENROLLMENT_REGISTRY_VERSION);
+  assert.equal(Object.isFrozen(exported.registry), true);
+  assert.deepEqual(validateEnrollmentRegistrySnapshot(exported.registry), exported.registry);
+
+  const unsorted = structuredClone(exported.registry);
+  unsorted.entries.reverse();
+  assert.throws(() => validateEnrollmentRegistrySnapshot(unsorted),
+    (error) => error?.code === "enrollment_registry_malformed");
+  const unknown = structuredClone(exported.registry);
+  unknown.extra = true;
+  assert.throws(() => validateEnrollmentRegistrySnapshot(unknown),
+    (error) => error?.code === "enrollment_registry_malformed");
+  for (const mutate of [
+    (snapshot) => { snapshot.entries[0].revision = "01"; },
+    (snapshot) => { snapshot.entries[0].status = "unknown"; },
+    (snapshot) => { snapshot.entries[0].credential.digest_hex = "bad"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "yesterday"; },
+  ]) {
+    const malformed = structuredClone(exported.registry);
+    mutate(malformed);
+    assert.throws(() => validateEnrollmentRegistrySnapshot(malformed));
+  }
+
+  const legacy = {
+    schema: ENROLLMENT_REGISTRY_SCHEMA,
+    version: 1,
+    entries: structuredClone(exported.registry.entries),
+  };
+  const migrated = validateEnrollmentRegistrySnapshot(legacy);
+  assert.equal(migrated.version, 2);
+  assert.deepEqual(migrated.migration_requests, []);
+
+  let writes = 0;
+  const countingStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (name) => store.readNamespace(name),
+    compareAndSwap: async (...args) => {
+      writes += 1;
+      return store.compareAndSwap(...args);
+    },
+  };
+  const importing = EnrollmentRegistry.open({ stateStore: countingStore, config: configForState(statePath) });
+  const replacement = {
+    schema: ENROLLMENT_REGISTRY_SCHEMA,
+    version: 1,
+    entries: structuredClone(exported.registry.entries.slice(1)),
+  };
+  const imported = await importing.importSnapshot({
+    snapshot: replacement,
+    expectedNamespaceRevision: importing.exportSnapshot().namespace_revision,
+  });
+  assert.equal(writes, 1);
+  assert.equal(imported.registry.version, 2);
+  assert.equal(imported.registry.entries.length, 1);
+  assert.equal(importing.getStatus("snapshot-b"), null);
+
+  const beforeRestore = importing.exportSnapshot();
+  const restored = await importing.applyAtomicBatch({
+    expectedNamespaceRevision: beforeRestore.namespace_revision,
+    operations: [{ operation: "restore", snapshot: exported.registry }],
+  });
+  assert.equal(writes, 2);
+  assert.equal(restored.restored_entry_count, 2);
+  assert.equal(importing.getStatus("snapshot-b").status, "active");
+});
+
+test("a persisted v1 enrollment registry upgrades lazily on its next mutation", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "legacy-registry-a", credential: FIRST_CREDENTIAL });
+  const current = store.readNamespace(ENROLLMENT_NAMESPACE);
+  await store.compareAndSwap(ENROLLMENT_NAMESPACE, current.namespace_revision, {
+    schema: ENROLLMENT_REGISTRY_SCHEMA,
+    version: 1,
+    entries: current.value.entries,
+  });
+  const reopened = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  assert.equal(reopened.exportSnapshot().registry.version, 2);
+  assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.version, 1, "read-only open must not rewrite state");
+  const beforeMutation = reopened.exportSnapshot();
+  await reopened.applyAtomicBatch({
+    expectedNamespaceRevision: beforeMutation.namespace_revision,
+    operations: [{ operation: "allowlist", endpoint_id: "legacy-registry-b", credential: SECOND_CREDENTIAL }],
+  });
+  const persisted = store.readNamespace(ENROLLMENT_NAMESPACE).value;
+  assert.equal(persisted.version, 2);
+  assert.deepEqual(persisted.migration_requests, []);
+});
+
+test("migration ledger survives a crash after pending and seals a secret-free terminal outcome", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  const input = {
+    requestId: "migration-request-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: FIRST_CREDENTIAL }],
+  };
+  const pending = await registry.beginMigrationRequest(input);
+  assert.equal(pending.status, "pending");
+  const persistedPending = store.readNamespace(ENROLLMENT_NAMESPACE).value;
+  assert.equal(persistedPending.version, 2);
+  assert.equal(persistedPending.migration_requests[0].status, "pending");
+  assert.doesNotMatch(JSON.stringify(persistedPending), new RegExp(FIRST_CREDENTIAL, "u"));
+
+  const restarted = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const completed = await restarted.completeMigrationRequest(input);
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.outcome.results[0].endpoint_id, "ledger-a");
+  const replay = await restarted.executeMigrationRequest(input);
+  assert.deepEqual(replay, completed);
+  assert.equal(restarted.getStatus("ledger-a").revision, "1");
+  assert.doesNotMatch(
+    JSON.stringify(store.readNamespace(ENROLLMENT_NAMESPACE).value),
+    new RegExp(FIRST_CREDENTIAL, "u"),
+  );
+
+  await rejectsCode(restarted.executeMigrationRequest({
+    ...input,
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: SECOND_CREDENTIAL }],
+  }), "migration_request_conflict");
+});
+
+test("concurrent handlers converge on one request and one endpoint mutation", async (t) => {
+  const { statePath, store } = await openRegistry(t);
+  const left = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const right = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const input = {
+    requestId: "migration-concurrent-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-concurrent", credential: FIRST_CREDENTIAL }],
+  };
+  const [leftResult, rightResult] = await Promise.all([
+    left.executeMigrationRequest(input),
+    right.executeMigrationRequest(input),
+  ]);
+  assert.deepEqual(leftResult, rightResult);
+  assert.equal(leftResult.status, "succeeded");
+  assert.equal(left.getStatus("ledger-concurrent").revision, "1");
+  const snapshot = left.exportSnapshot().registry;
+  assert.equal(snapshot.entries.filter((entry) => entry.endpoint_id === "ledger-concurrent").length, 1);
+  assert.equal(snapshot.migration_requests.filter((request) => request.request_id === input.requestId).length, 1);
+});
+
+test("post-commit response loss is recovered for pending and terminal writes", async (t) => {
+  const { statePath, store } = await openRegistry(t);
+  let commitsBeforeThrow = 1;
+  const lossyStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: (name) => store.readNamespace(name),
+    async compareAndSwap(...args) {
+      const committed = await store.compareAndSwap(...args);
+      if (commitsBeforeThrow > 0) {
+        commitsBeforeThrow -= 1;
+        throw Object.assign(new Error("simulated response loss"), { code: "EPIPE" });
+      }
+      return committed;
+    },
+  };
+  const input = {
+    requestId: "migration-response-loss-1",
+    operations: [{ operation: "allowlist", endpoint_id: "loss-a", credential: FIRST_CREDENTIAL }],
+  };
+  const lossyRegistry = EnrollmentRegistry.open({ stateStore: lossyStore, config: configForState(statePath) });
+  await rejectsCode(lossyRegistry.beginMigrationRequest(input), "enrollment_registry_unavailable");
+  const recovered = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  assert.equal(recovered.getMigrationRequest(input.requestId).status, "pending");
+
+  commitsBeforeThrow = 1;
+  await rejectsCode(lossyRegistry.completeMigrationRequest(input), "enrollment_registry_unavailable");
+  const terminal = recovered.getMigrationRequest(input.requestId);
+  assert.equal(terminal.status, "succeeded");
+  assert.deepEqual(await recovered.executeMigrationRequest(input), terminal);
+  assert.equal(recovered.getStatus("loss-a").revision, "1");
+});
+
+test("deterministic migration failure is terminal and schema corruption fails closed", async (t) => {
+  const { statePath, store, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "failure-a", credential: FIRST_CREDENTIAL });
+  const failing = {
+    requestId: "migration-failure-0001",
+    operations: [{
+      operation: "re_enroll",
+      endpoint_id: "failure-a",
+      current_credential: SECOND_CREDENTIAL,
+      new_credential: THIRD_CREDENTIAL,
+      expected_revision: "1",
+    }],
+  };
+  await rejectsCode(registry.executeMigrationRequest(failing), "invalid_enrollment_credential");
+  assert.equal(registry.getMigrationRequest(failing.requestId).status, "failed");
+  await rejectsCode(registry.executeMigrationRequest(failing), "invalid_enrollment_credential");
+
+  const snapshot = registry.exportSnapshot();
+  const malformed = structuredClone(snapshot.registry);
+  malformed.migration_requests[0].parameters.digest_hex = "bad";
+  await store.compareAndSwap(ENROLLMENT_NAMESPACE, snapshot.namespace_revision, malformed);
+  assert.throws(() => EnrollmentRegistry.open({
+    stateStore: store,
+    config: configForState(statePath),
+  }), (error) => error?.code === "migration_request_malformed");
 });
