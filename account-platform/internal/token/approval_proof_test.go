@@ -3,6 +3,8 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -52,5 +54,28 @@ func TestTokenApprovalProofRecomputesOwnerFactsAndEpoch(t *testing.T) {
 	service.WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "SAFE_ROLLBACK", Epoch: 8}})
 	if _, err := service.tokenApprovalProof(context.Background(), request); err == nil {
 		t.Fatal("SAFE_ROLLBACK issued a proof")
+	}
+}
+
+func TestTokenApprovalProofRouteDoesNotTrustLegacyTokenOrBrowser(t *testing.T) {
+	service := NewService(nil, nil, nil, nil, ProviderURLPolicy{}, nil, nil, 0)
+	for _, item := range []struct {
+		name, bearer string
+		status       int
+	}{
+		{"browser", "", http.StatusUnauthorized},
+		{"legacy shared token", "Bearer legacy", http.StatusForbidden},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/internal/v1/approval-command-proofs", strings.NewReader(`{}`))
+			if item.bearer != "" {
+				request.Header.Set("Authorization", item.bearer)
+			}
+			response := httptest.NewRecorder()
+			service.Handler("legacy", nil).ServeHTTP(response, request)
+			if response.Code != item.status || !strings.Contains(response.Body.String(), "SERVICE_AUTH_") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
