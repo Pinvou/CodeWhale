@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,12 +11,13 @@ import { WebSocket } from "ws";
 import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
 import { createEnrollmentGateway, validateLegacyRollbackTopology } from "../enrollment-gateway.js";
 import {
+  createOfficialEnrollmentProofVerifier,
   EnrollmentMigrationHandler,
   createEnrollmentBackup,
   restoreEnrollmentBackup,
   runEnrollmentBatch,
 } from "../enrollment-migration-handler.js";
-import { RelayStateStore } from "../relay-state-store.js";
+import { protectWindowsPath, RelayStateStore, verifyWindowsPath } from "../relay-state-store.js";
 import { main as migrationCli } from "../scripts/enrollment-migrate.js";
 
 const relayDir = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -24,6 +25,36 @@ const ACCESS_A = "legacy-access-token-a-0000000000000000000001";
 const ACCESS_B = "legacy-access-token-b-0000000000000000000002";
 const ACCESS_C = "legacy-access-token-c-0000000000000000000003";
 const DESKTOP_SECRET = "legacy-desktop-secret-000000000000000000001";
+
+function officialIdentity() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  return {
+    privateKey,
+    verifier: createOfficialEnrollmentProofVerifier({
+      publicKeys: [{ key_id: "official-test-key", public_key_pem: publicKey.export({ type: "spki", format: "pem" }) }],
+    }),
+  };
+}
+
+function signedEnrollmentProof({ privateKey, endpointId, accessToken, desktopSecret, challenge }) {
+  const now = Date.now();
+  const proof = {
+    schema: "pinvou-official-endpoint-enrollment-proof",
+    version: 1,
+    key_id: "official-test-key",
+    device_id: endpointId,
+    endpoint_id: endpointId,
+    access_token_sha256: crypto.createHash("sha256").update(accessToken, "utf8").digest("hex"),
+    desktop_secret_sha256: crypto.createHash("sha256").update(desktopSecret, "utf8").digest("hex"),
+    socket_challenge_b64: challenge,
+    issued_at_ms: now - 1000,
+    expires_at_ms: now + 60_000,
+  };
+  return {
+    proof,
+    signatureB64: crypto.sign(null, Buffer.from(JSON.stringify(proof), "utf8"), privateKey).toString("base64url"),
+  };
+}
 
 function environment(root, deployment = "official") {
   return {
@@ -37,6 +68,15 @@ function environment(root, deployment = "official") {
   };
 }
 
+function testStoreSecurityOptions() {
+  if (process.platform !== "win32") return {};
+  return {
+    protectPath: async () => {},
+    verifyPath: async () => {},
+    verifyAncestors: async () => {},
+  };
+}
+
 async function fixture(t, deployment = "official") {
   const root = await mkdtemp(join(tmpdir(), "pinvou-enrollment-migration-"));
   const env = environment(root, deployment);
@@ -44,6 +84,8 @@ async function fixture(t, deployment = "official") {
   const store = await RelayStateStore.open({
     statePath: config.controller_state_path,
     legacyStatePath: config.legacy_web_state_path,
+    processIdentity: async (pid) => `migration-test-process:${pid}`,
+    ...testStoreSecurityOptions(),
   });
   t.after(async () => {
     await store.close();
@@ -58,12 +100,25 @@ async function rejectsCode(promise, code) {
 
 test("official claim is socket-bound, stable, conflicting-safe and keeps the Web token", async (t) => {
   const { store, registry } = await fixture(t);
-  const handler = new EnrollmentMigrationHandler({ registry });
+  const identity = officialIdentity();
+  const handler = new EnrollmentMigrationHandler({ registry, identityVerifier: identity.verifier });
   const socket = {};
+  const challenge = handler.issueClaimChallenge({ socket, endpointId: "official-endpoint-1" });
+  const signed = signedEnrollmentProof({
+    privateKey: identity.privateKey,
+    endpointId: "official-endpoint-1",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: challenge.socket_challenge_b64,
+  });
   const proof = handler.bindAuthenticatedLegacySocket({
     socket,
     endpointId: "official-endpoint-1",
     accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: challenge.socket_challenge_b64,
+    enrollmentProof: signed.proof,
+    signatureB64: signed.signatureB64,
   });
   await rejectsCode(handler.claim({ socket: {}, proof, requestId: "request-0001" }), "migration_socket_proof_invalid");
   const first = await handler.claim({ socket, proof, requestId: "request-0001" });
@@ -76,12 +131,27 @@ test("official claim is socket-bound, stable, conflicting-safe and keeps the Web
     purpose: "web_v2_reregister",
   });
 
-  const restartedHandler = new EnrollmentMigrationHandler({ registry });
+  const restartedHandler = new EnrollmentMigrationHandler({ registry, identityVerifier: identity.verifier });
   const restartedSocket = {};
+  const restartedChallenge = restartedHandler.issueClaimChallenge({
+    socket: restartedSocket,
+    endpointId: "official-endpoint-1",
+  });
+  const restartedSigned = signedEnrollmentProof({
+    privateKey: identity.privateKey,
+    endpointId: "official-endpoint-1",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: restartedChallenge.socket_challenge_b64,
+  });
   const restartedProof = restartedHandler.bindAuthenticatedLegacySocket({
     socket: restartedSocket,
     endpointId: "official-endpoint-1",
     accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: restartedChallenge.socket_challenge_b64,
+    enrollmentProof: restartedSigned.proof,
+    signatureB64: restartedSigned.signatureB64,
   });
   const afterRestart = await restartedHandler.claim({
     socket: restartedSocket,
@@ -92,10 +162,22 @@ test("official claim is socket-bound, stable, conflicting-safe and keeps the Web
   assert.equal(afterRestart.legacy_web_link, "preserved");
 
   const otherSocket = {};
+  const otherChallenge = handler.issueClaimChallenge({ socket: otherSocket, endpointId: "official-endpoint-2" });
+  const otherSigned = signedEnrollmentProof({
+    privateKey: identity.privateKey,
+    endpointId: "official-endpoint-2",
+    accessToken: ACCESS_B,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: otherChallenge.socket_challenge_b64,
+  });
   const otherProof = handler.bindAuthenticatedLegacySocket({
     socket: otherSocket,
     endpointId: "official-endpoint-2",
     accessToken: ACCESS_B,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: otherChallenge.socket_challenge_b64,
+    enrollmentProof: otherSigned.proof,
+    signatureB64: otherSigned.signatureB64,
   });
   await rejectsCode(handler.claim({ socket: otherSocket, proof: otherProof, requestId: "request-0001" }), "migration_request_conflict");
   assert.deepEqual(handler.coverage(["official-endpoint-2", "official-endpoint-1"]), {
@@ -111,14 +193,111 @@ test("official claim is socket-bound, stable, conflicting-safe and keeps the Web
   assert.doesNotMatch(JSON.stringify(store.readNamespace("endpoint_enrollment")), new RegExp(ACCESS_A, "u"));
 });
 
+test("official migration rejects unsigned TOFU endpoints, replay and cross-endpoint proofs", async (t) => {
+  const { registry } = await fixture(t);
+  const identity = officialIdentity();
+  const handler = new EnrollmentMigrationHandler({ registry, identityVerifier: identity.verifier });
+  const socket = {};
+  const challenge = handler.issueClaimChallenge({ socket, endpointId: "official-proof-a" });
+  const signed = signedEnrollmentProof({
+    privateKey: identity.privateKey,
+    endpointId: "official-proof-a",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: challenge.socket_challenge_b64,
+  });
+  const tampered = { ...signed.proof, endpoint_id: "official-proof-b", device_id: "official-proof-b" };
+  assert.throws(() => handler.bindAuthenticatedLegacySocket({
+    socket,
+    endpointId: "official-proof-a",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: challenge.socket_challenge_b64,
+    enrollmentProof: tampered,
+    signatureB64: signed.signatureB64,
+  }), (error) => error?.code === "migration_identity_proof_invalid");
+
+  assert.throws(() => handler.bindAuthenticatedLegacySocket({
+    socket,
+    endpointId: "official-proof-a",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: challenge.socket_challenge_b64,
+    enrollmentProof: signed.proof,
+    signatureB64: signed.signatureB64,
+  }), (error) => error?.code === "migration_socket_challenge_invalid");
+
+  const validChallenge = handler.issueClaimChallenge({ socket, endpointId: "official-proof-a" });
+  const validSigned = signedEnrollmentProof({
+    privateKey: identity.privateKey,
+    endpointId: "official-proof-a",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: validChallenge.socket_challenge_b64,
+  });
+
+  const proof = handler.bindAuthenticatedLegacySocket({
+    socket,
+    endpointId: "official-proof-a",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: validChallenge.socket_challenge_b64,
+    enrollmentProof: validSigned.proof,
+    signatureB64: validSigned.signatureB64,
+  });
+  assert.throws(() => handler.bindAuthenticatedLegacySocket({
+    socket,
+    endpointId: "official-proof-a",
+    accessToken: ACCESS_A,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: validChallenge.socket_challenge_b64,
+    enrollmentProof: validSigned.proof,
+    signatureB64: validSigned.signatureB64,
+  }), (error) => error?.code === "migration_socket_challenge_invalid");
+  await handler.claim({ socket, proof, requestId: "official-proof-request-0001" });
+
+  const attacker = crypto.generateKeyPairSync("ed25519");
+  const attackerSocket = {};
+  const attackerChallenge = handler.issueClaimChallenge({ socket: attackerSocket, endpointId: "anonymous-tofu" });
+  const attackerSigned = signedEnrollmentProof({
+    privateKey: attacker.privateKey,
+    endpointId: "anonymous-tofu",
+    accessToken: ACCESS_B,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: attackerChallenge.socket_challenge_b64,
+  });
+  assert.throws(() => handler.bindAuthenticatedLegacySocket({
+    socket: attackerSocket,
+    endpointId: "anonymous-tofu",
+    accessToken: ACCESS_B,
+    desktopSecret: DESKTOP_SECRET,
+    challenge: attackerChallenge.socket_challenge_b64,
+    enrollmentProof: attackerSigned.proof,
+    signatureB64: attackerSigned.signatureB64,
+  }), (error) => error?.code === "migration_identity_proof_invalid");
+});
+
 test("self-hosted batch dry-run, apply, re-enroll and backup restore are explicit", async (t) => {
   const { registry } = await fixture(t, "self_hosted");
   const allowlist = [{ operation: "allowlist", endpoint_id: "self-hosted-1", credential: ACCESS_A }];
-  const dryRun = await runEnrollmentBatch({ registry, operations: allowlist, dryRun: true });
+  const dryRun = await runEnrollmentBatch({
+    registry, operations: allowlist, dryRun: true, requestId: "batch-allowlist-0001",
+  });
   assert.equal(dryRun.applied, 0);
   assert.equal(registry.getStatus("self-hosted-1"), null);
-  const applied = await runEnrollmentBatch({ registry, operations: allowlist, dryRun: false });
+  const applied = await runEnrollmentBatch({
+    registry, operations: allowlist, dryRun: false, requestId: "batch-allowlist-0001",
+  });
   assert.equal(applied.results[0].legacy_web_link, "preserved");
+  assert.deepEqual(await runEnrollmentBatch({
+    registry, operations: allowlist, dryRun: false, requestId: "batch-allowlist-0001",
+  }), applied);
+  await rejectsCode(runEnrollmentBatch({
+    registry,
+    operations: [{ operation: "allowlist", endpoint_id: "self-hosted-1", credential: ACCESS_B }],
+    dryRun: false,
+    requestId: "batch-allowlist-0001",
+  }), "migration_request_conflict");
   const revision = registry.getStatus("self-hosted-1").revision;
   const reenrolled = await runEnrollmentBatch({
     registry,
@@ -130,6 +309,7 @@ test("self-hosted batch dry-run, apply, re-enroll and backup restore are explici
       expected_revision: revision,
     }],
     dryRun: false,
+    requestId: "batch-reenroll-0001",
   });
   assert.equal(reenrolled.results[0].legacy_web_link, "invalidated");
   await rejectsCode(registry.authorizeRegistration({
@@ -138,6 +318,14 @@ test("self-hosted batch dry-run, apply, re-enroll and backup restore are explici
   await registry.authorizeRegistration({
     endpointId: "self-hosted-1", credential: ACCESS_B, purpose: "web_v2_reregister",
   });
+  await rejectsCode(runEnrollmentBatch({
+    registry,
+    operations: [{
+      operation: "allowlist", endpoint_id: "strict-operation", credential: ACCESS_A, ignored: true,
+    }],
+    dryRun: true,
+    requestId: "batch-strict-operation-0001",
+  }), "migration_operation_invalid");
 
   const backup = createEnrollmentBackup(registry);
   const tampered = structuredClone(backup);
@@ -158,6 +346,7 @@ test("a failing batch performs no prefix write", async (t) => {
   await rejectsCode(runEnrollmentBatch({
     registry,
     dryRun: false,
+    requestId: "batch-failure-0001",
     operations: [
       { operation: "allowlist", endpoint_id: "batch-endpoint-1", credential: ACCESS_A },
       { operation: "allowlist", endpoint_id: "batch-endpoint-2", credential: ACCESS_B },
@@ -165,7 +354,17 @@ test("a failing batch performs no prefix write", async (t) => {
   }), "migration_batch_failed");
   assert.equal(registry.getStatus("batch-endpoint-1"), null);
   assert.equal(registry.getStatus("batch-endpoint-2").revision, "1");
-  assert.equal(registry.exportSnapshot().namespace_revision, before.namespace_revision);
+  const after = registry.exportSnapshot();
+  assert.deepEqual(after.registry.entries, before.registry.entries);
+  assert.deepEqual(after.registry.migration_requests.map((request) => ({
+    request_id: request.request_id,
+    status: request.status,
+    code: request.outcome?.code,
+  })), [{
+    request_id: "batch-failure-0001",
+    status: "failed",
+    code: "endpoint_already_enrolled",
+  }]);
 });
 
 test("backup restore accepts canonical v1 and rejects malformed v2", async (t) => {
@@ -206,18 +405,33 @@ test("self-hosted CLI is machine-readable, private-file only, and never prints c
   await writeFile(input, JSON.stringify({
     schema: "pinvou-enrollment-migration-batch",
     version: 1,
+    request_id: "cli-migration-request-0001",
     operations: [{ operation: "allowlist", endpoint_id: "cli-endpoint", credential: ACCESS_A }],
   }), { mode: 0o600 });
-  if (process.platform !== "win32") await chmod(input, 0o600);
   const output = [];
   const errors = [];
   const io = { log: (value) => output.push(value), error: (value) => errors.push(value) };
+  if (process.platform === "win32") {
+    assert.equal(await migrationCli(["--dry-run", "--input", input], environment(root, "self_hosted"), io), 1);
+    assert.equal(JSON.parse(errors.pop()).code, "input_permissions_unsafe");
+    await protectWindowsPath(input, "file");
+  } else {
+    await chmod(input, 0o644);
+    assert.equal(await migrationCli(["--dry-run", "--input", input], environment(root, "self_hosted"), io), 1);
+    assert.equal(JSON.parse(errors.pop()).code, "input_permissions_unsafe");
+    await chmod(input, 0o600);
+  }
   assert.equal(await migrationCli(["--dry-run", "--input", input], environment(root, "self_hosted"), io), 0);
   assert.equal(JSON.parse(output[0]).dry_run, true);
   assert.equal(errors.length, 0);
   assert.doesNotMatch(`${output.join("\n")}\n${errors.join("\n")}`, new RegExp(ACCESS_A, "u"));
   assert.equal(await migrationCli(["--apply", "--input", input], environment(root, "official"), io), 1);
   assert.equal(JSON.parse(errors.at(-1)).code, "self_hosted_mode_required");
+
+  const backup = join(root, "enrollment-backup.json");
+  assert.equal(await migrationCli(["--backup", "--output", backup], environment(root, "self_hosted"), io), 0);
+  if (process.platform === "win32") await verifyWindowsPath(backup, "file");
+  else assert.equal((await lstat(backup)).mode & 0o077, 0);
 });
 
 function freePort() {
@@ -242,11 +456,22 @@ async function waitForHealth(url, child) {
   throw new Error("legacy relay did not become ready");
 }
 
-function openSocket(url) {
+function openSocket(url, options) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(url, options);
     socket.once("open", () => resolve(socket));
     socket.once("error", reject);
+  });
+}
+
+function socketClosed(socket) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("close timeout")), 5000);
+    socket.once("close", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+    socket.once("error", () => {});
   });
 }
 
@@ -257,6 +482,23 @@ function nextMessage(socket) {
       clearTimeout(timer);
       resolve(JSON.parse(data.toString("utf8")));
     });
+  });
+}
+
+function nextMessageMatching(socket, predicate) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off("message", onMessage);
+      reject(new Error("matching message timeout"));
+    }, 5000);
+    const onMessage = (data) => {
+      const message = JSON.parse(data.toString("utf8"));
+      if (!predicate(message)) return;
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      resolve(message);
+    };
+    socket.on("message", onMessage);
   });
 }
 
@@ -291,7 +533,11 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   bootstrap.close();
   await registry.enroll({ endpointId: "legacy-preserved-endpoint", credential: ACCESS_A });
 
-  const gateway = createEnrollmentGateway({ registry, upstreamUrl: legacyWs });
+  const gateway = createEnrollmentGateway({
+    registry,
+    upstreamUrl: legacyWs,
+    allowedWebOrigins: ["https://allowed.example"],
+  });
   assert.throws(() => createEnrollmentGateway({
     registry,
     upstreamUrl: "wss://relay.public.example/pinvou3/remote/ws",
@@ -300,6 +546,12 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   t.after(() => gateway.close());
   const gatewayHttp = `http://127.0.0.1:${address.port}/pinvou3/remote`;
   const gatewayWs = `ws://127.0.0.1:${address.port}/pinvou3/remote/ws`;
+
+  await assert.rejects(openSocket(gatewayWs, { origin: "https://evil.example" }));
+  await assert.rejects(openSocket(gatewayWs, { origin: new URL(gatewayHttp).origin }));
+  const allowedOrigin = await openSocket(gatewayWs, { origin: "https://allowed.example" });
+  allowedOrigin.terminate();
+  await assert.rejects(openSocket(gatewayWs, { headers: { "x-forwarded-for": "198.51.100.8" } }));
 
   const desktop = await openSocket(gatewayWs);
   t.after(() => desktop.terminate());
@@ -326,6 +578,16 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   }));
   assert.equal((await joined).type, "web_client_joined");
 
+  const forwarded = nextMessageMatching(desktop, (message) => message.id === "large-valid-frame");
+  web.send(JSON.stringify({
+    v: 2,
+    type: "rpc_request",
+    id: "large-valid-frame",
+    method: "test.large",
+    args: { payload: "x".repeat(1024 * 1024) },
+  }));
+  assert.equal((await forwarded).args.payload.length, 1024 * 1024);
+
   const anonymous = await openSocket(gatewayWs);
   t.after(() => anonymous.terminate());
   const denied = nextMessage(anonymous);
@@ -337,6 +599,52 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
     desktop_secret: DESKTOP_SECRET,
   }));
   assert.equal((await denied).code, "endpoint_not_found");
+
+  const oversizedFirstFrame = await openSocket(gatewayWs);
+  const oversizedDenied = nextMessage(oversizedFirstFrame);
+  const oversizedClosed = socketClosed(oversizedFirstFrame);
+  oversizedFirstFrame.send(JSON.stringify({
+    v: 2,
+    type: "desktop_endpoint_register",
+    endpoint_id: "legacy-preserved-endpoint",
+    access_token: ACCESS_A,
+    desktop_secret: DESKTOP_SECRET,
+    padding: "x".repeat(20 * 1024),
+  }));
+  assert.equal((await oversizedDenied).code, "endpoint_not_found");
+  assert.equal(await oversizedClosed, 1008);
+
+  const payloadOverflow = await openSocket(gatewayWs);
+  const payloadClosed = socketClosed(payloadOverflow);
+  payloadOverflow.send("x".repeat(4 * 1024 * 1024 + 1));
+  assert.equal(await payloadClosed, 1009);
+  assert.equal((await fetch(`${gatewayHttp}/healthz`)).ok, true);
+
+  const constrained = createEnrollmentGateway({
+    registry,
+    upstreamUrl: legacyWs,
+    trustedProxyIps: ["127.0.0.1"],
+    connectionLimit: 10,
+    maxSourceBuckets: 1,
+  });
+  const constrainedAddress = await constrained.listen({ host: "127.0.0.1", port: 0 });
+  t.after(() => constrained.close());
+  const constrainedWs = `ws://127.0.0.1:${constrainedAddress.port}/pinvou3/remote/ws`;
+  const trustedSource = await openSocket(constrainedWs, {
+    headers: { "x-forwarded-for": "198.51.100.10" },
+  });
+  t.after(() => trustedSource.terminate());
+  await assert.rejects(openSocket(constrainedWs, {
+    headers: { "x-forwarded-for": "198.51.100.11" },
+  }));
+  await assert.rejects(openSocket(constrainedWs, {
+    headers: { "x-forwarded-for": "198.51.100.10, 198.51.100.11" },
+  }));
+
+  assert.doesNotThrow(() => createEnrollmentGateway({
+    registry,
+    upstreamUrl: "ws://[::1]:8787/pinvou3/remote/ws",
+  }));
 
   const safe = await validateLegacyRollbackTopology({
     publicEntrypoints: [gatewayHttp],
@@ -364,6 +672,22 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
     legacyRelayUrl: legacyWs,
     legacyRelayBindHost: "0.0.0.0",
   }), "gateway_legacy_bind_not_loopback");
+  await rejectsCode(validateLegacyRollbackTopology({
+    publicEntrypoints: [gatewayHttp],
+    legacyRelayUrl: legacyWs,
+    legacyRelayBindHost: "127.0.0.1",
+    listenerInspector: async () => ["0.0.0.0"],
+  }), "gateway_legacy_listener_exposed");
+  await rejectsCode(validateLegacyRollbackTopology({
+    publicEntrypoints: [gatewayHttp],
+    legacyRelayUrl: `ws://localhost:${relayPort}/pinvou3/remote/ws`,
+    legacyRelayBindHost: "127.0.0.1",
+  }), "gateway_direct_bypass_exposed");
+  await rejectsCode(validateLegacyRollbackTopology({
+    publicEntrypoints: [gatewayHttp],
+    legacyRelayUrl: `http://127.0.0.1:${relayPort}/pinvou3/remote/ws`,
+    legacyRelayBindHost: "127.0.0.1",
+  }), "gateway_upstream_invalid");
 });
 
 test("deployment artifacts force gateway coverage and contain no credential interpolation", async () => {

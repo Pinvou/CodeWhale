@@ -9,6 +9,10 @@ const ENDPOINT_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const BACKUP_SCHEMA = "pinvou-enrollment-migration-backup";
 const BACKUP_VERSION = 1;
 const SOCKET_PROOFS = new WeakMap();
+const SOCKET_CHALLENGES = new WeakMap();
+const OFFICIAL_VERIFIERS = new WeakMap();
+const PROOF_KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const PROOF_MAX_LIFETIME_MS = 5 * 60_000;
 
 export class EnrollmentMigrationError extends Error {
   constructor(code, options) {
@@ -32,10 +36,98 @@ function endpointId(value) {
   return value;
 }
 
+function exactObject(value, expected, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expected].sort())) fail(code);
+  return value;
+}
+
 function credential(value, label = "migration_credential") {
   const bytes = typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
   if (bytes < 32 || bytes > 4096) fail(`${label}_invalid`);
   return value;
+}
+
+function base64Url(value, bytes, label) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/u.test(value)) fail(`${label}_invalid`);
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.length !== bytes || decoded.toString("base64url") !== value) fail(`${label}_invalid`);
+  return decoded;
+}
+
+function proofPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("migration_identity_proof_invalid");
+  const keys = Object.keys(value);
+  const required = [
+    "schema", "version", "key_id", "device_id", "endpoint_id", "access_token_sha256",
+    "desktop_secret_sha256", "socket_challenge_b64", "issued_at_ms", "expires_at_ms",
+  ];
+  if (keys.length !== required.length || required.some((key) => !Object.hasOwn(value, key))) {
+    fail("migration_identity_proof_invalid");
+  }
+  if (value.schema !== "pinvou-official-endpoint-enrollment-proof" || value.version !== 1
+    || !PROOF_KEY_ID.test(value.key_id) || !ENDPOINT_ID.test(value.device_id)
+    || !ENDPOINT_ID.test(value.endpoint_id) || !/^[a-f0-9]{64}$/u.test(value.access_token_sha256)
+    || !/^[a-f0-9]{64}$/u.test(value.desktop_secret_sha256)) fail("migration_identity_proof_invalid");
+  base64Url(value.socket_challenge_b64, 32, "migration_socket_challenge");
+  if (!Number.isSafeInteger(value.issued_at_ms) || !Number.isSafeInteger(value.expires_at_ms)
+    || value.issued_at_ms < 0 || value.expires_at_ms <= value.issued_at_ms
+    || value.expires_at_ms - value.issued_at_ms > PROOF_MAX_LIFETIME_MS) {
+    fail("migration_identity_proof_invalid");
+  }
+  return value;
+}
+
+function canonicalProof(value) {
+  const proof = proofPayload(value);
+  return Buffer.from(JSON.stringify({
+    schema: proof.schema,
+    version: proof.version,
+    key_id: proof.key_id,
+    device_id: proof.device_id,
+    endpoint_id: proof.endpoint_id,
+    access_token_sha256: proof.access_token_sha256,
+    desktop_secret_sha256: proof.desktop_secret_sha256,
+    socket_challenge_b64: proof.socket_challenge_b64,
+    issued_at_ms: proof.issued_at_ms,
+    expires_at_ms: proof.expires_at_ms,
+  }), "utf8");
+}
+
+export function createOfficialEnrollmentProofVerifier({ publicKeys, clock = Date.now } = {}) {
+  if (!Array.isArray(publicKeys) || publicKeys.length === 0 || publicKeys.length > 32
+    || typeof clock !== "function") fail("migration_identity_verifier_invalid");
+  const keys = new Map();
+  for (const entry of publicKeys) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || Object.keys(entry).length !== 2 || !PROOF_KEY_ID.test(entry.key_id)
+      || typeof entry.public_key_pem !== "string" || entry.public_key_pem.length > 8192
+      || keys.has(entry.key_id)) fail("migration_identity_verifier_invalid");
+    let key;
+    try { key = crypto.createPublicKey(entry.public_key_pem); } catch { fail("migration_identity_verifier_invalid"); }
+    if (key.asymmetricKeyType !== "ed25519") fail("migration_identity_verifier_invalid");
+    keys.set(entry.key_id, key);
+  }
+  const verifier = Object.freeze(Object.create(null));
+  OFFICIAL_VERIFIERS.set(verifier, { keys, clock });
+  return verifier;
+}
+
+function verifyOfficialEnrollmentProof(verifier, { proof, signatureB64, expected }) {
+  const state = OFFICIAL_VERIFIERS.get(verifier);
+  if (!state) fail("migration_identity_verifier_invalid");
+  proof = proofPayload(proof);
+  const key = state.keys.get(proof.key_id);
+  const signature = base64Url(signatureB64, 64, "migration_identity_signature");
+  const now = state.clock();
+  if (!Number.isSafeInteger(now) || now < proof.issued_at_ms || now >= proof.expires_at_ms
+    || proof.endpoint_id !== expected.endpointId || proof.device_id !== expected.endpointId
+    || proof.access_token_sha256 !== crypto.createHash("sha256").update(expected.accessToken, "utf8").digest("hex")
+    || proof.desktop_secret_sha256 !== crypto.createHash("sha256").update(expected.desktopSecret, "utf8").digest("hex")
+    || proof.socket_challenge_b64 !== expected.challenge || !key
+    || !crypto.verify(null, canonicalProof(proof), key, signature)) fail("migration_identity_proof_invalid");
+  return proof;
 }
 
 function publicResult(entry, request, action) {
@@ -56,21 +148,48 @@ function publicResult(entry, request, action) {
  */
 export class EnrollmentMigrationHandler {
   #registry;
-  #requests = new Map();
+  #identityVerifier;
 
-  constructor({ registry } = {}) {
-    if (!registry || typeof registry.enroll !== "function" || typeof registry.getStatus !== "function") {
+  constructor({ registry, identityVerifier } = {}) {
+    if (!registry || typeof registry.executeMigrationRequest !== "function" || typeof registry.getStatus !== "function") {
       fail("migration_registry_invalid");
     }
+    if (identityVerifier !== undefined && !OFFICIAL_VERIFIERS.has(identityVerifier)) {
+      fail("migration_identity_verifier_invalid");
+    }
     this.#registry = registry;
+    this.#identityVerifier = identityVerifier ?? null;
   }
 
-  bindAuthenticatedLegacySocket({ socket, endpointId: id, accessToken } = {}) {
+  issueClaimChallenge({ socket, endpointId: id } = {}) {
+    if (!this.#identityVerifier) fail("migration_identity_verifier_required");
+    if (!socket || (typeof socket !== "object" && typeof socket !== "function")) {
+      fail("migration_socket_invalid");
+    }
+    id = endpointId(id);
+    const challenge = crypto.randomBytes(32).toString("base64url");
+    SOCKET_CHALLENGES.set(socket, { owner: this, endpointId: id, challenge, consumed: false });
+    return Object.freeze({ endpoint_id: id, socket_challenge_b64: challenge });
+  }
+
+  bindAuthenticatedLegacySocket({
+    socket, endpointId: id, accessToken, desktopSecret, challenge, enrollmentProof, signatureB64,
+  } = {}) {
     if (!socket || (typeof socket !== "object" && typeof socket !== "function")) {
       fail("migration_socket_invalid");
     }
     id = endpointId(id);
     accessToken = credential(accessToken, "legacy_access_token");
+    desktopSecret = credential(desktopSecret, "legacy_desktop_secret");
+    const issued = SOCKET_CHALLENGES.get(socket);
+    if (!issued || issued.owner !== this || issued.endpointId !== id || issued.consumed
+      || issued.challenge !== challenge) fail("migration_socket_challenge_invalid");
+    issued.consumed = true;
+    verifyOfficialEnrollmentProof(this.#identityVerifier, {
+      proof: enrollmentProof,
+      signatureB64,
+      expected: { endpointId: id, accessToken, desktopSecret, challenge },
+    });
     const proof = Object.freeze(Object.create(null));
     SOCKET_PROOFS.set(proof, { owner: this, socket, endpointId: id, accessToken, active: true });
     return proof;
@@ -87,19 +206,25 @@ export class EnrollmentMigrationHandler {
     if (!record || record.owner !== this || !record.active || record.socket !== socket) {
       fail("migration_socket_proof_invalid");
     }
-    const known = this.#requests.get(id);
-    if (known && known.endpointId !== record.endpointId) fail("migration_request_conflict");
-    if (known) return known.result;
     try {
-      const entry = await this.#registry.enroll({
-        endpointId: record.endpointId,
-        credential: record.accessToken,
+      const request = await this.#registry.executeMigrationRequest({
+        requestId: id,
+        operations: [{
+          operation: "allowlist",
+          endpoint_id: record.endpointId,
+          credential: record.accessToken,
+        }],
       });
-      const result = publicResult(entry, id, "claimed");
-      this.#requests.set(id, { endpointId: record.endpointId, result });
-      return result;
+      if (request.status !== "succeeded") fail("migration_claim_failed");
+      const operationResult = request.outcome?.results?.[0];
+      if (!operationResult || operationResult.endpoint_id !== record.endpointId) {
+        fail("migration_claim_failed");
+      }
+      return publicResult({ ...operationResult, status: "active" }, id, "claimed");
     } catch (error) {
-      fail(error?.code === "endpoint_already_enrolled" ? "migration_claim_conflict" : "migration_claim_failed", error);
+      if (error?.code === "migration_request_conflict") fail("migration_request_conflict", error);
+      fail(["endpoint_already_enrolled", "endpoint_revoked"].includes(error?.code)
+        ? "migration_claim_conflict" : "migration_claim_failed", error);
     }
   }
 
@@ -185,9 +310,13 @@ function validateOperation(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("migration_operation_invalid");
   const operation = raw.operation;
   if (operation === "allowlist") {
+    exactObject(raw, ["operation", "endpoint_id", "credential"], "migration_operation_invalid");
     return { operation, endpointId: endpointId(raw.endpoint_id), credential: credential(raw.credential) };
   }
   if (operation === "re_enroll") {
+    exactObject(raw, [
+      "operation", "endpoint_id", "current_credential", "new_credential", "expected_revision",
+    ], "migration_operation_invalid");
     return {
       operation,
       endpointId: endpointId(raw.endpoint_id),
@@ -213,9 +342,9 @@ function registryOperation(operation) {
 }
 
 /** DEV-01 owns validation and the single namespace CAS; no prefix can persist. */
-export async function runEnrollmentBatch({ registry, operations, dryRun = true } = {}) {
+export async function runEnrollmentBatch({ registry, operations, dryRun = true, requestId: stableRequestId } = {}) {
   if (!registry || typeof registry.previewAtomicBatch !== "function"
-    || typeof registry.applyAtomicBatch !== "function" || typeof registry.exportSnapshot !== "function") {
+    || typeof registry.executeMigrationRequest !== "function") {
     fail("migration_registry_invalid");
   }
   if (!Array.isArray(operations) || operations.length === 0 || operations.length > 100_000) {
@@ -226,6 +355,7 @@ export async function runEnrollmentBatch({ registry, operations, dryRun = true }
     fail("migration_batch_duplicate_endpoint");
   }
   const atomicOperations = parsed.map(registryOperation);
+  stableRequestId = requestId(stableRequestId);
   try {
     if (dryRun) {
       const preview = registry.previewAtomicBatch({ operations: atomicOperations });
@@ -240,13 +370,18 @@ export async function runEnrollmentBatch({ registry, operations, dryRun = true }
         })),
       });
     }
-    const snapshot = registry.exportSnapshot();
-    const applied = await registry.applyAtomicBatch({
+    const applied = await registry.executeMigrationRequest({
+      requestId: stableRequestId,
       operations: atomicOperations,
-      expectedNamespaceRevision: snapshot.namespace_revision,
     });
-    return Object.freeze({ dry_run: false, applied: applied.results.length, results: applied.results });
+    return Object.freeze({
+      dry_run: false,
+      request_id: stableRequestId,
+      applied: applied.outcome.results.length,
+      results: applied.outcome.results,
+    });
   } catch (error) {
+    if (error?.code === "migration_request_conflict") fail("migration_request_conflict", error);
     fail("migration_batch_failed", error);
   }
 }
