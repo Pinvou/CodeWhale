@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,19 @@ func TestApprovalDirectoryAndHistoricalVisibilityPostgresIntegration(t *testing.
 	missing := performApprovalIntegrationRequest(t, service.adminApprovalRequest, approvalIntegrationPrincipal(outsider), http.MethodGet, "/admin/v1/approval-requests/"+missingID.String(), missingID.String(), nil)
 	if invisible.Code != http.StatusNotFound || missing.Code != http.StatusNotFound || invisible.Body.String() != missing.Body.String() || invisible.Header().Get("Cache-Control") != "no-store" || missing.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("non-leaking detail mismatch invisible=%d/%q/%q missing=%d/%q/%q", invisible.Code, invisible.Header().Get("Cache-Control"), invisible.Body.String(), missing.Code, missing.Header().Get("Cache-Control"), missing.Body.String())
+	}
+	v2Invisible := performApprovalIntegrationRequest(t, service.adminApprovalRequestV2, approvalIntegrationPrincipal(outsider), http.MethodGet, "/admin/v2/approval-requests/"+requestID.String(), requestID.String(), nil)
+	v2Missing := performApprovalIntegrationRequest(t, service.adminApprovalRequestV2, approvalIntegrationPrincipal(outsider), http.MethodGet, "/admin/v2/approval-requests/"+missingID.String(), missingID.String(), nil)
+	if v2Invisible.Code != http.StatusNotFound || v2Missing.Code != http.StatusNotFound || v2Invisible.Body.String() != v2Missing.Body.String() || v2Invisible.Header().Get("Cache-Control") != "no-store" || v2Missing.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("v2 detail visibility mismatch invisible=%d/%q missing=%d/%q", v2Invisible.Code, v2Invisible.Body.String(), v2Missing.Code, v2Missing.Body.String())
+	}
+	v1Visible := performApprovalIntegrationRequest(t, service.adminApprovalRequest, approvalIntegrationPrincipal(requester), http.MethodGet, "/admin/v1/approval-requests/"+requestID.String(), requestID.String(), nil)
+	if v1Visible.Code != http.StatusOK || v1Visible.Header().Get("X-Pinvou-Approval-Action-Control-Version") == "" {
+		t.Fatalf("v1 control header missing: %d %v", v1Visible.Code, v1Visible.Header())
+	}
+	v2Visible := performApprovalIntegrationRequest(t, service.adminApprovalRequestV2, approvalIntegrationPrincipal(requester), http.MethodGet, "/admin/v2/approval-requests/"+requestID.String(), requestID.String(), nil)
+	if v2Visible.Code != http.StatusOK || !strings.Contains(v2Visible.Body.String(), "DETAIL_PRESENTATION_UNAVAILABLE") || strings.Contains(v2Visible.Body.String(), "normalized_command") {
+		t.Fatalf("v2 historical detail unsafe: %d %s", v2Visible.Code, v2Visible.Body.String())
 	}
 	decisionBody := map[string]any{"expected_version": 1, "decision": "REJECTED", "reason": "uniform invisible decision"}
 	invisibleDecision := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequest, approvalIntegrationPrincipal(outsider), http.MethodPost, "/admin/v1/approval-requests/"+requestID.String()+"/actions/decide", requestID.String(), decisionBody)

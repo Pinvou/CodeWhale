@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +81,27 @@ func TestApprovalPresenterRejectsUnsafeHistoricalTargets(t *testing.T) {
 		TargetResourceType: "PRIVATE", TargetResourceID: "private-resource"}
 	if summary := approvalV2Summary(item); summary.Target != (ApprovalV2Target{}) {
 		t.Fatalf("unknown historical command leaked target: %+v", summary)
+	}
+}
+
+func TestApprovalDetailActionsFollowControl(t *testing.T) {
+	control := AdminApprovalControl{ControlID: adminApprovalControlID, SchemaVersion: 1,
+		Mode: AdminApprovalModeLegacy, ApprovalWireVersion: 1, AuthorizationRelayState: AdminApprovalRelayRunning,
+		ApprovalEpoch: 1, AuthorizationRelayEpoch: 1, Version: 1, UpdatedAt: time.Now()}
+	all := []string{"EDIT", "SUBMIT", "APPROVE", "REJECT", "WITHDRAW"}
+	actions, err := approvalActionsForControl(all, control)
+	if err != nil || len(actions) != len(all) {
+		t.Fatalf("legacy actions=%v err=%v", actions, err)
+	}
+	control.AuthorizationRelayState = AdminApprovalRelayFenced
+	actions, err = approvalActionsForControl(all, control)
+	if err != nil || slices.Contains(actions, "APPROVE") {
+		t.Fatalf("fenced actions=%v err=%v", actions, err)
+	}
+	control.Mode = AdminApprovalModeSafeRollback
+	control.ProofRequired = true
+	actions, err = approvalActionsForControl(all, control)
+	if err != nil || len(actions) != 2 || actions[0] != "REJECT" || actions[1] != "WITHDRAW" {
+		t.Fatalf("safe actions=%v err=%v", actions, err)
 	}
 }

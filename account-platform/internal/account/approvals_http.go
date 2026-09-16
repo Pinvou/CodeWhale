@@ -228,8 +228,44 @@ func (s *Service) adminApprovalRequest(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	if reader, ok := s.repository.(interface {
+		ApprovalActionControl(context.Context) (AdminApprovalControl, error)
+	}); ok {
+		control, err := reader.ApprovalActionControl(r.Context())
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		item.AllowedActions, err = approvalActionsForControl(item.AllowedActions, control)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		w.Header().Set("X-Pinvou-Approval-Action-Control-Version", strconv.FormatInt(control.Version, 10))
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminApprovalRequestV2(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	id, ok := pathUUID(w, r, "approval_request_id")
+	if !ok {
+		return
+	}
+	repository, ok := s.repository.(interface {
+		ApprovalRequestV2(context.Context, identity.Principal, uuid.UUID) (any, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_UNAVAILABLE", "approval workflow is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	detail, err := repository.ApprovalRequestV2(r.Context(), mustPrincipal(r.Context()), id)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, detail)
 }
 
 func (s *Service) adminSubmitApprovalRequest(w http.ResponseWriter, r *http.Request) {
