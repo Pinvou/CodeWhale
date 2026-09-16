@@ -568,6 +568,9 @@ fn server_to_entry(server: RegistryServer) -> Option<McpRegistryServerEntry> {
 }
 
 /// Prompt attached to every `registry_sync` result (Registry-first policy).
+/// A successful `registry_sync` call proves its own availability, but
+/// `start_registry_mcp_server` is deferred independently, so the prompt must
+/// teach its activation path instead of commanding an absent tool name.
 const REGISTRY_FIRST_PROMPT: &str = concat!(
     "REGISTRY-FIRST POLICY: These are the top scored matches for your ",
     "query from the local Registry snapshot; the full catalog stays on the ",
@@ -575,10 +578,11 @@ const REGISTRY_FIRST_PROMPT: &str = concat!(
     "core specialized capability; wording need not be exact. If a returned ",
     "match is plausible, you must call start_registry_mcp_server with its ",
     "exact name and inspect its tools before using shell commands, local ",
-    "programs, custom code, or a manual implementation. When no returned ",
-    "match plausibly covers the capability, refine the query once; if the ",
-    "refined query still returns nothing plausible, fall back to local ",
-    "tools.",
+    "programs, custom code, or a manual implementation; if ",
+    "start_registry_mcp_server is not in your tool list, run tool_search ",
+    "first to activate it. When no returned match plausibly covers the ",
+    "capability, refine the query once; if the refined query still returns ",
+    "nothing plausible, fall back to local tools.",
 );
 
 /// Host-side cap on model-visible Registry matches. The complete catalog
@@ -1888,5 +1892,22 @@ mod tests {
         eprintln!("--- catalog payload (what the model sees) ---");
         eprintln!("{}", result.content);
         eprintln!("=== end ===\n");
+    }
+
+    // REGISTRY_FIRST_PROMPT rides on every `registry_sync` result. A
+    // successful call proves `registry_sync`'s own availability, but
+    // `start_registry_mcp_server` is deferred independently, so the prompt
+    // must teach its activation path instead of commanding an absent name
+    // (Pinvou #490 phantom-tool class).
+    #[test]
+    fn forkguard_registry_first_prompt_teaches_start_tool_activation() {
+        assert!(
+            REGISTRY_FIRST_PROMPT.contains("must call start_registry_mcp_server"),
+            "prompt must keep commanding the start tool:\n{REGISTRY_FIRST_PROMPT}"
+        );
+        assert!(
+            REGISTRY_FIRST_PROMPT.contains("run tool_search first to activate it"),
+            "start_registry_mcp_server is deferred independently of              registry_sync; the prompt must name the activation path:\n{REGISTRY_FIRST_PROMPT}"
+        );
     }
 }

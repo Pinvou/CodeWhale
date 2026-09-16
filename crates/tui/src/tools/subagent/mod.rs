@@ -897,6 +897,21 @@ fn default_agent_inspect_tool() -> String {
     "handle_read".to_string()
 }
 
+/// `handle_read` is deferred on stock hosts, so model-facing text that pairs
+/// it with a transcript handle must teach the activation path instead of
+/// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
+const HANDLE_READ_ACTIVATION_HINT: &str =
+    "if `handle_read` is not in your tool list, activate it via `tool_search` first";
+
+/// Shared inspect brief for worker records and takeover targets; both name
+/// `handle_read`, so both must carry the activation hint.
+fn agent_transcript_inspect_instructions(agent_ref: &str) -> String {
+    format!(
+        "Inspect agent '{agent_ref}' through the returned transcript_handle with handle_read; \
+         {HANDLE_READ_ACTIVATION_HINT}; open a replacement with agent if the lane no longer fits."
+    )
+}
+
 fn default_subagent_takeover_kind() -> String {
     "local_subagent_session".to_string()
 }
@@ -1154,8 +1169,10 @@ fn default_agent_run_recommended_action() -> AgentRunRecommendedAction {
     AgentRunRecommendedAction {
         action: "inspect_transcript".to_string(),
         tool: Some(default_agent_inspect_tool()),
-        reason: "Inspect the returned transcript handle if the child result needs audit detail."
-            .to_string(),
+        reason: format!(
+            "Inspect the returned transcript handle if the child result needs audit detail; \
+             {HANDLE_READ_ACTIVATION_HINT}."
+        ),
     }
 }
 
@@ -1190,21 +1207,21 @@ fn recommended_action_for_worker_status(
             action: "inspect_or_replace".to_string(),
             tool: Some(default_agent_inspect_tool()),
             reason: format!(
-                "Worker {agent_ref} needs parent action; inspect the transcript handle and open a replacement with agent if the task still matters."
+                "Worker {agent_ref} needs parent action; inspect the transcript handle and open a replacement with agent if the task still matters; {HANDLE_READ_ACTIVATION_HINT}."
             ),
         },
         AgentWorkerStatus::Completed => AgentRunRecommendedAction {
             action: "verify_self_report".to_string(),
             tool: Some("handle_read".to_string()),
             reason: format!(
-                "Worker {agent_ref} completed; verify its self-report before treating side effects as fact."
+                "Worker {agent_ref} completed; verify its self-report before treating side effects as fact; {HANDLE_READ_ACTIVATION_HINT}."
             ),
         },
         AgentWorkerStatus::Failed => AgentRunRecommendedAction {
             action: "inspect_failure".to_string(),
             tool: Some(default_agent_inspect_tool()),
             reason: format!(
-                "Worker {agent_ref} failed; inspect the transcript handle and decide whether to open a replacement."
+                "Worker {agent_ref} failed; inspect the transcript handle and decide whether to open a replacement; {HANDLE_READ_ACTIVATION_HINT}."
             ),
         },
         AgentWorkerStatus::Cancelled => AgentRunRecommendedAction {
@@ -1218,7 +1235,7 @@ fn recommended_action_for_worker_status(
             action: "inspect_or_replace".to_string(),
             tool: Some(default_agent_inspect_tool()),
             reason: format!(
-                "Worker {agent_ref} was interrupted; inspect the transcript handle before deciding whether to re-dispatch."
+                "Worker {agent_ref} was interrupted; inspect the transcript handle before deciding whether to re-dispatch; {HANDLE_READ_ACTIVATION_HINT}."
             ),
         },
     }
@@ -1253,9 +1270,7 @@ fn takeover_target_for_spec(spec: &AgentWorkerSpec) -> AgentRunTakeoverTarget {
         supported: true,
         agent_id: spec.worker_id.clone(),
         session_name: spec.session_name.clone(),
-        instructions: format!(
-            "Inspect agent '{agent_ref}' through the returned transcript_handle with handle_read; open a replacement with agent if the lane no longer fits."
-        ),
+        instructions: agent_transcript_inspect_instructions(agent_ref),
         unsupported_reason: None,
     }
 }
@@ -1273,8 +1288,9 @@ fn default_subagent_artifacts(run_id: &str) -> Vec<AgentRunArtifactRef> {
             kind: "transcript".to_string(),
             name: "transcript_handle".to_string(),
             target: format!("agent:{run_id}"),
-            description: "Open loads the complete private chat artifact, including the child's agent-owned todo_write working notes; use the bounded transcript_handle with handle_read for slices and artifact metadata."
-                .to_string(),
+            description: format!(
+                "Open loads the complete private chat artifact, including the child's agent-owned todo_write working notes; use the bounded transcript_handle with handle_read for slices and artifact metadata; {HANDLE_READ_ACTIVATION_HINT}."
+            ),
         },
         AgentRunArtifactRef {
             kind: "receipt".to_string(),
@@ -7597,10 +7613,7 @@ async fn subagent_session_projection(
             supported: true,
             agent_id: snapshot.agent_id.clone(),
             session_name: Some(snapshot.name.clone()),
-            instructions: format!(
-                "Inspect agent '{}' through the returned transcript_handle with handle_read; open a replacement with agent if the lane no longer fits.",
-                snapshot.agent_id
-            ),
+            instructions: agent_transcript_inspect_instructions(&snapshot.agent_id),
             unsupported_reason: None,
         });
     let artifacts = worker_record

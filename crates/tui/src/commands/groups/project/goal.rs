@@ -92,7 +92,8 @@ fn goal_command(
                      CURRENT work. Synthesize the objective from the conversation context (the \
                      task in flight, recent findings, open items) and set it by calling \
                      `create_goal` with the full objective (and a token_budget only if one was \
-                     discussed). Then continue working toward it. Only if the conversation \
+                     discussed); if `create_goal` is not in your tool list, activate it via \
+                     `tool_search` first. Then continue working toward it. Only if the conversation \
                      genuinely contains no work yet, ask the user what the goal should be."
                     .to_string();
                 CommandResult::with_message_and_action(
@@ -458,6 +459,11 @@ mod tests {
         };
         assert!(message.contains("Synthesize the objective from the conversation"));
         assert!(message.contains("`create_goal`"));
+        assert!(
+            message.contains("activate it via `tool_search` first"),
+            "create_goal is deferred on stock hosts; the bare /goal brief must \
+             teach the activation path instead of commanding an absent tool:\n{message}"
+        );
     }
 
     #[test]

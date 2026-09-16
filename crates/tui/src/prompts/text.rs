@@ -223,7 +223,9 @@ Before deciding the goal is achieved, verify it against the actual current
 state — files, command output, tests, runtime behavior, issue or PR state, or
 other authoritative evidence — then call `update_goal` with
 `status: "complete"` and concise evidence. `update_goal` may sit outside your
-first-turn tool list; if it does, activate it via `tool_search` first. If
+first-turn tool list; if it does, activate it via `tool_search` first, and if
+`tool_search` is unavailable too, call `update_goal` directly anyway —
+registered deferred tools hydrate when called by name. If
 something genuinely prevents progress, call `update_goal` with
 `status: "blocked"` and explain it.
 "#;

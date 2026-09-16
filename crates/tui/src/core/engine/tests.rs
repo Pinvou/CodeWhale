@@ -464,6 +464,19 @@ fn forkguard_registry_first_instruction_names_registered_tool_specs() {
         "registry_sync schema must keep the match-cap wording in sync with \
          MAX_REGISTRY_MATCHES: {schema}"
     );
+    // Both registry commands are deferred on stock hosts, so the instruction
+    // must teach the `tool_search` activation path instead of only
+    // commanding names the model cannot see yet.
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("run `tool_search` first to activate it"),
+        "the instruction must teach the `registry_sync` activation path:\n\
+         {MCP_REGISTRY_FIRST_INSTRUCTION}"
+    );
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("activate it via `tool_search` as well"),
+        "activating `registry_sync` must not be taught as also activating \
+         `start_registry_mcp_server`:\n{MCP_REGISTRY_FIRST_INSTRUCTION}"
+    );
 }
 
 #[test]
@@ -16900,6 +16913,11 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          activation path instead of commanding a tool the model cannot see:\n\
          {context}"
     );
+    assert!(
+        context.contains("call `handle_read` directly anyway"),
+        "allowed_tools-filtered sessions can strip tool_search too; the hint \
+         must keep the direct-call fallback instead of dead-ending:\n{context}"
+    );
 }
 
 // Regression (Pinvou #490 phantom-tool class): GOAL_CONTINUATION_PROMPT
@@ -16918,6 +16936,12 @@ fn forkguard_goal_continuation_names_tool_search_activation() {
         prompt.contains("activate it via `tool_search` first"),
         "update_goal is deferred on stock hosts; the prompt must teach \
          activation instead of commanding an absent tool:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("call `update_goal` directly anyway"),
+        "allowed_tools-filtered sessions can strip tool_search too; the \
+         prompt must keep the direct-call fallback instead of dead-ending:\n\
+         {prompt}"
     );
 }
 
