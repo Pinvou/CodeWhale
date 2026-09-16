@@ -210,6 +210,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	adminV2.GET("/approval-directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	adminV2.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequestsV2))
 	adminV2.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequestV2))
+	adminV2.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequestV2))
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
 	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryRegistration))
 	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_COMPENSATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCompensateRegistration))

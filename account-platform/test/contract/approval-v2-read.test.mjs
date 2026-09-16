@@ -65,3 +65,24 @@ test('closed v2 detail schema accepts six presenters but rejects raw or mismatch
 	assert.equal(valid({ ...response, execution: { attempt_status: 'FAILED', error_class: 'raw-provider-failure', retryable: true, next_retry_at: null, execution_deadline: null } }), false, command_type);
   }
 });
+
+test('v2 decision has a separate closed body and the same governed repository action', () => {
+  const api = YAML.parse(read('contracts/openapi/admin.yaml'));
+  const schema = api.components.schemas.ApprovalV2Decision;
+  const path = api.paths['/account/admin/v2/approval-requests/{approval_request_id}/actions/decide'];
+  const catalog = JSON.parse(read('deploy/authorization-entrypoints.json'));
+  assert.deepEqual(Object.keys(path), ['post']);
+  assert.equal(path.post.requestBody.content['application/json'].schema.$ref, '#/components/schemas/ApprovalV2Decision');
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ['expected_version', 'decision', 'reason']);
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  const validate = ajv.compile(schema);
+  const body = { expected_version: 1, decision: 'APPROVED', reason: 'independent approval' };
+  assert.equal(validate(body), true);
+  for (const field of ['observed_versions', 'proof', 'proof_digest', 'domain_revision', 'verdict']) {
+    assert.equal(validate({ ...body, [field]: 'untrusted' }), false, field);
+  }
+  assert.ok(catalog.http_policies.some((policy) => policy.receiver === 'adminV2' &&
+    policy.method === 'POST' && policy.path === '/approval-requests/:approval_request_id/actions/decide'));
+  assert.ok(read('internal/account/approvals_http.go').includes('requestID, decision.ExpectedVersion, decision.Decision, decision.Reason, nil'));
+});

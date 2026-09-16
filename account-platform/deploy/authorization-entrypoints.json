@@ -42,6 +42,7 @@
     { "source": "account-platform/internal/account/service.go", "receiver": "admin", "method": "POST", "path": "/approval-requests/:approval_request_id/actions/submit", "scope": "platform", "strategy": "domain.approval-policy-v1" },
     { "source": "account-platform/internal/account/service.go", "receiver": "admin", "method": "POST", "path": "/approval-requests/:approval_request_id/actions/withdraw", "scope": "platform", "strategy": "domain.approval-policy-v1" },
     { "source": "account-platform/internal/account/service.go", "receiver": "admin", "method": "POST", "path": "/approval-requests/:approval_request_id/actions/decide", "scope": "platform", "strategy": "domain.approval-policy-v1" },
+    { "source": "account-platform/internal/account/service.go", "receiver": "adminV2", "method": "POST", "path": "/approval-requests/:approval_request_id/actions/decide", "scope": "platform", "strategy": "domain.approval-policy-v1" },
     { "source": "account-platform/internal/account/service.go", "receiver": "adminV2", "method": "GET", "path": "/approval-directory", "scope": "platform", "strategy": "domain.approval-policy-v2-directory" },
     { "source": "account-platform/internal/account/service.go", "receiver": "adminV2", "method": "GET", "path": "/approval-requests", "scope": "platform", "strategy": "domain.approval-policy-v2-list" },
     { "source": "account-platform/internal/account/service.go", "receiver": "adminV2", "method": "GET", "path": "/approval-requests/:approval_request_id", "scope": "platform", "strategy": "domain.approval-policy-v2-detail" },

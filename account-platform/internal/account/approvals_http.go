@@ -327,6 +327,36 @@ func (s *Service) adminDecideApprovalRequest(w http.ResponseWriter, r *http.Requ
 	api.WriteJSON(w, http.StatusOK, item)
 }
 
+func (s *Service) adminDecideApprovalRequestV2(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	repository, requestID, ok := s.approvalRequestTarget(w, r)
+	if !ok {
+		return
+	}
+	view, ok := s.repository.(interface {
+		ApprovalRequestV2(context.Context, identity.Principal, uuid.UUID) (any, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_UNAVAILABLE", "approval workflow is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	decision, err := decodeApprovalV2Decision(r.Body)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_DECISION", "invalid approval decision", httpserver.RequestID(r.Context()))
+		return
+	}
+	if _, err := repository.DecideApprovalRequest(r.Context(), mustPrincipal(r.Context()), requestID, decision.ExpectedVersion, decision.Decision, decision.Reason, nil); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	detail, err := view.ApprovalRequestV2(r.Context(), mustPrincipal(r.Context()), requestID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, detail)
+}
+
 func (s *Service) approvalRequestTarget(w http.ResponseWriter, r *http.Request) (approvalRepository, uuid.UUID, bool) {
 	repository, ok := s.requireApprovalRepository(w, r)
 	if !ok {

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +50,7 @@ func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
 			if _, err := db.adminPool.Exec(ctx, `UPDATE account_approval_control.admin_approval_control
 SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now()
 WHERE control_id='ADMIN_APPROVAL'`); err != nil {
-			return ApprovalProofResult{}, err
+				return ApprovalProofResult{}, err
 			}
 		}
 		if changeAuthorization {
@@ -128,5 +130,22 @@ WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 	}
 	if decisions != 1 || outboxRows != 1 || sidecars != 1 || serialization != approvalencoding.ApprovalSerializationVersion {
 		t.Fatalf("proof authorization facts not atomic: decisions=%d outbox=%d sidecars=%d wire=%s", decisions, outboxRows, sidecars, serialization)
+	}
+	// Both write versions share the request state machine. V2 rejects all
+	// browser proof/observed fields before it invokes the repository; a safe
+	// rejection never needs the owner-domain proof.
+	rejected := seedSubmittedApprovalForAuthorization(t, db, "WALLET_ADJUSTMENT")
+	service := &Service{repository: repository}
+	path := "/admin/v2/approval-requests/" + rejected.ID.String() + "/actions/decide"
+	invalid := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, path, rejected.ID.String(),
+		map[string]any{"expected_version": rejected.Version, "decision": "REJECTED", "reason": "independent rejection", "observed_versions": map[string]any{}})
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "INVALID_APPROVAL_DECISION") {
+		t.Fatalf("v2 accepted untrusted observed versions: %d %s", invalid.Code, invalid.Body.String())
+	}
+	response := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, path, rejected.ID.String(),
+		map[string]any{"expected_version": rejected.Version, "decision": "REJECTED", "reason": "independent rejection"})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"REJECTED"`) ||
+		strings.Contains(response.Body.String(), "normalized_command") || calls != 4 {
+		t.Fatalf("v2 safe close did not return a closed detail or called proof: %d %s calls=%d", response.Code, response.Body.String(), calls)
 	}
 }

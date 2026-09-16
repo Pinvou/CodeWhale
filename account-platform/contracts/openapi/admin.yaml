@@ -2411,6 +2411,27 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /account/admin/v2/approval-requests/{approval_request_id}/actions/decide:
+    post:
+      operationId: decideAdminApprovalRequestV2
+      summary: Decide through the same request and proof control as v1
+      description: Closed v2 body rejects observed_versions and all browser-supplied proof fields. In PROOF_REQUIRED mode both versions use the same authoritative domain proof; REJECTED never calls the domain.
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalV2Decision" }
+      responses:
+        "200": { description: Closed decided detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
     get:
       operationId: listAdminApprovalPolicies
@@ -5511,12 +5532,20 @@ components:
     ApprovalDecision:
       type: object
       additionalProperties: false
-      required: [expected_version, decision, reason, observed_versions]
+      required: [expected_version, decision, reason]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
-        decision: { type: string, enum: [APPROVE, REJECT] }
+        decision: { type: string, enum: [APPROVED, REJECTED] }
         reason: { type: string, minLength: 3, maxLength: 2000 }
         observed_versions: { type: object, additionalProperties: true }
+    ApprovalV2Decision:
+      type: object
+      additionalProperties: false
+      required: [expected_version, decision, reason]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        decision: { type: string, enum: [APPROVED, REJECTED] }
+        reason: { type: string, minLength: 3, maxLength: 2000 }
     ApprovalRequest:
       type: object
       additionalProperties: true
