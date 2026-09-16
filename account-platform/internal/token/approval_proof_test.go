@@ -45,7 +45,8 @@ func TestTokenApprovalProofRecomputesOwnerFactsAndEpoch(t *testing.T) {
 	requestID := uuid.New()
 	request := approvalencoding.ProofRequest{ApprovalRequestID: requestID, Artifacts: artifacts}
 	proof, err := service.tokenApprovalProof(context.Background(), request)
-	if err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "7:"+projection.PrecheckFingerprint || !approvalencoding.ProofResponseBound(proof, requestID, artifacts) {
+	credentialRevision, revisionErr := credentialProofRevision(projection.PrecheckFingerprint, projection.CriticalResourceVersions)
+	if revisionErr != nil || err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "7:"+credentialRevision || !approvalencoding.ProofResponseBound(proof, requestID, artifacts) {
 		t.Fatalf("authoritative proof=%+v err=%v", proof, err)
 	}
 	proofBody := approvedTokenCommandBody{
@@ -77,6 +78,13 @@ func TestTokenApprovalProofRecomputesOwnerFactsAndEpoch(t *testing.T) {
 	proof, err = service.tokenApprovalProof(context.Background(), request)
 	if err != nil || proof.Verdict != "DENY" || proof.ReasonCode != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("drift proof=%+v err=%v", proof, err)
+	}
+	evidence.RouteSetFingerprint = strings.Repeat("b", 64)
+	accountVersion = 8
+	service.WithImpactPrechecks(true, stubImpactRepository{evidence: evidence}, nil)
+	proof, err = service.tokenApprovalProof(context.Background(), request)
+	if err != nil || proof.Verdict != "DENY" || proof.ReasonCode != "RESOURCE_VERSION_CHANGED" || proof.DomainRevision == "7:"+credentialRevision {
+		t.Fatalf("credential version change proof=%+v old_revision=%s err=%v", proof, credentialRevision, err)
 	}
 	service.WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "SAFE_ROLLBACK", Epoch: 8}})
 	if _, err := service.tokenApprovalProof(context.Background(), request); err == nil {

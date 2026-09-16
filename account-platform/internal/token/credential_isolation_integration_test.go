@@ -370,7 +370,8 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		t.Fatal(err)
 	}
 	proof, err := proofService.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: approvalID, Artifacts: artifacts})
-	if err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "1:"+proofProjection.PrecheckFingerprint {
+	credentialRevision, revisionErr := credentialProofRevision(proofProjection.PrecheckFingerprint, proofProjection.CriticalResourceVersions)
+	if revisionErr != nil || err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "1:"+credentialRevision {
 		t.Fatalf("real credential proof=%+v err=%v", proof, err)
 	}
 	proofDigest, err := approvalencoding.DeriveProofDigest(proof)
@@ -456,6 +457,10 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 	if revokedStatus != "REVOKED" || revokedAccountVersion != 3 || revokeAuditCount != 1 || revokeGenericAuditCount != 1 || revokeOutboxCount != 1 {
 		t.Fatalf("revoke status=%s account=%d audit=%d genericAudit=%d outbox=%d", revokedStatus, revokedAccountVersion, revokeAuditCount, revokeGenericAuditCount, revokeOutboxCount)
+	}
+	changedProof, proofErr := proofService.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: approvalID, Artifacts: artifacts})
+	if proofErr != nil || changedProof.Verdict != "DENY" || changedProof.ReasonCode != "RESOURCE_VERSION_CHANGED" || changedProof.DomainRevision == proof.DomainRevision {
+		t.Fatalf("real credential version drift proof=%+v err=%v", changedProof, proofErr)
 	}
 	repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error {
 		t.Error("terminal revoke replay must remain read-only without entering the write guard")

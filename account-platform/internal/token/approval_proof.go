@@ -2,6 +2,8 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -94,35 +96,50 @@ func (s *Service) tokenApprovalProof(ctx context.Context, request approvalencodi
 		CommandType: input.CommandType, TargetResourceType: input.TargetResourceType,
 		TargetResourceID: input.TargetResourceID, NormalizedCommand: input.NormalizedCommand,
 	})
+	conflictReason := ""
+	if err != nil && artifacts.CommandType == "TOKEN_CREDENTIAL_REVOKE" && errors.Is(err, ErrCatalogVersionConflict) {
+		current, conflictReason, err = s.credentialProofConflict(ctx, input.NormalizedCommand)
+	}
 	if err != nil || !validImpactFingerprint(current.PrecheckFingerprint) {
 		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
 	}
-	fresh, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
-		CommandType: input.CommandType, PolicyVersion: input.PolicyVersion,
-		SnapshotSchemaVersion: input.SnapshotSchemaVersion,
-		TargetResourceType:    input.TargetResourceType, TargetResourceID: input.TargetResourceID,
-		NormalizedCommand:        input.NormalizedCommand,
-		CriticalResourceVersions: current.CriticalResourceVersions, FinancialSnapshot: current.FinancialSnapshot,
-	})
-	if err != nil || fresh.CommandDigest != artifacts.CommandDigest {
-		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
+	if conflictReason == "" {
+		fresh, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+			CommandType: input.CommandType, PolicyVersion: input.PolicyVersion,
+			SnapshotSchemaVersion: input.SnapshotSchemaVersion,
+			TargetResourceType:    input.TargetResourceType, TargetResourceID: input.TargetResourceID,
+			NormalizedCommand:        input.NormalizedCommand,
+			CriticalResourceVersions: current.CriticalResourceVersions, FinancialSnapshot: current.FinancialSnapshot,
+		})
+		if err != nil || fresh.CommandDigest != artifacts.CommandDigest {
+			return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
+		}
 	}
 	last, err := s.commandGovernanceActivation.CurrentTokenCommandGovernanceActivation(ctx)
 	if err != nil || last.State != "ACTIVE" || last.Epoch != first.Epoch {
 		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
+	}
+	revision := current.PrecheckFingerprint
+	if artifacts.CommandType == "TOKEN_CREDENTIAL_REVOKE" {
+		revision, err = credentialProofRevision(current.PrecheckFingerprint, current.CriticalResourceVersions)
+		if err != nil {
+			return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
+		}
 	}
 	now := time.Now().UTC()
 	response := approvalencoding.ProofResponse{
 		ApprovalRequestID: request.ApprovalRequestID, CommandType: artifacts.CommandType,
 		CommandDigest: artifacts.CommandDigest, SnapshotDigest: artifacts.SnapshotDigest,
 		PolicyVersion: artifacts.PolicyVersion, ProofSchemaVersion: approvalencoding.ProofSchemaVersion,
-		DomainRevision: strconv.FormatInt(last.Epoch, 10) + ":" + current.PrecheckFingerprint,
+		DomainRevision: strconv.FormatInt(last.Epoch, 10) + ":" + revision,
 		Verdict:        "ALLOW", ReasonCode: "PROOF_VALID", IssuedAt: now, ExpiresAt: now.Add(time.Minute),
 	}
 	// billing_as_of is observation metadata and advances on every independent
 	// Billing read. It is frozen in the original proof digest, but a new read
 	// must compare the price facts rather than falsely deny elapsed time.
-	if artifacts.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && !tokenLifecyclePlanExecutable(input.NormalizedCommand) {
+	if conflictReason != "" {
+		response.Verdict, response.ReasonCode = "DENY", conflictReason
+	} else if artifacts.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && !tokenLifecyclePlanExecutable(input.NormalizedCommand) {
 		// Frozen historical immediate requests remain decodable for audit, but
 		// the owner executor can only schedule an immutable persisted plan.
 		response.Verdict, response.ReasonCode = "DENY", "DOMAIN_INVARIANT_FAILED"
@@ -133,6 +150,62 @@ func (s *Service) tokenApprovalProof(ctx context.Context, request approvalencodi
 		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
 	}
 	return response, nil
+}
+
+// A version or invariant conflict can still yield a deterministic DENY when
+// the credential and its current owner facts remain readable. Unknown or
+// incomplete evidence never receives a synthetic revision.
+func (s *Service) credentialProofConflict(ctx context.Context, raw json.RawMessage) (ApprovalSnapshotProjection, string, error) {
+	repository, ok := s.impactPrechecks.(ImpactPrecheckRepository)
+	if !ok || !s.impactPrechecksEnabled {
+		return ApprovalSnapshotProjection{}, "", errTokenApprovalProofUnavailable
+	}
+	var command struct {
+		TokenAccountID         uuid.UUID `json:"token_account_id"`
+		ExpectedAccountVersion int64     `json:"expected_account_version"`
+		CredentialID           uuid.UUID `json:"credential_id"`
+		CredentialVersion      int       `json:"credential_version"`
+	}
+	if json.Unmarshal(raw, &command) != nil || command.TokenAccountID == uuid.Nil || command.CredentialID == uuid.Nil {
+		return ApprovalSnapshotProjection{}, "", errTokenApprovalProofUnavailable
+	}
+	evidence, err := repository.TokenCredentialImpact(ctx, command.TokenAccountID, &command.CredentialID)
+	if err != nil {
+		return ApprovalSnapshotProjection{}, "", err
+	}
+	result := credentialRevokeImpactResult(command.TokenAccountID, command.CredentialID, evidence)
+	if !validImpactFingerprint(result.PrecheckFingerprint) || evidence.CurrentVersion.AccountVersion == nil || evidence.CurrentVersion.CredentialVersion == nil ||
+		!validImpactFingerprint(evidence.CredentialFingerprint) || !validImpactFingerprint(evidence.RouteSetFingerprint) ||
+		!validImpactFingerprint(evidence.ProvisioningSetFingerprint) || !validImpactFingerprint(evidence.InflightSetFingerprint) {
+		return ApprovalSnapshotProjection{}, "", errTokenApprovalProofUnavailable
+	}
+	critical, err := json.Marshal(result.CriticalResourceVersions)
+	if err != nil {
+		return ApprovalSnapshotProjection{}, "", err
+	}
+	projection := ApprovalSnapshotProjection{PrecheckFingerprint: result.PrecheckFingerprint, CriticalResourceVersions: critical}
+	if *evidence.CurrentVersion.AccountVersion != command.ExpectedAccountVersion || *evidence.CurrentVersion.CredentialVersion != command.CredentialVersion {
+		return projection, "RESOURCE_VERSION_CHANGED", nil
+	}
+	return projection, "DOMAIN_INVARIANT_FAILED", nil
+}
+
+func credentialProofRevision(fingerprint string, critical json.RawMessage) (string, error) {
+	if !validImpactFingerprint(fingerprint) {
+		return "", errTokenApprovalProofUnavailable
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(critical)))
+	decoder.UseNumber()
+	var fields map[string]any
+	if decoder.Decode(&fields) != nil || fields == nil || decoder.Decode(new(any)) != io.EOF {
+		return "", errTokenApprovalProofUnavailable
+	}
+	canonical, err := json.Marshal(fields)
+	if err != nil {
+		return "", errTokenApprovalProofUnavailable
+	}
+	digest := sha256.Sum256(append(append([]byte(fingerprint), 0), canonical...))
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func tokenLifecyclePlanExecutable(command json.RawMessage) bool {
@@ -196,7 +269,17 @@ func (s *Service) tokenExecutionProof(ctx context.Context, command string, body 
 		CommandType: command, TargetResourceType: frozen.TargetResourceType, TargetResourceID: frozen.TargetResourceID,
 		NormalizedCommand: frozen.NormalizedCommand,
 	})
-	if err != nil || current.PrecheckFingerprint != parts[1] || !tokenProofSnapshotMatches(command, frozen, current) {
+	if err != nil || !tokenProofSnapshotMatches(command, frozen, current) {
+		return errTokenApprovalProofUnavailable
+	}
+	revision := current.PrecheckFingerprint
+	if command == "TOKEN_CREDENTIAL_REVOKE" {
+		revision, err = credentialProofRevision(current.PrecheckFingerprint, current.CriticalResourceVersions)
+		if err != nil {
+			return errTokenApprovalProofUnavailable
+		}
+	}
+	if revision != parts[1] {
 		return errTokenApprovalProofUnavailable
 	}
 	return nil
