@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -727,6 +728,7 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	if strings.HasPrefix(code, "APPROVAL_PROOF_") || code == "APPROVAL_REQUEST_CHANGED" ||
 		code == "APPROVAL_RELAY_FENCED" || code == "APPROVAL_QUIESCING" || code == "APPROVAL_SAFE_ROLLBACK" {
 		w.Header().Set("Cache-Control", "no-store")
+		slog.WarnContext(r.Context(), "approval proof decision closed", "request_id", httpserver.RequestID(r.Context()), "error_code", code)
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
