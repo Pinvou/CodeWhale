@@ -159,6 +159,9 @@ test("pairing store persists tombstone before returning and replays a sealed res
   assert.equal(stateStore.value.registrations.length, 1);
   assert.doesNotMatch(JSON.stringify(stateStore.value), /2222222/u);
   assert.equal(store.activePairing(first.result.pairing_id).endpoint_id, request.endpoint_id);
+  assert.equal(store.findActiveByCode("2222222").pairing_id, first.result.pairing_id);
+  assert.equal(store.findActiveByCode("2222223"), null);
+  assert.equal(store.findActiveByCode("222222O"), null);
 
   const restarted = await PairingStore.open({
     stateStore, digestKeyring: keyring(), clock: () => 2000, randomBytes: deterministicEntropy(1),
@@ -216,6 +219,7 @@ test("pairing store seals collision exhaustion and checks every retained digest 
   });
   const oldPairingId = stateStore.value.tombstones[0].pairing_id;
   assert.equal(compacted.activePairing(oldPairingId), null);
+  assert.equal(compacted.findActiveByCode("2222222"), null);
   assert.equal(stateStore.value.tombstones[0].code_digests.length, 0);
   assert.equal(stateStore.value.registrations.length, 0);
   const reused = await compacted.register({
@@ -228,6 +232,7 @@ test("pairing store seals collision exhaustion and checks every retained digest 
     sealCode: sealPairingCode,
   });
   assert.notEqual(reused.result.pairing_id, oldPairingId);
+  assert.equal(compacted.findActiveByCode("2222222").pairing_id, reused.result.pairing_id);
   assert.equal(stateStore.value.tombstones.length, 2);
 });
 
