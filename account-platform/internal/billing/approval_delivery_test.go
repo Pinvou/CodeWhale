@@ -227,6 +227,26 @@ func TestAuthorizationCommandConsumerDefiniteAndUnknownFailures(t *testing.T) {
 	}
 }
 
+func TestProofEraReadyFailureCannotBeginOrGrantAgain(t *testing.T) {
+	for _, test := range []struct {
+		attempts int16
+		code     *string
+	}{
+		{attempts: 1},
+		{attempts: 1, code: approvalTestStringPointer("DOMAIN_REVISION_CHANGED")},
+		{attempts: 0, code: approvalTestStringPointer("DOMAIN_REVISION_CHANGED")},
+	} {
+		consumer, account, domain, delivery := authorizationConsumerFixture(t, "READY", test.attempts)
+		binding := account.binding
+		binding.SerializationVersion = approvalencoding.ApprovalSerializationVersion
+		state := account.state
+		state.LastErrorCode = test.code
+		if err := consumer.advance(context.Background(), delivery, binding, approvalencoding.AuthorizationEvent{}, state); err == nil || account.begin != 0 || account.grant != 0 || domain.calls != 0 {
+			t.Fatalf("proof-era old READY row dispatched: attempt=%d err=%v begin=%d grant=%d domain=%d", test.attempts, err, account.begin, account.grant, domain.calls)
+		}
+	}
+}
+
 func TestAuthorizationCommandConsumerTwelfthDefiniteFailurePublishesThenAcknowledges(t *testing.T) {
 	consumer, account, domain, delivery := authorizationConsumerFixture(t, "READY", 11)
 	domain.attempt = definiteAuthorizationFailure("DOMAIN_PRECONDITION_REJECTED")

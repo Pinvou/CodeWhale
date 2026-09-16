@@ -185,6 +185,13 @@ func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, deliv
 	if state.State != "READY" || state.DomainAttemptCount >= approvalconsumer.MaxDomainAttempts {
 		return errors.New("authorization delivery is not executable")
 	}
+	// A proof-era grant is single-shot until a separately reviewed recovery
+	// contract exists. This local gate also covers a mixed-version Account
+	// deployment that still exposes an old READY failure row.
+	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion &&
+		(state.DomainAttemptCount != 0 || state.LastErrorCode != nil) {
+		return errors.New("proof-era authorization requires result-only recovery")
+	}
 	jobRunID := binding.EventID.String()
 	command, err := consumer.account.BeginAuthorized(ctx, binding, jobRunID, event.CriticalResourceVersions, event.FinancialSnapshot)
 	if err != nil || !validApprovedAuthorizationCommand(command, binding, event) {
