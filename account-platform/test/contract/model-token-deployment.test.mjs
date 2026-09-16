@@ -386,8 +386,10 @@ test('workload roles preserve existing permissions and narrowly register credent
   assert.ok(!token.find(rule => rule.service === 'token-command-executor').permissions.includes('internal.token.approval-effect.read'));
   assert.ok(!token.find(rule => rule.service === 'token-command-executor').permissions.includes('internal.token.approval-proof.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-activation.read'));
+  assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-proof.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-effect.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-activation.read'));
+  assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-proof.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-effect.read'));
   for (const rules of [account, billing, token]) assert.ok(rules.every(rule => rule.subject === `pinvou:service:${rule.service}` && rule.permissions.every(permission => !permission.includes('*'))));
 });
@@ -397,7 +399,7 @@ const billingWorkloadPermissions = {
     'internal.billing.wallet.ensure', 'internal.billing.account-closure-assessment.read',
     'internal.billing.account-closure-grants.isolate', 'internal.billing.organization.lifecycle',
     'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
-    'internal.billing.approval-activation.read', 'internal.billing.approval-effect.read',
+    'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read',
   ],
   'token-gateway': [
     'internal.billing.wallet.ensure', 'internal.billing.wallet.read', 'internal.billing.entitlement.read',

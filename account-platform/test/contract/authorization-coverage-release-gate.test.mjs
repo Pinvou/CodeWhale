@@ -21,7 +21,7 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 360, tasks: 28, events: 7, cli: 22 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 361, tasks: 28, events: 7, cli: 22 });
 });
 
 test('Token proof endpoint requires a dedicated Account-only permission', async () => {
@@ -43,6 +43,7 @@ test('approval reconciliation has an exact bounded workload entry', async () => 
 test('Billing approval activation projection requires its exact workload permission', async () => {
   const source = await readFile(new URL('../../internal/billing/service.go', import.meta.url), 'utf8');
   assert.match(source, /protected\.GET\("\/internal\/v1\/approval-command-activations", serviceauth\.Require\("internal\.billing\.approval-activation\.read"\)/);
+  assert.match(source, /protected\.POST\("\/internal\/v1\/approval-command-proofs", serviceauth\.Require\("internal\.billing\.approval-proof\.read"\)/);
 });
 
 test('fixed NATS resource operator has an exact required authorization entry', async () => {
