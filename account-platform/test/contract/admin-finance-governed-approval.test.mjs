@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildPaymentControlApprovalDraft, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest } from '../../../pinvou3-app/src/features/account-platform/admin-finance.js';
+import { buildPaymentControlApprovalDraft, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, walletAdjustmentApprovalDraft, walletAdjustmentReplacementReference, walletReplacementEligible } from '../../../pinvou3-app/src/features/account-platform/admin-finance.js';
 import { readFileSync } from 'node:fs';
 
 const id = '0199a300-0001-7000-8000-000000000017';
@@ -46,4 +46,31 @@ test('fresh payment control draft links the old request without inheriting its f
   assert.equal(draft.idempotency_key, 'new-key');
   assert.equal(draft.normalized_command.provider_control_version, 3);
   assert.equal(draft.financial_snapshot.provider_control_version, 3);
+});
+
+test('replacement wallet adjustment links a terminal own approval but never reopens its old target', () => {
+  const oldAdjustmentID = '0199a300-0001-7000-8000-000000000019';
+  const walletID = '0199a300-0001-7000-8000-000000000020';
+  const requesterID = '0199a300-0001-7000-8000-000000000021';
+  const freshAdjustmentID = '0199a300-0001-7000-8000-000000000022';
+  const key = `replacement:${id}:0199a300-0001-7000-8000-000000000023`;
+  const old = { approval_request_id: id, command_type: 'WALLET_ADJUSTMENT', status: 'REJECTED',
+    detail_availability: 'AVAILABLE', requester: { user_id: requesterID },
+    target: { resource_type: 'MANUAL_ADJUSTMENT', resource_id: oldAdjustmentID },
+    command: { adjustment_id: oldAdjustmentID, wallet_id: walletID } };
+  assert.equal(walletAdjustmentReplacementReference(key), id);
+  assert.equal(walletAdjustmentReplacementReference('replacement:bad:key'), '');
+  assert.equal(walletReplacementEligible(old, oldAdjustmentID, walletID, requesterID), true);
+  for (const status of ['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED', 'EXECUTED']) {
+    assert.equal(walletReplacementEligible({ ...old, status }, oldAdjustmentID, walletID, requesterID), false);
+  }
+  assert.equal(walletReplacementEligible(old, oldAdjustmentID, walletID, 'another-user'), false);
+  const fresh = walletAdjustmentApprovalDraft({ adjustment_id: freshAdjustmentID, wallet_id: walletID,
+    amount_microcredits: 500, requested_by: requesterID, version: 1 }, 'new user-written reason', key);
+  assert.equal(fresh.target_resource_id, freshAdjustmentID);
+  assert.equal(fresh.supersedes_request_id, id);
+  assert.equal(fresh.idempotency_key, `approval:${key}`);
+  const source = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(source, /walletReplacementEligible\(await client\.governedApprovalRequest\(supersedesID\)/);
+  assert.match(source, /created = await client\.createAdjustment\(/);
 });

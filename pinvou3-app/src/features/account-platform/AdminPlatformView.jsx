@@ -1,7 +1,7 @@
 import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, editWalletAdjustmentApproval, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState, walletAdjustmentApprovalDraft } from './admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, editWalletAdjustmentApproval, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState, walletAdjustmentApprovalDraft, walletAdjustmentReplacementReference, walletReplacementEligible } from './admin-finance.js';
 import { createAndSubmitGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
@@ -853,7 +853,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
+          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} modelDirectoryVisible={modelTokenIAEnabled && adminVisibleSections(authorization, { modelTokenIAEnabled }).includes('models')} modelDetailsEnabled={modelDetailsEnabled} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
@@ -2624,7 +2624,7 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
 const EMPTY_BILLING_QUERY = Object.freeze({});
 const EMPTY_BILLING_DETAIL = Object.freeze({ type: '', id: '', query: EMPTY_BILLING_QUERY });
 
-function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', routeQuery = EMPTY_BILLING_QUERY, routeDetail = EMPTY_BILLING_DETAIL, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onRouteDetailChange, onNavigate, embedded = false, requestTracker }) {
+function Billing({ copy, language, data, client, setData, permissions, currentUserID = '', surface = 'billing', routeTab = '', routeQuery = EMPTY_BILLING_QUERY, routeDetail = EMPTY_BILLING_DETAIL, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onRouteDetailChange, onNavigate, embedded = false, requestTracker }) {
   const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
   const initialFilter = (targetTab, fallback) => routeTab === targetTab
     ? normalizeAdminFinanceQuery(targetTab, routeQuery)
@@ -2653,6 +2653,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const [adjustment, setAdjustment] = useState({ walletID: '', amount: '', reason: '' });
   const [adjustmentEditReasons, setAdjustmentEditReasons] = useState({});
   const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => secureRequestID());
+  const [adjustmentReplacement, setAdjustmentReplacement] = useState(null);
   const [walletFilter, setWalletFilter] = useState(() => initialFilter('wallets', {}));
   const [receivableFilter, setReceivableFilter] = useState(() => initialFilter('receivables', {}));
   const [adjustmentFilter, setAdjustmentFilter] = useState(() => initialFilter('adjustments', {}));
@@ -3058,11 +3059,20 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     setError('');
     let created = null;
     try {
+      const supersedesID = walletAdjustmentReplacementReference(adjustmentRequestKey);
+      if (adjustmentReplacement) {
+        if (!supersedesID || supersedesID !== adjustmentReplacement.requestID || walletID !== adjustmentReplacement.walletID ||
+          !walletReplacementEligible(await client.governedApprovalRequest(supersedesID),
+            adjustmentReplacement.adjustmentID, walletID, currentUserID)) {
+          throw new Error('old adjustment approval is not eligible for replacement');
+        }
+      }
       created = await client.createAdjustment({ wallet_id: walletID, amount_microcredits: amountMicrocredits, reason, idempotency_key: adjustmentRequestKey });
       await ensureAdjustmentApproval(created, reason, adjustmentRequestKey);
       await reload();
       setAdjustment({ walletID: '', amount: '', reason: '' });
       setAdjustmentRequestKey(secureRequestID());
+      setAdjustmentReplacement(null);
       setNotice(copy.billing.adjustmentSubmitted);
     } catch {
       try {
@@ -3091,6 +3101,16 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const openAdjustmentApproval = (item) => {
     onNavigate?.('approvals', { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item.adjustment_id,
       approval_request_id: adjustmentApprovalByTarget.get(item.adjustment_id)?.approval_request_id || item.approval_request_id || null });
+  };
+  const replaceAdjustmentApproval = (item, approval) => {
+    const requester = approval?.requester?.user_id || approval?.requester_user_id;
+    if (!canRequestAdjustment || !currentUserID || requester !== currentUserID ||
+      !['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED'].includes(approval?.status) ||
+      approval?.command_type !== 'WALLET_ADJUSTMENT' ||
+      (approval?.target?.resource_id || approval?.target_resource_id) !== item.adjustment_id) return;
+    setAdjustment({ walletID: item.wallet_id, amount: '', reason: '' });
+    setAdjustmentRequestKey(`replacement:${approval.approval_request_id}:${secureRequestID()}`);
+    setAdjustmentReplacement({ requestID: approval.approval_request_id, adjustmentID: item.adjustment_id, walletID: item.wallet_id });
   };
   const refund = (item) => {
     if (!orderDetail) return;
@@ -3736,7 +3756,12 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
                 <button onClick={() => openAdjustmentApproval(item)}>{copy.billing.viewApproval}</button>
               </>}
             </div>;
-            if (action === 'view') return <button onClick={() => openAdjustmentApproval(item)}>{copy.billing.viewApproval}</button>;
+            if (action === 'view') return <div className="adm-row-actions">
+              <button onClick={() => openAdjustmentApproval(item)}>{copy.billing.viewApproval}</button>
+              {canRequestAdjustment && (approval?.requester?.user_id || approval?.requester_user_id) === currentUserID &&
+                ['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED'].includes(approval?.status) &&
+                <button onClick={() => replaceAdjustmentApproval(item, approval)}>{copy.billing.replaceAdjustment}</button>}
+            </div>;
             return '—';
           },
         },
@@ -4610,9 +4635,13 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       )}
       {tab === 'adjustments' && canRequestAdjustment && (
         <form className="adm-ops-form" onSubmit={submitAdjustment}>
+          {adjustmentReplacement && <div className="adm-inline-message" role="status">
+            {copy.billing.replacingAdjustment} <code>{shortID(adjustmentReplacement.requestID)}</code>
+            <button type="button" onClick={() => { setAdjustmentReplacement(null); setAdjustmentRequestKey(secureRequestID()); setAdjustment({ walletID: '', amount: '', reason: '' }); }}>{copy.billing.cancelReplacement}</button>
+          </div>}
           <label>
             {copy.billing.adjustmentWallet}
-            <input list="adjustment-wallet-options" value={adjustment.walletID} onChange={(event) => setAdjustment((current) => ({ ...current, walletID: event.target.value }))} placeholder={copy.billing.selectWallet} required />
+            <input list="adjustment-wallet-options" value={adjustment.walletID} onChange={(event) => setAdjustment((current) => ({ ...current, walletID: event.target.value }))} placeholder={copy.billing.selectWallet} readOnly={Boolean(adjustmentReplacement)} required />
             <datalist id="adjustment-wallet-options">
               {(data.wallets || []).map((wallet) => (
                 <option key={wallet.wallet_id} value={wallet.wallet_id}>{wallet.owner_type} · {shortID(wallet.owner_id)}</option>

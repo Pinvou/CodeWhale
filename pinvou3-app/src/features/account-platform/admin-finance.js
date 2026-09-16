@@ -1,6 +1,26 @@
 import { createAndSubmitGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 
+const approvalIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function walletAdjustmentReplacementReference(requestKey) {
+  const match = /^replacement:([0-9a-f-]{36}):([0-9a-f-]{36})$/i.exec(String(requestKey || ''));
+  return match && approvalIDPattern.test(match[1]) && approvalIDPattern.test(match[2]) ? match[1] : '';
+}
+
+export function walletReplacementEligible(detail, oldAdjustmentID, walletID, requesterID) {
+  const target = detail?.target || { resource_type: detail?.target_resource_type, resource_id: detail?.target_resource_id };
+  const command = detail?.command || detail?.normalized_command;
+  const requester = detail?.requester?.user_id || detail?.requester_user_id;
+  return Boolean(requesterID && detail?.approval_request_id && requester === requesterID &&
+    ['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED'].includes(detail.status) &&
+    [undefined, 'AVAILABLE'].includes(detail.detail_availability) &&
+    detail.command_type === 'WALLET_ADJUSTMENT' && target.resource_type === 'MANUAL_ADJUSTMENT' &&
+    target.resource_id === oldAdjustmentID && command?.adjustment_id === oldAdjustmentID &&
+    command?.wallet_id === walletID);
+}
+
 export function walletAdjustmentApprovalDraft(item, reason, requestKey) {
+  const supersedesID = walletAdjustmentReplacementReference(requestKey);
   return {
     command_type: 'WALLET_ADJUSTMENT', idempotency_key: `approval:${requestKey}`,
     normalized_command: { adjustment_id: item.adjustment_id, wallet_id: item.wallet_id,
@@ -10,6 +30,7 @@ export function walletAdjustmentApprovalDraft(item, reason, requestKey) {
     expected_impact: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
     critical_resource_versions: { adjustment_version: item.version },
     financial_snapshot: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
+    ...(supersedesID ? { supersedes_request_id: supersedesID } : {}),
   };
 }
 

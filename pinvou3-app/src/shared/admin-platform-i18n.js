@@ -2426,6 +2426,9 @@ Object.assign(adminPlatformCopy.zh.billing, {
   viewApproval: '查看审批',
   resumeApproval: '恢复审批提交',
   updateAndSubmitAdjustment: '更新调账草稿并提交',
+  replaceAdjustment: '新建替代调账',
+  replacingAdjustment: '将创建全新调账，关联原审批：',
+  cancelReplacement: '取消替代',
 });
 Object.assign(adminPlatformCopy.en.billing, {
   adjustmentWallet: 'Target wallet ID',
@@ -2441,6 +2444,9 @@ Object.assign(adminPlatformCopy.en.billing, {
   viewApproval: 'View approval',
   resumeApproval: 'Resume approval submission',
   updateAndSubmitAdjustment: 'Update adjustment draft and submit',
+  replaceAdjustment: 'Create replacement adjustment',
+  replacingAdjustment: 'A new adjustment will be created and linked to the prior approval:',
+  cancelReplacement: 'Cancel replacement',
 });
 Object.assign(adminPlatformCopy.ja.billing, {
   adjustmentWallet: '対象ウォレット ID',
@@ -2456,6 +2462,9 @@ Object.assign(adminPlatformCopy.ja.billing, {
   viewApproval: '承認を表示',
   resumeApproval: '承認申請を再開',
   updateAndSubmitAdjustment: '調整の下書きを更新して送信',
+  replaceAdjustment: '代替調整を新規作成',
+  replacingAdjustment: '新しい調整を作成し、元の承認申請に関連付けます：',
+  cancelReplacement: '代替をキャンセル',
 });
 
 Object.assign(adminPlatformCopy.zh.billing, {
