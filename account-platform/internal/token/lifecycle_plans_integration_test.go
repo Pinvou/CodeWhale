@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -66,7 +67,8 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 		t.Fatalf("unfrozen publication insert error=%v", err)
 	}
 	service := NewService(repository, nil, nil, nil, ProviderURLPolicy{}, nil, NewHTTPUpstreamClient(), 0).
-		WithImpactPrechecks(true, repository, lifecyclePricingStub{observedAt: now})
+		WithImpactPrechecks(true, repository, lifecyclePricingStub{observedAt: now}).
+		WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: activation})
 	governedHandler := newGovernedPublishIntegrationHandler(t, service, actor)
 	lifecycleHandler := newLifecyclePlanIntegrationHandler(t, repository, actor)
 	revokedHandler := newLifecyclePlanPermissionIntegrationHandler(t, repository, actor, []string{"platform.models.read"}, "lifecycle-plan-revoked")
@@ -136,6 +138,32 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	if err != nil || !created || plan.PlanVersion != 1 || plan.Status != "PENDING_APPROVAL" {
 		t.Fatalf("create plan=%+v created=%v err=%v", plan, created, err)
 	}
+	planCommand := mustMarshalJSON(t, lifecyclePlanCommandFromPlan(plan))
+	planProjection, err := service.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), NormalizedCommand: planCommand})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planArtifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: "MODEL", TargetResourceID: modelID.String(), NormalizedCommand: planCommand,
+		CriticalResourceVersions: planProjection.CriticalResourceVersions, FinancialSnapshot: planProjection.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planProof, err := service.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: uuid.New(), Artifacts: planArtifacts})
+	if err != nil || planProof.Verdict != "ALLOW" || planProof.DomainRevision != "1:"+planProjection.PrecheckFingerprint {
+		t.Fatalf("real lifecycle plan proof=%+v err=%v", planProof, err)
+	}
+	planBody := approvedTokenCommandBody{ActivationEpoch: 1, ProofSchemaVersion: planProof.ProofSchemaVersion,
+		CommandDigest: planProof.CommandDigest, SnapshotDigest: planProof.SnapshotDigest,
+		DomainRevision: planProof.DomainRevision, ProofDigest: strings.Repeat("a", 64), ApprovalControlEpoch: 1,
+		CriticalResourceVersions: planProjection.CriticalResourceVersions, FinancialSnapshot: planProjection.FinancialSnapshot,
+		Envelope: TokenCommandEnvelope{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: planCommand},
+	}
+	if err := service.tokenExecutionProof(ctx, "TOKEN_MODEL_LIFECYCLE_CHANGE", planBody, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true}); err != nil {
+		t.Fatalf("real lifecycle execution proof=%v", err)
+	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET effective_at=effective_at+interval '1 minute' WHERE id=$1`, plan.ID); err == nil {
 		t.Fatal("immutable lifecycle plan definition was mutated")
 	}
@@ -157,6 +185,9 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	old, err := repository.LifecyclePlan(ctx, modelID, plan.ID)
 	if err != nil || old.Status != "CANCELLED" || old.StableErrorCode == nil || *old.StableErrorCode != "PLAN_SUPERSEDED" {
 		t.Fatalf("superseded plan=%+v err=%v", old, err)
+	}
+	if _, err := service.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: uuid.New(), Artifacts: planArtifacts}); err == nil {
+		t.Fatal("superseded plan retained authority to issue lifecycle proof")
 	}
 	cancelled, err := repository.CancelLifecyclePlan(ctx, modelID, rescheduled.ID, rescheduled.PlanVersion, actor, "cancel after dependency review", "lifecycle-plan-cancel-0001")
 	if err != nil || cancelled.Status != "CANCELLED" {
