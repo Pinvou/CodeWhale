@@ -102,6 +102,26 @@ test('fresh Token approval refuses incomplete or active history and links an eli
   await assert.rejects(createAndSubmitFreshGovernedApproval(client, draft), { code: 'APPROVAL_ALREADY_ACTIVE' });
 });
 
+test('Token confirmation updates the only existing DRAFT instead of creating a second request', async () => {
+  const existing = { approval_request_id: requestID, command_type: draft.command_type, status: 'DRAFT',
+    target: { resource_type: draft.target_resource_type, resource_id: draft.target_resource_id } };
+  const calls = [];
+  const client = {
+    governedApprovalRequests: async () => ({ items: [existing], has_more: false }),
+    governedApprovalRequest: async () => { calls.push('read'); return calls.length === 1
+      ? { ...detail('DRAFT'), allowed_actions: ['EDIT'] } : calls.length === 3
+        ? detail('DRAFT', 2) : detail('SUBMITTED', 3); },
+    updateGovernedApprovalDraft: async (_id, current, edited) => {
+      assert.equal(current.version, 1); assert.equal(edited, draft); calls.push('update'); },
+    submitGovernedApprovalRequest: async (_id, current) => { assert.equal(current.version, 2); calls.push('submit'); },
+    createGovernedApprovalDraft: async () => assert.fail('must reuse the existing DRAFT'),
+  };
+  assert.equal((await createAndSubmitFreshGovernedApproval(client, draft)).version, 3);
+  assert.deepEqual(calls, ['read', 'update', 'read', 'submit', 'read']);
+  client.governedApprovalRequests = async () => ({ items: [existing, { ...existing, approval_request_id: 'another' }] });
+  await assert.rejects(createAndSubmitFreshGovernedApproval(client, draft), { code: 'APPROVAL_ALREADY_ACTIVE' });
+});
+
 test('existing business draft is re-read and never submitted from a stale list version', async () => {
   const existing = { approval_request_id: requestID, command_type: draft.command_type,
     target_resource_type: draft.target_resource_type, target_resource_id: draft.target_resource_id, status: 'DRAFT', version: 1 };

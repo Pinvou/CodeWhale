@@ -65,6 +65,19 @@ export function supersedesEligibleApproval(page, commandType, targetID) {
 export async function createAndSubmitFreshGovernedApproval(client, draft, signal) {
   const page = await client.governedApprovalRequests({ command_type: draft.command_type,
     target: draft.target_resource_id, limit: 200 }, signal);
+  if (!page || !Array.isArray(page.items) || page.has_more === true || page.next_cursor || page.items.length >= 200) {
+    throw Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+  }
+  const matching = page.items.filter((item) => item.command_type === draft.command_type &&
+    (item.target?.resource_id || item.target_resource_id) === draft.target_resource_id);
+  if (matching[0]?.status === 'DRAFT') {
+    if (!matching[0].approval_request_id || matching.slice(1).some((item) =>
+      !terminalStatuses.has(item.status) && item.status !== 'EXECUTED')) {
+      throw Object.assign(new Error('approval history cannot identify a single editable draft'),
+        { code: 'APPROVAL_ALREADY_ACTIVE' });
+    }
+    return updateAndSubmitGovernedApproval(client, matching[0], draft, signal);
+  }
   const supersedesID = supersedesEligibleApproval(page, draft.command_type, draft.target_resource_id);
   return createAndSubmitGovernedApproval(client, supersedesID
     ? { ...draft, supersedes_request_id: supersedesID } : draft, signal);
