@@ -95,6 +95,33 @@ func EncodeProofRequest(requestID uuid.UUID, artifacts ProofArtifacts) ([]byte, 
 	return encoded, nil
 }
 
+// EncodeProofResponse emits exactly the eleven approved transport fields.
+// Validation is shared with the consumer's digest derivation so the owner
+// cannot accidentally publish an unbound or non-canonical proof.
+func EncodeProofResponse(response ProofResponse) ([]byte, error) {
+	if _, err := DeriveProofDigest(response); err != nil {
+		return nil, err
+	}
+	value := newObject(map[string]*jsonValue{
+		"approval_request_id": jsonString(response.ApprovalRequestID.String()),
+		"command_type": jsonString(response.CommandType),
+		"command_digest": jsonString(response.CommandDigest),
+		"snapshot_digest": jsonString(response.SnapshotDigest),
+		"policy_version": jsonInteger(response.PolicyVersion),
+		"proof_schema_version": jsonString(response.ProofSchemaVersion),
+		"domain_revision": jsonString(response.DomainRevision),
+		"verdict": jsonString(response.Verdict),
+		"reason_code": jsonString(response.ReasonCode),
+		"issued_at": jsonString(response.IssuedAt.Format(time.RFC3339Nano)),
+		"expires_at": jsonString(response.ExpiresAt.Format(time.RFC3339Nano)),
+	})
+	encoded, err := canonicalJSON(value)
+	if err != nil || len(encoded) > MaximumDocumentBytes {
+		return nil, ErrDocumentTooLarge
+	}
+	return encoded, nil
+}
+
 // DecodeProofResponse rejects unknown, duplicate and trailing fields before
 // constructing a typed value. It only validates the shared transport; the
 // caller must bind request/digests, time budget and command-specific reasons.

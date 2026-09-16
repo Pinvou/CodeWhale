@@ -31,6 +31,14 @@ func TestProofTransportClosedGoldenAndBinding(t *testing.T) {
 		!ProofResponseFresh(response, response.IssuedAt.Add(5*time.Second)) || !ProofTransportWithinBudget(request, responseRaw) {
 		t.Fatalf("golden proof response invalid: %+v digest=%q err=%v", response, digest, err)
 	}
+	reencoded, err := EncodeProofResponse(response)
+	if err != nil || !bytes.Equal(reencoded, responseRaw) {
+		t.Fatalf("owner response differs from frozen proof: %v", err)
+	}
+	response.DomainRevision = ""
+	if _, err := EncodeProofResponse(response); err == nil {
+		t.Fatal("owner encoded an unbound domain revision")
+	}
 	changed := artifacts
 	changed.CommandDigest = strings.Repeat("a", 64)
 	if _, err := EncodeProofRequest(requestID, changed); !errors.Is(err, ErrInvalidDocument) || ProofResponseBound(response, requestID, changed) {
