@@ -652,9 +652,16 @@ fn head_ref_path(root: &Path) -> Option<PathBuf> {
 
 // 经 `git rev-parse --git-path <name>` 解析仓库真实 git 目录内的路径。linked
 // worktree 中 `.git` 是 gitfile，朴素的 `root.join(".git/...")` 启发式读不到
-// index/HEAD/ref 文件，指纹字段会恒为 0 并返回陈旧缓存差异。git 不可用（非 git
-// 工作区、单测里的合成 .git 目录）时返回 None，回退到朴素启发式。
+// index/HEAD/ref 文件，指纹字段会恒为 0 并返回陈旧缓存差异。主工作区的 `.git`
+// 是真实目录，从工作区根向上发现必然落在其中，路径拼接与子进程输出逐字节一致，
+// 故直接走快路径、不 spawn git——指纹在每次缓存探测都要计算，每次探测多次进程
+// 启动会拖垮它所守护的缓存。gitfile 布局（linked worktree、submodule、
+// separate-git-dir）走发现路径；git 不可用（非 git 工作区）时回退朴素启发式。
 fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git.join(name));
+    }
     let mut command = crate::platform::process::HiddenCommand::new("git");
     crate::platform::process::strip_git_override_env(&mut command);
     let output = command
