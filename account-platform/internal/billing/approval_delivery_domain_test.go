@@ -218,6 +218,69 @@ func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {
 	}
 }
 
+func TestBillingProofEraExecutionRejectsRevisionBeforeDomainEffect(t *testing.T) {
+	adjustment := ManualAdjustment{ID: uuid.New(), WalletID: uuid.New(), AmountMicrocredits: 7, RequestedBy: uuid.New(), Version: 3}
+	normalized, _ := json.Marshal(map[string]any{"adjustment_id": adjustment.ID, "wallet_id": adjustment.WalletID, "amount_microcredits": adjustment.AmountMicrocredits, "requested_by": adjustment.RequestedBy})
+	critical := json.RawMessage(`{"adjustment_version":3}`)
+	financial, _ := json.Marshal(map[string]any{"wallet_id": adjustment.WalletID, "delta_microcredits": adjustment.AmountMicrocredits})
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, SnapshotSchemaVersion: 1,
+		TargetResourceType: "MANUAL_ADJUSTMENT", TargetResourceID: adjustment.ID.String(),
+		NormalizedCommand: normalized, CriticalResourceVersions: critical, FinancialSnapshot: financial,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := approvalencoding.AuthorizationEvent{CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, TargetResourceType: "MANUAL_ADJUSTMENT", TargetResourceID: adjustment.ID.String(), NormalizedCommand: normalized, CriticalResourceVersions: critical, FinancialSnapshot: financial,
+		ProofSchemaVersion: "1", CommandDigest: artifacts.CommandDigest, SnapshotDigest: artifacts.SnapshotDigest, DomainRevision: "1:" + strings.Repeat("a", 64), ApprovalControlEpoch: 2}
+	command := ApprovedCommand{CommandType: event.CommandType, TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,
+		NormalizedCommand: normalized, CriticalResourceVersions: critical, FinancialSnapshot: financial,
+		RequesterUserID: adjustment.RequestedBy, ApproverUserID: uuid.New(), DecisionReason: "approved independently", ExecutionIdempotencyKey: "approval:stable"}
+	binding := ApprovalAuthorizationBinding{ApprovalRequestID: uuid.New(), CommandType: event.CommandType, ApprovalEpoch: 2, SerializationVersion: approvalencoding.ApprovalSerializationVersion}
+	repository := &authorizationExecutionRepositoryStub{adjustment: adjustment}
+	domain := &billingAuthorizationDomain{repository: repository, proof: func(_ context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
+		return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: "1:" + strings.Repeat("b", 64), CommandDigest: request.Artifacts.CommandDigest, SnapshotDigest: request.Artifacts.SnapshotDigest}, nil
+	}}
+	attempt := domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_REVISION_CHANGED" || repository.adjustmentRuns != 0 {
+		t.Fatalf("drift must not reach adjustment executor: %+v runs=%d", attempt, repository.adjustmentRuns)
+	}
+	domain.proof = func(_ context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
+		return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: event.DomainRevision, CommandDigest: request.Artifacts.CommandDigest, SnapshotDigest: request.Artifacts.SnapshotDigest}, nil
+	}
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if len(attempt.Result.DomainResult) == 0 || repository.adjustmentRuns != 1 {
+		t.Fatalf("matching owner proof should reach existing local CAS: %+v runs=%d", attempt, repository.adjustmentRuns)
+	}
+	provider := ProviderResumeVersions{ProviderID: "provider-a", ProviderVersion: "v1", ProviderControlVersion: 3, ProbeOrderID: uuid.New(), PolicyVersion: "p1", ActiveMappingSetFingerprint: strings.Repeat("a", 32)}
+	providerRaw, _ := json.Marshal(provider)
+	providerFinancial := json.RawMessage(`{"new_orders_enabled":false,"provider_control_version":3,"product_control_version":null}`)
+	providerArtifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, SnapshotSchemaVersion: 1,
+		TargetResourceType: "PAYMENT_PROVIDER_CONTROL", TargetResourceID: provider.ProviderID,
+		NormalizedCommand: providerRaw, CriticalResourceVersions: providerRaw, FinancialSnapshot: providerFinancial,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerEvent := approvalencoding.AuthorizationEvent{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, TargetResourceType: "PAYMENT_PROVIDER_CONTROL", TargetResourceID: provider.ProviderID,
+		NormalizedCommand: providerRaw, CriticalResourceVersions: providerRaw, FinancialSnapshot: providerFinancial,
+		ProofSchemaVersion: "1", CommandDigest: providerArtifacts.CommandDigest, SnapshotDigest: providerArtifacts.SnapshotDigest, DomainRevision: "1:" + strings.Repeat("c", 64), ApprovalControlEpoch: 2}
+	providerCommand := ApprovedCommand{CommandType: providerEvent.CommandType, TargetResourceType: providerEvent.TargetResourceType, TargetResourceID: providerEvent.TargetResourceID,
+		NormalizedCommand: providerRaw, CriticalResourceVersions: providerRaw, FinancialSnapshot: providerFinancial,
+		RequesterUserID: adjustment.RequestedBy, ApproverUserID: uuid.New(), DecisionReason: "approved independently"}
+	probeCalls := 0
+	domain.probe = func(context.Context, uuid.UUID) (PaymentOrder, ProviderOrder, uuid.UUID, error) {
+		probeCalls++
+		return PaymentOrder{}, ProviderOrder{}, uuid.Nil, errors.New("probe must not run on proof drift")
+	}
+	providerBinding := ApprovalAuthorizationBinding{ApprovalRequestID: uuid.New(), CommandType: providerEvent.CommandType, ApprovalEpoch: 2, SerializationVersion: approvalencoding.ApprovalSerializationVersion}
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), providerBinding, providerEvent, providerCommand)
+	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_REVISION_CHANGED" || probeCalls != 0 {
+		t.Fatalf("provider drift reached probe: %+v probes=%d", attempt, probeCalls)
+	}
+}
+
 func TestBillingAuthorizationDomainProviderAndProductProbeBoundary(t *testing.T) {
 	requester, approver := uuid.New(), uuid.New()
 	provider := ProviderResumeVersions{ProviderID: "provider-a", ProviderVersion: "v1", ProviderControlVersion: 3, ProbeOrderID: uuid.New(), PolicyVersion: "p1", ActiveMappingSetFingerprint: strings.Repeat("a", 64)}

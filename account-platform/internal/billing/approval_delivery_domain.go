@@ -15,6 +15,7 @@ type billingAuthorizationDomain struct {
 	repository billingAuthorizationExecutionRepository
 	database   queryable
 	probe      func(context.Context, uuid.UUID) (PaymentOrder, ProviderOrder, uuid.UUID, error)
+	proof      func(context.Context, approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error)
 }
 
 type billingAuthorizationExecutionRepository interface {
@@ -36,6 +37,7 @@ func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain
 		}
 	}
 	domain := &billingAuthorizationDomain{repository: repository}
+	domain.proof = service.billingApprovalProof
 	if repository != nil {
 		domain.database = repository.pool
 	}
@@ -96,6 +98,11 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 	if domain == nil || domain.repository == nil {
 		return authorizationDomainAttempt{}
 	}
+	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
+		if result, valid := domain.executionProof(ctx, binding, event, command); !valid {
+			return result
+		}
+	}
 	switch binding.CommandType {
 	case "WALLET_ADJUSTMENT":
 		return domain.executeAdjustment(ctx, binding, event, command)
@@ -106,6 +113,34 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
+}
+
+// A proof-era event cannot reach a local effect (or a trusted provider probe)
+// until its frozen command and current Billing owner revision agree. The
+// command transactions still perform their own row/version CAS afterwards.
+func (domain *billingAuthorizationDomain) executionProof(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, command ApprovedCommand) (authorizationDomainAttempt, bool) {
+	if domain.proof == nil || event.ProofSchemaVersion != approvalencoding.ProofSchemaVersion ||
+		event.ApprovalControlEpoch != binding.ApprovalEpoch || !sameRawJSON(command.NormalizedCommand, event.NormalizedCommand) ||
+		!sameRawJSON(command.CriticalResourceVersions, event.CriticalResourceVersions) || !sameRawJSON(command.FinancialSnapshot, event.FinancialSnapshot) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH"), false
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: 1,
+		TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,
+		NormalizedCommand: event.NormalizedCommand, CriticalResourceVersions: event.CriticalResourceVersions,
+		FinancialSnapshot: event.FinancialSnapshot,
+	})
+	if err != nil || artifacts.CommandDigest != event.CommandDigest || artifacts.SnapshotDigest != event.SnapshotDigest {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH"), false
+	}
+	proof, err := domain.proof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: binding.ApprovalRequestID, Artifacts: artifacts})
+	if err != nil {
+		return authorizationDomainAttempt{}, false
+	}
+	if proof.Verdict != "ALLOW" || proof.DomainRevision != event.DomainRevision || proof.CommandDigest != event.CommandDigest || proof.SnapshotDigest != event.SnapshotDigest {
+		return definiteAuthorizationFailure("DOMAIN_REVISION_CHANGED"), false
+	}
+	return authorizationDomainAttempt{}, true
 }
 
 func (domain *billingAuthorizationDomain) executeAdjustment(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
