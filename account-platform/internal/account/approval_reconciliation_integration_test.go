@@ -56,7 +56,7 @@ JOIN public.approval_request_snapshots s ON s.approval_request_id=r.id WHERE r.i
 		t.Fatal(err)
 	}
 	setApprovalConsumerControl(t, ctx, db, "QUIESCING", "RUNNING", 1, false, 2)
-	plan, err := repository.PlanExpiredApprovalReconciliation(ctx, 20)
+	plan, err := repository.PlanApprovalReconciliation(ctx, 20)
 	if err != nil || len(plan.Candidates) != 4 || plan.MoreCandidates {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
@@ -72,7 +72,7 @@ JOIN public.approval_request_snapshots s ON s.approval_request_id=r.id WHERE r.i
 		observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
 			ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
 			State: state, ObservedAt: time.Now().UTC()}
-		result, err := repository.ReconcileExpiredApproval(ctx, plan.Control, candidate, observation)
+		result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -129,7 +129,7 @@ FROM public.approval_requests r WHERE r.id=$1`, requestByEvent[eventID]).Scan(&s
 	if exclusionCount != 1 || auditCount != 1 {
 		t.Fatalf("exclusion=%d audit=%d", exclusionCount, auditCount)
 	}
-	second, err := repository.PlanExpiredApprovalReconciliation(ctx, 20)
+	second, err := repository.PlanApprovalReconciliation(ctx, 20)
 	if err != nil || len(second.Candidates) != 2 {
 		t.Fatalf("idempotent plan=%+v err=%v", second, err)
 	}
@@ -146,7 +146,7 @@ FROM public.approval_requests r WHERE r.id=$1`, requestByEvent[eventID]).Scan(&s
 	}
 	absent := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling, ApprovalRequestID: candidate.RequestID,
 		CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint, State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-	if _, err := repository.ReconcileExpiredApproval(ctx, changed, candidate, absent); !errors.Is(err, ErrApprovalReconciliationControlChanged) {
+	if _, err := repository.ReconcileApproval(ctx, changed, candidate, absent); !errors.Is(err, ErrApprovalReconciliationControlChanged) {
 		t.Fatalf("control drift err=%v", err)
 	}
 }
@@ -175,7 +175,7 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 		t.Fatal(err)
 	}
 	setApprovalConsumerControl(t, ctx, db, "SAFE_ROLLBACK", "RUNNING", 1, true, 3)
-	plan, err := repository.PlanExpiredApprovalReconciliation(ctx, 20)
+	plan, err := repository.PlanApprovalReconciliation(ctx, 20)
 	if err != nil || len(plan.Candidates) != 1 {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
@@ -183,7 +183,7 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 	observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
 		ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
 		State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-	result, err := repository.ReconcileExpiredApproval(ctx, plan.Control, candidate, observation)
+	result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation)
 	if err != nil || result != ApprovalReconciliationExclusionSealed {
 		t.Fatalf("result=%s err=%v", result, err)
 	}
@@ -191,4 +191,62 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 	if err := db.adminPool.QueryRow(ctx, `SELECT reason_code FROM account_approval_authorization.approval_authorization_delivery_exclusions WHERE event_id=$1`, eventID).Scan(&reason); err != nil || reason != "SAFE_ROLLBACK_INVALIDATED_NO_EXECUTION" {
 		t.Fatalf("reason=%s err=%v", reason, err)
 	}
+}
+
+func TestSafeRollbackApprovalReconciliationPostgresIntegration(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		controlEpoch int64
+		wantResult   ApprovalReconciliationResult
+		wantStatus   string
+		wantCode     *string
+	}{
+		{name: "previous epoch is invalidated inside execution window", controlEpoch: 2, wantResult: ApprovalReconciliationInvalidated,
+			wantStatus: "INVALIDATED", wantCode: stringPointer("APPROVAL_SAFE_ROLLBACK_INVALIDATED")},
+		{name: "older epoch remains a hard history blocker", controlEpoch: 3, wantResult: ApprovalReconciliationBlockedHistory,
+			wantStatus: "APPROVED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, repository, _, _ := newApprovalDeliveryIntegrationDatabase(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			eventID := seedBackfillAuthorization(t, ctx, db, true)
+			var requestID uuid.UUID
+			if err := db.adminPool.QueryRow(ctx, `SELECT aggregate_id FROM public.outbox_events WHERE event_id=$1`, eventID).Scan(&requestID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests
+SET execution_deadline=transaction_timestamp()+interval '4 minutes',updated_at=transaction_timestamp()
+WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
+				t.Fatal(err)
+			}
+			setApprovalConsumerControl(t, ctx, db, "SAFE_ROLLBACK", "RUNNING", 1, true, test.controlEpoch)
+			plan, err := repository.PlanApprovalReconciliation(ctx, 20)
+			if err != nil || len(plan.Candidates) != 1 || plan.Candidates[0].InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED" {
+				t.Fatalf("plan=%+v err=%v", plan, err)
+			}
+			candidate := plan.Candidates[0]
+			observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
+				ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
+				State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
+			result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation)
+			if err != nil || result != test.wantResult {
+				t.Fatalf("result=%s err=%v", result, err)
+			}
+			var status string
+			var code *string
+			if err := db.adminPool.QueryRow(ctx, `SELECT status,invalidation_code FROM public.approval_requests WHERE id=$1`, requestID).Scan(&status, &code); err != nil {
+				t.Fatal(err)
+			}
+			if status != test.wantStatus || !sameOptionalString(code, test.wantCode) {
+				t.Fatalf("status=%s code=%v", status, code)
+			}
+		})
+	}
+}
+
+func stringPointer(value string) *string { return &value }
+
+func sameOptionalString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }

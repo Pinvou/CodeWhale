@@ -26,6 +26,7 @@ type ApprovalReconciliationCandidate struct {
 	Status             string    `json:"status"`
 	Version            int64     `json:"version"`
 	ExecutionDeadline  time.Time `json:"execution_deadline"`
+	InvalidationCode   string    `json:"invalidation_code"`
 }
 
 type ApprovalReconciliationPlan struct {
@@ -52,6 +53,8 @@ type ApprovalReconciliationSummary struct {
 	ControlVersion         int64             `json:"control_version"`
 	CandidateCount         int               `json:"candidate_count"`
 	EligibleCount          int               `json:"eligible_count"`
+	ExpiredCandidateCount  int               `json:"expired_candidate_count"`
+	SafeCandidateCount     int               `json:"safe_candidate_count"`
 	InvalidatedCount       int               `json:"invalidated_count"`
 	SealedExclusionCount   int               `json:"sealed_exclusion_count"`
 	ObservedEffectCount    int               `json:"observed_effect_count"`
@@ -65,11 +68,11 @@ type ApprovalReconciliationSummary struct {
 }
 
 type ApprovalReconciliationStore interface {
-	PlanExpiredApprovalReconciliation(context.Context, int) (ApprovalReconciliationPlan, error)
-	ReconcileExpiredApproval(context.Context, AdminApprovalControl, ApprovalReconciliationCandidate, approvaleffect.Observation) (ApprovalReconciliationResult, error)
+	PlanApprovalReconciliation(context.Context, int) (ApprovalReconciliationPlan, error)
+	ReconcileApproval(context.Context, AdminApprovalControl, ApprovalReconciliationCandidate, approvaleffect.Observation) (ApprovalReconciliationResult, error)
 }
 
-func (r *PostgresRepository) PlanExpiredApprovalReconciliation(ctx context.Context, limit int) (ApprovalReconciliationPlan, error) {
+func (r *PostgresRepository) PlanApprovalReconciliation(ctx context.Context, limit int) (ApprovalReconciliationPlan, error) {
 	if limit < 1 || limit > 200 {
 		return ApprovalReconciliationPlan{}, ErrApprovalReconciliationBlocked
 	}
@@ -91,12 +94,15 @@ func (r *PostgresRepository) PlanExpiredApprovalReconciliation(ctx context.Conte
 		commands = append(commands, descriptor.CommandType)
 	}
 	rows, err := tx.Query(ctx, `SELECT r.id,r.command_type,encode(r.command_fingerprint,'hex'),r.policy_version,p.executor_identity,
-  r.status,r.version,r.execution_deadline
+  r.status,r.version,r.execution_deadline,
+  CASE WHEN r.execution_deadline<=transaction_timestamp() THEN 'EXECUTION_WINDOW_EXPIRED'
+       ELSE 'APPROVAL_SAFE_ROLLBACK_INVALIDATED' END
 FROM approval_requests r
 JOIN approval_command_policies p ON p.command_type=r.command_type AND p.policy_version=r.policy_version
 WHERE r.command_type=ANY($1) AND r.status IN ('APPROVED','EXECUTION_FAILED')
-  AND r.execution_deadline IS NOT NULL AND r.execution_deadline<=transaction_timestamp()
-ORDER BY r.execution_deadline,r.id LIMIT $2`, commands, limit+1)
+  AND r.execution_deadline IS NOT NULL
+  AND (r.execution_deadline<=transaction_timestamp() OR ($2 AND r.status='APPROVED'))
+ORDER BY r.execution_deadline,r.id LIMIT $3`, commands, control.Mode == AdminApprovalModeSafeRollback, limit+1)
 	if err != nil {
 		return ApprovalReconciliationPlan{}, err
 	}
@@ -105,12 +111,15 @@ ORDER BY r.execution_deadline,r.id LIMIT $2`, commands, limit+1)
 	for rows.Next() {
 		var candidate ApprovalReconciliationCandidate
 		if err := rows.Scan(&candidate.RequestID, &candidate.CommandType, &candidate.CommandFingerprint, &candidate.PolicyVersion,
-			&candidate.ExecutorIdentity, &candidate.Status, &candidate.Version, &candidate.ExecutionDeadline); err != nil {
+			&candidate.ExecutorIdentity, &candidate.Status, &candidate.Version, &candidate.ExecutionDeadline, &candidate.InvalidationCode); err != nil {
 			return ApprovalReconciliationPlan{}, err
 		}
 		candidate.ExecutionDeadline = candidate.ExecutionDeadline.UTC()
 		if candidate.RequestID == uuid.Nil || candidate.Version < 1 || !approvaleffect.ValidFingerprint(candidate.CommandFingerprint) ||
-			(candidate.Status != "APPROVED" && candidate.Status != "EXECUTION_FAILED") || !reconciliationDescriptorMatches(descriptors, candidate) {
+			(candidate.Status != "APPROVED" && candidate.Status != "EXECUTION_FAILED") ||
+			(candidate.InvalidationCode != "EXECUTION_WINDOW_EXPIRED" && candidate.InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED") ||
+			(candidate.InvalidationCode == "APPROVAL_SAFE_ROLLBACK_INVALIDATED" && (control.Mode != AdminApprovalModeSafeRollback || candidate.Status != "APPROVED")) ||
+			!reconciliationDescriptorMatches(descriptors, candidate) {
 			return ApprovalReconciliationPlan{}, ErrApprovalReconciliationBlocked
 		}
 		plan.Candidates = append(plan.Candidates, candidate)
@@ -148,7 +157,7 @@ type reconciliationOutbox struct {
 	lockedUntil    *time.Time
 }
 
-func (r *PostgresRepository) ReconcileExpiredApproval(ctx context.Context, expectedControl AdminApprovalControl, candidate ApprovalReconciliationCandidate, observation approvaleffect.Observation) (ApprovalReconciliationResult, error) {
+func (r *PostgresRepository) ReconcileApproval(ctx context.Context, expectedControl AdminApprovalControl, candidate ApprovalReconciliationCandidate, observation approvaleffect.Observation) (ApprovalReconciliationResult, error) {
 	now := time.Now().UTC()
 	if r.now != nil {
 		now = r.now()
@@ -189,7 +198,7 @@ WHERE r.id=$1 FOR UPDATE OF r`, candidate.RequestID).Scan(
 	}
 	if commandType != candidate.CommandType || commandFingerprint != candidate.CommandFingerprint || policyVersion != candidate.PolicyVersion ||
 		executorIdentity != candidate.ExecutorIdentity || status != candidate.Status ||
-		version != candidate.Version || !executionDeadline.Equal(candidate.ExecutionDeadline) || executionDeadline.After(databaseNow) {
+		version != candidate.Version || !executionDeadline.Equal(candidate.ExecutionDeadline) {
 		return ApprovalReconciliationStale, nil
 	}
 	// Begin takes control -> request -> Outbox. Use the same ordering so the
@@ -204,6 +213,16 @@ WHERE r.id=$1 FOR UPDATE OF r`, candidate.RequestID).Scan(
 	outbox := outboxes[0]
 	if outbox.approvalEpoch > control.ApprovalEpoch {
 		return ApprovalReconciliationBlockedHistory, nil
+	}
+	invalidationCode := "EXECUTION_WINDOW_EXPIRED"
+	if executionDeadline.After(databaseNow) {
+		if control.Mode != AdminApprovalModeSafeRollback || status != "APPROVED" || control.ApprovalEpoch <= 1 ||
+			outbox.approvalEpoch != control.ApprovalEpoch-1 || candidate.InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED" {
+			return ApprovalReconciliationBlockedHistory, nil
+		}
+		invalidationCode = "APPROVAL_SAFE_ROLLBACK_INVALIDATED"
+	} else if candidate.InvalidationCode != "EXECUTION_WINDOW_EXPIRED" {
+		return ApprovalReconciliationStale, nil
 	}
 	if outbox.deadLetteredAt != nil {
 		if err := tx.QueryRow(ctx, `SELECT event_digest FROM public.inspect_authorization_dead_letter($1)`, outbox.eventID).Scan(&outbox.eventDigest); errors.Is(err, pgx.ErrNoRows) {
@@ -220,11 +239,14 @@ WHERE r.id=$1 FOR UPDATE OF r`, candidate.RequestID).Scan(
 		return ApprovalReconciliationBlockedExecution, nil
 	}
 	command, err := tx.Exec(ctx, `UPDATE approval_requests
-SET status='INVALIDATED',invalidation_code='EXECUTION_WINDOW_EXPIRED',invalidation_details='{}',version=version+1,updated_at=$2
+SET status='INVALIDATED',invalidation_code=$9,invalidation_details='{}',version=version+1,updated_at=$2
 WHERE id=$1 AND version=$3 AND status=$4 AND command_type=$5 AND encode(command_fingerprint,'hex')=$6 AND policy_version=$7
-  AND execution_deadline=$8 AND execution_deadline<=transaction_timestamp()
+	AND execution_deadline=$8
+	AND (execution_deadline<=transaction_timestamp()
+	  OR ($9='APPROVAL_SAFE_ROLLBACK_INVALIDATED' AND status='APPROVED'))
   AND NOT EXISTS(SELECT 1 FROM approval_executions WHERE approval_request_id=$1)`, candidate.RequestID, databaseNow,
-		candidate.Version, candidate.Status, candidate.CommandType, candidate.CommandFingerprint, candidate.PolicyVersion, candidate.ExecutionDeadline)
+		candidate.Version, candidate.Status, candidate.CommandType, candidate.CommandFingerprint, candidate.PolicyVersion, candidate.ExecutionDeadline,
+		invalidationCode)
 	if err != nil {
 		return "", err
 	}
@@ -232,7 +254,7 @@ WHERE id=$1 AND version=$3 AND status=$4 AND command_type=$5 AND encode(command_
 		return ApprovalReconciliationStale, nil
 	}
 	if err := appendApprovalStateEvent(ctx, tx, candidate.RequestID, candidate.Status, "INVALIDATED", "SYSTEM", "approval-cutover-reconciler",
-		"EXECUTION_WINDOW_EXPIRED", map[string]any{"effect_authority": observation.Authority, "effect_observed_at": observation.ObservedAt}, databaseNow); err != nil {
+		invalidationCode, map[string]any{"effect_authority": observation.Authority, "effect_observed_at": observation.ObservedAt}, databaseNow); err != nil {
 		return "", err
 	}
 	result := ApprovalReconciliationInvalidated
@@ -305,13 +327,21 @@ func RunApprovalReconciliation(ctx context.Context, store ApprovalReconciliation
 	if store == nil || effects == nil {
 		return ApprovalReconciliationSummary{}, ErrApprovalReconciliationBlocked
 	}
-	plan, err := store.PlanExpiredApprovalReconciliation(ctx, limit)
+	plan, err := store.PlanApprovalReconciliation(ctx, limit)
 	if err != nil {
 		return ApprovalReconciliationSummary{}, err
 	}
 	summary := ApprovalReconciliationSummary{Mode: plan.Control.Mode, ApprovalEpoch: plan.Control.ApprovalEpoch,
 		ControlVersion: plan.Control.Version, CandidateCount: len(plan.Candidates), MoreCandidates: plan.MoreCandidates, DryRun: !apply}
 	for _, candidate := range plan.Candidates {
+		switch candidate.InvalidationCode {
+		case "EXECUTION_WINDOW_EXPIRED":
+			summary.ExpiredCandidateCount++
+		case "APPROVAL_SAFE_ROLLBACK_INVALIDATED":
+			summary.SafeCandidateCount++
+		default:
+			return summary, ErrApprovalReconciliationBlocked
+		}
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
@@ -335,7 +365,7 @@ func RunApprovalReconciliation(ctx context.Context, store ApprovalReconciliation
 		if !apply {
 			continue
 		}
-		result, reconcileErr := store.ReconcileExpiredApproval(ctx, plan.Control, candidate, observation)
+		result, reconcileErr := store.ReconcileApproval(ctx, plan.Control, candidate, observation)
 		if reconcileErr != nil {
 			return summary, reconcileErr
 		}

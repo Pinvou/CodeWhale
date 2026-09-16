@@ -20,7 +20,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
 )
 
-const applyConfirmation = "RECONCILE_EXPIRED_APPROVALS"
+const applyConfirmation = "RECONCILE_APPROVALS"
 
 type commandConfig struct {
 	DatabaseURL string
@@ -57,7 +57,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, output 
 	limit := flags.Int("limit", 100, "maximum requests in this bounded run (1..200)")
 	deadline := flags.Duration("deadline", 5*time.Minute, "maximum run duration (1s..30m)")
 	apply := flags.Bool("apply", false, "apply eligible invalidations")
-	confirm := flags.String("confirm", "", "must equal RECONCILE_EXPIRED_APPROVALS when applying")
+	confirm := flags.String("confirm", "", "must equal RECONCILE_APPROVALS when applying")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *limit < 1 || *limit > 200 ||
 		*deadline < time.Second || *deadline > 30*time.Minute || (*apply && *confirm != applyConfirmation) || (!*apply && *confirm != "") {
 		return emit(commandResult{Status: "failed", Reason: "INVALID_ARGUMENTS"}, 2)
@@ -102,7 +102,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, output 
 	if !*apply {
 		return emit(commandResult{Status: "planned", Reason: "DRY_RUN_ONLY", Summary: &summary}, 0)
 	}
-	return emit(commandResult{Status: "complete", Reason: "EXPIRED_APPROVALS_RECONCILED", Summary: &summary}, 0)
+	return emit(commandResult{Status: "complete", Reason: "APPROVALS_RECONCILED", Summary: &summary}, 0)
 }
 
 func executeReconciliation(ctx context.Context, config commandConfig) (account.ApprovalReconciliationSummary, error) {
