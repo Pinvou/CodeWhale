@@ -433,7 +433,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (finishCfg) finishCfg(cfg.key, false);
           reportConnectorFailure(cfg.key, e, stage);
           conn.stopTick();
-          setBusyId(null);
+          // 失败收尾只释放自己的槽位:异步期间 busyId 可能已易主(同 releaseBusy 纪律)。
+          setBusyId(busy => releaseBusy(busy, cfg.key));
           conn.setFlow(f => applyConnectorFailure(f, e, stage));
         }
       };
@@ -442,7 +443,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         if (finishCfg) finishCfg(cfg.key, false);
         conn.stopTick();
         invokeTauri(cfg.commands.cancel).catch(() => {});
-        conn.setFlow(null); setBusyId(null);
+        conn.setFlow(null);
+        // 收起弹窗只释放自己的槽位:此时用户可能已发起另一个工具操作。
+        setBusyId(busy => releaseBusy(busy, cfg.key));
       };
       // Retry: ensure_cli is idempotent, so simply rerun the whole connection flow.
       const retry = (deps) => { connect(deps); };
@@ -459,7 +462,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error(`${cfg.key} logout failed:`, e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isError: true });
         } finally {
-          setBusyId(null);
+          // 断开收尾只释放自己的槽位:logout 期间别的操作可能已接手 busyId。
+          setBusyId(busy => releaseBusy(busy, cfg.key));
         }
       };
       return { conn, ensureListeners, connect, disconnect, resetFlow, retry };
@@ -1106,7 +1110,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('restore recycled plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, item.id));
         }
       };
       // 彻底删除：二次确认（沿用更新确认的弹窗模式）后物理删除包文件与回收站条目。
@@ -1125,7 +1130,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('purge recycled plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, id));
         }
       };
       // 导出为 zip 插件包：桌面端弹原生保存对话框，返回保存路径=成功；
@@ -1145,7 +1151,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('export recycled plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, item.id));
         }
       };
       // 已安装卡片「导出」：companion 技能卡先经 skillToMcp 映射为所属包 id（与可见性
@@ -1165,7 +1172,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('export installed plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, tool.backendId));
         }
       };
       const [visibilityLoaded, setVisibilityLoaded] = useState(false);
@@ -1247,6 +1255,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const [eipSso, setEipSso] = useState(null); // { url, qr } SSO 登录引导弹窗
       const [zhidaoConnected, setZhidaoConnected] = useState(false);
       const [zhidaoSso, setZhidaoSso] = useState(null); // { url, qr } SSO 登录引导弹窗
+      // 连接态镜像 ref:事件回调持有的是渲染时快照,无法判断迟到的 sso/sso_wait
+      // (Reuse 重放)是否落在 eip:connected 之后——ref 记录最新连接态,已连接就
+      // 不再弹 SSO 弹窗(收起弹窗后立即重连恰逢旧流程完成的窄窗口,issue #1097)。
+      const eipConnectedRef = useRef(false);
+      const zhidaoConnectedRef = useRef(false);
+      const markEipConnected = (v) => { eipConnectedRef.current = v; setEipConnected(v); };
+      const markZhidaoConnected = (v) => { zhidaoConnectedRef.current = v; setZhidaoConnected(v); };
 
       // 从后端加载已安装状态 + 统一 readiness（Phase 2 第八刀：逐连接器 status
       // 命令退役，installed/ready/actions 统一经 bundle_readiness 取数）。
@@ -1330,7 +1345,15 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
       };
 
-      useEffect(() => { loadBackendState(); }, []);
+      useEffect(() => {
+        loadBackendState();
+        // EIP/知道卡面的已连接跟随事件(eip:connected / zhidao:connected),而
+        // 监听只在本页挂载期间在场——离开插件中心后完成的 SSO 连接没人听见,
+        // 回来若不主动问后端,卡面会一直显示未连接(issue #1097 窄窗口②)。
+        // 挂载时按后端真相校准一次;status 的副作用(set_connected)与查询同源,幂等。
+        invokeTauri('eip_status').then(res => markEipConnected(!!(res && res.connected))).catch(() => {});
+        invokeTauri('zhidao_status').then(res => markZhidaoConnected(!!(res && res.connected))).catch(() => {});
+      }, []);
 
       // EIP/知道(SSO 路线)连接态挂载回填:两者未接入 bundle_readiness,连接态是
       // 组件内 state,切视图卸载重挂后会丢成"未连接"——挂载时从后端真实态恢复
@@ -1396,10 +1419,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }));
         // 节流/等旧流程期间的进度,让用户看到"约 N 秒后出码"并能取消(见 sso_wait 弹窗状态)。
         track(ev.listen('eip:sso_wait', (e) => {
+          // 已连接后迟到的等待/二维码事件(Reuse 重放恰逢旧流程完成):不再弹窗,
+          // 否则用户会面对一张已无效的登录引导(issue #1097 窄窗口①)。
+          if (eipConnectedRef.current) return;
           const p = e.payload || {};
           setEipSso({ url: null, qr: null, waitSeconds: p.seconds || 0, previousFlow: !!p.previous_flow });
         }));
         track(ev.listen('eip:sso', (e) => {
+          if (eipConnectedRef.current) return; // 同上:迟到的重放不再弹窗
           const p = e.payload || {};
           setEipSso({ url: p.url, qr: p.qr_data_url });
         }));
@@ -1407,7 +1434,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           finishToolConfiguration('eip', true);
           // 只释放自己的忙碌槽位:用户可能已收起弹窗、并发起了另一个工具操作,那时
           // 无条件清空会把别人未完成的忙碌态一起抹掉(按钮提前可点 → 重复操作)。
-          setEipSso(null); setEipConnected(true); setBusyId(busy => releaseBusy(busy, 'eip'));
+          setEipSso(null); markEipConnected(true); setBusyId(busy => releaseBusy(busy, 'eip'));
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         }));
@@ -1419,16 +1446,19 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
         }));
         track(ev.listen('zhidao:sso_wait', (e) => {
+          // 同 eip:sso_wait:已连接后迟到的重放不再弹窗(issue #1097 窄窗口①)。
+          if (zhidaoConnectedRef.current) return;
           const p = e.payload || {};
           setZhidaoSso({ url: null, qr: null, waitSeconds: p.seconds || 0, previousFlow: !!p.previous_flow });
         }));
         track(ev.listen('zhidao:sso', (e) => {
+          if (zhidaoConnectedRef.current) return; // 同上:迟到的重放不再弹窗
           const p = e.payload || {};
           setZhidaoSso({ url: p.url, qr: p.qr_data_url });
         }));
         track(ev.listen('zhidao:connected', () => {
           finishToolConfiguration('zhidao', true);
-          setZhidaoSso(null); setZhidaoConnected(true); setBusyId(busy => releaseBusy(busy, 'zhidao'));
+          setZhidaoSso(null); markZhidaoConnected(true); setBusyId(busy => releaseBusy(busy, 'zhidao'));
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         }));
@@ -1786,7 +1816,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             const tool = findLocalizedTool(backendId);
             const name = tool ? tool.title : backendId;
             clearOAuthRequest(backendId, requestId);
-            setBusyId(null);
+            // 只释放自己的槽位:取消期间别的操作可能已接手 busyId(同 releaseBusy)。
+            setBusyId(busy => releaseBusy(busy, backendId));
             const outcome = resolveOAuthInstallOutcome(
               name,
               { status: 'cancelled', message: storeCopy.authWaitCancelled },
@@ -1940,10 +1971,10 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (t?.oauthMcp) {
             if (isCurrentOAuthRequest(backendId, oauthRequestId)) {
               clearOAuthRequest(backendId, oauthRequestId);
-              setBusyId(null);
+              setBusyId(busy => releaseBusy(busy, backendId));
             }
           } else {
-            setBusyId(null);
+            setBusyId(busy => releaseBusy(busy, backendId));
           }
         }
       };
@@ -1967,7 +1998,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('skill action failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, backendId));
         }
       };
 
@@ -1995,7 +2027,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('skill update failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, backendId));
         }
       };
 
@@ -2059,7 +2092,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('update bundle display meta failed:', e);
           return String(e);
         } finally {
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, dlg.backendId));
         }
       };
 
@@ -2099,7 +2132,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('import skill failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.importFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, '__upload__'));
         }
       };
       const handleUploadSkill = () => doImportSkillZip(() => invokeTauri('import_plugin_package_cmd'));
@@ -2140,7 +2173,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setAlert({ visible: true, loading: false, title: detailCopy.actions.imaFailed, subtitle: detailCopy.actions.operationFailed, isInstall: false, isError: true });
         } finally {
           finishToolConfiguration('ima', succeeded);
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, 'ima'));
         }
       };
 
@@ -2159,7 +2192,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('ima logout failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, subtitle: detailCopy.actions.operationFailed, isError: true });
         } finally {
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, 'ima'));
         }
       };
 
@@ -2195,7 +2228,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setBusyId('eip');
         try {
           await invokeTauri('eip_logout');
-          setEipConnected(false);
+          markEipConnected(false);
           setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         } catch (e) {
@@ -2237,7 +2270,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setBusyId('zhidao');
         try {
           await invokeTauri('zhidao_logout');
-          setZhidaoConnected(false);
+          markZhidaoConnected(false);
           setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         } catch (e) {
@@ -2374,7 +2407,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('uninstall failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, backendId));
         }
       };
 
@@ -2473,7 +2507,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             // Mirrors the wecom flow reset (factory resetFlow): backend cancel is now
             // silent (no wecom:error cleanup), so we must clear the flow here, otherwise
             // the detail/mini flow cards stay stale on "waiting for scan".
-            const cancel = () => { finishToolConfiguration('wecom', false); wecomConn.stopTick(); invokeTauri('wecom_cancel').catch(() => {}); wecomConn.setFlow(null); setWecomQr(null); setBusyId(null); };
+            const cancel = () => { finishToolConfiguration('wecom', false); wecomConn.stopTick(); invokeTauri('wecom_cancel').catch(() => {}); wecomConn.setFlow(null); setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom')); };
             return createPortal((
             <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)' }} onClick={cancel}>
               <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[440px] flex flex-col items-center text-center shadow-2xl" onClick={e => e.stopPropagation()}>
