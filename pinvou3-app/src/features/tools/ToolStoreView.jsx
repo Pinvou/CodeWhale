@@ -1332,6 +1332,20 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       useEffect(() => { loadBackendState(); }, []);
 
+      // EIP/知道(SSO 路线)连接态挂载回填:两者未接入 bundle_readiness,连接态是
+      // 组件内 state,切视图卸载重挂后会丢成"未连接"——挂载时从后端真实态恢复
+      // (eip_status 顺带 set_connected 自愈后端持久标记)。失败静默,与
+      // composer-shared.jsx 的既有消费口径一致。
+      useEffect(() => {
+        if (!isTauriAvailable()) return;
+        invokeTauri('eip_status')
+          .then((s) => setEipConnected(!!(s && s.connected)))
+          .catch(() => {});
+        invokeTauri('zhidao_status')
+          .then((s) => setZhidaoConnected(!!(s && s.connected)))
+          .catch(() => {});
+      }, []);
+
       // 订阅跨视图 store：把 store 状态镜像进本组件渲染，并在完成/失败时做组件级收尾
       // (alert dialog, connection-state refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
       useConnectorFlowSubscription({ enabled: externalAuthAvailable, conn: feishuConn, ensureListeners: ensureFeishuListeners, setFlow: setFeishuFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle: storeCopy.connectedTool(storeCopy.toolNames.feishu), toolId: 'feishu', finishToolConfiguration });

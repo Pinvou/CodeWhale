@@ -555,6 +555,42 @@ async function visibilityBox(page, cardText, modeLabel, click) {
     const info=await page.evaluate(({commands})=>({calls:commands.every(c=>window.__TOOL_STORE_TEST__.calls.some(x=>x.cmd===c)),seen:window.__TOOL_STORE_TEST__.calls.map(x=>x.cmd)}),{commands});
     rec(`${query} 授权编排命令与成功事件`,info.calls,info.calls?'':JSON.stringify(info.seen.slice(-12)));
     await closeDetail(page,query);
+    if(id==='eip'){
+      // PR#1119 修复的用户可见行为:连接态是组件内 state,切走卸载重挂载后必须由
+      // 挂载回填(eip_status)恢复,不能重置成「连接」。
+      // 在搜索框上放卸载探针:切走后须等探针消失(新视图真正接管)再切回——
+      // 切得太快时 Suspense 会保住旧视图不卸载(state 保留,虽也保持连接态,
+      // 但测不到挂载回填路径)。
+      const statusCallsBefore=await page.evaluate(()=>{
+        const input=document.querySelector('[data-testid="tool-store-search"], input[placeholder="搜索连接器、skill、插件等"], input[placeholder="搜索 MCP、API 或工作流工具"]');
+        if(input) input.setAttribute('data-unmount-probe','1');
+        return window.__TOOL_STORE_TEST__.calls.filter(x=>x.cmd==='eip_status').length;
+      });
+      await page.evaluate(()=>{const el=document.querySelector('[data-nav="knowledge"]');if(!el)throw new Error('knowledge nav not found');el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));});
+      const unmounted=await page.waitForFunction(
+        ()=>!document.querySelector('[data-unmount-probe]'),
+        {timeout:8000},
+      ).then(()=>true).catch(()=>false);
+      await page.evaluate(()=>{const el=document.querySelector('[data-nav="toolstore"]');if(!el)throw new Error('toolstore nav not found');el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));});
+      // 等工具商店搜索框真正回来再搜索:固定 sleep 在慢机上可能早于重挂,
+      // search() 的兜底会命中 KnowledgeView 的搜索框、把关键词打进错误视图。
+      await page.waitForFunction(
+        (sel)=>!!document.querySelector(sel),
+        {timeout:8000},
+        TOOL_STORE_SEARCH_SELECTOR,
+      ).catch(()=>{});
+      await search(page,query);
+      const eipRestore=await page.evaluate(({before,unmounted})=>{
+        const btns=[...document.querySelectorAll('button')].filter(b=>b.getAttribute('data-tool-id')==='eip');
+        const statusCalls=window.__TOOL_STORE_TEST__.calls.filter(x=>x.cmd==='eip_status').length;
+        return {pass:btns.some(b=>(b.textContent||'').trim()==='断开')
+          &&!btns.some(b=>(b.textContent||'').trim()==='连接')
+          &&statusCalls>before,
+          labels:btns.map(b=>(b.textContent||'').trim()),
+          statusCalls,before,unmounted};
+      },{before:statusCallsBefore,unmounted});
+      rec('EIP 切走再切回连接态由挂载回填恢复',eipRestore.pass,JSON.stringify(eipRestore));
+    }
   }
 
   // 管理可见性（四轮评审）：加载成功时勾选框可用；读取失败时勾选框禁用、

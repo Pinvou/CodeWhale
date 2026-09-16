@@ -246,7 +246,9 @@ fn emit(app: &AppHandle, event: &str, payload: Value) {
 // ───────────────────────────── Tauri commands ─────────────────────────────
 
 /// 查询 EIP 连接状态:`auth status --output json`。connected = 有有效 token。
-/// 纯查询：不写连接标记、不改技能目录、不回收 Engine。
+/// 只读 CLI 凭证态,但会把结果对账进持久连接标记(自愈后端标记漂移;技能目录
+/// 与 Engine 回收不动——可见性变更经 connector_visibility 应用:空闲时立即,
+/// 有活跃 turn 时延至回合边界)。
 pub async fn eip_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let cmd = eip(&["auth", "status", "--output", "json"])?;
@@ -516,6 +518,11 @@ mod tests {
                     out.insert(key);
                 } else if !domain.is_empty()
                     && !span.is_empty()
+                    // flag 说明段不是命令:以 `-` 开头(如行内 `--type`)或内含
+                    // `--`(如裸前括号 `[--keyword`)的段拼成「域 + flag」都会
+                    // 得到路由表必然不存在的伪命令,契约测试误报缺失。
+                    && !span.starts_with('-')
+                    && !span.contains("--")
                     && span
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c == '-' || c == '[')
@@ -564,6 +571,32 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn skill_command_collector_ignores_flag_spans() {
+        // 速查表行内的 flag 说明段（如 `--type`）不得被「同格续写命令」语法糖
+        // 拼成「域 + flag」伪命令——cc16d7fa 增补 todo-count 说明时踩坑，产生
+        // 路由表必然不存在的 "todo-count --type"，契约测试误报缺失。
+        let skill = "| 有没有待办 | `eip todo` / `eip todo-count`;审批状态加 `--type`:`2` 已审批、`3` 我的申请 |";
+        let cmds = collect_skill_commands(skill);
+        assert!(
+            cmds.contains("todo") && cmds.contains("todo-count"),
+            "{cmds:?}"
+        );
+        assert!(!cmds.contains("todo-count --type"), "{cmds:?}");
+        // 裸前括号形态(`[--keyword`)同样不是命令:以 `[` 开头但内含 `--`,
+        // 六轮评审解析器推演实测的另一误捕形态。
+        let bracket = "| 资讯 | `eip news` `[--keyword` 补充说明 |";
+        let cmds = collect_skill_commands(bracket);
+        assert!(!cmds.contains("news [--keyword"), "{cmds:?}");
+        // 续写命令语法糖本身不受影响：不带 eip 前缀的裸命令段仍继承本行域。
+        let legacy = "| 各类假期余额 | `eip leave get-balance` / `get-sick-balance` |";
+        let cmds = collect_skill_commands(legacy);
+        assert!(
+            cmds.contains("leave get-balance") && cmds.contains("leave get-sick-balance"),
+            "{cmds:?}"
+        );
     }
 
     #[test]

@@ -44,8 +44,14 @@ for target in $targets; do
     go build -trimpath -buildvcs=false -ldflags "-s -w" \
     -o "$out" "$src_dir"
   # darwin 两个架构统一补 ad-hoc 签名（Go 链接器只自动签 darwin/arm64，--force 幂等）。
-  if [ "$goos" = darwin ] && command -v codesign >/dev/null; then
-    codesign --sign - --force "$out"
+  # 无 codesign 时必须大声警告而非静默跳过:Linux 宿主交叉编译的产物将不带
+  # adhoc 签名,与「darwin 双端已补签」的声明矛盾(#1119 六轮评审 P1)。
+  if [ "$goos" = darwin ]; then
+    if command -v codesign >/dev/null; then
+      codesign --sign - --force "$out"
+    else
+      echo "WARN: codesign 不可用,$target 产物未做 adhoc 签名(需 macOS 宿主补签)" >&2
+    fi
   fi
   echo "built $target -> $out"
 done
