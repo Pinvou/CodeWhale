@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 #[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -36,8 +38,6 @@ pub(super) const MAX_SENSITIVE_STRING_BYTES: usize = 8 * 1024;
 const SEALED_CODE_VERSION: u8 = 1;
 const PAIRING_CODE_BYTES: usize = 7;
 const SEALED_CODE_BYTES: usize = 1 + 32 + AEAD_NONCE_BYTES + PAIRING_CODE_BYTES + AEAD_TAG_BYTES;
-#[cfg(test)]
-static SECRET_OWNER_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ControllerCryptoError {
@@ -146,13 +146,6 @@ pub(crate) struct CodeWrapKeyPair {
 impl fmt::Debug for CodeWrapKeyPair {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CodeWrapKeyPair([REDACTED])")
-    }
-}
-
-impl Drop for CodeWrapKeyPair {
-    fn drop(&mut self) {
-        #[cfg(test)]
-        SECRET_OWNER_DROPS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -359,13 +352,6 @@ impl fmt::Debug for HandshakeKeyPair {
     }
 }
 
-impl Drop for HandshakeKeyPair {
-    fn drop(&mut self) {
-        #[cfg(test)]
-        SECRET_OWNER_DROPS.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 impl HandshakeKeyPair {
     pub(crate) fn generate() -> CryptoResult<Self> {
         let bytes = random_32()?;
@@ -486,13 +472,6 @@ impl FrameDirection {
 }
 
 pub(crate) struct ReceiptSecret(Zeroizing<[u8; RECEIPT_SECRET_BYTES]>);
-
-impl Drop for ReceiptSecret {
-    fn drop(&mut self) {
-        #[cfg(test)]
-        SECRET_OWNER_DROPS.fetch_add(1, Ordering::Relaxed);
-    }
-}
 
 impl fmt::Debug for ReceiptSecret {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1055,12 +1034,42 @@ fn open_aead(
         .map_err(|_| ControllerCryptoError::new("authentication_failed", "aead"))
 }
 
-pub(crate) struct SensitiveString(Zeroizing<String>);
+pub(crate) struct SensitiveString {
+    value: Zeroizing<String>,
+    #[cfg(test)]
+    drop_probe: Option<Arc<SensitiveDropProbe>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SensitiveDropProbe {
+    drops: AtomicUsize,
+    original_bytes: AtomicUsize,
+    remaining_bytes: AtomicUsize,
+}
+
+#[cfg(test)]
+impl SensitiveDropProbe {
+    fn observation(&self) -> (usize, usize, usize) {
+        (
+            self.drops.load(Ordering::SeqCst),
+            self.original_bytes.load(Ordering::SeqCst),
+            self.remaining_bytes.load(Ordering::SeqCst),
+        )
+    }
+}
 
 impl SensitiveString {
     pub(crate) fn new(value: impl Into<String>) -> CryptoResult<Self> {
-        let candidate = Self(Zeroizing::new(value.into()));
-        if candidate.0.is_empty() || candidate.0.len() > MAX_SENSITIVE_STRING_BYTES {
+        Self::validate(Self {
+            value: Zeroizing::new(value.into()),
+            #[cfg(test)]
+            drop_probe: None,
+        })
+    }
+
+    fn validate(candidate: Self) -> CryptoResult<Self> {
+        if candidate.value.is_empty() || candidate.value.len() > MAX_SENSITIVE_STRING_BYTES {
             return Err(ControllerCryptoError::new(
                 "invalid_sensitive_value",
                 "sensitive_string",
@@ -1069,15 +1078,34 @@ impl SensitiveString {
         Ok(candidate)
     }
 
+    #[cfg(test)]
+    fn new_with_drop_probe(
+        value: impl Into<String>,
+        drop_probe: Arc<SensitiveDropProbe>,
+    ) -> CryptoResult<Self> {
+        Self::validate(Self {
+            value: Zeroizing::new(value.into()),
+            drop_probe: Some(drop_probe),
+        })
+    }
+
     pub(crate) fn expose(&self) -> &str {
-        self.0.as_str()
+        self.value.as_str()
     }
 }
 
+#[cfg(test)]
 impl Drop for SensitiveString {
     fn drop(&mut self) {
-        #[cfg(test)]
-        SECRET_OWNER_DROPS.fetch_add(1, Ordering::Relaxed);
+        if let Some(probe) = &self.drop_probe {
+            let original_bytes = self.value.len();
+            self.value.zeroize();
+            probe.original_bytes.store(original_bytes, Ordering::SeqCst);
+            probe
+                .remaining_bytes
+                .store(self.value.len(), Ordering::SeqCst);
+            probe.drops.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -1586,20 +1614,25 @@ mod tests {
     }
 
     #[test]
-    fn generated_secret_owners_run_zeroizing_drop_paths() {
+    fn generated_secret_owners_use_zeroizing_and_redacted_types() {
         fn require_zeroizing_array(_: &Zeroizing<[u8; 32]>) {}
 
-        let before = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
-        {
-            let random_owner = random_32().unwrap();
-            require_zeroizing_array(&random_owner);
-            let _wrap = CodeWrapKeyPair::generate().unwrap();
-            let _handshake = HandshakeKeyPair::generate().unwrap();
-            let _receipt = ReceiptSecret::generate().unwrap();
-            let (a, _b) = session_pair();
-            let _ciphers = a.into_role_ciphers(ControllerRole::A, lease(1)).unwrap();
-        }
-        assert!(SECRET_OWNER_DROPS.load(Ordering::Relaxed) >= before + 5);
+        let random_owner = random_32().unwrap();
+        require_zeroizing_array(&random_owner);
+        let wrap = CodeWrapKeyPair::generate().unwrap();
+        assert_eq!(format!("{wrap:?}"), "CodeWrapKeyPair([REDACTED])");
+        let handshake = HandshakeKeyPair::generate().unwrap();
+        assert_eq!(format!("{handshake:?}"), "HandshakeKeyPair([REDACTED])");
+        let receipt = ReceiptSecret::generate().unwrap();
+        require_zeroizing_array(&receipt.0);
+        let (a, _b) = session_pair();
+        require_zeroizing_array(&a.finished_a);
+        require_zeroizing_array(&a.finished_b);
+        require_zeroizing_array(&a.business_a_to_b);
+        require_zeroizing_array(&a.business_b_to_a);
+        require_zeroizing_array(&a.resume_secret);
+        let ciphers = a.into_role_ciphers(ControllerRole::A, lease(1)).unwrap();
+        require_zeroizing_array(&ciphers.resume_secret.0);
     }
 
     #[test]
@@ -1903,7 +1936,6 @@ mod tests {
 
     #[test]
     fn sensitive_strings_never_debug_display_or_serialize_the_secret() {
-        let before = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
         let secret = SensitiveString::new("top-secret-value").unwrap();
         assert_eq!(secret.expose(), "top-secret-value");
         assert_eq!(format!("{secret}"), "[REDACTED]");
@@ -1911,30 +1943,36 @@ mod tests {
         let error = serde_json::to_string(&secret).unwrap_err().to_string();
         assert!(!error.contains("top-secret-value"));
         assert!(error.contains("serialization forbidden"));
-        let before_empty_rejection = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
-        assert_eq!(
-            SensitiveString::new("").unwrap_err().code,
-            "invalid_sensitive_value"
-        );
-        assert_eq!(
-            SECRET_OWNER_DROPS.load(Ordering::Relaxed),
-            before_empty_rejection + 1,
-            "even an invalid candidate is owned by Zeroizing before validation"
-        );
         assert!(SensitiveString::new("界".repeat(MAX_SENSITIVE_STRING_BYTES / 3)).is_ok());
-        let before_oversize_rejection = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
-        assert_eq!(
-            SensitiveString::new("界".repeat(MAX_SENSITIVE_STRING_BYTES / 3 + 1))
-                .unwrap_err()
-                .code,
-            "invalid_sensitive_value"
-        );
-        assert_eq!(
-            SECRET_OWNER_DROPS.load(Ordering::Relaxed),
-            before_oversize_rejection + 1,
-            "the over-limit secret follows the same zeroizing drop path"
-        );
-        drop(secret);
-        assert!(SECRET_OWNER_DROPS.load(Ordering::Relaxed) > before);
+
+        for _ in 0..256 {
+            let empty_probe = Arc::new(SensitiveDropProbe::default());
+            assert_eq!(
+                SensitiveString::new_with_drop_probe("", Arc::clone(&empty_probe))
+                    .unwrap_err()
+                    .code,
+                "invalid_sensitive_value"
+            );
+            assert_eq!(
+                empty_probe.observation(),
+                (1, 0, 0),
+                "this empty rejected candidate ran exactly one zeroizing drop"
+            );
+
+            let oversized = "界".repeat(MAX_SENSITIVE_STRING_BYTES / 3 + 1);
+            let oversized_bytes = oversized.len();
+            let oversized_probe = Arc::new(SensitiveDropProbe::default());
+            assert_eq!(
+                SensitiveString::new_with_drop_probe(oversized, Arc::clone(&oversized_probe),)
+                    .unwrap_err()
+                    .code,
+                "invalid_sensitive_value"
+            );
+            assert_eq!(
+                oversized_probe.observation(),
+                (1, oversized_bytes, 0),
+                "this over-limit rejected candidate was cleared by its own drop"
+            );
+        }
     }
 }
