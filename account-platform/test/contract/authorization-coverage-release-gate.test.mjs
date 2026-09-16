@@ -21,7 +21,12 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 359, tasks: 28, events: 7, cli: 22 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 360, tasks: 28, events: 7, cli: 22 });
+});
+
+test('Token proof endpoint requires a dedicated Account-only permission', async () => {
+  const source = await readFile(new URL('../../internal/token/service.go', import.meta.url), 'utf8');
+  assert.match(source, /internal\.POST\("\/approval-command-proofs", serviceauth\.Require\("internal\.token\.approval-proof\.read"\)/);
 });
 
 test('approval reconciliation has an exact bounded workload entry', async () => {
