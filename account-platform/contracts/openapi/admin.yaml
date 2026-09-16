@@ -2375,6 +2375,42 @@ paths:
               schema: { $ref: "#/components/schemas/ApprovalDirectoryProjection" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v2/approval-requests:
+    get:
+      operationId: listAdminApprovalRequestsV2
+      summary: Read one bounded and authorization-trimmed approval snapshot page
+      description: The response is a closed minimal envelope. It never contains raw commands, financial snapshots, or allowed actions. No aggregate statistics are exposed until an independent authorization-trimmed endpoint exists.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: command_type, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ApprovalStatus" } }
+        - { name: risk_class, in: query, schema: { type: string } }
+        - { name: requester_user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: target, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: submitted_from, in: query, schema: { type: string, format: date-time } }
+        - { name: submitted_to, in: query, schema: { type: string, format: date-time } }
+        - { name: expires_from, in: query, schema: { type: string, format: date-time } }
+        - { name: expires_to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200": { description: Bounded approval page, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Page" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+  /account/admin/v2/approval-requests/{approval_request_id}:
+    get:
+      operationId: getAdminApprovalRequestV2
+      summary: Read a closed command presenter or a safe historical minimum
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      responses:
+        "200": { description: Closed detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
     get:
       operationId: listAdminApprovalPolicies
@@ -2443,7 +2479,12 @@ paths:
       summary: Get one immutable approval command and its current allowed actions
       parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
       responses:
-        "200": { description: Approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "200":
+          description: Unchanged v1 approval request body with a separately versioned action header
+          headers:
+            X-Pinvou-Approval-Action-Control-Version:
+              schema: { type: integer, format: int64, minimum: 1 }
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     put:
@@ -5248,6 +5289,120 @@ components:
     ApprovalStatus:
       type: string
       enum: [DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED]
+    ApprovalV2Page:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor, has_more, limit, as_of, snapshot_expires_at]
+      properties:
+        items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ApprovalV2Summary" } }
+        next_cursor: { type: [string, "null"] }
+        has_more: { type: boolean }
+        limit: { type: integer, minimum: 1, maximum: 200 }
+        as_of: { type: string, format: date-time }
+        snapshot_expires_at: { type: string, format: date-time }
+    ApprovalV2Summary:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        risk_class: { type: string }
+        target:
+          type: object
+          additionalProperties: false
+          required: [resource_type, resource_id]
+          properties:
+            resource_type: { type: string }
+            resource_id: { type: string }
+        requester:
+          type: object
+          additionalProperties: false
+          required: [user_id]
+          properties: { user_id: { type: string, format: uuid } }
+        status: { $ref: "#/components/schemas/ApprovalStatus" }
+        submitted_at: { type: [string, "null"], format: date-time }
+        expires_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        supersedes_request_id: { type: [string, "null"], format: uuid }
+        detail_availability: { type: string, enum: [AVAILABLE, DETAIL_PRESENTATION_UNAVAILABLE] }
+    ApprovalV2Detail:
+      oneOf:
+        - { $ref: "#/components/schemas/ApprovalV2Summary" }
+        - { $ref: "#/components/schemas/ApprovalV2KnownDetail" }
+    ApprovalV2KnownDetail:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability, allowed_actions, action_control_version, command]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        risk_class: { type: string }
+        target: { $ref: "#/components/schemas/ApprovalV2Summary/properties/target" }
+        requester: { $ref: "#/components/schemas/ApprovalV2Summary/properties/requester" }
+        status: { $ref: "#/components/schemas/ApprovalStatus" }
+        submitted_at: { type: [string, "null"], format: date-time }
+        expires_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        supersedes_request_id: { type: [string, "null"], format: uuid }
+        detail_availability: { const: AVAILABLE }
+        allowed_actions: { type: array, items: { type: string, enum: [EDIT, SUBMIT, WITHDRAW, APPROVE, REJECT] } }
+        action_control_version: { type: integer, format: int64, minimum: 1 }
+        command: { type: object }
+      oneOf:
+        - properties: { command_type: { const: WALLET_ADJUSTMENT }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, command: { $ref: "#/components/schemas/ApprovalV2WalletCommand" } }
+        - properties: { command_type: { const: PAYMENT_PROVIDER_RESUME }, policy_version: { const: 2 }, snapshot_schema_version: { const: 1 }, command: { $ref: "#/components/schemas/ApprovalV2ProviderCommand" } }
+        - properties: { command_type: { const: PAYMENT_PRODUCT_RESUME }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, command: { $ref: "#/components/schemas/ApprovalV2ProductCommand" } }
+        - properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE }, policy_version: { const: 2 }, snapshot_schema_version: { const: 2 }, command: { $ref: "#/components/schemas/ApprovalV2LifecycleCommand" } }
+        - properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK }, policy_version: { const: 2 }, snapshot_schema_version: { const: 2 }, command: { $ref: "#/components/schemas/ApprovalV2CatalogCommand" } }
+        - properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, command: { $ref: "#/components/schemas/ApprovalV2CredentialCommand" } }
+    ApprovalV2WalletCommand:
+      type: object
+      additionalProperties: false
+      required: [adjustment_id, wallet_id, amount_microcredits]
+      properties:
+        adjustment_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        amount_microcredits: { type: string, pattern: '^-?[1-9][0-9]*$' }
+    ApprovalV2ProviderCommand:
+      type: object
+      additionalProperties: false
+      required: [provider_id, provider_control_version]
+      properties:
+        provider_id: { type: string }
+        provider_control_version: { type: string, pattern: '^[1-9][0-9]*$' }
+    ApprovalV2ProductCommand:
+      type: object
+      additionalProperties: false
+      required: [product_id, provider_id, product_control_version]
+      properties:
+        product_id: { type: string }
+        provider_id: { type: string }
+        product_control_version: { type: string, pattern: '^[1-9][0-9]*$' }
+    ApprovalV2LifecycleCommand:
+      type: object
+      additionalProperties: false
+      required: [model_id, target_lifecycle, effective_at]
+      properties:
+        model_id: { type: string, format: uuid }
+        target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+        effective_at: { type: [string, "null"], format: date-time }
+    ApprovalV2CatalogCommand:
+      type: object
+      additionalProperties: false
+      required: [source_catalog_version]
+      properties: { source_catalog_version: { type: string, pattern: '^[1-9][0-9]*$' } }
+    ApprovalV2CredentialCommand:
+      type: object
+      additionalProperties: false
+      required: [credential_id, token_account_id]
+      properties:
+        credential_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
     ApprovalDirectoryProjection:
       type: object
       additionalProperties: false
