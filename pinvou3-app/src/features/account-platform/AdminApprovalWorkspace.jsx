@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { approvalActionsForDetail, approvalDecisionForAction } from './admin-approval-actions.js';
+import { approvalActionsForDetail, approvalBusinessRoute, approvalDecisionForAction } from './admin-approval-actions.js';
 import './admin-approval-workspace.css';
 
 const views = ['mine', 'pending', 'execution', 'directory'];
@@ -32,7 +32,7 @@ function date(value, language) {
   return Number.isNaN(parsed.getTime()) ? '—' : parsed.toLocaleString(language === 'ja' ? 'ja-JP' : language === 'en' ? 'en-US' : 'zh-CN');
 }
 
-export function AdminApprovalWorkspace({ client, copy, language, currentUserID, routeVersion }) {
+export function AdminApprovalWorkspace({ client, copy, language, currentUserID, routeVersion, onNavigate, visibleSections = [], modelDetailsEnabled = false, tokenDetailsEnabled = false }) {
   const c = copy.approvalCenter;
   const [route, setRoute] = useState(readRoute);
   const [commandInput, setCommandInput] = useState(route.commandType);
@@ -168,6 +168,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
   };
 
   const offeredActions = approvalActionsForDetail(detail, currentUserID);
+  const businessRoute = approvalBusinessRoute(detail, { modelDetailsEnabled, tokenDetailsEnabled });
 
   const rows = (page?.items || []).filter((item) => route.view !== 'pending' || requesterOf(item) !== currentUserID);
   const nextCursor = page?.next_cursor || '';
@@ -224,6 +225,8 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
         <div><dt>{c.updated}</dt><dd>{date(detail.updated_at, language)}</dd></div>
       </dl>}
       {detail?.detail_availability === 'DETAIL_PRESENTATION_UNAVAILABLE' && <p>{c.historicalMinimum}</p>}
+      {businessRoute && visibleSections.includes(businessRoute.section) && <button type="button"
+        onClick={() => onNavigate?.(businessRoute.section, businessRoute.query)}>{c.openBusinessArea}</button>}
       {outcomeUnknown && <div className="adm-approval-uncertain" role="alert"><p>{c.actionUnknown}</p><button type="button" onClick={() => setRefresh((value) => value + 1)}>{c.refreshDetail}</button></div>}
       {!outcomeUnknown && offeredActions.length > 0 && <div className="adm-approval-actions">{offeredActions.map((name) => <button key={name} type="button" onClick={(event) => {
         actionSourceRef.current = event.currentTarget;

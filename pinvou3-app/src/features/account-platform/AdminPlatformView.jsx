@@ -865,7 +865,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </>
           )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'approvals' && <AdminApprovalWorkspace key={JSON.stringify(authorizationVersions(authorization))} client={client} copy={copy} language={language} currentUserID={authorization?.user_id || ''} routeVersion={routeVersion} />}
+          {section === 'approvals' && <AdminApprovalWorkspace key={JSON.stringify(authorizationVersions(authorization))} client={client} copy={copy} language={language} currentUserID={authorization?.user_id || ''} routeVersion={routeVersion} onNavigate={navigate} visibleSections={visibleSections} modelDetailsEnabled={modelDetailsEnabled} tokenDetailsEnabled={tokenDetailsEnabled} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} />}
           <AdminExtensionSlot section={section} financeTab={financeTab} authorization={authorization} />
         </div>

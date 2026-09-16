@@ -16,3 +16,33 @@ export function approvalDecisionForAction(action) {
   if (action === 'REJECT') return 'REJECTED';
   return null;
 }
+
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function approvalBusinessRoute(detail, { modelDetailsEnabled = false, tokenDetailsEnabled = false } = {}) {
+  if (detail?.detail_availability !== 'AVAILABLE' || !detail.command || !detail.target) return null;
+  const target = detail.target;
+  switch (detail.command_type) {
+    case 'WALLET_ADJUSTMENT':
+      return target.resource_type === 'MANUAL_ADJUSTMENT' && uuid.test(target.resource_id) &&
+        detail.command.adjustment_id === target.resource_id ? { section: 'billing', query: { finance_tab: 'adjustments' } } : null;
+    case 'PAYMENT_PROVIDER_RESUME':
+      return target.resource_type === 'PAYMENT_PROVIDER_CONTROL' && detail.command.provider_id === target.resource_id
+        ? { section: 'payments', query: { finance_tab: 'controls' } } : null;
+    case 'PAYMENT_PRODUCT_RESUME':
+      return target.resource_type === 'PAYMENT_PRODUCT_CONTROL' && detail.command.product_id === target.resource_id
+        ? { section: 'payments', query: { finance_tab: 'controls' } } : null;
+    case 'TOKEN_MODEL_LIFECYCLE_CHANGE':
+      return target.resource_type === 'MODEL' && uuid.test(target.resource_id) && detail.command.model_id === target.resource_id
+        ? { section: 'models', query: modelDetailsEnabled ? { model_id: target.resource_id } : {} } : null;
+    case 'TOKEN_MODEL_CATALOG_ROLLBACK':
+      return target.resource_type === 'MODEL_CATALOG' && detail.command.source_catalog_version === target.resource_id
+        ? { section: 'models', query: {} } : null;
+    case 'TOKEN_CREDENTIAL_REVOKE':
+      return target.resource_type === 'PROVIDER_CREDENTIAL' && uuid.test(target.resource_id) &&
+        detail.command.credential_id === target.resource_id && uuid.test(detail.command.token_account_id)
+        ? { section: 'tokenResources', query: tokenDetailsEnabled ? { token_account_id: detail.command.token_account_id } : {} } : null;
+    default:
+      return null;
+  }
+}

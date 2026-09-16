@@ -62,7 +62,7 @@ export const adminPlatformCopy = {
       actionNames: { APPROVE: '批准', REJECT: '拒绝', SUBMIT: '提交申请', WITHDRAW: '撤回申请' },
       actionConfirm: '确认后不会自动重试；若结果不明，请先刷新申请详情。', actionReason: '审批理由（至少 3 字）',
       actionUnknown: '暂时无法确认操作结果。请刷新申请详情，不要重复提交。', actionFailed: '请填写有效的审批理由。',
-      refreshDetail: '刷新申请详情', submitting: '正在提交…', confirm: '确认提交', cancel: '取消',
+      refreshDetail: '刷新申请详情', submitting: '正在提交…', confirm: '确认提交', cancel: '取消', openBusinessArea: '前往业务区域',
     },
     pageLeads: {
       organizations: '管理组织生命周期、所有者、成员与节点结构。',
@@ -548,7 +548,7 @@ export const adminPlatformCopy = {
       actionNames: { APPROVE: 'Approve', REJECT: 'Reject', SUBMIT: 'Submit request', WITHDRAW: 'Withdraw request' },
       actionConfirm: 'This action will not retry automatically. If its result is unclear, refresh the request details first.', actionReason: 'Decision reason (at least 3 characters)',
       actionUnknown: 'The result cannot be confirmed. Refresh the request details; do not submit again.', actionFailed: 'Enter a valid decision reason.',
-      refreshDetail: 'Refresh request details', submitting: 'Submitting…', confirm: 'Confirm and submit', cancel: 'Cancel',
+      refreshDetail: 'Refresh request details', submitting: 'Submitting…', confirm: 'Confirm and submit', cancel: 'Cancel', openBusinessArea: 'Go to business area',
     },
     pageLeads: {
       organizations: 'Manage organization lifecycle, ownership, membership, and unit structure.',
@@ -1029,7 +1029,7 @@ export const adminPlatformCopy = {
       actionNames: { APPROVE: '承認', REJECT: '却下', SUBMIT: '申請を提出', WITHDRAW: '申請を取り下げ' },
       actionConfirm: '自動再試行は行いません。結果が不明な場合は先に申請詳細を更新してください。', actionReason: '判断理由（3 文字以上）',
       actionUnknown: '結果を確認できません。再送信せず、申請詳細を更新してください。', actionFailed: '有効な判断理由を入力してください。',
-      refreshDetail: '申請詳細を更新', submitting: '送信中…', confirm: '確認して送信', cancel: 'キャンセル',
+      refreshDetail: '申請詳細を更新', submitting: '送信中…', confirm: '確認して送信', cancel: 'キャンセル', openBusinessArea: '業務エリアへ移動',
     },
     pageLeads: {
       organizations: '組織のライフサイクル、所有者、メンバー、組織ツリーを管理します。',
