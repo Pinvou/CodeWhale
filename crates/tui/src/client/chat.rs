@@ -2611,8 +2611,9 @@ fn build_chat_messages_with_reasoning(
     // turn is appended. Move the latest summary that directly follows a tool
     // result ahead of its retained prompt on every request, not just the first
     // request after compaction. Ordinary user text containing the summary
-    // header in a chat turn keeps its original position. Saved history and
-    // assistant/tool call IDs stay untouched.
+    // header in a chat turn keeps its original position, even when it follows
+    // a tool result: only generated checkpoints carry the provenance block.
+    // Saved history and assistant/tool call IDs stay untouched.
     let summary_index = messages
         .iter()
         .enumerate()
@@ -6601,6 +6602,34 @@ mod image_block_wire_tests {
         assert_eq!(wire[0]["content"], "Earlier question");
         assert_eq!(wire[1]["role"], "assistant");
         assert_eq!(wire[2]["content"], pasted);
+    }
+
+    #[test]
+    fn forkguard_full_summary_header_pasted_after_tool_result_is_not_relocated() {
+        let pasted =
+            crate::compaction::build_compaction_summary_block_text("Please analyze this text", "");
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Run the tool"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+        ]))
+        .unwrap();
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: pasted.clone(),
+                cache_control: None,
+            }],
+        });
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        let roles: Vec<_> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "user"]);
+        assert_eq!(wire[0]["content"], "Run the tool");
+        assert_eq!(wire[3]["content"], pasted);
+        assert_eq!(wire[2]["tool_call_id"], "call_1");
     }
 
     #[test]

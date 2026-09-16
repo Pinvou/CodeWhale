@@ -167,6 +167,7 @@ pub const COMPACTION_SUMMARY_MARKER: &str = "Another language model started to s
 /// Marker written by pre-v0.9.6 compaction; sessions saved under the old
 /// format must still be recognized so their summary is replaced, not stacked.
 pub const LEGACY_COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
+const COMPACTION_CHECKPOINT_PROVENANCE: &str = "<!-- codewhale.compaction-checkpoint.v1 -->";
 const COMPACTION_SUMMARY_BEGIN: &str = "<!-- compaction-summary:begin -->";
 const COMPACTION_SUMMARY_END: &str = "<!-- compaction-summary:end -->";
 
@@ -282,10 +283,16 @@ pub fn summary_prompt_text(prompt: &SystemPrompt) -> String {
 pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
     Message {
         role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: summary_prompt_text(prompt),
-            cache_control: None,
-        }],
+        content: vec![
+            ContentBlock::Text {
+                text: summary_prompt_text(prompt),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: COMPACTION_CHECKPOINT_PROVENANCE.to_string(),
+                cache_control: None,
+            },
+        ],
     }
 }
 
@@ -303,11 +310,17 @@ pub(crate) fn is_wire_compaction_checkpoint_message(message: &Message) -> bool {
             text,
             cache_control: None,
         },
+        ContentBlock::Text {
+            text: provenance,
+            cache_control: None,
+        },
     ] = message.content.as_slice()
     else {
         return false;
     };
-    message.role == Role::User && text.starts_with(SUMMARY_HEADER)
+    message.role == Role::User
+        && text.starts_with(SUMMARY_HEADER)
+        && provenance == COMPACTION_CHECKPOINT_PROVENANCE
 }
 
 /// Replace the saved history checkpoint with the authoritative carrier while
@@ -2069,10 +2082,13 @@ mod tests {
             })
         }));
         assert!(is_compaction_checkpoint_message(retained.last().unwrap()));
-        assert_eq!(
-            user_text_of(retained.last().unwrap()).as_deref(),
-            Some(text.as_str())
-        );
+        assert!(is_wire_compaction_checkpoint_message(
+            retained.last().unwrap()
+        ));
+        let ContentBlock::Text { text: body, .. } = &retained.last().unwrap().content[0] else {
+            panic!("compaction checkpoint must begin with its summary");
+        };
+        assert_eq!(body, text);
         last_round::validate_last_round_coverage(&messages, &retained[..retained.len() - 1])
             .unwrap();
     }
