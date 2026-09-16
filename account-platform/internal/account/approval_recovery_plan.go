@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -15,21 +16,22 @@ var ErrApprovalRecoveryPlanInvalid = errors.New("approval recovery plan has inco
 // ApprovalRecoveryCandidate contains only references and stable codes. It is
 // not an execution lease or an authorization to retry or invalidate anything.
 type ApprovalRecoveryCandidate struct {
-	RequestID         uuid.UUID                           `json:"approval_request_id"`
-	ExecutionID       uuid.UUID                           `json:"execution_id"`
-	OriginalKey       string                              `json:"original_execution_idempotency_key"`
-	OriginalEventID   uuid.UUID                           `json:"original_event_id"`
-	Durable           string                              `json:"durable"`
-	Workload          string                              `json:"workload"`
-	CommandType       string                              `json:"command_type"`
-	PolicyVersion     int64                               `json:"policy_version"`
-	ApprovalEpoch     int64                               `json:"approval_epoch"`
-	RequestStatus     string                              `json:"request_status"`
-	ExecutionStatus   string                              `json:"execution_status"`
-	ExecutionDeadline time.Time                           `json:"execution_deadline"`
-	WindowElapsed     bool                                `json:"window_elapsed"`
-	Delivery          ApprovalDeliveryState               `json:"delivery"`
-	Investigation     approvalconsumer.RecoveryAssessment `json:"investigation"`
+	RequestID          uuid.UUID                           `json:"approval_request_id"`
+	ExecutionID        uuid.UUID                           `json:"execution_id"`
+	OriginalKey        string                              `json:"original_execution_idempotency_key"`
+	OriginalEventID    uuid.UUID                           `json:"original_event_id"`
+	Durable            string                              `json:"durable"`
+	Workload           string                              `json:"workload"`
+	CommandType        string                              `json:"command_type"`
+	CommandFingerprint string                              `json:"command_fingerprint"`
+	PolicyVersion      int64                               `json:"policy_version"`
+	ApprovalEpoch      int64                               `json:"approval_epoch"`
+	RequestStatus      string                              `json:"request_status"`
+	ExecutionStatus    string                              `json:"execution_status"`
+	ExecutionDeadline  time.Time                           `json:"execution_deadline"`
+	WindowElapsed      bool                                `json:"window_elapsed"`
+	Delivery           ApprovalDeliveryState               `json:"delivery"`
+	Investigation      approvalconsumer.RecoveryAssessment `json:"investigation"`
 }
 
 type ApprovalRecoveryPlan struct {
@@ -61,7 +63,7 @@ func (r *PostgresRepository) PlanProofApprovalRecovery(ctx context.Context, limi
 		return ApprovalRecoveryPlan{}, err
 	}
 	rows, err := tx.Query(ctx, `SELECT r.id,e.id,e.execution_idempotency_key,e.authorization_event_id,e.authorization_durable,e.executor_identity,
- r.command_type,r.policy_version,e.authorization_approval_epoch,r.status,e.status,r.execution_deadline
+ r.command_type,encode(r.command_fingerprint,'hex'),r.policy_version,e.authorization_approval_epoch,r.status,e.status,r.execution_deadline
 FROM public.approval_requests r JOIN public.approval_executions e ON e.approval_request_id=r.id AND e.command_type=r.command_type
 WHERE e.authorization_serialization_version='APPROVAL_RFC8785_DECIMAL_V1'
   AND e.status IN ('EXECUTING','FAILED') AND r.status IN ('EXECUTING','EXECUTION_FAILED')
@@ -74,7 +76,7 @@ ORDER BY r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
 	for rows.Next() {
 		var item ApprovalRecoveryCandidate
 		if err := rows.Scan(&item.RequestID, &item.ExecutionID, &item.OriginalKey, &item.OriginalEventID, &item.Durable,
-			&item.Workload, &item.CommandType, &item.PolicyVersion, &item.ApprovalEpoch,
+			&item.Workload, &item.CommandType, &item.CommandFingerprint, &item.PolicyVersion, &item.ApprovalEpoch,
 			&item.RequestStatus, &item.ExecutionStatus, &item.ExecutionDeadline); err != nil {
 			rows.Close()
 			return ApprovalRecoveryPlan{}, err
@@ -95,7 +97,7 @@ ORDER BY r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
 		descriptor, ok := approvalconsumer.LookupDurable(item.Durable)
 		if !ok || !approvalconsumer.Match(descriptor, item.CommandType, item.PolicyVersion, item.Workload) ||
 			item.RequestID == uuid.Nil || item.ExecutionID == uuid.Nil || item.OriginalEventID == uuid.Nil || item.OriginalKey == "" ||
-			item.ApprovalEpoch < 1 || item.ExecutionDeadline.IsZero() ||
+			item.ApprovalEpoch < 1 || !approvaleffect.ValidFingerprint(item.CommandFingerprint) || item.ExecutionDeadline.IsZero() ||
 			(item.RequestStatus == "EXECUTING" && item.ExecutionStatus != "EXECUTING") ||
 			(item.RequestStatus == "EXECUTION_FAILED" && item.ExecutionStatus != "FAILED") {
 			return ApprovalRecoveryPlan{}, ErrApprovalRecoveryPlanInvalid

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
@@ -145,7 +146,7 @@ func TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration(t *test
 		t.Fatalf("proof recovery plan=%+v err=%v", plan, err)
 	}
 	item := plan.Candidates[0]
-	if item.RequestID != request.ID || item.OriginalEventID != eventID || item.OriginalKey != execution.ExecutionIdempotencyKey || item.Durable != durable || item.ExecutionStatus != "FAILED" ||
+	if item.RequestID != request.ID || item.OriginalEventID != eventID || item.OriginalKey != execution.ExecutionIdempotencyKey || item.Durable != durable || !approvaleffect.ValidFingerprint(item.CommandFingerprint) || item.ExecutionStatus != "FAILED" ||
 		item.RequestStatus != "EXECUTION_FAILED" || item.Delivery.DomainAttemptCount != 1 || item.Investigation.Class != approvalconsumer.FailureUnknown ||
 		item.Investigation.Retryable || !item.Investigation.QueryOnly {
 		t.Fatalf("original execution not preserved for query-only investigation: %+v", item)
