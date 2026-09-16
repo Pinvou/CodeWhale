@@ -155,6 +155,16 @@ type recoveryResultStub struct {
 	calls int
 }
 
+type recoveryConfirmerStub struct {
+	calls int
+	err   error
+}
+
+func (stub *recoveryConfirmerStub) ConfirmOriginalSuccess(_ context.Context, _ ApprovalRecoveryCandidate, _ RecoveryQueryLease) error {
+	stub.calls++
+	return stub.err
+}
+
 func (stub *recoveryResultStub) ObserveRecoveryResult(_ context.Context, _ ApprovalRecoveryCandidate) (RecoveryResultObservation, error) {
 	stub.calls++
 	if stub.err != nil {
@@ -190,6 +200,38 @@ func TestProofRecoveryResultAndEffectStayUnderOneLeaseAndNeverAuthorizeMutation(
 			}
 			if err == nil && (batch.Inspections[0].ResultObservation != tc.wantResult || batch.Inspections[0].Disposition != "UNKNOWN_QUERY_ONLY") {
 				t.Fatalf("result observation was promoted to recovery: %+v", batch.Inspections[0])
+			}
+		})
+	}
+}
+
+func TestProofRecoveryConvergesOnlyPositiveOriginalResultUnderLease(t *testing.T) {
+	descriptor := approvalconsumer.BillingCommands()[0]
+	item := ApprovalRecoveryCandidate{RequestID: uuid.New(), ExecutionID: uuid.New(), OriginalEventID: uuid.New(), OriginalKey: "original-key",
+		Durable: descriptor.Durable, Workload: descriptor.Workload, CommandType: descriptor.CommandType,
+		PolicyVersion: descriptor.PolicyVersion, CommandFingerprint: "a1" + "00000000000000000000000000000000000000000000000000000000000000",
+		ApprovalEpoch: 1, RequestVersion: 1, Investigation: approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, "")}
+	for _, tc := range []struct {
+		name, result, effect, wantDisposition string
+		confirmErr                            error
+		wantConfirm                           int
+		wantError                             bool
+	}{
+		{"positive", "SUCCEEDED", approvaleffect.StateObserved, "ORIGINAL_RESULT_CONFIRMED", nil, 1, false},
+		{"unconfirmed", "UNCONFIRMED", approvaleffect.StateAbsent, "UNKNOWN_QUERY_ONLY", nil, 0, false},
+		{"contradiction", "SUCCEEDED", approvaleffect.StateAbsent, "", nil, 0, true},
+		{"account unavailable", "SUCCEEDED", approvaleffect.StateObserved, "", ErrApprovalRecoveryConfirmationUnavailable, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leaser := &recoveryLeaserStub{}
+			confirmer := &recoveryConfirmerStub{err: tc.confirmErr}
+			batch, err := InspectProofRecoveryLeasedWithConfirmation(context.Background(), &recoveryPlannerStub{plan: ApprovalRecoveryPlan{Candidates: []ApprovalRecoveryCandidate{item}}},
+				leaser, &recoveryEffectStub{state: tc.effect}, &recoveryResultStub{state: tc.result}, confirmer, 1)
+			if (err != nil) != tc.wantError || confirmer.calls != tc.wantConfirm || leaser.releaseCalls != 1 {
+				t.Fatalf("err=%v confirmer=%d releases=%d", err, confirmer.calls, leaser.releaseCalls)
+			}
+			if err == nil && batch.Inspections[0].Disposition != tc.wantDisposition {
+				t.Fatalf("disposition=%s", batch.Inspections[0].Disposition)
 			}
 		})
 	}

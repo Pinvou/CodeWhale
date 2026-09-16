@@ -1,5 +1,6 @@
-// approval-recovery is a bounded, query-only one-shot investigator. It is not
-// deployed or scheduled by default and cannot retry or complete an execution.
+// approval-recovery is a bounded one-shot investigator. It may ask Account to
+// independently confirm an original persisted success, but cannot retry a
+// domain call or infer zero effect. It is not deployed or scheduled by default.
 package main
 
 import (
@@ -31,6 +32,7 @@ type commandSummary struct {
 	Candidates     int    `json:"candidates,omitempty"`
 	Observed       int    `json:"observed,omitempty"`
 	Confirmed      int    `json:"confirmed,omitempty"`
+	Converged      int    `json:"converged,omitempty"`
 	Unavailable    int    `json:"unavailable,omitempty"`
 	MoreCandidates bool   `json:"more_candidates,omitempty"`
 }
@@ -116,7 +118,11 @@ func investigate(ctx context.Context, config commandConfig) (commandSummary, err
 	if err != nil {
 		return commandSummary{}, err
 	}
-	batch, err := account.InspectProofRecoveryLeasedWithResults(ctx, planner, leaser, effects, results, config.Limit)
+	confirmer, err := account.NewApprovalRecoveryConfirmationClient(config.AccountURL, config.Credential)
+	if err != nil {
+		return commandSummary{}, err
+	}
+	batch, err := account.InspectProofRecoveryLeasedWithConfirmation(ctx, planner, leaser, effects, results, confirmer, config.Limit)
 	if err != nil {
 		return commandSummary{}, err
 	}
@@ -130,6 +136,13 @@ func investigate(ctx context.Context, config commandConfig) (commandSummary, err
 		if inspection.ResultObservation == "SUCCEEDED" {
 			summary.Confirmed++
 		}
+		if inspection.Disposition == "ORIGINAL_RESULT_CONFIRMED" {
+			summary.Converged++
+		}
+	}
+	if summary.Converged > 0 {
+		summary.Status = "partial_recovery"
+		summary.Reason = "POSITIVE_RESULTS_ONLY"
 	}
 	return summary, nil
 }

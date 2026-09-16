@@ -14,6 +14,10 @@ type RecoveryQueryLeaser interface {
 	Release(context.Context, RecoveryQueryLease) (time.Time, error)
 }
 
+type RecoverySuccessConfirmer interface {
+	ConfirmOriginalSuccess(context.Context, ApprovalRecoveryCandidate, RecoveryQueryLease) error
+}
+
 type oneRecoveryCandidate struct{ candidate ApprovalRecoveryCandidate }
 
 func (p oneRecoveryCandidate) PlanProofApprovalRecovery(context.Context, int) (ApprovalRecoveryPlan, error) {
@@ -31,6 +35,20 @@ func InspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPla
 // Result observations are gathered under the same short query lease as the
 // effect check. Neither a positive result nor an absent effect changes state.
 func InspectProofRecoveryLeasedWithResults(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, nil, limit)
+}
+
+// A positive domain result can be converged only while the original query
+// lease is live. Account performs a second authoritative read and the CAS;
+// this worker never sends a claimed result or invokes a domain executor.
+func InspectProofRecoveryLeasedWithConfirmation(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	if results == nil || confirmer == nil {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+	}
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, confirmer, limit)
+}
+
+func inspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
 	if planner == nil || leaser == nil || effects == nil || limit < 1 || limit > 200 {
 		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 	}
@@ -68,7 +86,7 @@ func InspectProofRecoveryLeasedWithResults(ctx context.Context, planner Approval
 		if lease.RequestID != candidate.RequestID || lease.Token == uuid.Nil || lease.Version < 1 || lease.QueryCount < 1 {
 			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 		}
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(7 * time.Second)
 		if lease.Until.Add(-time.Second).Before(deadline) {
 			deadline = lease.Until.Add(-time.Second)
 		}
@@ -109,6 +127,19 @@ func InspectProofRecoveryLeasedWithResults(ctx context.Context, planner Approval
 				observation.ResultObservedAt = resultAt
 				if resultState == "SUCCEEDED" && observation.EffectObservation == approvaleffect.StateAbsent {
 					inspectionErr = ErrApprovalRecoveryPlanInvalid
+				}
+			}
+			if inspectionErr == nil && resultState == "SUCCEEDED" && confirmer != nil {
+				confirmDeadline := lease.Until.Add(-time.Second)
+				if confirmDeadline.After(time.Now()) {
+					confirmCtx, cancelConfirm := context.WithDeadline(ctx, confirmDeadline)
+					inspectionErr = confirmer.ConfirmOriginalSuccess(confirmCtx, candidate, lease)
+					cancelConfirm()
+				} else {
+					inspectionErr = ErrApprovalRecoveryLeaseUnavailable
+				}
+				if inspectionErr == nil {
+					observation.Disposition = "ORIGINAL_RESULT_CONFIRMED"
 				}
 			}
 		} else {

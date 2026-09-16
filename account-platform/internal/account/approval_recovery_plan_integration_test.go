@@ -1,10 +1,13 @@
 package account
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -14,8 +17,19 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
+
+type fixedRecoveryResultReader struct {
+	result RecoveryResultObservation
+	calls  int
+}
+
+func (reader *fixedRecoveryResultReader) ObserveRecoveryResult(context.Context, ApprovalRecoveryCandidate) (RecoveryResultObservation, error) {
+	reader.calls++
+	return reader.result, nil
+}
 
 func TestProofRecoveryPlanExcludesLegacyAndNeverMutatesIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
@@ -223,8 +237,21 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, lease, badResult); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
 		t.Fatalf("incomplete billing positive result confirmed: %v", err)
 	}
-	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, lease, result); err != nil {
-		t.Fatalf("original result could not converge without a new domain call: %v", err)
+	confirmation, err := json.Marshal(approvalRecoveryConfirmation{Candidate: item, Lease: lease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceContext, err := serviceauth.ContextForJob(ctx, "account-approval-recovery", "APPROVAL_RECOVERY_QUERY", uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/approval-recovery/confirm", bytes.NewReader(confirmation)).WithContext(serviceContext)
+	confirmRequest.Header.Set("Content-Type", "application/json")
+	confirmResponse := httptest.NewRecorder()
+	reader := &fixedRecoveryResultReader{result: result}
+	NewService(repository, nil).WithApprovalRecoveryResults(reader).internalConfirmApprovalRecovery(confirmResponse, confirmRequest)
+	if confirmResponse.Code != http.StatusNoContent || reader.calls != 1 {
+		t.Fatalf("independent original-result recheck did not converge: status=%d reads=%d body=%s", confirmResponse.Code, reader.calls, confirmResponse.Body.String())
 	}
 	var requestStatus, executionStatus string
 	var domainResult json.RawMessage
