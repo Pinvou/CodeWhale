@@ -2562,6 +2562,23 @@ fn last_chars(value: &str, count: usize) -> String {
     chars.into_iter().collect()
 }
 
+fn merge_adjacent_user_content(previous: Value, current: Value) -> Value {
+    match (previous, current) {
+        (Value::String(left), Value::String(right)) => json!(format!("{left}\n\n{right}")),
+        (left, right) => {
+            let mut parts = Vec::new();
+            for content in [left, right] {
+                match content {
+                    Value::Array(items) => parts.extend(items),
+                    Value::String(text) => parts.push(json!({"type": "text", "text": text})),
+                    other => parts.push(other),
+                }
+            }
+            Value::Array(parts)
+        }
+    }
+}
+
 fn build_chat_messages_with_reasoning(
     system: Option<&SystemPrompt>,
     messages: &[Message],
@@ -2587,7 +2604,39 @@ fn build_chat_messages_with_reasoning(
         }));
     }
 
-    for (message_index, message) in messages.iter().enumerate() {
+    // Compaction persists its summary after the retained round. On strict
+    // alternating templates that puts a user message after a tool result
+    // (which the template treats as the user's half of the tool exchange).
+    // Move only the summary on the wire, ahead of the retained user prompt;
+    // the saved history and matching assistant/tool call IDs stay untouched.
+    let summary_index = messages
+        .iter()
+        .rposition(crate::compaction::is_wire_compaction_checkpoint_message);
+    let summary_target = summary_index.and_then(|summary_index| {
+        messages[..summary_index]
+            .iter()
+            .rposition(crate::runtime_handoff::is_user_turn_prompt)
+            .or_else(|| {
+                messages[..summary_index]
+                    .iter()
+                    .position(|message| message.role.is_assistant_like())
+            })
+    });
+    let wire_messages = (0..messages.len())
+        .filter(|index| Some(*index) != summary_index || summary_target.is_none())
+        .flat_map(|index| {
+            if Some(index) == summary_target {
+                [summary_index, Some(index)]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            } else {
+                vec![index]
+            }
+        });
+
+    for message_index in wire_messages {
+        let message = &messages[message_index];
         // Which wire channel this message belongs in is decided by the shared
         // placement table, not by an `if` chain local to this adapter.
         let placement = role_placement(&message.role, WireDialect::ChatCompletions);
@@ -2787,7 +2836,22 @@ fn build_chat_messages_with_reasoning(
                 if include_tool_budget_metadata && let Some(turn_meta) = &turn_meta_budget {
                     msg["_turn_meta_budget"] = turn_meta_budget_json(turn_meta);
                 }
-                out.push(msg);
+                if summary_target.is_some()
+                    && let Some(previous) = out.last_mut()
+                    && previous.get("role").and_then(Value::as_str) == Some("user")
+                {
+                    // A compaction summary, retained prompt, and topology
+                    // checkpoint are one user turn to a paired template.
+                    let previous_content = previous["content"].take();
+                    let current_content = msg["content"].take();
+                    previous["content"] =
+                        merge_adjacent_user_content(previous_content, current_content);
+                    if let Some(meta) = msg.get("_turn_meta_budget") {
+                        previous["_turn_meta_budget"] = meta.clone();
+                    }
+                } else {
+                    out.push(msg);
+                }
             }
         }
 
@@ -6357,6 +6421,65 @@ mod image_block_wire_tests {
     use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest};
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
+
+    #[test]
+    fn forkguard_compaction_tool_round_has_valid_chat_wire_roles() {
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Analyze the data"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ready"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_2","name":"read","input":{"path":"b.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"done"}]}
+        ])).unwrap();
+        messages.push(crate::compaction::compaction_checkpoint_message(
+            &crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+            ),
+        ));
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut messages, &[]);
+        let stored = messages.clone();
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        assert_eq!(
+            messages, stored,
+            "wire normalization must not alter saved history"
+        );
+        let roles: Vec<&str> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "assistant", "tool"]);
+        let prompt = wire[0]["content"].as_str().unwrap();
+        assert!(prompt.contains("Compacted summary"));
+        assert!(prompt.contains("Analyze the data"));
+        assert!(prompt.contains("codewhale.agent_topology.v1"));
+        assert_eq!(wire[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(wire[2]["tool_call_id"], "call_1");
+        assert_eq!(wire[3]["tool_calls"][0]["id"], "call_2");
+        assert_eq!(wire[4]["tool_call_id"], "call_2");
+    }
+
+    #[test]
+    fn compaction_marker_quoted_by_user_keeps_wire_order() {
+        let messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"First question"}]},
+            {"role":"assistant","content":[{"type":"text","text":"First answer"}]},
+            {"role":"user","content":[{"type":"text","text":"Please explain the phrase: Another language model started to solve this problem"}]},
+            {"role":"assistant","content":[{"type":"text","text":"It introduces a summary."}]},
+            {"role":"user","content":[{"type":"text","text":"Follow-up question"}]}
+        ])).unwrap();
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        let roles: Vec<&str> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant", "user"]);
+        assert_eq!(wire[0]["content"], "First question");
+        assert_eq!(
+            wire[2]["content"],
+            "Please explain the phrase: Another language model started to solve this problem"
+        );
+        assert_eq!(wire[4]["content"], "Follow-up question");
+    }
 
     fn fixture_tool_use(id: &str) -> ContentBlock {
         ContentBlock::ToolUse {

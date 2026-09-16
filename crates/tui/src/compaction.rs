@@ -294,6 +294,22 @@ pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
     user_text_of(message).is_some_and(|text| is_compaction_summary_text(&text))
 }
 
+/// Narrow recognition for request-time reordering. The broader legacy marker
+/// scan above is needed while replacing old summaries, but must not turn an
+/// ordinary user quoting that marker into a movable wire checkpoint.
+pub(crate) fn is_wire_compaction_checkpoint_message(message: &Message) -> bool {
+    let [
+        ContentBlock::Text {
+            text,
+            cache_control: None,
+        },
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    message.role == Role::User && text.starts_with(SUMMARY_HEADER)
+}
+
 pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usize {
     message
         .content
@@ -1151,7 +1167,7 @@ pub async fn compact_messages_safe(
         .unwrap_or_else(|| anyhow::anyhow!("Compaction failed after {MAX_RETRIES} retries")))
 }
 
-fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
+pub(crate) fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
     let summary = summary.trim();
     let summary = if summary.is_empty() {
         "(no summary available)"

@@ -456,8 +456,9 @@ fn is_agent_topology_checkpoint(message: &Message) -> bool {
 /// compaction. A current empty topology is still meaningful: it overrides a
 /// narrative summary or old runtime event that says an Agent remains live.
 /// Replays are idempotent because the previous sidecar is structurally removed
-/// before the replacement is inserted. At a tool-result boundary, place it
-/// after the latest user input, before that round's assistant/tool chain.
+/// before the replacement is inserted. At a tool-result or trailing summary
+/// boundary, place it after the latest real user input, before that round's
+/// assistant/tool chain.
 /// Strict paired chat templates cannot encode a tool result followed by a
 /// user checkpoint. Compaction already replaces history; this does not mutate
 /// the session-pinned system/cache prefix or impersonate an assistant reply.
@@ -476,11 +477,15 @@ pub(crate) fn replace_agent_topology_checkpoint(
             )
         })
     });
-    let position = if ends_with_tool_result {
+    let ends_with_compaction_summary = messages
+        .last()
+        .is_some_and(crate::compaction::is_wire_compaction_checkpoint_message);
+    let position = if ends_with_tool_result || ends_with_compaction_summary {
         messages
             .iter()
             .rposition(|message| {
-                classify_user_turn_prompt(message) != UserTurnPromptKind::NotPrompt
+                !crate::compaction::is_wire_compaction_checkpoint_message(message)
+                    && classify_user_turn_prompt(message) != UserTurnPromptKind::NotPrompt
             })
             .map_or_else(
                 || {
