@@ -328,6 +328,36 @@ must match it. This independent registration context is not a lease context.
 Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
 
+DEV-04 provides a disconnected claim/reservation authority; `server.js` does
+not route live traffic through it until DEV-06 composes the handshake. A claim
+normalizes ASCII case and removes whitespace/hyphen separators before applying
+the seven-character alphabet. Source, socket and global fixed-window limits run
+before code lookup, and their bounded source/socket maps fail closed when full.
+Invalid syntax, absent, expired, consumed, revoked, stale-generation and
+rate-limited claims all expose only `pairing_code_invalid`.
+
+Each endpoint has one revisioned interaction slot. Its owner is exactly one of
+`web_lease`, `desktop_reservation`, or `controller_lease`; mutation requires a
+matching canonical uint64 revision. A free slot may be claimed by either Web or
+desktop, a Web owner may be replaced only by the existing Web-to-Web takeover,
+and a desktop owner maps a legacy Web join to the existing
+`endpoint_not_found` compatibility response. An existing Web/controller owner
+makes a new desktop claim `controller_busy`; a losing claim for the same
+pairing collapses to `pairing_code_invalid`. Neither failure consumes the code.
+
+A desktop reservation binds the stable claim `request_id`, claim-socket
+identity, pairing/endpoint/generation and SHA-256 of A's canonical 32-byte
+handshake public key. An exact request retry returns the same reservation;
+reusing its request ID with different bindings fails closed. Reserved state has
+a 10-second deadline; entering `handshake_pending` starts its separate
+20-second deadline. Owner disconnect, timeout, refresh or handshake failure first durably
+terminates the one-shot pairing and requests B's replacement-code notification,
+then releases the slot. If either durable invalidation or notification fails,
+the slot remains closed in retryable `invalidating` state. The module stores no
+raw pairing code and emits only fixed audit event names. The notification
+receives the pairing, endpoint and generation bindings needed to reject a stale
+refresh result.
+
 `controller_joined` is the sole `lease_install_messages` entry and never
 requires a pre-existing lease. It is not accepted by the general runtime
 validator. DEV-00 parses the complete raw `controller_pairing_reserved`
