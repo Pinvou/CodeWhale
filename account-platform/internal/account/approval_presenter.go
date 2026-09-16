@@ -2,9 +2,9 @@ package account
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/google/uuid"
@@ -107,7 +107,7 @@ func approvalSafeTargetID(value string) string {
 		return ""
 	}
 	for _, r := range value {
-		if !unicode.IsPrint(r) || unicode.IsSpace(r) {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' || r == ':') {
 			return ""
 		}
 	}
@@ -158,10 +158,8 @@ func approvalV2Command(item ApprovalRequest) any {
 		if value[0] < '1' || value[0] > '9' {
 			return nil
 		}
-		for _, digit := range value {
-			if digit < '0' || digit > '9' {
-				return nil
-			}
+		if parsed, err := strconv.ParseInt(value, 10, 64); err != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != value {
+			return nil
 		}
 		return approvalCatalogSummary{value}
 	case "TOKEN_CREDENTIAL_REVOKE":

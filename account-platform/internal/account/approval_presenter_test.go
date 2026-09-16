@@ -61,12 +61,19 @@ func TestApprovalPresenterClosedSixCommands(t *testing.T) {
 }
 
 func TestApprovalPresenterRejectsUnsafeHistoricalTargets(t *testing.T) {
-	item := ApprovalRequest{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, SnapshotSchemaVersion: 1,
-		TargetResourceType: "PAYMENT_PROVIDER_CONTROL", TargetResourceID: strings.Repeat("x", 161)}
-	if summary := approvalV2Summary(item); summary.Target.ResourceID != "" || summary.DetailAvailability != "DETAIL_PRESENTATION_UNAVAILABLE" {
-		t.Fatalf("unsafe target should be unavailable: %+v", summary)
+	for _, target := range []string{strings.Repeat("x", 161), "https://internal.example/secret", "person@example.com", "white space"} {
+		item := ApprovalRequest{CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, SnapshotSchemaVersion: 1,
+			TargetResourceType: "PAYMENT_PROVIDER_CONTROL", TargetResourceID: target}
+		if summary := approvalV2Summary(item); summary.Target.ResourceID != "" || summary.DetailAvailability != "DETAIL_PRESENTATION_UNAVAILABLE" {
+			t.Fatalf("unsafe target should be unavailable: %+v", summary)
+		}
+		if _, err := approvalV2Detail(item, 1); !errors.Is(err, ErrApprovalDetailPresentationUnavailable) {
+			t.Fatal("unsafe target detail must fail closed")
+		}
 	}
-	if _, err := approvalV2Detail(item, 1); !errors.Is(err, ErrApprovalDetailPresentationUnavailable) {
-		t.Fatal("unsafe target detail must fail closed")
+	item := ApprovalRequest{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: "MODEL_CATALOG", TargetResourceID: "9223372036854775808"}
+	if approvalV2Summary(item).DetailAvailability != "DETAIL_PRESENTATION_UNAVAILABLE" {
+		t.Fatal("out of range version must not be presented")
 	}
 }
