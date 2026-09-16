@@ -985,11 +985,8 @@ func approvalPaginationReadError(err error) error {
 }
 
 func approvalPaginationOperationError(err error, continuation bool) error {
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-		return err
-	}
 	if continuation {
-		return ErrApprovalPaginationQueryTimeout
+		return approvalPaginationReadError(err)
 	}
-	return ErrApprovalPaginationSnapshotUnavailable
+	return approvalPaginationBuildError(err)
 }

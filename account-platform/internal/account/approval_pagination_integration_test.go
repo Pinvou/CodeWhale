@@ -42,25 +42,25 @@ func newApprovalPaginationIntegrationDatabase(t *testing.T) (*approvalAuthorizat
 
 func approvalPaginationMigrations(loaded []migrations.Migration) ([]migrations.Migration, error) {
 	for index, migration := range loaded {
-		if migration.Version == 62 {
+		if migration.Version == 63 {
 			return loaded[:index+1], nil
 		}
 	}
-	return nil, errors.New("pagination integration fixture requires Account migration 62")
+	return nil, errors.New("pagination integration fixture requires Account migration 63")
 }
 
 func TestApprovalPaginationMigrationBoundary(t *testing.T) {
-	for _, versions := range [][]int64{{61, 62}, {61, 62, 63}} {
+	for _, versions := range [][]int64{{62, 63}, {62, 63, 64}} {
 		loaded := make([]migrations.Migration, len(versions))
 		for index, version := range versions {
 			loaded[index] = migrations.Migration{Version: version, UpSQL: "up", DownSQL: "down", Checksum: "checksum"}
 		}
 		current, err := approvalPaginationMigrations(loaded)
-		if err != nil || current[len(current)-1] != loaded[1] || current[len(current)-1].Version != 62 {
+		if err != nil || current[len(current)-1] != loaded[1] || current[len(current)-1].Version != 63 {
 			t.Fatalf("pagination boundary changed: %+v err=%v", current, err)
 		}
 	}
-	if _, err := approvalPaginationMigrations([]migrations.Migration{{Version: 61}, {Version: 63}}); err == nil {
+	if _, err := approvalPaginationMigrations([]migrations.Migration{{Version: 62}, {Version: 64}}); err == nil {
 		t.Fatal("missing pagination migration was accepted")
 	}
 }
@@ -287,6 +287,10 @@ func TestApprovalPaginationPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
+		t.Fatalf("drained rollback fence down: %v", err)
+	}
+	migrations.Unlock(ctx, connection.Conn())
+	if err = migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
 		t.Fatalf("drained key-binding down: %v", err)
 	}
 	migrations.Unlock(ctx, connection.Conn())
@@ -296,6 +300,43 @@ func TestApprovalPaginationPostgresIntegration(t *testing.T) {
 	migrations.Unlock(ctx, connection.Conn())
 	if err = migrations.Up(ctx, connection.Conn(), loaded); err != nil {
 		t.Fatalf("pagination migration reentry: %v", err)
+	}
+	migrations.Unlock(ctx, connection.Conn())
+}
+
+func TestApprovalPaginationUnsignedSnapshotRollbackFencePostgresIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	database, repository, loaded := newApprovalPaginationIntegrationDatabase(t)
+	if err := repository.ConfigureApprovalPagination(ctx, ApprovalPaginationConfig{Enabled: true, CurrentKeyID: "unsigned-key", CurrentKey: []byte(strings.Repeat("u", 32))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetApprovalPaginationGate(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	actor := seedTokenOwnerCandidateActor(t, ctx, database.adminPool, "PLATFORM_BILLING_OPERATOR", "pagination-unsigned-"+uuid.NewString())
+	policy, err := approvalpolicy.Lookup("WALLET_ADJUSTMENT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAdvancementRequest(t, ctx, repository, actor.ID, policy, "SUBMITTED")
+	page, err := repository.ApprovalPaginationPage(ctx, approvalIntegrationPrincipal(actor), ApprovalFilter{}, "", 2, "127.0.0.1")
+	if err != nil || page.NextCursor != nil || len(page.ApprovalRequestIDs) != 1 {
+		t.Fatalf("unsigned snapshot=%+v err=%v", page, err)
+	}
+	var signingKeys int
+	if err = database.adminPool.QueryRow(ctx, `SELECT count(*) FROM approval_pagination_signing_keys`).Scan(&signingKeys); err != nil || signingKeys != 0 {
+		t.Fatalf("unexpected signing keys=%d err=%v", signingKeys, err)
+	}
+	if err = repository.SetApprovalPaginationGate(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	connection := authorizationTestConnection(t, ctx, database.migratorPool)
+	if _, err = connection.Exec(ctx, `SET ROLE account_service`); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrations.DownOne(ctx, connection.Conn(), loaded); err == nil || !strings.Contains(err.Error(), "ACCOUNT_APPROVAL_PAGINATION_CURSOR_ACTIVE") {
+		t.Fatalf("unsigned active snapshot down=%v", err)
 	}
 	migrations.Unlock(ctx, connection.Conn())
 }

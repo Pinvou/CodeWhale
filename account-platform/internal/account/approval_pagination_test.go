@@ -200,6 +200,9 @@ func TestApprovalPaginationPostgresStatementTimeoutClassification(t *testing.T) 
 	if err := approvalPaginationReadError(&pgconn.PgError{Code: "57014"}); !errors.Is(err, ErrApprovalPaginationQueryTimeout) {
 		t.Fatalf("PostgreSQL statement cancellation classification=%v", err)
 	}
+	if err := approvalPaginationOperationError(&pgconn.PgError{Code: "57014"}, true); !errors.Is(err, ErrApprovalPaginationQueryTimeout) {
+		t.Fatalf("authorization lookup statement timeout classification=%v", err)
+	}
 	if err := approvalPaginationReadError(&pgconn.PgError{Code: "23505"}); errors.Is(err, ErrApprovalPaginationQueryTimeout) {
 		t.Fatalf("unrelated PostgreSQL error was classified as timeout: %v", err)
 	}

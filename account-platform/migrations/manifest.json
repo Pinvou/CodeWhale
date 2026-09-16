@@ -622,6 +622,16 @@
         "file": "000062_approval_pagination_key_binding.up.sql",
         "version": 62,
         "sha256": "a4c93607a8386df5799b88ee1bd93f2a99f5244e581178a608d670408f6a34ce"
+      },
+      {
+        "file": "000063_approval_pagination_rollback_fence.down.sql",
+        "version": 63,
+        "sha256": "a78fd2c5df37b5bfde93ea2397ceb77ad22ebd4ce2ce2dec6dd06916f2a82fb6"
+      },
+      {
+        "file": "000063_approval_pagination_rollback_fence.up.sql",
+        "version": 63,
+        "sha256": "c958451bbc27b90d682ea762aa55db49f3b39a2eeb1915bdc37b880c1f9b2a67"
       }
     ],
     "billing": [

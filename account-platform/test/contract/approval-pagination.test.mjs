@@ -11,6 +11,7 @@ test('Account approval pagination freezes bounded membership and a closed signed
   const source = read('internal/account/approval_pagination.go');
   const migration = read('migrations/account/000061_approval_pagination_snapshots.up.sql');
   const keyBinding = read('migrations/account/000062_approval_pagination_key_binding.up.sql');
+  const rollbackFence = read('migrations/account/000063_approval_pagination_rollback_fence.down.sql');
 
   for (const contract of [
     /ApprovalSnapshotTTL\s+= 15 \* time\.Minute/,
@@ -45,6 +46,9 @@ test('Account approval pagination freezes bounded membership and a closed signed
   assert.match(migration, /CREATE TABLE approval_pagination_snapshot_tombstones/);
   assert.match(migration, /CREATE TABLE approval_pagination_signing_keys/);
   assert.match(keyBinding, /ADD COLUMN key_digest TEXT CHECK/);
+  assert.match(rollbackFence, /ACCOUNT_APPROVAL_PAGINATION_CURSOR_ACTIVE/);
+  assert.match(rollbackFence, /ACCOUNT_APPROVAL_PAGINATION_TOMBSTONE_ACTIVE/);
+  assert.match(rollbackFence, /ACCOUNT_APPROVAL_PAGINATION_KEY_ACTIVE/);
   assert.match(source, /approval_pagination_signing_keys\.key_digest=EXCLUDED\.key_digest/);
   assert.match(migration, /REVOKE ALL[\s\S]*FROM PUBLIC/);
 });
