@@ -7,7 +7,7 @@
 - Account `000065` 将 proof-era Billing 确定失败保留为 `DOMAIN_INFLIGHT`；`000066` 栅栏化旧版本留下的 `READY + last_error_code`；`000067` 进一步把 `READY + 已有attempt`（即使错误码丢失）迁入只查证态，并使直接 grant 对 proof-era 仅允许第 0 次到第 1 次。Billing consumer 本地也拒绝第二次 Begin/Grant。legacy Billing 的既有 12 次上限不变。
 - `EXECUTION_FAILED` 不由通用过期 worker 直接标记 INVALIDATED；已有执行记录的结果必须先经领域权威查证。未 Begin 的 APPROVED 仍按原五分钟执行窗口过期。
 - 任何已提交 Billing proof claim、已进入 Provider 探测、Token 本地命令已开始、数据库提交结果不明、权威结果读超时或未知错误码，均按 UNKNOWN 处理。一次“未查到结果”不是“没有产生效果”的证明。
-- 六命令 closed 分类已落入 `approvalconsumer.ClassifyProofFailure`。Billing 的 `DOMAIN_REVISION_CHANGED`、`COMMAND_SNAPSHOT_MISMATCH`、`DOMAIN_PRECONDITION_REJECTED` 暂归事实/政策变化调查，`DOMAIN_RESOURCE_NOT_FOUND` 暂归永久失败调查；Token 的合并码 `DOMAIN_EXECUTION_FAILED` 及所有缺码、未知版本都归 UNKNOWN。分类本身不能证明零效果、不能直接 INVALIDATED；当前六命令均不允许自动第二次领域调用，`TRANSIENT_SAFE` 和 `WINDOW_ENDED` 必须待领域证据与绝对窗口核实后才可最终判定。
+- 六命令 closed 分类已落入 `approvalconsumer.ClassifyProofFailure`。Billing 的 `DOMAIN_REVISION_CHANGED`、`COMMAND_SNAPSHOT_MISMATCH` 暂归事实/政策变化调查，`DOMAIN_RESOURCE_NOT_FOUND` 暂归永久失败调查；`DOMAIN_PRECONDITION_REJECTED` 混合余额、可用性和冲突，不具备单义分类，故与 Token 合并码 `DOMAIN_EXECUTION_FAILED`、缺码、未知版本一律归 UNKNOWN。分类本身不能证明零效果、不能直接 INVALIDATED；当前六命令均不允许自动第二次领域调用，`TRANSIENT_SAFE` 和 `WINDOW_ENDED` 必须待领域证据与绝对窗口核实后才可最终判定。
 
 ## 封闭命令矩阵
 

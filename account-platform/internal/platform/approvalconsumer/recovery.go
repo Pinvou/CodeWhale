@@ -48,11 +48,14 @@ func ClassifyProofFailure(command string, policyVersion int64, code string) Reco
 
 func classifyBillingFailure(code string) FailureClass {
 	switch code {
-	case "DOMAIN_REVISION_CHANGED", "COMMAND_SNAPSHOT_MISMATCH", "DOMAIN_PRECONDITION_REJECTED":
+	case "DOMAIN_REVISION_CHANGED", "COMMAND_SNAPSHOT_MISMATCH":
 		return FailureFactOrPolicyChanged
 	case "DOMAIN_RESOURCE_NOT_FOUND":
 		return FailurePermanent
 	default:
+		// DOMAIN_PRECONDITION_REJECTED currently combines balance,
+		// availability and conflict failures. It is not a stable semantic
+		// reason for invalidation until the owner separates those cases.
 		return FailureUnknown
 	}
 }

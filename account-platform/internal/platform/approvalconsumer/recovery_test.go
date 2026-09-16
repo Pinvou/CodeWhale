@@ -9,7 +9,7 @@ func TestProofRecoveryClassificationsAreClosedAndQueryOnly(t *testing.T) {
 			want := FailureUnknown
 			if descriptor.Workload == BillingWorkload {
 				switch code {
-				case "DOMAIN_REVISION_CHANGED", "COMMAND_SNAPSHOT_MISMATCH", "DOMAIN_PRECONDITION_REJECTED":
+				case "DOMAIN_REVISION_CHANGED", "COMMAND_SNAPSHOT_MISMATCH":
 					want = FailureFactOrPolicyChanged
 				case "DOMAIN_RESOURCE_NOT_FOUND":
 					want = FailurePermanent
