@@ -991,6 +991,13 @@ pub(crate) fn restored_subagent_checkpoint_display(message: &Message) -> Option<
     Some(text)
 }
 
+/// Only the restored topology sidecar belongs to the compaction prompt
+/// cluster. Other restored Agent events keep their own message boundaries.
+pub(crate) fn is_restored_agent_topology_checkpoint(message: &Message) -> bool {
+    restored_subagent_checkpoint_display(message)
+        .is_some_and(|display| display.starts_with(RESTORED_TOPOLOGY_HEADER))
+}
+
 /// Classification used when locating a user-authored turn in the session log.
 ///
 /// Runtime and tool messages are skipped because their provider-compatible

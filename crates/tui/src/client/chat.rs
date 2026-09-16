@@ -2856,14 +2856,13 @@ fn build_chat_messages_with_reasoning(
                 }
                 if (Some(message_index) == summary_target
                     || crate::runtime_handoff::is_agent_topology_checkpoint(message)
-                    || crate::runtime_handoff::restored_subagent_checkpoint_display(message)
-                        .is_some())
+                    || crate::runtime_handoff::is_restored_agent_topology_checkpoint(message))
                     && let Some(previous) = out.last_mut()
                     && previous.get("role").and_then(Value::as_str) == Some("user")
                 {
                     // Merge only this retained prompt with its moved summary,
-                    // or an adjacent runtime checkpoint (including restored
-                    // topology). Other user turns keep their boundaries.
+                    // or an adjacent topology checkpoint, including its
+                    // restored form. Other user turns keep their boundaries.
                     let previous_content = previous["content"].take();
                     let current_content = msg["content"].take();
                     previous["content"] =
@@ -6543,6 +6542,33 @@ mod image_block_wire_tests {
                 .contains("restored Agent topology checkpoint")
         );
         assert_eq!(restored_wire[6]["content"], "What happened next?");
+    }
+
+    #[test]
+    fn restored_completion_does_not_join_an_ordinary_user_turn() {
+        let prompt: Message = serde_json::from_value(serde_json::json!({
+            "role":"user","content":[{"type":"text","text":"Continue the task"}]
+        }))
+        .unwrap();
+        let completion = crate::runtime_handoff::subagent_completion_runtime_message(
+            "unavailable historical completion",
+        );
+        let restored = crate::runtime_handoff::project_messages_for_restore(&[prompt, completion]);
+        assert!(
+            crate::runtime_handoff::restored_subagent_checkpoint_display(&restored[1]).is_some()
+        );
+        assert!(!crate::runtime_handoff::is_restored_agent_topology_checkpoint(&restored[1]));
+
+        let wire = build_chat_messages(None, &restored, "gpt-4o");
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0]["content"], "Continue the task");
+        assert_eq!(wire[1]["role"], "user");
+        assert!(
+            wire[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("restored sub-agent checkpoint")
+        );
     }
 
     #[test]
