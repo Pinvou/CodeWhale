@@ -133,7 +133,7 @@ async function runWindowsAclScript(script, target, kind) {
   if (stdout !== "ok") fail("relay_state_acl_unverified");
 }
 
-async function verifyWindowsAncestors(paths) {
+export async function verifyWindowsAncestors(paths) {
   const encodedPaths = Buffer.from(JSON.stringify(paths), "utf8").toString("base64");
   const { stdout } = await execFileAsync(windowsPowerShellExecutable(), [
     "-NoLogo", "-NoProfile", "-NonInteractive",
@@ -147,11 +147,11 @@ async function verifyWindowsAncestors(paths) {
   if (stdout !== "ok") fail("relay_state_path_component_unsafe");
 }
 
-async function protectWindowsPath(target, kind) {
+export async function protectWindowsPath(target, kind) {
   await runWindowsAclScript(WINDOWS_ACL_SCRIPT, target, kind);
 }
 
-async function verifyWindowsPath(target, kind) {
+export async function verifyWindowsPath(target, kind) {
   await runWindowsAclScript(WINDOWS_ACL_VERIFY_SCRIPT, target, kind);
 }
 

@@ -261,40 +261,68 @@ targets from deployment-specific load tests, not these hard ceilings.
 Registry, storage, digest-key, corruption, and persistence failures reject authorization;
 no in-memory success is returned after a failed durable commit. DEV-02 supplies
 the migration and rollback perimeter around this authority; DEV-06 still owns
-protocol routing, rate limits, origin checks, and production startup wiring.
+the new desktop protocol routing and production startup wiring.
 
 ## DEV-02 migration and legacy rollback
 
 Official migration is accepted only through `EnrollmentMigrationHandler` after
-DEV-06 binds an already authenticated legacy desktop socket. The claim request
-contains only a stable request ID: endpoint ID and the existing `access_token`
-come from the opaque socket proof. Repeating a claim preserves endpoint ID,
-token, timestamps, and old Web links; a request ID used by another endpoint is
-rejected. No credential is returned or logged.
+DEV-06 binds an already authenticated legacy desktop socket and verifies an
+official device identity. The Relay first issues a random 256-bit, socket-bound
+challenge. The client returns an Ed25519-signed, canonical proof containing the
+pinned signing-key ID, device/endpoint ID, hashes of the legacy access token and
+desktop secret, challenge, issue time and expiry. A challenge is consumed by
+the first verification attempt, proofs live for at most five minutes, and a
+proof from another socket, endpoint, credential, device key or time window is
+rejected. Deployment code constructs the verifier from official public keys;
+an authenticated legacy TOFU socket alone is never sufficient to enroll.
+
+The claim request contains only a stable request ID: endpoint ID and the
+existing `access_token` come from the opaque socket proof. Claim outcomes use
+the durable migration-request ledger, so a retry after response loss or process
+restart returns the original terminal result. Repeating a claim preserves
+endpoint ID, token, timestamps and old Web links; a request ID used by another
+endpoint or parameter set is rejected. No credential is returned or logged.
 
 Self-hosted operators use `scripts/enrollment-migrate.js`. Credentials must be
 provided in a private input file and are never accepted as command-line values.
-`--dry-run` validates the whole batch without mutation. `--apply` preflights the
-whole batch in memory and commits all endpoint changes with one namespace CAS;
-there is no durable partial prefix to roll back. Backup restore accepts strict
+`--dry-run` validates the whole batch without mutation. Each version-1 batch
+document contains a stable `request_id`; `--apply` records it in the durable
+migration ledger and commits all endpoint changes plus the terminal result with
+one namespace CAS. A retry returns that sealed result and a different batch
+under the same ID conflicts. A failed request may persist a secret-free failed
+ledger row, but no endpoint-operation prefix can persist. Backup restore accepts strict
 version 1 or version 2 registry snapshots, normalizes them through the same
 validator, and executes as a stable migration request while preserving the
 monotonic request ledger.
 `re_enroll` rotates the access token and therefore explicitly invalidates old
 Web links. Backup files contain keyed digests, not credentials, and still need
-mode 0600/private ACL storage.
+mode 0600/private ACL storage. The CLI rejects symlink/reparse-point ancestors,
+requires input and pre-existing output files to have private ownership/ACLs,
+creates backup output as mode 0600 on POSIX, and applies a protected Windows
+DACL before writing any bytes.
 
-An old v2 Relay may be used for rollback only on a loopback listener behind
-`enrollment-gateway.js`. The gateway validates the first
+An old v2 Relay may be used for rollback only on a literal IPv4 or IPv6 loopback
+listener behind `enrollment-gateway.js`; `localhost` is not accepted as proof of
+loopback binding. The gateway validates the first
 `desktop_endpoint_register` or `web_client_join` frame against the registry
-before forwarding it. Use `nginx-enrollment-gateway.conf` for the public route
-and run `scripts/enrollment-gateway-preflight.js` with every public entrypoint.
-The preflight fails if a route lacks the gateway marker, is unavailable, or the
-legacy Relay URL is not loopback. A bare v2 rollback is never a safe fallback.
+before forwarding it. The first authentication frame is independently capped
+at 16 KiB, while later valid business frames retain the legacy Relay's 4 MiB
+default payload range. The gateway also enforces browser Origin policy,
+connection/ingress limits, a bounded source bucket table and a strict trusted
+proxy allowlist; untrusted forwarding headers are rejected. Use
+`nginx-enrollment-gateway.conf` for the public route and run
+`scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
+preflight fails if a route lacks the gateway marker, is unavailable, the
+anonymous active-denial probe is not rejected, the Relay URL is not literal
+loopback, or OS listener inspection finds a wildcard/non-loopback bind. A bare
+v2 rollback is never a safe fallback.
 `scripts/check-enrollment-gated-v2-rollback.mjs` combines the private endpoint
 inventory coverage report and gateway check; deployment automation must require
 its zero exit status before starting an old v2 binary.
-The preflight checks both the health marker and the WebSocket upgrade marker on
-every declared public route, and requires the old Relay's declared bind host to
-be literal loopback. `scripts/enrollment-gateway-server.js` is the standalone
-gateway entry point; it also refuses a non-loopback listener.
+The preflight checks the health marker, WebSocket upgrade marker and an
+anonymous registration denial on every declared public route. The declared
+bind host remains a required assertion, but does not replace OS listener
+inspection. `scripts/enrollment-gateway-server.js` is the standalone gateway
+entry point; it also refuses a non-loopback listener. The example deployment
+forwards a single nginx-derived client address instead of accepting a caller's
+incoming forwarding chain.

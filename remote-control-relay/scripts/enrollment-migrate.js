@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, readFile, rename, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { lstat, open, rename, rm } from "node:fs/promises";
+import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnrollmentRegistryConfig, EnrollmentRegistry } from "../enrollment-registry.js";
-import { RelayStateStore } from "../relay-state-store.js";
+import {
+  protectWindowsPath,
+  RelayStateStore,
+  verifyWindowsAncestors,
+  verifyWindowsPath,
+} from "../relay-state-store.js";
 import {
   EnrollmentMigrationHandler,
   createEnrollmentBackup,
@@ -18,6 +23,15 @@ function cliError(code) {
   const error = new Error(code);
   error.code = code;
   return error;
+}
+
+function exactDocument(value, keys, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...keys].sort())) {
+    throw cliError(code);
+  }
+  return value;
 }
 
 function parseArguments(argv) {
@@ -41,11 +55,15 @@ function parseArguments(argv) {
 }
 
 async function secureReadJson(path) {
+  await verifyPrivateAncestors(path);
   const metadata = await lstat(path);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_INPUT_BYTES) {
     throw cliError("input_file_unsafe");
   }
   if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) throw cliError("input_permissions_unsafe");
+  if (process.platform === "win32") {
+    try { await verifyWindowsPath(path, "file"); } catch { throw cliError("input_permissions_unsafe"); }
+  }
   const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
   try {
     const afterOpen = await handle.stat();
@@ -58,10 +76,42 @@ async function secureReadJson(path) {
   }
 }
 
+async function verifyPrivateAncestors(path) {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  const relative = absolute.slice(root.length).split(/[\\/]+/u).filter(Boolean);
+  const paths = [];
+  let current = root;
+  for (const component of relative.slice(0, -1)) {
+    current = join(current, component);
+    const metadata = await lstat(current);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw cliError("operator_path_unsafe");
+    paths.push(current);
+  }
+  if (process.platform === "win32") {
+    try { await verifyWindowsAncestors(paths); } catch { throw cliError("operator_path_unsafe"); }
+  }
+}
+
 async function atomicWriteJson(path, value) {
+  await verifyPrivateAncestors(path);
+  try {
+    const existing = await lstat(path);
+    if (!existing.isFile() || existing.isSymbolicLink()) throw cliError("output_file_unsafe");
+    if (process.platform === "win32") await verifyWindowsPath(path, "file");
+    else if ((existing.mode & 0o077) !== 0) throw cliError("output_permissions_unsafe");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   const temporary = `${path}.${process.pid}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
+    if (process.platform === "win32") {
+      await protectWindowsPath(temporary, "file");
+      await verifyWindowsPath(temporary, "file");
+    } else {
+      await handle.chmod(0o600);
+    }
     await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
     await handle.sync();
   } catch (error) {
@@ -70,9 +120,18 @@ async function atomicWriteJson(path, value) {
     throw error;
   }
   await handle.close();
-  await rename(temporary, path);
-  const directory = await open(dirname(path), "r");
-  try { await directory.sync(); } finally { await directory.close(); }
+  try {
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+  if (process.platform === "win32") await verifyWindowsPath(path, "file");
+  else if (((await lstat(path)).mode & 0o077) !== 0) throw cliError("output_permissions_unsafe");
+  if (process.platform !== "win32") {
+    const directory = await open(dirname(path), "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
 }
 
 function publicFailure(error) {
@@ -104,6 +163,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     if (args.mode === "coverage") {
       if (!args.input || args.output) throw cliError("coverage_arguments_invalid");
       const document = await secureReadJson(args.input);
+      exactDocument(document, ["schema", "version", "endpoint_ids"], "inventory_document_invalid");
       if (document?.schema !== "pinvou-legacy-endpoint-inventory" || document?.version !== 1) {
         throw cliError("inventory_document_invalid");
       }
@@ -127,7 +187,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     } else {
       if (!args.input || args.output) throw cliError("batch_arguments_invalid");
       const document = await secureReadJson(args.input);
-      if (document?.schema !== "pinvou-enrollment-migration-batch" || document?.version !== 1) {
+      exactDocument(document, ["schema", "version", "request_id", "operations"], "batch_document_invalid");
+      if (document?.schema !== "pinvou-enrollment-migration-batch" || document?.version !== 1
+        || typeof document?.request_id !== "string") {
         throw cliError("batch_document_invalid");
       }
       result = {
@@ -136,6 +198,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
           registry,
           operations: document.operations,
           dryRun: args.mode === "dry-run",
+          requestId: document.request_id,
         })),
       };
     }
