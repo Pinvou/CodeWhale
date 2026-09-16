@@ -42,7 +42,9 @@ type PostgresRepository struct {
 	// approvalPresenterReady remains nil until GSA-12 installs the closed
 	// command presenters. Directory entries fail closed instead of advertising
 	// a command whose versioned detail cannot yet be rendered safely.
-	approvalPresenterReady func(approvalpolicy.Policy) bool
+	approvalPresenterReady    func(approvalpolicy.Policy) bool
+	approvalPagination        approvalPaginationRuntime
+	approvalPaginationMetrics *ApprovalPaginationMetrics
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -61,6 +63,8 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 		pool: pool, now: func() time.Time { return time.Now().UTC() },
 		walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA,
 		commerceProviderID: defaultCommerceProviderID, commerceAdapterVersion: defaultCommerceAdapterVersion,
+		approvalPagination:        approvalPaginationRuntime{hardDisabled: true},
+		approvalPaginationMetrics: newApprovalPaginationMetrics(),
 	}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()

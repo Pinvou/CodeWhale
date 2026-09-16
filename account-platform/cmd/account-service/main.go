@@ -160,6 +160,7 @@ func main() {
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "approval-pagination-cleanup", account.NewApprovalPaginationCleanupWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "manual-review-sla", account.NewManualReviewSLAWorker(repository, onCallSchedule, time.Minute).Run)
 	go observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).WithCleanup(identities, billingAccountClosure).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {
@@ -215,7 +216,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("account-service", repository.WithApprovalWriterReadiness(compatibility.Wrap(service.Handler(verify))), repository.Ping); err != nil {
+	if err := httpserver.RunWithApplicationAndCollectors("account-service", repository.WithApprovalWriterReadiness(compatibility.Wrap(service.Handler(verify))), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
 		log.Fatal(err)
 	}
 }

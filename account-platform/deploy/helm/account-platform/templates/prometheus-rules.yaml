@@ -62,4 +62,19 @@ spec:
           for: 2m
           labels: { severity: p1 }
           annotations: { summary: "Billing admin pagination cleanup is more than five minutes behind" }
+        - alert: PinvouAccountApprovalPaginationCapacityWarning
+          expr: pinvou_account_approval_pagination_capacity_level{level="warning"} == 1
+          for: 5m
+          labels: { severity: p2 }
+          annotations: { summary: "Account approval pagination reached a 70% capacity watermark" }
+        - alert: PinvouAccountApprovalPaginationCapacityCritical
+          expr: pinvou_account_approval_pagination_capacity_level{level="critical"} == 1
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account approval pagination reached an 85% capacity watermark" }
+        - alert: PinvouAccountApprovalPaginationCleanupBacklog
+          expr: pinvou_account_approval_pagination_cleanup_lag_seconds > 300
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account approval pagination cleanup is more than five minutes behind" }
 {{- end }}

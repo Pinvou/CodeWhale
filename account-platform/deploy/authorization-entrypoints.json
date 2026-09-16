@@ -119,6 +119,7 @@
     { "source": "account-platform/cmd/account-service/main.go", "name": "wallet-provisioning", "permission": "internal.job.wallet-provisioning" },
     { "source": "account-platform/cmd/account-service/main.go", "name": "role-binding-expiry", "permission": "internal.job.role-binding-expiry" },
     { "source": "account-platform/cmd/account-service/main.go", "name": "approval-expiry", "permission": "internal.job.approval-expiry" },
+    { "source": "account-platform/cmd/account-service/main.go", "name": "approval-pagination-cleanup", "permission": "internal.job.approval-pagination-cleanup" },
     { "source": "account-platform/cmd/account-service/main.go", "name": "manual-review-sla", "permission": "internal.job.manual-review-sla" },
     { "source": "account-platform/cmd/account-service/main.go", "name": "account-closure", "permission": "internal.job.account-closure" },
     { "source": "account-platform/cmd/account-service/main.go", "name": "profile-change", "permission": "internal.job.profile-change" },
