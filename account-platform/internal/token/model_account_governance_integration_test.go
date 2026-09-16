@@ -299,6 +299,16 @@ VALUES($1,$2,'rollback-current-only-session',$3,$4,$5,'rollback-current-only',$6
 	}
 	body.ProofSchemaVersion, body.CommandDigest, body.SnapshotDigest = proof.ProofSchemaVersion, proof.CommandDigest, proof.SnapshotDigest
 	body.DomainRevision, body.ProofDigest, body.ApprovalControlEpoch = proof.DomainRevision, hex.EncodeToString(proofDigest[:]), 1
+	pricing.result.FinancialFactRevision++
+	proofDrift := perform()
+	if proofDrift.Code != http.StatusConflict || !strings.Contains(proofDrift.Body.String(), "DOMAIN_REVISION_CHANGED") {
+		t.Fatalf("v2 price revision drift=%d/%s", proofDrift.Code, proofDrift.Body.String())
+	}
+	var prematureResult int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM token_command_results WHERE approval_request_id=$1`, approvalID).Scan(&prematureResult); err != nil || prematureResult != 0 {
+		t.Fatalf("v2 drift produced a Token claim=%d err=%v", prematureResult, err)
+	}
+	pricing.result.FinancialFactRevision--
 	first, second := perform(), perform()
 	var firstResult, replayResult TokenCommandResult
 	if first.Code != http.StatusOK || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &replayResult) != nil || firstResult.Status != "SUCCEEDED" || firstResult.CommandReference != replayResult.CommandReference {
