@@ -42,7 +42,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | PENDING |
+| GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | PENDING |
 | GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | PENDING |
 | GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | PENDING |
@@ -213,6 +213,8 @@ GSA-18 详情路由并发防错（仍PARTIAL / REVIEW_PENDING）：审批详情�
 GSA-19 钱包终态替代业务入口（仍PARTIAL / REVIEW_PENDING）：仅原申请人可从REJECTED/WITHDRAWN/EXPIRED/INVALIDATED的调账行显式选择“新建替代调账”；新表单固定原钱包但要求重新填写金额与原因。创建Billing新调整前重读原Account审批详情并校验申请人、终态、命令、原目标及钱包；新Billing记录获得新ID、新幂等键，Account审批携`supersedes_request_id`但不继承旧授权或旧金额。替代关联编码进新Billing请求幂等键，列表恢复提交仍能重建完全相同的审批草稿；执行失败未知、在途或EXECUTED均无替代入口。定向状态/关联测试、Portal构建及架构检查通过；真实跨域E2E与Token业务草稿编辑仍待完成。
 
 GSA-19 Token业务DRAFT更新入口（仍PARTIAL / REVIEW_PENDING）：三个Token高风险业务确认框仍先由当前领域impact/precheck重建命令与快照；受控历史若识别出唯一同命令同目标DRAFT，则依用户确认的本次原因/事实按当前版本CAS更新该申请、重读新版本和SUBMIT动作后提交，不新建第二申请。若历史不完整、另有在途或未知状态则失败关闭；三语按钮明确为“提交或更新审批申请”。写入未知不自动重试；定向状态/写序测试、Portal构建、三语和架构检查通过。真实浏览器交互与六命令跨域E2E仍待验，任务保持PARTIAL。
+
+GSA-20 审计导出幂等及表单切片（IN_PROGRESS / PARTIAL / REVIEW_PENDING）：移除原生`window.prompt`，导出原因改为页面可访问表单；一次导出尝试在首次发送前冻结筛选、原因、PII选项与幂等键，响应不明时仅以相同请求重试，不得由客户端悄然生成第二份任务。导出任务保留刷新、一次性票据下载和显式新导出入口；服务端原有权限、近期认证、限额与密钥生命周期保持权威。定向冻结/重试测试、Portal构建、三语和架构门禁通过。系统/安全、偏好及320/768/1440px与200%缩放、读屏/键盘、真实导出生命周期尚未验收；GSA-19跨域欠账仍保留，不将GSA-20标为CODE_COMPLETE。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

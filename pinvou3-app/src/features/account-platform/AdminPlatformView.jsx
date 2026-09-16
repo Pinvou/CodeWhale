@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, editWalletAdjustmentApproval, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState, walletAdjustmentApprovalDraft, walletAdjustmentReplacementReference, walletReplacementEligible } from './admin-finance.js';
 import { createAndSubmitGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
+import { newAuditExportAttempt, submitAuditExportAttempt } from './admin-audit-export.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
@@ -5906,6 +5907,9 @@ function Audit({ copy, data, client, setData, permissions }) {
   const [includePII, setIncludePII] = useState(false);
   const [exportJob, setExportJob] = useState(null);
   const [exportKey, setExportKey] = useState('');
+  const [exportReason, setExportReason] = useState('');
+  const [exportAttempted, setExportAttempted] = useState(false);
+  const exportAttemptRef = useRef(null);
   const canExport = (permissions || []).includes('platform.audit.export');
   const canExportPII = (permissions || []).includes('platform.audit.pii.export');
   const items = data.audits || [];
@@ -5939,17 +5943,19 @@ function Audit({ copy, data, client, setData, permissions }) {
     }
   };
   const createExport = async () => {
-    const filter = queryFilters();
-    if (!filter.from || !filter.to) {
-      setError(copy.audit.exportRangeRequired);
-      return;
+    if (!exportAttemptRef.current) {
+      const filter = queryFilters();
+      if (!filter.from || !filter.to) { setError(copy.audit.exportRangeRequired); return; }
+      try {
+        exportAttemptRef.current = newAuditExportAttempt(filter, exportReason, includePII,
+          `audit-export-${secureRequestID()}`);
+      } catch { setError(copy.audit.exportRequestInvalid); return; }
+      setExportAttempted(true);
     }
-    const reason = window.prompt(copy.audit.exportReason);
-    if (!reason) return;
     setBusy(true);
     setError('');
     try {
-      const job = await client.createAuditExport(filter, reason, includePII);
+      const job = await submitAuditExportAttempt(client, exportAttemptRef.current);
       setExportJob(job);
       setExportKey(job.decryption_key || '');
     } catch {
@@ -6041,11 +6047,7 @@ function Audit({ copy, data, client, setData, permissions }) {
   return (
     <>
     <section className="adm-panel">
-      <SectionHeader title={copy.audit.title} count={items.length} copy={copy}>
-        <button disabled={busy || !canExport} title={!canExport ? copy.permissionDenied : undefined} onClick={createExport}>
-          {copy.audit.export}
-        </button>
-      </SectionHeader>
+      <SectionHeader title={copy.audit.title} count={items.length} copy={copy} />
       <form className="adm-ops-form" onSubmit={search}>
         <input placeholder={copy.audit.actorFilter} value={filters.actor} onChange={(event) => setFilters((current) => ({ ...current, actor: event.target.value }))} />
         <input
@@ -6099,13 +6101,15 @@ function Audit({ copy, data, client, setData, permissions }) {
           <span>{copy.audit.to}</span>
           <input type="datetime-local" value={filters.to} onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))} />
         </label>
-        <label>
-          <input type="checkbox" checked={includePII} disabled={!canExportPII} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />
-          {copy.audit.includePII}
-        </label>
         <button disabled={busy}>{copy.searchAction}</button>
       </form>
       <p>{copy.audit.exportLimits}</p>
+      {canExport && <form className="adm-ops-form" onSubmit={(event) => { event.preventDefault(); void createExport(); }}>
+        <label>{copy.audit.exportReason}<input value={exportReason} minLength="10" maxLength="500" disabled={exportAttempted || busy || Boolean(exportJob)} onChange={(event) => setExportReason(event.target.value)} required /></label>
+        <label><input type="checkbox" checked={includePII} disabled={!canExportPII || exportAttempted || busy || Boolean(exportJob)} title={!canExportPII ? copy.permissionDenied : undefined} onChange={(event) => setIncludePII(event.target.checked)} />{copy.audit.includePII}</label>
+        <button type="submit" disabled={busy || Boolean(exportJob)}>{exportAttempted ? copy.audit.retryExport : copy.audit.export}</button>
+        {exportAttempted && !exportJob && <small role="status">{copy.audit.retrySameExport}</small>}
+      </form>}
       {exportJob && (
         <div className="adm-inline-message">
           <strong>
@@ -6128,9 +6132,10 @@ function Audit({ copy, data, client, setData, permissions }) {
               {copy.audit.download}
             </button>
           )}
+          <button type="button" disabled={busy} onClick={() => { exportAttemptRef.current = null; setExportAttempted(false); setExportJob(null); setExportKey(''); setExportReason(''); setIncludePII(false); }}>{copy.audit.newExport}</button>
         </div>
       )}
-      {error && <div className="adm-inline-message error">{error}</div>}
+      {error && <div className="adm-inline-message error" role="alert">{error}</div>}
       <Table columns={columns} items={items} copy={copy} />
     </section>
     <RunbookBoundary copy={copy} permissions={permissions} mode="audit" />

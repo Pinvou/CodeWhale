@@ -356,12 +356,13 @@ export class AdminPlatformClient {
   audit(auditID, signal) {
     return this.request('account', `/admin/v1/audit-logs/${encodeURIComponent(auditID)}`, signal);
   }
-  createAuditExport(filter, reason, includePII = false) {
+  createAuditExport(filter, reason, includePII = false, idempotencyKey) {
+    if (!idempotencyKey) throw new Error('audit export idempotency key is required');
     return this.mutate('account', '/admin/v1/audit-exports', 'POST', {
       filter,
       reason,
       include_pii: includePII,
-      idempotency_key: `audit-export-${secureRequestID()}`,
+      idempotency_key: idempotencyKey,
     });
   }
   auditExport(exportID, signal) {
