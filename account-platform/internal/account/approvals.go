@@ -539,6 +539,13 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 		if err != nil {
 			return ApprovalRequest{}, err
 		}
+		// The owner may disable a command while the bounded proof request is
+		// in flight. Reobserve activation after proof, without holding Account
+		// control/request locks. The executor still rechecks its domain revision
+		// before any effect; this is not a cross-database transaction.
+		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
+			return ApprovalRequest{}, err
+		}
 		checkpoint, proofResult = &observed, &result
 	}
 	// A missing or already-known unusable writer must not take the request row
@@ -715,8 +722,10 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 			return rollback(ApprovalRequest{}, ErrApprovalProofInvalid)
 		}
 	}
-	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
-		return rollback(ApprovalRequest{}, err)
+	if checkpoint == nil {
+		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
+			return rollback(ApprovalRequest{}, err)
+		}
 	}
 	if checkpoint == nil && !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
 		invalidated, invalidationErr := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "INVALIDATED", "RESOURCE_VERSION_CHANGED", map[string]any{"observed": jsonOrDefault(observedVersions, `{}`)}, now, stateEventID)

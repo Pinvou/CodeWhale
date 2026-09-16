@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/google/uuid"
 )
 
@@ -18,6 +19,26 @@ type approvalProofSourceFunc func(context.Context, uuid.UUID, approvalencoding.P
 
 func (fn approvalProofSourceFunc) Proof(ctx context.Context, id uuid.UUID, artifacts approvalencoding.ProofArtifacts) (ApprovalProofResult, error) {
 	return fn(ctx, id, artifacts)
+}
+
+type approvalActivationCallbackReader struct {
+	snapshot billinggovernance.Snapshot
+	calls    int
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (reader *approvalActivationCallbackReader) Snapshot(ctx context.Context) (billinggovernance.Snapshot, error) {
+	reader.calls++
+	if reader.calls == 2 {
+		close(reader.entered)
+		select {
+		case <-reader.release:
+		case <-ctx.Done():
+			return billinggovernance.Snapshot{}, ctx.Err()
+		}
+	}
+	return reader.snapshot, nil
 }
 
 func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
@@ -123,10 +144,47 @@ WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 	}
 	assertNoAuthorization("AUTH_CHANGED")
 	changeAuthorization = false
+	// The second activation read runs after proof. If it held the Account
+	// control lock, this concurrent FENCE could not commit until release.
+	previousActivation := repository.billingGovernanceActivation
+	blockedActivation := &approvalActivationCallbackReader{
+		snapshot: billingAdvancementSnapshot("ACTIVE"), entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	repository.billingGovernanceActivation = blockedActivation
+	result := make(chan error, 1)
+	go func() {
+		_, err := repository.DecideApprovalRequest(ctx, principal, request.ID, request.Version, "APPROVED", "independent proof", nil)
+		result <- err
+	}()
+	select {
+	case <-blockedActivation.entered:
+	case <-time.After(5 * time.Second):
+		close(blockedActivation.release)
+		t.Fatal("proof did not reach the post-proof activation read")
+	}
+	fenceCtx, stopFence := context.WithTimeout(ctx, time.Second)
+	_, fenceErr := db.adminPool.Exec(fenceCtx, `UPDATE account_approval_control.admin_approval_control
+SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now()
+WHERE control_id='ADMIN_APPROVAL'`)
+	stopFence()
+	close(blockedActivation.release)
+	if fenceErr != nil {
+		t.Fatalf("remote activation held Account control lock: %v", fenceErr)
+	}
+	if err := <-result; !errors.Is(err, ErrApprovalRelayFenced) {
+		t.Fatalf("fence must defeat the completed proof: %v", err)
+	}
+	assertNoAuthorization("POST_PROOF_ACTIVATION_FENCE")
+	repository.billingGovernanceActivation = previousActivation
+	if _, err := db.adminPool.Exec(ctx, `UPDATE account_approval_control.admin_approval_control
+SET authorization_relay_state='RUNNING',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now()
+WHERE control_id='ADMIN_APPROVAL'`); err != nil {
+		t.Fatal(err)
+	}
 	// v1 accepts the legacy transport field, but it is not an authorization
 	// input once the singleton is proof-required.
 	approved, err := repository.DecideApprovalRequest(ctx, principal, request.ID, request.Version, "APPROVED", "independent proof", json.RawMessage(`{"forged":999}`))
-	if err != nil || approved.Status != "APPROVED" || calls != 4 {
+	if err != nil || approved.Status != "APPROVED" || calls != 5 {
 		t.Fatalf("proof decision failed or used observed versions: %v status=%s calls=%d", err, approved.Status, calls)
 	}
 	var serialization string
@@ -148,7 +206,7 @@ WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 	v2Approval := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, v2Path, v2Approved.ID.String(),
 		map[string]any{"expected_version": v2Approved.Version, "decision": "APPROVED", "reason": "independent v2 proof"})
 	if v2Approval.Code != http.StatusOK || !strings.Contains(v2Approval.Body.String(), `"status":"APPROVED"`) ||
-		strings.Contains(v2Approval.Body.String(), "normalized_command") || calls != 5 {
+		strings.Contains(v2Approval.Body.String(), "normalized_command") || calls != 6 {
 		t.Fatalf("v2 approval did not share proof writer: %d %s calls=%d", v2Approval.Code, v2Approval.Body.String(), calls)
 	}
 	// Both write versions share the request state machine. V2 rejects all
@@ -164,7 +222,7 @@ WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 	response := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, path, rejected.ID.String(),
 		map[string]any{"expected_version": rejected.Version, "decision": "REJECTED", "reason": "independent rejection"})
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"REJECTED"`) ||
-		strings.Contains(response.Body.String(), "normalized_command") || calls != 5 {
+		strings.Contains(response.Body.String(), "normalized_command") || calls != 6 {
 		t.Fatalf("v2 safe close did not return a closed detail or called proof: %d %s calls=%d", response.Code, response.Body.String(), calls)
 	}
 }
