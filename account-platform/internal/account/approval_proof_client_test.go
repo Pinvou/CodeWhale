@@ -152,3 +152,24 @@ func TestApprovalProofCommandReasonWhitelist(t *testing.T) {
 		t.Fatal("reason whitelist widened across commands")
 	}
 }
+
+func TestApprovalProofClientNeverFollowsRedirect(t *testing.T) {
+	artifacts, _ := approvalProofClientFixture(t)
+	var redirected atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/approval-command-proofs" {
+			redirected.Add(1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/untrusted-proof-target", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	source, err := NewHTTPApprovalProofSource(server.URL, server.URL, "test-workload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Proof(context.Background(), uuid.New(), artifacts); !errors.Is(err, ErrApprovalProofUnavailable) || redirected.Load() != 0 {
+		t.Fatalf("internal proof redirect followed: %v redirected=%d", err, redirected.Load())
+	}
+}

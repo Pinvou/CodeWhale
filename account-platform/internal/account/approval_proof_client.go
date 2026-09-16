@@ -56,7 +56,11 @@ func NewHTTPApprovalProofSource(tokenURL, billingURL, serviceToken string) (*HTT
 	if err != nil || strings.TrimSpace(serviceToken) == "" {
 		return nil, ErrApprovalProofUnavailable
 	}
-	return &HTTPApprovalProofSource{tokenURL: token, billingURL: billing, serviceToken: strings.TrimSpace(serviceToken), client: observability.NewHTTPClient(2 * time.Second)}, nil
+	client := observability.NewHTTPClient(2 * time.Second)
+	// This is a credentialed internal endpoint, not a navigable URL. Even a
+	// same-host redirect must not select a different proof authority/path.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &HTTPApprovalProofSource{tokenURL: token, billingURL: billing, serviceToken: strings.TrimSpace(serviceToken), client: client}, nil
 }
 
 func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid.UUID, artifacts approvalencoding.ProofArtifacts) (ApprovalProofResult, error) {
