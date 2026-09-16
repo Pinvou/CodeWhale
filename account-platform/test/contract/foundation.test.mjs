@@ -433,7 +433,7 @@ test('operations API is role protected and limits mutations to documented manage
     '/billing/internal/v1/token-account-wallet-provisioning-receipts/{command_reference}',
   ]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
-    if (!serviceOnlyPaths.has(pathName)) assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/token\/admin\/v2\/(?:provisionings\/\{provisioning_id\}|token-accounts\/\{token_account_id\}(?:\/(?:routes|impact\/route))?)$)/);
+    if (!serviceOnlyPaths.has(pathName)) assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/account\/admin\/v2\/approval-directory$|\/token\/admin\/v2\/(?:provisionings\/\{provisioning_id\}|token-accounts\/\{token_account_id\}(?:\/(?:routes|impact\/route))?)$)/);
     for (const operation of Object.values(pathItem)) {
       if (serviceOnlyPaths.has(pathName)) assert.deepEqual(operation.security, [{ serviceToken: [] }], `${pathName} must remain service-authenticated`);
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
