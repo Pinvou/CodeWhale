@@ -76,7 +76,10 @@ func (r *PostgresRepository) readApprovalProofCheckpoint(ctx context.Context, pr
 	if err != nil {
 		return approvalProofCheckpoint{}, err
 	}
-	if control.Mode != AdminApprovalModeProofRequired || !control.ProofRequired || control.ApprovalWireVersion != 2 || control.AuthorizationRelayState != AdminApprovalRelayRunning {
+	if err := approvalApproveGateError(control); err != nil {
+		return approvalProofCheckpoint{}, err
+	}
+	if control.Mode != AdminApprovalModeProofRequired || !control.ProofRequired || control.ApprovalWireVersion != 2 {
 		return approvalProofCheckpoint{}, ErrApprovalAuthorizationControlChanged
 	}
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{

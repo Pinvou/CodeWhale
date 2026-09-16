@@ -508,6 +508,9 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
+	if err := approvalApproveGateError(control); err != nil {
+		return ApprovalRequest{}, err
+	}
 	if control.Mode == AdminApprovalModeProofRequired {
 		// The writer is a prerequisite for a useful domain proof. Check it
 		// before spending the owner's bounded read budget.
@@ -598,7 +601,7 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	} else if proofResult == nil || control.Mode != AdminApprovalModeProofRequired ||
 		control.ApprovalEpoch != checkpoint.Control.ApprovalEpoch ||
 		control.ApprovalWireVersion != checkpoint.Control.ApprovalWireVersion || !control.ProofRequired {
-		return rollback(ApprovalRequest{}, ErrApprovalAuthorizationControlChanged)
+		return rollback(ApprovalRequest{}, ErrApprovalRequestChanged)
 	}
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
@@ -612,7 +615,7 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		return rollback(ApprovalRequest{}, ErrForbidden)
 	}
 	if checkpoint != nil && *actorID != checkpoint.ActorID {
-		return rollback(ApprovalRequest{}, ErrApprovalAuthorizationChanged)
+		return rollback(ApprovalRequest{}, ErrApprovalRequestChanged)
 	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
@@ -691,7 +694,7 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 	if checkpoint != nil {
 		if bindingID != checkpoint.BindingID || authorizationVersion != checkpoint.AuthorizationVersion ||
 			approvalProofNeedsRecentAuthentication(item.CommandType) && !recentlyAuthenticated(principal.AuthenticatedAt, now) {
-			return rollback(ApprovalRequest{}, ErrApprovalAuthorizationChanged)
+			return rollback(ApprovalRequest{}, ErrApprovalRequestChanged)
 		}
 		artifacts, conversionErr := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
 			CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, SnapshotSchemaVersion: item.SnapshotSchemaVersion,

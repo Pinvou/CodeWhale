@@ -695,6 +695,17 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusServiceUnavailable, "APPROVAL_PROOF_UNAVAILABLE", "the authoritative domain proof is temporarily unavailable"
 	case errors.Is(err, ErrApprovalProofTimeout):
 		status, code, message = http.StatusGatewayTimeout, "APPROVAL_PROOF_TIMEOUT", "the authoritative domain proof timed out"
+	case errors.Is(err, ErrApprovalRequestChanged):
+		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_CHANGED", "the approval request changed after the proof checkpoint"
+	case errors.Is(err, ErrApprovalRelayFenced):
+		w.Header().Set("Retry-After", "5")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_RELAY_FENCED", "approval authorization relay is fenced"
+	case errors.Is(err, ErrApprovalQuiescing):
+		w.Header().Set("Retry-After", "5")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_QUIESCING", "approval authorization is quiescing"
+	case errors.Is(err, ErrApprovalSafeRollback):
+		w.Header().Set("Retry-After", "5")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_SAFE_ROLLBACK", "approval authorization is in safe rollback"
 	case errors.Is(err, ErrApprovalSnapshotRejected):
 		status, code, message = http.StatusConflict, "APPROVAL_SNAPSHOT_REJECTED", "the authoritative approval snapshot request was rejected"
 	case errors.Is(err, ErrApprovalCommandNotExecutable):
@@ -712,7 +723,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		w.Header().Set("Cache-Control", "no-store")
 		status, code, message = http.StatusServiceUnavailable, "APPROVAL_AUTHORIZATION_UNAVAILABLE", "approval authorization state is temporarily unavailable"
 	}
-	if strings.HasPrefix(code, "APPROVAL_PROOF_") {
+	if strings.HasPrefix(code, "APPROVAL_PROOF_") || code == "APPROVAL_REQUEST_CHANGED" ||
+		code == "APPROVAL_RELAY_FENCED" || code == "APPROVAL_QUIESCING" || code == "APPROVAL_SAFE_ROLLBACK" {
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))

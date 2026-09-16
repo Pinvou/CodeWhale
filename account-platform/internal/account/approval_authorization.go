@@ -24,7 +24,30 @@ const approvalAuthorizationEventType = "account.approval-command.authorized.v1"
 var (
 	ErrApprovalAuthorizationControlChanged = errors.New("approval authorization control changed")
 	ErrApprovalAuthorizationInvalid        = errors.New("approval authorization facts are invalid")
+	ErrApprovalQuiescing                   = errors.New("approval authorization is quiescing")
+	ErrApprovalRelayFenced                 = errors.New("approval authorization relay is fenced")
+	ErrApprovalSafeRollback                = errors.New("approval authorization is in safe rollback")
+	ErrApprovalRequestChanged              = errors.New("approval request changed after proof checkpoint")
 )
+
+func approvalApproveGateError(control AdminApprovalControl) error {
+	actions, err := AdminApprovalActionsFor(control)
+	if err != nil {
+		return err
+	}
+	switch {
+	case control.Mode == AdminApprovalModeSafeRollback:
+		return ErrApprovalSafeRollback
+	case control.Mode == AdminApprovalModeQuiescing:
+		return ErrApprovalQuiescing
+	case control.AuthorizationRelayState == AdminApprovalRelayFenced:
+		return ErrApprovalRelayFenced
+	case !actions.Approve:
+		return ErrApprovalAuthorizationControlChanged
+	default:
+		return nil
+	}
+}
 
 type ApprovalAuthorizationRecord struct {
 	EventID              uuid.UUID
@@ -68,12 +91,8 @@ func lockApprovalAuthorizationControl(ctx context.Context, tx pgx.Tx) (AdminAppr
 	if err != nil {
 		return AdminApprovalControl{}, err
 	}
-	actions, err := AdminApprovalActionsFor(control)
-	if err != nil {
+	if err := approvalApproveGateError(control); err != nil {
 		return AdminApprovalControl{}, err
-	}
-	if !actions.Approve || control.AuthorizationRelayState != AdminApprovalRelayRunning {
-		return AdminApprovalControl{}, ErrApprovalAuthorizationControlChanged
 	}
 	return control, nil
 }
