@@ -1,7 +1,7 @@
 import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { createAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
@@ -2508,16 +2508,28 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
   const requestResume = async (product = null, existingApproval = null) => {
     const targetKey = product?.product_id || 'provider';
     const reason = String(reasons[targetKey] || '').trim();
-    let approvalInput = null;
-    if (!existingApproval) {
-      if (!requestKeysRef.current.has(targetKey)) requestKeysRef.current.set(targetKey, `payment-control-resume-${secureRequestID()}`);
-      approvalInput = buildPaymentControlApprovalDraft(control, product, reason, requestKeysRef.current.get(targetKey));
-    }
-    if (!canRequest || (!approvalInput && !existingApproval)) return;
+    if (!canRequest || (!existingApproval && reason.length < 10)) return;
     setBusyTarget(targetKey);
     setNotice('');
     setError('');
     try {
+      let approvalInput = null;
+      if (!existingApproval) {
+        const freshControl = await client.paymentProviderControls();
+        const freshProduct = product ? freshControl?.products?.find((item) => item.product_id === product.product_id) : null;
+        if (!freshControl?.provider_id || (!product && freshControl.new_orders_enabled) ||
+          (product && (!freshProduct || freshProduct.new_orders_enabled))) {
+          throw new Error('payment control changed');
+        }
+        const commandType = product ? 'PAYMENT_PRODUCT_RESUME' : 'PAYMENT_PROVIDER_RESUME';
+        const targetID = product?.product_id || freshControl?.provider_id;
+        const page = await client.governedApprovalRequests({ command_type: commandType, target: targetID, limit: 200 });
+        const supersedesID = paymentControlSupersedesRequest(page, commandType, targetID);
+        if (!requestKeysRef.current.has(targetKey)) requestKeysRef.current.set(targetKey, `payment-control-resume-${secureRequestID()}`);
+        approvalInput = buildPaymentControlApprovalDraft(freshControl, freshProduct, reason,
+          requestKeysRef.current.get(targetKey), supersedesID);
+        if (!approvalInput) throw new Error('payment control resume draft unavailable');
+      }
       await submitPaymentControlApproval(client, approvalInput, existingApproval);
       setReasons((current) => ({ ...current, [targetKey]: '' }));
       requestKeysRef.current.delete(targetKey);

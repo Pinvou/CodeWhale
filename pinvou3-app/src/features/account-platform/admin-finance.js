@@ -8,7 +8,7 @@ export function adjustmentApprovalAction(adjustment, approval, { canRequest = fa
   return 'none';
 }
 
-export function buildPaymentControlApprovalDraft(control, product, reason, idempotencyKey) {
+export function buildPaymentControlApprovalDraft(control, product, reason, idempotencyKey, supersedesRequestID = '') {
   const draftInput = product ? product.resume_draft : control?.resume_draft;
   const normalizedReason = String(reason || '').trim();
   if (!control || !draftInput || normalizedReason.length < 10 || !idempotencyKey) return null;
@@ -19,6 +19,7 @@ export function buildPaymentControlApprovalDraft(control, product, reason, idemp
     redacted_evidence: [],
     expected_impact: { provider_id: control.provider_id, product_id: product?.product_id || null, new_orders_enabled: true },
     financial_snapshot: { new_orders_enabled: false, provider_control_version: control.provider_control_version, product_control_version: product?.version || null },
+    ...(supersedesRequestID ? { supersedes_request_id: supersedesRequestID } : {}),
   };
 }
 
@@ -26,8 +27,27 @@ export function paymentControlApprovalAction(approval, { canRequest = false } = 
   if (!approval) return canRequest ? 'create' : 'none';
   if (approval.status === 'DRAFT' && canRequest && (approval.allowed_actions || []).includes('SUBMIT')) return 'submit';
   if (['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING'].includes(approval.status)) return 'view';
-  if (['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTION_FAILED', 'EXECUTED'].includes(approval.status)) return canRequest ? 'create' : 'view';
+  if (approval.status === 'EXECUTION_FAILED') return 'view';
+  if (['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTED'].includes(approval.status)) return canRequest ? 'create' : 'view';
   return 'view';
+}
+
+export function paymentControlSupersedesRequest(page, commandType, targetID) {
+  if (!page || !Array.isArray(page.items) || page.has_more === true || page.items.length >= 200) {
+    throw Object.assign(new Error('approval history is incomplete'), { code: 'APPROVAL_HISTORY_INCOMPLETE' });
+  }
+  const matching = page.items.filter((item) => item.command_type === commandType &&
+    (item.target?.resource_id || item.target_resource_id) === targetID);
+  const current = matching[0]; // The Account list is ordered by updated_at DESC, id DESC.
+  if (!current) return '';
+  if (['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTION_FAILED'].includes(current.status)) {
+    throw Object.assign(new Error('an approval is already open or awaiting recovery'), { code: 'APPROVAL_ALREADY_ACTIVE' });
+  }
+  if (current.status === 'EXECUTED') return '';
+  if (['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED'].includes(current.status) && current.approval_request_id) {
+    return current.approval_request_id;
+  }
+  throw Object.assign(new Error('approval state is not eligible for replacement'), { code: 'APPROVAL_REPLACEMENT_UNAVAILABLE' });
 }
 
 export async function submitPaymentControlApproval(client, draftInput, existingApproval = null) {
