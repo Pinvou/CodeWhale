@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
@@ -34,8 +35,9 @@ func (r *PostgresRepository) confirmedResumeProbe(ctx context.Context, providerI
 // currentBillingProofInput reconstructs the closed legacy projection from the
 // current rows, retaining only the already-frozen normalized command. A
 // state/invariant failure is a DENY only when all revision facts are readable.
-func currentBillingProofInput(ctx context.Context, repository billingProofFacts, frozen approvalencoding.LegacyProofInput) (approvalencoding.LegacyProofInput, string, error) {
+func currentBillingProofInput(ctx context.Context, repository billingProofFacts, frozen approvalencoding.LegacyProofInput) (approvalencoding.LegacyProofInput, string, string, error) {
 	current := frozen
+	ownerState := ""
 	marshal := func(value any) json.RawMessage {
 		encoded, _ := json.Marshal(value)
 		return encoded
@@ -49,68 +51,71 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 			RequestedBy        uuid.UUID `json:"requested_by"`
 		}
 		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.AdjustmentID == uuid.Nil {
-			return current, "", ErrApprovalSnapshotMismatch
+			return current, "", "", ErrApprovalSnapshotMismatch
 		}
 		adjustment, err := repository.AdjustmentForExecution(ctx, command.AdjustmentID)
 		if err != nil {
-			return current, "", err
+			return current, "", "", err
 		}
 		wallet, err := repository.GetWallet(ctx, adjustment.WalletID)
 		if err != nil {
-			return current, "", err
+			return current, "", "", err
 		}
+		ownerState = adjustment.Status + ":" + wallet.Status
 		current.CriticalResourceVersions = marshal(map[string]any{"adjustment_version": adjustment.Version})
 		current.FinancialSnapshot = marshal(map[string]any{"wallet_id": adjustment.WalletID, "delta_microcredits": adjustment.AmountMicrocredits})
 		if adjustment.ID != command.AdjustmentID || adjustment.ID.String() != frozen.TargetResourceID || adjustment.WalletID != command.WalletID || adjustment.AmountMicrocredits != command.AmountMicrocredits || adjustment.RequestedBy != command.RequestedBy {
-			return current, "SNAPSHOT_MISMATCH", nil
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 		if adjustment.Status != "PENDING_APPROVAL" || wallet.Status != "ACTIVE" {
-			return current, "RESOURCE_STATE_CHANGED", nil
+			return current, "RESOURCE_STATE_CHANGED", ownerState, nil
 		}
 	case "PAYMENT_PROVIDER_RESUME":
 		var command ProviderResumeVersions
 		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ProbeOrderID == uuid.Nil {
-			return current, "", ErrApprovalSnapshotMismatch
+			return current, "", "", ErrApprovalSnapshotMismatch
 		}
 		actual, err := repository.providerResumeVersions(ctx, command)
 		if err != nil {
-			return current, "", err
+			return current, "", "", err
 		}
 		confirmed, err := repository.confirmedResumeProbe(ctx, command.ProviderID, command.ProviderVersion, "", command.ProbeOrderID)
 		if err != nil {
-			return current, "", err
+			return current, "", "", err
 		}
+		ownerState = "confirmed:" + strconv.FormatBool(confirmed)
 		current.CriticalResourceVersions = marshal(actual)
 		current.FinancialSnapshot = marshal(map[string]any{"new_orders_enabled": false, "provider_control_version": actual.ProviderControlVersion, "product_control_version": nil})
 		if !confirmed {
-			return current, "EVIDENCE_MISSING", nil
+			return current, "EVIDENCE_MISSING", ownerState, nil
 		}
 		if actual.ProviderID != frozen.TargetResourceID || !sameProviderResumeVersions(actual, command) {
-			return current, "SNAPSHOT_MISMATCH", nil
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	case "PAYMENT_PRODUCT_RESUME":
 		var command ProductResumeVersions
 		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ProbeOrderID == uuid.Nil {
-			return current, "", ErrApprovalSnapshotMismatch
+			return current, "", "", ErrApprovalSnapshotMismatch
 		}
 		actual, err := repository.productResumeVersions(ctx, command)
 		if err != nil {
-			return current, "", err
+			return current, "", "", err
 		}
 		confirmed, err := repository.confirmedResumeProbe(ctx, command.ProviderID, command.ProviderVersion, command.ProductID, command.ProbeOrderID)
 		if err != nil {
-			return current, "", err
+			return current, "", "", err
 		}
+		ownerState = "confirmed:" + strconv.FormatBool(confirmed)
 		current.CriticalResourceVersions = marshal(actual)
 		current.FinancialSnapshot = marshal(map[string]any{"new_orders_enabled": false, "provider_control_version": actual.ProviderControlVersion, "product_control_version": actual.ProductControlVersion})
 		if !confirmed {
-			return current, "EVIDENCE_MISSING", nil
+			return current, "EVIDENCE_MISSING", ownerState, nil
 		}
 		if actual.ProductID != frozen.TargetResourceID || !sameProductResumeVersions(actual, command) {
-			return current, "SNAPSHOT_MISMATCH", nil
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:
-		return current, "", errors.New("unsupported Billing proof command")
+		return current, "", "", errors.New("unsupported Billing proof command")
 	}
-	return current, "", nil
+	return current, "", ownerState, nil
 }

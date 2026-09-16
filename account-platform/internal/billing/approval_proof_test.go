@@ -152,6 +152,16 @@ func TestBillingApprovalProofRechecksActivationAndOwnerFacts(t *testing.T) {
 	if _, err := approvalencoding.DeriveProofDigest(proof); err != nil {
 		t.Fatalf("response must meet the closed transport: %v", err)
 	}
+	staleInput := input
+	staleInput.CriticalResourceVersions = marshal(map[string]any{"adjustment_version": 2})
+	staleArtifacts, err := approvalencoding.ConvertLegacyProofInput(staleInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := service.billingApprovalProof(context.Background(), approvalencoding.ProofRequest{ApprovalRequestID: uuid.New(), Artifacts: staleArtifacts})
+	if err != nil || stale.ReasonCode != "SNAPSHOT_MISMATCH" || stale.DomainRevision != proof.DomainRevision {
+		t.Fatalf("same owner facts must retain domain revision across requests: %+v err=%v", stale, err)
+	}
 	reader.adjustment.Version++
 	changed, err := service.billingApprovalProof(context.Background(), request)
 	if err != nil || changed.Verdict != "DENY" || changed.ReasonCode != "SNAPSHOT_MISMATCH" || changed.DomainRevision == proof.DomainRevision {

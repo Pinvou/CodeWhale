@@ -56,7 +56,7 @@ func (s *Service) billingApprovalProof(ctx context.Context, request approvalenco
 	if err != nil {
 		return approvalencoding.ProofResponse{}, errBillingApprovalProofUnavailable
 	}
-	current, reason, err := currentBillingProofInput(ctx, repository, frozen)
+	current, reason, ownerState, err := currentBillingProofInput(ctx, repository, frozen)
 	if err != nil {
 		return approvalencoding.ProofResponse{}, errBillingApprovalProofUnavailable
 	}
@@ -77,10 +77,11 @@ func (s *Service) billingApprovalProof(ctx context.Context, request approvalenco
 	if err != nil || unchanged.Version != active.Version {
 		return approvalencoding.ProofResponse{}, errBillingApprovalProofUnavailable
 	}
-	// The persisted status/evidence reason participates even if the typed
-	// snapshot has no corresponding field (e.g. a posted adjustment).
+	// The owner status/evidence participates even if the typed snapshot has
+	// no corresponding field. The request-specific DENY reason does not:
+	// domain_revision must be a function of current domain facts only.
 	hash := sha256.New()
-	for _, part := range []string{command, strconv.FormatInt(active.Version, 10), string(current.CriticalResourceVersions), string(current.FinancialSnapshot), reason} {
+	for _, part := range []string{command, strconv.FormatInt(active.Version, 10), string(current.CriticalResourceVersions), string(current.FinancialSnapshot), ownerState} {
 		_, _ = hash.Write([]byte(part))
 		_, _ = hash.Write([]byte{0})
 	}
