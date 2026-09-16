@@ -233,5 +233,37 @@ targets from deployment-specific load tests, not these hard ceilings.
 
 Registry, storage, digest-key, corruption, and persistence failures reject authorization;
 no in-memory success is returned after a failed durable commit. DEV-02 supplies
-authenticated migration/admin tooling, and DEV-06 supplies protocol routing,
-rate limits, origin checks, and production startup wiring.
+the migration and rollback perimeter around this authority; DEV-06 still owns
+protocol routing, rate limits, origin checks, and production startup wiring.
+
+## DEV-02 migration and legacy rollback
+
+Official migration is accepted only through `EnrollmentMigrationHandler` after
+DEV-06 binds an already authenticated legacy desktop socket. The claim request
+contains only a stable request ID: endpoint ID and the existing `access_token`
+come from the opaque socket proof. Repeating a claim preserves endpoint ID,
+token, timestamps, and old Web links; a request ID used by another endpoint is
+rejected. No credential is returned or logged.
+
+Self-hosted operators use `scripts/enrollment-migrate.js`. Credentials must be
+provided in a private input file and are never accepted as command-line values.
+`--dry-run` validates the whole batch without mutation. `--apply` preflights the
+whole batch and restores a registry backup by CAS if a later mutation fails.
+`re_enroll` rotates the access token and therefore explicitly invalidates old
+Web links. Backup files contain keyed digests, not credentials, and still need
+mode 0600/private ACL storage.
+
+An old v2 Relay may be used for rollback only on a loopback listener behind
+`enrollment-gateway.js`. The gateway validates the first
+`desktop_endpoint_register` or `web_client_join` frame against the registry
+before forwarding it. Use `nginx-enrollment-gateway.conf` for the public route
+and run `scripts/enrollment-gateway-preflight.js` with every public entrypoint.
+The preflight fails if a route lacks the gateway marker, is unavailable, or the
+legacy Relay URL is not loopback. A bare v2 rollback is never a safe fallback.
+`scripts/check-enrollment-gated-v2-rollback.mjs` combines the private endpoint
+inventory coverage report and gateway check; deployment automation must require
+its zero exit status before starting an old v2 binary.
+The preflight checks both the health marker and the WebSocket upgrade marker on
+every declared public route, and requires the old Relay's declared bind host to
+be literal loopback. `scripts/enrollment-gateway-server.js` is the standalone
+gateway entry point; it also refuses a non-loopback listener.
