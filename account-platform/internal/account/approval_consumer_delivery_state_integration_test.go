@@ -112,6 +112,23 @@ func TestProofEraBillingFailureRemainsQueryOnlyIntegration(t *testing.T) {
 	if err != nil || state.State != "READY" {
 		t.Fatalf("proof delivery fixture=%+v err=%v", state, err)
 	}
+	if _, err := db.adminPool.Exec(ctx, `UPDATE account_approval_authorization.approval_delivery_states SET last_error_code='DOMAIN_REVISION_CHANGED',version=version+1,updated_at=now() WHERE original_event_id=$1 AND durable=$2`, proof.EventID, proof.Durable); err != nil {
+		t.Fatal(err)
+	}
+	state, err = repository.ApprovalAuthorizationDeliveryState(ctx, proof.EventID, proof.Durable, proof.Workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.GrantApprovalAuthorizationDomainAttempt(ctx, proof.EventID, proof.Durable, proof.Workload, state.Version); !errors.Is(err, ErrApprovalConsumerBindingInvalid) {
+		t.Fatalf("preexisting proof READY failure was retried: %v", err)
+	}
+	if _, err := db.adminPool.Exec(ctx, `UPDATE account_approval_authorization.approval_delivery_states SET last_error_code=NULL,version=version+1,updated_at=now() WHERE original_event_id=$1 AND durable=$2`, proof.EventID, proof.Durable); err != nil {
+		t.Fatal(err)
+	}
+	state, err = repository.ApprovalAuthorizationDeliveryState(ctx, proof.EventID, proof.Durable, proof.Workload)
+	if err != nil {
+		t.Fatal(err)
+	}
 	state, err = repository.GrantApprovalAuthorizationDomainAttempt(ctx, proof.EventID, proof.Durable, proof.Workload, state.Version)
 	if err != nil || state.DomainAttemptCount != 1 || state.State != "DOMAIN_INFLIGHT" {
 		t.Fatalf("first proof attempt=%+v err=%v", state, err)

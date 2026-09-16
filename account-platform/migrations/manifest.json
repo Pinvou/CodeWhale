@@ -652,6 +652,16 @@
         "file": "000065_approval_proof_failure_default_unknown.up.sql",
         "version": 65,
         "sha256": "e904deea873fcbb552f679ba33f016d8c4920b29c2359152d4f82bdbae8861d9"
+      },
+      {
+        "file": "000066_approval_proof_retry_grant_fence.down.sql",
+        "version": 66,
+        "sha256": "d792aa6a0e6f21a705817709ff03079aca849225330e98ac9eafa4282bd09905"
+      },
+      {
+        "file": "000066_approval_proof_retry_grant_fence.up.sql",
+        "version": 66,
+        "sha256": "e0a1c084f8a0e8b19b42f4a90d4fa69b606dc4a7b6604c275dbb91434efa8c7b"
       }
     ],
     "billing": [
