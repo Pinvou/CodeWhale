@@ -111,6 +111,8 @@ GSA-16 防御纵深：`55c3a359`在Billing consumer结果优先查询之后，�
 GSA-16 提交级自审修订：`61132792`新增前向`000067`，即使历史proof-era `READY` 丢失错误码，只要已有attempt就搬入只查证态；Account grant在数据库层对proof-era仅允许首个attempt。真实隔离PG覆盖66→67迁移、旧代码再次写回READY后直接grant被拒、legacy不受影响；迁移manifest不可变校验通过。分类、租约、查证worker仍未完成。
 
 GSA-16 分类阶段（仍PARTIAL）：`d547eeee`以六命令/version closed registry提供保守调查分类；Billing仅识别确定性稳定码，Token合并失败码、未知命令/版本/错误一律UNKNOWN；六命令均最多一次领域调用且只允许查询，不因分类自动INVALIDATED或重试。分类单测PASS；零效果/窗口权威确认、持久租约与独立worker尚未完成。
+
+GSA-16 只读规划阶段（仍PARTIAL）：`2f13128b`新增Account同一只读一致性快照的有界proof-era失败执行规划，返回原execution/event/durable/epoch/状态及保守分类，legacy排除；隔离PG覆盖真实批准→投递→首次授权→失败后的原执行查证及零第二execution。尚未接入独立worker、领域权威结果、租约和终态CAS，规划输出不授权重试/失效。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。

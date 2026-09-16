@@ -17,6 +17,7 @@ var ErrApprovalRecoveryPlanInvalid = errors.New("approval recovery plan has inco
 type ApprovalRecoveryCandidate struct {
 	RequestID         uuid.UUID                           `json:"approval_request_id"`
 	ExecutionID       uuid.UUID                           `json:"execution_id"`
+	OriginalKey       string                              `json:"original_execution_idempotency_key"`
 	OriginalEventID   uuid.UUID                           `json:"original_event_id"`
 	Durable           string                              `json:"durable"`
 	Workload          string                              `json:"workload"`
@@ -59,18 +60,20 @@ func (r *PostgresRepository) PlanProofApprovalRecovery(ctx context.Context, limi
 	if err != nil {
 		return ApprovalRecoveryPlan{}, err
 	}
-	rows, err := tx.Query(ctx, `SELECT r.id,e.id,e.authorization_event_id,e.authorization_durable,e.executor_identity,
+	rows, err := tx.Query(ctx, `SELECT r.id,e.id,e.execution_idempotency_key,e.authorization_event_id,e.authorization_durable,e.executor_identity,
  r.command_type,r.policy_version,e.authorization_approval_epoch,r.status,e.status,r.execution_deadline
-FROM public.approval_executions e JOIN public.approval_requests r ON r.id=e.approval_request_id
+FROM public.approval_requests r JOIN public.approval_executions e ON e.approval_request_id=r.id AND e.command_type=r.command_type
 WHERE e.authorization_serialization_version='APPROVAL_RFC8785_DECIMAL_V1'
   AND e.status IN ('EXECUTING','FAILED') AND r.status IN ('EXECUTING','EXECUTION_FAILED')
-ORDER BY e.started_at,e.id LIMIT $1`, limit+1)
+-- Existing approval_requests_queue_idx begins with status,expires_at,updated_at,id.
+-- Drive the bounded scan from that index rather than sorting all executions.
+ORDER BY r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
 	if err != nil {
 		return ApprovalRecoveryPlan{}, err
 	}
 	for rows.Next() {
 		var item ApprovalRecoveryCandidate
-		if err := rows.Scan(&item.RequestID, &item.ExecutionID, &item.OriginalEventID, &item.Durable,
+		if err := rows.Scan(&item.RequestID, &item.ExecutionID, &item.OriginalKey, &item.OriginalEventID, &item.Durable,
 			&item.Workload, &item.CommandType, &item.PolicyVersion, &item.ApprovalEpoch,
 			&item.RequestStatus, &item.ExecutionStatus, &item.ExecutionDeadline); err != nil {
 			rows.Close()
@@ -91,7 +94,7 @@ ORDER BY e.started_at,e.id LIMIT $1`, limit+1)
 		item := &plan.Candidates[index]
 		descriptor, ok := approvalconsumer.LookupDurable(item.Durable)
 		if !ok || !approvalconsumer.Match(descriptor, item.CommandType, item.PolicyVersion, item.Workload) ||
-			item.RequestID == uuid.Nil || item.ExecutionID == uuid.Nil || item.OriginalEventID == uuid.Nil ||
+			item.RequestID == uuid.Nil || item.ExecutionID == uuid.Nil || item.OriginalEventID == uuid.Nil || item.OriginalKey == "" ||
 			item.ApprovalEpoch < 1 || item.ExecutionDeadline.IsZero() ||
 			(item.RequestStatus == "EXECUTING" && item.ExecutionStatus != "EXECUTING") ||
 			(item.RequestStatus == "EXECUTION_FAILED" && item.ExecutionStatus != "FAILED") {
@@ -134,7 +137,11 @@ FROM public.read_approval_authorization_delivery_state($1,$2,$3)`, item.Original
 		&state.DomainAttemptCount, &state.State, &state.Version, &state.LastErrorCode, &state.ExecutionStatus, &state.ExecutionErrorClass,
 	)
 	if err != nil {
-		return ApprovalDeliveryState{}, ErrApprovalRecoveryPlanInvalid
+		classified := approvalConsumerError(ctx, err)
+		if errors.Is(classified, ErrApprovalConsumerBindingInvalid) {
+			return ApprovalDeliveryState{}, ErrApprovalRecoveryPlanInvalid
+		}
+		return ApprovalDeliveryState{}, classified
 	}
 	return state, nil
 }
