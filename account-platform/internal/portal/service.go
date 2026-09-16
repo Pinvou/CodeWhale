@@ -98,6 +98,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
 	router.GET("/api/admin/approvals/capability", httpserver.AdaptFunc(s.adminApprovalCapability))
 	router.GET("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	router.POST("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.Any("/api/admin/approvals/requests/*resource", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
 	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))

@@ -18,12 +18,13 @@ import (
 func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	resource := strings.Trim(r.PathValue("resource"), "/")
-	requestID, detail, decide := approvalBFFTarget(r.Method, resource)
-	if !detail && !decide && (resource != "" || r.Method != http.MethodGet) {
+	requestID, kind := approvalBFFTarget(r.Method, resource)
+	if kind == "" {
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
 		return
 	}
-	if (detail || decide) && r.URL.RawQuery != "" || r.URL.ForceQuery && (detail || decide) {
+	mutation := kind != "list" && kind != "detail"
+	if kind != "list" && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "approval detail accepts no query", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -38,11 +39,11 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusUnauthorized, "LOGIN_REQUIRED", "login is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	if decide && !s.validMutation(r, session) {
+	if mutation && !s.validMutation(r, session) {
 		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	if decide && !s.config.AdminModelTokenActionsEnabled && s.rejectDisabledExistingTokenApprovalAction(w, r, requestID) {
+	if mutation && kind != "create" && !s.config.AdminModelTokenActionsEnabled && s.rejectDisabledExistingTokenApprovalAction(w, r, requestID) {
 		return
 	}
 	capability, err := s.readApprovalCapability(r.Context(), session)
@@ -61,21 +62,28 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body []byte
-	if decide {
-		body, err = io.ReadAll(io.LimitReader(r.Body, 8193))
-		if err != nil || len(body) > 8192 || !validApprovalBFFDecision(body, wire, capability.Version, r.Header.Get("X-Pinvou-Approval-Action-Control-Version")) {
-			api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_DECISION", "invalid approval decision", httpserver.RequestID(r.Context()))
+	if mutation {
+		limit := int64(8192)
+		if kind == "create" || kind == "update" {
+			limit = 4 << 20
+		}
+		body, err = io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if err != nil || int64(len(body)) > limit || !validApprovalBFFMutation(kind, body, wire, capability.Version, r.Header.Get("X-Pinvou-Approval-Action-Control-Version")) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid approval mutation", httpserver.RequestID(r.Context()))
+			return
+		}
+		if kind == "create" && !s.config.AdminModelTokenActionsEnabled && rejectDisabledBFFTokenDraft(w, r, body) {
 			return
 		}
 	}
 	target := *s.config.AccountURL
 	target.Path = strings.TrimRight(target.Path, "/") + "/admin/v" + strconv.Itoa(wire) + "/approval-requests"
-	if detail || decide {
+	if kind != "list" && kind != "create" {
 		target.Path += "/" + requestID.String()
 	}
-	if decide {
-		target.Path += "/actions/decide"
-	} else if !detail {
+	if kind == "decide" || kind == "submit" || kind == "withdraw" {
+		target.Path += "/actions/" + kind
+	} else if kind == "list" {
 		target.RawQuery = r.URL.RawQuery
 	}
 	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
@@ -85,8 +93,11 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 	}
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
-	if decide {
+	if mutation {
 		request.Header.Set("Content-Type", "application/json")
+		if wire == 2 && kind != "decide" {
+			request.Header.Set("X-Pinvou-Approval-Action-Control-Version", strconv.FormatInt(capability.Version, 10))
+		}
 	}
 	client := *s.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -106,7 +117,7 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusConflict, "APPROVAL_ACTION_CONTROL_CHANGED", "approval actions changed; reload the approval detail", httpserver.RequestID(r.Context()))
 		return
 	}
-	if response.StatusCode == http.StatusOK && detail {
+	if response.StatusCode == http.StatusOK && kind == "detail" {
 		version := int64(0)
 		if wire == 1 {
 			version, err = strconv.ParseInt(response.Header.Get("X-Pinvou-Approval-Action-Control-Version"), 10, 64)
@@ -127,35 +138,153 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	if response.StatusCode == http.StatusOK && decide {
-		// A decision response is not a fresh detail: v1 has no control-version
-		// header. The browser must refetch before offering another action.
+	if mutation && response.StatusCode >= 200 && response.StatusCode < 300 && kind != "create" {
+		// A mutation response is not a fresh detail. The browser must refetch.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if response.StatusCode == http.StatusOK && detail {
+	if kind == "create" && response.StatusCode == http.StatusCreated {
+		id, ok := approvalCreatedID(data, wire)
+		if !ok {
+			approvalBFFUnavailable(w, r)
+			return
+		}
+		api.WriteJSON(w, http.StatusCreated, map[string]string{"approval_request_id": id.String()})
+		return
+	}
+	if response.StatusCode == http.StatusOK && kind == "detail" {
 		response.Body = io.NopCloser(bytes.NewReader(data))
 		s.captureApprovalClassification(r.Context(), session, r.Method, "/admin/v"+strconv.Itoa(wire)+"/approval-requests/"+requestID.String(), response)
 	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
-	if detail && wire == 1 && response.StatusCode == http.StatusOK {
+	if kind == "detail" && wire == 1 && response.StatusCode == http.StatusOK {
 		w.Header().Set("X-Pinvou-Approval-Action-Control-Version", response.Header.Get("X-Pinvou-Approval-Action-Control-Version"))
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(data)
 }
 
-func approvalBFFTarget(method, resource string) (uuid.UUID, bool, bool) {
+func approvalBFFTarget(method, resource string) (uuid.UUID, string) {
+	if resource == "" {
+		if method == http.MethodGet {
+			return uuid.Nil, "list"
+		}
+		if method == http.MethodPost {
+			return uuid.Nil, "create"
+		}
+		return uuid.Nil, ""
+	}
 	parts := strings.Split(resource, "/")
-	if len(parts) == 1 && method == http.MethodGet {
+	if len(parts) == 1 && (method == http.MethodGet || method == http.MethodPut) {
 		id, err := uuid.Parse(parts[0])
-		return id, err == nil, false
+		if err != nil {
+			return uuid.Nil, ""
+		}
+		if method == http.MethodGet {
+			return id, "detail"
+		}
+		return id, "update"
 	}
-	if len(parts) == 3 && parts[1] == "actions" && parts[2] == "decide" && method == http.MethodPost {
+	if len(parts) == 3 && parts[1] == "actions" && method == http.MethodPost && (parts[2] == "decide" || parts[2] == "submit" || parts[2] == "withdraw") {
 		id, err := uuid.Parse(parts[0])
-		return id, false, err == nil
+		if err == nil {
+			return id, parts[2]
+		}
 	}
-	return uuid.Nil, false, false
+	return uuid.Nil, ""
+}
+
+func validApprovalBFFMutation(kind string, raw []byte, wire int, version int64, header string) bool {
+	observed, err := strconv.ParseInt(header, 10, 64)
+	if err != nil || observed != version {
+		return false
+	}
+	if kind == "decide" {
+		return len(raw) <= 8192 && validApprovalBFFDecision(raw, wire, version, header)
+	}
+	allowed := map[string]bool{"expected_version": true}
+	if kind == "create" || kind == "update" {
+		allowed = map[string]bool{
+			"command_type": true, "idempotency_key": true, "normalized_command": true,
+			"target_resource_type": true, "target_resource_id": true, "reason": true,
+			"redacted_evidence": true, "expected_impact": true,
+			"critical_resource_versions": true, "financial_snapshot": true,
+			"supersedes_request_id": true,
+		}
+		if kind == "update" {
+			allowed["expected_version"] = true
+		}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return false
+	}
+	seen := map[string]json.RawMessage{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		name, ok := key.(string)
+		if err != nil || !ok || !allowed[name] {
+			return false
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return false
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return false
+		}
+		seen[name] = value
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') || decoder.Decode(new(any)) != io.EOF {
+		return false
+	}
+	if kind == "create" || kind == "update" {
+		var commandType string
+		if json.Unmarshal(seen["command_type"], &commandType) != nil || strings.TrimSpace(commandType) == "" {
+			return false
+		}
+	}
+	if kind != "create" {
+		expected, err := strconv.ParseInt(string(seen["expected_version"]), 10, 64)
+		if err != nil || expected < 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func rejectDisabledBFFTokenDraft(w http.ResponseWriter, r *http.Request, raw []byte) bool {
+	var input struct {
+		CommandType string `json:"command_type"`
+	}
+	if json.Unmarshal(raw, &input) != nil || strings.TrimSpace(input.CommandType) == "" {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_CLASSIFICATION_UNAVAILABLE", "the approval request could not be classified", httpserver.RequestID(r.Context()))
+		return true
+	}
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(input.CommandType)), "TOKEN_") {
+		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return true
+	}
+	return false
+}
+
+func approvalCreatedID(raw []byte, wire int) (uuid.UUID, bool) {
+	var envelope struct {
+		ID                uuid.UUID `json:"id"`
+		ApprovalRequestID uuid.UUID `json:"approval_request_id"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return uuid.Nil, false
+	}
+	if wire == 1 && envelope.ID != uuid.Nil {
+		return envelope.ID, true
+	}
+	if wire == 2 && envelope.ApprovalRequestID != uuid.Nil {
+		return envelope.ApprovalRequestID, true
+	}
+	return uuid.Nil, false
 }
 
 func validApprovalBFFDecision(raw []byte, wire int, version int64, header string) bool {
