@@ -3,6 +3,7 @@ package token
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -191,7 +193,8 @@ UPDATE provider_credentials SET allowed_models=ARRAY['rollback-model','rollback-
 	executor := NewPostgresApprovedCredentialExecutor(repository)
 	service := NewService(repository, nil, nil, nil, ProviderURLPolicy{}, nil, NewHTTPUpstreamClient(), 0).
 		WithImpactPrechecks(true, repository, pricing).
-		WithApprovedTokenCommandExecutor(executor)
+		WithApprovedTokenCommandExecutor(executor).
+		WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}})
 	command := mustMarshalJSON(t, governedCatalogRollbackCommand{SourceCatalogVersion: sourceVersion})
 	projection, err := service.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", TargetResourceType: "MODEL_CATALOG", TargetResourceID: strconv.FormatInt(sourceVersion, 10), NormalizedCommand: command})
 	if err != nil {
@@ -277,6 +280,25 @@ VALUES($1,$2,'rollback-current-only-session',$3,$4,$5,'rollback-current-only',$6
 	}
 	approvalID, fingerprint = uuid.New(), strings.Repeat("f", 64)
 	body = approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 12, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_CATALOG_ROLLBACK:" + fingerprint, CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot, Envelope: envelope}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: envelope.CommandType, PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: envelope.TargetResourceType, TargetResourceID: envelope.TargetResourceID,
+		NormalizedCommand: command, CriticalResourceVersions: projection.CriticalResourceVersions,
+		FinancialSnapshot: projection.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := service.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: approvalID, Artifacts: artifacts})
+	if err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "1:"+projection.PrecheckFingerprint {
+		t.Fatalf("real catalog proof=%+v err=%v", proof, err)
+	}
+	proofDigest, err := approvalencoding.DeriveProofDigest(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.ProofSchemaVersion, body.CommandDigest, body.SnapshotDigest = proof.ProofSchemaVersion, proof.CommandDigest, proof.SnapshotDigest
+	body.DomainRevision, body.ProofDigest, body.ApprovalControlEpoch = proof.DomainRevision, hex.EncodeToString(proofDigest[:]), 1
 	first, second := perform(), perform()
 	var firstResult, replayResult TokenCommandResult
 	if first.Code != http.StatusOK || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &replayResult) != nil || firstResult.Status != "SUCCEEDED" || firstResult.CommandReference != replayResult.CommandReference {
