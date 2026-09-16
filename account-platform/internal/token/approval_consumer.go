@@ -42,6 +42,12 @@ type tokenAuthorizedEvent struct {
 	TargetResourceID         string          `json:"target_resource_id"`
 	CriticalResourceVersions json.RawMessage `json:"critical_resource_versions"`
 	FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
+	ProofSchemaVersion       string          `json:"proof_schema_version,omitempty"`
+	CommandDigest            string          `json:"command_digest,omitempty"`
+	SnapshotDigest           string          `json:"snapshot_digest,omitempty"`
+	DomainRevision           string          `json:"domain_revision,omitempty"`
+	ProofDigest              string          `json:"proof_digest,omitempty"`
+	ApprovalControlEpoch     int64           `json:"approval_control_epoch,omitempty"`
 }
 
 type tokenApprovalLease struct {

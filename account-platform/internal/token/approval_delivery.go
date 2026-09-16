@@ -237,6 +237,9 @@ func (consumer *TokenAuthorizationCommandConsumer) advance(ctx context.Context, 
 			AuthorizationVersion: lease.RequesterAuthorizationVersion, CommandFingerprint: lease.CommandFingerprint,
 			ExecutionIdempotencyKey: lease.ExecutionIdempotencyKey, CriticalResourceVersions: lease.CriticalResourceVersions,
 			FinancialSnapshot: lease.FinancialSnapshot, Envelope: envelope,
+			ProofSchemaVersion: selected.ProofSchemaVersion, CommandDigest: selected.CommandDigest,
+			SnapshotDigest: selected.SnapshotDigest, DomainRevision: selected.DomainRevision,
+			ProofDigest: selected.ProofDigest, ApprovalControlEpoch: selected.ApprovalControlEpoch,
 		}, &domain)
 		found = requestErr == nil && (status == http.StatusOK || status == http.StatusAccepted)
 	}
@@ -281,7 +284,10 @@ func tokenEventFromAuthorization(event approvalencoding.AuthorizationEvent) toke
 	return tokenAuthorizedEvent{ApprovalRequestID: event.ApprovalRequestID, CommandType: event.CommandType,
 		CommandFingerprint: event.CommandFingerprint, PolicyVersion: event.PolicyVersion, ExecutorIdentity: event.ExecutorIdentity,
 		ExecutionDeadline: event.ExecutionDeadline, NormalizedCommand: event.NormalizedCommand, TargetResourceType: event.TargetResourceType,
-		TargetResourceID: event.TargetResourceID, CriticalResourceVersions: event.CriticalResourceVersions, FinancialSnapshot: event.FinancialSnapshot}
+		TargetResourceID: event.TargetResourceID, CriticalResourceVersions: event.CriticalResourceVersions, FinancialSnapshot: event.FinancialSnapshot,
+		ProofSchemaVersion: event.ProofSchemaVersion, CommandDigest: event.CommandDigest,
+		SnapshotDigest: event.SnapshotDigest, DomainRevision: event.DomainRevision,
+		ProofDigest: event.ProofDigest, ApprovalControlEpoch: event.ApprovalControlEpoch}
 }
 
 func (consumer *TokenAuthorizationCommandConsumer) validBinding(binding tokenAuthorizationBinding) bool {

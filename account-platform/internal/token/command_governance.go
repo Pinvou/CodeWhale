@@ -117,6 +117,12 @@ type approvedTokenCommandBody struct {
 	ExecutionIdempotencyKey  string               `json:"execution_idempotency_key"`
 	CriticalResourceVersions json.RawMessage      `json:"critical_resource_versions,omitempty"`
 	FinancialSnapshot        json.RawMessage      `json:"financial_snapshot,omitempty"`
+	ProofSchemaVersion       string               `json:"proof_schema_version,omitempty"`
+	CommandDigest            string               `json:"command_digest,omitempty"`
+	SnapshotDigest           string               `json:"snapshot_digest,omitempty"`
+	DomainRevision           string               `json:"domain_revision,omitempty"`
+	ProofDigest              string               `json:"proof_digest,omitempty"`
+	ApprovalControlEpoch     int64                `json:"approval_control_epoch,omitempty"`
 	Envelope                 TokenCommandEnvelope `json:"command"`
 }
 
@@ -1063,6 +1069,12 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 	var body approvedTokenCommandBody
 	if api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command body is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	if body.ProofSchemaVersion != "" || body.CommandDigest != "" || body.SnapshotDigest != "" || body.DomainRevision != "" || body.ProofDigest != "" || body.ApprovalControlEpoch != 0 {
+		// A v2 authorization may be transported before this domain's execution
+		// revision validator is installed. Never silently execute it as legacy.
+		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_PROOF_EXECUTION_NOT_READY", "proof execution requires domain revision validation", httpserver.RequestID(r.Context()))
 		return
 	}
 	selection, selected := r.Context().Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)

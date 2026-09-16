@@ -110,7 +110,10 @@ func newTokenAuthorizationHTTPFixture(t *testing.T, wire string) (*tokenAuthoriz
 		}
 		serialization = approvalencoding.ApprovalSerializationVersion
 	} else {
-		payload, _ := json.Marshal(tokenEventFromAuthorization(event))
+		legacyEvent := event
+		legacyEvent.ProofSchemaVersion, legacyEvent.DomainRevision, legacyEvent.ProofDigest = "", "", ""
+		legacyEvent.ApprovalControlEpoch = 0
+		payload, _ := json.Marshal(tokenEventFromAuthorization(legacyEvent))
 		var err error
 		raw, err = approvalencoding.EncodeLegacyAuthorizationEvent(events.Event{ID: eventID, Type: approvalencoding.AuthorizationEventType, AggregateID: requestID, AggregateVersion: 7, OccurredAt: now, TraceID: event.TraceID, Payload: payload})
 		if err != nil {
@@ -190,6 +193,19 @@ func (fixture *tokenAuthorizationHTTPFixture) handleHTTP(w http.ResponseWriter, 
 		}
 		_ = json.NewEncoder(w).Encode(fixture.lease)
 	case strings.HasSuffix(path, "/execute"):
+		var body approvedTokenCommandBody
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			fixture.testing.Fatal(err)
+		}
+		if fixture.binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
+			if body.DomainRevision != fixture.event.DomainRevision || body.ProofDigest != fixture.event.ProofDigest ||
+				body.CommandDigest != fixture.event.CommandDigest || body.SnapshotDigest != fixture.event.SnapshotDigest ||
+				body.ApprovalControlEpoch != fixture.event.ApprovalControlEpoch {
+				fixture.testing.Fatalf("proof binding lost before Token execution: %+v", body)
+			}
+		} else if body.DomainRevision != "" || body.ProofDigest != "" || body.ApprovalControlEpoch != 0 {
+			fixture.testing.Fatalf("legacy authorization acquired proof fields: %+v", body)
+		}
 		fixture.domainCalls++
 		if fixture.failStage != "execute-unknown" {
 			fixture.domainPersisted = true
