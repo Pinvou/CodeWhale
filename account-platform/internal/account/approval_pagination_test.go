@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestNormalizeApprovalPaginationLimit(t *testing.T) {
@@ -192,5 +193,14 @@ func TestApprovalPaginationDeadlineCoversAuthorizationRead(t *testing.T) {
 	}
 	if _, err = repository.ApprovalPaginationPage(cancelled, principal, ApprovalFilter{}, raw, 50, "127.0.0.1"); !errors.Is(err, ErrApprovalPaginationQueryTimeout) {
 		t.Fatalf("continuation deadline error=%v", err)
+	}
+}
+
+func TestApprovalPaginationPostgresStatementTimeoutClassification(t *testing.T) {
+	if err := approvalPaginationReadError(&pgconn.PgError{Code: "57014"}); !errors.Is(err, ErrApprovalPaginationQueryTimeout) {
+		t.Fatalf("PostgreSQL statement cancellation classification=%v", err)
+	}
+	if err := approvalPaginationReadError(&pgconn.PgError{Code: "23505"}); errors.Is(err, ErrApprovalPaginationQueryTimeout) {
+		t.Fatalf("unrelated PostgreSQL error was classified as timeout: %v", err)
 	}
 }

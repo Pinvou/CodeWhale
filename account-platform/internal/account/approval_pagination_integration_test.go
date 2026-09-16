@@ -42,25 +42,25 @@ func newApprovalPaginationIntegrationDatabase(t *testing.T) (*approvalAuthorizat
 
 func approvalPaginationMigrations(loaded []migrations.Migration) ([]migrations.Migration, error) {
 	for index, migration := range loaded {
-		if migration.Version == 61 {
+		if migration.Version == 62 {
 			return loaded[:index+1], nil
 		}
 	}
-	return nil, errors.New("pagination integration fixture requires Account migration 61")
+	return nil, errors.New("pagination integration fixture requires Account migration 62")
 }
 
 func TestApprovalPaginationMigrationBoundary(t *testing.T) {
-	for _, versions := range [][]int64{{60, 61}, {60, 61, 62}} {
+	for _, versions := range [][]int64{{61, 62}, {61, 62, 63}} {
 		loaded := make([]migrations.Migration, len(versions))
 		for index, version := range versions {
 			loaded[index] = migrations.Migration{Version: version, UpSQL: "up", DownSQL: "down", Checksum: "checksum"}
 		}
 		current, err := approvalPaginationMigrations(loaded)
-		if err != nil || current[len(current)-1] != loaded[1] || current[len(current)-1].Version != 61 {
+		if err != nil || current[len(current)-1] != loaded[1] || current[len(current)-1].Version != 62 {
 			t.Fatalf("pagination boundary changed: %+v err=%v", current, err)
 		}
 	}
-	if _, err := approvalPaginationMigrations([]migrations.Migration{{Version: 60}, {Version: 62}}); err == nil {
+	if _, err := approvalPaginationMigrations([]migrations.Migration{{Version: 61}, {Version: 63}}); err == nil {
 		t.Fatal("missing pagination migration was accepted")
 	}
 }
@@ -171,6 +171,14 @@ func TestApprovalPaginationPostgresIntegration(t *testing.T) {
 	if err = repository.ConfigureApprovalPagination(ctx, rotation); err != nil {
 		t.Fatalf("restore rotation configuration: %v", err)
 	}
+	wrongMaterial := rotation
+	wrongMaterial.CurrentKey = []byte(strings.Repeat("x", 32))
+	if err = repository.ConfigureApprovalPagination(ctx, wrongMaterial); err == nil || repository.approvalPagination.valid() {
+		t.Fatal("same-kid different-key reconfiguration was accepted or did not fail closed")
+	}
+	if err = repository.ConfigureApprovalPagination(ctx, rotation); err != nil {
+		t.Fatalf("restore key material after rejection: %v", err)
+	}
 
 	// A signed cursor is invalidated before member reads as soon as the current
 	// authorization version advances.
@@ -279,7 +287,11 @@ func TestApprovalPaginationPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
-		t.Fatalf("drained down: %v", err)
+		t.Fatalf("drained key-binding down: %v", err)
+	}
+	migrations.Unlock(ctx, connection.Conn())
+	if err = migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
+		t.Fatalf("drained pagination down: %v", err)
 	}
 	migrations.Unlock(ctx, connection.Conn())
 	if err = migrations.Up(ctx, connection.Conn(), loaded); err != nil {

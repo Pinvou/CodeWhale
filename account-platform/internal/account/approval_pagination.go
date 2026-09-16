@@ -188,7 +188,7 @@ func (r *PostgresRepository) ConfigureApprovalPagination(ctx context.Context, co
 	if config.CurrentKeyID != "" && config.CurrentKeyID == config.PreviousKeyID {
 		return errors.New("approval pagination current and previous kid must differ")
 	}
-	rows, err := r.pool.Query(ctx, `SELECT kid,last_signed_at FROM approval_pagination_signing_keys WHERE last_signed_at+make_interval(secs=>$1)>transaction_timestamp() ORDER BY kid`, int64(ApprovalSnapshotKeyRetention/time.Second))
+	rows, err := r.pool.Query(ctx, `SELECT kid,last_signed_at,key_digest FROM approval_pagination_signing_keys WHERE last_signed_at+make_interval(secs=>$1)>transaction_timestamp() ORDER BY kid`, int64(ApprovalSnapshotKeyRetention/time.Second))
 	if err != nil {
 		return fmtApprovalPaginationConfiguration(err)
 	}
@@ -196,17 +196,24 @@ func (r *PostgresRepository) ConfigureApprovalPagination(ctx context.Context, co
 	for rows.Next() {
 		var kid string
 		var lastSignedAt time.Time
-		if err = rows.Scan(&kid, &lastSignedAt); err != nil {
+		var storedDigest *string
+		if err = rows.Scan(&kid, &lastSignedAt, &storedDigest); err != nil {
 			return fmtApprovalPaginationConfiguration(err)
 		}
+		var configuredKey []byte
 		switch kid {
 		case config.CurrentKeyID:
+			configuredKey = config.CurrentKey
 		case config.PreviousKeyID:
+			configuredKey = config.PreviousKey
 			if config.PreviousRetainUntil.Before(lastSignedAt.Add(ApprovalSnapshotKeyRetention)) {
 				return errors.New("approval pagination previous key retention is shorter than the persisted cursor lifetime")
 			}
 		default:
 			return errors.New("approval pagination configuration omits a key that still has cursor references")
+		}
+		if storedDigest == nil || *storedDigest != approvalPaginationKeyDigest(configuredKey) {
+			return errors.New("approval pagination kid is bound to different or unknown signing material")
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -227,6 +234,11 @@ func (r *PostgresRepository) ConfigureApprovalPagination(ctx context.Context, co
 
 func fmtApprovalPaginationConfiguration(err error) error {
 	return errors.Join(ErrApprovalPaginationSnapshotUnavailable, err)
+}
+
+func approvalPaginationKeyDigest(key []byte) string {
+	digest := sha256.Sum256(key)
+	return hex.EncodeToString(digest[:])
 }
 
 func (r *PostgresRepository) SetApprovalPaginationGate(ctx context.Context, enabled bool) error {
@@ -518,6 +530,16 @@ ORDER BY ar.updated_at DESC,ar.id DESC LIMIT $13`, snapshotID, now, command, sta
 	if activeMembers+memberCount > ApprovalSnapshotMaxGlobalMembers || storageBytes+memberBytes > r.approvalPagination.maximumStorageBytes {
 		return ApprovalPaginationPage{}, ErrApprovalPaginationSnapshotLimited
 	}
+	// pg_column_size does not include B-tree or page overhead. The physical
+	// post-insert check is the hard cap; a rejected transaction rolls back all
+	// member rows and cannot deliver a truncated first page.
+	var physicalBytes int64
+	if err = tx.QueryRow(ctx, `SELECT pg_total_relation_size('approval_pagination_snapshots')+pg_total_relation_size('approval_pagination_snapshot_members')+pg_total_relation_size('approval_pagination_snapshot_tombstones')`).Scan(&physicalBytes); err != nil {
+		return ApprovalPaginationPage{}, err
+	}
+	if physicalBytes > r.approvalPagination.maximumStorageBytes {
+		return ApprovalPaginationPage{}, ErrApprovalPaginationSnapshotLimited
+	}
 	if _, err = tx.Exec(ctx, `UPDATE approval_pagination_snapshots SET member_count=$2,member_bytes=$3 WHERE id=$1`, snapshotID, memberCount, memberBytes); err != nil {
 		return ApprovalPaginationPage{}, err
 	}
@@ -556,7 +578,7 @@ func (r *PostgresRepository) readApprovalPaginationPage(ctx context.Context, act
 		return ApprovalPaginationPage{}, approvalPaginationReadError(err)
 	}
 	if err = reserveApprovalPaginationReads(deadlineCtx, tx, actorID, sourceIP, now); err != nil {
-		return ApprovalPaginationPage{}, err
+		return ApprovalPaginationPage{}, approvalPaginationReadError(err)
 	}
 	var storedVersion int64
 	var storedScope, storedFilter, storedSort string
@@ -656,7 +678,11 @@ ORDER BY m.position LIMIT $3`, snapshotID, position, limit+1, actorID)
 		if signErr != nil {
 			return ApprovalPaginationPage{}, signErr
 		}
-		if _, signErr = queryer.Exec(ctx, `INSERT INTO approval_pagination_signing_keys(kid,last_signed_at) VALUES($1,transaction_timestamp()) ON CONFLICT(kid) DO UPDATE SET last_signed_at=GREATEST(approval_pagination_signing_keys.last_signed_at,EXCLUDED.last_signed_at)`, r.approvalPagination.currentKeyID); signErr != nil {
+		command, signErr := queryer.Exec(ctx, `INSERT INTO approval_pagination_signing_keys(kid,last_signed_at,key_digest) VALUES($1,transaction_timestamp(),$2) ON CONFLICT(kid) DO UPDATE SET last_signed_at=GREATEST(approval_pagination_signing_keys.last_signed_at,EXCLUDED.last_signed_at) WHERE approval_pagination_signing_keys.key_digest=EXCLUDED.key_digest`, r.approvalPagination.currentKeyID, approvalPaginationKeyDigest(r.approvalPagination.currentKey))
+		if signErr != nil || command.RowsAffected() != 1 {
+			if signErr == nil {
+				signErr = ErrApprovalPaginationSnapshotUnavailable
+			}
 			return ApprovalPaginationPage{}, signErr
 		}
 		page.NextCursor = &cursor
@@ -949,6 +975,10 @@ func approvalPaginationBuildError(err error) error {
 }
 func approvalPaginationReadError(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return ErrApprovalPaginationQueryTimeout
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "57014" {
 		return ErrApprovalPaginationQueryTimeout
 	}
 	return err

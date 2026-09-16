@@ -612,6 +612,16 @@
         "file": "000061_approval_pagination_snapshots.up.sql",
         "version": 61,
         "sha256": "df826d50b0f95184f2dbba19bce4ef1a29dbb5eeaf7e154b069a1a8ed9a86777"
+      },
+      {
+        "file": "000062_approval_pagination_key_binding.down.sql",
+        "version": 62,
+        "sha256": "d93434bc246cfd3e442deaf68acd21adf607859d339890f8817413972a370893"
+      },
+      {
+        "file": "000062_approval_pagination_key_binding.up.sql",
+        "version": 62,
+        "sha256": "a4c93607a8386df5799b88ee1bd93f2a99f5244e581178a608d670408f6a34ce"
       }
     ],
     "billing": [

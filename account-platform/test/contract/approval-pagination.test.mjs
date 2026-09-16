@@ -10,6 +10,7 @@ const read = (relative) => readFileSync(path.join(root, relative), 'utf8');
 test('Account approval pagination freezes bounded membership and a closed signed cursor', () => {
   const source = read('internal/account/approval_pagination.go');
   const migration = read('migrations/account/000061_approval_pagination_snapshots.up.sql');
+  const keyBinding = read('migrations/account/000062_approval_pagination_key_binding.up.sql');
 
   for (const contract of [
     /ApprovalSnapshotTTL\s+= 15 \* time\.Minute/,
@@ -43,6 +44,8 @@ test('Account approval pagination freezes bounded membership and a closed signed
   assert.match(migration, /CHECK\(member_count BETWEEN 0 AND 1000000\)/);
   assert.match(migration, /CREATE TABLE approval_pagination_snapshot_tombstones/);
   assert.match(migration, /CREATE TABLE approval_pagination_signing_keys/);
+  assert.match(keyBinding, /ADD COLUMN key_digest TEXT CHECK/);
+  assert.match(source, /approval_pagination_signing_keys\.key_digest=EXCLUDED\.key_digest/);
   assert.match(migration, /REVOKE ALL[\s\S]*FROM PUBLIC/);
 });
 
