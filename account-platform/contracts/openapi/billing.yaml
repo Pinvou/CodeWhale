@@ -50,6 +50,25 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-command-proofs:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: establishBillingApprovalProofInternal
+      summary: Recompute a closed Billing proof from persisted owner-domain facts
+      description: Account-service workload with internal.billing.approval-proof.read only. No browser or Provider probe. Request and response together are limited to 64 KiB and the deadline is two seconds; inactive activation and unavailable facts fail closed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BillingApprovalProofRequest" }
+      responses:
+        "200": { description: Closed eleven-field ALLOW or DENY proof with 60-second TTL and no-store, content: { application/json: { schema: { $ref: "#/components/schemas/BillingApprovalProofResponse" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /internal/v1/pricing/impact-coverage:
     post:
       operationId: readImpactPriceCoverage
@@ -554,6 +573,115 @@ components:
         command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         state: { type: string, enum: [ABSENT, EFFECT_OR_ATTEMPT_OBSERVED] }
         observed_at: { type: string, format: date-time }
+    BillingApprovalProofRequest:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, policy_version, proof_schema_version, command_digest, snapshot_digest, proof_input]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] }
+        policy_version: { type: integer, enum: [1, 2] }
+        proof_schema_version: { type: string, const: "1" }
+        command_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        snapshot_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        proof_input:
+          oneOf:
+            - { $ref: "#/components/schemas/BillingWalletProofInput" }
+            - { $ref: "#/components/schemas/BillingProviderProofInput" }
+            - { $ref: "#/components/schemas/BillingProductProofInput" }
+      allOf:
+        - if: { properties: { command_type: { const: WALLET_ADJUSTMENT } }, required: [command_type] }
+          then: { properties: { policy_version: { const: 1 }, proof_input: { $ref: "#/components/schemas/BillingWalletProofInput" } } }
+        - if: { properties: { command_type: { const: PAYMENT_PROVIDER_RESUME } }, required: [command_type] }
+          then: { properties: { policy_version: { const: 2 }, proof_input: { $ref: "#/components/schemas/BillingProviderProofInput" } } }
+        - if: { properties: { command_type: { const: PAYMENT_PRODUCT_RESUME } }, required: [command_type] }
+          then: { properties: { policy_version: { const: 1 }, proof_input: { $ref: "#/components/schemas/BillingProductProofInput" } } }
+    BillingWalletProofInput:
+      type: object
+      additionalProperties: false
+      required: [snapshot_schema_version, target, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        snapshot_schema_version: { type: integer, const: 1 }
+        target: { type: object, additionalProperties: false, required: [resource_type, resource_id], properties: { resource_type: { const: MANUAL_ADJUSTMENT }, resource_id: { type: string, format: uuid } } }
+        normalized_command:
+          type: object
+          additionalProperties: false
+          required: [adjustment_id, wallet_id, amount_microcredits, requested_by]
+          properties:
+            adjustment_id: { type: string, format: uuid }
+            wallet_id: { type: string, format: uuid }
+            amount_microcredits: { type: string, pattern: '^-?[1-9][0-9]*$' }
+            requested_by: { type: string, format: uuid }
+        critical_resource_versions: { type: object, additionalProperties: false, required: [adjustment_version], properties: { adjustment_version: { type: string, pattern: '^[1-9][0-9]*$' } } }
+        financial_snapshot: { type: object, additionalProperties: false, required: [wallet_id, delta_microcredits], properties: { wallet_id: { type: string, format: uuid }, delta_microcredits: { type: string, pattern: '^-?[1-9][0-9]*$' } } }
+    BillingProviderVersionsProof:
+      type: object
+      additionalProperties: false
+      required: [provider_id, provider_version, provider_control_version, probe_order_id, policy_version, observation_high_watermark, evaluation_high_watermark, active_mapping_set_fingerprint]
+      properties:
+        provider_id: { type: string, minLength: 1, maxLength: 160 }
+        provider_version: { type: string, minLength: 1, maxLength: 160 }
+        provider_control_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        probe_order_id: { type: string, format: uuid }
+        policy_version: { type: string, minLength: 1, maxLength: 160 }
+        observation_high_watermark: { type: [string, "null"], format: uuid }
+        evaluation_high_watermark: { type: [string, "null"], format: uuid }
+        active_mapping_set_fingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+    BillingProductVersionsProof:
+      type: object
+      additionalProperties: false
+      required: [provider_id, provider_version, product_id, provider_control_version, product_control_version, catalog_item_id, catalog_version, admission_version, mapping_id, mapping_version, probe_order_id, policy_version, observation_high_watermark, evaluation_high_watermark]
+      properties:
+        provider_id: { type: string, minLength: 1, maxLength: 160 }
+        provider_version: { type: string, minLength: 1, maxLength: 160 }
+        product_id: { type: string, minLength: 1, maxLength: 160 }
+        provider_control_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        product_control_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        catalog_item_id: { type: string, format: uuid }
+        catalog_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        admission_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        mapping_id: { type: string, format: uuid }
+        mapping_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        probe_order_id: { type: string, format: uuid }
+        policy_version: { type: string, minLength: 1, maxLength: 160 }
+        observation_high_watermark: { type: [string, "null"], format: uuid }
+        evaluation_high_watermark: { type: [string, "null"], format: uuid }
+    BillingProviderProofInput:
+      type: object
+      additionalProperties: false
+      required: [snapshot_schema_version, target, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        snapshot_schema_version: { type: integer, const: 1 }
+        target: { type: object, additionalProperties: false, required: [resource_type, resource_id], properties: { resource_type: { const: PAYMENT_PROVIDER_CONTROL }, resource_id: { type: string, minLength: 1, maxLength: 160 } } }
+        normalized_command: { $ref: "#/components/schemas/BillingProviderVersionsProof" }
+        critical_resource_versions: { $ref: "#/components/schemas/BillingProviderVersionsProof" }
+        financial_snapshot: { type: object, additionalProperties: false, required: [new_orders_enabled, provider_control_version, product_control_version], properties: { new_orders_enabled: { const: false }, provider_control_version: { type: string, pattern: '^[1-9][0-9]*$' }, product_control_version: { type: "null" } } }
+    BillingProductProofInput:
+      type: object
+      additionalProperties: false
+      required: [snapshot_schema_version, target, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        snapshot_schema_version: { type: integer, const: 1 }
+        target: { type: object, additionalProperties: false, required: [resource_type, resource_id], properties: { resource_type: { const: PAYMENT_PRODUCT_CONTROL }, resource_id: { type: string, minLength: 1, maxLength: 160 } } }
+        normalized_command: { $ref: "#/components/schemas/BillingProductVersionsProof" }
+        critical_resource_versions: { $ref: "#/components/schemas/BillingProductVersionsProof" }
+        financial_snapshot: { type: object, additionalProperties: false, required: [new_orders_enabled, provider_control_version, product_control_version], properties: { new_orders_enabled: { const: false }, provider_control_version: { type: string, pattern: '^[1-9][0-9]*$' }, product_control_version: { type: string, pattern: '^[1-9][0-9]*$' } } }
+    BillingApprovalProofResponse:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, command_digest, snapshot_digest, policy_version, proof_schema_version, domain_revision, verdict, reason_code, issued_at, expires_at]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] }
+        command_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        snapshot_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, enum: [1, 2] }
+        proof_schema_version: { type: string, const: "1" }
+        domain_revision: { type: string, pattern: '^[1-9][0-9]*:[0-9a-f]{64}$' }
+        verdict: { type: string, enum: [ALLOW, DENY] }
+        reason_code: { type: string, enum: [PROOF_VALID, RESOURCE_STATE_CHANGED, SNAPSHOT_MISMATCH, EVIDENCE_MISSING] }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
     BillingApprovalActivationSnapshot:
       type: object
       additionalProperties: false
