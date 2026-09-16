@@ -3,7 +3,7 @@
 GSA-07 发布约束入口：[审批授权 Relay 手册](../deploy/runbooks/approval-authorization-relay.md)。该手册不构成代码审核通过、环境验收或部署完成证据。
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED并以`0dd3d481`提交；GSA-04代码已完成且B代码审核通过、以`0c9db1e2`提交，环境验收待补；GSA-05协议文档以`16895b97`提交，Provider p2兼容事实修订以`4e06e225`提交，代码获B最终APPROVED并以`cad7f48f`提交；GSA-06代码、迁移与测试已获B代码审核PASS并以`a18397c4`提交，但受依赖环境欠账约束保持IN_PROGRESS；GSA-07设计以`15e7feff`提交，代码、迁移与测试已获B代码审核PASS并以`410d7db0`提交，但受依赖环境欠账约束保持IN_PROGRESS；GSA-08实施细化已获B审核PLAN_APPROVED，消息与离线资源、只读回执校验器`4ed6f79c`及Account前向加固`84904490`已获B提交级PASS；旧shared Billing授权raw消费由`47447723`+`742d34e1`闭合，Token授权消费由`ac4547e3`闭合并经单角色提交级自审PASS。GSA-08当前为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED；GSA-09历史审批对账、排除事实绑定与SAFE收敛已完成仓库实现并经单角色提交级自审PASS，状态为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED；GSA-10安全目录、历史可见集合与无泄露读取以`d03b4f62`实现，门禁稳定性和路径白名单分别以`0517a1f7`、`a31c8cfd`独立修订并完成提交级自审，状态同为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED。真实Q捕获、生产资源、activation与部署仍归GSA-38～40；GSA-11起其余任务PENDING。
+> 本任务拆分的既有A/B审核历史保留；2026-09-16起由单角色执行逐次修改、Signed-off提交、提交级自审与独立修订提交。GSA-01～07既有状态与环境欠账不变；GSA-08～11均为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，其中GSA-11提交链为`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`。GSA-12起其余任务PENDING；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
 
 ## 1. 所有权与执行规则
 
@@ -33,7 +33,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-08 | APT-141 | 六命令 consumer、持久尝试及确认式 DLQ 收口 | GSA-07 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-09 | APT-141 | 历史审批 reconciler、exclusion 与 SAFE 收敛 | GSA-08 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-10 | APT-141 | 安全命令目录、历史可见集合及无泄露读取 | GSA-03, GSA-04 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-11 | APT-141 | 有界 Account membership snapshot/cursor | GSA-10 | CODE | PENDING |
+| GSA-11 | APT-141 | 有界 Account membership snapshot/cursor | GSA-10 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-12 | APT-141 | v2 最小列表、统计与六命令 closed detail | GSA-11 | CODE | PENDING |
 | GSA-13 | APT-141 | Account proof 客户端、批准检查点与版本化动作 | GSA-04, GSA-05, GSA-12 | CODE | PENDING |
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | PENDING |
@@ -258,3 +258,10 @@ GSA-10：安全命令目录、历史可见集合及无泄露读取的仓库实�
 - **提交与修订链**：产品提交`d03b4f62`；提交级自审补入统一管理路径白名单的遗漏，以`a31c8cfd`独立Signed-off修复。统一门禁另暴露既有impact precheck测试把授权网络调用压入15ms截止窗口的非确定性，以`0517a1f7`独立Signed-off修订为500ms并保持阻塞仓储超时语义，10次重复及Token全包均通过。三个提交均完成提交级自审，结论PASS。
 - **验证证据**：真实PostgreSQL定向用例覆盖requester/approver/outsider目录、近期认证、授权竞态、本人历史、当前approver集合、统一详情/决定404、撤权和writer readiness前置，PASS/no-SKIP；Account与Token包测试、9项审批/授权定向Node合同均通过。最终`node scripts/account-platform.mjs verify` exit 0：Node 584项为582 PASS / 0 FAIL / 2项既有环境SKIP，Go全包test/vet、迁移清单300项、授权356 HTTP/27 task/7 event/22 CLI、OpenAPI（9项既有warning）、i18n、observability及architecture全部通过。
 - **保留边界**：GSA-11才交付有界Account membership snapshot/cursor，GSA-12才注册六命令closed presenter并开放非空生产目录，GSA-13～15负责proof与领域检查，GSA-17～20负责Portal/UI。本项没有部署、activation或生产切换；受GSA-04环境欠账传递约束不能标记DONE或已部署。
+
+GSA-11：有界 Account membership snapshot/cursor 仓库实现已闭合；当前状态为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED。
+
+- **读合同与容量**：Account 000061～000064 前向迁移新增默认关闭的建快照门、冻结成员、墓碑、速率窗口和签名密钥使用账本。固定`updated_at DESC,id DESC`与当前可见集合，50/200 limit、15分钟 TTL、至少20分钟墓碑、单快照100万成员、全局64快照/2000万成员/8GiB，以及主体/全局创建6/60每分钟、主体/IP读取60/120每分钟；单资源事务替换旧快照。读页在成员 SQL 前校验closed签名、kid、授权版本和scope；每页成员 SQL再按当前权限过滤，撤权不泄露旧成员。创建/读取分别共用10/3秒墙钟预算；失败不返回半页。
+- **轮换、观测与回退**：签发只用current，previous只验签；持久`kid + key_digest + last_signed_at`拒绝同kid异密钥及35分钟引用窗口内提前退役。hard disable全部503；关闭建快照门仅拒绝首页，原cursor只读至原TTL。每分钟幂等清理及Prometheus 70%/85%水位、超过5分钟积压告警已接线。数据库schema down由000064永久拒绝；应用N/N-1回退保留schema并关门，不重新构造live列表。GSA-12才负责v2 HTTP closed envelope、参数解析、具体presenter与上线密钥配置；本项没有新增可访问的v2列表或生产激活。
+- **提交级审核链**：首轮`ba1b47ac`；自审发现PG read timeout与物理容量二次核验、同kid轮换材料绑定缺口，分别由`8126615a`和前向000062修复；复审发现多事务数据库down窗口，以`e8293602`补000063栅栏，再以`fe7219de`新增000064前向永久禁止down，避免跨事务重开门竞态。各轮均独立Signed-off提交并针对提交复核，最终自审PASS。
+- **验证与环境欠账**：真实隔离PostgreSQL覆盖000061～000064迁移重入、冻结全量翻页及并发变更、替换/墓碑、关门续读、授权撤销、密钥轮换/同kid异材料、速率/70%/85%容量、未签发cursor的活动快照与永久down拒绝，PASS/no-SKIP；Go单元/vet、Node合同、迁移清单308项、架构门禁通过。000062版本全量统一verify exit 0：Node586项584 PASS/0 FAIL/2既有环境SKIP，Go全包test/vet、OpenAPI（9既有warning）、i18n和observability通过；000064增量另有真实PG与定向门禁通过，不把未运行的生产百万级容量/跨副本密钥轮换冒称为已验。GSA-04 Linux依赖和GSA-38～40生产发布证据继续待验，不部署、不开放目录或新列表。
