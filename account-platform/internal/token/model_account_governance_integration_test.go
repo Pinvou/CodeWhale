@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	accountdomain "github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -293,6 +294,19 @@ VALUES($1,$2,'rollback-current-only-session',$3,$4,$5,'rollback-current-only',$6
 	if err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "1:"+projection.PrecheckFingerprint {
 		t.Fatalf("real catalog proof=%+v err=%v", proof, err)
 	}
+	t.Run("signed Account to real catalog proof", func(t *testing.T) {
+		_, sign := tokenProofWorkloadIssuer(t)
+		server := httptest.NewServer(service.Handler("", nil))
+		defer server.Close()
+		source, err := accountdomain.NewHTTPApprovalProofSource(server.URL, server.URL, sign("account-subject"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := source.Proof(ctx, approvalID, artifacts)
+		if err != nil || result.Response.Verdict != "ALLOW" || result.Response.DomainRevision != proof.DomainRevision {
+			t.Fatalf("real catalog HTTP proof=%+v err=%v", result, err)
+		}
+	})
 	proofDigest, err := approvalencoding.DeriveProofDigest(proof)
 	if err != nil {
 		t.Fatal(err)
