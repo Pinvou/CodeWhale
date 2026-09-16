@@ -152,6 +152,8 @@ GSA-17 Account capability 起步（仍PARTIAL / REVIEW_PENDING）：新增仅认
 GSA-17 Portal会话协议持久锁基础（仍PARTIAL / REVIEW_PENDING）：新登录Session标记允许在首次进入审批流程时选择v2；既有无字段Session必须锁v1。Redis以独立key和`SETNX`竞争只允许一次选定，后续同一Session无论副本/标签或capability回退都返回原版本；锁TTL长于Session并在删除Session时一起清理。40标签内存并发定向测试通过；真实多副本TLS Redis用例已补充但当前缺隔离fixture而SKIP，明确保留`ENV_PENDING`。尚未接入BFF的capability读取与路由，不能宣称Portal已实际锁定协议。
 
 GSA-17 Portal可信capability入口（仍PARTIAL / REVIEW_PENDING）：`GET /api/admin/approvals/capability`只从当前服务端Session取用户令牌，向Account只读capability接口查询九字段封闭真相，拒绝redirect、可缓存、超限、重复/未知/缺失字段和非法控制元组；从未读取浏览器自报模式。成功才调用Redis协议锁并返回`control`及`session_approval_wire_version`，v2已锁会话遇到gate回退固定503而不降级，旧会话固定v1。定向Portal HTTP与授权入口门禁通过。普通审批list/detail/decide BFF尚未按锁定版本路由，动作代次与迟到响应也未接线；本项仍PARTIAL且真实Redis多副本ENV_PENDING。
+
+GSA-17 Account v2决定动作代次（仍PARTIAL / REVIEW_PENDING）：v2闭合请求体新增必填正整数`action_control_version`；批准在领域proof调用前比对控制版本，并在最终Serializable写事务内重验，驳回在可见性检查后的Serializable事务内持有控制共享锁并重验。旧v1请求体不变。版本失配返回409 `APPROVAL_ACTION_CONTROL_CHANGED`、`no-store`，零领域proof及决定副作用。真实隔离PG覆盖批准/驳回过期版本与零领域调用；Portal BFF的路由和迟到响应处理仍未完成。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。

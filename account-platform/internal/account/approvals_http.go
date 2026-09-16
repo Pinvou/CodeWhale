@@ -365,12 +365,17 @@ func (s *Service) adminDecideApprovalRequestV2(w http.ResponseWriter, r *http.Re
 			s.writeError(w, r, err)
 			return
 		}
+		if control.Version != decision.ActionControlVersion {
+			s.writeError(w, r, ErrApprovalActionControlChanged)
+			return
+		}
 		if control.Mode != AdminApprovalModeProofRequired {
 			s.writeError(w, r, ErrApprovalProofUnavailable)
 			return
 		}
 	}
-	if _, err := repository.DecideApprovalRequest(r.Context(), mustPrincipal(r.Context()), requestID, decision.ExpectedVersion, decision.Decision, decision.Reason, nil); err != nil {
+	decisionCtx := context.WithValue(r.Context(), approvalV2ControlVersionKey{}, decision.ActionControlVersion)
+	if _, err := repository.DecideApprovalRequest(decisionCtx, mustPrincipal(r.Context()), requestID, decision.ExpectedVersion, decision.Decision, decision.Reason, nil); err != nil {
 		s.writeError(w, r, err)
 		return
 	}

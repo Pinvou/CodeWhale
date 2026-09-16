@@ -51,7 +51,7 @@ func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
 	legacyService := &Service{repository: &PostgresRepository{pool: db.runtimePool, now: func() time.Time { return time.Now().UTC() }}}
 	legacyPath := "/admin/v2/approval-requests/" + request.ID.String() + "/actions/decide"
 	legacyV2 := performApprovalIntegrationRequest(t, legacyService.adminDecideApprovalRequestV2, principal, http.MethodPost, legacyPath, request.ID.String(),
-		map[string]any{"expected_version": request.Version, "decision": "APPROVED", "reason": "no legacy observed versions"})
+		map[string]any{"expected_version": request.Version, "action_control_version": 1, "decision": "APPROVED", "reason": "no legacy observed versions"})
 	if legacyV2.Code != http.StatusServiceUnavailable || !strings.Contains(legacyV2.Body.String(), "APPROVAL_PROOF_UNAVAILABLE") {
 		t.Fatalf("v2 approval entered legacy writer without observed versions: %d %s", legacyV2.Code, legacyV2.Body.String())
 	}
@@ -202,12 +202,25 @@ WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 	}
 	v2Approved := seedSubmittedApprovalForAuthorization(t, db, "WALLET_ADJUSTMENT")
 	service := &Service{repository: repository}
+	currentControl, err := repository.ApprovalActionControl(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	v2Path := "/admin/v2/approval-requests/" + v2Approved.ID.String() + "/actions/decide"
 	v2Approval := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, v2Path, v2Approved.ID.String(),
-		map[string]any{"expected_version": v2Approved.Version, "decision": "APPROVED", "reason": "independent v2 proof"})
+		map[string]any{"expected_version": v2Approved.Version, "action_control_version": currentControl.Version, "decision": "APPROVED", "reason": "independent v2 proof"})
 	if v2Approval.Code != http.StatusOK || !strings.Contains(v2Approval.Body.String(), `"status":"APPROVED"`) ||
 		strings.Contains(v2Approval.Body.String(), "normalized_command") || calls != 6 {
 		t.Fatalf("v2 approval did not share proof writer: %d %s calls=%d", v2Approval.Code, v2Approval.Body.String(), calls)
+	}
+	stale := seedSubmittedApprovalForAuthorization(t, db, "WALLET_ADJUSTMENT")
+	stalePath := "/admin/v2/approval-requests/" + stale.ID.String() + "/actions/decide"
+	for _, action := range []string{"APPROVED", "REJECTED"} {
+		staleResponse := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, stalePath, stale.ID.String(),
+			map[string]any{"expected_version": stale.Version, "action_control_version": currentControl.Version - 1, "decision": action, "reason": "stale action control"})
+		if staleResponse.Code != http.StatusConflict || !strings.Contains(staleResponse.Body.String(), "APPROVAL_ACTION_CONTROL_CHANGED") || calls != 6 {
+			t.Fatalf("stale %s decision was not closed before proof: %d %s calls=%d", action, staleResponse.Code, staleResponse.Body.String(), calls)
+		}
 	}
 	// Both write versions share the request state machine. V2 rejects all
 	// browser proof/observed fields before it invokes the repository; a safe
@@ -215,12 +228,12 @@ WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 	rejected := seedSubmittedApprovalForAuthorization(t, db, "WALLET_ADJUSTMENT")
 	path := "/admin/v2/approval-requests/" + rejected.ID.String() + "/actions/decide"
 	invalid := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, path, rejected.ID.String(),
-		map[string]any{"expected_version": rejected.Version, "decision": "REJECTED", "reason": "independent rejection", "observed_versions": map[string]any{}})
+		map[string]any{"expected_version": rejected.Version, "action_control_version": currentControl.Version, "decision": "REJECTED", "reason": "independent rejection", "observed_versions": map[string]any{}})
 	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "INVALID_APPROVAL_DECISION") {
 		t.Fatalf("v2 accepted untrusted observed versions: %d %s", invalid.Code, invalid.Body.String())
 	}
 	response := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequestV2, principal, http.MethodPost, path, rejected.ID.String(),
-		map[string]any{"expected_version": rejected.Version, "decision": "REJECTED", "reason": "independent rejection"})
+		map[string]any{"expected_version": rejected.Version, "action_control_version": currentControl.Version, "decision": "REJECTED", "reason": "independent rejection"})
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"REJECTED"`) ||
 		strings.Contains(response.Body.String(), "normalized_command") || calls != 6 {
 		t.Fatalf("v2 safe close did not return a closed detail or called proof: %d %s calls=%d", response.Code, response.Body.String(), calls)

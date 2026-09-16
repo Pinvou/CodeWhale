@@ -5541,9 +5541,10 @@ components:
     ApprovalV2Decision:
       type: object
       additionalProperties: false
-      required: [expected_version, decision, reason]
+      required: [expected_version, action_control_version, decision, reason]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
+        action_control_version: { type: integer, format: int64, minimum: 1 }
         decision: { type: string, enum: [APPROVED, REJECTED] }
         reason: { type: string, minLength: 3, maxLength: 2000 }
     ApprovalRequest:

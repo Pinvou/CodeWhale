@@ -2,6 +2,7 @@ package account
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,11 +11,20 @@ import (
 )
 
 var errInvalidApprovalDecision = errors.New("invalid v2 approval decision")
+var ErrApprovalActionControlChanged = errors.New("approval action control changed")
 
 type approvalV2Decision struct {
-	ExpectedVersion int64
-	Decision        string
-	Reason          string
+	ExpectedVersion      int64
+	ActionControlVersion int64
+	Decision             string
+	Reason               string
+}
+
+type approvalV2ControlVersionKey struct{}
+
+func approvalV2ControlVersion(ctx context.Context) int64 {
+	version, _ := ctx.Value(approvalV2ControlVersionKey{}).(int64)
+	return version
 }
 
 // decodeApprovalV2Decision rejects aliases, duplicate keys, unknown proof
@@ -52,6 +62,11 @@ func decodeApprovalV2Decision(body io.Reader) (approvalV2Decision, error) {
 				return approvalV2Decision{}, errInvalidApprovalDecision
 			}
 			result.ExpectedVersion, err = strconv.ParseInt(string(field), 10, 64)
+		case "action_control_version":
+			if len(field) == 0 || field[0] < '1' || field[0] > '9' {
+				return approvalV2Decision{}, errInvalidApprovalDecision
+			}
+			result.ActionControlVersion, err = strconv.ParseInt(string(field), 10, 64)
 		case "decision":
 			err = json.Unmarshal(field, &result.Decision)
 		case "reason":
@@ -64,8 +79,8 @@ func decodeApprovalV2Decision(body io.Reader) (approvalV2Decision, error) {
 		}
 	}
 	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || decoder.Decode(new(any)) != io.EOF || len(seen) != 3 ||
-		result.ExpectedVersion <= 0 || result.Decision != strings.ToUpper(result.Decision) ||
+	if err != nil || end != json.Delim('}') || decoder.Decode(new(any)) != io.EOF || len(seen) != 4 ||
+		result.ExpectedVersion <= 0 || result.ActionControlVersion <= 0 || result.Decision != strings.ToUpper(result.Decision) ||
 		(result.Decision != "APPROVED" && result.Decision != "REJECTED") ||
 		len(strings.TrimSpace(result.Reason)) < 3 || len(strings.TrimSpace(result.Reason)) > 2000 {
 		return approvalV2Decision{}, errInvalidApprovalDecision

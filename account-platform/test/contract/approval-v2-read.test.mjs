@@ -74,10 +74,10 @@ test('v2 decision has a separate closed body and the same governed repository ac
   assert.deepEqual(Object.keys(path), ['post']);
   assert.equal(path.post.requestBody.content['application/json'].schema.$ref, '#/components/schemas/ApprovalV2Decision');
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.required, ['expected_version', 'decision', 'reason']);
+  assert.deepEqual(schema.required, ['expected_version', 'action_control_version', 'decision', 'reason']);
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   const validate = ajv.compile(schema);
-  const body = { expected_version: 1, decision: 'APPROVED', reason: 'independent approval' };
+  const body = { expected_version: 1, action_control_version: 1, decision: 'APPROVED', reason: 'independent approval' };
   assert.equal(validate(body), true);
   for (const field of ['observed_versions', 'proof', 'proof_digest', 'domain_revision', 'verdict']) {
     assert.equal(validate({ ...body, [field]: 'untrusted' }), false, field);

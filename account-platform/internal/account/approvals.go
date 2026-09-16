@@ -422,6 +422,15 @@ func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx conte
 	if _, err := approvalRequestVisibilityForActor(ctx, tx, *actorID, requestID); err != nil {
 		return ApprovalRequest{}, err
 	}
+	if expectedControlVersion := approvalV2ControlVersion(ctx); expectedControlVersion > 0 {
+		control, err := LockAdminApprovalControlShared(ctx, tx)
+		if err != nil {
+			return ApprovalRequest{}, err
+		}
+		if control.Version != expectedControlVersion {
+			return ApprovalRequest{}, ErrApprovalActionControlChanged
+		}
+	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
 		return ApprovalRequest{}, approvalVisibleRequestReadError(err)
@@ -507,6 +516,9 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 	control, err := r.ApprovalActionControl(ctx)
 	if err != nil {
 		return ApprovalRequest{}, err
+	}
+	if expectedControlVersion := approvalV2ControlVersion(ctx); expectedControlVersion > 0 && control.Version != expectedControlVersion {
+		return ApprovalRequest{}, ErrApprovalActionControlChanged
 	}
 	if err := approvalApproveGateError(control); err != nil {
 		return ApprovalRequest{}, err
@@ -597,8 +609,14 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		rollbackErr := tx.Rollback(rollbackContext)
 		return result, false, rollbackErr == nil || errors.Is(rollbackErr, pgx.ErrTxClosed), cause
 	}
-	control, err := lockApprovalAuthorizationControl(ctx, tx)
+	control, err := LockAdminApprovalControlShared(ctx, tx)
 	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if expectedControlVersion := approvalV2ControlVersion(ctx); expectedControlVersion > 0 && control.Version != expectedControlVersion {
+		return rollback(ApprovalRequest{}, ErrApprovalActionControlChanged)
+	}
+	if err := approvalApproveGateError(control); err != nil {
 		return rollback(ApprovalRequest{}, err)
 	}
 	if checkpoint == nil {
