@@ -672,6 +672,16 @@
         "file": "000067_approval_proof_single_attempt_fence.up.sql",
         "version": 67,
         "sha256": "bbb2828f46746f0241f65287d059c49b61bbf0af4f4de82a93b59f17864230bb"
+      },
+      {
+        "file": "000068_approval_recovery_query_lease.down.sql",
+        "version": 68,
+        "sha256": "fcbffea90bd7abeb98eb15b41ba3e381a69863f9c6819bff557d6c9a8a84bb26"
+      },
+      {
+        "file": "000068_approval_recovery_query_lease.up.sql",
+        "version": 68,
+        "sha256": "ad8cca5a43d773368c69017c78938e06e3c3eb21757930a124f210c30e646fda"
       }
     ],
     "billing": [

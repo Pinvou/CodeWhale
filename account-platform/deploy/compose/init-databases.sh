@@ -33,6 +33,10 @@ SELECT format('CREATE ROLE account_approval_backfill LOGIN NOINHERIT NOSUPERUSER
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_backfill') \gexec
 SELECT format('CREATE ROLE account_approval_relay LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_approval_relay_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_relay') \gexec
+-- Recovery is provisioned disabled. A later controlled deployment must issue
+-- its own credential/LOGIN only after the query-only worker is release-ready.
+SELECT 'CREATE ROLE account_approval_recovery NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_recovery') \gexec
 GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE, SET TRUE, ADMIN TRUE;
 SELECT format('CREATE ROLE billing_service LOGIN PASSWORD %L', :'billing_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_service') \gexec

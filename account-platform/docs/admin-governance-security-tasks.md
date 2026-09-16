@@ -115,6 +115,8 @@ GSA-16 分类阶段（仍PARTIAL）：`d547eeee`以六命令/version closed regi
 GSA-16 只读规划阶段（仍PARTIAL）：`2f13128b`新增Account同一只读一致性快照的有界proof-era失败执行规划，返回原execution/event/durable/epoch/状态及保守分类，legacy排除；隔离PG覆盖真实批准→投递→首次授权→失败后的原执行查证及零第二execution。尚未接入独立worker、领域权威结果、租约和终态CAS，规划输出不授权重试/失效。
 
 GSA-16 只读检查阶段（仍PARTIAL）：`15279bd8`补齐原幂等键、数据库故障与证据不一致的错误隔离，并改用既有审批队列索引顺序作有界扫描；`b83d9038`将封闭候选映射到现有Billing/Token效果权威，但ABSENT/已观测/不可用均只得UNKNOWN_QUERY_ONLY，伪造绑定在领域调用前拒绝。真实PG正向原执行与legacy排除、分类/效果单测PASS。缺少独立身份、持久租约、逐命令结果终态及安全收敛，不标记CODE_COMPLETE。
+
+GSA-16 查询租约阶段（仍PARTIAL）：前向Account`000068`新增原execution/event/epoch/version绑定的15秒持久只读租约与2～512秒退避；`account_approval_recovery`仅预建NOLOGIN，不能直接读写租约表，只持claim/release函数权限。真实隔离PG验证首抢、同租约拒绝、错误token拒绝、释放退避，manifest校验PASS。已有生产库需运维先预建相同角色再迁移；本阶段没有启用LOGIN或部署worker，不能称独立恢复已运行。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。

@@ -50,14 +50,14 @@ func TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	connection := authorizationTestConnection(t, ctx, db.migratorPool)
-	if _, err := connection.Exec(ctx, `SET ROLE account_service`); err != nil {
+	migrationConnection := authorizationTestConnection(t, ctx, db.migratorPool)
+	if _, err := migrationConnection.Exec(ctx, `SET ROLE account_service`); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Up(ctx, connection.Conn(), loaded); err != nil {
+	if err := migrations.Up(ctx, migrationConnection.Conn(), loaded); err != nil {
 		t.Fatal(err)
 	}
-	migrations.Unlock(ctx, connection.Conn())
+	migrations.Unlock(ctx, migrationConnection.Conn())
 	for _, statement := range []string{
 		`UPDATE account_approval_control.admin_approval_control SET mode='QUIESCING',approval_epoch=approval_epoch+1,version=version+1,updated_at=now()`,
 		`UPDATE account_approval_control.admin_approval_control SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now()`,
@@ -154,5 +154,50 @@ func TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration(t *test
 	var count int
 	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM approval_executions WHERE approval_request_id=$1`, request.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("planner created a second execution: count=%d err=%v", count, err)
+	}
+	var canLogin, canWrite bool
+	if err := db.adminPool.QueryRow(ctx, `SELECT rolcanlogin,has_table_privilege('account_approval_recovery','public.approval_recovery_query_leases','INSERT,UPDATE,DELETE') FROM pg_roles WHERE rolname='account_approval_recovery'`).Scan(&canLogin, &canWrite); err != nil || canLogin || canWrite {
+		t.Fatalf("recovery role enabled or has direct DML: login=%t write=%t err=%v", canLogin, canWrite, err)
+	}
+	connection, err := db.adminPool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION account_approval_recovery`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		resetCtx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		defer cancel()
+		if _, err := connection.Exec(resetCtx, `RESET SESSION AUTHORIZATION`); err != nil {
+			t.Errorf("reset isolated recovery test session: %v", err)
+		}
+	}()
+	if _, err := connection.Exec(ctx, `SELECT * FROM public.approval_recovery_query_leases`); postgresSQLState(err) != "42501" {
+		t.Fatalf("recovery role directly read private leases: SQLSTATE=%s err=%v", postgresSQLState(err), err)
+	}
+	var token uuid.UUID
+	var until time.Time
+	var queries int
+	var version int64
+	claim := `SELECT lease_token,lease_until,query_count,version FROM public.claim_approval_recovery_query($1,$2,$3,$4,$5,$6)`
+	args := []any{item.RequestID, item.ExecutionID, item.OriginalEventID, item.Durable, item.ApprovalEpoch, item.RequestVersion}
+	if err := connection.QueryRow(ctx, claim, args...).Scan(&token, &until, &queries, &version); err != nil || token == uuid.Nil || queries != 1 || version != 1 || !until.After(time.Now()) {
+		t.Fatalf("original query lease invalid: token=%s until=%v count=%d version=%d err=%v", token, until, queries, version, err)
+	}
+	claimedToken, claimedVersion := token, version
+	if err := connection.QueryRow(ctx, claim, args...).Scan(&token, &until, &queries, &version); postgresSQLState(err) != "55000" {
+		t.Fatalf("active lease was stolen: SQLSTATE=%s err=%v", postgresSQLState(err), err)
+	}
+	var next time.Time
+	if err := connection.QueryRow(ctx, `SELECT next_query_at,version FROM public.release_approval_recovery_query($1,$2,$3)`, item.RequestID, uuid.New(), claimedVersion).Scan(&next, &version); postgresSQLState(err) != "55000" {
+		t.Fatalf("wrong token released lease: SQLSTATE=%s err=%v", postgresSQLState(err), err)
+	}
+	if err := connection.QueryRow(ctx, `SELECT next_query_at,version FROM public.release_approval_recovery_query($1,$2,$3)`, item.RequestID, claimedToken, claimedVersion).Scan(&next, &version); err != nil || version != 2 || !next.After(time.Now()) {
+		t.Fatalf("query lease release/backoff invalid: next=%v version=%d err=%v", next, version, err)
+	}
+	if err := connection.QueryRow(ctx, claim, args...).Scan(&token, &until, &queries, &version); postgresSQLState(err) != "55000" {
+		t.Fatalf("backoff was bypassed: SQLSTATE=%s err=%v", postgresSQLState(err), err)
 	}
 }

@@ -8,6 +8,7 @@
 - `EXECUTION_FAILED` 不由通用过期 worker 直接标记 INVALIDATED；已有执行记录的结果必须先经领域权威查证。未 Begin 的 APPROVED 仍按原五分钟执行窗口过期。
 - Account `PlanProofApprovalRecovery` 已提供最多200条同一只读快照的原request/execution/event/durable、原幂等键、投递/执行状态、epoch、截止时间及分类；legacy不进入列表。它不取租约、不读取领域效果、不改变状态，也不暴露为Portal接口。生产恢复worker、独立身份和领域结果权威仍未接入，不可把这份计划当作完成恢复的证据。
 - `InspectProofRecovery` 在30秒总预算内对每个closed候选仅调用原Billing/Token效果观测；`ABSENT`、`EFFECT_OR_ATTEMPT_OBSERVED`、不可用都输出 `UNKNOWN_QUERY_ONLY`。它不查询原命令的权威终态，也不授予零效果证明；只读效果观测不能替代逐命令领域结果查证或独立持久租约。
+- Account `000068` 增加原执行/事件/epoch/请求版本绑定的15秒只读查询租约，重复抢占与错误token受CAS拒绝，释放按2～512秒退避。独立`account_approval_recovery`身份目前只预建为`NOLOGIN`，仅可执行租约函数，不能直读/写表。既有数据库升级前需要通过受控运维预建同样NOLOGIN角色；本阶段没有运行worker、颁发凭证或启用LOGIN，租约不授权领域重试或终态变更。
 - 任何已提交 Billing proof claim、已进入 Provider 探测、Token 本地命令已开始、数据库提交结果不明、权威结果读超时或未知错误码，均按 UNKNOWN 处理。一次“未查到结果”不是“没有产生效果”的证明。
 - 六命令 closed 分类已落入 `approvalconsumer.ClassifyProofFailure`。Billing 的 `DOMAIN_REVISION_CHANGED`、`COMMAND_SNAPSHOT_MISMATCH` 暂归事实/政策变化调查，`DOMAIN_RESOURCE_NOT_FOUND` 暂归永久失败调查；`DOMAIN_PRECONDITION_REJECTED` 混合余额、可用性和冲突，不具备单义分类，故与 Token 合并码 `DOMAIN_EXECUTION_FAILED`、缺码、未知版本一律归 UNKNOWN。分类本身不能证明零效果、不能直接 INVALIDATED；当前六命令均不允许自动第二次领域调用，`TRANSIENT_SAFE` 和 `WINDOW_ENDED` 必须待领域证据与绝对窗口核实后才可最终判定。
 
