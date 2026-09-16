@@ -508,6 +508,13 @@ func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, princip
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
+	if control.Mode == AdminApprovalModeProofRequired {
+		// The writer is a prerequisite for a useful domain proof. Check it
+		// before spending the owner's bounded read budget.
+		if err := r.ApprovalWriterReady(ctx); err != nil {
+			return ApprovalRequest{}, ErrApprovalWriterUnavailable
+		}
+	}
 	var checkpoint *approvalProofCheckpoint
 	var proofResult *ApprovalProofResult
 	if control.Mode == AdminApprovalModeProofRequired {

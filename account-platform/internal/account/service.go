@@ -685,6 +685,16 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		w.Header().Set("Retry-After", "5")
 		w.Header().Set("Cache-Control", "no-store")
 		status, code, message = http.StatusServiceUnavailable, "APPROVAL_WRITER_UNAVAILABLE", "the approval authorization writer is temporarily unavailable"
+	case errors.Is(err, ErrApprovalProofRejected):
+		status, code, message = http.StatusConflict, "APPROVAL_PROOF_REJECTED", "the authoritative domain proof rejected the approval"
+	case errors.Is(err, ErrApprovalProofInvalid):
+		status, code, message = http.StatusBadGateway, "APPROVAL_PROOF_INVALID", "the authoritative domain proof was invalid"
+	case errors.Is(err, ErrApprovalProofTooLarge):
+		status, code, message = http.StatusBadGateway, "APPROVAL_PROOF_TOO_LARGE", "the authoritative domain proof exceeded the size limit"
+	case errors.Is(err, ErrApprovalProofUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_PROOF_UNAVAILABLE", "the authoritative domain proof is temporarily unavailable"
+	case errors.Is(err, ErrApprovalProofTimeout):
+		status, code, message = http.StatusGatewayTimeout, "APPROVAL_PROOF_TIMEOUT", "the authoritative domain proof timed out"
 	case errors.Is(err, ErrApprovalSnapshotRejected):
 		status, code, message = http.StatusConflict, "APPROVAL_SNAPSHOT_REJECTED", "the authoritative approval snapshot request was rejected"
 	case errors.Is(err, ErrApprovalCommandNotExecutable):
@@ -701,6 +711,9 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		w.Header().Set("Retry-After", "5")
 		w.Header().Set("Cache-Control", "no-store")
 		status, code, message = http.StatusServiceUnavailable, "APPROVAL_AUTHORIZATION_UNAVAILABLE", "approval authorization state is temporarily unavailable"
+	}
+	if strings.HasPrefix(code, "APPROVAL_PROOF_") {
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
