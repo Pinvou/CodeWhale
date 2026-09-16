@@ -16,6 +16,7 @@ func TestApprovalBFFLocksPathAndRejectsBrowserProof(t *testing.T) {
 	bumpAfterDetail := false
 	staleDetailHeader := false
 	historical := false
+	commandType := "WALLET_ADJUSTMENT"
 	var upstreamPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -44,7 +45,7 @@ func TestApprovalBFFLocksPathAndRejectsBrowserProof(t *testing.T) {
 			}
 			w.Header().Set("X-Pinvou-Approval-Action-Control-Version", fmt.Sprint(detailVersion))
 		}
-		_, _ = fmt.Fprintf(w, `{"action_control_version":%d,"allowed_actions":["APPROVE"]}`, version)
+		_, _ = fmt.Fprintf(w, `{"approval_request_id":"0198fbf7-c3ba-7bc4-8849-c157740963de","command_type":%q,"action_control_version":%d,"allowed_actions":["APPROVE"]}`, commandType, version)
 		if bumpAfterDetail {
 			version++
 		}
@@ -91,6 +92,18 @@ func TestApprovalBFFLocksPathAndRejectsBrowserProof(t *testing.T) {
 	if response.Code != http.StatusNoContent || upstreamPath != "/admin/v2/approval-requests/"+id+"/actions/decide" {
 		t.Fatalf("v2 decision not routed: %d %s %s", response.Code, response.Body.String(), upstreamPath)
 	}
+	commandType = "TOKEN_CREDENTIAL_REVOKE"
+	response = httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request(http.MethodGet, resource, ""))
+	if response.Code != http.StatusOK {
+		t.Fatalf("token approval detail should remain readable: %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request(http.MethodPost, resource+"/actions/decide", valid))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("disabled Token approval action passed BFF: %d %s", response.Code, response.Body.String())
+	}
+	commandType = "WALLET_ADJUSTMENT"
 	wire = 1
 	response = httptest.NewRecorder()
 	service.Handler(nil).ServeHTTP(response, request(http.MethodGet, resource, ""))

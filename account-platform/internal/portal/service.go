@@ -627,12 +627,12 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 
 func (s *Service) captureApprovalClassification(ctx context.Context, session Session, method, resource string, response *http.Response) {
 	parts := strings.Split(strings.Trim(path.Clean(resource), "/"), "/")
-	if len(parts) < 3 || parts[0] != "admin" || parts[1] != "v1" || parts[2] != "approval-requests" {
+	if len(parts) < 3 || parts[0] != "admin" || (parts[1] != "v1" && parts[1] != "v2") || parts[2] != "approval-requests" {
 		return
 	}
-	isCreate := method == http.MethodPost && len(parts) == 3
+	isCreate := parts[1] == "v1" && method == http.MethodPost && len(parts) == 3
 	isDetail := method == http.MethodGet && len(parts) == 4
-	isUpdate := method == http.MethodPut && len(parts) == 4
+	isUpdate := parts[1] == "v1" && method == http.MethodPut && len(parts) == 4
 	if !isCreate && !isDetail && !isUpdate {
 		return
 	}

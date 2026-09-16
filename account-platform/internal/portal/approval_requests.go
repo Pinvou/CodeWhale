@@ -42,6 +42,9 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
+	if decide && !s.config.AdminModelTokenActionsEnabled && s.rejectDisabledExistingTokenApprovalAction(w, r, requestID) {
+		return
+	}
 	capability, err := s.readApprovalCapability(r.Context(), session)
 	if err != nil {
 		approvalBFFUnavailable(w, r)
@@ -129,6 +132,10 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		// header. The browser must refetch before offering another action.
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+	if response.StatusCode == http.StatusOK && detail {
+		response.Body = io.NopCloser(bytes.NewReader(data))
+		s.captureApprovalClassification(r.Context(), session, r.Method, "/admin/v"+strconv.Itoa(wire)+"/approval-requests/"+requestID.String(), response)
 	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	if detail && wire == 1 && response.StatusCode == http.StatusOK {
