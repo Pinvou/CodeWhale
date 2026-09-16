@@ -453,10 +453,13 @@ fn artifact_metadata(write: ArtifactWrite) -> Value {
         "artifact_relative_path": crate::artifacts::format_artifact_relative_path(&write.relative_path),
         "artifact_byte_size": write.byte_size,
         "artifact_preview": write.preview,
-        // The overflow footer tells the model to recover via
-        // `retrieve_tool_result`; this flag is what makes the engine
-        // auto-activate that tool on the next turn (same contract as the
-        // shell-truncation spillover), so the named tool is actually present.
+        // Every artifact this tool writes is retrievable evidence, so flag it
+        // for the engine's `activate_result_dependencies` (same contract as
+        // the shell-truncation spillover): the next turn auto-activates
+        // `retrieve_tool_result`. Text overflows name that tool in their
+        // footer; binary PDF/media saves name only the saved-artifact path in
+        // their inline pointer, so this flag is what makes that pointer
+        // actionable rather than a dead end.
         "evidence_available": true,
     })
 }
@@ -616,7 +619,7 @@ mod tests {
         assert_eq!(
             metadata.get("evidence_available"),
             Some(&json!(true)),
-            "overflow metadata must flag retrievable evidence:\n{metadata}"
+            "artifact metadata must flag retrievable evidence:\n{metadata}"
         );
     }
 

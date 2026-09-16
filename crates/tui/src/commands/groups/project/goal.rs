@@ -93,7 +93,7 @@ fn goal_command(
                      task in flight, recent findings, open items) and set it by calling \
                      `create_goal` with the full objective (and a token_budget only if one was \
                      discussed); if `create_goal` is not in your tool list, activate it via \
-                     `tool_search` first. Then continue working toward it. Only if the conversation \
+                     `tool_search` first; if `tool_search` cannot surface it, call `create_goal` directly anyway, since registered deferred tools hydrate when called by name. Then continue working toward it. Only if the conversation \
                      genuinely contains no work yet, ask the user what the goal should be."
                     .to_string();
                 CommandResult::with_message_and_action(
@@ -463,6 +463,12 @@ mod tests {
             message.contains("activate it via `tool_search` first"),
             "create_goal is deferred on stock hosts; the bare /goal brief must \
              teach the activation path instead of commanding an absent tool:\n{message}"
+        );
+        assert!(
+            message.contains("call `create_goal` directly anyway"),
+            "allowed_tools-filtered sessions can strip tool_search too; the \
+             bare /goal brief must keep the direct-call fallback instead of \
+             dead-ending:\n{message}"
         );
     }
 

@@ -900,7 +900,9 @@ fn default_agent_inspect_tool() -> String {
 /// `handle_read` is deferred on stock hosts, so model-facing text that pairs
 /// it with a transcript handle must teach the activation path instead of
 /// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
-const HANDLE_READ_ACTIVATION_HINT: &str =
+/// `pub(crate)` so the engine's parent-context hint reuses the exact wording
+/// instead of re-typing a drifting copy.
+pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str =
     "if `handle_read` is not in your tool list, activate it via `tool_search` first";
 
 /// Shared inspect brief for worker records and takeover targets; both name

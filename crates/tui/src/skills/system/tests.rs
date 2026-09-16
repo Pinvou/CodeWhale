@@ -80,43 +80,44 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
 // not a phantom. Scope note: `v4-best-practices` and `feishu` are not in
 // BUNDLED_SKILLS (legacy/optional, never auto-installed), so this sweep does
 // not cover them.
+const PHANTOM_NAMES: &[&str] = &[
+    "`File`",
+    "`Bash`",
+    "`exec_shell`",
+    "`exec_shell_wait`",
+    "`exec_shell_interact`",
+    "`exec_shell_cancel`",
+    "`read_file`",
+    "`write_file`",
+    "`edit_file`",
+    "`fetch_url`",
+    "`web_fetch`",
+    "`web_search`",
+    "`work_update`",
+    "`TodoWrite`",
+    "`todo`",
+    "`checklist_write`",
+    "`checklist_update`",
+    "`update_plan`",
+    "`rlm`",
+    "`run_tests`",
+    "`run_verifiers`",
+    "`git_status`",
+    "`git_diff`",
+    "`git_log`",
+    "`git_show`",
+    "`git_blame`",
+    "`wait_for_dev_server`",
+    "`agents/list`",
+    "`agents/message`",
+    "`agents/coordinate`",
+    "`agents/followup`",
+    "`agents/interrupt`",
+    "`agents/wait`",
+];
+
 #[test]
 fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
-    const PHANTOM_NAMES: &[&str] = &[
-        "`File`",
-        "`Bash`",
-        "`exec_shell`",
-        "`exec_shell_wait`",
-        "`exec_shell_interact`",
-        "`exec_shell_cancel`",
-        "`read_file`",
-        "`write_file`",
-        "`edit_file`",
-        "`fetch_url`",
-        "`web_fetch`",
-        "`web_search`",
-        "`work_update`",
-        "`TodoWrite`",
-        "`todo`",
-        "`checklist_write`",
-        "`checklist_update`",
-        "`update_plan`",
-        "`rlm`",
-        "`run_tests`",
-        "`run_verifiers`",
-        "`git_status`",
-        "`git_diff`",
-        "`git_log`",
-        "`git_show`",
-        "`git_blame`",
-        "`wait_for_dev_server`",
-        "`agents/list`",
-        "`agents/message`",
-        "`agents/coordinate`",
-        "`agents/followup`",
-        "`agents/interrupt`",
-        "`agents/wait`",
-    ];
     for skill in BUNDLED_SKILLS {
         for phantom in PHANTOM_NAMES {
             assert!(
@@ -127,6 +128,27 @@ fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
                 skill.body
             );
         }
+    }
+}
+
+// The denylist above is a hand-maintained superset of the canonical lists in
+// `tools/canonical_action.rs` (`RETIRED_TOOL_NAMES`, `HIDDEN_COMPAT_TOOL_NAMES`)
+// plus extra fork-era names (the todo family, `rlm`, the `agents/*` set). A
+// newly registered hidden alias would otherwise skip this sweep silently, so
+// anchor the hand list to the canonical one: every canonical entry must stay
+// covered here in its backticked citation form.
+#[test]
+fn forkguard_phantom_denylist_covers_canonical_lists() {
+    let canonical = crate::tools::canonical_action::RETIRED_TOOL_NAMES
+        .iter()
+        .chain(crate::tools::canonical_action::HIDDEN_COMPAT_TOOL_NAMES);
+    for name in canonical {
+        let cited = format!("`{name}`");
+        assert!(
+            PHANTOM_NAMES.contains(&cited.as_str()),
+            "PHANTOM_NAMES must cover canonical entry {cited} or retired/hidden \
+             names can re-enter bundled skill bodies unguarded"
+        );
     }
 }
 

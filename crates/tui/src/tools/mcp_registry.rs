@@ -1907,7 +1907,7 @@ mod tests {
         );
         assert!(
             REGISTRY_FIRST_PROMPT.contains("run tool_search first to activate it"),
-            "start_registry_mcp_server is deferred independently of              registry_sync; the prompt must name the activation path:\n{REGISTRY_FIRST_PROMPT}"
+            "start_registry_mcp_server is deferred independently of registry_sync; the prompt must name the activation path:\n{REGISTRY_FIRST_PROMPT}"
         );
     }
 }
