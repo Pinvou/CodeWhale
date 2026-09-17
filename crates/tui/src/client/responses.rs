@@ -193,7 +193,10 @@ impl DeepSeekClient {
                     self.http1_fallback_client(),
                     policy,
                 );
-                self.send_with_retry(|| {
+                // Stream open: no per-request total — the response body
+                // outlives the open, and a total would ride on it and
+                // truncate the stream.
+                self.send_stream_open_with_retry(|| {
                     let mut builder = client
                         .post(&url)
                         .header("Content-Type", "application/json")

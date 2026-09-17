@@ -342,10 +342,12 @@ const RATE_LIMIT_PAUSE_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// (connect through body end, so a trickling body cannot extend forever),
 /// and the retry loop through `send_with_retry` is wrapped in one outer
 /// envelope of the same length (all attempts, backoff, and honored
-/// Retry-After included). Requests consumed by streaming paths are sent
-/// through their own entry points (open cap + per-chunk idle), so this
-/// never truncates a stream. Also applied to the Anthropic dialect's
-/// non-streaming Messages request, which has no retry loop of its own.
+/// Retry-After included). Streaming paths never carry it: their opens go
+/// through `send_stream_open_with_retry`, which sets no per-request total
+/// (a total would ride on the returned body), so a stream stays bounded by
+/// its open cap and per-chunk idle checks only. Also applied to the
+/// Anthropic dialect's non-streaming Messages request, which has no retry
+/// loop of its own.
 pub(crate) const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
 
 #[cfg(test)]
@@ -2444,11 +2446,11 @@ impl DeepSeekClient {
     /// List available models from the provider.
     pub async fn list_models(&self) -> Result<Vec<AvailableModel>> {
         let url = api_url(&self.base_url, "models");
+        // The pinned 30s total survives: the retry loop's shared envelope is
+        // not allowed to overwrite a caller's own per-attempt budget.
         let response = self
-            .send_with_retry(|| {
-                self.http_client
-                    .get(&url)
-                    .timeout(NON_STREAMING_HTTP_TIMEOUT)
+            .send_with_retry_total(NON_STREAMING_HTTP_TIMEOUT, || {
+                self.http_client.get(&url)
             })
             .await?;
 
@@ -2885,35 +2887,88 @@ impl DeepSeekClient {
         }
     }
 
-    pub(super) async fn send_with_retry<F>(&self, mut build: F) -> Result<reqwest::Response>
+    pub(super) async fn send_with_retry<F>(&self, build: F) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
         if self.isolated_request_state {
             return self.send_with_isolated_retry(build).await;
         }
+        self.send_retry_loop(build, Some(non_streaming_request_envelope()))
+            .await
+    }
+
+    /// `send_with_retry` with a caller-pinned per-attempt total (connect
+    /// through body end). `list_models` pins its own 30s: the plain variant
+    /// would otherwise stretch that pinned budget out to the envelope,
+    /// because `.timeout()` on the builder is a pure overwrite.
+    pub(super) async fn send_with_retry_total<F>(
+        &self,
+        total: Duration,
+        build: F,
+    ) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        if self.isolated_request_state {
+            return self.send_with_isolated_retry(build).await;
+        }
+        self.send_retry_loop(build, Some(total)).await
+    }
+
+    /// The streaming-open twin of [`Self::send_with_retry`]: the same retry
+    /// and rate-limit handling with no total deadline anywhere. reqwest's
+    /// per-request timeout wraps the response *body*, so a total set on the
+    /// open would ride along inside the returned body and hard-cut a live
+    /// stream mid-generation. Stream opens stay bounded by the caller's
+    /// `stream_open_timeout` around the open and per-chunk idle checks on
+    /// the returned body instead.
+    pub(super) async fn send_stream_open_with_retry<F>(
+        &self,
+        build: F,
+    ) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        if self.isolated_request_state {
+            return self.send_with_isolated_retry(build).await;
+        }
+        self.send_retry_loop(build, None).await
+    }
+
+    async fn send_retry_loop<F>(
+        &self,
+        mut build: F,
+        attempt_total: Option<Duration>,
+    ) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
-        // Two bounded layers around the non-streaming completion: the
-        // per-attempt request total below (connect through body end) and
-        // this envelope around the whole retry loop (all attempts +
-        // backoff + honored Retry-After). The shared client intentionally
-        // has no client-level total timeout — streaming is protected
-        // per-chunk instead — so without these nothing bounds a
+        // Two bounded layers around the non-streaming completion
+        // (`attempt_total` = `Some`): the per-attempt request total (connect
+        // through body end) and an envelope around the whole retry loop (all
+        // attempts + backoff + honored Retry-After). The shared client
+        // intentionally has no client-level total timeout — streaming is
+        // protected per-chunk instead — so without these nothing bounds a
         // non-streaming completion: a provider that accepts the connection
         // and then stalls (or a gateway answering 429 + Retry-After: 3600
         // forever) wedged the caller (mid-turn compaction, translate, …)
-        // indefinitely. The envelope is inert for callers with a tighter
-        // outer budget (stream open 45s).
-        let request_result = match tokio::time::timeout(
-            non_streaming_request_envelope(),
-            with_retry(
-                &retry_cfg,
-                || {
-                    // Per-attempt total: unlike the loop envelope above,
-                    // reqwest's per-request timeout also covers the response
-                    // body, so a slow-drip body cannot outlive the budget.
-                    let request = build().timeout(non_streaming_request_envelope());
-                    async move {
+        // indefinitely. `None` (streaming opens) sets no deadline at all:
+        // any total here would be inherited by the returned body and
+        // truncate the stream, so those calls keep only the caller's own
+        // open budget.
+        let retry_future = with_retry(
+            &retry_cfg,
+            || {
+                // Per-attempt total: unlike the loop envelope below,
+                // reqwest's per-request timeout also covers the response
+                // body, so a slow-drip body cannot outlive the budget.
+                let request = match attempt_total {
+                    Some(total) => build().timeout(total),
+                    None => build(),
+                };
+                async move {
                         // Sleep in bounded slices rather than the full remaining
                         // window: the pause is process-global, so a concurrent
                         // `clear_rate_limit()` (or a shortened deadline) must
@@ -2958,18 +3013,25 @@ impl DeepSeekClient {
                     }
                     crate::retry_status::start(attempt + 1, delay, human_reason);
                 })),
-            ),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                let last = LlmError::Timeout(NON_STREAMING_REQUEST_ENVELOPE);
-                crate::retry_status::failed(last.to_string());
-                self.mark_request_failure("non-streaming request envelope exceeded")
-                    .await;
-                return Err(anyhow::Error::new(last));
+        );
+        let request_result = if let Some(total) = attempt_total {
+            // The loop envelope must dominate the per-attempt total it
+            // wraps: a caller-pinned budget (list_models' 30s) may exceed
+            // the shared envelope, and the envelope must never strangle
+            // its own attempts.
+            let loop_envelope = total.max(non_streaming_request_envelope());
+            match tokio::time::timeout(loop_envelope, retry_future).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    let last = LlmError::Timeout(loop_envelope);
+                    crate::retry_status::failed(last.to_string());
+                    self.mark_request_failure("non-streaming request envelope exceeded")
+                        .await;
+                    return Err(anyhow::Error::new(last));
+                }
             }
+        } else {
+            retry_future.await
         };
 
         match request_result {
@@ -3060,6 +3122,25 @@ impl DeepSeekClient {
         let request_body =
             serde_json::to_vec(body).context("Failed to serialize JSON request body")?;
         self.send_with_retry(|| {
+            self.http_client
+                .post(url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(request_body.clone())
+        })
+        .await
+    }
+
+    /// JSON POST through the streaming-open retry path: no total deadline,
+    /// because the response body outlives the open (see
+    /// [`Self::send_stream_open_with_retry`]).
+    pub(super) async fn open_stream_json_with_retry(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let request_body =
+            serde_json::to_vec(body).context("Failed to serialize JSON request body")?;
+        self.send_stream_open_with_retry(|| {
             self.http_client
                 .post(url)
                 .header(CONTENT_TYPE, "application/json")
@@ -4479,6 +4560,75 @@ mod tests {
             err.to_string().to_lowercase().contains("timed out"),
             "envelope timeout must be reported as such; got {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_open_retry_path_sets_no_total_deadline() {
+        // The injected budget is process-global; serialize against other
+        // tests (which may issue non-streaming requests with their own
+        // timing assumptions) through the shared test-env lock.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(250);
+        let server = MockServer::start().await;
+        // The open answers past the injected non-streaming envelope. The
+        // streaming-open path must not inherit any total: reqwest's
+        // per-request timeout wraps the response body, so a total set on
+        // the open would ride on the returned body and hard-cut a live
+        // stream 30 minutes in.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("data: [DONE]\n\n")
+                    .set_delay(Duration::from_millis(600)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client(&server.uri(), server.uri());
+        let response = client
+            .send_stream_open_with_retry(|| {
+                client
+                    .http_client
+                    .post(format!("{}/chat/completions", server.uri()))
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body("{}".to_string())
+            })
+            .await
+            .expect("stream open must not carry the non-streaming envelope");
+        assert!(response.status().is_success());
+        let text = response.text().await.expect("read stream-open body");
+        assert_eq!(text, "data: [DONE]\n\n");
+    }
+
+    #[tokio::test]
+    async fn pinned_request_total_survives_the_shared_retry_envelope() {
+        // The injected budget is process-global; serialize against other
+        // tests (which may issue non-streaming requests with their own
+        // timing assumptions) through the shared test-env lock.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(250);
+        let server = MockServer::start().await;
+        // A caller that pins its own, larger total (`list_models` pins 30s)
+        // must keep it: `.timeout()` on the builder is a pure overwrite, so
+        // an unconditional envelope would silently replace the pinned
+        // budget with the injected 250ms and fail this 600ms-late response.
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("{}")
+                    .set_delay(Duration::from_millis(600)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client(&server.uri(), server.uri());
+        let response = client
+            .send_with_retry_total(Duration::from_secs(5), || {
+                client.http_client.get(format!("{}/models", server.uri()))
+            })
+            .await
+            .expect("caller-pinned total must not be overwritten by the envelope");
+        assert!(response.status().is_success());
     }
 
     fn ollama_cloud_request_boundary_client(transport_base_url: String) -> DeepSeekClient {
