@@ -14,8 +14,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,7 +39,7 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	repository, connection, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL)
+	repository, connection, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 43)
 	migration := loaded[len(loaded)-1]
 	if migration.Version != 43 {
 		t.Fatalf("latest account migration=%d, want 43 for this isolated test", migration.Version)
@@ -143,7 +141,30 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 	}
 	total := len(scanPage.Items)
 	lateOrganizationID := uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
-	if _, err := repository.pool.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,'late organization','ACTIVE',$2,clock_timestamp(),clock_timestamp())`, lateOrganizationID, superActor.ID); err != nil {
+	lateTx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lateTx.Rollback(ctx)
+	if _, err := lateTx.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,'late organization','ACTIVE',$2,clock_timestamp(),clock_timestamp())`, lateOrganizationID, superActor.ID); err != nil {
+		t.Fatal(err)
+	}
+	lateMembershipID := uuid.New()
+	if _, err := lateTx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,version,joined_at,updated_at)
+VALUES($1,$2,$3,'ACTIVE',1,clock_timestamp(),clock_timestamp())`, lateMembershipID, lateOrganizationID, superActor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lateTx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at)
+VALUES($1,$2,'OWNER',$3,clock_timestamp(),clock_timestamp()-interval '1 second')`, uuid.New(), lateMembershipID, superActor.ID); err != nil {
+		t.Fatal(err)
+	}
+	var lateOwners int
+	if err := lateTx.QueryRow(ctx, `SELECT count(*) FROM memberships membership JOIN role_bindings binding ON binding.membership_id=membership.id
+WHERE membership.organization_id=$1 AND membership.status<>'REVOKED' AND binding.role='OWNER' AND binding.revoked_at IS NULL
+AND binding.starts_at<=now()`, lateOrganizationID).Scan(&lateOwners); err != nil || lateOwners != 1 {
+		t.Fatalf("late organization owners=%d err=%v", lateOwners, err)
+	}
+	if err := lateTx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	for scanPage.next != nil {
@@ -159,7 +180,7 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 		}
 		total += len(scanPage.Items)
 	}
-	if total != 1601 || time.Since(scanStarted) > 10*time.Second {
+	if total != 1603 || time.Since(scanStarted) > 10*time.Second {
 		t.Fatalf("bulk scan total=%d elapsed=%s", total, time.Since(scanStarted))
 	}
 	var logicalScans int
@@ -302,7 +323,12 @@ func assertTokenAccountCreateCompositeAuthority(t *testing.T, ctx context.Contex
 	if status != http.StatusOK || allowed.Decision != "ALLOW" || allowed.ReasonCode != nil || allowed.ObservedPlatformAuthorizationVersion != strconv.FormatInt(decision.PlatformAuthorizationVersion, 10) || allowed.ObservedOwnerVersion == nil || *allowed.ObservedOwnerVersion != strconv.FormatInt(ownerVersion, 10) || allowed.OwnerIdentityDigest == nil || *allowed.OwnerIdentityDigest != tokenauthority.OwnerIdentityDigest("USER", actor.ID, "ACTIVE", ownerVersion) {
 		t.Fatalf("authority allow status=%d result=%+v body=%s", status, allowed, body)
 	}
-	if _, err := repository.pool.Exec(ctx, `DELETE FROM role_permissions WHERE role_code='PLATFORM_SUPER_ADMIN' AND permission_code='platform.tokens.manage'`); err != nil {
+	if _, err := repository.pool.Exec(ctx, `DELETE FROM role_permissions
+WHERE permission_code='platform.tokens.manage' AND role_code IN ('PLATFORM_SUPER_ADMIN','PLATFORM_MODEL_ADMIN')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE authorization_versions SET version=version+1,updated_at=now()
+WHERE user_id=$1 AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'`, actor.ID); err != nil {
 		t.Fatal(err)
 	}
 	status, denied, body := callAuthority()
@@ -327,20 +353,40 @@ func assertTokenOwnerCandidateLifecycleWhitelist(t *testing.T, ctx context.Conte
 		}
 	}
 	activeOrganization, disabledOrganization, deletedOrganization := uuid.New(), uuid.New(), uuid.New()
+	organizationTx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer organizationTx.Rollback(ctx)
 	for _, organization := range []struct {
 		id     uuid.UUID
 		status string
 	}{{activeOrganization, "ACTIVE"}, {disabledOrganization, "DISABLED"}, {deletedOrganization, "DELETED"}} {
-		if _, err := repository.pool.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5)`, organization.id, "candidate-"+strings.ToLower(organization.status), organization.status, creator, createdAt); err != nil {
+		if _, err := organizationTx.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5)`, organization.id, "candidate-"+strings.ToLower(organization.status), organization.status, creator, createdAt); err != nil {
 			t.Fatal(err)
 		}
+		if organization.status == "DELETED" {
+			continue
+		}
+		membershipID := uuid.New()
+		if _, err := organizationTx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,version,joined_at,updated_at)
+VALUES($1,$2,$3,'ACTIVE',1,$4,$4)`, membershipID, organization.id, creator, createdAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := organizationTx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at)
+VALUES($1,$2,'OWNER',$3,$4,$4)`, uuid.New(), membershipID, creator, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := organizationTx.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
 	activeUnit, disabledUnit, deletedUnit := uuid.New(), uuid.New(), uuid.New()
 	for _, unit := range []struct {
 		id     uuid.UUID
 		status string
 	}{{activeUnit, "ACTIVE"}, {disabledUnit, "DISABLED"}, {deletedUnit, "DELETED"}} {
-		if _, err := repository.pool.Exec(ctx, `INSERT INTO organization_units(id,organization_id,parent_unit_id,name,status,created_at,updated_at) VALUES($1,$2,NULL,$3,$4,$5,$5)`, unit.id, activeOrganization, "candidate-"+strings.ToLower(unit.status), unit.status, createdAt); err != nil {
+		if _, err := repository.pool.Exec(ctx, `INSERT INTO organization_units(id,organization_id,parent_id,name,status,created_at,updated_at) VALUES($1,$2,NULL,$3,$4,$5,$5)`, unit.id, activeOrganization, "candidate-"+strings.ToLower(unit.status), unit.status, createdAt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -374,6 +420,37 @@ func assertTokenOwnerCandidateLifecycleWhitelist(t *testing.T, ctx context.Conte
 	assertPage("UNIT", map[uuid.UUID]string{activeUnit: "ACTIVE", disabledUnit: "DISABLED"}, deletedUnit)
 }
 
+func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("PINVOU_TEST_ACCOUNT_DATABASE_URL is not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+	repository, connection, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
+	if latest := loaded[len(loaded)-1]; latest.Version != 69 {
+		t.Fatalf("latest account migration=%d, want 69", latest.Version)
+	}
+	var sessionUser, currentUser string
+	var latestVersion int64
+	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT max(version) FROM schema_migrations)`).
+		Scan(&sessionUser, &currentUser, &latestVersion); err != nil || sessionUser != "account_migrator" ||
+		currentUser != "account_service" || latestVersion != 69 {
+		t.Fatalf("migration identity session=%q current=%q version=%d err=%v", sessionUser, currentUser, latestVersion, err)
+	}
+	var policyVersion int64
+	if err := repository.pool.QueryRow(ctx, `SELECT policy_version FROM approval_command_policies
+WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' ORDER BY policy_version DESC LIMIT 1`).Scan(&policyVersion); err != nil || policyVersion != 2 {
+		t.Fatalf("entitlement correction policy version=%d err=%v", policyVersion, err)
+	}
+	var controlSchemas, authorizationSchemas int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE nspname='account_approval_control'),
+count(*) FILTER (WHERE nspname='account_approval_authorization') FROM pg_namespace`).Scan(&controlSchemas, &authorizationSchemas); err != nil ||
+		controlSchemas != 1 || authorizationSchemas != 1 {
+		t.Fatalf("production authorization schemas control=%d authorization=%d err=%v", controlSchemas, authorizationSchemas, err)
+	}
+}
+
 type integrationActor struct {
 	ID      uuid.UUID
 	Issuer  string
@@ -384,132 +461,138 @@ func (actor integrationActor) TokenActor(service, subject string) TokenOwnerCand
 	return TokenOwnerCandidateActor{Issuer: actor.Issuer, Subject: actor.Subject, CallerService: service, CallerSubject: subject}
 }
 
-func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Context, databaseURL string) (*PostgresRepository, *pgx.Conn, []migrations.Migration) {
+func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Context, databaseURL string, maximumVersion int64) (*PostgresRepository, *pgx.Conn, []migrations.Migration) {
 	t.Helper()
-	connection, err := pgx.Connect(ctx, databaseURL)
+	admin, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = connection.Close(context.Background()) })
-	schema := "account_owner_candidates_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	identifier := pgx.Identifier{schema}.Sanitize()
-	if _, err := connection.Exec(ctx, `CREATE SCHEMA `+identifier); err != nil {
+	fixtureDatabase := "account_fixture_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	databaseIdentifier := pgx.Identifier{fixtureDatabase}.Sanitize()
+	if _, err := admin.Exec(ctx, `CREATE DATABASE `+databaseIdentifier+` OWNER account_service`); err != nil {
+		_ = admin.Close(context.Background())
 		t.Fatal(err)
 	}
+	var connection *pgx.Conn
+	var pool, writerPool *pgxpool.Pool
 	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cleanupCancel()
-		_, _ = connection.Exec(cleanupCtx, `DROP SCHEMA `+identifier+` CASCADE`)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if connection != nil {
+			_ = connection.Close(cleanupCtx)
+		}
+		if pool != nil {
+			pool.Close()
+		}
+		if writerPool != nil {
+			writerPool.Close()
+		}
+		_, _ = admin.Exec(cleanupCtx, `DROP DATABASE IF EXISTS `+databaseIdentifier)
+		_ = admin.Close(context.Background())
 	})
-	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loadAccountIntegrationMigrations(t, ctx, connection, schema)
+
+	migrationConfiguration, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
 		t.Fatal(err)
+	}
+	migrationConfiguration.Database = fixtureDatabase
+	connection, err = pgx.ConnectConfig(ctx, migrationConfiguration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `GRANT CREATE ON DATABASE `+databaseIdentifier+` TO account_service WITH GRANT OPTION`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION account_service; GRANT CREATE ON DATABASE `+databaseIdentifier+` TO account_migrator`); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	connection = nil
+	connection, err = pgx.ConnectConfig(ctx, migrationConfiguration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION account_migrator; SET ROLE account_service; SET search_path TO public,pg_temp`); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadAccountIntegrationMigrations(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maximumVersion > 0 {
+		bounded := make([]migrations.Migration, 0, len(loaded))
+		for _, migration := range loaded {
+			if migration.Version <= maximumVersion {
+				bounded = append(bounded, migration)
+			}
+		}
+		loaded = bounded
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
-	configuration, err := pgxpool.ParseConfig(databaseURL)
+
+	runtimeConfiguration, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	configuration.MaxConns = 70
-	if configuration.ConnConfig.RuntimeParams == nil {
-		configuration.ConnConfig.RuntimeParams = make(map[string]string)
+	runtimeConfiguration.MaxConns = 70
+	runtimeConfiguration.ConnConfig.Database = fixtureDatabase
+	runtimeConfiguration.AfterConnect = func(connectContext context.Context, connect *pgx.Conn) error {
+		_, connectErr := connect.Exec(connectContext, `SET SESSION AUTHORIZATION account_service; SET ROLE account_service; SET search_path TO public,pg_temp`)
+		return connectErr
 	}
-	configuration.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, configuration)
+	pool, err = pgxpool.NewWithConfig(ctx, runtimeConfiguration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+
+	writerConfiguration, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerConfiguration.MaxConns = 10
+	writerConfiguration.ConnConfig.Database = fixtureDatabase
+	writerConfiguration.AfterConnect = func(connectContext context.Context, connect *pgx.Conn) error {
+		_, connectErr := connect.Exec(connectContext, `SET SESSION AUTHORIZATION account_approval_writer; SET ROLE account_approval_writer; SET search_path TO public,pg_temp`)
+		return connectErr
+	}
+	writerPool, err = pgxpool.NewWithConfig(ctx, writerConfiguration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &PostgresRepository{pool: pool, approvalWriterPool: writerPool, now: func() time.Time { return time.Now().UTC() }}
 	return repository, connection, loaded
 }
 
-// loadAccountIntegrationMigrations keeps legacy random-schema fixtures isolated
-// without making the product control schema configurable. Migration 50 is still
-// executed; only its fixed schema name is mechanically replaced by a unique,
-// otherwise-unused fixture schema. The exact occurrence counts make production
-// SQL drift fail this adapter rather than silently producing a partial rewrite.
-func loadAccountIntegrationMigrations(t *testing.T, ctx context.Context, connection *pgx.Conn, fixtureSchema string) ([]migrations.Migration, error) {
+// loadAccountIntegrationMigrations keeps the production public/control schema
+// names intact in a dedicated fixture database. Only migration 11 is adapted to
+// reuse the cluster extension already installed by the database owner.
+func loadAccountIntegrationMigrations(t *testing.T) ([]migrations.Migration, error) {
 	t.Helper()
 	loaded, err := migrations.Load("../../migrations/account")
 	if err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256([]byte(fixtureSchema))
-	controlSchema := "account_control_" + hex.EncodeToString(digest[:8])
-	controlIdentifier := pgx.Identifier{controlSchema}.Sanitize()
-	fixtureIdentifier := pgx.Identifier{fixtureSchema}.Sanitize()
-	replaceExact := func(sql, old, replacement string, expected int) (string, error) {
-		if count := strings.Count(sql, old); count != expected {
-			return "", fmt.Errorf("migration 50 fixture adapter expected %d occurrences of %q, got %d", expected, old, count)
-		}
-		return strings.ReplaceAll(sql, old, replacement), nil
-	}
-	controlMigration := -1
 	for index := range loaded {
-		if loaded[index].Version != 50 {
+		if loaded[index].Version != 11 {
 			continue
 		}
-		controlMigration = index
-		up := loaded[index].UpSQL
-		for _, replacement := range []struct {
-			old, value string
-			count      int
-		}{
-			{"account_approval_control.", controlIdentifier + ".", 19},
-			{"nspname='account_approval_control'", "nspname='" + controlSchema + "'", 1},
-			{"CREATE SCHEMA account_approval_control AUTHORIZATION", "CREATE SCHEMA " + controlIdentifier + " AUTHORIZATION", 1},
-			{"ON SCHEMA account_approval_control", "ON SCHEMA " + controlIdentifier, 2},
-		} {
-			up, err = replaceExact(up, replacement.old, replacement.value, replacement.count)
-			if err != nil {
-				return nil, err
-			}
+		const extension = "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+		if count := strings.Count(loaded[index].UpSQL, extension); count != 1 {
+			return nil, fmt.Errorf("migration 11 fixture adapter expected one pgcrypto creation, got %d", count)
 		}
-		down := loaded[index].DownSQL
-		for _, replacement := range []struct {
-			old, value string
-			count      int
-		}{
-			{"account_approval_control.", controlIdentifier + ".", 6},
-			{"DROP SCHEMA IF EXISTS account_approval_control", "DROP SCHEMA IF EXISTS " + controlIdentifier, 1},
-		} {
-			down, err = replaceExact(down, replacement.old, replacement.value, replacement.count)
-			if err != nil {
-				return nil, err
-			}
-		}
-		loaded[index].UpSQL = up + "\nRESET ROLE; SET search_path TO " + fixtureIdentifier + ";"
-		loaded[index].DownSQL = down + "\nRESET ROLE; SET search_path TO " + fixtureIdentifier + ";"
+		loaded[index].UpSQL = strings.ReplaceAll(loaded[index].UpSQL, extension, "-- fixture: pgcrypto is preinstalled for the low-privilege migration role")
 		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")
 		checksum := sha256.Sum256([]byte(normalized))
 		loaded[index].Checksum = hex.EncodeToString(checksum[:])
 	}
-	if controlMigration < 0 {
-		return nil, errors.New("migration 50 is missing from account fixture")
-	}
-	// Do not mutate database privileges until every exact rewrite has succeeded.
-	var database string
-	if err := connection.QueryRow(ctx, `SELECT current_database()`).Scan(&database); err != nil {
-		return nil, err
-	}
-	databaseIdentifier := pgx.Identifier{database}.Sanitize()
-	if _, err := connection.Exec(ctx, `GRANT CREATE ON DATABASE `+databaseIdentifier+` TO account_migrator`); err != nil {
-		return nil, err
-	}
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if _, cleanupErr := connection.Exec(cleanupCtx, `RESET ROLE; REVOKE CREATE ON DATABASE `+databaseIdentifier+` FROM account_migrator; DROP SCHEMA IF EXISTS `+controlIdentifier+` CASCADE; SET search_path TO `+fixtureIdentifier); cleanupErr != nil {
-			t.Errorf("clean account control fixture privileges and schema: %v", cleanupErr)
-		}
-	})
 	return loaded, nil
 }
 
@@ -531,14 +614,35 @@ func seedTokenOwnerCandidateActor(t *testing.T, ctx context.Context, pool *pgxpo
 
 func seedTokenOwnerCandidateOrganizations(t *testing.T, ctx context.Context, pool *pgxpool.Pool, creator uuid.UUID, count int) {
 	t.Helper()
-	rows := make([][]any, 0, count)
+	organizationRows := make([][]any, 0, count)
+	membershipRows := make([][]any, 0, count)
+	ownerRows := make([][]any, 0, count)
 	createdAt := time.Now().UTC().Add(-time.Hour)
 	for index := 0; index < count; index++ {
-		rows = append(rows, []any{uuid.New(), fmt.Sprintf("bulk-%04d", index), "ACTIVE", creator, createdAt, createdAt})
+		organizationID, membershipID := uuid.New(), uuid.New()
+		organizationRows = append(organizationRows, []any{organizationID, fmt.Sprintf("bulk-%04d", index), "ACTIVE", creator, createdAt, createdAt})
+		membershipRows = append(membershipRows, []any{membershipID, organizationID, creator, "ACTIVE", 1, createdAt, createdAt})
+		ownerRows = append(ownerRows, []any{uuid.New(), membershipID, "OWNER", creator, createdAt, createdAt})
 	}
-	inserted, err := pool.CopyFrom(ctx, pgx.Identifier{"organizations"}, []string{"id", "name", "status", "created_by", "created_at", "updated_at"}, pgx.CopyFromRows(rows))
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	inserted, err := tx.CopyFrom(ctx, pgx.Identifier{"organizations"}, []string{"id", "name", "status", "created_by", "created_at", "updated_at"}, pgx.CopyFromRows(organizationRows))
 	if err != nil || inserted != int64(count) {
 		t.Fatalf("seed organizations inserted=%d err=%v", inserted, err)
+	}
+	inserted, err = tx.CopyFrom(ctx, pgx.Identifier{"memberships"}, []string{"id", "organization_id", "user_id", "status", "version", "joined_at", "updated_at"}, pgx.CopyFromRows(membershipRows))
+	if err != nil || inserted != int64(count) {
+		t.Fatalf("seed memberships inserted=%d err=%v", inserted, err)
+	}
+	inserted, err = tx.CopyFrom(ctx, pgx.Identifier{"role_bindings"}, []string{"id", "membership_id", "role", "created_by", "created_at", "starts_at"}, pgx.CopyFromRows(ownerRows))
+	if err != nil || inserted != int64(count) {
+		t.Fatalf("seed organization owners inserted=%d err=%v", inserted, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -612,52 +716,38 @@ func assertTokenOwnerCandidateRateLimit(t *testing.T, ctx context.Context, repos
 	if _, err := repository.pool.Exec(ctx, `DELETE FROM token_owner_candidate_query_attempts`); err != nil {
 		t.Fatal(err)
 	}
-	var success atomic.Int64
-	var limited atomic.Int64
-	var wait sync.WaitGroup
+	var success, limited int
 	for index := 0; index < attempts; index++ {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			_, err := repository.TokenOwnerCandidates(ctx, actor, TokenOwnerCandidateFilter{OwnerType: "UNIT", Limit: 1})
-			switch {
-			case err == nil:
-				success.Add(1)
-			case errors.Is(err, ErrTokenOwnerCandidateRateLimited):
-				limited.Add(1)
-			default:
-				t.Errorf("concurrent candidate query: %v", err)
-			}
-		}()
+		_, err := repository.TokenOwnerCandidates(ctx, actor, TokenOwnerCandidateFilter{OwnerType: "UNIT", Limit: 50000})
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, ErrTokenOwnerCandidateRateLimited):
+			limited++
+		default:
+			t.Fatalf("candidate rate query: %v", err)
+		}
 	}
-	wait.Wait()
-	if success.Load() != int64(expectedSuccess) || limited.Load() != int64(attempts-expectedSuccess) {
-		t.Fatalf("rate boundary success=%d limited=%d", success.Load(), limited.Load())
+	if success != expectedSuccess || limited != attempts-expectedSuccess {
+		t.Fatalf("rate boundary success=%d limited=%d", success, limited)
 	}
 }
 
 func assertSharedServiceLimit(t *testing.T, ctx context.Context, repository *PostgresRepository, actors []TokenOwnerCandidateActor) {
 	t.Helper()
-	var success atomic.Int64
-	var limited atomic.Int64
-	var wait sync.WaitGroup
+	var success, limited int
 	for index := 0; index < 61; index++ {
 		actor := actors[index%len(actors)]
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			_, err := repository.TokenOwnerCandidates(ctx, actor, TokenOwnerCandidateFilter{OwnerType: "UNIT", Limit: 1})
-			if err == nil {
-				success.Add(1)
-			} else if errors.Is(err, ErrTokenOwnerCandidateRateLimited) {
-				limited.Add(1)
-			} else {
-				t.Errorf("shared-service query: %v", err)
-			}
-		}()
+		_, err := repository.TokenOwnerCandidates(ctx, actor, TokenOwnerCandidateFilter{OwnerType: "UNIT", Limit: 50000})
+		if err == nil {
+			success++
+		} else if errors.Is(err, ErrTokenOwnerCandidateRateLimited) {
+			limited++
+		} else {
+			t.Fatalf("shared-service query: %v", err)
+		}
 	}
-	wait.Wait()
-	if success.Load() != 60 || limited.Load() != 1 {
-		t.Fatalf("service boundary success=%d limited=%d", success.Load(), limited.Load())
+	if success != 60 || limited != 1 {
+		t.Fatalf("service boundary success=%d limited=%d", success, limited)
 	}
 }

@@ -57,7 +57,7 @@ func TestBillingApprovalActivationAccountPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, dsn)
+	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, dsn, 0)
 	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "billing-activation-requester")
 	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "billing-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
@@ -224,19 +224,7 @@ func assertApprovalRequestState(t *testing.T, ctx context.Context, repository *P
 
 func seedExecutingBillingApproval(t *testing.T, ctx context.Context, repository *PostgresRepository, requester, approver uuid.UUID, policy approvalpolicy.Policy) uuid.UUID {
 	t.Helper()
-	id := seedAdvancementRequest(t, ctx, repository, requester, policy, "SUBMITTED")
-	binding, version, _, err := strongPlatformAuthorization(ctx, repository.pool, approver, policy.ApproverPermission)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repository.pool.Exec(ctx, `INSERT INTO approval_decisions
-		(id,approval_request_id,approver_user_id,approver_binding_id,approver_authorization_version,decision,reason,authorization_snapshot,decided_at)
-		VALUES($1,$2,$3,$4,$5,'APPROVED','historical decision','{}',now())`, uuid.New(), id, approver, binding, version); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := repository.pool.Exec(ctx, `UPDATE approval_requests SET status='APPROVED',decided_at=now(),execution_deadline=now()+interval '5 minutes',version=2 WHERE id=$1`, id); err != nil {
-		t.Fatal(err)
-	}
+	id := seedHistoricalAdvancementApproval(t, ctx, repository, requester, approver, policy)
 	if _, err := repository.pool.Exec(ctx, `UPDATE approval_requests SET status='EXECUTING',version=3 WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}

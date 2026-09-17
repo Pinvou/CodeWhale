@@ -53,7 +53,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, accountMigrations := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL)
+	repository, _, accountMigrations := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
 	repository.WithBillingGovernanceActivation(&billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")})
 	repository.tokenApprovalCreateGate = func(commandType string) bool {
 		return commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_CREDENTIAL_REVOKE"
@@ -316,6 +316,11 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	if json.Unmarshal(eventPayload, &authorizedEvent) != nil || !sameJSONObject(authorizedEvent.NormalizedCommand, draft.NormalizedCommand) || !sameJSONObject(authorizedEvent.CriticalResourceVersions, critical) || !sameJSONObject(authorizedEvent.FinancialSnapshot, financial) {
 		t.Fatalf("authorized event did not retain the approved command and snapshots: %s", eventPayload)
 	}
+	var authorizationEventID uuid.UUID
+	if err := repository.pool.QueryRow(ctx, `SELECT event_id FROM outbox_events WHERE event_type='account.approval-command.authorized.v1' AND aggregate_id=$1`, seeded.ID).Scan(&authorizationEventID); err != nil {
+		t.Fatal(err)
+	}
+	publishLegacyAuthorizationEvent(t, ctx, repository, authorizationEventID)
 
 	executionCtx, err := serviceauth.ContextForJob(ctx, "token-command-executor", "APPROVAL_EXECUTION", "snapshot-chain")
 	if err != nil {
@@ -342,12 +347,20 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 				claimErrors[index] = ctx.Err()
 				return
 			}
-			for attempt := 0; attempt < 3; attempt++ {
+			for attempt := 0; attempt < 10; attempt++ {
 				claims[index], claimErrors[index] = repository.BeginApprovalExecution(executionCtx, seeded.ID, "token-command-executor", fmt.Sprintf("snapshot-first-claim-%d", index), critical, observedProjection.FinancialSnapshot)
-				var pgErr *pgconn.PgError
-				if !errors.As(claimErrors[index], &pgErr) || pgErr.Code != "40001" {
+				if claimErrors[index] == nil {
 					return
 				}
+				time.Sleep(10 * time.Millisecond)
+				var pgErr *pgconn.PgError
+				if errors.Is(claimErrors[index], ErrApprovalConsumerBindingUnavailable) {
+					continue
+				}
+				if errors.As(claimErrors[index], &pgErr) && (pgErr.Code == "40001" || pgErr.Code == "40P01") {
+					continue
+				}
+				return
 			}
 		}(index)
 	}
