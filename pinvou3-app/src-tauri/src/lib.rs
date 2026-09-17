@@ -1046,6 +1046,7 @@ pub fn run() {
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
                     // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
                     handle.manage(ControlledDeviceManager::default());
+                    commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
                     handle.manage(ControllingDeviceManager::default());
                     handle.manage(CapabilitySnapshotManager::default());
                     let temporary_models = commands::desktop_remote_model::shared_model_store();
