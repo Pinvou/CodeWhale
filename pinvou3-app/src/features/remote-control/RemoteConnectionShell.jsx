@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
+import RemoteConversationView from './RemoteConversationView.jsx';
 
 const TERMINAL_STATUSES = ['idle', 'disconnected', 'error'];
 
@@ -54,10 +55,8 @@ export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconn
       <p className="mt-1 text-[11px] opacity-60">{copy.backgroundHint}</p>
       {error && <p role="alert" className="text-[12px] text-[#EA4335]">{copy.errorGeneric}</p>}
       {connected ? (
-        // DEV-23 接入远程会话窗口；本任务只交付连接壳与后台/断开语义。
-        <p className="mt-3 text-[12px] opacity-70" role="status" aria-live="polite">
-          {copy.connectedTo(connection.deviceName || copy.connected)}
-        </p>
+        // 远程会话窗口：模型/能力/审批/附件/成果/历史全部经 DEV-20 bridge。
+        <RemoteConversationView t={t} bs={bs} />
       ) : (
         <p className="mt-3 text-[12px] opacity-70">{copy.codeHint}</p>
       )}
