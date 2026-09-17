@@ -138,6 +138,126 @@ fn render_available_skills_context_lists_paths_and_usage() {
     assert!(rendered.contains("### Usage"));
 }
 
+// Regression: `load_skill` is deferred, so it is absent from the first-turn
+// tool catalog unless the host force-loads it. The Usage line must name
+// `tool_search` as the activation path, or the model is told to call a tool
+// it cannot see (Pinvou #490 phantom-tool incident). It is also the single
+// fallback teaching point in the index: per-skill rows and the omitted tail
+// deliberately do not repeat it.
+#[test]
+fn forkguard_skill_index_usage_names_tool_search_activation() {
+    let tmpdir = TempDir::new().unwrap();
+    create_skill_dir(
+        &tmpdir,
+        "test-skill",
+        "---\nname: test-skill\ndescription: A test skill\n---\nDo something special",
+    );
+
+    let rendered = crate::skills::render_available_skills_context(&tmpdir.path().join("skills"))
+        .expect("skill context");
+
+    assert!(
+        rendered.contains("`load_skill` with `name=\"list\""),
+        "usage must keep pointing at load_skill list discovery:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("`tool_search`"),
+        "usage must tell the model how to activate deferred load_skill:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("call `load_skill` anyway"),
+        "tool_search being unable to surface load_skill does not make it \
+         unreachable — a registered deferred tool hydrates on demand when \
+         called directly; the usage line must not surrender that path:\n\
+         {rendered}"
+    );
+}
+
+// Regression guard paired with the Usage-line dedup (commit 9f46ac5f0): the
+// omitted tail stays a short pointer and must not re-grow the full fallback
+// teaching — the Usage block appended below it is the single teaching point.
+#[test]
+fn forkguard_omitted_skills_line_stays_short() {
+    let line = super::omitted_skills_line(2);
+    assert!(
+        !line.contains("tool_search"),
+        "omitted tail must not repeat the Usage block's tool_search fallback; \
+         re-adding it reintroduces the per-row duplication the dedup removed:\n\
+         {line}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-tool incident): the bundled mcp-discovery
+// skill must keep `registry_sync` reachable on stock hosts — where it is
+// deferred but `tool_search`-activatable — instead of declaring the Registry
+// unavailable, must teach a `query`-bearing call (the schema rejects `{}`),
+// must describe the scored-matches contract honestly, and must not cite the
+// retired `exec_shell` alias as if it were callable. Step 3 reuses step 1's
+// activation teaching by reference instead of repeating the full fallback.
+#[test]
+fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
+    const SKILL: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
+    assert!(
+        SKILL.contains("If `registry_sync` is not in your tool list"),
+        "workflow step 1 must gate the registry_sync command on availability:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("run `tool_search` first to activate it"),
+        "registry_sync is deferred on stock hosts; step 1 must name the \
+         activation path instead of surrendering a reachable capability:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("`registry_sync {query:"),
+        "registry_sync requires a non-empty `query`; the skill must teach a \
+         call that can succeed:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("eight scored matches"),
+        "the skill must describe the scored-matches contract, not a complete \
+         catalog dump:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("`registry_sync {}`"),
+        "registry_sync requires a `query` field and the host rejects an empty \
+         one; never teach a call that cannot succeed:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("available in the active tool surface"),
+        "both tools are deferred by default; the preamble must not claim an \
+         always-active surface:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("If `start_registry_mcp_server` is not in"),
+        "step 3 must gate the start tool, which can be absent while \
+         registry_sync is registered (pool init failure, tool-security mode):\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("`tool_search` as in step 1"),
+        "the start tool is deferred-but-searchable and its activation does not \
+         follow from registry_sync's, so step 3 must point at step 1's \
+         tool_search path instead of surrendering on visibility alone:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("the start tool once the host's MCP pool is initialized"),
+        "the start tool registers only after the pool initializes (the \
+         discovery tool needs only MCP support); the preamble must not \
+         overclaim registration for either side:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("drop out of your tool list again"),
+        "connected tools re-defer on later turns; step 4 must teach \
+         re-activation instead of a blind call:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("`start_registry_mcp_server`"),
+        "the structured start tool must stay documented:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("`exec_shell`"),
+        "exec_shell is a retired alias; cite `bash` instead:\n{SKILL}"
+    );
+}
+
 #[test]
 fn workspace_prompt_omits_disabled_skills_without_configured_directory() {
     let _env_lock = crate::test_support::lock_test_env();
@@ -1686,6 +1806,11 @@ fn plugin_skills_are_qualified_and_denied_until_trusted_and_enabled() {
     let rendered = super::render_skills_block(&registry, "en", tmp.path()).unwrap();
     assert!(rendered.contains("reviewed plugin snapshot: demo"));
     assert!(rendered.contains("use load_skill"));
+    assert!(
+        !rendered.contains("use load_skill —"),
+        "plugin rows stay short; the deferred-load_skill fallback is taught \
+         once in the Usage line:\n{rendered}"
+    );
     assert!(
         rendered.contains("hello"),
         "plugin skill descriptions must reach the model catalogue like native skills: {rendered}"

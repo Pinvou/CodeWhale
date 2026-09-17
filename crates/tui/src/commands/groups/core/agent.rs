@@ -59,7 +59,8 @@ pub fn agent(_app: &mut App, arg: Option<&str>) -> CommandResult {
         }
     };
     let message = format!(
-        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on the returned transcript_handle if you need more detail. Verify any claimed side effects before reporting success."
+        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on the returned transcript_handle if you need more detail; {handle_read_hint}; if `tool_search` cannot surface it, call `handle_read` directly anyway, since registered deferred tools hydrate when called by name. Verify any claimed side effects before reporting success.",
+        handle_read_hint = crate::tools::subagent::HANDLE_READ_ACTIVATION_HINT
     );
     CommandResult::with_message_and_action(
         format!("Opening persistent sub-agent at depth {max_depth}..."),
@@ -123,5 +124,29 @@ mod tests {
             panic!("expected CancelSubAgent action");
         };
         assert_eq!(agent_id, "agent_123");
+    }
+
+    #[test]
+    fn forkguard_slash_agent_dispatch_teaches_handle_read_activation() {
+        // `handle_read` is deferred on stock hosts, so the dispatch brief
+        // must teach the `tool_search` activation path instead of pointing
+        // the model at a tool absent from its first-turn catalog (Pinvou
+        // #490 phantom-tool class).
+        let mut app = test_app();
+        let result = agent(&mut app, Some("inspect the failing test"));
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+        assert!(message.contains("`handle_read`"));
+        assert!(
+            message.contains("activate it via `tool_search` first"),
+            "the dispatch brief must teach the handle_read activation path:\n{message}"
+        );
+        assert!(
+            message.contains("call `handle_read` directly anyway"),
+            "allowed_tools-filtered sessions can strip tool_search too; the \
+             dispatch brief must keep the direct-call fallback instead of \
+             dead-ending:\n{message}"
+        );
     }
 }
