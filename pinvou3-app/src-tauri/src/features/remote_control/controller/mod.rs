@@ -10,5 +10,6 @@ pub(crate) mod protocol;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
 pub(crate) mod task;
+pub(crate) mod telemetry;
 pub(crate) mod temporary_model;
 pub(crate) mod transfer;
