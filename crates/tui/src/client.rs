@@ -337,12 +337,31 @@ fn client_user_agent(api_provider: ApiProvider) -> &'static str {
 /// of committing to the full remaining window up front.
 const RATE_LIMIT_PAUSE_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Total envelope for one non-streaming request through `send_with_retry`
-/// (all retry attempts, backoff, and honored Retry-After included). Matches
-/// the documented stream wall-clock backstop: 30 minutes of time-to-headers
-/// is already far past any legitimate completion, and the envelope never
-/// truncates a stream body because it only resolves at response headers.
-const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
+/// Total budget for one non-streaming request. Two layers use it: the
+/// per-attempt request carries it as a reqwest per-request total
+/// (connect through body end, so a trickling body cannot extend forever),
+/// and the retry loop through `send_with_retry` is wrapped in one outer
+/// envelope of the same length (all attempts, backoff, and honored
+/// Retry-After included). Requests consumed by streaming paths are sent
+/// through their own entry points (open cap + per-chunk idle), so this
+/// never truncates a stream. Also applied to the Anthropic dialect's
+/// non-streaming Messages request, which has no retry loop of its own.
+pub(crate) const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
+
+#[cfg(test)]
+static TEST_NON_STREAMING_ENVELOPE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn non_streaming_request_envelope() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_NON_STREAMING_ENVELOPE_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    NON_STREAMING_REQUEST_ENVELOPE
+}
 
 pub(super) const SSE_BACKPRESSURE_HIGH_WATERMARK: usize = 1024 * 1024; // 1 MB
 pub(super) const SSE_BACKPRESSURE_SLEEP_MS: u64 = 10;
@@ -2874,23 +2893,27 @@ impl DeepSeekClient {
             return self.send_with_isolated_retry(build).await;
         }
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
-        // Total envelope around the whole non-streaming retry loop (all
-        // attempts + backoff + honored Retry-After). The shared client
-        // intentionally has no client-level total timeout — streaming is
-        // protected per-chunk instead — so without this envelope nothing
-        // bounds a non-streaming completion: a provider that accepts the
-        // connection and then stalls (or a gateway answering 429 +
-        // Retry-After: 3600 forever) wedges the caller (mid-turn
-        // compaction, translate, …) indefinitely. The envelope is inert for
-        // callers with a tighter outer budget (stream open 45s, /models
-        // probes 30s) and only resolves at response headers, so it never
-        // truncates a stream body.
+        // Two bounded layers around the non-streaming completion: the
+        // per-attempt request total below (connect through body end) and
+        // this envelope around the whole retry loop (all attempts +
+        // backoff + honored Retry-After). The shared client intentionally
+        // has no client-level total timeout — streaming is protected
+        // per-chunk instead — so without these nothing bounds a
+        // non-streaming completion: a provider that accepts the connection
+        // and then stalls (or a gateway answering 429 + Retry-After: 3600
+        // forever) wedged the caller (mid-turn compaction, translate, …)
+        // indefinitely. The envelope is inert for callers with a tighter
+        // outer budget (stream open 45s).
         let request_result = match tokio::time::timeout(
-            NON_STREAMING_REQUEST_ENVELOPE,
+            non_streaming_request_envelope(),
             with_retry(
                 &retry_cfg,
                 || {
-                    let request = build();
+                    // Per-attempt total: unlike the loop envelope above,
+                    // reqwest's per-request timeout also covers the response
+                    // body, so a slow-drip body cannot outlive the budget.
+                    let request =
+                        build().timeout(non_streaming_request_envelope());
                     async move {
                         // Sleep in bounded slices rather than the full remaining
                         // window: the pause is process-global, so a concurrent
@@ -4385,6 +4408,78 @@ mod tests {
         .expect("DeepSeek request-boundary client");
         client.test_chat_transport_base_url = Some(transport_base_url);
         client
+    }
+
+    struct NonStreamingEnvelopeGuard(u64);
+
+    impl NonStreamingEnvelopeGuard {
+        fn millis(ms: u64) -> Self {
+            Self(TEST_NON_STREAMING_ENVELOPE_MS.swap(ms, std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    impl Drop for NonStreamingEnvelopeGuard {
+        fn drop(&mut self) {
+            TEST_NON_STREAMING_ENVELOPE_MS.store(self.0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn non_streaming_envelope_bounds_a_stalled_provider() {
+        // The injected budget is process-global; serialize against other
+        // tests (which may issue non-streaming requests with their own
+        // timing assumptions) through the shared test-env lock.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(250);
+        let server = MockServer::start().await;
+        // The provider accepts the connection but stalls far past the
+        // budgeted envelope before answering: the whole request (headers
+        // and body) must be cut off with a timeout instead of wedging the
+        // caller.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "model": "deepseek-v4-pro",
+                        "choices": [
+                            { "message": { "role": "assistant", "content": "late" } }
+                        ]
+                    }))
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client(&server.uri(), server.uri());
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "envelope".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+
+        let err = client
+            .create_message(request)
+            .await
+            .expect_err("a provider that never answers must hit the envelope");
+        assert!(
+            err.to_string().to_lowercase().contains("timed out"),
+            "envelope timeout must be reported as such; got {err:#}"
+        );
     }
 
     fn ollama_cloud_request_boundary_client(transport_base_url: String) -> DeepSeekClient {
