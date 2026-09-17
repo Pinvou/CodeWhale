@@ -162,3 +162,54 @@ test("router collapses internal claim failures to a bounded public error", async
     message: "消息无效",
   });
 });
+
+// DEV-06 审核修复：DEV-09 曾需要修改 server.js/router 才能接入 resume hook，
+// 说明冻结的 hook 槽不完整。这里固化「新 hook 可在不改动 router/server 接线
+// 的前提下注入」这一能力，并保证非法 hook 失败关闭。
+function leaseManagerStub() {
+  return {
+    claim: async () => null,
+    acceptCommitment: () => null,
+    forwardFinished: () => null,
+    acceptReceipt: async () => null,
+    lease: () => null,
+    terminateLease: async () => false,
+    abortHandshakesBySocket: async () => 0,
+    abortBySocket: async () => ({ handshakes: 0, leases: 0 }),
+  };
+}
+
+test("additional hooks extend the router without editing its wiring", async () => {
+  const handled = [];
+  const created = [];
+  const extraHook = {
+    handles: (type) => type === "controller_extra_probe",
+    handle: async ({ message }) => { handled.push(message.type); return null; },
+    onLeaseCreated: async (lease) => { created.push(lease.controller_lease_id); },
+    onSocketClosed: async () => {},
+    onLeaseTerminated: async () => {},
+    expire: () => 0,
+  };
+  const router = new ControllerRouter({
+    pairingRegistrationHandler: { register: async () => null },
+    leaseManager: leaseManagerStub(),
+    send: () => true,
+    additionalHooks: [extraHook],
+  });
+  router.addSocket({ socketIdentity: "socket-A", source: "198.51.100.9", socket: "socket-A" });
+  const result = await router.handle({
+    socketIdentity: "socket-A",
+    message: { v: 1, type: "controller_extra_probe", request_id: "request-extra-0001" },
+  });
+  assert.deepEqual(handled, ["controller_extra_probe"]);
+  // The injected hook consumed the message: the router has no reply payload.
+  assert.equal(result, null);
+  assert.deepEqual(created, []);
+
+  assert.throws(() => new ControllerRouter({
+    pairingRegistrationHandler: { register: async () => null },
+    leaseManager: leaseManagerStub(),
+    send: () => true,
+    additionalHooks: [{ handles: () => false }],
+  }), (error) => error?.code === "controller_router_hooks_invalid");
+});
