@@ -67,3 +67,13 @@
   - 修复提交：`6e8f5a31` — router 新增 `additionalHooks` 注入数组（保持原有 hook 形状校验），新增用例证明新 hook 可在不改动 router/server 接线的情况下参与分发，非法 hook 失败关闭。
 - 验证：`node --test remote-control-relay/test/controller-handshake.test.js remote-control-relay/test/controller-router.test.js` 10 通过 / 0 失败；三个真实三方握手用例（`relay.test.js`）此前单独运行 25 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 7. DEV-07：Rust 桌面控制 transport 与状态所有者基座
+
+审核轮次 1（审核提交 f9071c1f）
+
+- 逐条核对：`controller/relay_transport.rs` 提供有界双队列（control/business 各自字节预算且互不侵占）、敏感帧硬上限与脱敏 Debug、取消令牌、lease 上下文准入、generation/lease epoch 门、注入式 RTT 采样；Web manager、B manager、A manager 三个状态域可独立启停；租约帧与预认证队列隔离，业务帧必须带当前认证租约（不存在 Web RPC 后门）；`app/commands/mod.rs` 一次性声明 9 个命令模块槽。
+- 验收核对：13 条定向用例一一对应验收点（队列满释放预算与取消终态、三个状态域独立停止、敏感帧上限、业务帧需认证租约、租约安装绑定 transport generation、断线使已排队租约帧失效、业务字节不得占用控制预算、stale generation/epoch 在派发前拒绝、RTT 采样使用注入时钟）。
+- 观察（无影响）：提交同时向 `Cargo.toml` 增加了 3 行（测试依赖），不在预计文件清单内但属必要构建配置。
+- 验证：`cargo test remote_control::controller::relay_transport` 13 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
