@@ -1679,7 +1679,9 @@ jobs:
             'features::voice::platform::windows::tests::closed_temp_wav_can_be_reopened_when_asr_denies_write_sharing' \
             'features::memory::tests::topic_migration_' \
             'connector_introspection_guard_matches_complete_names_only' \
-            'features::projects::tests::'; do
+            'features::projects::tests::' \
+            'run_with_timeout_reaps_and_stays_bounded' \
+            'reap_killed_child_'; do
             index=$((index+1))
             started=$SECONDS
             "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
