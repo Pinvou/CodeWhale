@@ -22,6 +22,9 @@ function fixture() {
     remote_control_generation: "generation-0001",
     liveness_epoch_a: "liveness-epoch-A-0001",
     liveness_epoch_b: "liveness-epoch-B-0001",
+    resume_token_a_sha256: "a".repeat(64),
+    resume_token_b_sha256: "b".repeat(64),
+    resume_deadline_ms: "30000",
     sockets: Object.freeze({ A: "socket-A", B: "socket-B" }),
   });
   const joined = {
