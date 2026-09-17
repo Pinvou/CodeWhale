@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { sealPairingCode } from "../pairing-code-sealer.js";
@@ -371,4 +372,66 @@ test("Relay restart invalidation terminates old codes and rejects old-epoch regi
     relayEpoch: "relay-epoch-0002",
     sealCode: sealPairingCode,
   }), (error) => error?.code === "pairing_registration_stale_relay_epoch");
+});
+
+// DEV-03 审核修复：验收要求「代码库不存在 B/A 生成路径；码明文不进日志或遥测」，
+// 但原测试只断言持久化状态里没有明文。这里用真实解封得到的明文做日志/信道扫描。
+test("the plaintext pairing code never reaches logs, telemetry or wire projections", async () => {
+  const receiver = crypto.generateKeyPairSync("x25519");
+  const request = registration({
+    code_wrap_public_key_b64: rawPublic(receiver.publicKey).toString("base64"),
+  });
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(0),
+  });
+
+  const captured = [];
+  const originals = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+  for (const key of Object.keys(originals)) {
+    console[key] = (...args) => { captured.push(args.map(String).join(" ")); };
+  }
+  let registered;
+  try {
+    registered = await store.register({
+      request, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+    });
+  } finally {
+    Object.assign(console, originals);
+  }
+
+  const binding = {
+    registration_request_id: request.registration_request_id,
+    pairing_id: registered.result.pairing_id,
+    remote_control_generation: request.remote_control_generation,
+    relay_epoch: "relay-epoch-0001",
+    expires_at_ms: registered.result.expires_at_ms,
+  };
+  const plaintext = openCode(receiver.privateKey, binding, registered.result.sealed_code_b64);
+  assert.match(plaintext, /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u);
+
+  // 1) the wire projection carries only the sealed envelope.
+  assert.equal(registered.result.code, undefined);
+  assert.ok(!JSON.stringify(registered.result).includes(plaintext));
+  // 2) a real registration logs nothing that contains the code.
+  assert.ok(!captured.join("\n").includes(plaintext), "the plaintext code must never be logged");
+  // 3) persisted state only keeps digests.
+  assert.ok(!JSON.stringify(stateStore.value).includes(plaintext));
+  // 4) the pairing modules have no logging surface to leak through at all.
+  for (const file of ["pairing-store.js", "pairing-registration-handler.js", "pairing-code-sealer.js"]) {
+    const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(
+      source,
+      /console\.|logger|process\.stdout|process\.stderr/u,
+      `${file} must stay free of logging calls`,
+    );
+  }
+  // 5) the client validates codes and never generates them (no fallback path).
+  const controlled = await readFile(
+    new URL("../../pinvou3-app/src-tauri/src/features/remote_control/controller/controlled.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(controlled, /fn validate_pairing_code/u);
+  assert.doesNotMatch(controlled, /fn \w*pairing_code\w*generate|fn \w*generate\w*pairing_code/u);
+  assert.doesNotMatch(controlled, /rand::|thread_rng|OsRng/u);
 });
