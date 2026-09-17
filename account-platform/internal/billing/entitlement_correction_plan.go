@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -19,6 +21,14 @@ type entitlementCorrectionReadPlan struct {
 	SourceComponentID    uuid.UUID
 	SourceLotID          uuid.UUID
 	ExistingTargetID     uuid.UUID
+	TargetComponentID    uuid.UUID
+	TargetLotID          uuid.UUID
+	WalletVersion        int64
+	PackageTotal         int64
+	SourceOriginal       int64
+	TargetOriginal       int64
+	SourceEvidenceDigest string
+	FactsDigest          string
 	Amounts              entitlementCorrectionAmounts
 }
 
@@ -26,7 +36,7 @@ type entitlementCorrectionReadPlan struct {
 // cannot grant execution: approval proof and the eventual Billing write must
 // independently re-read every fact under their own deadlines and locks.
 func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Context, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
-	if r == nil || r.pool == nil || packageID == uuid.Nil || orderID == uuid.Nil {
+	if r == nil || r.pool == nil {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
 	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -36,13 +46,37 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 		return entitlementCorrectionReadPlan{}, err
 	}
 	defer tx.Rollback(bounded)
+	plan, err := entitlementCorrectionPlanFrom(bounded, tx, r.now(), packageID, orderID)
+	if err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	if err := tx.Commit(bounded); err != nil {
+		return entitlementCorrectionReadPlan{}, err
+	}
+	return plan, nil
+}
+
+// entitlementCorrectionQuerier is satisfied by the pool-backed read-only
+// transaction and by the serializable transaction that claims a proof.
+type entitlementCorrectionQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// entitlementCorrectionPlanFrom derives the only permitted complete
+// reclassification from already-open owner-domain reads.
+func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrectionQuerier, now time.Time, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
+	if packageID == uuid.Nil || orderID == uuid.Nil {
+		return entitlementCorrectionReadPlan{}, ErrConflict
+	}
+	var err error
 	var walletID, transactionID uuid.UUID
 	var packageStatus, sourceType, walletStatus, orderStatus, fulfillmentStatus, transactionStatus string
 	var packageTotal, remaining, reserved, used, expired, revoked, orderCredits, orderAmount, transactionAmount, walletVersion int64
 	var packageUntil time.Time
 	var orderCurrency, transactionCurrency, productID, sourceReference string
 	var rawProduct []byte
-	err = tx.QueryRow(bounded, `SELECT p.wallet_id,p.source_payment_transaction_id,p.status,p.source_type,
+	err = source.QueryRow(ctx, `SELECT p.wallet_id,p.source_payment_transaction_id,p.status,p.source_type,
  p.points_total,p.points_remaining,p.points_reserved,p.points_used,p.points_expired,p.points_revoked,p.valid_until,
  w.status,w.version,o.status,o.fulfillment_status,o.credit_microcredits,o.amount_fen,o.currency,o.product_id,o.product_snapshot,
  t.status,t.amount_fen,t.currency,p.source_reference
@@ -65,7 +99,7 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 		!((orderStatus == "PAID" && transactionStatus == "PAID") || (orderStatus == "PAID_LATE" && transactionStatus == "LATE_PAID")) ||
 		packageTotal <= 0 || remaining != packageTotal || reserved != 0 || used != 0 || expired != 0 || revoked != 0 ||
 		orderCredits != packageTotal || orderAmount <= 0 || transactionAmount != orderAmount ||
-		orderCurrency != "CNY" || transactionCurrency != orderCurrency || !packageUntil.After(r.now()) ||
+		orderCurrency != "CNY" || transactionCurrency != orderCurrency || !packageUntil.After(now) ||
 		sourceReference != "payment-transaction:"+transactionID.String() {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
@@ -76,7 +110,7 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
 	var hasRelated bool
-	err = tx.QueryRow(bounded, `SELECT
+	err = source.QueryRow(ctx, `SELECT
  EXISTS(SELECT 1 FROM member_quota_grants WHERE package_id=$1) OR
  EXISTS(SELECT 1 FROM usage_hold_allocations WHERE package_id=$1) OR
  EXISTS(SELECT 1 FROM refunds WHERE entitlement_package_id=$1) OR
@@ -93,14 +127,14 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
 	var journalID uuid.UUID
-	err = tx.QueryRow(bounded, `SELECT id FROM journal_entries WHERE business_reference=$1 AND entry_type='RECHARGE'`, sourceReference).Scan(&journalID)
+	err = source.QueryRow(ctx, `SELECT id FROM journal_entries WHERE business_reference=$1 AND entry_type='RECHARGE'`, sourceReference).Scan(&journalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
 	if err != nil {
 		return entitlementCorrectionReadPlan{}, err
 	}
-	rows, err := tx.Query(bounded, `SELECT c.id,c.component_type,c.credit_lot_id,c.original_microcredits,c.available_microcredits,
+	rows, err := source.Query(ctx, `SELECT c.id,c.component_type,c.credit_lot_id,c.original_microcredits,c.available_microcredits,
  c.reserved_microcredits,c.used_microcredits,c.active_grant_microcredits,c.suspended_grant_microcredits,
  c.expired_microcredits,c.revoked_microcredits,c.reclassified_out_microcredits,c.status,c.expires_at,
  l.wallet_id,l.original_microcredits,l.remaining_microcredits,l.refundable,l.expires_at,l.source_type,l.source_reference
@@ -134,7 +168,7 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 			lotSourceType != "RECHARGE" ||
 			(lotSourceReference != sourceReference && (kind != "BONUS" || lotSourceReference != sourceReference+":bonus")) ||
 			refundable != (kind == "BASE") || !expiresAt.Equal(lotExpiresAt) ||
-			!expiresAt.Equal(packageUntil) || !expiresAt.After(r.now()) ||
+			!expiresAt.Equal(packageUntil) || !expiresAt.After(now) ||
 			original > math.MaxInt64-base-bonus {
 			err = ErrConflict
 			break
@@ -161,7 +195,7 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 	if err != nil {
 		return entitlementCorrectionReadPlan{}, err
 	}
-	postingRows, err := tx.Query(bounded, `SELECT posting.credit_lot_id,posting.delta_microcredits
+	postingRows, err := source.Query(ctx, `SELECT posting.credit_lot_id,posting.delta_microcredits
  FROM ledger_postings posting JOIN ledger_accounts account ON account.id=posting.ledger_account_id
 	 WHERE posting.journal_entry_id=$1 AND account.wallet_id=$2 AND account.account_type='WALLET_LIABILITY'`, journalID, walletID)
 	if err != nil {
@@ -190,12 +224,98 @@ func (r *PostgresRepository) planEntitlementComponentCorrection(ctx context.Cont
 	if len(seenLots) != len(lotAmounts) {
 		return entitlementCorrectionReadPlan{}, ErrConflict
 	}
-	if err = tx.Commit(bounded); err != nil {
-		return entitlementCorrectionReadPlan{}, err
+
+	sourceOriginal := base
+	if amounts.SourceType == "BONUS" {
+		sourceOriginal = bonus
 	}
+	targetOriginal := int64(0)
+	if lotID := lotIDs[amounts.TargetType]; lotID != uuid.Nil {
+		targetOriginal = lotAmounts[lotID]
+	}
+	evidenceDigest, factsDigest := entitlementCorrectionDigests(entitlementCorrectionDigestInput{
+		PackageID: packageID, WalletID: walletID, WalletVersion: walletVersion,
+		PaymentOrderID: orderID, PaymentTransactionID: transactionID, JournalEntryID: journalID,
+		SourceReference: sourceReference, PackageTotal: packageTotal, PackageExpiresAt: packageUntil,
+		OrderCreditMicrocredits: orderCredits, OrderAmountFen: orderAmount, Currency: orderCurrency,
+		ProductBasePoints: product.BasePoints, ProductBonusPoints: product.BonusPoints,
+		CurrentBase: base, CurrentBonus: bonus, SourceOriginal: sourceOriginal, TargetOriginal: targetOriginal,
+		SourceComponentID: componentIDs[amounts.SourceType], SourceLotID: lotIDs[amounts.SourceType],
+		TargetComponentID: componentIDs[amounts.TargetType], TargetLotID: lotIDs[amounts.TargetType],
+		Amounts: amounts,
+	})
 	return entitlementCorrectionReadPlan{
 		PackageID: packageID, WalletID: walletID, PaymentOrderID: orderID, PaymentTransactionID: transactionID,
 		SourceComponentID: componentIDs[amounts.SourceType], SourceLotID: lotIDs[amounts.SourceType],
-		ExistingTargetID: componentIDs[amounts.TargetType], Amounts: amounts,
+		ExistingTargetID: componentIDs[amounts.TargetType], TargetComponentID: componentIDs[amounts.TargetType],
+		TargetLotID: lotIDs[amounts.TargetType], WalletVersion: walletVersion, PackageTotal: packageTotal,
+		SourceOriginal: sourceOriginal, TargetOriginal: targetOriginal,
+		SourceEvidenceDigest: evidenceDigest, FactsDigest: factsDigest, Amounts: amounts,
 	}, nil
+}
+
+type entitlementCorrectionDigestInput struct {
+	PackageID               uuid.UUID
+	WalletID                uuid.UUID
+	WalletVersion           int64
+	PaymentOrderID          uuid.UUID
+	PaymentTransactionID    uuid.UUID
+	JournalEntryID          uuid.UUID
+	SourceReference         string
+	PackageTotal            int64
+	PackageExpiresAt        time.Time
+	OrderCreditMicrocredits int64
+	OrderAmountFen          int64
+	Currency                string
+	ProductBasePoints       int64
+	ProductBonusPoints      int64
+	CurrentBase             int64
+	CurrentBonus            int64
+	SourceOriginal          int64
+	TargetOriginal          int64
+	SourceComponentID       uuid.UUID
+	SourceLotID             uuid.UUID
+	TargetComponentID       uuid.UUID
+	TargetLotID             uuid.UUID
+	Amounts                 entitlementCorrectionAmounts
+}
+
+// entitlementCorrectionDigests binds the original payment evidence and the
+// recomputed correction facts with the shared typed closed encoding. Both
+// digests are derived only from owner-domain persisted rows.
+func entitlementCorrectionDigests(input entitlementCorrectionDigestInput) (string, string) {
+	id := func(value uuid.UUID) string {
+		if value == uuid.Nil {
+			return ""
+		}
+		return value.String()
+	}
+	evidence, err := json.Marshal(map[string]any{
+		"command_type": "ENTITLEMENT_COMPONENT_ADJUSTMENT", "package_id": id(input.PackageID),
+		"payment_order_id": id(input.PaymentOrderID), "payment_transaction_id": id(input.PaymentTransactionID),
+		"journal_entry_id": id(input.JournalEntryID), "source_reference": input.SourceReference,
+		"order_credit_microcredits": input.OrderCreditMicrocredits, "order_amount_fen": input.OrderAmountFen,
+		"currency": input.Currency, "product_base_points": input.ProductBasePoints, "product_bonus_points": input.ProductBonusPoints,
+	})
+	facts, err2 := json.Marshal(map[string]any{
+		"command_type": "ENTITLEMENT_COMPONENT_ADJUSTMENT", "package_id": id(input.PackageID),
+		"wallet_id": id(input.WalletID), "wallet_version": input.WalletVersion,
+		"payment_order_id": id(input.PaymentOrderID), "payment_transaction_id": id(input.PaymentTransactionID),
+		"package_total_microcredits": input.PackageTotal, "package_expires_at": input.PackageExpiresAt.UTC().Format(time.RFC3339Nano),
+		"source_component_id": id(input.SourceComponentID), "source_lot_id": id(input.SourceLotID),
+		"target_component_id": id(input.TargetComponentID), "target_lot_id": id(input.TargetLotID),
+		"source_type": input.Amounts.SourceType, "target_type": input.Amounts.TargetType,
+		"amount_microcredits": input.Amounts.Amount, "source_original_microcredits": input.SourceOriginal,
+		"target_original_microcredits": input.TargetOriginal, "current_base_microcredits": input.CurrentBase,
+		"current_bonus_microcredits": input.CurrentBonus, "policy_version": 2,
+	})
+	if err != nil || err2 != nil {
+		return "", ""
+	}
+	return digestHex(evidence), digestHex(facts)
+}
+
+func digestHex(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
 }

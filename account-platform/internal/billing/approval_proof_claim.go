@@ -48,6 +48,10 @@ func (f billingTxProofFacts) confirmedResumeProbe(ctx context.Context, providerI
 	return f.repository.confirmedResumeProbeFrom(ctx, f.tx, providerID, providerVersion, productID, orderID)
 }
 
+func (f billingTxProofFacts) entitlementCorrectionPlan(ctx context.Context, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
+	return entitlementCorrectionPlanFrom(ctx, f.tx, f.repository.now(), packageID, orderID)
+}
+
 // ClaimBillingApprovalProof is the last zero-effect authorization boundary.
 // Once committed, a crash or provider failure is an unknown outcome, never
 // permission to run a second probe under a newly issued proof.

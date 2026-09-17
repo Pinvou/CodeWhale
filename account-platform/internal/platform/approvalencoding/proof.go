@@ -69,6 +69,16 @@ var commandSpecs = map[string]commandSpec{
 		financialKeys:  []string{},
 		normalizedInts: []string{"expected_account_version", "credential_version"}, criticalInts: []string{"token_account_version", "credential_version", "policy_version"}, nullableCriticalInts: []string{"replacement_credential_version"},
 	},
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {
+		policyVersion: 2, snapshotVersion: 2, targetType: "ENTITLEMENT_PACKAGE", executor: "billing-command-executor",
+		normalizedKeys: []string{"package_id", "payment_order_id", "reason_code"},
+		criticalKeys: []string{"package_id", "wallet_id", "wallet_version", "payment_order_id", "payment_transaction_id",
+			"source_component_id", "source_lot_id", "target_component_id", "target_lot_id", "source_type", "target_type",
+			"amount_microcredits", "source_evidence_digest", "facts_digest", "policy_version"},
+		financialKeys: []string{"package_total_microcredits", "source_original_microcredits", "target_original_microcredits", "effective_total_microcredits"},
+		criticalInts:  []string{"wallet_version", "amount_microcredits", "policy_version"},
+		financialInts: []string{"package_total_microcredits", "source_original_microcredits", "target_original_microcredits", "effective_total_microcredits"},
+	},
 }
 
 func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
@@ -502,6 +512,27 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 		}
 	case "TOKEN_CREDENTIAL_REVOKE":
 		if !validUUID(targetID) || !equalString(normalizedObject["credential_id"], targetID) || !equalString(criticalObject["credential_id"], targetID) || !validUUIDField(normalizedObject["token_account_id"]) || !sameCanonical(normalizedObject["token_account_id"], criticalObject["token_account_id"]) || integers["n.expected_account_version"] < 1 || integers["n.credential_version"] < 1 || integers["c.token_account_version"] != integers["n.expected_account_version"] || integers["c.credential_version"] != integers["n.credential_version"] || integers["c.policy_version"] != spec.policyVersion || !oneOfString(criticalObject["credential_status"], "PENDING", "ACTIVE", "RETIRED", "REVOKED") || !hexField(criticalObject["credential_fingerprint"]) || !hexField(criticalObject["active_route_set_fingerprint"]) || !hexField(criticalObject["provisioning_lease_set_fingerprint"]) || !hexField(criticalObject["inflight_request_set_fingerprint"]) {
+			return ErrInvalidDocument
+		}
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		sourceType, sourceErr := stringValue(criticalObject["source_type"])
+		targetType, targetErr := stringValue(criticalObject["target_type"])
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		if !validUUID(targetID) || !equalString(normalizedObject["package_id"], targetID) ||
+			!sameCanonical(normalizedObject["package_id"], criticalObject["package_id"]) ||
+			!validUUIDField(normalizedObject["payment_order_id"]) || !sameCanonical(normalizedObject["payment_order_id"], criticalObject["payment_order_id"]) ||
+			!validUUIDField(criticalObject["wallet_id"]) || integers["c.wallet_version"] < 1 ||
+			!validUUIDField(criticalObject["payment_transaction_id"]) ||
+			!validUUIDField(criticalObject["source_component_id"]) || !validUUIDField(criticalObject["source_lot_id"]) ||
+			!nullableUUID(criticalObject["target_component_id"]) || !nullableUUID(criticalObject["target_lot_id"]) ||
+			sourceErr != nil || targetErr != nil || !((sourceType == "BASE" && targetType == "BONUS") || (sourceType == "BONUS" && targetType == "BASE")) ||
+			!hexField(criticalObject["source_evidence_digest"]) || !hexField(criticalObject["facts_digest"]) ||
+			integers["c.policy_version"] != spec.policyVersion || integers["c.amount_microcredits"] < 1 ||
+			integers["c.amount_microcredits"] > integers["f.source_original_microcredits"] ||
+			integers["f.package_total_microcredits"] < 1 || integers["f.source_original_microcredits"] < 1 || integers["f.target_original_microcredits"] < 0 ||
+			integers["f.effective_total_microcredits"] != integers["f.source_original_microcredits"]+integers["f.target_original_microcredits"] ||
+			integers["f.effective_total_microcredits"] != integers["f.package_total_microcredits"] ||
+			reasonErr != nil || len(reasonCode) == 0 || len(reasonCode) > 80 {
 			return ErrInvalidDocument
 		}
 	}

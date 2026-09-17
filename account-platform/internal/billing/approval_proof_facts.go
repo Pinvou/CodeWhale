@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
@@ -18,6 +19,11 @@ type billingProofFacts interface {
 	providerResumeVersions(context.Context, ProviderResumeVersions) (ProviderResumeVersions, error)
 	productResumeVersions(context.Context, ProductResumeVersions) (ProductResumeVersions, error)
 	confirmedResumeProbe(context.Context, string, string, string, uuid.UUID) (bool, error)
+	entitlementCorrectionPlan(context.Context, uuid.UUID, uuid.UUID) (entitlementCorrectionReadPlan, error)
+}
+
+func (r *PostgresRepository) entitlementCorrectionPlan(ctx context.Context, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
+	return r.planEntitlementComponentCorrection(ctx, packageID, orderID)
 }
 
 func (r *PostgresRepository) confirmedResumeProbe(ctx context.Context, providerID, providerVersion, productID string, orderID uuid.UUID) (bool, error) {
@@ -116,6 +122,44 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 			return current, "EVIDENCE_MISSING", ownerState, nil
 		}
 		if actual.ProductID != frozen.TargetResourceID || !sameProductResumeVersions(actual, command) {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		var command struct {
+			PackageID      uuid.UUID `json:"package_id"`
+			PaymentOrderID uuid.UUID `json:"payment_order_id"`
+			ReasonCode     string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.PackageID == uuid.Nil ||
+			command.PaymentOrderID == uuid.Nil || strings.TrimSpace(command.ReasonCode) == "" {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		plan, err := repository.entitlementCorrectionPlan(ctx, command.PackageID, command.PaymentOrderID)
+		if err != nil {
+			return current, "", "", err
+		}
+		nullableID := func(value uuid.UUID) any {
+			if value == uuid.Nil {
+				return nil
+			}
+			return value
+		}
+		ownerState = plan.Amounts.SourceType + "->" + plan.Amounts.TargetType
+		current.CriticalResourceVersions = marshal(map[string]any{
+			"package_id": plan.PackageID, "wallet_id": plan.WalletID, "wallet_version": plan.WalletVersion,
+			"payment_order_id": plan.PaymentOrderID, "payment_transaction_id": plan.PaymentTransactionID,
+			"source_component_id": plan.SourceComponentID, "source_lot_id": plan.SourceLotID,
+			"target_component_id": nullableID(plan.TargetComponentID), "target_lot_id": nullableID(plan.TargetLotID),
+			"source_type": plan.Amounts.SourceType, "target_type": plan.Amounts.TargetType,
+			"amount_microcredits": plan.Amounts.Amount, "source_evidence_digest": plan.SourceEvidenceDigest,
+			"facts_digest": plan.FactsDigest, "policy_version": 2,
+		})
+		current.FinancialSnapshot = marshal(map[string]any{
+			"package_total_microcredits": plan.PackageTotal, "source_original_microcredits": plan.SourceOriginal,
+			"target_original_microcredits": plan.TargetOriginal,
+			"effective_total_microcredits": plan.SourceOriginal + plan.TargetOriginal,
+		})
+		if plan.PackageID != command.PackageID || plan.PaymentOrderID != command.PaymentOrderID {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:

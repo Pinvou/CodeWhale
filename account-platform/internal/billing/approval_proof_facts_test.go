@@ -16,6 +16,7 @@ type billingProofFactsStub struct {
 	provider   ProviderResumeVersions
 	product    ProductResumeVersions
 	confirmed  bool
+	correction entitlementCorrectionReadPlan
 	reads      int
 }
 
@@ -38,6 +39,58 @@ func (s *billingProofFactsStub) productResumeVersions(context.Context, ProductRe
 func (s *billingProofFactsStub) confirmedResumeProbe(context.Context, string, string, string, uuid.UUID) (bool, error) {
 	s.reads++
 	return s.confirmed, nil
+}
+func (s *billingProofFactsStub) entitlementCorrectionPlan(context.Context, uuid.UUID, uuid.UUID) (entitlementCorrectionReadPlan, error) {
+	s.reads++
+	return s.correction, nil
+}
+
+func TestEntitlementCorrectionProofFactsBindOwnerFacts(t *testing.T) {
+	marshal := func(value any) json.RawMessage {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	packageID, orderID := uuid.New(), uuid.New()
+	walletID, transactionID := uuid.New(), uuid.New()
+	sourceComponent, sourceLot := uuid.New(), uuid.New()
+	stub := &billingProofFactsStub{correction: entitlementCorrectionReadPlan{
+		PackageID: packageID, WalletID: walletID, PaymentOrderID: orderID, PaymentTransactionID: transactionID,
+		SourceComponentID: sourceComponent, SourceLotID: sourceLot, WalletVersion: 3, PackageTotal: 100,
+		SourceOriginal: 70, TargetOriginal: 30,
+		SourceEvidenceDigest: strings.Repeat("ab", 32), FactsDigest: strings.Repeat("cd", 32),
+		Amounts: entitlementCorrectionAmounts{SourceType: "BASE", TargetType: "BONUS", Amount: 20, ExpectedBase: 50, ExpectedBonus: 50, CurrentBase: 70, CurrentBonus: 30},
+	}}
+	frozen := approvalencoding.LegacyProofInput{
+		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: "ENTITLEMENT_PACKAGE", TargetResourceID: packageID.String(),
+		NormalizedCommand:        marshal(map[string]any{"package_id": packageID, "payment_order_id": orderID, "reason_code": "SNAPSHOT_SPLIT_MISMATCH"}),
+		CriticalResourceVersions: json.RawMessage(`{}`), FinancialSnapshot: json.RawMessage(`{}`),
+	}
+	current, reason, ownerState, err := currentBillingProofInput(context.Background(), stub, frozen)
+	if err != nil || reason != "" || ownerState != "BASE->BONUS" || stub.reads != 1 {
+		t.Fatalf("correction facts reason=%s owner=%s reads=%d err=%v", reason, ownerState, stub.reads, err)
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(current)
+	if err != nil {
+		t.Fatalf("correction projection must satisfy the closed v2 schema: %v", err)
+	}
+	if artifacts.PolicyVersion != 2 || artifacts.SnapshotSchemaVersion != 2 || artifacts.CommandDigest == "" || artifacts.SnapshotDigest == "" {
+		t.Fatalf("correction projection artifacts=%+v", artifacts)
+	}
+	drifted := stub.correction
+	drifted.Amounts.Amount = 0
+	stub.correction = drifted
+	driftedInput, _, _, err := currentBillingProofInput(context.Background(), stub, frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := approvalencoding.ConvertLegacyProofInput(driftedInput); err == nil {
+		t.Fatal("a zero recomputed amount must not satisfy the closed v2 schema")
+	}
 }
 
 func TestBillingProofFactsUsePersistedOwnerRows(t *testing.T) {
