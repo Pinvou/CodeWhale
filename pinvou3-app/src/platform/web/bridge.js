@@ -286,6 +286,15 @@
     // (state.projectsList = { projects, assignments, loadedAt },见
     // tauri/bridge/projects.js),否则分组读到 undefined 只能靠防御性兜底。
     projectsList: { projects: [], assignments: {}, loadedAt: null },
+    // desktopRemoteControl 域桌面专属（Windows 双端远控）：Web 端只保留空桩，
+    // 保证 getMany 不抛 unknown slice；真正的 UI 入口由 desktopRemoteControl
+    // capability=false 隐藏。
+    controlledDevice: null,
+    controllerConnection: null,
+    remoteCapabilities: null,
+    remoteModels: [],
+    remoteHistories: [],
+    tasks: [],
     // 依赖体检(设置页): deps = [{key, installed, apt}], null = 尚未检测
     deps: null,
     depsChecking: false,

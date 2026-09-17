@@ -154,6 +154,10 @@ impl DesktopRemoteTaskRuntime {
         Arc::clone(&self.service)
     }
 
+    pub(crate) fn ledger(&self) -> Arc<RemoteTaskLedger> {
+        self.service.ledger()
+    }
+
     pub(crate) fn authorizations(&self) -> Arc<RemoteWorkspaceAuthorizations> {
         Arc::clone(&self.authorizations)
     }

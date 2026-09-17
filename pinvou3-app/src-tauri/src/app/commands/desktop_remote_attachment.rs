@@ -16,6 +16,7 @@ use tauri::State;
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::task::RemoteTaskService;
+use crate::features::remote_control::controller::task::RemoteTaskTransferScope;
 use crate::features::remote_control::controller::transfer::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferMetadata, TransferRegistry,
 };
@@ -220,9 +221,43 @@ impl DesktopRemoteAttachmentRuntime {
             tasks,
         )
     }
+
+    pub(crate) fn uploads_cleanup_for_task(&self, task_id: &str) -> usize {
+        self.uploads.cleanup_for_task(task_id)
+    }
+
+    pub(crate) fn uploads_cleanup_for_connection(&self, connection_id: &str) -> usize {
+        self.uploads.cleanup_for_connection(connection_id)
+    }
 }
 
 type AttachmentState<'a> = State<'a, Arc<DesktopRemoteAttachmentRuntime>>;
+
+/// Terminal cleanup for both transfer directions: the task owner calls this on
+/// every terminal path so no half-finished attachment or artifact survives.
+pub(crate) struct DesktopRemoteTransferScope {
+    attachments: Arc<DesktopRemoteAttachmentRuntime>,
+    artifacts: Arc<crate::app::commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime>,
+}
+
+impl DesktopRemoteTransferScope {
+    pub(crate) fn new(
+        attachments: Arc<DesktopRemoteAttachmentRuntime>,
+        artifacts: Arc<crate::app::commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime>,
+    ) -> Self {
+        Self {
+            attachments,
+            artifacts,
+        }
+    }
+}
+
+impl RemoteTaskTransferScope for DesktopRemoteTransferScope {
+    fn abort_transfers_for_task(&self, task_id: &str) -> usize {
+        self.attachments.uploads_cleanup_for_task(task_id)
+            + self.artifacts.downloads().cleanup_for_task(task_id)
+    }
+}
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
     if controlled.is_supported() {

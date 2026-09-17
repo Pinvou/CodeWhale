@@ -17,6 +17,8 @@ pub(crate) struct DesktopCapabilities {
     /// hook is required); on other platforms the native layer is a no-op and
     /// only the in-window Alt fallback is available.
     pub(crate) voice_shortcut_native: bool,
+    /// Windows-only desktop dual-end remote control backend.
+    pub(crate) desktop_remote_control_supported: bool,
 }
 
 /// Sole production-release switch for macOS BrowserCore. Keep it `false` until physical
@@ -62,11 +64,19 @@ pub(crate) fn current() -> DesktopCapabilities {
         browser_agent_automation: browser_product_enabled(),
         browser_cdp: cfg!(target_os = "windows"),
         voice_shortcut_native: cfg!(target_os = "windows"),
+        desktop_remote_control_supported: supports_desktop_remote_control(std::env::consts::OS),
     }
 }
 
 pub(crate) fn supports_codex_acp(os: &str) -> bool {
     matches!(os, "linux" | "windows" | "macos")
+}
+
+/// Windows is the only target with the desktop dual-end remote-control backend
+/// (A control / B controlled). Other targets report `unsupported` instead of
+/// pretending to support the feature.
+pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
+    matches!(os, "windows")
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -116,6 +126,10 @@ mod tests {
         );
         assert_eq!(capabilities.browser_cdp, is_windows());
         assert_eq!(capabilities.voice_shortcut_native, is_windows());
+        assert_eq!(
+            capabilities.desktop_remote_control_supported,
+            supports_desktop_remote_control(std::env::consts::OS)
+        );
     }
 
     #[test]

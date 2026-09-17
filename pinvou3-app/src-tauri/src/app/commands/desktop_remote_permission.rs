@@ -6,6 +6,8 @@
 //! commands are not a remote authority path: a remote task must go through this
 //! module, and the ACP adapter refuses non-controller sources.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 use serde_json::Value;
 use tauri::State;
@@ -52,7 +54,7 @@ fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> 
 pub fn desktop_remote_permission_request(
     request: DesktopRemotePermissionRequestInput,
     controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, PermissionAuthority>,
+    authority: State<'_, Arc<PermissionAuthority>>,
 ) -> Result<PermissionView, String> {
     ensure_supported(&controlled)?;
     let live = controlled
@@ -84,8 +86,8 @@ pub fn desktop_remote_permission_decide(
     permission_request_id: String,
     decision: String,
     controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, PermissionAuthority>,
-    ledger: State<'_, RemoteTaskLedger>,
+    authority: State<'_, Arc<PermissionAuthority>>,
+    ledger: State<'_, Arc<RemoteTaskLedger>>,
 ) -> Result<Value, String> {
     ensure_supported(&controlled)?;
     let live = controlled
@@ -137,7 +139,7 @@ pub fn desktop_remote_permission_decide(
 pub fn desktop_remote_permission_list(
     task_id: String,
     controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, PermissionAuthority>,
+    authority: State<'_, Arc<PermissionAuthority>>,
 ) -> Result<Vec<PermissionView>, String> {
     ensure_supported(&controlled)?;
     Ok(authority.pending_for_task(&task_id))
@@ -149,7 +151,7 @@ pub fn desktop_remote_permission_deny_task(
     task_id: String,
     reason: String,
     controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, PermissionAuthority>,
+    authority: State<'_, Arc<PermissionAuthority>>,
 ) -> Result<usize, String> {
     ensure_supported(&controlled)?;
     Ok(authority.deny_all_for_task(&task_id, &reason, monotonic_millis()))

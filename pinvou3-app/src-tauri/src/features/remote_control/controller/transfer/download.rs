@@ -352,7 +352,8 @@ fn preview_kind_for(mime_type: &str, total_bytes: u64) -> PreviewKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ArtifactDownloadBegin {
     pub(crate) handle_id: String,
     pub(crate) chunk_bytes: usize,

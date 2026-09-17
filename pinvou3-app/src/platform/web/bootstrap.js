@@ -18,6 +18,9 @@
     interruptSend: false,
     deviceFileUpload: true,
     acpCodeMode: true,
+    // Windows-only desktop dual-end remote control: the browser lane owns the
+    // WebUI v2 wire and must never expose the desktop controller surface.
+    desktopRemoteControl: false,
   };
   const SEMANTIC_COMMAND_REQUIREMENTS = {
     hostFilePicker: ["web_access_list_host_files", "web_access_ingest_file"],
