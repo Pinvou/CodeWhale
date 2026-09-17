@@ -46,3 +46,13 @@
 - 发现（minor，仅登记）：`PROTOCOL.md` 不在 DEV-04 的预计文件清单内（该文档由 DEV-00 定义、DEV-06 冻结），本任务为其新增的消息族补了 30 行说明；属文档边界偏差，无功能影响。
 - 验证：`node --test remote-control-relay/test/controller-reservation.test.js` 14 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 5. DEV-05：A/B 密码学原语、规范 receipt 与敏感序列化
+
+审核轮次 1（审核提交 d4c2c72e 与修复 57e0c79b、fc64574c、9f75a354、84bb1166）
+
+- 逐条核对：严格 LP 编码（`lp()` 于 crypto.rs:64）、`CodeWrapPublicKey`/`HandshakePublicKey` 与两套 KeyPair 为互不兼容类型（用例 `code_wrap_and_handshake_keys_are_domain_separated_types`）、32 字节 receipt secret（`ReceiptSecret(Zeroizing<[u8;32]>)`）、Finished 绑定角色/transcript/receipt、receipt commitment 与 JS 共享固定向量一致、业务 AEAD 绑定方向+epoch+sequence 且带重放窗口、序列耗尽终态、密文长度在 AEAD 之前拒绝、`SensitiveString` 的 Debug/Display/Serialize 均不透出明文、Relay 签名用 ring ED25519 真实校验并有篡改用例。
+- 固定向量：`frozen_cross_language_crypto_vector_matches_every_stage` 同时校验 shared secret、Finished key、业务 root/派生 key、nonce、AAD 与密文，与 `remote-control-relay/test/fixtures/controller-protocol-v1.json` 完全一致。
+- 发现（minor，仅登记）：与 DEV-04 相同，`PROTOCOL.md` 属 DEV-00/DEV-06 的文档边界，本任务的修复提交对它做了 79 行说明性更新；无功能影响。
+- 验证：`cargo test controller::crypto` 13 通过 / 0 失败；`node --test remote-control-relay/test/controller-protocol.test.js` 20 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
