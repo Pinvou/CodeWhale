@@ -171,7 +171,8 @@ pub(crate) fn last_round_range(messages: &[Message]) -> (usize, usize) {
     (start, messages.len())
 }
 
-/// How many messages of the open round sit in `messages` before a checkpoint.
+/// How many round messages the open round kept in a history carrying a
+/// checkpoint; `None` when there is no checkpoint to report on.
 #[must_use]
 pub fn last_round_kept_count(messages: &[Message]) -> Option<usize> {
     messages
@@ -602,6 +603,38 @@ mod tests {
         let error = validate_survival_contract(&original, &without_anchor, Some("ship 0.9.12"))
             .expect_err("dropped /anchor text must fail closed");
         assert!(error.to_string().contains("anchor"), "{error}");
+    }
+
+    #[test]
+    fn forkguard_marker_quoted_by_a_user_turn_survives_recompaction() {
+        let quoting = "why does my log say 'Another language model started to solve this problem'?";
+        let mut messages = vec![
+            msg("user", "Run the suite now."),
+            tool_use("live", "Bash", json!({"command": "cargo test"})),
+            tool_result("live", "ok"),
+            checkpoint("suite finished"),
+        ];
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut messages, &[]);
+        messages.push(msg("assistant", "It is the compaction header."));
+        messages.push(msg("user", quoting));
+
+        let next = crate::compaction::build_compaction_summary_block_text("second summary", "");
+        let replacement = build_replacement_history(&messages, &next, None)
+            .expect("a quoting user turn must not break the round");
+
+        assert!(
+            replacement
+                .iter()
+                .any(|message| user_text_of(message).as_deref() == Some(quoting)),
+            "the quoting turn is user intent, not the checkpoint: {replacement:?}"
+        );
+        assert_eq!(
+            replacement
+                .iter()
+                .filter(|message| is_compaction_checkpoint_message(message))
+                .count(),
+            1
+        );
     }
 
     #[test]

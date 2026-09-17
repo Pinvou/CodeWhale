@@ -2620,26 +2620,24 @@ fn build_chat_messages_with_reasoning(
         .rev()
         .find_map(|(index, message)| {
             (index > 0
-                && crate::compaction::is_wire_compaction_checkpoint_message(message)
-                && messages[index - 1]
-                    .content
-                    .iter()
-                    .any(|block| matches!(block, ContentBlock::ToolResult { .. })))
+                && crate::compaction::is_generated_compaction_checkpoint(message)
+                && crate::runtime_handoff::carries_tool_result(&messages[index - 1]))
             .then_some(index)
         });
-    let summary_target = summary_index.and_then(|summary_index| {
-        messages[..summary_index]
-            .iter()
-            .rposition(|message| {
-                crate::runtime_handoff::classify_user_turn_prompt(message)
-                    != crate::runtime_handoff::UserTurnPromptKind::NotPrompt
-            })
-            .or_else(|| {
-                messages[..summary_index]
-                    .iter()
-                    .position(|message| message.role.is_assistant_like())
-            })
-    });
+    let summary_target = summary_index
+        .and_then(|summary_index| {
+            crate::runtime_handoff::compaction_anchor(messages, summary_index)
+        })
+        .map(crate::runtime_handoff::CompactionAnchor::request_index);
+    if summary_index.is_some() && summary_target.is_none() {
+        // Degenerate saved history: the summary trails a tool result, yet no
+        // retained prompt or assistant message precedes it. It stays where it
+        // is (moving it somewhere arbitrary would be guesswork), so the request
+        // keeps the shape a strict template rejects. Worth a breadcrumb.
+        logging::warn(
+            "Compaction summary trails a tool result with no retained prompt or assistant to anchor it",
+        );
+    }
     let wire_messages = (0..messages.len())
         .filter(|index| Some(*index) != summary_index || summary_target.is_none())
         .flat_map(|index| {
@@ -6445,6 +6443,13 @@ mod image_block_wire_tests {
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
 
+    /// Invariant: no `role="user"` message directly follows a `role="tool"`
+    /// message, with tool-call/result IDs still paired.
+    ///
+    /// Not covered here, and not claimed: compaction retains older user turns
+    /// verbatim, so a pass that retains two of them still emits adjacent user
+    /// messages, and any template that demands full alternation would reject
+    /// that shape. See the PR body's residual notes.
     #[test]
     fn forkguard_compaction_tool_round_has_valid_chat_wire_roles() {
         let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
@@ -6542,6 +6547,66 @@ mod image_block_wire_tests {
                 .contains("restored Agent topology checkpoint")
         );
         assert_eq!(restored_wire[6]["content"], "What happened next?");
+    }
+
+    #[test]
+    fn forkguard_restored_pre_fix_session_has_valid_chat_wire_roles() {
+        // Sessions saved before the placement fix append the topology sidecar
+        // to the end of the replacement history, so restore sees it after the
+        // summary (either order both releases produced). Request-time
+        // rewriting moves only the summary, so without an in-place repair the
+        // first request after restore is `tool → user` again — the exact 400
+        // this pipeline exists to fix.
+        let checkpoint = crate::models::SystemPrompt::Text(
+            crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+        );
+        for topology_after_summary in [false, true] {
+            let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[{"type":"text","text":"Analyze the data"}]},
+                {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ready"}]}
+            ]))
+            .unwrap();
+            let topology = persisted_topology_message();
+            let summary = Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: crate::compaction::build_compaction_summary_block_text(
+                        "Compacted summary",
+                        "",
+                    ),
+                    cache_control: None,
+                }],
+            };
+            if topology_after_summary {
+                messages.push(summary);
+                messages.push(topology);
+            } else {
+                messages.push(topology);
+                messages.push(summary);
+            }
+
+            let restored = crate::compaction::restore_compaction_checkpoint(
+                crate::runtime_handoff::project_messages_for_restore(&messages),
+                Some(&checkpoint),
+            );
+            let wire = build_chat_messages(None, &restored, "gpt-4o");
+            let roles: Vec<&str> = wire
+                .iter()
+                .map(|message| message["role"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                roles,
+                ["user", "assistant", "tool"],
+                "topology_after_summary={topology_after_summary}: {restored:?}"
+            );
+            let prompt = wire[0]["content"].as_str().unwrap();
+            assert!(prompt.contains("Compacted summary"));
+            assert!(prompt.contains("Analyze the data"));
+            assert!(prompt.contains("restored Agent topology checkpoint"));
+            assert_eq!(wire[1]["tool_calls"][0]["id"], "call_1");
+            assert_eq!(wire[2]["tool_call_id"], "call_1");
+        }
     }
 
     #[test]
@@ -6676,6 +6741,12 @@ mod image_block_wire_tests {
             wire[0]["content"]
                 .as_str()
                 .unwrap()
+                .contains("Run the suite")
+        );
+        assert!(
+            wire[0]["content"]
+                .as_str()
+                .unwrap()
                 .contains("codewhale.agent_topology.v1")
         );
         assert_eq!(wire[1]["tool_calls"][0]["id"], wire[2]["tool_call_id"]);
@@ -6704,8 +6775,82 @@ mod image_block_wire_tests {
                 .unwrap()
                 .contains("Run the suite")
         );
+        // The summary belongs to the round's own prompt, not to the retained
+        // older turn it happens to sit next to in saved history.
+        assert!(wire[1]["content"].as_str().unwrap().contains("Summary"));
         assert_eq!(wire[2]["role"], "assistant");
         assert_eq!(wire[3]["role"], "tool");
+    }
+
+    /// The provenance block, not the header text, decides relocation. Sessions
+    /// from before the header was rewritten carry the legacy marker, and their
+    /// first request must be reordered too.
+    #[test]
+    fn legacy_summary_carrier_moves_ahead_of_its_prompt_on_the_wire() {
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Continue from the handoff"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+        ]))
+        .unwrap();
+        messages.push(crate::compaction::compaction_checkpoint_message(
+            &crate::models::SystemPrompt::Text(format!(
+                "{}\nold-format body",
+                crate::compaction::LEGACY_COMPACTION_SUMMARY_MARKER
+            )),
+        ));
+
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        let roles: Vec<&str> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+        let prompt = wire[0]["content"].as_str().unwrap();
+        assert!(prompt.contains("old-format body"));
+        assert!(prompt.contains("Continue from the handoff"));
+        assert_eq!(wire[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(wire[2]["tool_call_id"], "call_1");
+    }
+
+    /// A summary whose retained history has no prompt left anchors before the
+    /// first assistant message instead of staying after the tool result. A
+    /// history with neither anchor keeps it in place rather than inventing
+    /// one; this fixture is unreachable from a real save, and the wire already
+    /// drops the orphaned result for want of a matching tool call.
+    #[test]
+    fn summary_without_a_retained_prompt_anchors_before_the_assistant() {
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![fixture_tool_use("call_1")],
+        }];
+        messages.push(fixture_tool_result("call_1"));
+        messages.push(crate::compaction::compaction_checkpoint_message(
+            &crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+            ),
+        ));
+
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        let roles: Vec<&str> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+        assert_eq!(wire[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(wire[2]["tool_call_id"], "call_1");
+
+        let degenerate = vec![fixture_tool_result("call_1"), messages[2].clone()];
+        let degenerate_wire = build_chat_messages(None, &degenerate, "gpt-4o");
+        let roles: Vec<&str> = degenerate_wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            ["user"],
+            "with no anchor the summary stays put and the orphaned result is dropped"
+        );
     }
 
     fn fixture_tool_use(id: &str) -> ContentBlock {
@@ -6728,6 +6873,14 @@ mod image_block_wire_tests {
                 content_blocks: None,
             }],
         }
+    }
+
+    /// A sidecar exactly as a compaction commit persisted it: built by the one
+    /// production constructor, without placing it in a replacement history.
+    fn persisted_topology_message() -> Message {
+        let mut empty: Vec<Message> = Vec::new();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut empty, &[]);
+        empty.remove(0)
     }
 
     fn request_with_image() -> MessageRequest {
