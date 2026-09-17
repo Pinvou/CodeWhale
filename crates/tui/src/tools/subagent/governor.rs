@@ -97,18 +97,21 @@ struct GateState {
 ///
 /// A thin accounting layer over [`tokio::sync::Semaphore`]: the semaphore
 /// owns the FIFO wait queue and cancellation safety, this struct owns the
-/// `capacity`/`outstanding` bookkeeping that lets capacity drop below the
-/// number of outstanding holders. Once every in-flight admission has
-/// finished registering, the identity
-/// `sem.available_permits() == capacity.saturating_sub(outstanding)` holds
-/// exactly. The semaphore grant and the ledger registration are two steps,
-/// so a capacity change racing that window can leave a surplus of
-/// semaphore permits — each racing admission can contribute one (a clamped
-/// shrink followed by an expand is the compound case), and further races
-/// can add more. The surplus is bounded, no slot is ever lost, and it
-/// drains when demand pushes the fleet past capacity (the excess holders'
-/// releases are absorbed) or a later shrink clamps at the available count;
-/// until then the gate may admit up to that many extra children.
+/// `capacity`/`outstanding` ledger that lets capacity drop below the
+/// number of outstanding holders. The ledger — not the semaphore token
+/// count — is the admission authority: a granted token is registered only
+/// while `outstanding < capacity`; one granted while the ledger is full is
+/// surplus and is destroyed (`forget`) instead of admitted. Two paths
+/// create such tokens while no slot is free, both invisible to
+/// `forget_permits` (which sees free tokens only): a grant that races a
+/// capacity change (handed out before the shrink can forget it), and a
+/// grant handed to a queued waiter that is cancelled before polling again
+/// (tokio re-injects it into the pool). Surplus tokens are harmless — they
+/// cannot admit — and the next admission attempt destroys them; every slot
+/// freed below capacity mints a fresh token on release, so no slot is ever
+/// lost. Once no surplus token remains and every in-flight admission has
+/// registered, `sem.available_permits() ==
+/// capacity.saturating_sub(outstanding)` holds exactly.
 ///
 /// `acquire` returns a [`DynamicGatePermit`] whose `Drop` returns the slot.
 /// Reducing capacity below `outstanding` is allowed: the surplus holders
@@ -136,9 +139,9 @@ impl DynamicGate {
         self.inner.lock().expect("launch gate poisoned").capacity
     }
 
-    /// Free semaphore permits right now — equal to
-    /// `capacity - outstanding` whenever the gate is at rest (see the struct
-    /// docs for the racing windows). Diagnostics and tests only; racy by
+    /// Free semaphore permits right now — `capacity - outstanding` at
+    /// rest, plus any surplus tokens not yet destroyed by an admission
+    /// attempt (see the struct docs). Diagnostics and tests only; racy by
     /// design.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn available_permits(&self) -> usize {
@@ -149,6 +152,9 @@ impl DynamicGate {
     /// the semaphore immediately (queued acquirers wake in FIFO order);
     /// lowering it forgets free slots — holders above the new capacity keep
     /// running, and their releases are absorbed instead of re-admitted.
+    /// Grants already handed to queued waiters are invisible to the shrink;
+    /// if their acquirers are cancelled, admission destroys the returned
+    /// surplus token (see the struct docs).
     pub(crate) fn set_capacity(&self, capacity: usize) {
         let mut inner = self.inner.lock().expect("launch gate poisoned");
         let old = inner.capacity;
@@ -167,29 +173,51 @@ impl DynamicGate {
     /// Try to acquire a permit without waiting.
     pub(crate) fn try_acquire(self: &std::sync::Arc<Self>) -> Option<DynamicGatePermit> {
         let sem_permit = self.sem.try_acquire().ok()?;
-        // Slot ownership moves from the semaphore permit into
-        // `DynamicGatePermit::drop`.
+        self.admit_grant(sem_permit)
+    }
+
+    /// Register a granted semaphore token as a held slot. The ledger, not
+    /// the token count, is the admission authority: a token granted while
+    /// the ledger is full is surplus drift — a cancelled waiter's
+    /// re-injected grant, or a grant that raced a shrink — and is destroyed
+    /// with `forget` (never dropped: a drop would re-inject it). Since
+    /// `DynamicGatePermit::drop` mints one fresh token per slot freed below
+    /// capacity, destroying a token never loses a slot.
+    fn admit_grant(
+        self: &std::sync::Arc<Self>,
+        sem_permit: tokio::sync::SemaphorePermit<'_>,
+    ) -> Option<DynamicGatePermit> {
+        let mut inner = self.inner.lock().expect("launch gate poisoned");
+        if inner.outstanding < inner.capacity {
+            inner.outstanding += 1;
+            // Slot ownership moves from the semaphore permit into
+            // `DynamicGatePermit::drop`.
+            sem_permit.forget();
+            return Some(DynamicGatePermit {
+                gate: std::sync::Arc::clone(self),
+            });
+        }
         sem_permit.forget();
-        self.inner.lock().expect("launch gate poisoned").outstanding += 1;
-        Some(DynamicGatePermit {
-            gate: std::sync::Arc::clone(self),
-        })
+        None
     }
 
     /// Acquire a permit, waiting until capacity is available. The semaphore
     /// queue is FIFO and cancel safe: a cancelled future dequeues itself and
-    /// never swallows a slot or loses a wakeup.
+    /// never swallows a slot or loses a wakeup. A grant that turns out to be
+    /// surplus (see [`Self::admit_grant`]) is destroyed and the wait
+    /// continues for the release that mints a fresh one; each surplus round
+    /// consumes exactly one pool token, so the loop cannot spin.
     pub(crate) async fn acquire(self: &std::sync::Arc<Self>) -> DynamicGatePermit {
-        // The semaphore is never closed, so `acquire` cannot fail.
-        let sem_permit = self
-            .sem
-            .acquire()
-            .await
-            .expect("launch gate semaphore closed");
-        sem_permit.forget();
-        self.inner.lock().expect("launch gate poisoned").outstanding += 1;
-        DynamicGatePermit {
-            gate: std::sync::Arc::clone(self),
+        loop {
+            // The semaphore is never closed, so `acquire` cannot fail.
+            let sem_permit = self
+                .sem
+                .acquire()
+                .await
+                .expect("launch gate semaphore closed");
+            if let Some(permit) = self.admit_grant(sem_permit) {
+                return permit;
+            }
         }
     }
 }
@@ -830,6 +858,66 @@ mod tests {
                 .try_acquire()
                 .expect("slot usable after the cancelled waiter dequeued");
             drop(permit);
+        });
+    }
+
+    /// The third cancel interleaving: a grant already handed to a queued
+    /// waiter comes back *after* the shrink. tokio re-injects a grant that
+    /// its waiter never polled when the waiter's future is dropped, and
+    /// `forget_permits` cannot see it — so a pause (capacity 0) can find a
+    /// surplus token sitting in the pool. The slot ledger is the admission
+    /// authority: the surplus token must be refused and destroyed, never
+    /// admit. Deterministic on a current-thread runtime: the waiter is
+    /// granted on `drop(holder)` and aborted before it can poll again.
+    #[test]
+    fn forkguard_cancelled_grant_returned_after_shrink_cannot_bypass_pause() {
+        let (_governor, gate) = RateLimitGovernor::new(1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move {
+            let holder = gate.try_acquire().expect("holder");
+            let g2 = std::sync::Arc::clone(&gate);
+            let waiter = tokio::spawn(async move { g2.acquire().await });
+            tokio::time::sleep(ms(20)).await;
+            assert!(!waiter.is_finished(), "waiter must be queued");
+
+            // The release assigns the freed grant to the queued waiter; on
+            // a current-thread runtime the waiter has not polled yet.
+            drop(holder);
+            // The shrink forgets free permits only: the assigned grant is
+            // invisible to it.
+            gate.set_capacity(0);
+            waiter.abort();
+            tokio::time::sleep(ms(20)).await;
+
+            // The cancelled waiter's grant is back in the pool. The pause
+            // must hold for both admission paths.
+            assert!(
+                gate.try_acquire().is_none(),
+                "surplus token returned by a cancelled waiter must not bypass the pause"
+            );
+            assert_eq!(
+                gate.available_permits(),
+                0,
+                "the refused surplus token must be destroyed, not left in the pool"
+            );
+            let g2 = std::sync::Arc::clone(&gate);
+            let async_waiter = tokio::spawn(async move { g2.acquire().await });
+            tokio::time::sleep(ms(20)).await;
+            assert!(
+                !async_waiter.is_finished(),
+                "acquire must keep waiting while the pause holds"
+            );
+
+            // Recovery mints a fresh token for the freed capacity; the
+            // surplus never took part.
+            gate.set_capacity(1);
+            let _permit = async_waiter
+                .await
+                .expect("waiter admitted after the pause lifts");
+            assert_eq!(gate.available_permits(), 0, "capacity 1 is now full");
         });
     }
 
