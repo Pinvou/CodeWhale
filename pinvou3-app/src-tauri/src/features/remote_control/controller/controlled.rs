@@ -130,9 +130,9 @@ struct WorkspaceAuthorization {
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ControlledWorkspaceInfo {
-    workspace_id: String,
-    display_name: String,
-    code_allowed: bool,
+    pub(crate) workspace_id: String,
+    pub(crate) display_name: String,
+    pub(crate) code_allowed: bool,
 }
 
 #[derive(Clone, Serialize, Eq, PartialEq)]
@@ -706,6 +706,17 @@ impl ControlledDeviceManager {
 
     pub(crate) fn status(&self) -> ControlledStatus {
         status_locked(&self.inner.lock())
+    }
+
+    pub(crate) fn live_lease(&self) -> Result<LeaseContext> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        inner
+            .lease_context
+            .clone()
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
     }
 
     pub(crate) fn register_cleanup_sink(&self, sink: Arc<dyn ControlledCleanupSink>) {
