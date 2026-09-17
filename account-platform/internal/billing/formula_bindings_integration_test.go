@@ -66,6 +66,10 @@ func TestFormulaDraftUnitValidationPostgresIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO metering_unit_definitions(id,unit_code,version,minimum_precision,price_denominator,rounding_rule,status,created_at,deactivated_at) VALUES($1,'INPUT_TOKEN',7,1,1000000,'CEILING','ACTIVE',now(),NULL),($2,'CACHED_INPUT_TOKEN',2,1,1000000,'CEILING','ACTIVE',now(),NULL),($3,'REQUEST',4,1,1,'CEILING','ACTIVE',now(),NULL),($4,'OUTPUT_TOKEN',3,1,1000000,'CEILING','INACTIVE',now(),now())`, activeID, secondActiveID, concurrentUnitID, inactiveID); err != nil {
 		t.Fatal(err)
 	}
+	var originalBindingFacts int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM billing_protocol_formula_bindings`).Scan(&originalBindingFacts); err != nil {
+		t.Fatal(err)
+	}
 	result, err := repository.ValidateFormulaDraftUnits(ctx, map[string]uuid.UUID{"INPUT_TOKEN": activeID})
 	if err != nil || result.VerifiedCount != 1 || len(result.UnitVersions) != 1 || result.UnitVersions[0].UnitDefinitionID != activeID || result.UnitVersions[0].Version != 7 || result.UnitVersions[0].Status != "ACTIVE" || result.ObservedAt.IsZero() || len(result.UnitSetFingerprint) != 64 {
 		t.Fatalf("unexpected authoritative validation: %#v err=%v", result, err)
@@ -89,8 +93,8 @@ func TestFormulaDraftUnitValidationPostgresIntegration(t *testing.T) {
 		t.Fatalf("service-authenticated validation failed: %d %s", authorizedResponse.Code, authorizedResponse.Body.String())
 	}
 	var bindingFacts int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM billing_protocol_formula_bindings`).Scan(&bindingFacts); err != nil || bindingFacts != 0 {
-		t.Fatalf("read-only validation wrote Billing facts: count=%d err=%v", bindingFacts, err)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM billing_protocol_formula_bindings`).Scan(&bindingFacts); err != nil || bindingFacts != originalBindingFacts {
+		t.Fatalf("read-only validation changed Billing facts: before=%d after=%d err=%v", originalBindingFacts, bindingFacts, err)
 	}
 	for name, required := range map[string]map[string]uuid.UUID{
 		"wrong code":   {"OUTPUT_TOKEN": activeID},

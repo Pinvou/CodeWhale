@@ -43,10 +43,18 @@ func TestBillingAuthorizationDomainResultFirstPostgresIntegration(t *testing.T) 
 		t.Fatal(err)
 	}
 	loaded, err := loadBillingIntegrationMigrations("../../migrations/billing", schema)
-	if err != nil || len(loaded) < 2 || loaded[len(loaded)-2].Version != 54 || loaded[len(loaded)-1].Version != 55 {
+	activationIndex := -1
+	for index := range loaded {
+		if loaded[index].Version == 54 {
+			activationIndex = index
+			break
+		}
+	}
+	if err != nil || activationIndex < 0 || activationIndex+1 >= len(loaded) || loaded[activationIndex+1].Version != 55 {
 		t.Fatalf("load isolated Billing 54 boundary: count=%d err=%v", len(loaded), err)
 	}
-	if err := migrations.Up(ctx, connection, loaded[:len(loaded)-2]); err != nil {
+	proofIndex := activationIndex + 1
+	if err := migrations.Up(ctx, connection, loaded[:activationIndex]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -60,15 +68,15 @@ func TestBillingAuthorizationDomainResultFirstPostgresIntegration(t *testing.T) 
 		t.Fatal(err)
 	}
 	production, err := migrations.Load("../../migrations/billing")
-	if err != nil || len(production) < 2 || production[len(production)-2].Version != 54 || production[len(production)-1].Version != 55 {
+	if err != nil || proofIndex >= len(production) || production[activationIndex].Version != 54 || production[proofIndex].Version != 55 {
 		t.Fatalf("load production Billing 54 migration: %v", err)
 	}
-	loaded[len(loaded)-2].UpSQL = rewriteBillingPublicSchema(production[len(production)-2].UpSQL, identifier)
-	digest := sha256.Sum256([]byte(strings.ReplaceAll(loaded[len(loaded)-2].UpSQL, "\r\n", "\n")))
-	loaded[len(loaded)-2].Checksum = hex.EncodeToString(digest[:])
-	loaded[len(loaded)-1].UpSQL = rewriteBillingPublicSchema(production[len(production)-1].UpSQL, identifier)
-	finalDigest := sha256.Sum256([]byte(strings.ReplaceAll(loaded[len(loaded)-1].UpSQL, "\r\n", "\n")))
-	loaded[len(loaded)-1].Checksum = hex.EncodeToString(finalDigest[:])
+	loaded[activationIndex].UpSQL = rewriteBillingPublicSchema(production[activationIndex].UpSQL, identifier)
+	digest := sha256.Sum256([]byte(strings.ReplaceAll(loaded[activationIndex].UpSQL, "\r\n", "\n")))
+	loaded[activationIndex].Checksum = hex.EncodeToString(digest[:])
+	loaded[proofIndex].UpSQL = rewriteBillingPublicSchema(production[proofIndex].UpSQL, identifier)
+	finalDigest := sha256.Sum256([]byte(strings.ReplaceAll(loaded[proofIndex].UpSQL, "\r\n", "\n")))
+	loaded[proofIndex].Checksum = hex.EncodeToString(finalDigest[:])
 	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION billing_migrator`); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +91,7 @@ func TestBillingAuthorizationDomainResultFirstPostgresIntegration(t *testing.T) 
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,current_schema(),to_regclass('schema_migrations') IS NOT NULL`).Scan(&sessionRole, &currentRole, &currentSchema, &ledgerExists); err != nil || sessionRole != "billing_migrator" || currentRole != "billing_service" || currentSchema != schema || !ledgerExists {
 		t.Fatalf("isolated Billing migration identity/session mismatch: session=%s current=%s schema=%s ledger=%v err=%v", sessionRole, currentRole, currentSchema, ledgerExists, err)
 	}
-	if err := migrations.Up(ctx, connection, loaded); err != nil {
+	if err := migrations.Up(ctx, connection, loaded[:proofIndex+1]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)

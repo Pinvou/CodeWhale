@@ -170,18 +170,28 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 		kind                                   string
 		original, available, active, suspended int64
 	}
-	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,original_microcredits,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 ORDER BY id FOR UPDATE`, packageID)
+	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,original_microcredits,reclassified_out_microcredits,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 ORDER BY id FOR UPDATE`, packageID)
 	if err != nil {
 		return ChargebackCase{}, err
 	}
 	components := []componentState{}
 	for rows.Next() {
 		var item componentState
-		if err := rows.Scan(&item.id, &item.lotID, &item.kind, &item.original, &item.available, &item.active, &item.suspended); err != nil {
+		var historicalOriginal, reclassifiedOut int64
+		if err := rows.Scan(&item.id, &item.lotID, &item.kind, &historicalOriginal, &reclassifiedOut, &item.available, &item.active, &item.suspended); err != nil {
+			rows.Close()
+			return ChargebackCase{}, err
+		}
+		item.original, err = effectiveComponentOriginal(historicalOriginal, reclassifiedOut)
+		if err != nil {
 			rows.Close()
 			return ChargebackCase{}, err
 		}
 		components = append(components, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ChargebackCase{}, err
 	}
 	rows.Close()
 	if len(components) == 0 {
@@ -262,7 +272,7 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	result := existing
 	result.Status, result.RevokedBaseMicrocredits, result.RevokedBonusMicrocredits, result.ReceivableID, result.ResolvedAt = "CONFIRMED", revokedBase, revokedBonus, receivableID, &now
 	result.Version++
-	if _, err := tx.Exec(ctx, `UPDATE entitlement_components SET status=CASE WHEN revoked_microcredits=original_microcredits THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE package_id=$1`, packageID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_components SET status=CASE WHEN revoked_microcredits=original_microcredits-reclassified_out_microcredits THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE package_id=$1`, packageID, now); err != nil {
 		return ChargebackCase{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN NOT EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND component.status<>'REVOKED') THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE id=$1`, packageID, now); err != nil {

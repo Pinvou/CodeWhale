@@ -42,6 +42,7 @@ test('confirmed chargeback targets evidence transaction package and creates only
   assert.match(chargebacks, /evidence_type,provider_id,provider_version,evidence_key/);
   assert.match(chargebacks, /'CHARGEBACK_CONFIRMED'/);
   assert.match(chargebacks, /if component\.kind == "BASE"/);
+  assert.match(chargebacks, /item\.original, err = effectiveComponentOriginal\(historicalOriginal, reclassifiedOut\)/);
   assert.match(chargebacks, /baseShortfall \+= component\.original - revocable/);
   assert.match(chargebacks, /createReceivableWithinTransaction\(ctx, tx, walletID, "CHARGEBACK"/);
 });

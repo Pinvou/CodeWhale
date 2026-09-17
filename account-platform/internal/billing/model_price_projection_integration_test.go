@@ -34,16 +34,21 @@ func TestModelPriceProjectionPostgresIntegration(t *testing.T) {
 	futureAt := databaseNow.Add(time.Hour)
 	if _, err := repository.pool.Exec(ctx, `
 INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status,version,space_etag,published_at) VALUES
-($1,'*',10,30,5,$4::timestamptz-interval '1 hour',$4::timestamptz-interval '2 hours','GLOBAL',NULL,'CHAT',$3,'MICROCREDIT','PUBLISHED',1,7,$4::timestamptz-interval '2 hours'),
-($2,$5,20,60,10,$6,$4,'MODEL',$5,'CHAT',$3,'MICROCREDIT','PUBLISHED',1,3,$4);
-INSERT INTO pricing_space_versions(scope_type,scope_key,protocol_code,formula_version_id,credit_unit,etag,updated_at) VALUES
-('GLOBAL','*','CHAT',$3,'MICROCREDIT',7,$4),('MODEL',$5,'CHAT',$3,'MICROCREDIT',3,$4)`, globalPriceID, futurePriceID, formulaID, databaseNow, modelID.String(), futureAt); err != nil {
+($1,'*',10,30,5,$4::timestamptz-interval '1 hour',$4::timestamptz-interval '2 hours','GLOBAL',NULL,'CHAT',$3,'MICROCREDIT','DRAFT',1,7,NULL),
+($2,$5,20,60,10,$6,$4,'MODEL',$5,'CHAT',$3,'MICROCREDIT','DRAFT',1,3,NULL)`, globalPriceID, futurePriceID, formulaID, databaseNow, modelID.String(), futureAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO pricing_space_versions(scope_type,scope_key,protocol_code,formula_version_id,credit_unit,etag,updated_at) VALUES
+('GLOBAL','*','CHAT',$1,'MICROCREDIT',7,$2),('MODEL',$3,'CHAT',$1,'MICROCREDIT',3,$2)`, formulaID, databaseNow, modelID.String()); err != nil {
 		t.Fatal(err)
 	}
 	for _, unitID := range unitIDs {
 		if _, err := repository.pool.Exec(ctx, `INSERT INTO pricing_version_unit_configs(price_version_id,unit_definition_id,config_type,fixed_price_per_denominator,created_at) VALUES($1,$3,'FIXED_PRICE',10,transaction_timestamp()),($2,$3,'INHERIT_GLOBAL',NULL,transaction_timestamp())`, globalPriceID, futurePriceID, unitID); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE pricing_versions SET lifecycle_status='PUBLISHED',published_at=$3 WHERE id IN ($1,$2)`, globalPriceID, futurePriceID, databaseNow.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
 	}
 	projection, err := repository.AdminModelPriceProjection(ctx, modelID, "CHAT", formulaID, "MICROCREDIT")
 	if err != nil {

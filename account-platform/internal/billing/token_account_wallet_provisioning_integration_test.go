@@ -166,7 +166,17 @@ GRANT billing_service,billing_wallet_receipt_deployer,billing_schema_owner TO bi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Up(ctx, connection, loaded); err != nil {
+	receiptIndex := -1
+	for index := range loaded {
+		if loaded[index].Version == 53 {
+			receiptIndex = index
+			break
+		}
+	}
+	if receiptIndex < 0 || receiptIndex+1 >= len(loaded) || loaded[receiptIndex+1].Version != 54 {
+		t.Fatal("integration fixture must explicitly isolate migration 53 from future migrations")
+	}
+	if err = migrations.Up(ctx, connection, loaded[:receiptIndex+1]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
