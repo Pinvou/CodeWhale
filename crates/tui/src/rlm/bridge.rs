@@ -124,6 +124,10 @@ pub struct RlmBridge {
     /// Recursion budget remaining for `Rlm` / `RlmBatch` requests. When
     /// zero, those requests fall back to plain `Llm` completions.
     depth_remaining: u32,
+    /// Wall-clock budget for one child completion. Configurable via the
+    /// RLM session's `sub_query_timeout_secs` so callers can size it for
+    /// big-context child generations.
+    sub_query_timeout: Duration,
     usage: Arc<Mutex<Usage>>,
 }
 
@@ -137,8 +141,15 @@ impl RlmBridge {
             client,
             child_model,
             depth_remaining,
+            sub_query_timeout: Duration::from_secs(CHILD_TIMEOUT_SECS),
             usage: Arc::new(Mutex::new(Usage::default())),
         }
+    }
+
+    /// Override the per-child-completion wall-clock budget (seconds).
+    pub(crate) fn with_sub_query_timeout_secs(mut self, secs: u64) -> Self {
+        self.sub_query_timeout = Duration::from_secs(secs);
+        self
     }
 
     pub fn usage_handle(&self) -> Arc<Mutex<Usage>> {
@@ -187,22 +198,24 @@ impl RlmBridge {
         };
 
         let fut = self.client.create_message_boxed(request);
-        let response =
-            match tokio::time::timeout(Duration::from_secs(CHILD_TIMEOUT_SECS), fut).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    return SingleResp {
-                        text: String::new(),
-                        error: Some(format!("llm_query failed: {e}")),
-                    };
-                }
-                Err(_) => {
-                    return SingleResp {
-                        text: String::new(),
-                        error: Some(format!("llm_query timed out after {CHILD_TIMEOUT_SECS}s")),
-                    };
-                }
-            };
+        let response = match tokio::time::timeout(self.sub_query_timeout, fut).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return SingleResp {
+                    text: String::new(),
+                    error: Some(format!("llm_query failed: {e}")),
+                };
+            }
+            Err(_) => {
+                return SingleResp {
+                    text: String::new(),
+                    error: Some(format!(
+                        "llm_query timed out after {}s",
+                        self.sub_query_timeout.as_secs()
+                    )),
+                };
+            }
+        };
 
         {
             let mut u = self.usage.lock().await;

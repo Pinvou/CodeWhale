@@ -469,7 +469,8 @@ impl RlmTool {
                 Arc::new(client),
                 self.root_model.clone(),
                 config.sub_rlm_max_depth.min(HARD_SUB_RLM_DEPTH_CAP),
-            );
+            )
+            .with_sub_query_timeout_secs(config.sub_query_timeout_secs);
             let usage_handle = bridge.usage_handle();
             let round_result = kernel.run(code, Some(&bridge)).await;
             let usage = usage_handle.lock().await.clone();

@@ -337,6 +337,13 @@ fn client_user_agent(api_provider: ApiProvider) -> &'static str {
 /// of committing to the full remaining window up front.
 const RATE_LIMIT_PAUSE_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Total envelope for one non-streaming request through `send_with_retry`
+/// (all retry attempts, backoff, and honored Retry-After included). Matches
+/// the documented stream wall-clock backstop: 30 minutes of time-to-headers
+/// is already far past any legitimate completion, and the envelope never
+/// truncates a stream body because it only resolves at response headers.
+const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
+
 pub(super) const SSE_BACKPRESSURE_HIGH_WATERMARK: usize = 1024 * 1024; // 1 MB
 pub(super) const SSE_BACKPRESSURE_SLEEP_MS: u64 = 10;
 pub(super) const SSE_MAX_LINES_PER_CHUNK: usize = 256;
@@ -2867,57 +2874,81 @@ impl DeepSeekClient {
             return self.send_with_isolated_retry(build).await;
         }
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
-        let request_result = with_retry(
-            &retry_cfg,
-            || {
-                let request = build();
-                async move {
-                    // Sleep in bounded slices rather than the full remaining
-                    // window: the pause is process-global, so a concurrent
-                    // `clear_rate_limit()` (or a shortened deadline) must
-                    // release requests that are already waiting instead of
-                    // stranding them for the whole original window.
-                    while let Some(delay) = crate::retry_status::rate_limit_remaining() {
-                        tokio::time::sleep(delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL)).await;
+        // Total envelope around the whole non-streaming retry loop (all
+        // attempts + backoff + honored Retry-After). The shared client
+        // intentionally has no client-level total timeout — streaming is
+        // protected per-chunk instead — so without this envelope nothing
+        // bounds a non-streaming completion: a provider that accepts the
+        // connection and then stalls (or a gateway answering 429 +
+        // Retry-After: 3600 forever) wedges the caller (mid-turn
+        // compaction, translate, …) indefinitely. The envelope is inert for
+        // callers with a tighter outer budget (stream open 45s, /models
+        // probes 30s) and only resolves at response headers, so it never
+        // truncates a stream body.
+        let request_result = match tokio::time::timeout(
+            NON_STREAMING_REQUEST_ENVELOPE,
+            with_retry(
+                &retry_cfg,
+                || {
+                    let request = build();
+                    async move {
+                        // Sleep in bounded slices rather than the full remaining
+                        // window: the pause is process-global, so a concurrent
+                        // `clear_rate_limit()` (or a shortened deadline) must
+                        // release requests that are already waiting instead of
+                        // stranding them for the whole original window.
+                        while let Some(delay) = crate::retry_status::rate_limit_remaining() {
+                            tokio::time::sleep(delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL)).await;
+                        }
+                        self.wait_for_rate_limit().await;
+                        let response = request
+                            .send()
+                            .await
+                            .map_err(|err| LlmError::from_reqwest(&err))?;
+                        let status = response.status();
+                        if status.is_success() {
+                            return Ok(response);
+                        }
+                        let retry_after = extract_retry_after(response.headers());
+                        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                        let body = sanitize_http_error_body(
+                            Some(self.api_provider.display_name()),
+                            status.as_u16(),
+                            &body,
+                        );
+                        Err(LlmError::from_http_response_with_retry_after(
+                            status.as_u16(),
+                            &body,
+                            retry_after,
+                        ))
                     }
-                    self.wait_for_rate_limit().await;
-                    let response = request
-                        .send()
-                        .await
-                        .map_err(|err| LlmError::from_reqwest(&err))?;
-                    let status = response.status();
-                    if status.is_success() {
-                        return Ok(response);
+                },
+                Some(Box::new(|err: &LlmError, attempt, delay| {
+                    let (reason_label, human_reason) = retry_reason_label_and_human(err);
+                    logging::warn(format!(
+                        "HTTP retry reason={} attempt={} delay={:.2}s",
+                        reason_label,
+                        attempt + 1,
+                        delay.as_secs_f64(),
+                    ));
+                    if matches!(err, LlmError::RateLimited { .. }) {
+                        crate::retry_status::note_rate_limit(delay);
                     }
-                    let retry_after = extract_retry_after(response.headers());
-                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                    let body = sanitize_http_error_body(
-                        Some(self.api_provider.display_name()),
-                        status.as_u16(),
-                        &body,
-                    );
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
-                }
-            },
-            Some(Box::new(|err, attempt, delay| {
-                let (reason_label, human_reason) = retry_reason_label_and_human(err);
-                logging::warn(format!(
-                    "HTTP retry reason={} attempt={} delay={:.2}s",
-                    reason_label,
-                    attempt + 1,
-                    delay.as_secs_f64(),
-                ));
-                if matches!(err, LlmError::RateLimited { .. }) {
-                    crate::retry_status::note_rate_limit(delay);
-                }
-                crate::retry_status::start(attempt + 1, delay, human_reason);
-            })),
+                    crate::retry_status::start(attempt + 1, delay, human_reason);
+                })),
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                let last = LlmError::Timeout(NON_STREAMING_REQUEST_ENVELOPE);
+                crate::retry_status::failed(last.to_string());
+                self.mark_request_failure("non-streaming request envelope exceeded")
+                    .await;
+                return Err(anyhow::Error::new(last));
+            }
+        };
 
         match request_result {
             Ok(response) => {

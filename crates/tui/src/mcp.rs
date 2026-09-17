@@ -528,8 +528,12 @@ pub struct McpTimeouts {
 fn default_connect_timeout() -> u64 {
     10
 }
+// 30 minutes: an MCP tool call legitimately runs minutes (scrapes, remote
+// jobs, agent-side work). The old 60s default returned "timed out" to the
+// model for healthy-but-slow tools, which then retried and compounded cost.
+// Per-server/global overrides still apply via `execute_timeout`.
 fn default_execute_timeout() -> u64 {
-    60
+    1800
 }
 fn default_read_timeout() -> u64 {
     120
@@ -1507,7 +1511,13 @@ impl McpConnection {
         network_policy: Option<&NetworkPolicyDecider>,
     ) -> Result<Self> {
         let connect_timeout_secs = config.effective_connect_timeout(global_timeouts);
-        let read_timeout_secs = config.effective_read_timeout(global_timeouts);
+        // The response-read wait must never undercut the tool-call budget:
+        // a server is silent until its tool finishes, so a smaller read
+        // timeout would fire first, mark the connection Disconnected, and
+        // silently defeat a raised `execute_timeout`.
+        let read_timeout_secs = config
+            .effective_read_timeout(global_timeouts)
+            .max(config.effective_execute_timeout(global_timeouts));
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let authority_revocation_reason = Arc::new(std::sync::Mutex::new(None));
         if let Some(source) = config.reviewed_plugin.as_ref() {

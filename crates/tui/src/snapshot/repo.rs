@@ -18,6 +18,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use wait_timeout::ChildExt as _;
+
 use crate::dependencies::ExternalTool;
 
 use super::paths::{ensure_snapshot_dir, snapshot_git_dir};
@@ -983,15 +985,53 @@ fn cleanup_stale_pack_temps_in(
     Ok(removed)
 }
 
+// Generous budget: `git add -A` on a large workspace is legitimately slow,
+// but a wedged git (stalled NFS/FUSE, hung hook) must not block the turn
+// pipeline forever — callers run this on the per-turn path and treat every
+// error as snapshot-disabled-with-warning.
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
 fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output> {
-    crate::dependencies::Git::command()
+    let mut child = crate::dependencies::Git::command()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?
         .arg("--git-dir")
         .arg(git_dir)
         .arg("--work-tree")
         .arg(work_tree)
         .args(args)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let Some(status) = child.wait_timeout(GIT_COMMAND_TIMEOUT)? else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "git {} timed out after {}s",
+                args.first().unwrap_or(&""),
+                GIT_COMMAND_TIMEOUT.as_secs()
+            ),
+        ));
+    };
+    // The child has exited, so the pipe writers are closed and these reads
+    // terminate. (A git invocation verbose enough to fill the OS pipe buffer
+    // before exiting would instead hit the timeout above and be killed —
+    // the snapshot plumbing commands used here are all quiet-output.)
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        std::io::Read::read_to_end(&mut pipe, &mut stdout)?;
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        std::io::Read::read_to_end(&mut pipe, &mut stderr)?;
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn io_other(msg: impl Into<String>) -> io::Error {

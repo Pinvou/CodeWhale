@@ -79,7 +79,7 @@ fn mark_workspace_trusted(workspace: &Path) -> WorkspaceTrustConfigGuard {
 fn test_mcp_config_defaults() {
     let config = McpConfig::default();
     assert_eq!(config.timeouts.connect_timeout, 10);
-    assert_eq!(config.timeouts.execute_timeout, 60);
+    assert_eq!(config.timeouts.execute_timeout, 1800);
     assert_eq!(config.timeouts.read_timeout, 120);
     assert!(config.servers.is_empty());
 }
@@ -2521,7 +2521,10 @@ fn test_server_effective_timeouts() {
     };
 
     assert_eq!(server_with_override.effective_connect_timeout(&global), 20);
-    assert_eq!(server_with_override.effective_execute_timeout(&global), 60); // global default
+    assert_eq!(
+        server_with_override.effective_execute_timeout(&global),
+        1800 // global default
+    );
     assert_eq!(server_with_override.effective_read_timeout(&global), 180);
 }
 

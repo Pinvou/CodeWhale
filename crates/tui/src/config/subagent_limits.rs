@@ -39,7 +39,12 @@ pub const MAX_SUBAGENT_API_TIMEOUT_SECS: u64 = 3600;
 /// `tools::subagent::DEFAULT_TOOL_TIMEOUT` derives from it, so the heartbeat
 /// floor below and the timeout actually applied to a running tool can never
 /// drift apart.
-pub const DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS: u64 = 300;
+/// 1800s (was 300s): a single build, test suite, or MCP-backed call
+/// legitimately outlasts 5 minutes, and the old default killed healthy
+/// in-flight tools mid-run. The child's own wall-time budget remains the
+/// spend backstop, and the heartbeat floor (tool_timeout + 30s) follows this
+/// constant automatically.
+pub const DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS: u64 = 1800;
 /// Default wall-clock interval without manager-visible sub-agent progress
 /// before a running child can be auto-cancelled to release its slot (#2614).
 pub const DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 300;

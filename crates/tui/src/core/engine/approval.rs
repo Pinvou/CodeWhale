@@ -5,14 +5,10 @@
 //! or whenever a tool requests live user input (`await_user_input`). Channels
 //! and engine state stay private to the parent module.
 
-use std::time::Duration;
-
 use crate::approval_log::{ApprovalOutcome, ApprovalReceipt};
 use crate::core::events::Event;
 use crate::tools::spec::ToolError;
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
-
-const USER_INPUT_TIMEOUT: Duration = Duration::from_secs(300);
 
 use super::Engine;
 
@@ -216,9 +212,13 @@ impl Engine {
                         format!("Request cancelled while awaiting user input{suffix}"),
                     ));
                 }
-                result = tokio::time::timeout(USER_INPUT_TIMEOUT, self.rx_user_input.recv()) => {
+                // No wall-clock cap: the response is human-paced and may take
+                // arbitrarily long (mirrors the unbounded tool-approval wait,
+                // which also excludes this time from the turn wall clock).
+                // Cancellation and channel teardown end the wait instead.
+                result = self.rx_user_input.recv() => {
                     match result {
-                        Ok(Some(decision)) => {
+                        Some(decision) => {
                             match decision {
                                 UserInputDecision::Submitted { id, response } if id == tool_id => {
                                     return Ok(response);
@@ -231,24 +231,10 @@ impl Engine {
                                 _ => continue,
                             }
                         }
-                        Ok(None) => {
+                        None => {
                             return Err(ToolError::execution_failed(
                                 "User input channel closed".to_string(),
                             ));
-                        }
-                        Err(_) => {
-                            let _ = self
-                                .tx_event
-                                .send(Event::Status {
-                                    message: format!(
-                                        "User input timed out after {}s",
-                                        USER_INPUT_TIMEOUT.as_secs()
-                                    ),
-                                })
-                                .await;
-                            return Err(ToolError::Timeout {
-                                seconds: USER_INPUT_TIMEOUT.as_secs(),
-                            });
                         }
                     }
                 }
@@ -263,6 +249,7 @@ mod tests {
     use crate::config::Config;
     use crate::core::engine::EngineConfig;
     use crate::sandbox::SandboxPolicy;
+    use std::time::Duration;
 
     fn approval_event(tool_id: &str) -> Event {
         Event::ApprovalRequired {
