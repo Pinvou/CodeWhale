@@ -44,7 +44,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | DESIGN_COMPLETE / REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
-| GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | PENDING |
+| GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
 | GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | PENDING |
 | GSA-24 | APT-141 | 账本修复实现与领域 E2E | GSA-23 | CODE | PENDING |
 | GSA-25 | APT-141 | 应收核销领域设计 | GSA-24 | DESIGN | PENDING |
@@ -223,6 +223,8 @@ GSA-20 审计搜索可访问性切片（仍PARTIAL / REVIEW_PENDING）：审计�
 GSA-21 事实与决策门禁切片（IN_PROGRESS / DECISION_PENDING / REVIEW_PENDING）：[独立领域文档](entitlement-component-adjustment-design.md)已核对Billing组件守恒、BASE可退款与BONUS不可退款、成员配额/预留/退款引用及消费顺序；列出“仅未动用额度纠错”与“包含历史影响补偿”的范围差异。用户账务选择前不冻结写入协议、不开始GSA-22、不开启activation。本文仅事实记录，不算设计完成。
 
 GSA-21 首版领域设计（DESIGN_COMPLETE / REVIEW_PENDING / NOT_IMPLEMENTED）：用户确认只处理有原始来源证据且完全未动用的额度；[领域设计](entitlement-component-adjustment-design.md)将首版限定为同一支付package依据原订单商品快照一次性纠正全部BASE/BONUS差额，并冻结零历史效果门禁、原组件转出量/新组件与lot、零和成对账本分录、普通退款/强制退款/拒付有效原始量、closed v2申请与proof、未知结果只查证、默认INACTIVE、真实PG/E2E及前向回滚保全。文档范围自检及diff检查通过；审核按用户新流程留待全部任务完成后统一进行。此状态不表示GSA-22代码、生产等价验收或activation已完成。
+
+GSA-22 前向准备迁移切片（IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：Billing `000056`只给既有组件追加默认为0且被数据库约束为0的转出列，并建立schema-owner持有、运行时仅可读、UPDATE/DELETE/TRUNCATE拒绝的不可变纠错记录表；旧组件守恒和同包同类型唯一约束仍保持，运行时无纠错INSERT权限，因此此切片不能执行任何纠错。隔离PostgreSQL真实迁移验证了默认值/零值门禁/旧约束/只读授权/不可变触发器；后续仍需迁移切换、领域预检/proof、成对分录执行、全部消费者的有效原始量回归与跨域E2E，任务保持PARTIAL。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

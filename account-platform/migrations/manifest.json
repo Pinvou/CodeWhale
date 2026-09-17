@@ -1224,6 +1224,16 @@
         "file": "000055_approval_proof_claims.up.sql",
         "version": 55,
         "sha256": "56895411223495aac858a7ae2ae46b54b89fa66aec3aacd4fde6a3bb02eec92d"
+      },
+      {
+        "file": "000056_entitlement_component_correction_prepare.down.sql",
+        "version": 56,
+        "sha256": "1e730b4994fab8f04a80cbb731118bc1bdd9fc196c1875b8e26bf14484710953"
+      },
+      {
+        "file": "000056_entitlement_component_correction_prepare.up.sql",
+        "version": 56,
+        "sha256": "a651497c0844a86996a63efac05ba5d351189323b5249a2adf6a60b8da0e233d"
       }
     ],
     "payment-simulator": [
