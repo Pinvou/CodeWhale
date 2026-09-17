@@ -1,9 +1,9 @@
 //! H3C 知道知识库接入 —— 连接生命周期 + 鉴权编排。
 //!
-//! 复用 IT 提供的 `zhidao` CLI。连接流程与 EIP 同源 SSO_NEXT。当前 zhidao CLI
-//! 只提供 `login/save/load/exchange`,没有 poll 子命令;但底层凭证格式和 EIP CLI
-//! 相同,因此 Pinvou 用 `zhidao login` 拿 SSO URL,再借 EIP CLI 的 `auth poll`
-//! 收 token/AIT 到 zhidao 凭证目录,实现和 EIP 一样的扫码自动连接体验。
+//! 复用 IT 提供的 `zhidao` CLI。连接流程与 EIP 同源 SSO_NEXT。zhidao CLI 与
+//! EIP CLI 同源,提供 `login/poll/exchange/save/load/clear/search` 等子命令;
+//! Pinvou 用 `zhidao login` 拿 SSO URL,再用 `zhidao poll` 收 token/AIT 到
+//! zhidao 凭证目录,实现和 EIP 一样的扫码自动连接体验。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -193,7 +193,12 @@ fn emit(app: &AppHandle, event: &str, payload: Value) {
 pub async fn zhidao_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let cmd = zhidao(&["load"])?;
-        let (ok, _code, so, _se) = run(cmd)?;
+        // run 的超时/捕获上限错误内嵌子进程输出,而 load 的 stdout 就是
+        // ZHIDAO_TOKEN 本体——只记日志,给 webview 固定文案,不让捕获输出跨 IPC。
+        let (ok, _code, so, _se) = run(cmd).map_err(|e| {
+            log::warn!("[zhidao] load 执行失败: {e}");
+            "zhidao: load 执行失败".to_string()
+        })?;
         let connected = ok && so.contains("ZHIDAO_TOKEN");
         // 状态查询只更新期望可见性；活跃 turn 自然结束后再落技能文件。
         let _ = set_connected(connected);

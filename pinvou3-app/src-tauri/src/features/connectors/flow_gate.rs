@@ -242,11 +242,12 @@ static LAST_SSO_LOGIN: LazyLock<Mutex<Vec<Instant>>> = LazyLock::new(|| Mutex::n
 
 /// 放行凭证：throttle 放行只代表"轮到本次 login 发请求了"，请求是否真的发出
 /// 由调用方认领——
-/// - 已发（无论 CLI 退出码如何，网关都收到了请求）：[`LoginPermit::confirm`]，
-///   槽位留作最近一次 login 时刻约束后来者；
-/// - 未发（如 spawn 失败、放行与 run 之间新增了放弃路径）：直接丢弃，Drop 回
-///   滚自己的预约槽位，不让一次没发生的 login 白占 65s 窗口。认领是显式的、
-///   回滚是默认的，新增失败路径漏写归还也不会占窗口。
+/// - 视为已发（run 返回 Ok；CLI 非零退出码无法区分请求是否已到达网关，按
+///   「可能已发出」保守处理）：[`LoginPermit::confirm`]，槽位留作最近一次
+///   login 时刻约束后来者；
+/// - 未发（如 spawn 失败、超时击杀、放行与 run 之间新增了放弃路径）：直接
+///   丢弃，Drop 回滚自己的预约槽位，不让一次没发生的 login 白占 65s 窗口。
+///   认领是显式的、回滚是默认的，新增失败路径漏写归还也不会占窗口。
 pub(crate) struct LoginPermit<'a> {
     last: &'a Mutex<Vec<Instant>>,
     slot: Instant,
@@ -254,7 +255,8 @@ pub(crate) struct LoginPermit<'a> {
 }
 
 impl LoginPermit<'_> {
-    /// 本次 login 请求已真实发出：窗口已被消耗，保留预约。
+    /// 请求按已消耗节流窗口处理：run 返回 Ok 即认领（非零退出码无法区分
+    /// 是否已到达网关，按「可能已发出」保守保留）。
     pub(crate) fn confirm(mut self) {
         self.confirmed = true;
     }

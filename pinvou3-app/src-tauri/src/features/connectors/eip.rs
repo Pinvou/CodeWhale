@@ -250,7 +250,12 @@ fn emit(app: &AppHandle, event: &str, payload: Value) {
 pub async fn eip_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let cmd = eip(&["auth", "status", "--output", "json"])?;
-        let (_ok, _code, so, se) = run(cmd)?;
+        // run 的超时/捕获上限错误内嵌子进程输出,而 status 的输出可能含
+        // token 材料——只记日志,给 webview 固定文案,不让捕获输出跨 IPC。
+        let (_ok, _code, so, se) = run(cmd).map_err(|e| {
+            log::warn!("[eip] auth status 执行失败: {e}");
+            "eip: auth status 执行失败".to_string()
+        })?;
         let p = parse_json(&so).or_else(|| parse_json(&se));
         let connected = p
             .as_ref()
