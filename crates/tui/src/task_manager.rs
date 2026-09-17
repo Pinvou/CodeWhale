@@ -905,6 +905,13 @@ async fn drive_engine_turn(
     let mut cursor = 0u64;
     let mut terminal_status: Option<RuntimeTurnStatus> = None;
     let mut terminal_error: Option<String> = None;
+    // Tool calls currently in flight. The journal records a tool call only at
+    // start and completion — nothing in between (the engine's 10s tool
+    // heartbeats are not journaled), so the idle-progress deadline would run
+    // unopposed during any silent tool execution and kill healthy builds,
+    // test suites, and MCP calls at 2 minutes. A tool that is still running
+    // IS progress; the wall-time budget remains the backstop for a hung one.
+    let mut running_tools: HashSet<String> = HashSet::new();
 
     loop {
         let batch = match runtime_threads
@@ -937,7 +944,30 @@ async fn drive_engine_turn(
             {
                 continue;
             }
-            if runtime_event_is_progress(&event) {
+            match event.event.as_str() {
+                "item.started" => {
+                    if let Some(tool_id) = event
+                        .payload
+                        .get("tool")
+                        .and_then(|tool| tool.get("id"))
+                        .and_then(Value::as_str)
+                    {
+                        running_tools.insert(tool_id.to_string());
+                    }
+                }
+                "item.completed" | "item.failed" => {
+                    if let Some(item_id) = event
+                        .payload
+                        .get("item")
+                        .and_then(|item| item.get("id"))
+                        .and_then(Value::as_str)
+                    {
+                        running_tools.remove(item_id);
+                    }
+                }
+                _ => {}
+            }
+            if runtime_event_is_progress(&event) || !running_tools.is_empty() {
                 guard.note_progress(Instant::now());
             }
             if let Some((status, error)) =

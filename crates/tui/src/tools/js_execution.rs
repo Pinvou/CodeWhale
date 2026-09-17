@@ -114,7 +114,7 @@ pub fn js_execution_tool_definition() -> Tool {
 /// Run the model-provided JavaScript and return the captured
 /// stdout / stderr / return_code payload. Mirrors
 /// `execute_code_execution_tool` exactly — same tempfile pattern,
-/// same 120-second timeout, same error shape — so the surfaces
+/// same 600-second timeout, same error shape — so the surfaces
 /// stay interchangeable from the model's point of view.
 ///
 /// Tempfile lives only for the duration of this execution; `Drop`
@@ -155,10 +155,13 @@ pub async fn execute_js_execution_tool(
     if std::env::var_os("NODE_USE_ENV_PROXY").is_none() {
         cmd.env("NODE_USE_ENV_PROXY", "1");
     }
+    // Kill the child if the timeout below drops the output() future;
+    // otherwise node keeps running orphaned after we report the timeout.
+    cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(Duration::from_secs(120), cmd.output())
+    let output = tokio::time::timeout(Duration::from_secs(600), cmd.output())
         .await
-        .map_err(|_| ToolError::Timeout { seconds: 120 })
+        .map_err(|_| ToolError::Timeout { seconds: 600 })
         .and_then(|res| res.map_err(|e| ToolError::execution_failed(e.to_string())))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

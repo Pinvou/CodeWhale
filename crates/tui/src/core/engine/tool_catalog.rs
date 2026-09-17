@@ -1391,10 +1391,14 @@ pub(super) async fn execute_code_execution_tool(
         )
     })?;
     cmd.arg(&script_path).current_dir(workspace);
+    // Kill the child if the timeout below drops the output() future;
+    // otherwise the interpreter keeps running orphaned after we report
+    // the timeout.
+    cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(Duration::from_secs(120), cmd.output())
+    let output = tokio::time::timeout(Duration::from_secs(600), cmd.output())
         .await
-        .map_err(|_| ToolError::Timeout { seconds: 120 })
+        .map_err(|_| ToolError::Timeout { seconds: 600 })
         .and_then(|res| res.map_err(|e| ToolError::execution_failed(e.to_string())))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

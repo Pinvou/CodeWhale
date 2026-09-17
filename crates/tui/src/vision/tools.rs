@@ -34,7 +34,15 @@ impl ImageAnalyzeTool {
         route_client: Option<DeepSeekClient>,
     ) -> Self {
         let client = crate::tls::reqwest_client_builder()
-            .timeout(Duration::from_secs(120))
+            // No total deadline: this call uploads a multi-MB image and
+            // awaits a full non-streaming vision generation that can
+            // legitimately run for minutes. A total timeout here killed
+            // healthy in-flight analyses (and its retryable error stacked
+            // the wait several times over). `connect_timeout` bounds the
+            // handshake and `read_timeout` is a per-read idle bound, so a
+            // stalled connection still errors out instead of hanging.
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(120))
             .build()
             .expect("Failed to build HTTP client");
         Self {

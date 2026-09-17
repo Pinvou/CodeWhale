@@ -1285,7 +1285,10 @@ impl OauthLoginFlow {
         }
 
         let result = async {
-            let callback = timeout(Duration::from_secs(300), &mut self.rx)
+            // 15 minutes: this waits on a human finishing browser auth
+            // (2FA detours and slow mail-based logins routinely exceed the
+            // previous 300s).
+            let callback = timeout(Duration::from_secs(900), &mut self.rx)
                 .await
                 .with_context(|| {
                     let retry_hint = match announce {
