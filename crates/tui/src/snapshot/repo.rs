@@ -1049,12 +1049,12 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
     };
     Ok(Output {
         status,
-        stdout: stdout_thread.join().map_err(|_| {
-            io::Error::other("git stdout reader thread panicked")
-        })?,
-        stderr: stderr_thread.join().map_err(|_| {
-            io::Error::other("git stderr reader thread panicked")
-        })?,
+        stdout: stdout_thread
+            .join()
+            .map_err(|_| io::Error::other("git stdout reader thread panicked"))?,
+        stderr: stderr_thread
+            .join()
+            .map_err(|_| io::Error::other("git stderr reader thread panicked"))?,
     })
 }
 
@@ -2006,11 +2006,7 @@ mod tests {
         // blocks on its own undrained output never exits and would die at
         // the command timeout instead of returning the tree listing.
         for i in 0..5000 {
-            std::fs::write(
-                repo.work_tree().join(format!("file_{i:05}.txt")),
-                b"x",
-            )
-            .unwrap();
+            std::fs::write(repo.work_tree().join(format!("file_{i:05}.txt")), b"x").unwrap();
         }
         let id = repo.snapshot("large-output").expect("snapshot");
         let paths = repo

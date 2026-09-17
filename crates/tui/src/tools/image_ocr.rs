@@ -10,8 +10,8 @@
 //! a shell.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -77,9 +77,7 @@ impl ToolSpec for ImageOcrTool {
 /// the tool call itself is bounded.
 const OCR_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub(crate) async fn ocr_image_path_bounded(
-    image_path: PathBuf,
-) -> Result<String, ToolError> {
+pub(crate) async fn ocr_image_path_bounded(image_path: PathBuf) -> Result<String, ToolError> {
     tokio::time::timeout(
         OCR_TIMEOUT,
         tokio::task::spawn_blocking(move || ocr_image_path(&image_path)),

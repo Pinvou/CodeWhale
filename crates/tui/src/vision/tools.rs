@@ -293,58 +293,50 @@ impl ToolSpec for ImageAnalyzeTool {
             None => Some(crate::client::acquire_remote_control_inference_participant().await),
         };
 
-        let response_json = tokio::time::timeout(
-            vision_request_envelope(),
-            async {
-                let response = with_retry(
-                    &retry_config,
-                    || {
-                        let client = self.client.clone();
-                        let url = url.clone();
-                        let api_key = api_key.clone();
-                        let payload = payload.clone();
-                        async move {
-                            let response = client
-                                .post(&url)
-                                .header("Content-Type", "application/json")
-                                .header("Authorization", format!("Bearer {api_key}"))
-                                .json(&payload)
-                                .send()
+        let response_json = tokio::time::timeout(vision_request_envelope(), async {
+            let response = with_retry(
+                &retry_config,
+                || {
+                    let client = self.client.clone();
+                    let url = url.clone();
+                    let api_key = api_key.clone();
+                    let payload = payload.clone();
+                    async move {
+                        let response = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .header("Authorization", format!("Bearer {api_key}"))
+                            .json(&payload)
+                            .send()
+                            .await
+                            .map_err(|e| LlmError::from_reqwest(&e))?;
+
+                        let status = response.status();
+                        if !status.is_success() {
+                            let error_text = response
+                                .text()
                                 .await
-                                .map_err(|e| LlmError::from_reqwest(&e))?;
-
-                            let status = response.status();
-                            if !status.is_success() {
-                                let error_text = response
-                                    .text()
-                                    .await
-                                    .unwrap_or_else(|_| "Unknown error".to_string());
-                                let error_text = sanitize_http_error_body(
-                                    Some("Vision provider"),
-                                    status.as_u16(),
-                                    &error_text,
-                                );
-                                return Err(LlmError::from_http_response(
-                                    status.as_u16(),
-                                    &error_text,
-                                ));
-                            }
-                            Ok(response)
+                                .unwrap_or_else(|_| "Unknown error".to_string());
+                            let error_text = sanitize_http_error_body(
+                                Some("Vision provider"),
+                                status.as_u16(),
+                                &error_text,
+                            );
+                            return Err(LlmError::from_http_response(status.as_u16(), &error_text));
                         }
-                    },
-                    None,
-                )
-                .await
-                .map_err(|e| {
-                    ToolError::execution_failed(format!("Vision API request failed: {e}"))
-                })?;
+                        Ok(response)
+                    }
+                },
+                None,
+            )
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("Vision API request failed: {e}")))?;
 
-                let json: Value = response.json().await.map_err(|e| {
-                    ToolError::execution_failed(format!("Failed to parse response: {e}"))
-                })?;
-                Ok(json)
-            },
-        )
+            let json: Value = response.json().await.map_err(|e| {
+                ToolError::execution_failed(format!("Failed to parse response: {e}"))
+            })?;
+            Ok(json)
+        })
         .await
         .map_err(|_| {
             ToolError::execution_failed(format!(

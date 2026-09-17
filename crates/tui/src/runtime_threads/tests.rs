@@ -9960,8 +9960,7 @@ async fn approval_wait_ends_when_the_runtime_shuts_down() -> Result<()> {
     assert!(
         events.iter().any(|event| {
             event.event == "approval.decided"
-                && event.payload.get("approval_id").and_then(Value::as_str)
-                    == Some("tool_shutdown")
+                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_shutdown")
                 && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
         }),
         "shutdown resolution should emit approval.decided with interrupted=true"

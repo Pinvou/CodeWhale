@@ -325,14 +325,19 @@ async fn run_plugin_child_raw(
 
     let output = match tokio::time::timeout(PLUGIN_EXECUTION_TIMEOUT, child.wait()).await {
         Ok(status) => {
-            let status = status.map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
+            let status =
+                status.map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
             let stdout = stdout_task
                 .await
                 .map_err(|e| ToolError::execution_failed(format!("stdout reader: {e}")))?;
             let stderr = stderr_task
                 .await
                 .map_err(|e| ToolError::execution_failed(format!("stderr reader: {e}")))?;
-            std::process::Output { status, stdout, stderr }
+            std::process::Output {
+                status,
+                stdout,
+                stderr,
+            }
         }
         Err(_elapsed) => {
             let _ = child.kill().await;
