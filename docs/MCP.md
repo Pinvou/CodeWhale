@@ -336,7 +336,7 @@ The CLI also exposes helper tools when MCP is enabled:
 {
   "timeouts": {
     "connect_timeout": 10,
-    "execute_timeout": 60,
+    "execute_timeout": 1800,
     "read_timeout": 120
   },
   "servers": {
@@ -437,6 +437,11 @@ Per-server settings:
 - `args` (array of strings, optional)
 - `env` (object, optional)
 - `connect_timeout`, `execute_timeout`, `read_timeout` (seconds, optional)
+- Defaults: `connect_timeout` 10s, `execute_timeout` 1800s (30 min), `read_timeout` 120s.
+  `execute_timeout` bounds a whole tool call — a server is silent until its tool
+  finishes, so slow tools need this raised, not `read_timeout`. `read_timeout`
+  bounds the response wait of quick requests (`resources/read`, discovery, …);
+  a `tools/call` wait is automatically widened to at least its `execute_timeout`.
 - `disabled` (bool, optional)
 - `enabled` (bool, optional, default `true`)
 - `required` (bool, optional): startup/connect validation fails if this server cannot initialize.
