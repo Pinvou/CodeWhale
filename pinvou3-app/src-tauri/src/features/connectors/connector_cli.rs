@@ -168,11 +168,12 @@ pub(crate) fn reap_after_kill(child: &mut Child) {
 }
 
 /// 连接器 CLI 单次调用的兜底上限。Rust 侧全部单次调用(eip `auth login
-/// --no-poll` / `auth poll`(CLI 本地轮询窗口默认 5s)/ status / load / logout)
-/// 受 CLI 自带 HTTP 客户端超时 60s 约束(见 eip linux-src/main.go
-/// `httpClient`),合法最坏 ≈ 60s + 启动开销;超过视为进程级挂死。须小于
-/// 门闩抢占阈值 `flow_gate::STALL_LIMIT`(180s),让卡死先在调用点以本超时
-/// 自愈,抢占只作兜底。
+/// --no-poll` / `auth poll`(CLI 本地轮询窗口默认 30s,见 eip linux-src
+/// main.go `cmdPoll`;zhidao 侧缺省并显式传 5s)/ status / load / logout)
+/// 受 CLI 自带 HTTP 客户端超时 60s 约束(见同文件 `httpClient`),单次合法
+/// 最坏 ≈ 30s 轮询窗口末次在途请求 + 60s + 启动开销 ≈ 90s;超过视为进程级
+/// 挂死。须小于门闩抢占阈值 `flow_gate::STALL_LIMIT`(180s),让卡死先在
+/// 调用点以本超时自愈,抢占只作兜底。
 pub(crate) const CLI_RUN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 跑命令并**捕获输出**、带超时兜底(EIP / 知道 SSO 编排用)。

@@ -399,7 +399,8 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
         if !flow.is_active(epoch) {
             return;
         }
-        // auth poll 一轮(CLI 本地轮询窗口默认 5s);成功与否统一靠 auth status 判定。
+        // auth poll 一轮(CLI 本地轮询窗口默认 30s,Go 源 cmdPoll 缺省值);
+        // 成功与否统一靠 auth status 判定。
         if let Ok(cmd) = eip(&["auth", "poll", "--output", "json"]) {
             let _ = run(cmd);
         }
@@ -438,11 +439,12 @@ fn get_sso_url(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<Str
         return Ok(None);
     };
     // 放行 ≠ 请求已发出:Err(spawn 失败或 120s 兜底击杀)丢弃凭证自动回滚,
-    // 不白占 65s 窗口;Ok 时无论退出码如何,网关都收到了请求,confirm 保留
-    // 窗口(issue #1097:throttle 放行后 run(cmd) spawn 失败无法回滚预约)。
-    // 超时击杀的请求理论上可能已到达网关,回滚后立刻重试存在撞 429 的窄窗口;
-    // 但 CLI 自带 60s HTTP 超时,能拖到 120s 的基本是进程级挂死(请求未完成),
-    // 回滚不给失败重试强加 65s 等待。
+    // 不白占 65s 窗口;Ok(含 CLI 非零退出码——此时无法区分请求是否已到达
+    // 网关)按「可能已发出」保守 confirm 保留窗口(issue #1097:throttle
+    // 放行后 run(cmd) spawn 失败无法回滚预约)。超时击杀的请求理论上可能
+    // 已到达网关,回滚后立刻重试存在撞 429 的窄窗口;但 CLI 自带 60s HTTP
+    // 超时,能拖到 120s 的基本是进程级挂死(请求未完成),回滚不给失败重试
+    // 强加 65s 等待。
     let out = run(cmd);
     if out.is_ok() {
         permit.confirm();
