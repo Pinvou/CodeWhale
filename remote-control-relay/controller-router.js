@@ -45,15 +45,15 @@ function errorMessage(code) {
 }
 
 export class ControllerRouter {
-  #registration; #leases; #send; #peers = new Map(); #controlled = new Map(); #audit; #hooks;
+  #registration; #leases; #send; #peers = new Map(); #controlled = new Map(); #audit; #hooks; #livenessHooks;
 
   constructor({
     pairingRegistrationHandler,
     leaseManager,
     send,
     audit = () => {},
-    livenessHooks = new ControllerLivenessHooks(),
-    resumeHooks = new ControllerResumeHooks(),
+    livenessHooks = new ControllerLivenessHooks({ leaseManager }),
+    resumeHooks = new ControllerResumeHooks({ leaseManager }),
   } = {}) {
     if (!pairingRegistrationHandler || typeof pairingRegistrationHandler.register !== "function"
       || !leaseManager || typeof leaseManager.claimForDelivery !== "function"
@@ -65,6 +65,7 @@ export class ControllerRouter {
       || typeof leaseManager.isPendingHandshake !== "function"
       || typeof leaseManager.lease !== "function"
       || typeof leaseManager.terminateLease !== "function"
+      || typeof leaseManager.setTerminationObserver !== "function"
       || typeof send !== "function" || typeof audit !== "function") {
       fail("controller_router_config_invalid");
     }
@@ -79,7 +80,16 @@ export class ControllerRouter {
     this.#leases = leaseManager;
     this.#send = send;
     this.#audit = audit;
+    this.#livenessHooks = livenessHooks;
     this.#hooks = Object.freeze([livenessHooks, resumeHooks]);
+    this.#leases.setTerminationObserver(async (event, leaseOwner, previousOwner) => {
+      this.#clearAllLeaseLinks(leaseOwner);
+      const owners = previousOwner ? [leaseOwner, previousOwner] : [leaseOwner];
+      const outcomes = await Promise.allSettled(owners.flatMap((owner) => this.#hooks.map((hooks) =>
+        Promise.resolve().then(() => hooks.onLeaseTerminated(event, owner)))));
+      const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+      if (failures.length) throw new AggregateError(failures, "controller_hook_termination_failed");
+    });
   }
 
   #emit(event) {
@@ -220,16 +230,14 @@ export class ControllerRouter {
         try { disconnect = validateControllerMessage(message, peer.role, lease); } catch (error) {
           fail("controller_disconnect_invalid", error);
         }
-        const counterpart = this.#counterpart(peer);
-        this.#deliver(counterpart, disconnect);
-        await this.#leases.terminateLease({
-          controllerLeaseId: lease.controller_lease_id,
-          reason: disconnect.reason,
-        });
-        peer.controllerLeaseId = null;
-        counterpart.controllerLeaseId = null;
-        peer.counterpart = null;
-        counterpart.counterpart = null;
+        try {
+          this.#deliver(this.#counterpart(peer), disconnect);
+        } finally {
+          // A valid owner's explicit disconnect is terminal even when its
+          // counterpart vanished or cannot receive the courtesy notification.
+          await this.#leases.terminateLease({ controllerLeaseId: lease.controller_lease_id,
+            reason: disconnect.reason, expectedLease: lease });
+        }
         this.#emit("controller_disconnected");
         return disconnect;
       }
@@ -240,11 +248,30 @@ export class ControllerRouter {
         const result = await hooks.handle(Object.freeze({
           message, socket_identity: socketIdentity, role: peer.role, lease,
         }));
-        for (const delivery of result?.deliveries || []) {
-          const target = delivery.role === peer.role ? peer : this.#counterpart(peer);
-          this.#deliver(target, delivery.message);
+        let committed = null;
+        try {
+          this.#applyPeerUpdates(result?.peer_updates, lease);
+          for (const delivery of result?.deliveries || []) {
+            const target = delivery.role === peer.role ? peer : this.#counterpart(peer);
+            this.#deliver(target, delivery.message);
+          }
+          if (result?.commit) committed = await result.commit();
+          if (committed?.lease) {
+            await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
+          }
+          result?.finalize?.();
+          return result ?? null;
+        } catch (error) {
+          // Accepted hook results own this exact immutable lease revision.
+          // A rejected frame never reaches here, and delayed cleanup cannot
+          // terminate a subsequently committed revision with the same wire id.
+          try { await result?.abort?.(); } catch { /* authoritative fallback follows */ }
+          if (lease) await this.#leases.terminateLease({
+            controllerLeaseId: lease.controller_lease_id,
+            expectedLease: committed?.lease ?? lease, reason: "controller_resume_failed",
+          }).catch(() => {});
+          throw error;
         }
-        return result ?? null;
       }
       fail("controller_message_unsupported");
     } catch (error) {
@@ -258,7 +285,7 @@ export class ControllerRouter {
       }); } catch { /* Error delivery cannot broaden or skip precise cleanup. */ }
       if (createdLease) {
         await this.#leases.terminateLease({ controllerLeaseId: createdLease.controller_lease_id,
-          reason: "handshake_failed" }).catch(() => {});
+          expectedLease: createdLease, reason: "handshake_failed" }).catch(() => {});
         this.#clearLeaseLinks(peer, createdLease.controller_lease_id);
       } else if (deliveryReservationId) {
         // Only a successfully accepted operation whose delivery/binding failed
@@ -276,6 +303,32 @@ export class ControllerRouter {
     const counterpart = this.#peers.get(peer.counterpart);
     if (!counterpart || counterpart.counterpart !== peer.socketIdentity) fail("endpoint_offline");
     return counterpart;
+  }
+
+  #applyPeerUpdates(updates, lease) {
+    if (!updates) return;
+    if (!Array.isArray(updates)) fail("controller_peer_updates_invalid");
+    for (const update of updates) {
+      if (!update || !new Set(["A", "B"]).has(update.role)
+        || update.controller_lease_id !== lease.controller_lease_id
+        || typeof update.socket_identity !== "string" || !ID.test(update.socket_identity)) {
+        fail("controller_peer_updates_invalid");
+      }
+      const peer = this.#peers.get(update.socket_identity);
+      if (!peer) fail("endpoint_offline");
+      if (peer.role !== "unknown" && peer.role !== update.role) fail("controller_role_invalid");
+      peer.role = update.role;
+      peer.controllerLeaseId = lease.controller_lease_id;
+      peer.counterpart = update.counterpart ?? null;
+    }
+    for (const update of updates) {
+      if (!update.counterpart) continue;
+      const peer = this.#peers.get(update.socket_identity);
+      const counterpart = this.#peers.get(update.counterpart);
+      if (!peer || !counterpart || counterpart.counterpart !== peer.socketIdentity) {
+        fail("controller_peer_updates_invalid");
+      }
+    }
   }
 
   #clearPendingLinks(peer, reservationId) {
@@ -301,13 +354,30 @@ export class ControllerRouter {
     }
   }
 
+  #clearAllLeaseLinks(leaseOwner) {
+    const leaseId = leaseOwner.controller_lease_id;
+    // The observer belongs to the removed revision, never a replacement.
+    if (this.#leases.lease(leaseId)) return;
+    for (const peer of this.#peers.values()) {
+      if (peer.controllerLeaseId !== leaseId) continue;
+      peer.controllerLeaseId = null;
+      peer.counterpart = null;
+      peer.pendingReservationId = null;
+    }
+  }
+
   async removeSocket(socketIdentity) {
     socketIdentity = id(socketIdentity, "socket_identity");
     const peer = this.#peers.get(socketIdentity);
     if (!peer) return Object.freeze({ handshakes: 0, leases: 0 });
     const lease = peer.controllerLeaseId ? this.#leases.lease(peer.controllerLeaseId) : null;
+    // Both hooks run asynchronously and liveness removes its state on close.
+    // Capture authenticated evidence once, before dispatching either hook.
+    let evidenceDeadline = null;
+    try { evidenceDeadline = this.#livenessHooks.resumeDeadline?.(lease) ?? null; }
+    catch { /* Missing/invalid evidence must not prevent disconnect cleanup. */ }
     const hookOutcomes = await Promise.allSettled(this.#hooks.map((hooks) => hooks.onSocketClosed(Object.freeze({
-      socket_identity: socketIdentity, role: peer.role, lease,
+      socket_identity: socketIdentity, role: peer.role, lease, evidence_deadline_ms: evidenceDeadline,
     }))));
     const hookResults = hookOutcomes
       .filter((result) => result.status === "fulfilled")

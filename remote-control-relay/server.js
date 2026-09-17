@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { createTelemetryService } from "./telemetry-service.js";
 import { ControllerLeaseManager } from "./controller-lease.js";
+import { ControllerResumeHooks } from "./controller-resume.js";
 import { ControllerReservationManager, EndpointInteractionSlots } from "./controller-reservation.js";
 import { ControllerRouter } from "./controller-router.js";
 import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "./enrollment-registry.js";
@@ -252,10 +253,12 @@ async function createControllerRuntime() {
       resolveControlledEndpoint: (endpointId) => router?.resolveControlledEndpoint(endpointId),
       onLeaseTerminated: notifyReplacementCode,
     });
+    const resumeHooks = new ControllerResumeHooks({ leaseManager: leases });
     router = new ControllerRouter({
       pairingRegistrationHandler: registration,
       leaseManager: leases,
       send,
+      resumeHooks,
     });
     return Object.freeze({ pairingStore, registry, relayEpoch, reservations, leases, router });
   } catch (error) {
@@ -1205,7 +1208,8 @@ wss.on("connection", (ws, req) => {
         socketIdentity: ws.controllerSocketIdentity,
         message: msg,
       }).then(() => {
-        if (msg.type === "controller_pairing_claim") {
+        if (msg.type === "controller_pairing_claim"
+          || (typeof msg.type === "string" && msg.type.startsWith("controller_"))) {
           ws.controllerAuthenticated = true;
           clearTimeout(ws.authTimer);
           ws.authTimer = null;

@@ -75,6 +75,23 @@ function receiptSecret(value) {
   return bytes;
 }
 
+function resumeToken(value) {
+  if (typeof value !== "string" || value.length !== 44) fail("resume_token_invalid");
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.length !== 32 || bytes.toString("base64") !== value) fail("resume_token_invalid");
+  return bytes;
+}
+
+function resumeEpoch(value, label) {
+  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  return value;
+}
+
+function socketsValue(sockets, roleValue) {
+  if (!Object.hasOwn(sockets, roleValue)) fail("controller_resume_sockets_invalid");
+  return sockets[roleValue];
+}
+
 export class ControllerLeaseManager {
   #pairings; #reservations; #relayEpoch; #signingKeyId; #sign; #resolveControlled;
   #clock; #randomBytes; #audit; #onLeaseTerminated; #handshakes = new Map(); #leases = new Map();
@@ -497,6 +514,91 @@ export class ControllerLeaseManager {
   lease(controllerLeaseId) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     return this.#leases.get(controllerLeaseId) ?? null;
+  }
+
+  verifyResumeToken({ controllerLeaseId, role: tokenRole, resumeTokenB64 } = {}) {
+    controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
+    tokenRole = role(tokenRole);
+    const lease = this.#leases.get(controllerLeaseId);
+    if (!lease) fail("controller_lease_not_found");
+    const token = resumeToken(resumeTokenB64);
+    try {
+      const actual = Buffer.from(tokenDigest({
+        role: tokenRole,
+        relay_epoch: lease.relay_epoch,
+        connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id,
+        lease_epoch: lease.lease_epoch,
+        remote_control_generation: lease.remote_control_generation,
+      }, token), "ascii");
+      const expected = Buffer.from(
+        lease[`resume_token_${tokenRole.toLowerCase()}_sha256`],
+        "ascii",
+      );
+      if (!crypto.timingSafeEqual(actual, expected)) fail("resume_token_invalid");
+    } finally {
+      token.fill(0);
+    }
+    return Object.freeze({ lease, role: tokenRole });
+  }
+
+  completeResume({
+    controllerLeaseId,
+    activationId,
+    sockets,
+    livenessEpochA,
+    livenessEpochB,
+    tokenA,
+    tokenB,
+  } = {}) {
+    controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
+    activationId = id(activationId, "activation_id");
+    const lease = this.#leases.get(controllerLeaseId);
+    if (!lease) fail("controller_lease_not_found");
+    if (!sockets || typeof sockets !== "object") fail("controller_resume_sockets_invalid");
+    const socketA = id(socketsValue(sockets, "A"), "resume_socket_a");
+    const socketB = id(socketsValue(sockets, "B"), "resume_socket_b");
+    if (socketA === socketB) fail("controller_resume_sockets_invalid");
+    livenessEpochA = resumeEpoch(livenessEpochA, "liveness_epoch_a");
+    livenessEpochB = resumeEpoch(livenessEpochB, "liveness_epoch_b");
+    if (livenessEpochA === livenessEpochB
+      || livenessEpochA === lease.liveness_epoch_a
+      || livenessEpochB === lease.liveness_epoch_b) fail("liveness_epoch_invalid");
+    const nextTokenA = resumeToken(tokenA?.toString("base64"));
+    const nextTokenB = resumeToken(tokenB?.toString("base64"));
+    try {
+      if (nextTokenA.equals(nextTokenB)) fail("resume_token_invalid");
+      const resumeDeadline = String(this.#now(RESUME_BUDGET_MS));
+      const tokenADigest = tokenDigest({
+        role: "A", relay_epoch: lease.relay_epoch, connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+        remote_control_generation: lease.remote_control_generation,
+      }, nextTokenA);
+      const tokenBDigest = tokenDigest({
+        role: "B", relay_epoch: lease.relay_epoch, connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+        remote_control_generation: lease.remote_control_generation,
+      }, nextTokenB);
+      if (tokenADigest === lease.resume_token_a_sha256
+        || tokenBDigest === lease.resume_token_b_sha256) {
+        fail("resume_token_invalid");
+      }
+      const updated = Object.freeze({
+        ...lease,
+        liveness_epoch_a: livenessEpochA,
+        liveness_epoch_b: livenessEpochB,
+        resume_token_a_sha256: tokenADigest,
+        resume_token_b_sha256: tokenBDigest,
+        resume_deadline_ms: resumeDeadline,
+        sockets: Object.freeze({ A: socketA, B: socketB }),
+      });
+      this.#leases.set(controllerLeaseId, updated);
+      this.#emit("controller_resume_completed");
+      return updated;
+    } finally {
+      nextTokenA.fill(0);
+      nextTokenB.fill(0);
+    }
   }
 
   async terminateLease({ controllerLeaseId, reason = "disconnected" } = {}) {
