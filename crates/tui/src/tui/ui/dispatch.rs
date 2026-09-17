@@ -793,6 +793,8 @@ pub(crate) async fn spawned_dispatch_inner(
             verbosity: prepare.verbosity.clone(),
             provenance: prepare.provenance,
             turn_tool_security: None,
+            // Interactive TUI submissions do not correlate submissions.
+            submission_id: None,
         })
         .await
     {
