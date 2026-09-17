@@ -314,13 +314,69 @@ test("linux: zoom crops 1:1 in raster pixels and advances the last raster so cha
   assert.deepEqual(img2.px(0, 0), grad(30, 16));
 });
 
+test("linux: zoom clips an out-of-bounds region and chained zooms clip against the child", { skip: process.platform !== "linux" && "pixel check runs real ffmpeg (linux CI)" }, async (t) => {
+  const { create } = await import("../src/backends/linux.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-linux-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
+  const backend = create({ exec: {} });
+  const src = path.join(dir, "src.png");
+  fs.writeFileSync(src, encodePNG(64, 48, grad));
+
+  // ffmpeg clamps an out-of-bounds origin silently (x 50 -> 32, y 30 -> 16),
+  // so the backend must crop AND return the clipped region — the server
+  // binds child pixels against the receipt's region.
+  const one = await backend.zoom({ source: src, region: [50, 30, 32, 32], path: path.join(dir, "one.png") });
+  assert.deepEqual(one.region, [32, 16, 32, 32]);
+  const img1 = decodePNG(fs.readFileSync(one.file));
+  assert.equal(img1.width, 32);
+  assert.equal(img1.height, 32);
+  assert.deepEqual(img1.px(0, 0), grad(32, 16));
+  assert.deepEqual(img1.px(31, 31), grad(63, 47));
+
+  // A chained zoom clips against the child raster (32x32): region
+  // [20,20,20,20] overshoots both edges and must crop [12,12,20,20] —
+  // child2 (0,0) is child1 (12,12) = src (44,28).
+  const two = await backend.zoom({ region: [20, 20, 20, 20], path: path.join(dir, "two.png") });
+  assert.equal(two.source, one.file, "chained zoom must default to the advanced child raster");
+  assert.deepEqual(two.region, [12, 12, 20, 20]);
+  const img2 = decodePNG(fs.readFileSync(two.file));
+  assert.deepEqual(img2.px(0, 0), grad(44, 28));
+  assert.deepEqual(img2.px(19, 19), grad(63, 47));
+});
+
+test("darwin: zoom clips an out-of-bounds region and chained zooms clip against the child", { skip: process.platform !== "darwin" && "pixel check runs real sips (macOS only)" }, async (t) => {
+  const { create } = await import("../src/backends/darwin.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-darwin-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
+  const backend = create({ exec: { run: async () => ({ code: 0, stdout: "", stderr: "" }) } });
+  const src = path.join(dir, "src.png");
+  fs.writeFileSync(src, encodePNG(64, 48, grad));
+
+  const one = await backend.zoom({ source: src, region: [50, 30, 32, 32], path: path.join(dir, "one.png") });
+  assert.deepEqual(one.region, [32, 16, 32, 32]);
+  const img1 = decodePNG(fs.readFileSync(one.file));
+  assert.equal(img1.width, 32);
+  assert.equal(img1.height, 32);
+  assert.deepEqual(img1.px(0, 0), grad(32, 16));
+  assert.deepEqual(img1.px(31, 31), grad(63, 47));
+
+  const two = await backend.zoom({ region: [20, 20, 20, 20], path: path.join(dir, "two.png") });
+  assert.equal(two.source, one.file, "chained zoom must default to the advanced child raster");
+  assert.deepEqual(two.region, [12, 12, 20, 20]);
+  const img2 = decodePNG(fs.readFileSync(two.file));
+  assert.deepEqual(img2.px(0, 0), grad(44, 28));
+  assert.deepEqual(img2.px(19, 19), grad(63, 47));
+});
+
 // Region validation runs before any tool probe or exec, so these run on
 // every platform and pin the named error instead of a NaN-driven failure.
 for (const [platform, module] of [["linux", "../src/backends/linux.mjs"], ["win32", "../src/backends/win32.mjs"]]) {
   test(`${platform}: zoom refuses a malformed region with a named error`, async () => {
     const { create } = await import(module);
     const backend = create({ exec: {} });
-    for (const region of [undefined, ["a", 0, 10, 10], [10, 0, 10], [-1, 0, 10, 10]]) {
+    for (const region of [undefined, ["a", 0, 10, 10], [10, 0, 10], [-1, 0, 10, 10], [0, 0, 0, 10]]) {
       await assert.rejects(() => backend.zoom({ source: "/tmp/cu-unused.png", region }), /region must be \[x, y, w, h\] in last-raster pixels/u);
     }
   });

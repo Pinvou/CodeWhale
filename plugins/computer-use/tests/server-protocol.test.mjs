@@ -42,7 +42,15 @@ const CANNED = {
     capturedAt: "2026-09-14T00:00:00.000Z",
   }),
   // region[0] === 999 is the sentinel for "the agent cropped a stale raster".
-  zoom: (r) => ({ file: "/remote/zoom-1.png", bytes: 512, region: r.args?.region ?? null, source: r.args?.region?.[0] === 999 ? "/remote/stale.png" : (r.args?.source ?? null) }),
+  // region[0] === 50 mirrors the real backends' out-of-bounds behavior: the
+  // cropper clips the request against the source raster and the receipt
+  // carries the region actually cropped.
+  zoom: (r) => ({
+    file: "/remote/zoom-1.png",
+    bytes: 512,
+    region: r.args?.region?.[0] === 50 ? [32, 0, 32, 32] : (r.args?.region ?? null),
+    source: r.args?.region?.[0] === 999 ? "/remote/stale.png" : (r.args?.source ?? null),
+  }),
   left_click: () => ({ clicked: true }),
   left_click_drag: () => ({ dragged: true }),
   set_value: () => ({ set: true }),
@@ -261,6 +269,26 @@ test("ssh zoom rebinds the raster so child pixels aim at the crop region", { ski
   assert.equal(click.ok, true, JSON.stringify(click.error ?? {}));
   const clickSent = wireCalls("left_click").at(-1);
   assert.deepEqual({ x: clickSent.args.target.x, y: clickSent.args.target.y }, { x: 90, y: 68 });
+});
+
+test("ssh zoom binds the clipped region the receipt carries, not the raw request", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // The real backends clip an out-of-bounds region against the source raster
+  // (a region starting at x=50 on a 64-wide raster crops from x=32) and the
+  // receipt carries the clipped region; the canned endpoint mirrors that.
+  // The host must bind the clipped region — binding the raw request would
+  // land every child-pixel click 18 raster px to the right of the target.
+  const shot = await tool("screenshot", { computer: "box" });
+  assert.equal(shot.ok, true, JSON.stringify(shot.error ?? {}));
+  const zoom = await tool("zoom", { computer: "box", region: [50, 0, 32, 32] });
+  assert.equal(zoom.ok, true, JSON.stringify(zoom.error ?? {}));
+  assert.deepEqual(zoom.region, [32, 0, 32, 32]);
+  // Child pixel (0,0) resolves against the clipped origin: screenshot origin
+  // {10,20} at scale 2 + [32,0]/2 -> screen (26,20). The unclipped request
+  // would have produced (35,20).
+  const click = await tool("left_click", { computer: "box", target: { type: "coordinate", x: 0, y: 0 } });
+  assert.equal(click.ok, true, JSON.stringify(click.error ?? {}));
+  const sent = wireCalls("left_click").at(-1);
+  assert.deepEqual({ x: sent.args.target.x, y: sent.args.target.y }, { x: 26, y: 20 });
 });
 
 test("ssh drag endpoints resolve against the rebound child raster", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
