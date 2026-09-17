@@ -19,6 +19,7 @@ mod platform;
 mod providers;
 pub(crate) mod reader_window;
 mod resource_ledger;
+pub(crate) mod remote_turn;
 mod runtime;
 mod stall;
 mod store;
@@ -4008,6 +4009,16 @@ impl AcpPool {
             pending_permissions,
             pending_elicitations,
         ))
+    }
+
+    /// Read-only busy probe used by the remote-control task adapter (DEV-13).
+    /// It never spawns a session: an unknown session is simply not busy.
+    pub async fn is_session_busy(&self, session_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|session| session.busy.load(Ordering::Acquire))
     }
 
     /// 一次性模型探针：切换/删除 Provider（或恢复官方）后，草稿态会话本不连接
