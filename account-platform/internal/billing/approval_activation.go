@@ -62,6 +62,19 @@ var billingApprovalActivationOrder = []string{
 	"WALLET_ADJUSTMENT",
 }
 
+const entitlementComponentAdjustmentCommand = "ENTITLEMENT_COMPONENT_ADJUSTMENT"
+
+func validActivationItem(item ApprovalCommandActivation, commandType string, spec activationSpec, now time.Time) bool {
+	if item.CommandType != commandType || item.Version < 1 || item.UpdatedAt.IsZero() || item.UpdatedAt.After(now.Add(time.Second)) ||
+		(item.State != "ACTIVE" && item.State != "INACTIVE") || (!spec.mayBeActive && item.State != "INACTIVE") {
+		return false
+	}
+	if commandType == entitlementComponentAdjustmentCommand && item.PolicyVersion == 2 && item.SnapshotSchemaVersion == 2 {
+		return true
+	}
+	return item.PolicyVersion == spec.policyVersion && item.SnapshotSchemaVersion == spec.snapshotSchemaVersion
+}
+
 // validateApprovalCommandActivationSnapshot is the single server-side contract
 // gate used at both the storage and HTTP boundaries. In particular, a test or
 // alternate repository cannot make the workload endpoint emit a partial or
@@ -73,9 +86,7 @@ func validateApprovalCommandActivationSnapshot(snapshot ApprovalCommandActivatio
 	for index, commandType := range billingApprovalActivationOrder {
 		item := snapshot.Activations[index]
 		spec := billingApprovalActivationSpecs[commandType]
-		if item.CommandType != commandType || item.PolicyVersion != spec.policyVersion || item.SnapshotSchemaVersion != spec.snapshotSchemaVersion ||
-			item.Version < 1 || item.UpdatedAt.IsZero() || item.UpdatedAt.After(now.Add(time.Second)) ||
-			(item.State != "ACTIVE" && item.State != "INACTIVE") || (!spec.mayBeActive && item.State != "INACTIVE") {
+		if !validActivationItem(item, commandType, spec, now) {
 			return ErrApprovalActivationUnavailable
 		}
 	}
@@ -83,21 +94,47 @@ func validateApprovalCommandActivationSnapshot(snapshot ApprovalCommandActivatio
 }
 
 func (r *PostgresRepository) ApprovalCommandActivations(ctx context.Context) (ApprovalCommandActivationSnapshot, error) {
-	rows, err := r.pool.Query(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations ORDER BY command_type`)
+	rows, err := r.pool.Query(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations ORDER BY command_type,policy_version`)
 	if err != nil {
 		return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
 	}
 	defer rows.Close()
 
-	result := ApprovalCommandActivationSnapshot{SchemaVersion: approvalActivationSchemaVersion, Activations: make([]ApprovalCommandActivation, 0, len(billingApprovalActivationSpecs))}
+	raw := make([]ApprovalCommandActivation, 0, len(billingApprovalActivationSpecs)+1)
 	for rows.Next() {
 		var item ApprovalCommandActivation
 		if err := rows.Scan(&item.CommandType, &item.PolicyVersion, &item.SnapshotSchemaVersion, &item.State, &item.Version, &item.UpdatedAt); err != nil {
 			return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
 		}
+		raw = append(raw, item)
+	}
+	if rows.Err() != nil {
+		return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
+	}
+	result := ApprovalCommandActivationSnapshot{SchemaVersion: approvalActivationSchemaVersion, Activations: make([]ApprovalCommandActivation, 0, len(billingApprovalActivationOrder))}
+	index := 0
+	now := r.now()
+	for _, commandType := range billingApprovalActivationOrder {
+		if index >= len(raw) || raw[index].CommandType != commandType {
+			return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
+		}
+		item := raw[index]
+		index++
+		if commandType == entitlementComponentAdjustmentCommand {
+			if !validActivationItem(item, commandType, billingApprovalActivationSpecs[commandType], now) || item.PolicyVersion != 1 {
+				return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
+			}
+			if index < len(raw) && raw[index].CommandType == commandType {
+				item = raw[index]
+				index++
+				if item.PolicyVersion != 2 || !validActivationItem(item, commandType, billingApprovalActivationSpecs[commandType], now) {
+					return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
+				}
+			}
+		}
 		result.Activations = append(result.Activations, item)
 	}
-	if rows.Err() != nil || validateApprovalCommandActivationSnapshot(result, r.now()) != nil {
+	if index != len(raw) || validateApprovalCommandActivationSnapshot(result, now) != nil {
 		return ApprovalCommandActivationSnapshot{}, ErrApprovalActivationUnavailable
 	}
 	return result, nil

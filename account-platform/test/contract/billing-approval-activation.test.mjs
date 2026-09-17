@@ -61,6 +61,14 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
   for (const index of [4, 5, 10]) allCompatibleInactive.activations[index].state = 'INACTIVE';
   assert.equal(validate(allCompatibleInactive), true, JSON.stringify(validate.errors));
 
+  // The entitlement correction command may append exactly one still-INACTIVE
+  // policy v2 / snapshot v2 row while retaining the immutable v1 history; the
+  // projection then reports the higher version and stays INACTIVE.
+  const versionedCorrection = snapshot();
+  versionedCorrection.activations[1].policy_version = 2;
+  versionedCorrection.activations[1].snapshot_schema_version = 2;
+  assert.equal(validate(versionedCorrection), true, JSON.stringify(validate.errors));
+
   for (const [name, mutate] of [
     ['partial', value => value.activations.pop()],
     ['extra', value => value.activations.push({ ...value.activations[10] })],
@@ -69,6 +77,9 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
     ['wrong-policy-version', value => { value.activations[5].policy_version = 1; }],
     ['wrong-snapshot-schema', value => { value.activations[10].snapshot_schema_version = 2; }],
     ['policy-only-active', value => { value.activations[0].state = 'ACTIVE'; }],
+    ['mixed-correction-version', value => { value.activations[1].policy_version = 2; }],
+    ['unknown-correction-version', value => { value.activations[1].policy_version = 3; value.activations[1].snapshot_schema_version = 3; }],
+    ['premature-correction-activation', value => { value.activations[1].policy_version = 2; value.activations[1].snapshot_schema_version = 2; value.activations[1].state = 'ACTIVE'; }],
     ['unknown-command', value => { value.activations[0].command_type = 'UNKNOWN_COMMAND'; }],
     ['extra-field', value => { value.activations[0].private_fact = 'must-not-escape'; }],
   ]) {

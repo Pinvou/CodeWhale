@@ -198,6 +198,27 @@ func validBillingApprovalActivationSnapshot(now time.Time) ApprovalCommandActiva
 	return result
 }
 
+func TestEntitlementCorrectionActivationV2RemainsInactive(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := validBillingApprovalActivationSnapshot(now)
+	item := &snapshot.Activations[1]
+	if item.CommandType != entitlementComponentAdjustmentCommand {
+		t.Fatal("unexpected activation order")
+	}
+	item.PolicyVersion, item.SnapshotSchemaVersion = 2, 2
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("inactive v2 should be readable: %v", err)
+	}
+	item.State = "ACTIVE"
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("premature activation accepted: %v", err)
+	}
+	item.State, item.PolicyVersion = "INACTIVE", 3
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("unknown version accepted: %v", err)
+	}
+}
+
 func containsJSONCode(raw []byte, expected string) bool {
 	var body struct {
 		Code string `json:"code"`

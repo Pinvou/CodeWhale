@@ -235,6 +235,8 @@ GSA-22 退款/拒付归属兼容切片（仍PARTIAL / REVIEW_PENDING）：强制
 GSA-22 原证据预检反向覆盖切片（仍PARTIAL / REVIEW_PENDING）：隔离PostgreSQL同一支付包验证BONUS→BASE的完整差额，且来源lot可退款属性与类型不一致、原订单商品快照缺失都拒绝；与先前BASE→BONUS、已动用、错订单、无差额及修复证据负例合并覆盖。测试只证明内部只读预检，不赋予审批proof或写入权限。
 
 GSA-22 组成读取投影兼容切片（仍PARTIAL / REVIEW_PENDING）：个人中心与管理详情保留不可改的历史 `original_microcredits`，增量返回 `reclassified_out_microcredits` 和 `effective_original_microcredits`；个人中心“总额”优先展示有效原始量，旧服务响应回退历史字段。准备阶段所有转出量恒为0；已有支付包真实PostgreSQL读取和OpenAPI/UI合同验证不改变原值。纠错执行仍未开放，实际非零转出后的跨端回归仍待后续领域E2E。
+
+GSA-22 Billing 激活版本读取兼容切片（仍PARTIAL / REVIEW_PENDING）：读取器在保留原 v1 历史行时，仅允许权益组成纠错追加 `policy_version=2 / snapshot_schema_version=2 / INACTIVE` 并投影最新版本；v1 历史缺失/变为激活、v2 提前激活、未知版本或其他命令重复仍失败关闭。真实隔离PostgreSQL验证了 v1/v2 共存与提前激活拒绝；目前尚未新增 v2 激活迁移、Account v2 policy、proof 或执行器，不表示命令已开放。契约与发布顺序登记：Billing OpenAPI 闭环已允许该命令投影 `(1,1)` 或 `(2,2)` 且恒为 `INACTIVE`；旧 closed schema 客户端遇到 v2 投影会整表拒绝，属失败关闭但需按 N/N-1 可见变化登记；Account 侧 `internal/platform/billinggovernance` 的 `v1Commands`/`ValidateSnapshot` 仍是固定版本且为整快照门禁，追加 v2 激活行的前向迁移必须与 Account reader 的 v2 兼容同批或按先 Billing 后 Account 的顺序发布，否则 Account 会读到全部 Billing 治理激活不可用；读取器要求 v1 历史行必须保留，未来迁移只能追加不能替换。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

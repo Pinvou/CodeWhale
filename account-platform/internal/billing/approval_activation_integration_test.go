@@ -306,6 +306,23 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+	// A later forward migration may append policy v2 while retaining v1 as
+	// immutable history. Only this still-INACTIVE command may project v2.
+	if _, err := pool.Exec(ctx, `INSERT INTO billing_approval_command_activations(command_type,policy_version,snapshot_schema_version,state,version,updated_at)
+VALUES('ENTITLEMENT_COMPONENT_ADJUSTMENT',2,2,'INACTIVE',1,now())`); err != nil {
+		t.Fatal(err)
+	}
+	versioned, err := repository.ApprovalCommandActivations(ctx)
+	if err != nil || len(versioned.Activations) != 11 || versioned.Activations[1].CommandType != entitlementComponentAdjustmentCommand ||
+		versioned.Activations[1].PolicyVersion != 2 || versioned.Activations[1].SnapshotSchemaVersion != 2 || versioned.Activations[1].State != "INACTIVE" {
+		t.Fatalf("versioned inactive entitlement projection=%+v err=%v", versioned, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE billing_approval_command_activations SET state='ACTIVE',version=version+1 WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ApprovalCommandActivations(ctx); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("policy-only v2 activation escaped: %v", err)
+	}
 }
 
 func readBillingActivationHistory(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []ApprovalCommandActivation {

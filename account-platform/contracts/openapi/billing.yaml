@@ -765,14 +765,17 @@ components:
           type: array
           minItems: 11
           maxItems: 11
-          description: Fixed command_type ascending order; unknown, duplicate, missing, or mixed-version rows make the whole projection unavailable.
+          description: Fixed command_type ascending order; unknown, duplicate, missing, or mixed-version rows make the whole projection unavailable. ENTITLEMENT_COMPONENT_ADJUSTMENT keeps at most one v1 row plus at most one still-INACTIVE v2 correction row, and projects the highest available version.
           prefixItems:
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
                 - properties: { command_type: { const: CHARGEBACK_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
-                - properties: { command_type: { const: ENTITLEMENT_COMPONENT_ADJUSTMENT }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+                - properties: { command_type: { const: ENTITLEMENT_COMPONENT_ADJUSTMENT }, state: { const: INACTIVE } }
+                - oneOf:
+                    - properties: { policy_version: { const: 1 }, snapshot_schema_version: { const: 1 } }
+                    - properties: { policy_version: { const: 2 }, snapshot_schema_version: { const: 2 } }
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
                 - properties: { command_type: { const: LEDGER_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
