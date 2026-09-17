@@ -1,0 +1,206 @@
+// Windows B 被控端远程控制面板（DEV-21）。
+//
+// 与 Web 分享卡片完全独立：这里只展示本机被控状态、5 分钟短期连接码、
+// 已授权工作区、模型来源和只读的审批请求。B 端没有 Allow/Approve 入口，
+// 只能查看、停止任务或立即断开；所有文案走三语词条，倒计时通过
+// aria-live 节流播报，键盘可达。
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { RefreshCw, Wrench, X } from '../../components/icons.jsx';
+import { Toggle } from '../../components/Toggle.jsx';
+import { bridge } from '../../hooks/useBridge.js';
+
+const CODE_TICK_MS = 1000;
+const COUNTDOWN_ANNOUNCE_EVERY = 30;
+
+export function formatPairingCode(code) {
+  const digits = String(code || '').replace(/\s+/g, '');
+  if (digits.length !== 7) return digits;
+  return digits.slice(0, 4) + " " + digits.slice(4);
+}
+
+export function countdownSeconds(expiresAtMs, nowMs) {
+  const expires = Number(expiresAtMs);
+  if (!isFinite(expires) || expires <= 0) return 0;
+  return Math.max(0, Math.ceil((expires - nowMs) / 1000));
+}
+
+function statusKey(status) {
+  switch (status) {
+    case 'registering': return 'statusRegistering';
+    case 'waiting_for_pairing': return 'statusWaiting';
+    case 'pairing_reserved': return 'statusReserved';
+    case 'handshake_pending': return 'statusHandshake';
+    case 'connected': return 'statusConnected';
+    case 'reconnecting':
+    case 'resume_provisional':
+    case 'resume_activated_pending_liveness':
+      return 'statusReconnecting';
+    case 'stopping': return 'statusStopping';
+    case 'stopped': return 'statusStopped';
+    case 'error': return 'statusError';
+    default: return 'statusIdle';
+  }
+}
+
+export default function ControlledDevicePanel({ t, bs, supported }) {
+  const copy = (t && t.controlledDevice) || {};
+  const device = (bs && bs.controlledDevice) || {};
+  const status = device.status || 'idle';
+  const [now, setNow] = useState(() => Date.now());
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const liveRef = useRef(null);
+
+  const active = status !== 'idle' && status !== 'stopped' && status !== 'error';
+  const seconds = countdownSeconds(device.expiresAtMs, now);
+  const announce = useMemo(() => {
+    if (!device.expiresAtMs || seconds <= 0) return null;
+    if (seconds > COUNTDOWN_ANNOUNCE_EVERY && seconds % COUNTDOWN_ANNOUNCE_EVERY !== 0) return null;
+    return String(seconds);
+  }, [device.expiresAtMs, seconds]);
+
+  useEffect(() => {
+    if (!device.expiresAtMs) return undefined;
+    const timer = setInterval(() => setNow(Date.now()), CODE_TICK_MS);
+    return () => clearInterval(timer);
+  }, [device.expiresAtMs]);
+
+  const run = async (name, action) => {
+    if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return;
+    setBusy(name);
+    setError(null);
+    try {
+      await action(bridge.desktopRemoteControl);
+    } catch (failure) {
+      setError((failure && failure.code) || 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!supported) {
+    return (
+      <section className="settings-section" aria-labelledby="controlled-device-title">
+        <h3 id="controlled-device-title">{copy.section}</h3>
+        <p className="settings-hint">{copy.unsupported}</p>
+      </section>
+    );
+  }
+
+  const workspaces = Array.isArray(device.workspaces) ? device.workspaces : [];
+  const tasks = Array.isArray(bs && bs.tasks) ? bs.tasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task.status)) : [];
+  const permissions = Array.isArray(bs && bs.remotePermissions) ? bs.remotePermissions : [];
+
+  return (
+    <section className="settings-section" aria-labelledby="controlled-device-title">
+      <h3 id="controlled-device-title">{copy.title}</h3>
+      <p className="settings-hint">{copy.desc}</p>
+
+      <div className="settings-row">
+        <Toggle
+          checked={active}
+          disabled={busy === 'toggle'}
+          aria-label={active ? copy.disable : copy.enable}
+          onChange={() => run('toggle', (remote) => (active ? remote.controlledStop() : remote.controlledStart(null, [])))}
+        />
+        <span className="settings-value" role="status" aria-live="polite" ref={liveRef}>
+          {copy[statusKey(status)] || copy.statusIdle}
+        </span>
+      </div>
+
+      {status === 'waiting_for_pairing' && device.pairingCode && (
+        <div className="settings-row" role="group" aria-labelledby="controlled-device-code">
+          <span id="controlled-device-code">{copy.codeLabel}</span>
+          <output
+            className="pairing-code"
+            aria-live="polite"
+            aria-label={`${copy.codeLabel} ${formatPairingCode(device.pairingCode)}`}
+          >
+            {formatPairingCode(device.pairingCode)}
+          </output>
+          <span className="settings-hint" aria-live="polite">
+            {seconds > 0 ? copy.codeExpires(seconds) : copy.codeExpired}
+          </span>
+          {announce && <span className="sr-only" aria-live="polite">{copy.codeExpires(announce)}</span>}
+        </div>
+      )}
+      <p className="settings-hint">{copy.codeHint}</p>
+
+      <div className="settings-actions">
+        <button
+          type="button"
+          onClick={() => run('refresh', (remote) => remote.controlledRefresh())}
+          disabled={!active || busy === 'refresh'}
+        >
+          <RefreshCw aria-hidden="true" /> {busy === 'refresh' ? copy.refreshing : copy.refresh}
+        </button>
+        <button
+          type="button"
+          onClick={() => run('disconnect', (remote) => remote.controlledDisconnectNow())}
+          disabled={!active || busy === 'disconnect'}
+        >
+          <X aria-hidden="true" /> {copy.disconnectNow}
+        </button>
+        <button
+          type="button"
+          onClick={() => run('stop-tasks', (remote) => remote.remoteTaskStatus && remote.permissionDenyTask ? Promise.all(tasks.map((task) => remote.cancelRemoteTask(task.taskId))) : Promise.resolve())}
+          disabled={tasks.length === 0}
+        >
+          <Wrench aria-hidden="true" /> {copy.stopTasks}
+        </button>
+      </div>
+
+      {tasks.length > 0 && (
+        <p className="settings-hint" role="status" aria-live="polite">{copy.runningTasks(tasks.length)}</p>
+      )}
+
+      <div className="settings-row">
+        <span>{copy.deviceLabel}</span>
+        <span>{device.deviceName || copy.deviceUnknown}</span>
+      </div>
+
+      <div className="settings-row">
+        <span>{copy.modelSource}</span>
+        <span>{copy.modelSourceDevice}</span>
+      </div>
+
+      <h4>{copy.workspacesTitle}</h4>
+      {workspaces.length === 0 ? (
+        <p className="settings-hint">{copy.workspacesEmpty}</p>
+      ) : (
+        <ul className="settings-list">
+          {workspaces.map((workspace) => (
+            <li key={workspace.workspaceId}>
+              <span>{workspace.displayName}</span>
+              <span className="settings-hint">
+                {workspace.codeAllowed ? copy.codeAllowed : copy.workspaceUnauthorized}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="settings-hint">{copy.workspacesHint}</p>
+
+      <h4>{copy.pendingPermissions}</h4>
+      {permissions.length === 0 ? (
+        <p className="settings-hint">{copy.pendingPermissionEmpty}</p>
+      ) : (
+        <ul className="settings-list">
+          {permissions.map((permission) => (
+            <li key={permission.permissionRequestId}>
+              <span>{permission.operationType}</span>
+              <span className="settings-hint">{permission.riskLevel} · {permission.targetScope}</span>
+              <span className="settings-hint">{copy.noAllowControl}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="settings-hint">{copy.readOnlyNotice}</p>
+
+      {error && <p className="settings-error" role="alert">{copy.errorGeneric}</p>}
+    </section>
+  );
+}
+
+export { statusKey };

@@ -6,6 +6,7 @@ import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
+import ControlledDevicePanel from '../remote-control/ControlledDevicePanel.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
@@ -2268,6 +2269,11 @@ const formatMemoryTime = (item, copy) => {
               onUnlock={onUnlockTeamRelay}
               onDisable={onDisableTeamRelay}
             />
+          )}
+          {/* Windows 双端远程控制：B 被控端面板（DEV-21）。与上方 Web 分享
+              卡片完全独立，非 Windows 或能力关闭时不渲染。 */}
+          {can('desktopRemoteControl') && (
+            <ControlledDevicePanel t={t} bs={bs} supported />
           )}
         </>
         );

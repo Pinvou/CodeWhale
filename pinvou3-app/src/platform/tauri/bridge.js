@@ -1607,6 +1607,7 @@
       "remoteModels",
       "remoteHistories",
       "tasks",
+      "remotePermissions",
     ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
