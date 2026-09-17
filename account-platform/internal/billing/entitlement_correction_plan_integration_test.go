@@ -65,6 +65,37 @@ func TestEntitlementCorrectionReadPlanUsesPaymentEvidenceAndRejectsUsePostgresIn
 	if _, err := repository.planEntitlementComponentCorrection(ctx, packageID, uuid.New()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong source order accepted: %v", err)
 	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE entitlement_components SET component_type='BONUS' WHERE id=$1`, lotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE credit_lots SET refundable=FALSE,source_reference=$2 WHERE id=$1`, lotID, reference+":bonus"); err != nil {
+		t.Fatal(err)
+	}
+	bonusPlan, err := repository.planEntitlementComponentCorrection(ctx, packageID, orderID)
+	if err != nil || bonusPlan.Amounts.SourceType != "BONUS" || bonusPlan.Amounts.TargetType != "BASE" || bonusPlan.Amounts.Amount != 80 {
+		t.Fatalf("bonus-to-base payment plan=%+v err=%v", bonusPlan, err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE credit_lots SET refundable=TRUE WHERE id=$1`, lotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.planEntitlementComponentCorrection(ctx, packageID, orderID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("lot with wrong refundable attribution accepted: %v", err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE entitlement_components SET component_type='BASE' WHERE id=$1`, lotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE credit_lots SET source_reference=$2 WHERE id=$1`, lotID, reference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE payment_orders SET product_snapshot='{}'::jsonb WHERE id=$1`, orderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.planEntitlementComponentCorrection(ctx, packageID, orderID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing source snapshot accepted: %v", err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE payment_orders SET product_snapshot=$2 WHERE id=$1`, orderID, product); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=99,used_microcredits=1 WHERE id=$1`, lotID); err != nil {
 		t.Fatal(err)
 	}
