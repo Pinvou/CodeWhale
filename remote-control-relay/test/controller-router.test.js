@@ -20,6 +20,8 @@ function fixture() {
     lease_epoch: "1",
     relay_epoch: "relay-epoch-0001",
     remote_control_generation: "generation-0001",
+    liveness_epoch_a: "liveness-epoch-A-0001",
+    liveness_epoch_b: "liveness-epoch-B-0001",
     sockets: Object.freeze({ A: "socket-A", B: "socket-B" }),
   });
   const joined = {
