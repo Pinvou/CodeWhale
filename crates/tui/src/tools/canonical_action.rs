@@ -201,43 +201,45 @@ pub(crate) fn canonical_action_alias<'a>(tool_name: &'a str, input: &Value) -> &
         .unwrap_or(tool_name)
 }
 
+/// Names the v0.9.3 consolidation retired from the advertised catalog.
+/// Fully removed spellings cannot dispatch at all — `ToolRegistry::resolve`
+/// has no fuzzy step — and the rest survive only as `model_visible=false`
+/// replay aliases, so any one of them inside a model-visible description or
+/// schema teaches a name the model is never offered.
+// list_dir, file_search and grep_files are published standalone tools again.
+#[cfg(test)]
+pub(crate) const RETIRED_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "run_tests",
+    "run_verifiers",
+    "web_search",
+    "fetch_url",
+    "wait_for_dev_server",
+    "exec_shell",
+    "exec_shell_wait",
+    "exec_shell_interact",
+    "exec_shell_cancel",
+];
+
+/// Uppercase action-family aliases that still dispatch for saved v0.9.x
+/// transcript replay but are `model_visible=false`: new sessions publish
+/// `bash` and the independent `read`/`write`/`edit` primitives instead
+/// (`canonical_runtime_tools_hide_compatibility_aliases`). Matching is
+/// whole-token so prose like "BashHistory" or lowercase `bash` never trips.
+#[cfg(test)]
+pub(crate) const HIDDEN_COMPAT_TOOL_NAMES: &[&str] = &["Bash", "File"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// Names the v0.9.3 consolidation retired from the advertised catalog.
-    /// Fully removed spellings cannot dispatch at all — `ToolRegistry::resolve`
-    /// has no fuzzy step — and the rest survive only as `model_visible=false`
-    /// replay aliases, so any one of them inside a model-visible description or
-    /// schema teaches a name the model is never offered.
-    // list_dir, file_search and grep_files are published standalone tools again.
-    const RETIRED_TOOL_NAMES: &[&str] = &[
-        "read_file",
-        "write_file",
-        "edit_file",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "git_show",
-        "git_blame",
-        "run_tests",
-        "run_verifiers",
-        "web_search",
-        "fetch_url",
-        "wait_for_dev_server",
-        "exec_shell",
-        "exec_shell_wait",
-        "exec_shell_interact",
-        "exec_shell_cancel",
-    ];
-
-    /// Uppercase action-family aliases that still dispatch for saved v0.9.x
-    /// transcript replay but are `model_visible=false`: new sessions publish
-    /// `bash` and the independent `read`/`write`/`edit` primitives instead
-    /// (`canonical_runtime_tools_hide_compatibility_aliases`). Matching is
-    /// whole-token so prose like "BashHistory" or lowercase `bash` never trips.
-    const HIDDEN_COMPAT_TOOL_NAMES: &[&str] = &["Bash", "File"];
 
     /// The catalog is re-sent on every request, so a retired name in it is a
     /// per-turn lie to every model. `verifier.rs` already guarded one such

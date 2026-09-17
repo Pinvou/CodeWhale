@@ -417,6 +417,68 @@ fn registry_first_instruction_only_names_published_tools() {
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`Web`"));
 }
 
+/// The registry-first instruction commands tools that the host must keep
+/// callable, so the names in the text and the registered `ToolSpec`
+/// implementations must stay a paired set: renaming either side alone
+/// resurrects the phantom-tool incident (Pinvou #490) where the instruction
+/// cites a tool absent from the catalog and allowlist. If this test fails
+/// after a rename, update the instruction and the registration in
+/// `tool_setup` in the same change; downstream hosts that gate these tool
+/// names by allowlist must follow in the same commit.
+#[test]
+fn forkguard_registry_first_instruction_names_registered_tool_specs() {
+    use crate::mcp::{McpConfig, McpPool};
+    use crate::tools::mcp_registry::{McpSyncRegistry, StartRegistryMcpServer};
+    use crate::tools::spec::ToolSpec;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let sync = McpSyncRegistry::new();
+    let registry_sync = ToolSpec::name(&sync);
+    assert_eq!(registry_sync, "registry_sync");
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("`registry_sync`"),
+        "instruction must keep naming the registered `{registry_sync}`"
+    );
+
+    let pool = Arc::new(AsyncMutex::new(McpPool::new(McpConfig::default())));
+    let start_tool = StartRegistryMcpServer::new(pool);
+    let start = ToolSpec::name(&start_tool);
+    assert_eq!(start, "start_registry_mcp_server");
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("`start_registry_mcp_server`"),
+        "instruction must keep naming the registered `{start}`"
+    );
+    // The match cap is quoted as a literal word in the instruction, the
+    // `registry_sync` schema description, and the bundled mcp-discovery
+    // skill; `MAX_REGISTRY_MATCHES` pins the constant to it at compile time,
+    // and these two assertions pin the remaining text sides.
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("eight"),
+        "instruction must keep the match-cap wording in sync with \
+         MAX_REGISTRY_MATCHES"
+    );
+    let schema = ToolSpec::input_schema(&sync).to_string();
+    assert!(
+        schema.contains("eight"),
+        "registry_sync schema must keep the match-cap wording in sync with \
+         MAX_REGISTRY_MATCHES: {schema}"
+    );
+    // Both registry commands are deferred on stock hosts, so the instruction
+    // must teach the `tool_search` activation path instead of only
+    // commanding names the model cannot see yet.
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("run `tool_search` first to activate it"),
+        "the instruction must teach the `registry_sync` activation path:\n\
+         {MCP_REGISTRY_FIRST_INSTRUCTION}"
+    );
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("activate it via `tool_search` as well"),
+        "activating `registry_sync` must not be taught as also activating \
+         `start_registry_mcp_server`:\n{MCP_REGISTRY_FIRST_INSTRUCTION}"
+    );
+}
+
 #[test]
 fn registry_first_scenario() {
     // Scenario consolidation of: registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled, registry_first_guidance_is_attached_to_the_shell_fallback_once
@@ -16804,8 +16866,15 @@ fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window
     assert!(context.len() < content.len());
 }
 
+// Regression (Pinvou #490 phantom-tool class): the parent-context hint must
+// name tools that are first-turn active wherever the default native toolset
+// is registered (`read`, `bash`). `File` is a hidden compatibility alias no
+// catalog or `tool_search` result can return, and `list` is not a tool name
+// at all — the earlier wording commanded calls that allowlist hosts reject
+// outright. Shell-restricted sessions that carry neither tool surface the
+// same names through the catalog's core-action fallback explanations.
 #[test]
-fn subagent_results_are_summarized_before_parent_context_insertion() {
+fn forkguard_subagent_context_hint_names_active_tools() {
     let long_result = "verified detail\n".repeat(1_000);
     let output = ToolResult::success(
         json!({
@@ -16831,10 +16900,49 @@ fn subagent_results_are_summarized_before_parent_context_insertion() {
     assert!(context.contains("steps=12"));
     assert!(context.len() < output.content.len());
     assert!(context.contains("self-report"));
-    assert!(context.contains("verify side effects"));
-    assert!(context.contains("`File` actions like `read` or `list`"));
-    assert!(!context.contains("read_file") && !context.contains("list_dir"));
+    assert!(context.contains("verify side effects with `read` or `bash`"));
+    assert!(
+        !context.contains("`File`")
+            && !context.contains("read_file")
+            && !context.contains("list_dir")
+    );
     assert!(context.contains("handle_read"));
+    assert!(
+        context.contains("activate it via `tool_search` first"),
+        "handle_read is deferred on stock hosts; the hint must name the \
+         activation path instead of commanding a tool the model cannot see:\n\
+         {context}"
+    );
+    assert!(
+        context.contains("call `handle_read` directly anyway"),
+        "allowed_tools-filtered sessions can strip tool_search too; the hint \
+         must keep the direct-call fallback instead of dead-ending:\n{context}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-tool class): GOAL_CONTINUATION_PROMPT
+// commands `update_goal`, which is deferred on stock hosts — it must name the
+// `tool_search` activation path instead of telling the model to call a tool
+// that is not in its first-turn tool list.
+#[test]
+fn forkguard_goal_continuation_names_tool_search_activation() {
+    let prompt = crate::prompts::GOAL_CONTINUATION_PROMPT;
+    assert!(
+        prompt.contains("`update_goal`"),
+        "the continuation prompt must keep commanding the goal-close tool:\n\
+         {prompt}"
+    );
+    assert!(
+        prompt.contains("activate it via `tool_search` first"),
+        "update_goal is deferred on stock hosts; the prompt must teach \
+         activation instead of commanding an absent tool:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("call `update_goal` directly anyway"),
+        "allowed_tools-filtered sessions can strip tool_search too; the \
+         prompt must keep the direct-call fallback instead of dead-ending:\n\
+         {prompt}"
+    );
 }
 
 #[test]
