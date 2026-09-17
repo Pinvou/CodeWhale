@@ -266,7 +266,6 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
             model: app.model.clone(),
             workspace: app.workspace.clone(),
             workspace_roots: app.workspace_roots.clone(),
-
             mode: app.mode,
         },
     )

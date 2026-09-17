@@ -602,7 +602,6 @@ pub(crate) fn begin_launch_session(
         model: app.model.clone(),
         workspace: app.workspace.clone(),
         workspace_roots: app.workspace_roots.clone(),
-
         mode: app.mode,
     })
 }
@@ -652,6 +651,27 @@ pub(crate) async fn switch_workspace(
     apply_workspace_runtime_state(app, config, workspace.clone());
     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
 
+    // Persist the primary swap immediately (the same pattern as the fork
+    // paths): the autosave merge treats disk as the authority against an
+    // empty incoming set, so without a direct save the stale pre-`/cd`
+    // set would be rewritten on disk and resurrect the old directory as a
+    // writable root on the next resume.
+    match SessionManager::default_location() {
+        Ok(manager) => match crate::tui::ui::frame::build_session_snapshot(app, &manager) {
+            Ok(snapshot) => {
+                if let Err(err) = manager.save_session(&snapshot) {
+                    app.status_message = Some(format!("Failed to persist workspace switch: {err}"));
+                }
+            }
+            Err(err) => {
+                app.status_message = Some(format!("Failed to snapshot workspace switch: {err}"));
+            }
+        },
+        Err(err) => {
+            app.status_message = Some(format!("Failed to open sessions directory: {err}"));
+        }
+    }
+
     let _ = engine_handle.send(Op::Shutdown).await;
     let engine_config = build_engine_config(app, config);
     *engine_handle = spawn_tui_engine(engine_config, config);
@@ -665,7 +685,6 @@ pub(crate) async fn switch_workspace(
                 model: app.model.clone(),
                 workspace: workspace.clone(),
                 workspace_roots: app.workspace_roots.clone(),
-
                 mode: app.mode,
             })
             .await;

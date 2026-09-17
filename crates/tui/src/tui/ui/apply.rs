@@ -1097,7 +1097,6 @@ pub(crate) async fn apply_provider_fallback_switch(
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
                 workspace_roots: app.workspace_roots.clone(),
-
                 mode: app.mode,
             })
             .await;
@@ -1240,7 +1239,6 @@ pub(crate) async fn apply_command_result(
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
                         workspace_roots: app.workspace_roots.clone(),
-
                         mode: app.mode,
                     })
                     .await;
@@ -1418,7 +1416,6 @@ pub(crate) async fn apply_command_result(
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
                             workspace_roots: app.workspace_roots.clone(),
-
                             mode: app.mode,
                         })
                         .await;
@@ -2307,7 +2304,6 @@ pub(crate) async fn apply_command_result(
                                     model: app.model.clone(),
                                     workspace: app.workspace.clone(),
                                     workspace_roots: app.workspace_roots.clone(),
-
                                     mode: app.mode,
                                 })
                                 .await;

@@ -1674,11 +1674,16 @@ impl SessionManager {
         metadata.created_at = persisted.created_at;
         metadata.parent_session_id = persisted.parent_session_id;
         metadata.forked_from_message_count = persisted.forked_from_message_count;
-        // Like the lifecycle fields above, the persisted root set is the
-        // authority: a host that does not know about multi-root (or a
-        // snapshot built before the roots were loaded) must not erase the
-        // set another host persisted.
-        metadata.workspace_roots = persisted.workspace_roots;
+        // The persisted set is the authority only against roots-blind
+        // writers: an empty incoming set may mean "rebuilt without knowing
+        // about multi-root", so the persisted set wins there. A non-empty
+        // incoming set is a deliberate live-owner mutation (a `/cd` primary
+        // swap, or a snapshot stamped from the loaded session) and must
+        // survive the merge - overwriting it would durably revert the swap
+        // and resurrect abandoned directories on the next resume.
+        if metadata.workspace_roots.is_empty() {
+            metadata.workspace_roots = persisted.workspace_roots;
+        }
         true
     }
 
@@ -2675,6 +2680,56 @@ mod tests {
         assert_eq!(
             loaded.metadata.workspace_roots,
             vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
+    #[test]
+    fn workspace_switch_survives_autosave_merge_and_restart() {
+        // /cd round trip: disk holds the pre-switch state; the live owner
+        // swaps the primary (/A -> /C, roots [/A,/B] -> [/C,/B]); the
+        // autosave stamps the live set and merges against disk; the
+        // restart+resume re-normalizes. The abandoned directory must not
+        // resurrect as a writable root.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("a");
+        let messages = vec![make_test_message("user", "hi")];
+        let mut session = create_saved_session_with_id_and_mode(
+            "switch-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        session.metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("b")];
+        manager
+            .save_session(&session)
+            .expect("save pre-switch session");
+
+        // The /cd swap in memory: new primary, old primary leaves the set.
+        let mut live = manager
+            .load_session("switch-session")
+            .expect("load for switch");
+        let new_workspace = tmp.path().join("c");
+        live.metadata.workspace = new_workspace.clone();
+        live.metadata.workspace_roots = vec![new_workspace.clone(), tmp.path().join("b")];
+
+        // Autosave: stamp the live set, then merge against disk exactly as
+        // build_session_snapshot does.
+        live.metadata.total_tokens = 5;
+        assert!(manager.merge_persisted_lifecycle(&mut live.metadata));
+        manager.save_session(&live).expect("autosave");
+
+        // Restart + resume: reload, then re-normalize the way the engine
+        // resolves roots on resume.
+        let resumed = manager.load_session("switch-session").expect("reload");
+        assert_eq!(resumed.metadata.workspace, new_workspace);
+        assert_eq!(
+            resumed.metadata.workspace_roots,
+            vec![new_workspace, tmp.path().join("b")],
+            "the abandoned directory must not resurrect as a writable root"
         );
     }
 

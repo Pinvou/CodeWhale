@@ -1193,7 +1193,6 @@ pub(crate) async fn handle_view_events(
                                 model: app.model.clone(),
                                 workspace: app.workspace.clone(),
                                 workspace_roots: app.workspace_roots.clone(),
-
                                 mode: app.mode,
                             })
                             .await;
@@ -2226,7 +2225,6 @@ pub(crate) async fn handle_view_events(
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
                             workspace_roots: app.workspace_roots.clone(),
-
                             mode: app.mode,
                         })
                         .await;

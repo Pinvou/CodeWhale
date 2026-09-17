@@ -1402,6 +1402,11 @@ impl Runtime {
             path: policy_path.as_deref(),
             ask_for_approval: approval_mode,
             sandbox_mode: None,
+            // Known lane gap (disclosed in the PR description, scheduled
+            // follow-up): this entrypoint cannot carry the session's root
+            // set, so attached-root ask/deny rules never fire on the
+            // app-server bridge - under-prompting only, byte-identical to
+            // base for the root set itself.
             workspace_roots: Vec::new(),
         })?;
         let precheck = policy_precheck_payload(&decision, &command, &policy_cwd, execution_kind);
