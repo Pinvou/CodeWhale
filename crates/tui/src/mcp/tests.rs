@@ -2529,6 +2529,99 @@ fn test_server_effective_timeouts() {
 }
 
 #[test]
+fn connect_keeps_the_read_knob_unclamped() {
+    // The audit fix clamped the connection read timeout to
+    // max(read, execute), silently disabling user-configured read budgets:
+    // a fast request (`resources/read`, discovery) on a wedged server then
+    // waited out the 1800s execute budget instead of failing at the
+    // configured read timeout. The knob must survive the connection.
+    let global = McpTimeouts {
+        connect_timeout: 10,
+        execute_timeout: 1800,
+        read_timeout: 120,
+    };
+    let mut server = McpServerConfig {
+        command: Some("test".to_string()),
+        args: vec![],
+        env: HashMap::new(),
+        cwd: None,
+        url: None,
+        transport: None,
+        connect_timeout: None,
+        execute_timeout: None,
+        read_timeout: Some(180),
+        disabled: false,
+        enabled: true,
+        required: false,
+        enabled_tools: Vec::new(),
+        disabled_tools: Vec::new(),
+        headers: HashMap::new(),
+        env_headers: HashMap::new(),
+        bearer_token_env_var: None,
+        scopes: Vec::new(),
+        oauth: None,
+        oauth_resource: None,
+        reviewed_plugin: None,
+    };
+    assert_eq!(connection_read_timeout(&server, &global), 180);
+
+    server.read_timeout = Some(30);
+    assert_eq!(connection_read_timeout(&server, &global), 30);
+
+    server.read_timeout = None;
+    assert_eq!(connection_read_timeout(&server, &global), 120);
+}
+
+#[test]
+fn http_transport_total_covers_the_execute_budget() {
+    // The reqwest client-level total must bound the longest request the
+    // connection carries (tools/call at the execute budget), independent of
+    // the read knob.
+    let global = McpTimeouts {
+        connect_timeout: 10,
+        execute_timeout: 1800,
+        read_timeout: 120,
+    };
+    let mut server = McpServerConfig {
+        command: Some("test".to_string()),
+        args: vec![],
+        env: HashMap::new(),
+        cwd: None,
+        url: None,
+        transport: None,
+        connect_timeout: None,
+        execute_timeout: None,
+        read_timeout: Some(30),
+        disabled: false,
+        enabled: true,
+        required: false,
+        enabled_tools: Vec::new(),
+        disabled_tools: Vec::new(),
+        headers: HashMap::new(),
+        env_headers: HashMap::new(),
+        bearer_token_env_var: None,
+        scopes: Vec::new(),
+        oauth: None,
+        oauth_resource: None,
+        reviewed_plugin: None,
+    };
+    assert_eq!(http_total_timeout(&server, &global), 1800);
+
+    server.execute_timeout = Some(3600);
+    assert_eq!(http_total_timeout(&server, &global), 3600);
+}
+
+#[test]
+fn per_request_read_budget_widens_for_long_calls_only() {
+    // A tools/call with the default 1800s execute budget must not be cut
+    // short by a smaller read knob, while a 120s resources/read keeps the
+    // knob as its inner budget.
+    assert_eq!(per_request_read_budget(120, 1800), 1800);
+    assert_eq!(per_request_read_budget(30, 1800), 1800);
+    assert_eq!(per_request_read_budget(180, 120), 180);
+}
+
+#[test]
 fn test_mcp_pool_is_mcp_tool() {
     assert!(McpPool::is_mcp_tool("mcp_filesystem_read"));
     assert!(McpPool::is_mcp_tool("mcp_git_status"));
@@ -2757,7 +2850,7 @@ async fn recv_times_out_waiting_for_mcp_response_and_disconnects() {
     conn.read_timeout_secs = 0;
 
     let err = conn
-        .recv("1".to_string())
+        .recv("1".to_string(), 0)
         .await
         .expect_err("hung transport should time out inside recv");
 
