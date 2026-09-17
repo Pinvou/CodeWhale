@@ -19696,6 +19696,46 @@ async fn code_execution_scenario() {
     }
 }
 
+#[tokio::test]
+async fn code_execution_timeout_kills_the_interpreter_instead_of_orphaning_it() {
+    // The kill path needs a real interpreter; skip where python is absent.
+    if crate::dependencies::resolve_python_interpreter().is_none() {
+        eprintln!("skipping: python not present");
+        return;
+    }
+    let tmp = tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("child_pid");
+    let code = format!(
+        "import os, time\nopen({}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n",
+        serde_json::json!(pid_file.to_string_lossy())
+    );
+
+    let err = execute_code_execution_tool(&json!({ "code": code }), tmp.path())
+        .await
+        .expect_err("a 60s sleep must hit the execution timeout");
+    assert!(
+        matches!(err, ToolError::Timeout { .. }),
+        "expected a timeout error; got {err:?}"
+    );
+
+    // The interpreter reported its pid before sleeping; the timeout must
+    // have killed it (explicit kill), not left it running.
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("interpreter must have written its pid")
+        .trim()
+        .parse()
+        .expect("pid file must contain an integer");
+    let mut attempts = 0;
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            attempts < 50,
+            "interpreter {pid} is still alive after the timeout kill"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+}
+
 #[test]
 fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     let mut plan_catalog = vec![api_tool("read_file")];

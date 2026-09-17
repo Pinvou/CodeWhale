@@ -452,6 +452,60 @@ mod tests {
         RlmBridge::new(client, "child-model".to_string(), depth_remaining)
     }
 
+    /// A child client that accepts the request and never answers: the
+    /// configured per-completion budget must cut it off.
+    struct HangingChildClient;
+
+    impl RlmLlmClient for HangingChildClient {
+        fn effective_route_envelope(
+            &self,
+            _requested_model: &str,
+            _dispatched_at: chrono::DateTime<chrono::Utc>,
+        ) -> crate::cost_status::EffectiveRouteEnvelope {
+            crate::cost_status::EffectiveRouteEnvelope {
+                provider: crate::config::ApiProvider::Custom,
+                provider_identity: "mock".to_string(),
+                model: _requested_model.to_string(),
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::default(),
+                dispatched_at: _dispatched_at,
+            }
+        }
+
+        fn effective_max_output_tokens(&self, _requested_model: &str) -> u32 {
+            64
+        }
+
+        fn create_message_boxed(
+            &self,
+            _request: MessageRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<MessageResponse>> + Send + '_>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_query_timeout_governs_the_child_completion_deadline() {
+        // The session's sub_query_timeout_secs was historically stored but
+        // never read (the bridge always used its 120s const); this pins the
+        // configured budget actually governing the deadline, including the
+        // timeout message naming the configured value.
+        let client: Arc<dyn RlmLlmClient> = Arc::new(HangingChildClient);
+        let bridge = RlmBridge::new(Arc::clone(&client), "child-model".to_string(), 1)
+            .with_sub_query_timeout_secs(1);
+
+        let response = bridge
+            .dispatch_llm("hang forever".to_string(), None, None, None)
+            .await;
+
+        let error = response.error.expect("hanging child must time out");
+        assert!(
+            error.contains("timed out after 1s"),
+            "timeout must reflect the configured budget; got {error}"
+        );
+    }
+
     #[test]
     fn batch_guard_allows_non_empty_batches_at_the_cap() {
         assert!(batch_guard(MAX_BATCH, Some("independent")).is_none());
