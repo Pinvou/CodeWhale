@@ -46,13 +46,25 @@ impl DesktopRemoteArtifactRuntime {
     }
 
     pub(crate) fn with_default_registry(tasks: Arc<RemoteTaskService>) -> Arc<Self> {
-        Self::new(
+        let runtime = Self::new(
             ArtifactDownloads::new(
                 Arc::new(TransferRegistry::default()),
                 Arc::new(ArtifactIndex::default()),
             ),
             tasks,
-        )
+        );
+        // DEV-18 审核修复：未完成下载同样周期性回收（RC-F-003 下载侧）。
+        let reaper_runtime = Arc::clone(&runtime);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let expired = reaper_runtime.downloads.expire(monotonic_millis());
+                if expired > 0 {
+                    eprintln!("[remote-control] reaped {expired} stale artifact download(s)");
+                }
+            }
+        });
+        runtime
     }
 
     pub(crate) fn downloads(&self) -> &ArtifactDownloads {
