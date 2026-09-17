@@ -24,6 +24,9 @@ export const staticRuntimeScripts = new Set([
   'features/attachments/attachment-drop-controller.js',
   'features/personas/personas-i18n.js',
   'features/updater/update-notice-logic.js',
+  // Windows 双端远程控制的纯状态模块（DEV-20）：index.html 经典脚本，
+  // 由 tauri bridge feature 同步消费。
+  'features/remote-control/remote-control-state.js',
   'platform/tauri/bridge.js',
   'platform/web/bootstrap.js',
   'platform/web/bridge.js',
