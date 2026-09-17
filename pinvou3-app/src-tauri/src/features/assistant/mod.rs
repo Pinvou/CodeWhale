@@ -9,6 +9,7 @@ pub(crate) mod expert_roster;
 pub(crate) mod image_capability;
 pub(crate) mod pending_user_input;
 pub mod platform;
+pub(crate) mod remote_turn;
 #[cfg(any(feature = "benchmark-hooks", test))]
 pub(crate) mod product_runtime;
 pub(crate) mod runtime_model;
