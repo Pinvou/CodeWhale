@@ -2552,6 +2552,7 @@ impl Pinvou3Bridge {
             dynamic_tools: Vec::new(),
             provenance: deepseek_tui::core::ops::UserInputProvenance::ImportedTranscript,
             turn_tool_security: Some(Arc::new(turn_tool_security)),
+            submission_id: None,
         })
     }
 
@@ -2708,6 +2709,7 @@ impl Pinvou3Bridge {
             // provenance: 消息来源。build_send_message_op 是用户内容 → ExternalUser。
             provenance: deepseek_tui::core::ops::UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
     }
 }
