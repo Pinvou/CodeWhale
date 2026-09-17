@@ -209,6 +209,25 @@ impl TransferHandle {
     pub(crate) fn direction(&self) -> TransferDirection {
         self.direction
     }
+
+    /// Rebuilds a handle from its opaque ID (DEV-17/DEV-18 contract addition).
+    /// Only controller-prefixed IDs are accepted and the direction is derived
+    /// from the prefix, so a caller can never relabel an upload as a download.
+    pub(crate) fn from_id(value: &str) -> Option<Self> {
+        if value.starts_with(UPLOAD_PREFIX) {
+            Some(Self {
+                id: value.to_owned(),
+                direction: TransferDirection::Upload,
+            })
+        } else if value.starts_with(DOWNLOAD_PREFIX) {
+            Some(Self {
+                id: value.to_owned(),
+                direction: TransferDirection::Download,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn is_controller_handle_id(value: &str) -> bool {
