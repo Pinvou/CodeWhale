@@ -417,6 +417,68 @@ fn registry_first_instruction_only_names_published_tools() {
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`Web`"));
 }
 
+/// The registry-first instruction commands tools that the host must keep
+/// callable, so the names in the text and the registered `ToolSpec`
+/// implementations must stay a paired set: renaming either side alone
+/// resurrects the phantom-tool incident (Pinvou #490) where the instruction
+/// cites a tool absent from the catalog and allowlist. If this test fails
+/// after a rename, update the instruction and the registration in
+/// `tool_setup` in the same change; downstream hosts that gate these tool
+/// names by allowlist must follow in the same commit.
+#[test]
+fn forkguard_registry_first_instruction_names_registered_tool_specs() {
+    use crate::mcp::{McpConfig, McpPool};
+    use crate::tools::mcp_registry::{McpSyncRegistry, StartRegistryMcpServer};
+    use crate::tools::spec::ToolSpec;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let sync = McpSyncRegistry::new();
+    let registry_sync = ToolSpec::name(&sync);
+    assert_eq!(registry_sync, "registry_sync");
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("`registry_sync`"),
+        "instruction must keep naming the registered `{registry_sync}`"
+    );
+
+    let pool = Arc::new(AsyncMutex::new(McpPool::new(McpConfig::default())));
+    let start_tool = StartRegistryMcpServer::new(pool);
+    let start = ToolSpec::name(&start_tool);
+    assert_eq!(start, "start_registry_mcp_server");
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("`start_registry_mcp_server`"),
+        "instruction must keep naming the registered `{start}`"
+    );
+    // The match cap is quoted as a literal word in the instruction, the
+    // `registry_sync` schema description, and the bundled mcp-discovery
+    // skill; `MAX_REGISTRY_MATCHES` pins the constant to it at compile time,
+    // and these two assertions pin the remaining text sides.
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("eight"),
+        "instruction must keep the match-cap wording in sync with \
+         MAX_REGISTRY_MATCHES"
+    );
+    let schema = ToolSpec::input_schema(&sync).to_string();
+    assert!(
+        schema.contains("eight"),
+        "registry_sync schema must keep the match-cap wording in sync with \
+         MAX_REGISTRY_MATCHES: {schema}"
+    );
+    // Both registry commands are deferred on stock hosts, so the instruction
+    // must teach the `tool_search` activation path instead of only
+    // commanding names the model cannot see yet.
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("run `tool_search` first to activate it"),
+        "the instruction must teach the `registry_sync` activation path:\n\
+         {MCP_REGISTRY_FIRST_INSTRUCTION}"
+    );
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("activate it via `tool_search` as well"),
+        "activating `registry_sync` must not be taught as also activating \
+         `start_registry_mcp_server`:\n{MCP_REGISTRY_FIRST_INSTRUCTION}"
+    );
+}
+
 #[test]
 fn registry_first_scenario() {
     // Scenario consolidation of: registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled, registry_first_guidance_is_attached_to_the_shell_fallback_once
@@ -724,6 +786,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send exact custom turn");
@@ -1095,6 +1158,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send first goal turn");
@@ -1374,6 +1438,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send saturated goal turn");
@@ -1502,6 +1567,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
         turn_tool_security: None,
+        submission_id: None,
     };
 
     handle
@@ -2695,6 +2761,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send budgeted goal turn");
@@ -3148,6 +3215,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send explicit natural goal turn");
@@ -3258,6 +3326,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send probe turn");
@@ -3388,6 +3457,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
         turn_tool_security: None,
+        submission_id: None,
     };
 
     let first =
@@ -4071,6 +4141,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send host-owned goal turn");
@@ -4196,6 +4267,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send explicit host turn");
@@ -5938,6 +6010,7 @@ fn active_goal_message_op(
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
         turn_tool_security: None,
+        submission_id: None,
     }
 }
 
@@ -5953,6 +6026,15 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 }
 
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
+    external_user_message_op_with_submission(content, mode, config, None)
+}
+
+fn external_user_message_op_with_submission(
+    content: &str,
+    mode: AppMode,
+    config: &Config,
+    submission_id: Option<String>,
+) -> Op {
     Op::SendMessage {
         content: content.to_string(),
         mode,
@@ -5975,6 +6057,7 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
         turn_tool_security: None,
+        submission_id,
     }
 }
 
@@ -6023,6 +6106,7 @@ fn auto_review_message_op(content: &str, config: &Config) -> Op {
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
         turn_tool_security: None,
+        submission_id: None,
     }
 }
 
@@ -6861,6 +6945,7 @@ async fn forkguard_queued_goal_edit_and_mcp_keep_restricted_authority() {
     handle
         .send(Op::EditLastTurn {
             new_message: "must-not-replay".to_string(),
+            submission_id: None,
         })
         .await
         .expect("queue edit");
@@ -9929,6 +10014,122 @@ async fn forkguard_idle_subagent_completion_self_start_ignores_a_stale_previous_
     task.await.expect("engine task");
 }
 
+/// The foundation half of the pinvou-agent#254 overtaking-order regression:
+/// a host-submitted turn echoes the correlation token it was submitted with,
+/// while a runtime self-started turn (idle sub-agent completion resume) never
+/// carries one. With this contract the app's forwarder can tell "my pending
+/// submission started" apart from "an autonomous follow-up overtook it" and
+/// only ever consume the deferred submit-window stop replay on the former —
+/// the overtaking order itself is exercised app-side against the forwarder
+/// replay gate.
+#[tokio::test]
+async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
+    let workspace = tempdir().expect("tempdir");
+    // This test cancels by observed turn id, so the notify/drop-signal
+    // handles the client exposes stay unbound.
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(CompleteOnceThenBlockModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+            request_dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let completion_tx = engine.tx_subagent_completion.clone();
+    let owner_session_id = engine.session.id.clone();
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op_with_submission(
+            "Watch the child agent.",
+            AppMode::Agent,
+            &Config::default(),
+            Some("sub-host-1".to_string()),
+        ))
+        .await
+        .expect("send correlated turn");
+    let first_turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the submitted turn")
+                .expect("engine event");
+            if let Event::TurnStarted {
+                turn_id,
+                submission_id,
+                ..
+            } = event
+            {
+                assert_eq!(
+                    submission_id.as_deref(),
+                    Some("sub-host-1"),
+                    "the submitted turn's TurnStarted must echo its correlation token"
+                );
+                break turn_id;
+            }
+        }
+    };
+    // Deliver an idle child completion while the first turn is still in
+    // flight; the engine consumes it after the turn ends and self-starts the
+    // follow-up without any host submission.
+    completion_tx
+        .send(crate::tools::subagent::SubAgentCompletion {
+            owner_session_id,
+            agent_id: "idle-child".to_string(),
+            payload: "child finished its work".to_string(),
+        })
+        .expect("inject idle sub-agent completion");
+    let self_started_turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the self-started turn")
+                .expect("engine event");
+            if let Event::TurnStarted {
+                turn_id,
+                submission_id,
+                ..
+            } = event
+            {
+                assert_ne!(
+                    turn_id, first_turn_id,
+                    "the idle child completion must self-start a new turn"
+                );
+                assert!(
+                    submission_id.is_none(),
+                    "a runtime self-started turn must not present a submission id"
+                );
+                break turn_id;
+            }
+        }
+    };
+    // The self-started turn is in its blocked model request; a turn-bound
+    // cancel by its observed id still lands (unchanged contract) and drops
+    // the future so the engine task can finish.
+    assert!(handle.cancel_turn(
+        &self_started_turn_id,
+        CancelReason::User,
+        CancelMode::StopDropInbox,
+    ));
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the self-start cancellation")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
 #[test]
 fn engine_initial_prompt_includes_configured_goal() {
     let config = EngineConfig {
@@ -12353,6 +12554,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send Operate model turn");
@@ -12509,6 +12711,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             verbosity: None,
             provenance: UserInputProvenance::SubAgentHandoff,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send model turn");
@@ -12644,6 +12847,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send Full Access model turn");
@@ -12923,6 +13127,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send Auto-Review model turn");
@@ -13110,6 +13315,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send model turn");
@@ -13249,6 +13455,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send model turn");
@@ -13384,6 +13591,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send model turn");
@@ -13525,6 +13733,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send model turn");
@@ -15894,9 +16103,29 @@ async fn edit_last_turn_preserves_current_mode() {
     handle
         .send(Op::EditLastTurn {
             new_message: "revise this in plan mode".to_string(),
+            submission_id: Some("sub-edit-1".to_string()),
         })
         .await
         .expect("send edit");
+    // The replacement turn the edit replays must echo the edit's own
+    // correlation token, not the one of any earlier turn.
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the edited turn")
+                .expect("engine event");
+            if let Event::TurnStarted { submission_id, .. } = event {
+                assert_eq!(
+                    submission_id.as_deref(),
+                    Some("sub-edit-1"),
+                    "the edit's replacement turn must echo its correlation token"
+                );
+                break;
+            }
+        }
+    }
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
@@ -16020,6 +16249,7 @@ async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {
     handle
         .send(Op::EditLastTurn {
             new_message: "edited prompt".to_string(),
+            submission_id: None,
         })
         .await
         .expect("send edit");
@@ -16132,6 +16362,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
     handle
         .send(Op::EditLastTurn {
             new_message: "edited prompt".to_string(),
+            submission_id: None,
         })
         .await
         .expect("send edit");
@@ -16234,6 +16465,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
     handle
         .send(Op::EditLastTurn {
             new_message: "must not replace the older prompt".to_string(),
+            submission_id: None,
         })
         .await
         .expect("send unsupported edit");
@@ -16804,8 +17036,15 @@ fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window
     assert!(context.len() < content.len());
 }
 
+// Regression (Pinvou #490 phantom-tool class): the parent-context hint must
+// name tools that are first-turn active wherever the default native toolset
+// is registered (`read`, `bash`). `File` is a hidden compatibility alias no
+// catalog or `tool_search` result can return, and `list` is not a tool name
+// at all — the earlier wording commanded calls that allowlist hosts reject
+// outright. Shell-restricted sessions that carry neither tool surface the
+// same names through the catalog's core-action fallback explanations.
 #[test]
-fn subagent_results_are_summarized_before_parent_context_insertion() {
+fn forkguard_subagent_context_hint_names_active_tools() {
     let long_result = "verified detail\n".repeat(1_000);
     let output = ToolResult::success(
         json!({
@@ -16831,10 +17070,49 @@ fn subagent_results_are_summarized_before_parent_context_insertion() {
     assert!(context.contains("steps=12"));
     assert!(context.len() < output.content.len());
     assert!(context.contains("self-report"));
-    assert!(context.contains("verify side effects"));
-    assert!(context.contains("`File` actions like `read` or `list`"));
-    assert!(!context.contains("read_file") && !context.contains("list_dir"));
+    assert!(context.contains("verify side effects with `read` or `bash`"));
+    assert!(
+        !context.contains("`File`")
+            && !context.contains("read_file")
+            && !context.contains("list_dir")
+    );
     assert!(context.contains("handle_read"));
+    assert!(
+        context.contains("activate it via `tool_search` first"),
+        "handle_read is deferred on stock hosts; the hint must name the \
+         activation path instead of commanding a tool the model cannot see:\n\
+         {context}"
+    );
+    assert!(
+        context.contains("call `handle_read` directly anyway"),
+        "allowed_tools-filtered sessions can strip tool_search too; the hint \
+         must keep the direct-call fallback instead of dead-ending:\n{context}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-tool class): GOAL_CONTINUATION_PROMPT
+// commands `update_goal`, which is deferred on stock hosts — it must name the
+// `tool_search` activation path instead of telling the model to call a tool
+// that is not in its first-turn tool list.
+#[test]
+fn forkguard_goal_continuation_names_tool_search_activation() {
+    let prompt = crate::prompts::GOAL_CONTINUATION_PROMPT;
+    assert!(
+        prompt.contains("`update_goal`"),
+        "the continuation prompt must keep commanding the goal-close tool:\n\
+         {prompt}"
+    );
+    assert!(
+        prompt.contains("activate it via `tool_search` first"),
+        "update_goal is deferred on stock hosts; the prompt must teach \
+         activation instead of commanding an absent tool:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("call `update_goal` directly anyway"),
+        "allowed_tools-filtered sessions can strip tool_search too; the \
+         prompt must keep the direct-call fallback instead of dead-ending:\n\
+         {prompt}"
+    );
 }
 
 #[test]
@@ -19885,6 +20163,7 @@ async fn run_headless_turn_with_flaky_network(
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send flaky-network turn");
@@ -20011,6 +20290,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send terminal-then-drop turn");
@@ -20116,6 +20396,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send midstream-error turn");
@@ -20365,6 +20646,7 @@ async fn run_interactive_turn_with_flaky_network(
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send interactive flaky-network turn");
@@ -20594,6 +20876,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send thinking-only drop turn");
@@ -20842,6 +21125,7 @@ async fn run_reasoning_only_turn_with_reprompts(
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
             turn_tool_security: None,
+            submission_id: None,
         })
         .await
         .expect("send reasoning-only turn");

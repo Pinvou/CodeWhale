@@ -6313,6 +6313,7 @@ mod tests {
             turn_id: "turn_started_later".to_string(),
             created_at: chrono::Utc::now(),
             route: None,
+            submission_id: None,
         });
         let WorkerCommand::Upload { envelopes, .. } =
             worker_rx.try_recv().expect("one typed turn start")
