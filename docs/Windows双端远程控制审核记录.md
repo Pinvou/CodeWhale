@@ -77,3 +77,13 @@
 - 观察（无影响）：提交同时向 `Cargo.toml` 增加了 3 行（测试依赖），不在预计文件清单内但属必要构建配置。
 - 验证：`cargo test remote_control::controller::relay_transport` 13 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 8. DEV-08：角色隔离 liveness 与 B 本地 30 秒 watchdog
+
+审核轮次 1（审核提交 2c12c15f）
+
+- 逐条核对：`LIVENESS_TOTAL_BUDGET_MS = 30_000`、`LIVENESS_BLACKHOLE_SUSPECT_MS = 15_000`；直接证据用 `received_at + 30000`，再扣除 `measured_rtt + 1000`（用例：`direct_candidate_deadline(100_000, 5_000) == 124_000`，即 24000ms 剩余）；attestation 走 Relay 签名兜底并扣除 `observed_age_ms`、`remaining_ttl_ms`、请求 RTT 与安全裕量（用例断言 119_000，即 19000ms 剩余），跨机 `issued_at_relay` 被有意忽略；新序号可推进候选、同序号只收紧、旧序号拒绝；黑洞 15 秒进入 suspect，B 心跳与普通流量不推进 deadline；Relay 侧 `controller-liveness.js` 只做盲转发与签名新鲜度证明。
+- 验收核对：6 条 Rust 用例 + 6 条 Relay 用例覆盖 A 断 B 活、B 断 A 活、黑洞、另一角色/无效/重放心跳、Relay 不可达与本地 deadline 到期，均通过。
+- 发现：无 blocker/major；minor 记录：`issued_at_relay` 被忽略属规范要求的保守策略（需求 8.1），已由用例锁定，无需修改。
+- 验证：`cargo test remote_control::controller::liveness` 6 通过 / 0 失败；`node --test remote-control-relay/test/controller-liveness.test.js` 6 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
