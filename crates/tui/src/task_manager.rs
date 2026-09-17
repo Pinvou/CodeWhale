@@ -905,12 +905,16 @@ async fn drive_engine_turn(
     let mut cursor = 0u64;
     let mut terminal_status: Option<RuntimeTurnStatus> = None;
     let mut terminal_error: Option<String> = None;
-    // Tool calls currently in flight. The journal records a tool call only at
-    // start and completion — nothing in between (the engine's 10s tool
-    // heartbeats are not journaled), so the idle-progress deadline would run
-    // unopposed during any silent tool execution and kill healthy builds,
-    // test suites, and MCP calls at 2 minutes. A tool that is still running
-    // IS progress; the wall-time budget remains the backstop for a hung one.
+    // Journal ids of tool items currently in flight. The journal records a
+    // tool call only at start/completion — nothing in between (the engine's
+    // 10s tool heartbeats are not journaled) — so the idle-progress deadline
+    // would run unopposed during any silent build, test suite, or MCP call
+    // and kill healthy work at 2 minutes. A tool that is still running IS
+    // progress; the wall-time budget remains the backstop for a hung one.
+    // Both lifecycle edges are keyed by the journal item id: item.started
+    // also carries the engine tool-use id under "tool", but the terminal
+    // events only carry "item", so keying the insert by tool-use id would
+    // never drain the set.
     let mut running_tools: HashSet<String> = HashSet::new();
 
     loop {
@@ -946,28 +950,20 @@ async fn drive_engine_turn(
             }
             match event.event.as_str() {
                 "item.started" => {
-                    if let Some(tool_id) = event
-                        .payload
-                        .get("tool")
-                        .and_then(|tool| tool.get("id"))
-                        .and_then(Value::as_str)
+                    if event.payload.get("tool").is_some()
+                        && let Some(item_id) = journal_item_id(&event)
                     {
-                        running_tools.insert(tool_id.to_string());
+                        running_tools.insert(item_id);
                     }
                 }
                 "item.completed" | "item.failed" => {
-                    if let Some(item_id) = event
-                        .payload
-                        .get("item")
-                        .and_then(|item| item.get("id"))
-                        .and_then(Value::as_str)
-                    {
-                        running_tools.remove(item_id);
+                    if let Some(item_id) = journal_item_id(&event) {
+                        running_tools.remove(&item_id);
                     }
                 }
                 _ => {}
             }
-            if runtime_event_is_progress(&event) || !running_tools.is_empty() {
+            if runtime_event_is_progress(&event) {
                 guard.note_progress(Instant::now());
             }
             if let Some((status, error)) =
@@ -980,6 +976,15 @@ async fn drive_engine_turn(
 
         if terminal_status.is_some() {
             break;
+        }
+
+        // Steady-state progress refresh: the journal is silent for the whole
+        // execution window of an in-flight tool, so the idle check must be
+        // suppressed for as long as any tool is running — not only on event
+        // arrival. The loop below wakes at least every EVENT_CATCHUP_POLL,
+        // so this runs throughout silent builds, test suites, and MCP calls.
+        if !running_tools.is_empty() {
+            guard.note_progress(Instant::now());
         }
 
         match guard.evaluate(Instant::now(), cancel.is_cancelled(), false) {
@@ -1059,6 +1064,15 @@ fn runtime_event_is_progress(event: &RuntimeEventRecord) -> bool {
         event.event.as_str(),
         "item.delta" | "item.started" | "item.completed" | "item.failed" | "turn.completed"
     )
+}
+
+fn journal_item_id(event: &RuntimeEventRecord) -> Option<String> {
+    event
+        .payload
+        .get("item")
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 async fn ingest_runtime_event(
@@ -4610,6 +4624,173 @@ mod tests {
         let result = drive.await?;
         assert_eq!(result.status, TaskStatus::Failed);
         assert_eq!(result.terminal_reason, TaskTerminalReason::IdleTimeout);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn silent_running_tool_suppresses_idle_until_it_completes() -> Result<()> {
+        let runtime = Arc::new(test_runtime_manager().await?);
+        let thread = runtime
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let (tx, mut rx) = mpsc::channel(64);
+        let runtime_for_drive = Arc::clone(&runtime);
+        let thread_id = thread.id.clone();
+        let drive = tokio::spawn(async move {
+            drive_engine_turn(
+                runtime_for_drive.as_ref(),
+                &thread_id,
+                "turn_silent_tool",
+                tx,
+                CancellationToken::new(),
+                TaskExecutionLimits {
+                    wall_time: Duration::from_secs(5),
+                    idle_progress: Duration::from_millis(80),
+                    cancel_grace: Duration::from_millis(500),
+                    persist_debounce: Duration::from_millis(10),
+                },
+            )
+            .await
+        });
+
+        // Keyed by the journal item id on the started edge; the payload also
+        // carries the engine tool-use id under "tool" (which must NOT become
+        // the tracking key: the terminal events only repeat "item").
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_silent_tool"),
+                "item.started",
+                json!({
+                    "item": { "id": "item_tool_silent", "status": "in_progress" },
+                    "tool": { "id": "call_build", "name": "exec_command", "input": {} }
+                }),
+            )
+            .await?;
+
+        // A silent build produces no journal traffic for its whole window;
+        // far past the idle deadline the watchdog must still not fire.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                TaskExecutionEvent::Status { message }
+                    if message.contains("idle deadline")
+            )),
+            "idle watchdog fired while a tool was still running"
+        );
+
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_silent_tool"),
+                "item.completed",
+                json!({ "item": { "id": "item_tool_silent", "status": "completed" } }),
+            )
+            .await?;
+
+        // Completion drains the set; silence afterwards must let the idle
+        // deadline fire again (a drain bug would surface as WallTimeout).
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Some(TaskExecutionEvent::Status { message })
+                        if message.contains("idle deadline") =>
+                    {
+                        break;
+                    }
+                    Some(_) => {}
+                    None => panic!("task event stream closed before idle deadline"),
+                }
+            }
+        })
+        .await
+        .context("idle deadline did not fire after the tool completed")?;
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_silent_tool"),
+                "turn.completed",
+                json!({ "turn": { "status": "interrupted" } }),
+            )
+            .await?;
+        let result = drive.await?;
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert_eq!(result.terminal_reason, TaskTerminalReason::IdleTimeout);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hung_running_tool_still_hits_the_wall_budget() -> Result<()> {
+        let runtime = Arc::new(test_runtime_manager().await?);
+        let thread = runtime
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let (tx, mut rx) = mpsc::channel(64);
+        let runtime_for_drive = Arc::clone(&runtime);
+        let thread_id = thread.id.clone();
+        let drive = tokio::spawn(async move {
+            drive_engine_turn(
+                runtime_for_drive.as_ref(),
+                &thread_id,
+                "turn_hung_tool",
+                tx,
+                CancellationToken::new(),
+                TaskExecutionLimits {
+                    wall_time: Duration::from_millis(300),
+                    idle_progress: Duration::from_millis(80),
+                    cancel_grace: Duration::from_millis(500),
+                    persist_debounce: Duration::from_millis(10),
+                },
+            )
+            .await
+        });
+
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_hung_tool"),
+                "item.started",
+                json!({
+                    "item": { "id": "item_tool_hung", "status": "in_progress" },
+                    "tool": { "id": "call_hang", "name": "exec_command", "input": {} }
+                }),
+            )
+            .await?;
+
+        // The running-tool suppression only defers the idle watchdog; the
+        // wall-time budget remains the backstop for a tool that never
+        // completes.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Some(TaskExecutionEvent::Status { message })
+                        if message.contains("wall-time") =>
+                    {
+                        break;
+                    }
+                    Some(_) => {}
+                    None => panic!("task event stream closed before wall deadline"),
+                }
+            }
+        })
+        .await
+        .context("wall budget did not fire during a hung tool")?;
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_hung_tool"),
+                "turn.completed",
+                json!({ "turn": { "status": "interrupted" } }),
+            )
+            .await?;
+        let result = drive.await?;
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert_eq!(result.terminal_reason, TaskTerminalReason::WallTimeout);
         Ok(())
     }
 
