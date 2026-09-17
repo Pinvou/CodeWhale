@@ -787,14 +787,10 @@ type productComponentCredit struct {
 }
 
 func splitProductComponents(total, basePoints, bonusPoints int64) ([]productComponentCredit, error) {
-	if total <= 0 || basePoints < 0 || bonusPoints < 0 || basePoints > math.MaxInt64-bonusPoints || basePoints+bonusPoints <= 0 {
-		return nil, ErrConflict
+	base, bonus, err := productComponentAmounts(total, basePoints, bonusPoints)
+	if err != nil {
+		return nil, err
 	}
-	weight := basePoints + bonusPoints
-	fraction := new(big.Int).Mul(big.NewInt(total%weight), big.NewInt(basePoints))
-	fraction.Quo(fraction, big.NewInt(weight))
-	base := total/weight*basePoints + fraction.Int64()
-	bonus := total - base
 	components := make([]productComponentCredit, 0, 2)
 	if base > 0 {
 		components = append(components, productComponentCredit{kind: "BASE", amount: base, lotID: uuid.Must(uuid.NewV7())})
@@ -802,10 +798,21 @@ func splitProductComponents(total, basePoints, bonusPoints int64) ([]productComp
 	if bonus > 0 {
 		components = append(components, productComponentCredit{kind: "BONUS", amount: bonus, lotID: uuid.Must(uuid.NewV7())})
 	}
-	if len(components) == 0 {
-		return nil, ErrConflict
-	}
 	return components, nil
+}
+
+// productComponentAmounts is shared by original payment fulfillment and the
+// read-only correction precheck. It must never use the current product catalog.
+func productComponentAmounts(total, basePoints, bonusPoints int64) (int64, int64, error) {
+	if total <= 0 || basePoints < 0 || bonusPoints < 0 || basePoints > math.MaxInt64-bonusPoints || basePoints+bonusPoints <= 0 {
+		return 0, 0, ErrConflict
+	}
+	weight := basePoints + bonusPoints
+	fraction := new(big.Int).Mul(big.NewInt(total%weight), big.NewInt(basePoints))
+	fraction.Quo(fraction, big.NewInt(weight))
+	base := total/weight*basePoints + fraction.Int64()
+	bonus := total - base
+	return base, bonus, nil
 }
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
