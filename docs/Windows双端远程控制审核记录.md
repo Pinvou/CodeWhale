@@ -87,3 +87,13 @@
 - 发现：无 blocker/major；minor 记录：`issued_at_relay` 被忽略属规范要求的保守策略（需求 8.1），已由用例锁定，无需修改。
 - 验证：`cargo test remote_control::controller::liveness` 6 通过 / 0 失败；`node --test remote-control-relay/test/controller-liveness.test.js` 6 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 9. DEV-09：双端 provisional/pending-liveness resume
+
+审核轮次 1（审核提交 5db233a0）
+
+- 逐条核对：A/B 角色绑定 token 摘要（`resume_token_a_sha256`/`_b_sha256`，只在激活提交时原子轮换）；双方 prepare → `resume_provisional` → B activation ACK → `resume_activated_pending_liveness` → 首个 post-activation liveness 与 Relay 确认 → 双方 ready → `controller_resumed` 的完整链路；每个阶段都校验 `original_deadline_ms` 必须等于租约既有 `resume_deadline_ms`，因此 prepare/ACK/重试都不能把 DEV-08 的 30 秒预算重置；phase 白名单（`provisional`/`confirmed`/`pending_liveness`/`liveness_confirmed`）保证未激活前不承载业务；失败路径统一走 `#terminate`。
+- 验收核对：用例覆盖单边 prepare、跨角色/失效/重放 token、ACK 不能跳过任一 E2E 确认、单边 prepare/ready 在原 deadline 内过期、提交失败走同一收尾、最终投递丢失时终止而非留下 active lease（不存在 Relay active / B terminal 分裂）。
+- 发现：无新增 blocker/major；DEV-09 修改 `server.js`/`controller-router.js` 的边界问题已在 DEV-06 条目登记并通过 `6e8f5a31` 提供 hook 注入点解决。
+- 验证：`cargo test remote_control::controller::resume` 4 通过 / 0 失败；`node --test remote-control-relay/test/controller-resume.test.js` 8 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
