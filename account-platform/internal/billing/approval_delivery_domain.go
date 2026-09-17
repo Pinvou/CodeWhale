@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -26,6 +28,8 @@ type billingAuthorizationExecutionRepository interface {
 	productResumeVersions(context.Context, ProductResumeVersions) (ProductResumeVersions, error)
 	executeProviderResume(context.Context, ProviderResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProviderResumeResult, error)
 	executeProductResume(context.Context, ProductResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProductResumeResult, error)
+	EntitlementCorrectionForRequest(context.Context, uuid.UUID) (EntitlementCorrectionResult, error)
+	ExecuteEntitlementComponentCorrection(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string, entitlementCorrectionFrozenFacts) (EntitlementCorrectionResult, error)
 }
 
 func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain {
@@ -93,6 +97,23 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		}
 		encoded, err := json.Marshal(result)
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: json.RawMessage(`{}`)}, true, err
+	case entitlementComponentAdjustmentCommand:
+		if domain.repository == nil {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		result, err := domain.repository.EntitlementCorrectionForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
 	default:
 		return authorizationDomainResult{}, false, ErrConflict
 	}
@@ -130,6 +151,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return domain.executeProviderResume(ctx, binding, event, command)
 	case "PAYMENT_PRODUCT_RESUME":
 		return domain.executeProductResume(ctx, binding, event, command)
+	case entitlementComponentAdjustmentCommand:
+		return domain.executeEntitlementCorrection(ctx, binding, event, command)
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
@@ -144,8 +167,12 @@ func (domain *billingAuthorizationDomain) executionProof(ctx context.Context, bi
 		!sameRawJSON(command.CriticalResourceVersions, event.CriticalResourceVersions) || !sameRawJSON(command.FinancialSnapshot, event.FinancialSnapshot) {
 		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH"), false
 	}
+	snapshotSchemaVersion := 1
+	if event.CommandType == entitlementComponentAdjustmentCommand {
+		snapshotSchemaVersion = 2
+	}
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
-		CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: 1,
+		CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: snapshotSchemaVersion,
 		TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,
 		NormalizedCommand: event.NormalizedCommand, CriticalResourceVersions: event.CriticalResourceVersions,
 		FinancialSnapshot: event.FinancialSnapshot,
@@ -181,6 +208,83 @@ func (domain *billingAuthorizationDomain) executeAdjustment(ctx context.Context,
 	}
 	result, ledger := adjustmentAuthorizationResult(posted)
 	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: result, LedgerReferences: ledger}}
+}
+
+func (domain *billingAuthorizationDomain) executeEntitlementCorrection(ctx context.Context, binding ApprovalAuthorizationBinding,
+	event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
+	var normalized struct {
+		PackageID      uuid.UUID `json:"package_id"`
+		PaymentOrderID uuid.UUID `json:"payment_order_id"`
+		ReasonCode     string    `json:"reason_code"`
+	}
+	var critical struct {
+		PackageID            uuid.UUID  `json:"package_id"`
+		WalletID             uuid.UUID  `json:"wallet_id"`
+		WalletVersion        int64      `json:"wallet_version"`
+		PaymentOrderID       uuid.UUID  `json:"payment_order_id"`
+		PaymentTransactionID uuid.UUID  `json:"payment_transaction_id"`
+		SourceComponentID    uuid.UUID  `json:"source_component_id"`
+		SourceLotID          uuid.UUID  `json:"source_lot_id"`
+		TargetComponentID    *uuid.UUID `json:"target_component_id"`
+		TargetLotID          *uuid.UUID `json:"target_lot_id"`
+		SourceType           string     `json:"source_type"`
+		TargetType           string     `json:"target_type"`
+		AmountMicrocredits   int64      `json:"amount_microcredits"`
+		SourceEvidenceDigest string     `json:"source_evidence_digest"`
+		FactsDigest          string     `json:"facts_digest"`
+		PolicyVersion        int64      `json:"policy_version"`
+	}
+	if json.Unmarshal(event.NormalizedCommand, &normalized) != nil || json.Unmarshal(event.CriticalResourceVersions, &critical) != nil ||
+		normalized.PackageID == uuid.Nil || normalized.PaymentOrderID == uuid.Nil ||
+		strings.TrimSpace(normalized.ReasonCode) != normalized.ReasonCode || len(normalized.ReasonCode) == 0 || len(normalized.ReasonCode) > 80 ||
+		event.CommandType != entitlementComponentAdjustmentCommand || event.TargetResourceType != "ENTITLEMENT_PACKAGE" ||
+		event.TargetResourceID != normalized.PackageID.String() || command.TargetResourceType != event.TargetResourceType ||
+		command.TargetResourceID != event.TargetResourceID || !sameRawJSON(event.NormalizedCommand, command.NormalizedCommand) ||
+		!sameRawJSON(event.CriticalResourceVersions, command.CriticalResourceVersions) ||
+		!sameRawJSON(event.FinancialSnapshot, command.FinancialSnapshot) ||
+		event.ApprovalRequestID != binding.ApprovalRequestID || command.ApprovalRequestID != binding.ApprovalRequestID ||
+		event.EventID != binding.EventID || event.ApprovalControlEpoch != binding.ApprovalEpoch ||
+		event.ExecutorIdentity != billingApprovalExecutorIdentity || command.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		binding.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		!validIndependentApproval(command.RequesterUserID, command.ApproverUserID, command.DecisionReason) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	targetComponentID, targetLotID := uuid.Nil, uuid.Nil
+	if critical.TargetComponentID != nil {
+		targetComponentID = *critical.TargetComponentID
+	}
+	if critical.TargetLotID != nil {
+		targetLotID = *critical.TargetLotID
+	}
+	frozen := entitlementCorrectionFrozenFacts{
+		WalletID: critical.WalletID, WalletVersion: critical.WalletVersion, PaymentTransactionID: critical.PaymentTransactionID,
+		SourceComponentID: critical.SourceComponentID, SourceLotID: critical.SourceLotID,
+		TargetComponentID: targetComponentID, TargetLotID: targetLotID,
+		SourceType: critical.SourceType, TargetType: critical.TargetType, AmountMicrocredits: critical.AmountMicrocredits,
+		SourceEvidenceDigest: critical.SourceEvidenceDigest, FactsDigest: critical.FactsDigest,
+	}
+	validTypes := (frozen.SourceType == "BASE" && frozen.TargetType == "BONUS") ||
+		(frozen.SourceType == "BONUS" && frozen.TargetType == "BASE")
+	if critical.PackageID != normalized.PackageID || critical.PaymentOrderID != normalized.PaymentOrderID ||
+		critical.PolicyVersion != event.PolicyVersion || event.PolicyVersion != 2 || command.PolicyVersion != 2 ||
+		binding.PolicyVersion != 2 || frozen.WalletID == uuid.Nil || frozen.WalletVersion < 1 ||
+		frozen.PaymentTransactionID == uuid.Nil || frozen.SourceComponentID == uuid.Nil || frozen.SourceLotID == uuid.Nil ||
+		(frozen.TargetComponentID == uuid.Nil) != (frozen.TargetLotID == uuid.Nil) || !validTypes ||
+		frozen.AmountMicrocredits < 1 || !validHexDigest(frozen.SourceEvidenceDigest) || !validHexDigest(frozen.FactsDigest) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	result, err := domain.repository.ExecuteEntitlementComponentCorrection(ctx, binding.ApprovalRequestID, binding.EventID,
+		binding.ApprovalEpoch, normalized.PackageID, normalized.PaymentOrderID, command.RequesterUserID, command.ApproverUserID,
+		command.ExecutionIdempotencyKey, command.DecisionReason, normalized.ReasonCode, frozen)
+	if err != nil {
+		return classifyAuthorizationDomainFailure(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
 }
 
 func (domain *billingAuthorizationDomain) executeProviderResume(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
@@ -261,6 +365,14 @@ func adjustmentAuthorizationResult(adjustment ManualAdjustment) (json.RawMessage
 
 func definiteAuthorizationFailure(code string) authorizationDomainAttempt {
 	return authorizationDomainAttempt{StableFailureCode: code, FailureIsDefinite: true}
+}
+
+func validHexDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func classifyAuthorizationDomainFailure(err error) authorizationDomainAttempt {

@@ -158,8 +158,15 @@ type authorizationExecutionRepositoryStub struct {
 	providerErr, providerRunErr     error
 	product                         ProductResumeVersions
 	productErr, productRunErr       error
+	entitlementCorrection           EntitlementCorrectionResult
+	entitlementCorrectionErr        error
+	entitlementRunErr               error
+	entitlementFrozen               entitlementCorrectionFrozenFacts
+	entitlementKey                  string
+	entitlementReasonCode           string
 	adjustmentRuns                  int
 	providerRuns, productRuns       int
+	entitlementRuns                 int
 }
 
 func (s *authorizationExecutionRepositoryStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
@@ -184,6 +191,21 @@ func (s *authorizationExecutionRepositoryStub) executeProviderResume(context.Con
 func (s *authorizationExecutionRepositoryStub) executeProductResume(context.Context, ProductResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProductResumeResult, error) {
 	s.productRuns++
 	return ProductResumeResult{ExecutionID: uuid.New(), ProviderID: s.product.ProviderID, ProductID: s.product.ProductID, Status: "RESUMED"}, s.productRunErr
+}
+
+func (s *authorizationExecutionRepositoryStub) EntitlementCorrectionForRequest(context.Context, uuid.UUID) (EntitlementCorrectionResult, error) {
+	return s.entitlementCorrection, s.entitlementCorrectionErr
+}
+
+func (s *authorizationExecutionRepositoryStub) ExecuteEntitlementComponentCorrection(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int64, _, _, _, _ uuid.UUID, executionKey, _, reasonCode string, frozen entitlementCorrectionFrozenFacts) (EntitlementCorrectionResult, error) {
+	s.entitlementRuns++
+	s.entitlementFrozen = frozen
+	s.entitlementKey = executionKey
+	s.entitlementReasonCode = reasonCode
+	if s.entitlementRunErr != nil {
+		return EntitlementCorrectionResult{}, s.entitlementRunErr
+	}
+	return s.entitlementCorrection, nil
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {

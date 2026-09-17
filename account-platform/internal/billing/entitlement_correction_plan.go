@@ -27,6 +27,9 @@ type entitlementCorrectionReadPlan struct {
 	PackageTotal         int64
 	SourceOriginal       int64
 	TargetOriginal       int64
+	SourceCreditedAt     time.Time
+	SourceExpiresAt      time.Time
+	SourceEvidenceRef    string
 	SourceEvidenceDigest string
 	FactsDigest          string
 	Amounts              entitlementCorrectionAmounts
@@ -136,7 +139,7 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 	}
 	rows, err := source.Query(ctx, `SELECT c.id,c.component_type,c.credit_lot_id,c.original_microcredits,c.available_microcredits,
  c.reserved_microcredits,c.used_microcredits,c.active_grant_microcredits,c.suspended_grant_microcredits,
- c.expired_microcredits,c.revoked_microcredits,c.reclassified_out_microcredits,c.status,c.expires_at,
+ c.expired_microcredits,c.revoked_microcredits,c.reclassified_out_microcredits,c.status,c.expires_at,c.credited_at,
  l.wallet_id,l.original_microcredits,l.remaining_microcredits,l.refundable,l.expires_at,l.source_type,l.source_reference
  FROM entitlement_components c JOIN credit_lots l ON l.id=c.credit_lot_id WHERE c.package_id=$1 ORDER BY c.id`, packageID)
 	if err != nil {
@@ -146,17 +149,19 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 	componentIDs := map[string]uuid.UUID{}
 	lotIDs := map[string]uuid.UUID{}
 	lotAmounts := map[uuid.UUID]int64{}
+	creditedAtByKind := map[string]time.Time{}
+	expiresAtByKind := map[string]time.Time{}
 	count := 0
 	for rows.Next() {
 		var id, lotID, lotWalletID uuid.UUID
 		var kind, status string
 		var original, available, reservedComponent, usedComponent, activeGrant, suspendedGrant, expiredComponent, revokedComponent, reclassified, lotOriginal, lotRemaining int64
 		var lotSourceType, lotSourceReference string
-		var expiresAt, lotExpiresAt time.Time
+		var creditedAt, expiresAt, lotExpiresAt time.Time
 		var refundable bool
 		if err = rows.Scan(&id, &kind, &lotID, &original, &available, &reservedComponent, &usedComponent,
 			&activeGrant, &suspendedGrant, &expiredComponent, &revokedComponent, &reclassified, &status, &expiresAt,
-			&lotWalletID, &lotOriginal, &lotRemaining, &refundable, &lotExpiresAt, &lotSourceType, &lotSourceReference); err != nil {
+			&creditedAt, &lotWalletID, &lotOriginal, &lotRemaining, &refundable, &lotExpiresAt, &lotSourceType, &lotSourceReference); err != nil {
 			break
 		}
 		count++
@@ -169,11 +174,13 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 			(lotSourceReference != sourceReference && (kind != "BONUS" || lotSourceReference != sourceReference+":bonus")) ||
 			refundable != (kind == "BASE") || !expiresAt.Equal(lotExpiresAt) ||
 			!expiresAt.Equal(packageUntil) || !expiresAt.After(now) ||
+			creditedAt.IsZero() || creditedAt.After(now) || !expiresAt.After(creditedAt) ||
 			original > math.MaxInt64-base-bonus {
 			err = ErrConflict
 			break
 		}
 		componentIDs[kind], lotIDs[kind] = id, lotID
+		creditedAtByKind[kind], expiresAtByKind[kind] = creditedAt, expiresAt
 		lotAmounts[lotID] = original
 		if kind == "BASE" {
 			base += original
@@ -250,6 +257,8 @@ func entitlementCorrectionPlanFrom(ctx context.Context, source entitlementCorrec
 		ExistingTargetID: componentIDs[amounts.TargetType], TargetComponentID: componentIDs[amounts.TargetType],
 		TargetLotID: lotIDs[amounts.TargetType], WalletVersion: walletVersion, PackageTotal: packageTotal,
 		SourceOriginal: sourceOriginal, TargetOriginal: targetOriginal,
+		SourceCreditedAt: creditedAtByKind[amounts.SourceType], SourceExpiresAt: expiresAtByKind[amounts.SourceType],
+		SourceEvidenceRef:    sourceReference,
 		SourceEvidenceDigest: evidenceDigest, FactsDigest: factsDigest, Amounts: amounts,
 	}, nil
 }

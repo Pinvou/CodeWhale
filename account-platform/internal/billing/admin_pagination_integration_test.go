@@ -315,6 +315,10 @@ func TestAdminPaginationPostgresIntegration(t *testing.T) {
 }
 
 func newAdminPaginationIntegrationRepository(t *testing.T, ctx context.Context, databaseURL string) (*PostgresRepository, string) {
+	return newAdminPaginationIntegrationRepositoryToVersion(t, ctx, databaseURL, 0)
+}
+
+func newAdminPaginationIntegrationRepositoryToVersion(t *testing.T, ctx context.Context, databaseURL string, maximumVersion int64) (*PostgresRepository, string) {
 	t.Helper()
 	connection, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
@@ -337,6 +341,15 @@ func newAdminPaginationIntegrationRepository(t *testing.T, ctx context.Context, 
 	loaded, err := loadBillingIntegrationMigrations("../../migrations/billing", schema)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if maximumVersion > 0 {
+		bounded := make([]migrations.Migration, 0, len(loaded))
+		for _, migration := range loaded {
+			if migration.Version <= maximumVersion {
+				bounded = append(bounded, migration)
+			}
+		}
+		loaded = bounded
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatalf("migrate isolated integration schema: %v", err)

@@ -18,7 +18,7 @@ func TestEntitlementComponentCorrectionPreparePostgresIntegration(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	repository, schema := newAdminPaginationIntegrationRepository(t, ctx, databaseURL)
+	repository, schema := newAdminPaginationIntegrationRepositoryToVersion(t, ctx, databaseURL, 57)
 	var defaultValue, nullable string
 	err := repository.pool.QueryRow(ctx, `SELECT column_default,is_nullable FROM information_schema.columns
 WHERE table_schema=$1 AND table_name='entitlement_components' AND column_name='reclassified_out_microcredits'`, schema).Scan(&defaultValue, &nullable)
