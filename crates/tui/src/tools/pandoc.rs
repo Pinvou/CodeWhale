@@ -30,7 +30,9 @@
 //! anything in the list goes through unchanged.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::Command as TokioCommand;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -61,6 +63,12 @@ pub(crate) const SUPPORTED_TARGET_FORMATS: &[&str] = &[
 /// Tool implementing `pandoc_convert`. Converts a source file into
 /// a target format and either writes the output to disk or returns
 /// the converted text inline.
+/// Wall-clock bound for one pandoc conversion: a pathological document
+/// (giant epub, pathological LaTeX) otherwise blocked an executor thread
+/// for as long as pandoc felt like taking. Mirrors the 600s interpreter
+/// budget used by js_execution / code_execution.
+const PANDOC_TIMEOUT: Duration = Duration::from_secs(600);
+
 pub struct PandocConvertTool;
 
 #[async_trait]
@@ -154,18 +162,26 @@ impl ToolSpec for PandocConvertTool {
             )
         })?;
 
-        let mut cmd = Command::new(&pandoc);
+        let mut cmd = TokioCommand::new(&pandoc);
         cmd.arg(&source_path);
         cmd.arg("--to").arg(&target_format);
         if let Some(out) = resolved_output_path.as_ref() {
             cmd.arg("--output").arg(out);
         }
+        // Kill the converter if the timeout below drops the output()
+        // future; pandoc on a pathological document otherwise keeps
+        // running orphaned, and the sync variant blocked an executor
+        // thread for the whole conversion.
+        cmd.kill_on_drop(true);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let output = cmd
-            .output()
+        let output = tokio::time::timeout(PANDOC_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| ToolError::Timeout {
+                seconds: PANDOC_TIMEOUT.as_secs(),
+            })?
             .map_err(|e| ToolError::execution_failed(format!("failed to launch pandoc: {e}")))?;
 
         if !output.status.success() {
