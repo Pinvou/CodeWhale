@@ -10,6 +10,9 @@ const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   localModelSetup: true,
   externalSystemOpen: true,
   webAccessAdmin: true,
+  // Windows-only desktop dual-end remote control. The fallback is the desktop
+  // lane, so it defaults to true and the backend capability decides per OS.
+  desktopRemoteControl: true,
   desktopNotifications: true,
   hostFilePicker: true,
   artifactDownload: false,

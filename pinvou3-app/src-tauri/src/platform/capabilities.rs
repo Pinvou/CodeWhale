@@ -22,6 +22,8 @@ pub(crate) struct DesktopCapabilities {
     /// composer pastes fall back to a native clipboard read; the macOS/Windows
     /// WebViews carry image items natively and need no fallback.
     pub(crate) paste_image_clipboard_read: bool,
+    /// Windows-only desktop dual-end remote control backend.
+    pub(crate) desktop_remote_control_supported: bool,
 }
 
 fn browser_product_enabled_for(os: &str) -> bool {
@@ -58,11 +60,19 @@ pub(crate) fn current() -> DesktopCapabilities {
         browser_cdp: cfg!(target_os = "windows"),
         voice_shortcut_native: cfg!(target_os = "windows"),
         paste_image_clipboard_read: cfg!(target_os = "linux"),
+        desktop_remote_control_supported: supports_desktop_remote_control(std::env::consts::OS),
     }
 }
 
 pub(crate) fn supports_codex_acp(os: &str) -> bool {
     matches!(os, "linux" | "windows" | "macos")
+}
+
+/// Windows is the only target with the desktop dual-end remote-control backend
+/// (A control / B controlled). Other targets report `unsupported` instead of
+/// pretending to support the feature.
+pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
+    matches!(os, "windows")
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -115,6 +125,10 @@ mod tests {
         assert_eq!(
             capabilities.paste_image_clipboard_read,
             cfg!(target_os = "linux")
+        );
+        assert_eq!(
+            capabilities.desktop_remote_control_supported,
+            supports_desktop_remote_control(std::env::consts::OS)
         );
     }
 

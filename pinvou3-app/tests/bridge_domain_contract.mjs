@@ -18,6 +18,19 @@ export const desktopBridgeApi = {
   interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'resetWebRelayAddress', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
+  // Windows 双端远程控制（B 被控端 / A 主控端）。与 webAccess 完全不同域：
+  // 只暴露 opaque ID、状态投影与任务编排，模型凭证、路径和密钥都留在 Rust。
+  desktopRemoteControl: [
+    'artifactDownloadAbort', 'artifactDownloadBegin', 'artifactDownloadChunk', 'artifactIndex', 'artifactPreview',
+    'attachmentAbort', 'attachmentBegin', 'attachmentChunk',
+    'cancelRemoteTask', 'capabilitiesSnapshot', 'controlledAuthorizeWorkspace', 'controlledDisconnectNow',
+    'controlledListWorkspaces', 'controlledRefresh', 'controlledStart', 'controlledStatus', 'controlledStop',
+    'controllerConnect', 'controllerCreateHistory', 'controllerDisconnect', 'controllerListHistory', 'controllerStatus',
+    'historyDelete', 'historyList', 'historyLoad', 'historyMarkOffline', 'isAvailable',
+    'journalAcknowledge', 'journalReplay', 'journalSnapshot', 'listExportableModels',
+    'openRemoteSession', 'permissionDecide', 'permissionDenyTask', 'permissionList',
+    'remoteTaskStatus', 'submitRemoteTask', 'switchRemoteSession',
+  ],
   artifacts: ['artifactInfo', 'downloadArtifact', 'listDeliverableIndex', 'openArtifactExternal', 'openContainingFolder', 'openExternalUrl', 'openInSystem', 'openScheduledTaskFolder', 'openUserExternalUrl', 'readArtifactImageB64', 'readArtifactText', 'readArtifactThumbnail', 'renderArtifactVisual', 'revealSessionFolder', 'writeArtifactText'],
   attachments: ['addAttachmentByPath', 'addPasteImage', 'addPasteImageFromClipboard', 'clearAttachments', 'openConversationAttachment', 'pickAndAttach', 'removeAttachment', 'resolveConversationAttachment', 'revealConversationAttachment', 'uploadDeviceFiles'],
   resolutions: ['markResolved'],
@@ -70,7 +83,7 @@ export const desktopOnlyBridgeApi = {
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
 // 后端 remote_control 漏斗另有权威封禁。projects 是本地会话归档分组
 // （~/.pinvou3/projects/projects.json），Web 端没有对应后端。
-export const desktopOnlyBridgeDomains = ['multiAgent', 'projects'];
+export const desktopOnlyBridgeDomains = ['multiAgent', 'projects', 'desktopRemoteControl'];
 
 export function expectedWebBridgeApi() {
   return Object.fromEntries(

@@ -17,6 +17,7 @@ use crate::features::remote_control::controller::history::{
 use crate::features::remote_control::controller::journal::{
     JournalEvent, JournalSnapshot, RemoteJournal, ReplayOutcome,
 };
+use crate::features::remote_control::controller::task::{RemoteTaskEvent, RemoteTaskEventSink};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
@@ -34,6 +35,29 @@ pub struct DesktopRemoteJournalReplay {
 pub(crate) struct DesktopRemoteHistoryRuntime {
     store: Arc<RemoteHistoryStore>,
     journal: Arc<RemoteJournal>,
+}
+
+/// The task owner's terminal/status events go to both the frontend (live UI)
+/// and the authoritative journal this runtime owns.
+pub(crate) struct DesktopTaskEventSink {
+    app: tauri::AppHandle,
+    journal: Arc<RemoteJournal>,
+}
+
+impl DesktopTaskEventSink {
+    pub(crate) fn new(app: tauri::AppHandle, journal: Arc<RemoteJournal>) -> Self {
+        Self { app, journal }
+    }
+}
+
+const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
+
+impl RemoteTaskEventSink for DesktopTaskEventSink {
+    fn publish_task_event(&self, event: &RemoteTaskEvent) {
+        use tauri::Emitter as _;
+        let _ = self.app.emit(TASK_STATUS_EVENT, event);
+        RemoteTaskEventSink::publish_task_event(self.journal.as_ref(), event);
+    }
 }
 
 impl DesktopRemoteHistoryRuntime {
