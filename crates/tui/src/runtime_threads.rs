@@ -3037,6 +3037,17 @@ pub struct RuntimeThreadManager {
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
 }
 
+impl RuntimeThreadManager {
+    /// Request runtime shutdown: cancels the shared cancellation token that
+    /// turn monitoring and the unbounded external-approval wait observe, so
+    /// a manager being torn down resolves suspended waits instead of leaving
+    /// turns pending forever. Hosts call this while winding down; it is
+    /// idempotent and safe to call more than once.
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
+    }
+}
+
 #[derive(Debug)]
 struct RuntimeProcessOwnerLock {
     _file: File,
@@ -9275,7 +9286,9 @@ impl RuntimeThreadManager {
                     // long to review a command, so there is no wall-clock cap
                     // here (auto-denying would continue the turn under a
                     // decision the user never made). The wait only ends early
-                    // on turn interrupt or runtime shutdown.
+                    // on turn interrupt, runtime shutdown, or engine death —
+                    // without the last one, a crashed engine would leave the
+                    // pending approval (and this turn) suspended forever.
                     let mut rx = rx;
                     let mut interrupt_poll = tokio::time::interval(Duration::from_millis(500));
                     interrupt_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -9298,10 +9311,14 @@ impl RuntimeThreadManager {
                                 break ApprovalWakeup::Decision(decision);
                             }
                             _ = interrupt_poll.tick() => {
-                                if self
-                                    .is_interrupt_requested(&thread_id, &turn_id)
-                                    .await
-                                    .unwrap_or(false)
+                                // `tx_op.is_closed()` is a non-consuming
+                                // probe: the engine dropping its op receiver
+                                // means the engine task is gone.
+                                if engine.tx_op.is_closed()
+                                    || self
+                                        .is_interrupt_requested(&thread_id, &turn_id)
+                                        .await
+                                        .unwrap_or(false)
                                 {
                                     break ApprovalWakeup::Interrupted;
                                 }
