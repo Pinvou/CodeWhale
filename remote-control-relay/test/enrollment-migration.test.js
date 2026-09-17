@@ -434,6 +434,71 @@ test("self-hosted CLI is machine-readable, private-file only, and never prints c
   else assert.equal((await lstat(backup)).mode & 0o077, 0);
 });
 
+// DEV-02 审核修复：回滚门禁的验收是“未满足门禁时自动失败”，但此前测试只做了
+// check-enrollment-gated-v2-rollback.mjs 的源码字符串断言，脚本行为从未被执行。
+// 下面直接以子进程运行门禁脚本，覆盖两条必须失败的路径。
+async function runRollbackGate(env) {
+  const repoRoot = dirname(relayDir);
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [join(repoRoot, "scripts", "check-enrollment-gated-v2-rollback.mjs")],
+      { cwd: repoRoot, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.once("error", (error) => resolve({ code: null, stdout, stderr: `${stderr}${error?.message}` }));
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("rollback gate refuses without an inventory and never reports safe", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const result = await runRollbackGate({
+    ...process.env,
+    ...environment(root, "self_hosted"),
+    PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: "",
+  });
+  assert.equal(result.code, 1);
+  const failure = JSON.parse(result.stderr.trim().split(/\r?\n/u).at(-1));
+  assert.equal(failure.ok, false);
+  assert.equal(failure.safe_to_run_legacy_v2, false);
+  assert.equal(failure.code, "legacy_endpoint_inventory_required");
+  assert.doesNotMatch(result.stdout, /safe_to_run_legacy_v2/u);
+});
+
+test("rollback gate fails closed when its coverage input is unusable", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-rollback-gate-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const inventory = join(root, "inventory.json");
+  await writeFile(
+    inventory,
+    JSON.stringify({ schema: "not-a-legacy-inventory", version: 1, endpoint_ids: [] }),
+    "utf8",
+  );
+  if (process.platform === "win32") await protectWindowsPath(inventory, "file");
+  else await chmod(inventory, 0o600);
+  const result = await runRollbackGate({
+    ...process.env,
+    ...environment(root, "self_hosted"),
+    PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: inventory,
+  });
+  assert.equal(result.code, 1);
+  const failure = JSON.parse(result.stderr.trim().split(/\r?\n/u).at(-1));
+  assert.equal(failure.ok, false);
+  assert.equal(failure.safe_to_run_legacy_v2, false);
+  // Both codes are fail-closed for the same reason: the coverage step refused
+  // before the gateway preflight could ever report success.
+  assert.ok(
+    ["inventory_document_invalid", "input_permissions_unsafe"].includes(failure.code),
+    `unexpected gate failure code: ${failure.code}`,
+  );
+  assert.doesNotMatch(result.stdout, /safe_to_run_legacy_v2/u);
+});
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = http.createServer();
