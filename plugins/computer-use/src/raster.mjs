@@ -26,3 +26,25 @@ export function zoomChildRaster(prev, region) {
     },
   };
 }
+
+/**
+ * The region a zoom actually crops, clipped against the source raster's pixel
+ * size. Every backend crops and returns this exact rect: the croppers adjust
+ * an out-of-bounds request on their own (ffmpeg clamps the origin silently,
+ * sips/GDI are unspecified), so a backend that cropped the raw region and
+ * echoed it would hand the server a binding for a crop that was never taken.
+ * Returns null for a degenerate region (w or h below 1 pixel) — callers
+ * reject that with the named region error.
+ */
+export function clampRegion(region, srcW, srcH) {
+  if (!Array.isArray(region) || region.length < 4 || !region.slice(0, 4).every((n) => Number.isFinite(n))) return null;
+  if (!Number.isInteger(srcW) || !Number.isInteger(srcH) || srcW < 1 || srcH < 1) return null;
+  const [x, y, w, h] = region.map(Math.round);
+  if (w < 1 || h < 1) return null;
+  return [
+    Math.max(0, Math.min(x, srcW - w)),
+    Math.max(0, Math.min(y, srcH - h)),
+    Math.min(w, srcW),
+    Math.min(h, srcH),
+  ];
+}

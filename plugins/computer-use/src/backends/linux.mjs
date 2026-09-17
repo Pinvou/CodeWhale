@@ -8,6 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
+import { clampRegion } from "../raster.mjs";
 
 const XKEYS = {
   return: "Return", enter: "Return", tab: "Tab", escape: "Escape", esc: "Escape",
@@ -39,7 +40,7 @@ export function create({ exec }) {
     const wayland = !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland");
     const x11 = !!(process.env.DISPLAY || process.env.XDG_SESSION_TYPE === "x11");
     session = wayland && !x11 ? "wayland" : x11 ? "x11" : null;
-    for (const t of ["xdotool", "wmctrl", "scrot", "import", "grim", "slurp", "wtype", "ydotool", "wf-recorder", "ffmpeg", "xclip", "xsel", "wl-copy", "wl-paste", "python3", "xrandr", "swaymsg", "hyprctl"]) {
+    for (const t of ["xdotool", "wmctrl", "scrot", "import", "grim", "slurp", "wtype", "ydotool", "wf-recorder", "ffmpeg", "ffprobe", "xclip", "xsel", "wl-copy", "wl-paste", "python3", "xrandr", "swaymsg", "hyprctl"]) {
       tools[t] = await have(t);
     }
     tools.pyatspi = tools.python3 && (await run("python3", ["-c", "import pyatspi"], { timeoutMs: 10_000 })).code === 0;
@@ -48,6 +49,19 @@ export function create({ exec }) {
 
   function need(tool, purpose) {
     if (!tools[tool]) throw new ExecError(`linux backend needs "${tool}" for ${purpose} — install it and retry`);
+  }
+
+  /**
+   * Pixel size of an image file, via ffprobe (ships in the same package as
+   * ffmpeg). Zoom clips its region against the source raster bounds — the
+   * croppers would adjust an out-of-bounds region on their own, and the
+   * server must bind the geometry of the crop actually taken.
+   */
+  async function rasterSize(file) {
+    const r = await runOk("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", file], { timeoutMs: 10_000 });
+    const m = /(\d+)x(\d+)/.exec(r.stdout.trim());
+    if (!m) throw new ExecError(`cannot read the pixel size of ${file} — zoom clips its region against the source raster`);
+    return { w: Number(m[1]), h: Number(m[2]) };
   }
 
   async function shotTool() {
@@ -345,19 +359,28 @@ except Exception as e:
       return { ...lastRaster };
     },
     zoom: async ({ source, region, path: outPath }) => {
-      if (!Array.isArray(region) || ![region[0], region[1], region[2], region[3]].every((n) => Number.isFinite(n) && n >= 0)) {
+      if (!Array.isArray(region) || region.length < 4 || ![region[0], region[1]].every((n) => Number.isFinite(n) && n >= 0) || ![region[2], region[3]].every((n) => Number.isFinite(n) && n >= 1)) {
         throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
       }
+      // The one-shot ssh agent lands here without ever having probed, so the
+      // tool cache must be filled before need() can trust it.
+      await probeSession();
       need("ffmpeg", "zoom/crop");
+      need("ffprobe", "zoom/crop");
       const src = source ?? lastRaster?.file;
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
+      const size = await rasterSize(src);
+      const eff = clampRegion(region, size.w, size.h);
+      if (!eff) throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
       const out = outPath || path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
-      await runOk("ffmpeg", ["-y", "-loglevel", "error", "-i", src, "-vf", `crop=${Math.round(region[2])}:${Math.round(region[3])}:${Math.round(region[0])}:${Math.round(region[1])}`, out], { timeoutMs: 20_000 });
+      await runOk("ffmpeg", ["-y", "-loglevel", "error", "-i", src, "-vf", `crop=${eff[2]}:${eff[3]}:${eff[0]}:${eff[1]}`, out], { timeoutMs: 20_000 });
       const bytes = fs.statSync(out).size;
       // The child raster becomes the last raster so a follow-up zoom crops
       // from the child, matching zoom's "region in last-raster pixels" contract.
       lastRaster = { ...lastRaster, file: out, bytes, capturedAt: new Date().toISOString() };
-      return { file: out, bytes, region, source: src };
+      // The receipt carries the region actually cropped (clipped to the
+      // source raster) — the server binds child-pixel coordinates against it.
+      return { file: out, bytes, region: eff, source: src };
     },
     left_click: ({ target }) => { assertNum(target.x, "x"); assertNum(target.y, "y"); return inputChain(target.x, target.y, () => clickButton(1, 1)); },
     double_click: ({ target }) => inputChain(target.x, target.y, () => clickButton(1, 2)),

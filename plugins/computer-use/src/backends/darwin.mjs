@@ -11,6 +11,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
+import { clampRegion } from "../raster.mjs";
 
 const KEY_CODES = {
   return: 36, enter: 36, tab: 48, space: 49, escape: 53, esc: 53, delete: 51,
@@ -344,18 +345,29 @@ export function create({ exec }) {
 
   async function zoom({ source, region, path: outPath }) {
     const [x, y, w, h] = region;
-    if (![x, y, w, h].every((n) => Number.isFinite(n) && n >= 0)) throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
+    if (![x, y].every((n) => Number.isFinite(n) && n >= 0) || ![w, h].every((n) => Number.isFinite(n) && n >= 1)) throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
     const src = source ?? state.lastRaster?.file;
     if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
+    // Zoom clips the region against the source raster bounds — sips would
+    // adjust an out-of-bounds request on its own, and the server must bind
+    // the geometry of the crop actually taken.
+    const probe = await runOk("sips", ["-g", "pixelWidth", "-g", "pixelHeight", src], { timeoutMs: 10_000 });
+    const pw = /pixelWidth:\s*(\d+)/.exec(probe.stdout);
+    const ph = /pixelHeight:\s*(\d+)/.exec(probe.stdout);
+    if (!pw || !ph) throw new ExecError(`cannot read the pixel size of ${src} — zoom clips its region against the source raster`);
+    const eff = clampRegion(region, Number(pw[1]), Number(ph[1]));
+    if (!eff) throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
     const out = outPath || path.join(dir, `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
-    await runOk("sips", ["-s", "format", "png", "-c", String(Math.round(h)), String(Math.round(w)), "--cropOffset", String(Math.round(y)), String(Math.round(x)), src, "--out", out], { timeoutMs: 15_000 });
+    await runOk("sips", ["-s", "format", "png", "-c", String(eff[3]), String(eff[2]), "--cropOffset", String(eff[1]), String(eff[0]), src, "--out", out], { timeoutMs: 15_000 });
     const bytes = fs.statSync(out).size;
     // The child raster becomes the last raster so a follow-up zoom crops from
     // the child, matching zoom's "region in last-raster pixels" contract.
     state.lastRaster = { ...state.lastRaster, file: out, bytes, capturedAt: new Date().toISOString() };
-    return { file: out, bytes, source: src, region, scale: state.lastRaster.scale };
+    // The receipt carries the region actually cropped (clipped to the source
+    // raster) — the server binds child-pixel coordinates against it.
+    return { file: out, bytes, source: src, region: eff, scale: state.lastRaster.scale };
   }
 
   // ---------- recording ----------

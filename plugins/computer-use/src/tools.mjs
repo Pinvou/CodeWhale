@@ -138,12 +138,12 @@ export const TOOLS = [
   },
   {
     name: "zoom",
-    description: "Close-up crop of the latest raster (screenshot or zoom). Choose points from the returned child raster only. Over ssh aiming stays correct but the crop file stays on the remote computer — view it only with out-of-band access such as scp; unavailable on HarmonyOS (hdc) computers.",
+    description: "Close-up crop of the latest raster (screenshot or zoom). Choose points from the returned child raster only. A region reaching past the raster is clipped to it; the receipt's region is the crop actually taken, so aim from that. Over ssh aiming stays correct but the crop file stays on the remote computer — view it only with out-of-band access such as scp; unavailable on HarmonyOS (hdc) computers.",
     inputSchema: {
       type: "object",
       required: ["region"],
       properties: {
-        region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in last-raster pixels" },
+        region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in last-raster pixels; clipped to the raster when it reaches past it" },
         path: { type: "string" },
         computer: computerParam,
       },

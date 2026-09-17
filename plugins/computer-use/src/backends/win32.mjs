@@ -9,6 +9,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { run, runOk, ExecError, tryJson } from "../exec.mjs";
+import { clampRegion } from "../raster.mjs";
 
 function ps(script, opts = {}) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
@@ -218,29 +219,42 @@ Write-Output '{"ok": true, "w": ' + $bounds.Width + ', "h": ' + $bounds.Height +
       return { ...lastRaster };
     },
     zoom: async ({ source, region, path: outPath }) => {
-      if (!Array.isArray(region) || ![region[0], region[1], region[2], region[3]].every((n) => Number.isFinite(n) && n >= 0)) {
+      if (!Array.isArray(region) || region.length < 4 || ![region[0], region[1]].every((n) => Number.isFinite(n) && n >= 0) || ![region[2], region[3]].every((n) => Number.isFinite(n) && n >= 1)) {
         throw new ExecError("region must be [x, y, w, h] in last-raster pixels");
       }
       const src = source ?? lastRaster?.file;
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
       const out = outPath || path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
+      // The script clips the rect against the source image itself (GDI+ would
+      // otherwise render an out-of-bounds source rect unpredictably) and
+      // reports the pixel size; node recomputes the same clip with
+      // clampRegion, so the region in the receipt is the crop that was drawn.
       const script = `Add-Type -AssemblyName System.Drawing;
 $img = [System.Drawing.Image]::FromFile('${src.replace(/'/g, "''")}');
-$rect = New-Object System.Drawing.Rectangle(${Math.round(region[0])}, ${Math.round(region[1])}, ${Math.round(region[2])}, ${Math.round(region[3])});
+$srcW = $img.Width; $srcH = $img.Height;
+$rw = [Math]::Min(${Math.round(region[2])}, $srcW); $rh = [Math]::Min(${Math.round(region[3])}, $srcH);
+$rx = [Math]::Max(0, [Math]::Min(${Math.round(region[0])}, $srcW - $rw));
+$ry = [Math]::Max(0, [Math]::Min(${Math.round(region[1])}, $srcH - $rh));
+$rect = New-Object System.Drawing.Rectangle($rx, $ry, $rw, $rh);
 $bmp = New-Object System.Drawing.Bitmap($rect.Width, $rect.Height);
 $g = [System.Drawing.Graphics]::FromImage($bmp);
 $g.DrawImage($img, (New-Object System.Drawing.Rectangle(0, 0, $rect.Width, $rect.Height)), $rect, [System.Drawing.GraphicsUnit]::Pixel);
 $g.Dispose();
 $bmp.Save('${out.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png);
 $bmp.Dispose(); $img.Dispose();
-Write-Output '{"ok": true}';`;
+Write-Output '{"ok": true, "srcW": ' + $srcW + ', "srcH": ' + $srcH + '}';`;
       const r = await ps(script, { timeoutMs: 20_000 });
       if (r.code !== 0 || !fs.existsSync(out)) throw new ExecError(`zoom failed: ${(r.stderr || "").slice(0, 250)}`, r);
+      const meta = tryJson(r.stdout.trim().split("\n").pop(), {});
+      const eff = clampRegion(region, meta?.srcW, meta?.srcH);
+      if (!eff) throw new ExecError(`zoom cannot clip the region against ${src} — the crop source reported no pixel size`);
       const bytes = fs.statSync(out).size;
       // The child raster becomes the last raster so a follow-up zoom crops
       // from the child, matching zoom's "region in last-raster pixels" contract.
       lastRaster = { ...lastRaster, file: out, bytes, capturedAt: new Date().toISOString() };
-      return { file: out, bytes, region, source: src };
+      // The receipt carries the region actually cropped (clipped to the
+      // source raster) — the server binds child-pixel coordinates against it.
+      return { file: out, bytes, region: eff, source: src };
     },
     left_click: ({ target }) => clickAt(0, target.x, target.y, 1),
     double_click: ({ target }) => clickAt(0, target.x, target.y, 2),

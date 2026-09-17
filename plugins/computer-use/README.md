@@ -21,7 +21,8 @@ runs it. Nothing here writes to your Codewhale configuration.
 - **Observe & resolve** — `list_apps`, `list_windows`, `list_displays`,
   `switch_display`, `get_app_state` (accessibility/UIA/uitest tree with
   element indices + `state_id`), `screenshot` (display/region, raster-bound
-  coordinates), `zoom` (close-up crop of the last raster), `cursor_position`,
+  coordinates), `zoom` (close-up crop of the last raster, region clipped
+  to it), `cursor_position`,
   `open_application` (exact-name rule), `request_access` (fail-closed
   permission/capability probe).
 - **Pointer** — left/double/triple/right/middle click, move, drag,

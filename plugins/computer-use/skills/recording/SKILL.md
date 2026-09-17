@@ -33,4 +33,6 @@ Platform truths:
 
 Screenshots: `screenshot` returns the saved path and raster geometry; `zoom`
 crops the latest raster when a target is too small to read (over ssh the crop
-file stays on the remote computer).
+file stays on the remote computer). A zoom region reaching past the raster is
+clipped to it; aim from the receipt's region, which is the crop actually
+taken.
