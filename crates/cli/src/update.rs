@@ -31,9 +31,11 @@ const GITHUB_RELEASE_DOWNLOAD_BASE_URL: &str =
     "https://github.com/Hmbown/CodeWhale/releases/download";
 const UPDATE_HTTP_ATTEMPTS: usize = 3;
 const UPDATE_HTTP_RETRY_DELAY_MS: u64 = 100;
-/// Ceiling for one asset download. Generous, because release binaries are tens
-/// of megabytes and some of the networks this exists for are slow.
-const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Ceiling for one asset download. Release binaries are tens of megabytes
+/// and some of the networks this exists for are slow: 600s covers a full
+/// 60 MiB at ~100 KiB/s (the same download budget the audit gives skill
+/// tarballs; the old 300s needed an implausible >1.6 Mbps to finish).
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// Ceiling for one checksum-manifest probe. The manifest is a few hundred
 /// bytes, so this is only a backstop against a source that accepts the
 /// connection and then stalls. GitHub gets the first attempt; an unavailable

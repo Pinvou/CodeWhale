@@ -33,8 +33,11 @@ use super::spec::{
 
 use crate::config::ToolOverride;
 
-/// Timeout for plugin script execution (120 seconds).
-const PLUGIN_EXECUTION_TIMEOUT: Duration = Duration::from_secs(120);
+/// Timeout for plugin script execution. Plugin scripts are
+/// model-invoked interpreters in the same class as js_execution /
+/// code_execution (600s there): 120s killed healthy long-running
+/// plugins, and a timeout used to leave the script running orphaned.
+const PLUGIN_EXECUTION_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Metadata extracted from a plugin script's frontmatter header.
 #[derive(Debug, Clone)]
@@ -280,6 +283,11 @@ async fn run_plugin_child_raw(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+
+    // Kill the script if the timeout below drops the wait future;
+    // otherwise the plugin keeps running orphaned after we report the
+    // timeout.
+    cmd.kill_on_drop(true);
 
     let mut child = cmd
         .spawn()

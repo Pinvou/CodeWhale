@@ -1338,7 +1338,10 @@ pub(crate) fn start_auth_request_on(
     })
 }
 
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+// 15 minutes: this waits on a human finishing browser sign-in (2FA
+// detours and slow mail-based logins routinely exceed 300s) - the same
+// human-paced reasoning as the MCP OAuth callback budget.
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(900);
 const CALLBACK_HTML_OK: &str = "<!doctype html><html><body><p>Signed in to Codewhale. You can close this tab.</p></body></html>";
 const CALLBACK_HTML_ERR: &str = "<!doctype html><html><body><p>Sign-in did not complete. You can close this tab and retry in Codewhale.</p></body></html>";
 

@@ -889,7 +889,7 @@ impl ToolSpec for ReadFileTool {
             return Ok(result);
         }
         if is_image_for_ocr(&file_path) {
-            return read_image_via_ocr(&file_path, path_str);
+            return read_image_via_ocr(&file_path, path_str).await;
         }
 
         // Open before parameter parsing so a missing file keeps the
@@ -1227,8 +1227,8 @@ fn render_line_window(
     }))
 }
 
-fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, ToolError> {
-    let text = crate::tools::image_ocr::ocr_image_path(path)?;
+async fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, ToolError> {
+    let text = crate::tools::image_ocr::ocr_image_path_bounded(path.to_path_buf()).await?;
     Ok(ToolResult::success(format!(
         "<image_ocr path=\"{requested_path}\">\n{text}\n</image_ocr>"
     )))
