@@ -56,3 +56,14 @@
 - 发现（minor，仅登记）：与 DEV-04 相同，`PROTOCOL.md` 属 DEV-00/DEV-06 的文档边界，本任务的修复提交对它做了 79 行说明性更新；无功能影响。
 - 验证：`cargo test controller::crypto` 13 通过 / 0 失败；`node --test remote-control-relay/test/controller-protocol.test.js` 20 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 6. DEV-06：Relay 中央组合、两阶段握手与 controller lease 原子建立
+
+审核轮次 1（审核提交 b96d7abf）
+
+- 逐条核对：`controller-lease.js` 在一次 CAS 中消费 pairing 并创建 controller lease（`consumeForControllerLease`），A/B 各自独立 resume token 只持久化 sha256；双 receipt 提交后才产出 `controller_joined`；`controller-router.js` 组合 DEV-01～04 handler 并暴露 liveness/resume hook 槽；`server.js` 完成 dispatcher 接线；claim socket 临时身份、消息顺序与超时、失败终结 pairing 均有实现。
+- 验收核对：用例覆盖「两个相反 receipt 原子消费 pairing 且只产生一个 lease」「commitment/Finished/receipt 的顺序、角色、socket 与重放」「原子提交失败不产生 lease 且终结 pairing」「握手超时与任一端断线使 pairing 失效」「router 组合与显式断开」。
+- 发现（major，已修复）：DEV-06 承诺「为 DEV-08/09 冻结 liveness/resume hook 槽，后续不再修改 server.js/router」，但 DEV-09 的提交 5db233a0 仍需修改 `server.js`（6 行：import/构造 `ControllerResumeHooks`）与 `controller-router.js`（50 行），说明冻结槽缺少可扩展注入点。
+  - 修复提交：`6e8f5a31` — router 新增 `additionalHooks` 注入数组（保持原有 hook 形状校验），新增用例证明新 hook 可在不改动 router/server 接线的情况下参与分发，非法 hook 失败关闭。
+- 验证：`node --test remote-control-relay/test/controller-handshake.test.js remote-control-relay/test/controller-router.test.js` 10 通过 / 0 失败；三个真实三方握手用例（`relay.test.js`）此前单独运行 25 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
