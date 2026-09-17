@@ -2294,20 +2294,21 @@ impl McpConnection {
         result
     }
 
-    async fn recv(&mut self, expected_id: String, read_budget_secs: u64) -> Result<serde_json::Value> {
+    async fn recv(
+        &mut self,
+        expected_id: String,
+        read_budget_secs: u64,
+    ) -> Result<serde_json::Value> {
         loop {
-            let bytes = match tokio::time::timeout(
-                Duration::from_secs(read_budget_secs),
-                async {
-                    tokio::select! {
-                        biased;
-                        _ = self.cancel_token.cancelled() => {
-                            anyhow::bail!("MCP connection '{}' was cancelled", self.name)
-                        }
-                        result = self.transport.recv() => result,
+            let bytes = match tokio::time::timeout(Duration::from_secs(read_budget_secs), async {
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => {
+                        anyhow::bail!("MCP connection '{}' was cancelled", self.name)
                     }
-                },
-            )
+                    result = self.transport.recv() => result,
+                }
+            })
             .await
             {
                 Ok(result) => result.inspect_err(|_e| {

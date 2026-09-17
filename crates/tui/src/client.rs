@@ -2912,8 +2912,7 @@ impl DeepSeekClient {
                     // Per-attempt total: unlike the loop envelope above,
                     // reqwest's per-request timeout also covers the response
                     // body, so a slow-drip body cannot outlive the budget.
-                    let request =
-                        build().timeout(non_streaming_request_envelope());
+                    let request = build().timeout(non_streaming_request_envelope());
                     async move {
                         // Sleep in bounded slices rather than the full remaining
                         // window: the pause is process-global, so a concurrent

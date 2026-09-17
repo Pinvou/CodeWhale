@@ -1445,7 +1445,11 @@ pub(super) async fn execute_code_execution_tool(
             let stderr = stderr_task
                 .await
                 .map_err(|e| ToolError::execution_failed(format!("stderr reader: {e}")))?;
-            std::process::Output { status, stdout, stderr }
+            std::process::Output {
+                status,
+                stdout,
+                stderr,
+            }
         }
         Err(_elapsed) => {
             let _ = child.kill().await;
