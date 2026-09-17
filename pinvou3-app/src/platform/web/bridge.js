@@ -300,6 +300,7 @@
     remoteModels: [],
     remoteHistories: [],
     tasks: [],
+    remotePermissions: [],
     // 依赖体检(设置页): deps = [{key, installed, apt}], null = 尚未检测
     deps: null,
     depsChecking: false,

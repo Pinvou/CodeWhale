@@ -41,7 +41,8 @@
       "remoteCapabilities",
       "remoteModels",
       "remoteHistories",
-      "tasks"
+      "tasks",
+      "remotePermissions"
     ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstalling"]
