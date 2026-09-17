@@ -26,3 +26,13 @@
   - 处置：本轮不回改历史（改写已提交历史需要单独授权）；在本文登记偏差，并要求后续任务不再跨任务改写文件。如需严格归属，可单独安排一次历史重整。
 - 验证：`node --test remote-control-relay/test/enrollment-migration.test.js test/enrollment-deploy.test.js test/remote-test-deploy.test.js` 13 通过 / 0 失败（3 条 POSIX-only 部署用例在 Windows 跳过，属环境限制，需在 DEV-25 的真实 POSIX 拓扑上执行）。
 - 结论：**REVIEW: PASS**（功能验收通过；流程偏差已登记）。
+
+## 3. DEV-03：Relay 发码、全局摘要占用与 tombstone/keyring
+
+审核轮次 1（审核提交 9be011fb、fd58c78c、80a067a4）
+
+- 逐条核对：31 字符集与 CSPRNG 发码、5 分钟 TTL、32 次碰撞重采样与耗尽密封错误、多 digest key（keyring）查重与 keyring revision CAS、先 tombstone 后返回码（同一 CAS 写入 tombstone+registration，CAS 成功后才返回 sealed 结果）、同请求同参幂等与异参/跨 relay epoch 拒绝、持久化失败不返回码、重启后隔离与旧 pairing 不可恢复，均已实现。
+- 发现（major，已修复）：验收要求「代码库不存在 B/A 生成路径；码明文不进日志或遥测」，但原测试只断言持久化状态中无明文，缺少日志/信道扫描与客户端生成路径检查。
+  - 修复提交：`0ce3d2c0` — 真实注册后用一次性密封信封解出明文，断言明文不出现在 wire 投影、注册期 console 输出与持久化状态；扫描三个 pairing 模块不得有任何日志调用；断言客户端 `controlled.rs` 只有 `validate_pairing_code`、无码生成与随机数调用。
+- 验证：`node --test remote-control-relay/test/pairing-code.test.js` 12 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
