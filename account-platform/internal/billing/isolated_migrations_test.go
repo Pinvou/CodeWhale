@@ -16,7 +16,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 {
+		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 {
 			continue
 		}
 		loaded[index].UpSQL = rewriteBillingPublicSchema(loaded[index].UpSQL, qualified)
@@ -26,7 +26,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 		if loaded[index].Version == 54 {
 			loaded[index].UpSQL = "GRANT USAGE ON SCHEMA " + qualified + " TO billing_service;\n" + loaded[index].UpSQL
 		}
-		if loaded[index].Version == 55 || loaded[index].Version == 56 {
+		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 {
 			loaded[index].UpSQL += "\nRESET ROLE;"
 		}
 		if loaded[index].Version == 56 {

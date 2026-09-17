@@ -1234,6 +1234,16 @@
         "file": "000056_entitlement_component_correction_prepare.up.sql",
         "version": 56,
         "sha256": "a651497c0844a86996a63efac05ba5d351189323b5249a2adf6a60b8da0e233d"
+      },
+      {
+        "file": "000057_entitlement_component_correction_activation_v2.down.sql",
+        "version": 57,
+        "sha256": "128a975afdf9828ceefdc090fbcf842ca0f3164c4a306de494f79b67bb391f57"
+      },
+      {
+        "file": "000057_entitlement_component_correction_activation_v2.up.sql",
+        "version": 57,
+        "sha256": "597fd865c3fcac2c9384510f478a0f94324f7ac6ab2566ed2a3645a89eded2de"
       }
     ],
     "payment-simulator": [

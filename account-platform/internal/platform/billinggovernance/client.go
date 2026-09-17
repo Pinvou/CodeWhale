@@ -50,33 +50,51 @@ func (s Snapshot) Find(command string, policyVersion int64, snapshotSchemaVersio
 	return Activation{}, false
 }
 
-// This is the closed v1 compatibility set, not a mutable execution allowlist.
-// New policy versions require an explicit reader/owner-domain rollout.
-var v1Commands = map[string]int64{
-	"CHARGEBACK_FINANCIAL_REPAIR":      1,
-	"ENTITLEMENT_COMPONENT_ADJUSTMENT": 1,
-	"LEDGER_REPAIR":                    1,
-	"PAYMENT_FINANCIAL_REPAIR":         1,
-	"PAYMENT_PRODUCT_RESUME":           1,
-	"PAYMENT_PROVIDER_RESUME":          2,
-	"RECEIVABLE_WRITE_OFF":             1,
-	"RECONCILIATION_FINANCIAL_REPAIR":  1,
-	"REFUND_EXCEPTION_REPAIR":          1,
-	"USAGE_SETTLEMENT_REPAIR":          1,
-	"WALLET_ADJUSTMENT":                1,
+type activationVersion struct {
+	policyVersion         int64
+	snapshotSchemaVersion int
+}
+
+// This is the closed compatibility set, not a mutable execution allowlist.
+// New policy versions require an explicit reader/owner-domain rollout: the
+// entitlement correction command keeps exactly one v1 row as immutable history
+// and may append a still-INACTIVE v2 row, so this reader accepts either pair and
+// never rewrites the frozen version of an existing request.
+var activationVersions = map[string][]activationVersion{
+	"CHARGEBACK_FINANCIAL_REPAIR":      {{1, 1}},
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {{1, 1}, {2, 2}},
+	"LEDGER_REPAIR":                    {{1, 1}},
+	"PAYMENT_FINANCIAL_REPAIR":         {{1, 1}},
+	"PAYMENT_PRODUCT_RESUME":           {{1, 1}},
+	"PAYMENT_PROVIDER_RESUME":          {{2, 1}},
+	"RECEIVABLE_WRITE_OFF":             {{1, 1}},
+	"RECONCILIATION_FINANCIAL_REPAIR":  {{1, 1}},
+	"REFUND_EXCEPTION_REPAIR":          {{1, 1}},
+	"USAGE_SETTLEMENT_REPAIR":          {{1, 1}},
+	"WALLET_ADJUSTMENT":                {{1, 1}},
+}
+
+func knownActivationVersion(command string, policyVersion int64, snapshotSchemaVersion int) bool {
+	for _, version := range activationVersions[command] {
+		if version.policyVersion == policyVersion && version.snapshotSchemaVersion == snapshotSchemaVersion {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateSnapshot also protects in-process readers. An INACTIVE existing
 // command is valid authoritative data, not an unavailable transport.
 func ValidateSnapshot(s Snapshot) error {
-	if s.SchemaVersion != 1 || len(s.Activations) != len(v1Commands) {
+	if s.SchemaVersion != 1 || len(s.Activations) != len(activationVersions) {
 		return ErrUnavailable
 	}
 	latest := time.Now().Add(time.Second)
 	previous := ""
 	for _, activation := range s.Activations {
-		policyVersion, known := v1Commands[activation.CommandType]
-		if !known || activation.CommandType <= previous || activation.PolicyVersion != policyVersion || activation.SnapshotSchemaVersion != 1 || activation.Version < 1 || activation.UpdatedAt.IsZero() || activation.UpdatedAt.After(latest) {
+		_, known := activationVersions[activation.CommandType]
+		if !known || activation.CommandType <= previous || !knownActivationVersion(activation.CommandType, activation.PolicyVersion, activation.SnapshotSchemaVersion) ||
+			activation.Version < 1 || activation.UpdatedAt.IsZero() || activation.UpdatedAt.After(latest) {
 			return ErrUnavailable
 		}
 		if activation.State != "ACTIVE" && activation.State != "INACTIVE" {
@@ -141,7 +159,7 @@ func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, ErrUnavailable
 	}
 	var rows []json.RawMessage
-	if json.Unmarshal(root["activations"], &rows) != nil || len(rows) != len(v1Commands) {
+	if json.Unmarshal(root["activations"], &rows) != nil || len(rows) != len(activationVersions) {
 		return Snapshot{}, ErrUnavailable
 	}
 	for _, row := range rows {

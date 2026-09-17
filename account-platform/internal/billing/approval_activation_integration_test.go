@@ -232,7 +232,10 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Up(ctx, connection, loaded); err != nil {
+	// Re-entry may only replay migrations this fixture already applied; later
+	// forward migrations are exercised deliberately below through the
+	// production deployment identities.
+	if err := migrations.Up(ctx, connection, loaded[:activationIndex+1]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -303,19 +306,77 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	if !reflect.DeepEqual(historyAfterChange, readBillingActivationHistory(t, ctx, pool)) {
 		t.Fatal("rollback changed immutable activation history")
 	}
-	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
+	if _, err := migrations.VerifyApplied(ctx, connection, loaded[:activationIndex+1]); err != nil {
 		t.Fatal(err)
 	}
-	// A later forward migration may append policy v2 while retaining v1 as
-	// immutable history. Only this still-INACTIVE command may project v2.
-	if _, err := pool.Exec(ctx, `INSERT INTO billing_approval_command_activations(command_type,policy_version,snapshot_schema_version,state,version,updated_at)
-VALUES('ENTITLEMENT_COMPONENT_ADJUSTMENT',2,2,'INACTIVE',1,now())`); err != nil {
+	// 000057 is the real forward migration that appends the still-INACTIVE
+	// policy v2 / snapshot schema v2 owner activation for the correction
+	// command. Run it through the production deployment identities instead of
+	// injecting the row by hand so its guards, the immutable history append and
+	// the reader projection are exercised together.
+	correctionIndex := -1
+	for index := range loaded {
+		if loaded[index].Version == 57 {
+			correctionIndex = index
+			break
+		}
+	}
+	if correctionIndex < 0 {
+		t.Fatal("billing correction activation migration is missing")
+	}
+	// The shared fixture helper appends a role reset for migrations 55-57 so the
+	// ledger write runs as the owning session user. This schema deliberately
+	// keeps the ledger owned by billing_service, so apply the production SQL for
+	// this migration unchanged and let it end in its own runtime role.
+	loaded[correctionIndex].UpSQL = rewriteBillingPublicSchema(production[correctionIndex].UpSQL, identifier)
+	correctionChecksum := sha256.Sum256([]byte(strings.ReplaceAll(loaded[correctionIndex].UpSQL, "\r\n", "\n")))
+	loaded[correctionIndex].Checksum = hex.EncodeToString(correctionChecksum[:])
+	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION billing_migrator`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `SET ROLE billing_service`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `SELECT set_config('search_path',$1,false)`, schema); err != nil {
+		t.Fatal(err)
+	}
+	applied := append(append([]migrations.Migration{}, loaded[:activationIndex+1]...), loaded[correctionIndex])
+	if err := migrations.Up(ctx, connection, applied); err != nil {
+		t.Fatalf("forward correction activation migration: %v", err)
+	}
+	migrations.Unlock(ctx, connection)
+	if _, err := connection.Exec(ctx, `RESET SESSION AUTHORIZATION; RESET ROLE`); err != nil {
 		t.Fatal(err)
 	}
 	versioned, err := repository.ApprovalCommandActivations(ctx)
 	if err != nil || len(versioned.Activations) != 11 || versioned.Activations[1].CommandType != entitlementComponentAdjustmentCommand ||
 		versioned.Activations[1].PolicyVersion != 2 || versioned.Activations[1].SnapshotSchemaVersion != 2 || versioned.Activations[1].State != "INACTIVE" {
 		t.Fatalf("versioned inactive entitlement projection=%+v err=%v", versioned, err)
+	}
+	var retainedV1 int
+	if err := connection.QueryRow(ctx, `SELECT count(*) FROM billing_approval_command_activations WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND snapshot_schema_version=1 AND state='INACTIVE'`).Scan(&retainedV1); err != nil || retainedV1 != 1 {
+		t.Fatalf("immutable v1 entitlement history row was replaced: count=%d err=%v", retainedV1, err)
+	}
+	versionedActive := 0
+	for _, item := range versioned.Activations {
+		if item.State == "ACTIVE" {
+			versionedActive++
+		}
+	}
+	priorActive := 0
+	for _, item := range beforeDown.Activations {
+		if item.State == "ACTIVE" {
+			priorActive++
+		}
+	}
+	if versionedActive != priorActive {
+		t.Fatal("the forward activation migration opened a command")
+	}
+	downErr := migrations.DownOne(ctx, connection, loaded)
+	migrations.Unlock(ctx, connection)
+	requireActivationSQLState(t, downErr, "55000")
+	if _, err := migrations.VerifyApplied(ctx, connection, applied); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE billing_approval_command_activations SET state='ACTIVE',version=version+1 WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2`); err != nil {
 		t.Fatal(err)
