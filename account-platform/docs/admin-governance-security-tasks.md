@@ -227,6 +227,8 @@ GSA-21 首版领域设计（DESIGN_COMPLETE / REVIEW_PENDING / NOT_IMPLEMENTED�
 GSA-22 前向准备迁移切片（IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：Billing `000056`只给既有组件追加默认为0且被数据库约束为0的转出列，并建立schema-owner持有、运行时仅可读、UPDATE/DELETE/TRUNCATE拒绝的不可变纠错记录表；旧组件守恒和同包同类型唯一约束仍保持，运行时无纠错INSERT权限，因此此切片不能执行任何纠错。隔离PostgreSQL真实迁移验证了默认值/零值门禁/旧约束/只读授权/不可变触发器；后续仍需迁移切换、领域预检/proof、成对分录执行、全部消费者的有效原始量回归与跨域E2E，任务保持PARTIAL。
 
 GSA-22 原快照整数差额切片（仍PARTIAL / REVIEW_PENDING）：原支付履约和只读纠错计算共用同一纯整数拆分算法；纠错仅能由订单快照的目标BASE/BONUS与当前完整组成推出单向、全额差值，不接受任意输入金额。相同组成、负数、不守恒、零权重或int64溢出均拒绝。原支付拆分及双向/舍入/异常定向测试通过。当前尚未建立Billing权威事实读取、零历史效果证明或对外预检，不能把纯计算器当成可申请命令。
+
+GSA-22 权威只读预检切片（仍PARTIAL / REVIEW_PENDING）：Billing在2秒有界只读Serializable事务内联合原订单商品快照、已支付交易、普通RECHARGE journal/逐lot钱包posting、package/component/lot守恒与原支付拆分；任何历史使用、配额/预留、应收、退款/强制退款/拒付、支付修复/异常或已有纠错记录均拒绝。原支付证据缺失、目标无差额、错订单或来源不一致也无计划；数据库集成正例与已用、已修复、无差额负例通过。该内部方法尚无业务入口、独立proof、批准CAS或写入执行，不能视为可申请/可执行。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

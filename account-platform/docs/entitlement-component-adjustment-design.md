@@ -6,7 +6,7 @@
 
 `ENTITLEMENT_COMPONENT_ADJUSTMENT` 当前仅有 Account policy v1/schema v1 元数据，Billing activation 为 `INACTIVE`，没有专属 API、proof、executor 或恢复协议。既有充值、退款和人工调账 `AUDIT_ONLY` 路径不改道。[命令基线](admin-governance-security-command-baseline.md)与[治理设计 §11](admin-governance-security-redesign.md)继续约束激活。
 
-首版只接受 `source_type=PAYMENT`、同一钱包与同一 package 的 BASE/BONUS 组成纠错，且 `payment_orders.product_snapshot` 中封闭的 BasePoints/BonusPoints、订单总微积分、成功 payment transaction 和原入账 journal 可交叉核对。按原入账的 `splitProductComponents` 整数算法重新计算应有 BASE/BONUS；命令必须一次性纠正全部差额，方向和金额由 Billing 计算，浏览器不能指定任意转移量。快照缺失/歧义、已与当前有效组成一致、来源为 SYSTEM/MANUAL_ADJUSTMENT、币种或单位不符时拒绝。商品现价或当前商品配置不是历史来源证据；如原订单快照本身错误，不能通过本命令修改，另立有证据的补偿任务。
+首版只接受 `source_type=PAYMENT`、同一钱包与同一 package 的 BASE/BONUS 组成纠错，且 `payment_orders.product_snapshot` 中封闭的 BasePoints/BonusPoints、订单总微积分、成功 payment transaction 和原入账 journal 可交叉核对。按原入账的 `splitProductComponents` 整数算法重新计算应有 BASE/BONUS；命令必须一次性纠正全部差额，方向和金额由 Billing 计算，浏览器不能指定任意转移量。快照缺失/歧义、已与当前有效组成一致、来源为 SYSTEM/MANUAL_ADJUSTMENT、币种或单位不符时拒绝。商品现价或当前商品配置不是历史来源证据；如原订单快照本身错误，不能通过本命令修改，另立有证据的补偿任务。首版再限于普通 `RECHARGE` 入账；曾有 `payment_order_repairs` 或支付异常案的订单即使结案也排除，不把修复入账当普通原始入账。
 
 申请和执行前均要求 package/wallet ACTIVE、订单已支付且已履约、交易成功且未退款；整包所有组件和 lot 的金额可守恒、可用且未过期。只要任一组件已有 used/reserved/active_grant/suspended_grant/expired/revoked、任一成员配额或用量预留、应收清偿、退款/强制退款/拒付申请及其保留证据、在途修复或无法判定的外部状态，就失败关闭。首版不触碰历史消费、配额、退款、到期和应收；不主动调用 Provider。多包/跨钱包转移、发放或扣减总额度、改支付价格、追溯改变已出具发票均不属于本命令。
 
