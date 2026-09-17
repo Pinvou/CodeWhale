@@ -988,8 +988,13 @@ fn cleanup_stale_pack_temps_in(
 // Generous budget: `git add -A` on a large workspace is legitimately slow,
 // but a wedged git (stalled NFS/FUSE, hung hook) must not block the turn
 // pipeline forever — callers run this on the per-turn path and treat every
-// error as snapshot-disabled-with-warning.
+// error as snapshot-disabled-with-warning. Tests use a tighter budget so a
+// regression that deadlocks a child on its own output fails in seconds
+// instead of hanging for the full window.
+#[cfg(not(test))]
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output> {
     let mut child = crate::dependencies::Git::command()
@@ -1003,9 +1008,36 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
+    // Drain both pipes concurrently while waiting: several snapshot
+    // commands emit output that grows with workspace size (`ls-tree -r`
+    // on restore, `diff --name-only` after large refactors), and a child
+    // blocked on a full pipe buffer would never exit, turning every such
+    // call into a guaranteed timeout. Mirrors the sandbox exec plumbing
+    // in crate::run_sandboxed_exec.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut reader) = stdout_pipe {
+            let _ = std::io::Read::read_to_end(&mut reader, &mut buf);
+        }
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut reader) = stderr_pipe {
+            let _ = std::io::Read::read_to_end(&mut reader, &mut buf);
+        }
+        buf
+    });
+
     let Some(status) = child.wait_timeout(GIT_COMMAND_TIMEOUT)? else {
         let _ = child.kill();
         let _ = child.wait();
+        // Killing the child closes the pipe writers, so both readers see
+        // EOF and these joins cannot hang.
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
@@ -1015,22 +1047,14 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
             ),
         ));
     };
-    // The child has exited, so the pipe writers are closed and these reads
-    // terminate. (A git invocation verbose enough to fill the OS pipe buffer
-    // before exiting would instead hit the timeout above and be killed —
-    // the snapshot plumbing commands used here are all quiet-output.)
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        std::io::Read::read_to_end(&mut pipe, &mut stdout)?;
-    }
-    if let Some(mut pipe) = child.stderr.take() {
-        std::io::Read::read_to_end(&mut pipe, &mut stderr)?;
-    }
     Ok(Output {
         status,
-        stdout,
-        stderr,
+        stdout: stdout_thread.join().map_err(|_| {
+            io::Error::other("git stdout reader thread panicked")
+        })?,
+        stderr: stderr_thread.join().map_err(|_| {
+            io::Error::other("git stderr reader thread panicked")
+        })?,
     })
 }
 
@@ -1972,5 +1996,30 @@ mod tests {
         assert_eq!(list[0].session_id.as_deref(), Some("sess-a"));
         assert_eq!(list[1].session_id, None);
         assert_eq!(list[1].label, "pre-turn:1");
+    }
+
+    #[test]
+    fn run_git_drains_output_larger_than_the_pipe_buffer() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        // ~5000 paths is well past the 64 KiB OS pipe buffer: a child that
+        // blocks on its own undrained output never exits and would die at
+        // the command timeout instead of returning the tree listing.
+        for i in 0..5000 {
+            std::fs::write(
+                repo.work_tree().join(format!("file_{i:05}.txt")),
+                b"x",
+            )
+            .unwrap();
+        }
+        let id = repo.snapshot("large-output").expect("snapshot");
+        let paths = repo
+            .tree_paths(id.as_str())
+            .expect("tree_paths must drain output instead of timing out");
+        assert!(
+            paths.len() >= 5000,
+            "expected every file in the tree listing, got {}",
+            paths.len()
+        );
     }
 }
