@@ -97,3 +97,31 @@
 - 发现：无新增 blocker/major；DEV-09 修改 `server.js`/`controller-router.js` 的边界问题已在 DEV-06 条目登记并通过 `6e8f5a31` 提供 hook 注入点解决。
 - 验证：`cargo test remote_control::controller::resume` 4 通过 / 0 失败；`node --test remote-control-relay/test/controller-resume.test.js` 8 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 10. DEV-10：B 被控端 lifecycle、generation、watchdog 与 Tauri 命令
+
+审核轮次 1（审核提交 66cf47be）
+
+- 逐条核对：开启/刷新各自生成新 generation，回包按 generation 硬门丢弃（`stale_results_cannot_replace_a_new_generation`）；refresh 走 retire→Relay 撤销确认→本地清理→新 generation，撤销无法确认时失败关闭（`failed_revocation_fails_closed_and_rejects_workspace_paths_in_projection`）；状态枚举完整；本地 30 秒 watchdog 在 Relay 黑洞下仍能本地终止（`watchdog_blackhole_reconnects_then_fails_locally_without_relay`）；stop/立即断开无需网络即清空 lease/token/审批/敏感上下文（`stop_and_disconnect_clear_all_sensitive_context_without_network`）；工作区授权入口只接受真实可浏览目录。
+- 内存边界：`controlled.rs` 与 `controlling.rs` 均无任何持久化调用（`std::fs`/`persist`/`write_atomic` 零命中），设备名、连接码、lease 与 token 只存在内存。
+- 不做项核对：B 侧命令面只有 start/refresh/stop/disconnect_now/status/poll_watchdog/authorize_workspace/list_workspaces，无任何 Allow/Approve 入口；非 Windows 平台 `is_supported=false` 且命令返回 unsupported。
+- 验证：`cargo test remote_control::controller::controlled` 7 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
+
+## 11. DEV-11：A 主控端 claim、连接生命周期与远程历史壳层
+
+审核轮次 1（审核提交 fa77e16e）
+
+- 逐条核对：连接码粘贴/大小写/分隔符归一化（`pairing_code_normalization_and_invalid_characters_fail_closed`）；连接结果按 intent+generation 门控（`connection_result_is_generation_and_intent_gated`）；服务端失效原因统一为有界错误码且不自动重试旧码（`public_connection_errors_are_bounded_and_old_code_is_not_retried`）；显式断开关闭 live API 而离线历史保留（`explicit_disconnect_closes_live_api_but_history_remains_offline`）；恢复过程不回显旧 token（`transport_disconnect_and_resume_do_not_expose_the_old_token`）；进程重启后无残留操作（`process_restart_uses_an_empty_manager_and_no_stale_operations`）。
+- 存储边界：`controlling.rs` 无持久化调用，历史只保存标题/脱敏设备名/终态引用，不含连接码与设备凭证。
+- 验证：`cargo test remote_control::controller::controlling` 6 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
+
+## 12. DEV-12：B 能力快照、模式可见性与代码工作区约束
+
+审核轮次 1（审核提交 faaf6024）
+
+- 逐条核对：快照只含 opaque ID/显示名、模式与预授权工作区；绑定 connection/lease epoch/relay epoch/generation 与 revision，30 秒过期；跨 generation 或过期快照被拒（`capability_snapshot_stale`/`capability_snapshot_expired`）；描述符容量与重复校验、`workspace_for_task` 仅作提示并要求任务接纳时重新校验 B 策略；序列化文本不含路径、api_key、secret。
+- 命令层：`desktop_remote_capabilities` 只投影已安装工具与启用 Skill 的 id/显示名，并从 ACP 池读取 code agent readiness。
+- 验证：`cargo test remote_control::controller::capabilities` 4 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
