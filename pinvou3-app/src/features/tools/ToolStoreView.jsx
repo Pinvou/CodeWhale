@@ -1353,11 +1353,15 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       useEffect(() => {
         loadBackendState();
-        // EIP/知道卡面的已连接跟随事件(eip:connected / zhidao:connected),而
-        // 监听只在本页挂载期间在场——离开插件中心后完成的 SSO 连接没人听见,
-        // 回来若不主动问后端,卡面会一直显示未连接(issue #1097 窄窗口②)。
-        // 挂载时按后端真相校准一次;status 的副作用(set_connected)与查询同源,幂等。
+        // EIP/知道(SSO 路线)连接态挂载回填:两者未接入 bundle_readiness,连接态是
+        // 组件内 state,切视图卸载重挂后会丢成"未连接"。卡面的已连接跟随事件
+        // (eip:connected / zhidao:connected),而监听只在本页挂载期间在场——离开
+        // 插件中心后完成的 SSO 连接没人听见,回来若不主动问后端,卡面会一直显示
+        // 未连接(issue #1097 窄窗口②)。挂载时按后端真相校准一次;status 的副作用
+        // (set_connected)与查询同源,幂等且顺带自愈后端持久标记。失败静默,与
+        // composer-shared.jsx 的既有消费口径一致。
         // 探测在途期间若收到任何连接态事件(代际已变),说明探测结果已过时,丢弃。
+        if (!isTauriAvailable()) return;
         const eipProbeEpoch = eipConnEpochRef.current;
         invokeTauri('eip_status').then(res => {
           if (eipConnEpochRef.current === eipProbeEpoch) markEipConnected(!!(res && res.connected));
@@ -1366,20 +1370,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         invokeTauri('zhidao_status').then(res => {
           if (zhidaoConnEpochRef.current === zhidaoProbeEpoch) markZhidaoConnected(!!(res && res.connected));
         }).catch(() => {});
-      }, []);
-
-      // EIP/知道(SSO 路线)连接态挂载回填:两者未接入 bundle_readiness,连接态是
-      // 组件内 state,切视图卸载重挂后会丢成"未连接"——挂载时从后端真实态恢复
-      // (eip_status 顺带 set_connected 自愈后端持久标记)。失败静默,与
-      // composer-shared.jsx 的既有消费口径一致。
-      useEffect(() => {
-        if (!isTauriAvailable()) return;
-        invokeTauri('eip_status')
-          .then((s) => setEipConnected(!!(s && s.connected)))
-          .catch(() => {});
-        invokeTauri('zhidao_status')
-          .then((s) => setZhidaoConnected(!!(s && s.connected)))
-          .catch(() => {});
       }, []);
 
       // 订阅跨视图 store：把 store 状态镜像进本组件渲染，并在完成/失败时做组件级收尾
