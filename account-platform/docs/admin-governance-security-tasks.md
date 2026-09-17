@@ -233,6 +233,8 @@ GSA-22 权威只读预检切片（仍PARTIAL / REVIEW_PENDING）：Billing在2�
 GSA-22 退款/拒付归属兼容切片（仍PARTIAL / REVIEW_PENDING）：强制退款的比例基数与拒付BASE短缺改按 `original_microcredits-reclassified_out_microcredits` 计算，组件撤销状态也按有效原始量判定；旧数据转出量恒为0，行为不变。普通退款本已按当前可用/授予余额计算组成。数据库迁移后历史夹具改为按目标版本隔离，不再假设迁移53/54/55位于链尾；另修正全套数据库测试发现的公式绑定基数与价格发布次序错误。待真正纠错执行和迁移切换后仍须以真实PostgreSQL验证三种逆向路径，不把本切片视为消费端验收完成。
 
 GSA-22 原证据预检反向覆盖切片（仍PARTIAL / REVIEW_PENDING）：隔离PostgreSQL同一支付包验证BONUS→BASE的完整差额，且来源lot可退款属性与类型不一致、原订单商品快照缺失都拒绝；与先前BASE→BONUS、已动用、错订单、无差额及修复证据负例合并覆盖。测试只证明内部只读预检，不赋予审批proof或写入权限。
+
+GSA-22 组成读取投影兼容切片（仍PARTIAL / REVIEW_PENDING）：个人中心与管理详情保留不可改的历史 `original_microcredits`，增量返回 `reclassified_out_microcredits` 和 `effective_original_microcredits`；个人中心“总额”优先展示有效原始量，旧服务响应回退历史字段。准备阶段所有转出量恒为0；已有支付包真实PostgreSQL读取和OpenAPI/UI合同验证不改变原值。纠错执行仍未开放，实际非零转出后的跨端回归仍待后续领域E2E。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

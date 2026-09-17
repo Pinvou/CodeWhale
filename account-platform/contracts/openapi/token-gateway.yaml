@@ -1854,11 +1854,13 @@ components:
     EntitlementComponent:
       type: object
       additionalProperties: false
-      required: [component_id, component_type, original_microcredits, available_microcredits, reserved_microcredits, used_microcredits, active_grant_microcredits, suspended_grant_microcredits, expired_microcredits, revoked_microcredits, credited_at, expires_at, status]
+      required: [component_id, component_type, original_microcredits, reclassified_out_microcredits, effective_original_microcredits, available_microcredits, reserved_microcredits, used_microcredits, active_grant_microcredits, suspended_grant_microcredits, expired_microcredits, revoked_microcredits, credited_at, expires_at, status]
       properties:
         component_id: { type: string, format: uuid }
         component_type: { type: string, enum: [BASE, BONUS] }
         original_microcredits: { type: integer, format: int64, minimum: 1 }
+        reclassified_out_microcredits: { type: integer, format: int64, minimum: 0 }
+        effective_original_microcredits: { type: integer, format: int64, minimum: 0 }
         available_microcredits: { type: integer, format: int64, minimum: 0 }
         reserved_microcredits: { type: integer, format: int64, minimum: 0 }
         used_microcredits: { type: integer, format: int64, minimum: 0 }

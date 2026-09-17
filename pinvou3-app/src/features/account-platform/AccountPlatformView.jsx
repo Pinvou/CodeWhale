@@ -2312,7 +2312,7 @@ function EntitlementPackageDetail({ copy, language, item }) {
             <strong>{copy.componentTypes[component.component_type] || component.component_type}</strong>
             <TraceDetails
               items={[
-                [copy.totalPoints, `${formatWholePoints(component.original_microcredits, language)} ${copy.points}`],
+                [copy.totalPoints, `${formatWholePoints(component.effective_original_microcredits ?? component.original_microcredits, language)} ${copy.points}`],
                 [copy.availableCredits, `${formatWholePoints(component.available_microcredits, language)} ${copy.points}`],
                 [copy.reservedCredits, `${formatWholePoints(component.reserved_microcredits, language)} ${copy.points}`],
                 [copy.usedPoints, `${formatWholePoints(component.used_microcredits, language)} ${copy.points}`],

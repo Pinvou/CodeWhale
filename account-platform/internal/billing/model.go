@@ -111,19 +111,21 @@ type EntitlementPackage struct {
 }
 
 type EntitlementComponent struct {
-	ID                         uuid.UUID `json:"component_id"`
-	ComponentType              string    `json:"component_type"`
-	OriginalMicrocredits       int64     `json:"original_microcredits"`
-	AvailableMicrocredits      int64     `json:"available_microcredits"`
-	ReservedMicrocredits       int64     `json:"reserved_microcredits"`
-	UsedMicrocredits           int64     `json:"used_microcredits"`
-	ActiveGrantMicrocredits    int64     `json:"active_grant_microcredits"`
-	SuspendedGrantMicrocredits int64     `json:"suspended_grant_microcredits"`
-	ExpiredMicrocredits        int64     `json:"expired_microcredits"`
-	RevokedMicrocredits        int64     `json:"revoked_microcredits"`
-	CreditedAt                 time.Time `json:"credited_at"`
-	ExpiresAt                  time.Time `json:"expires_at"`
-	Status                     string    `json:"status"`
+	ID                            uuid.UUID `json:"component_id"`
+	ComponentType                 string    `json:"component_type"`
+	OriginalMicrocredits          int64     `json:"original_microcredits"`
+	ReclassifiedOutMicrocredits   int64     `json:"reclassified_out_microcredits"`
+	EffectiveOriginalMicrocredits int64     `json:"effective_original_microcredits"`
+	AvailableMicrocredits         int64     `json:"available_microcredits"`
+	ReservedMicrocredits          int64     `json:"reserved_microcredits"`
+	UsedMicrocredits              int64     `json:"used_microcredits"`
+	ActiveGrantMicrocredits       int64     `json:"active_grant_microcredits"`
+	SuspendedGrantMicrocredits    int64     `json:"suspended_grant_microcredits"`
+	ExpiredMicrocredits           int64     `json:"expired_microcredits"`
+	RevokedMicrocredits           int64     `json:"revoked_microcredits"`
+	CreditedAt                    time.Time `json:"credited_at"`
+	ExpiresAt                     time.Time `json:"expires_at"`
+	Status                        string    `json:"status"`
 }
 
 type MemberQuotaGrant struct {

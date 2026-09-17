@@ -40,8 +40,11 @@ test('entitlement API and all UI languages expose composition and refund semanti
   ]);
   const contract = YAML.parse(contractSource);
   assert.deepEqual(contract.components.schemas.EntitlementComponent.properties.component_type.enum, ['BASE', 'BONUS']);
+  assert.ok(contract.components.schemas.EntitlementComponent.required.includes('effective_original_microcredits'));
+  assert.ok(contract.components.schemas.EntitlementComponent.required.includes('reclassified_out_microcredits'));
   assert.equal(contract.components.schemas.EntitlementPackage.properties.components.type, 'array');
   assert.match(view, /item\.components\?\.map/);
+  assert.match(view, /component\.effective_original_microcredits \?\? component\.original_microcredits/);
   assert.match(view, /refundCompositionNotice/);
   assert.match(copy, /BONUS 不产生现金退款金额/);
   assert.match(copy, /BONUS has no cash refund value/);

@@ -62,6 +62,13 @@ func TestEntitlementCorrectionReadPlanUsesPaymentEvidenceAndRejectsUsePostgresIn
 		plan.Amounts.SourceType != "BASE" || plan.Amounts.TargetType != "BONUS" || plan.Amounts.Amount != 20 {
 		t.Fatalf("original payment plan=%+v err=%v", plan, err)
 	}
+	packages, _, err := repository.ListPackages(ctx, ownerID, walletID, 10)
+	if err != nil || len(packages) != 1 || len(packages[0].Components) != 1 ||
+		packages[0].Components[0].OriginalMicrocredits != 100 ||
+		packages[0].Components[0].ReclassifiedOutMicrocredits != 0 ||
+		packages[0].Components[0].EffectiveOriginalMicrocredits != 100 {
+		t.Fatalf("backward-compatible component projection=%+v err=%v", packages, err)
+	}
 	if _, err := repository.planEntitlementComponentCorrection(ctx, packageID, uuid.New()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong source order accepted: %v", err)
 	}

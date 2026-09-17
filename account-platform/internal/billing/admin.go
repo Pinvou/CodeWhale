@@ -1335,14 +1335,19 @@ func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid
 	}
 	packageRows.Close()
 	if len(packageIDs) > 0 {
-		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY package_id,component_type,id`, packageIDs)
+		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,reclassified_out_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY package_id,component_type,id`, packageIDs)
 		if err != nil {
 			return item, err
 		}
 		for componentRows.Next() {
 			var packageID uuid.UUID
 			var component EntitlementComponent
-			if err := componentRows.Scan(&packageID, &component.ID, &component.ComponentType, &component.OriginalMicrocredits, &component.AvailableMicrocredits, &component.ReservedMicrocredits, &component.UsedMicrocredits, &component.ActiveGrantMicrocredits, &component.SuspendedGrantMicrocredits, &component.ExpiredMicrocredits, &component.RevokedMicrocredits, &component.CreditedAt, &component.ExpiresAt, &component.Status); err != nil {
+			if err := componentRows.Scan(&packageID, &component.ID, &component.ComponentType, &component.OriginalMicrocredits, &component.ReclassifiedOutMicrocredits, &component.AvailableMicrocredits, &component.ReservedMicrocredits, &component.UsedMicrocredits, &component.ActiveGrantMicrocredits, &component.SuspendedGrantMicrocredits, &component.ExpiredMicrocredits, &component.RevokedMicrocredits, &component.CreditedAt, &component.ExpiresAt, &component.Status); err != nil {
+				componentRows.Close()
+				return item, err
+			}
+			component.EffectiveOriginalMicrocredits, err = effectiveComponentOriginal(component.OriginalMicrocredits, component.ReclassifiedOutMicrocredits)
+			if err != nil {
 				componentRows.Close()
 				return item, err
 			}
