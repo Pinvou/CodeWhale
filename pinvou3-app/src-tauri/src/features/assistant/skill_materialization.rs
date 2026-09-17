@@ -765,7 +765,12 @@ mod tests {
     #[test]
     fn session_skills_dir_uses_session_private_root() {
         // 会话技能物化(materialize_session_skills)落点即本目录(两个原测试断言同一等式)。
-        let dir = paths::session_skills_dir("abc-123");
-        assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
+        // 等式两侧都是 PINVOU3_HOME 的派生值:并行测试翻 home 时两次读取可能落进
+        // 不同快照,等式随机打红(2026-09-16 高负载下偶现)——锁 ENV_LOCK 钉干净
+        // home,两次读取串行且确定。
+        with_temp_home(|| {
+            let dir = paths::session_skills_dir("abc-123");
+            assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
+        });
     }
 }
