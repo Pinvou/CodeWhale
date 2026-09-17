@@ -245,7 +245,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.backflow_infra == 'true'", portability)
         self.assertIn("github.event_name == 'pull_request'", portability)
         self.assertIn("github.event_name == 'merge_group'", portability)
-        self.assertIn("os: [ubuntu-latest, windows-latest, macos-15]", portability)
+        self.assertIn("os: [ubuntu-22.04, windows-latest, macos-15]", portability)
         self.assertIn("runs-on: ${{ matrix.os }}", portability)
         self.assertIn("fail-fast: false", portability)
         self.assertIn("scripts/community-backflow.mjs preflight", portability)
@@ -543,10 +543,12 @@ class CiGatePolicyTests(unittest.TestCase):
             "        if: ${{ github.event_name == 'push' }}",
             rust_test,
         )
-        # 16GB runner 失联防护:编译与执行拆成独立 step(失联后日志全丢,按 step
-        # 状态定位阶段),CI 关 DWARF 缩小测试二进制降低链接内存峰值。有效内存
-        # 由 job 开头的 zram/swap 扩容 step(scripts/ci-memory-setup.sh)提供;
-        # 看门狗已删除,不再抢先杀编译进程。
+        # hosted runner 失联防护(私有仓规格实测为 2-core/7.8GiB RAM,2026-09
+        # 探针):编译与执行拆成独立 step(失联后日志全丢,按 step 状态定位阶段),
+        # CI 关 DWARF 缩小测试二进制降低链接内存峰值。有效内存由 job 开头的
+        # zram 扩容 step(scripts/ci-memory-setup.sh,zram→zswap→镜像自带 swap
+        # 逐层降级)提供;盘上 swapfile 不再默认创建(hosted runner 单盘布局,
+        # 会挤占构建磁盘,见 ci-memory-setup.sh 头注释);看门狗已删除。
         self.assertIn(
             "- name: cargo test --lib --no-run（编译链接测试二进制）\n"
             "        if: ${{ github.event_name != 'push' }}",
@@ -587,8 +589,8 @@ class CiGatePolicyTests(unittest.TestCase):
         # not at deeper indentation.
         setup_step = "- name: Set up zram and swap"
         # rust-lint 例外:该 job 在 Swatinem/rust-cache 恢复阶段与扩容后的
-        # 内存配置组合会稳定杀死 runner(5/5 复现),fmt/clippy 本身不是内存
-        # 密集型,不需要扩容层。
+        # 内存配置组合曾稳定杀死 runner(2026-09-12 前后 5/5 复现;后定性为
+        # 时间窗环境事故,但 fmt/clippy 非内存密集,保守维持豁免)。
         excluded_jobs = {"rust-lint"}
         blocks = re.split(
             r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.pr_workflow, flags=re.MULTILINE
@@ -613,6 +615,119 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"ubuntu job '{job_name}' must invoke scripts/ci-memory-setup.sh"
                 " via an absolute path (some jobs set a run working-directory)",
             )
+            # 内核态挂起无法被脚本内部的用户态 timeout 中断,workflow 侧的
+            # timeout 240 + 非致命包装是唯一防线(脚本头注释所声称的最后
+            # 一道防线)。漏写包装的 job 挂死时会烧满整个 job 时限,守卫
+            # 在此强制每个调用点结构一致。
+            self.assertIn(
+                'run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+                job,
+                f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
+                " 'timeout --kill-after=15 240' (userspace hang backstop)",
+            )
+            self.assertIn(
+                '|| echo "::warning::ci-memory-setup',
+                job,
+                f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
+                " (degrade to stock runner memory with a ::warning)",
+            )
+
+    def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):
+        # 发布构建 job(单盘 hosted runner,x64 开机仅 ~13-14G 可用)必须在
+        # 工具链/缓存/依赖落盘之前清理未使用预装 SDK,并在装系统依赖后
+        # autoremove + clean;否则冷编译曾把盘写满(ENOSPC,2026-09-13 起)。
+        blocks = re.split(
+            r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.release_workflow, flags=re.MULTILINE
+        )
+        for job_id in ("build-linux-x64", "build-linux-arm64"):
+            job = next(
+                (b for b in blocks if b.strip().startswith(f"{job_id}:")), None
+            )
+            self.assertIsNotNone(job, f"release job '{job_id}' not found")
+            self.assertIn(
+                "python3 scripts/ci-rust-disk.py",
+                job,
+                f"'{job_id}' must run the disk preparation script",
+            )
+            self.assertIn(
+                "--min-free-gib 24",
+                job,
+                f"'{job_id}' must fail fast below 24 GiB free",
+            )
+            # 磁盘准备必须发生在 setup-node 之前(aggressive 档会删
+            # /opt/hostedtoolcache,删后 setup-node 会重新下载 Node)。
+            self.assertLess(
+                job.index("python3 scripts/ci-rust-disk.py"),
+                job.index("uses: actions/setup-node"),
+                f"'{job_id}' must prepare disk before actions/setup-node",
+            )
+            self.assertIn("sudo apt-get autoremove -y --purge", job)
+            self.assertIn("sudo apt-get clean", job)
+        # x64 镜像预装最重(开机可用最少),用 aggressive 档;arm64 镜像轻量
+        # 且要保住 setup-node 的工具缓存,只用 base 档。
+        x64 = next(b for b in blocks if b.strip().startswith("build-linux-x64:"))
+        arm64 = next(b for b in blocks if b.strip().startswith("build-linux-arm64:"))
+        self.assertIn("--aggressive", x64)
+        self.assertNotIn("--aggressive", arm64)
+
+    def test_audited_redundant_apt_packages_stay_pruned(self):
+        # 2026-09-15 探针逐包审计结论(单包模拟安装,安装集合不变即冗余):
+        # libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/libxtst-dev 均被
+        # libwebkit2gtk-4.1-dev 硬依赖链传递安装,librsvg2-dev 构建不需要
+        # (Cargo 无 rsvg crate)。任何 workflow 的安装清单回填它们都会拖慢
+        # 依赖安装并占用单盘 runner 的构建磁盘。守卫剥注释后全文扫描:审计
+        # 注释允许提及这些名字,但非注释文本出现即拒绝(含多行续行)。
+        redundant = (
+            "libgtk-3-dev",
+            "libsoup-3.0-dev",
+            "librsvg2-dev",
+            "libx11-dev",
+            "libxi-dev",
+            "libxtst-dev",
+        )
+        workflows = sorted(
+            list((ROOT / ".github/workflows").glob("*.yml"))
+            + list((ROOT / ".github/workflows").glob("*.yaml"))
+        )
+        self.assertTrue(workflows, "no workflow files found under .github/workflows")
+        for workflow in workflows:
+            text = _without_yaml_comments(workflow.read_text(encoding="utf-8"))
+            for package in redundant:
+                self.assertNotIn(
+                    package,
+                    text,
+                    f"{workflow.name}: 审计判定的冗余 apt 包 '{package}' 不得回填"
+                    "(由 libwebkit2gtk-4.1-dev 传递安装或构建不需要)",
+                )
+
+    def test_all_linux_jobs_pin_the_release_runner_image(self):
+        # 镜像版本绝不漂移(单一镜像公约):全部 workflow 的 Linux runner 必须
+        # 与 release 构建同基线(ubuntu-22.04 / ubuntu-22.04-arm)。发布二进制
+        # 链接构建机的 glibc,测试/校验必须跑在发布同款系统上;镜像升级必须
+        # 全仓一次性协调进行(连同 glibc 下限守卫),禁止 ubuntu-latest 等
+        # 滚动镜像或个别 job 单独换版。剥掉 YAML 注释再扫:注释里的版本
+        # 记述(如迁移说明)不应触发守卫,守卫只管真实 runs-on。
+        allowed = {"ubuntu-22.04", "ubuntu-22.04-arm"}
+        workflows = sorted(
+            list((ROOT / ".github/workflows").glob("*.yml"))
+            + list((ROOT / ".github/workflows").glob("*.yaml"))
+        )
+        self.assertTrue(workflows, "no workflow files found under .github/workflows")
+        for workflow in workflows:
+            text = _without_yaml_comments(workflow.read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "ubuntu-latest",
+                text,
+                f"{workflow.name}: ubuntu-latest 是滚动镜像,违反单一镜像公约,"
+                "必须钉到与 release 一致的 ubuntu-22.04",
+            )
+            for image in sorted(set(re.findall(r"ubuntu-\d+\.\d+(?:-arm)?", text))):
+                self.assertIn(
+                    image,
+                    allowed,
+                    f"{workflow.name}: Linux 镜像 '{image}' 偏离发布基线,"
+                    "镜像升级必须全仓一次性进行",
+                )
 
     def test_windows_rust_test_parallel_phases_preserve_routing_and_coverage(self):
         # Both matrix legs retain the exact cumulative/high-risk route; splitting
@@ -1002,7 +1117,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("wrapper: ${{ steps.filter.outputs.wrapper }}", changes)
         self.assertIn("needs: changes", smoke)
         self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' }}", smoke)
-        self.assertIn("os: [macos-15, ubuntu-latest, windows-latest]", smoke)
+        self.assertIn("os: [macos-15, ubuntu-22.04, windows-latest]", smoke)
 
 
 if __name__ == "__main__":

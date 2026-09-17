@@ -100,7 +100,7 @@ jobs:
   # 同时用 sync-version.mjs --check 校验三处版本文件与 VERSION 一致,不一致 fail。
   check-version-bump:
     name: 检测发布链路变更
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     outputs:
       build_required: ${{ steps.diff.outputs.build_required }}
@@ -201,6 +201,15 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      # hosted runner 是单盘布局(/ 与 /mnt 同一 ext4,x64 镜像开机仅 ~13-14G
+      # 可用);发布冷编译(700+ crate,dep-level O2)曾把盘写满(ENOSPC)。在任何
+      # 工具链/缓存/依赖落盘之前删掉未使用的预装 SDK。
+      - name: 为发布构建准备磁盘空间
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --aggressive --min-free-gib 24
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -224,12 +233,22 @@ jobs:
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
           sudo apt-get update
+          # 清单经 2026-09-15 探针逐包冗余审计(剔除单包模拟安装,安装集合
+          # 不变即可移除):libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/
+          # libxtst-dev 均被 libwebkit2gtk-4.1-dev 硬依赖链传递安装,librsvg2-dev
+          # 构建不需要(Cargo 无 rsvg crate)。libssl-dev 必须保留:hf-hub→
+          # native-tls→openssl-sys 非 vendored,构建链接系统 OpenSSL;
+          # libayatana-appindicator3-dev 托盘在用;lld/cmake/build-essential
+          # 分别是链接器/aws-lc-rs/C 编译链。
           sudo apt-get install -y --no-install-recommends \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
-            librsvg2-dev libssl-dev \
-            libx11-dev libxi-dev libxtst-dev \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
             libayatana-appindicator3-dev \
             build-essential pkg-config cmake lld
+          # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
+          sudo apt-get autoremove -y --purge
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -327,6 +346,18 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      # hosted runner 是单盘布局(/ 与 /mnt 同一 ext4,x64 镜像开机仅 ~13-14G
+      # 可用);发布冷编译(700+ crate,dep-level O2)曾把盘写满(ENOSPC)。在任何
+      # 工具链/缓存/依赖落盘之前删掉未使用的预装 SDK。
+      # ARM64 镜像轻量(开机 ~34G 可用),base 档已足够;保守不动 /opt:
+      # hostedtoolcache 删了 setup-node 也只是重装一遍,徒增下载耗时
+      # (与 x64 的 aggressive 档不同)。
+      - name: 为发布构建准备磁盘空间
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py --min-free-gib 24
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -344,12 +375,22 @@ jobs:
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
           sudo apt-get update
+          # 清单经 2026-09-15 探针逐包冗余审计(剔除单包模拟安装,安装集合
+          # 不变即可移除):libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/
+          # libxtst-dev 均被 libwebkit2gtk-4.1-dev 硬依赖链传递安装,librsvg2-dev
+          # 构建不需要(Cargo 无 rsvg crate)。libssl-dev 必须保留:hf-hub→
+          # native-tls→openssl-sys 非 vendored,构建链接系统 OpenSSL;
+          # libayatana-appindicator3-dev 托盘在用;lld/cmake/build-essential
+          # 分别是链接器/aws-lc-rs/C 编译链。
           sudo apt-get install -y --no-install-recommends \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
-            librsvg2-dev libssl-dev \
-            libx11-dev libxi-dev libxtst-dev \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
             libayatana-appindicator3-dev \
             build-essential pkg-config cmake lld
+          # 从源头减负:孤儿依赖、apt 缓存包与索引清单不留在构建盘上。
+          sudo apt-get autoremove -y --purge
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
       - name: Node.js
         uses: actions/setup-node@v7
