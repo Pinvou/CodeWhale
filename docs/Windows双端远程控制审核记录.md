@@ -36,3 +36,13 @@
   - 修复提交：`0ce3d2c0` — 真实注册后用一次性密封信封解出明文，断言明文不出现在 wire 投影、注册期 console 输出与持久化状态；扫描三个 pairing 模块不得有任何日志调用；断言客户端 `controlled.rs` 只有 `validate_pairing_code`、无码生成与随机数调用。
 - 验证：`node --test remote-control-relay/test/pairing-code.test.js` 12 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 4. DEV-04：共享交互槽位、claim reservation 与竞态仲裁
+
+审核轮次 1（审核提交 62a98e50）
+
+- 逐条核对：`EndpointInteractionSlots` 以 revision CAS 串行化 Web lease / desktop reservation / controller lease；claim 归一化（含 IPv6 source 身份）与来源/连接/全局三档限流；reservation owner 绑定；10s reserved / 20s handshake 超时；断线（owner/endpoint）清理；失败自动换码通知（`onPairingInvalidated`，失败可重试）；统一 `pairing_code_invalid`；Web-to-Web 接管保留。
+- 验收核对：14 条用例覆盖「两个 A claim 与 Web join 共享同一槽位」「已有 Web owner 时 claim 不消费码」「A/Web 同时竞争只有一个 CAS 赢家」「stale revision 拒绝且保留 Web-to-Web 接管」「pending reservation 晋升 controller lease 不终结 pairing」，与规范验收一致。
+- 发现（minor，仅登记）：`PROTOCOL.md` 不在 DEV-04 的预计文件清单内（该文档由 DEV-00 定义、DEV-06 冻结），本任务为其新增的消息族补了 30 行说明；属文档边界偏差，无功能影响。
+- 验证：`node --test remote-control-relay/test/controller-reservation.test.js` 14 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
