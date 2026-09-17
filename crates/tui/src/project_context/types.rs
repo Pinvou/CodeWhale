@@ -2,7 +2,7 @@
 //! `ProjectContext` value that carries loaded instructions, rules, and the
 //! rendered repo-constitution block into the system prompt.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -87,10 +87,7 @@ impl ProjectContext {
     /// cross-agent `<project_instructions>` prose. Either may be absent.
     pub fn as_system_block(&self) -> Option<String> {
         let instructions_block = self.instructions.as_ref().map(|content| {
-            let source = self
-                .source_path
-                .as_ref()
-                .map_or_else(|| "project".to_string(), |p| p.display().to_string());
+            let source = project_instructions_source_label(self.source_path.as_deref());
 
             let mut block = format!(
                 "<project_instructions source=\"{source}\">\n{content}\n</project_instructions>"
@@ -124,6 +121,21 @@ impl ProjectContext {
             }
         }
     }
+}
+
+/// The `source` label for `<project_instructions>` (and repo constitution)
+/// blocks: the context file's name only, never its absolute path. The label
+/// sits inside the pinned system prompt, so keeping it stable across
+/// directory moves and recasings means an unchanged file does not emit a
+/// spurious `<context_update>` history append after a move, and absolute
+/// project paths stay out of provider-bound prompt labels. Directory
+/// identity stays discoverable via the shell; the label names the origin,
+/// it is not a locator.
+pub(crate) fn project_instructions_source_label(source_path: Option<&Path>) -> String {
+    source_path
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string())
 }
 
 /// Merge multiple project contexts (e.g., from nested directories)

@@ -28,6 +28,7 @@ use self::pack::generate_bounded_project_overview;
 pub use self::pack::generate_project_context_pack;
 pub use self::types::ProjectContext;
 use self::types::ProjectContextError;
+pub(crate) use self::types::project_instructions_source_label;
 
 /// Names of project context files to look for, in priority order.
 ///
@@ -1396,6 +1397,51 @@ mod tests {
     }
 
     #[test]
+    fn project_instructions_source_label_falls_back_to_project() {
+        use crate::project_context::project_instructions_source_label;
+        assert_eq!(
+            project_instructions_source_label(None),
+            "project",
+            "a missing source path keeps the historical literal label"
+        );
+        assert_eq!(
+            project_instructions_source_label(Some(std::path::Path::new("/etc/AGENTS.md"))),
+            "AGENTS.md"
+        );
+    }
+
+    #[test]
+    fn forkguard_project_instructions_source_is_file_name_not_absolute_path() {
+        // The source label sits inside the pinned system prompt: loading the
+        // same AGENTS.md from a different directory must leave the
+        // instructions block byte-identical, so a move emits no spurious
+        // `<context_update>` history append and no absolute path enters a
+        // provider-bound label. Scope note: ancestor-chain and project-rule
+        // labels keep their own (absolute) spellings; relativizing those is
+        // a separate decision.
+        let dir_a = tempdir().expect("tempdir a");
+        let dir_b = tempdir().expect("tempdir b");
+        fs::write(dir_a.path().join("AGENTS.md"), "Pinned content").expect("write a");
+        fs::write(dir_b.path().join("AGENTS.md"), "Pinned content").expect("write b");
+
+        let block_a = load_project_context(dir_a.path())
+            .as_system_block()
+            .expect("block a");
+        let block_b = load_project_context(dir_b.path())
+            .as_system_block()
+            .expect("block b");
+        assert_eq!(
+            block_a, block_b,
+            "a directory move must not change the project instructions block"
+        );
+        assert!(block_a.contains("source=\"AGENTS.md\""));
+        assert!(
+            !block_a.contains(&dir_a.path().display().to_string()),
+            "absolute paths must not enter prompt source labels"
+        );
+    }
+
+    #[test]
     fn test_empty_file_warning() {
         let tmp = tempdir().expect("tempdir");
         let agents_path = tmp.path().join("AGENTS.md");
@@ -1661,6 +1707,14 @@ mod tests {
             .as_deref()
             .expect("constitution block rendered");
         assert!(block.contains("<codewhale_repo_constitution"));
+        // Same origin-label convention as project_instructions: file name
+        // only, no absolute path in the provider-bound label (the locator
+        // stays available via constitution_source_path and /constitution).
+        assert!(block.contains("source=\"constitution.json\""));
+        assert!(
+            !block.contains(&tmp.path().display().to_string()),
+            "the constitution prompt label must not carry the absolute path"
+        );
         assert!(block.contains("current user request"));
         assert!(block.contains("run focused tests"));
         assert!(block.contains("keep the tool-catalog head byte-stable"));

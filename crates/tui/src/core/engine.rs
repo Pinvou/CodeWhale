@@ -146,7 +146,7 @@ fn agent_list_event(manager: &SubAgentManager, active_session_id: &str) -> Event
 }
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
-const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `bash`, the `Web` tool, code execution, local programs, custom code, or a manual implementation. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync` with a `query` describing that capability before `bash`, the `Web` tool, code execution, local programs, custom code, or a manual implementation. If `registry_sync` is not in your tool list, run `tool_search` first to activate it; if it cannot be surfaced or called at all, Registry access is unavailable in this session — use local tools instead. It scores the local Registry snapshot host-side and returns at most eight matches; the full catalog never enters the conversation. Treat a returned server as a match when it plausibly covers the core capability; wording need not be exact. If any plausible match exists, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative; activate it via `tool_search` as well, since activating `registry_sync` does not activate it. If nothing matches, refine the query once; a still-empty refined result means every Registry entry is clearly irrelevant. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, or after the matching server fails to start.";
 const ISOLATED_CHAT_ENGINE_PROMPT: &str = "You are Codewhale Chat. Answer the user's request directly and conversationally. This isolated chat-only session has no local workspace, project, memory, skill, account, credential, path, runtime context, or tools.";
 
 fn sanitize_isolated_chat_attachments(mut text: String) -> String {
@@ -2133,6 +2133,9 @@ impl Engine {
                 turn_id: turn_id.clone(),
                 created_at: chrono::Utc::now(),
                 route: None,
+                // A composer shell command has no host submission envelope to
+                // correlate with.
+                submission_id: None,
             })
             .await;
 
@@ -2848,6 +2851,9 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::Runtime,
+                // Background shell completion wake: no host submission to
+                // correlate with.
+                None,
             )
             .await;
     }
@@ -2910,6 +2916,7 @@ impl Engine {
                         verbosity,
                         provenance,
                         turn_tool_security,
+                        submission_id,
                     } => {
                         let configured_security = self.config.turn_tool_security.clone();
                         let previous_turn_was_restricted = self.control_plane_restricted;
@@ -2959,6 +2966,7 @@ impl Engine {
                             hook_executor,
                             verbosity,
                             provenance,
+                            submission_id,
                         )
                         .await;
                         if self.control_plane_restricted {
@@ -3084,6 +3092,9 @@ impl Engine {
                                 self.config.hook_executor.clone(),
                                 self.config.verbosity.clone(),
                                 UserInputProvenance::Runtime,
+                                // Engine-scheduled goal continuation: no host
+                                // submission to correlate with.
+                                None,
                             )
                             .await;
                     }
@@ -3608,7 +3619,10 @@ impl Engine {
                         }
                         self.handle_purge().await;
                     }
-                    Op::EditLastTurn { new_message } => {
+                    Op::EditLastTurn {
+                        new_message,
+                        submission_id,
+                    } => {
                         // `/edit` immediately starts another model turn but
                         // carries no replacement process-local policy. A fresh
                         // SendMessage is the only operation that can change
@@ -3699,6 +3713,7 @@ impl Engine {
                             self.config.hook_executor.clone(),
                             self.config.verbosity.clone(),
                             UserInputProvenance::ExternalUser,
+                            submission_id,
                         )
                         .await;
                     }
@@ -4456,6 +4471,9 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::SubAgentHandoff,
+                // Idle sub-agent completion resume: no host submission to
+                // correlate with.
+                None,
             )
             .await;
         if !outcome.started() {
@@ -5233,6 +5251,7 @@ impl Engine {
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
         provenance: UserInputProvenance,
+        submission_id: Option<String>,
     ) -> SendMessageOutcome {
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
@@ -5482,6 +5501,10 @@ impl Engine {
                 turn_id: turn.id.clone(),
                 created_at: turn_started_at,
                 route: Some(turn_route),
+                // Echo the host's correlation token (`None` when this turn
+                // was self-started without one) so the host can bind its
+                // submit-window actions to the turn that actually started.
+                submission_id,
             })
             .await;
 

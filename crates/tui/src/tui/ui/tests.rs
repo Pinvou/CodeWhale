@@ -13705,6 +13705,7 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             base_url: String::new(),
             billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
+        submission_id: None,
     };
 
     capture_turn_started_metadata(&mut app, &event);
@@ -13769,6 +13770,7 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
             base_url: String::new(),
             billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
+        submission_id: None,
     };
 
     capture_turn_started_metadata(&mut app, &event);
@@ -13811,6 +13813,7 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
             base_url: String::new(),
             billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
+        submission_id: None,
     };
 
     capture_turn_started_metadata(&mut app, &event);
@@ -13847,6 +13850,7 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             base_url: String::new(),
             billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
+        submission_id: None,
     };
     capture_turn_started_metadata(&mut app, &event);
 

@@ -498,12 +498,12 @@ done
     expect(matrix.trust.localInference).toContain("loopback local-model route");
     // The source candidate counts by default and says so. Disclosure alone
     // is never acceptance, every opt-out stays authoritative, and the
-    // published release's earlier opt-in behavior is named, not blurred.
+    // historically asking release (0.9.11) is named, not blurred.
     expect(matrix.trust.telemetry).toContain(`Codewhale ${matrix.sourceCandidate.version} counts anonymous usage by default`);
     expect(matrix.trust.telemetry).toContain("discloses it at first launch");
     expect(matrix.trust.telemetry).toContain("policy notice version 5");
     expect(matrix.trust.telemetry).toContain("Codewhale and PostHog");
-    expect(matrix.trust.telemetry).toContain(`published ${matrix.latestPublishedRelease.version} release asked first`);
+    expect(matrix.trust.telemetry).toContain("earlier 0.9.11 release asked first");
     expect(matrix.trust.telemetry).toContain("never records any acceptance");
     expect(matrix.trust.telemetry).toContain("opt-out recorded under the earlier opt-in policy stays off");
     expect(matrix.trust.telemetry).not.toContain("requires explicit consent");
@@ -530,6 +530,34 @@ done
     expect(roadmap).not.toContain("你的数据不会离开");
     expect(providers).toMatch(/Hosted\s+routes/);
     expect(runtime).toContain("No hosted relay");
+  });
+
+  it("names the asking release identically on every site face", () => {
+    // The asking-release reference names a historically fixed release, not
+    // the moving latestPublishedRelease pin: when the pin moved to 0.9.12
+    // the interpolated "published <version> release asked first" wording
+    // became a false claim. The same fixed phrasing is mirrored across the
+    // en/zh dictionaries and the faq/roadmap pages; anchor every copy so a
+    // future edit cannot update one face and silently leave the others
+    // describing a different contract.
+    const faq = text("web/app/[locale]/faq/page.tsx");
+    const roadmap = text("web/app/[locale]/roadmap/page.tsx");
+    for (const face of [
+      text("web/lib/i18n/dictionaries/en/docs-trust.ts"),
+      faq,
+      roadmap,
+    ]) {
+      expect(face).toContain("earlier 0.9.11 release asked first");
+      expect(face).not.toContain("published 0.9.11 release asked first");
+    }
+    for (const face of [
+      text("web/lib/i18n/dictionaries/zh/docs-trust.ts"),
+      faq,
+      roadmap,
+    ]) {
+      expect(face).toContain("早先的 0.9.11 版本会先询问");
+      expect(face).not.toContain("已发布的 0.9.11 版本会先询问");
+    }
   });
 
   it("backs product vocabulary, contributor credit, and the exact MIT footer", () => {
