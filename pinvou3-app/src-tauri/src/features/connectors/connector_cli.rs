@@ -167,6 +167,39 @@ pub(crate) fn reap_after_kill(child: &mut Child) {
     let _ = reap_killed_child(child, REAP_GRACE);
 }
 
+/// 连接器 CLI 单次调用的兜底上限。Rust 侧全部单次调用(eip `auth login
+/// --no-poll` / `auth poll`(CLI 本地轮询窗口默认 30s,见 eip linux-src
+/// main.go `cmdPoll`;zhidao 侧缺省并显式传 5s)/ status / load / logout)
+/// 受 CLI 自带 HTTP 客户端超时 60s 约束(见同文件 `httpClient`),单次合法
+/// 最坏 ≈ 30s 轮询窗口末次在途请求 + 60s + 启动开销 ≈ 90s;超过视为进程级
+/// 挂死。须小于门闩抢占阈值 `flow_gate::STALL_LIMIT`(180s),让卡死先在
+/// 调用点以本超时自愈,抢占只作兜底。
+pub(crate) const CLI_RUN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 跑命令并**捕获输出**、带超时兜底(EIP / 知道 SSO 编排用)。
+///
+/// 旧实现直接 `cmd.output()`:CLI 真挂死(网络半开、内网网关黑洞)时会无限
+/// 阻塞,spawn_blocking 线程与子进程都不回收,反复触发会耗尽线程池(issue
+/// #1097)。委托 `platform::process::output_with_timeout` 而非自管进程:临时
+/// 文件捕获输出(无管道写满死锁,孙进程继承句柄也不影响超时生效),超时
+/// kill 并 wait() 收尸,超过捕获上限同样终止,防失控输出拖垮调用方。
+pub(crate) fn run_captured_with_timeout(
+    cmd: Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<(bool, i32, String, String), String> {
+    crate::platform::process::output_with_timeout(cmd, timeout)
+        .map(|out| {
+            (
+                out.status.success(),
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        })
+        .map_err(|e| format!("{label}: {e}"))
+}
+
 /// 标准 base64 编码(避免引新依赖)。
 pub fn b64(data: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -610,5 +643,55 @@ mod tests {
             }
         }
         out
+    }
+
+    /// run_captured_with_timeout 正常路径:退出码与 stdout/stderr 都被完整捕获。
+    #[test]
+    fn run_captured_collects_output_and_status() {
+        // 用 std::env::consts::OS 常量分支而非 cfg 语法:平台条件编译不得出现在
+        // 适配层外(architecture-guard rust_target_cfg_outside_adapter)。
+        let windows = std::env::consts::OS == "windows";
+        let mut cmd = Command::new(if windows { "cmd" } else { "echo" });
+        if windows {
+            cmd.args(["/C", "echo captured-ok 1>&2"]);
+        } else {
+            cmd.arg("captured-stdout-ok");
+        }
+        let (ok, _code, so, se) = run_captured_with_timeout(cmd, "test-cli", CLI_RUN_TIMEOUT)
+            .expect("fast command must succeed");
+        assert!(ok);
+        if windows {
+            assert!(se.contains("captured-ok"), "stderr captured, got {se:?}");
+        } else {
+            assert!(
+                so.contains("captured-stdout-ok"),
+                "stdout captured, got {so:?}"
+            );
+        }
+    }
+
+    /// run_captured_with_timeout 超时路径:挂死的子进程被 kill 并收尸,调用在
+    /// 超时后很快返回错误,而不是无限阻塞(issue #1097:僵尸流程资源不回收)。
+    #[test]
+    fn run_captured_kills_a_hung_child_at_the_deadline() {
+        let windows = std::env::consts::OS == "windows";
+        let mut cmd = Command::new(if windows { "cmd" } else { "sleep" });
+        if windows {
+            cmd.args(["/C", "ping -n 30 127.0.0.1"]);
+        } else {
+            cmd.arg("30");
+        }
+        let t0 = Instant::now();
+        let err = run_captured_with_timeout(cmd, "test-cli", Duration::from_secs(1))
+            .expect_err("hung command must be killed");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "kill must return promptly, took {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            err.contains("timed out after 1s"),
+            "error must report the timeout, got {err:?}"
+        );
     }
 }
