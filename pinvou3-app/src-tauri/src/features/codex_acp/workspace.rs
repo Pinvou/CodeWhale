@@ -518,11 +518,11 @@ pub fn checkout_workspace_branch(
 }
 
 /// diff 内存缓存：键 = (session_id, 相对路径)，值 = 文件指纹 + diff 文本。
-/// 指纹覆盖工作区文件（size + mtime 纳秒 + 头尾采样 hash——内容变而 size/mtime
-/// 未变（同尺寸覆盖写）也能失效）、`.git/index`（git add/reset 等暂存区变化
-/// 会更新 index）与 HEAD 指向的 ref 文件（reset --soft / update-ref / commit 只
-/// 移动 HEAD、可能不更新 index 或工作区——而 git diff --cached 依赖 HEAD），
-/// 任一变化即失效；仅进程内存、不落盘，重启即清空。
+/// 指纹覆盖工作区文件（size + mtime 纳秒 + 内容采样 hash——≤8KB 全量、更大头尾
+/// 各 4KB，内容变而 size/mtime 未变（同尺寸覆盖写）也能失效）、`.git/index`
+/// （git add/reset 等暂存区变化会更新 index）与 HEAD 指向的 ref 文件（reset
+/// --soft / update-ref / commit 只移动 HEAD、可能不更新 index 或工作区——而
+/// git diff --cached 依赖 HEAD），任一变化即失效；仅进程内存、不落盘，重启即清空。
 const DIFF_CACHE_MAX_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -557,8 +557,10 @@ fn modified_nanos(metadata: &fs::Metadata) -> u128 {
         .unwrap_or_default()
 }
 
-// 头 4KB + 尾 4KB 的 FNV-1a 采样：文件内容变化（含同尺寸覆盖写）时大概率失效，
-// 每次开销恒定 ~8KB 读取，远小于重跑 git diff。
+// FNV-1a 内容采样：≤ 8KB 全量读取，不留采样盲区——中等规模仓库的 .git/index
+// 恰落此区间，条目定长、同路径同 SHA 位数的重写尺寸不变，且可能落在同一 mtime
+// 粒度内，只采样头部会漏掉后半段条目与校验和的改写；> 8KB 读头尾各 4KB，内容
+// 变化（含同尺寸覆盖写）时大概率失效。每次开销恒定 ≤ 8KB 读取，远小于重跑 git diff。
 fn sample_head_tail_hash(path: &Path, len: u64) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     let mut visit = |bytes: &[u8]| {
@@ -568,17 +570,18 @@ fn sample_head_tail_hash(path: &Path, len: u64) -> u64 {
         }
     };
     if let Ok(mut file) = fs::File::open(path) {
-        let head_len = 4096.min(len as usize);
-        let mut head = vec![0u8; head_len];
-        if file.read_exact(&mut head).is_ok() {
-            visit(&head);
-        }
-        if len > 8192 {
-            let tail_len = 4096.min((len - head_len as u64) as usize);
-            let mut tail = vec![0u8; tail_len];
-            if file.seek(SeekFrom::End(-(tail_len as i64))).is_ok()
-                && file.read_exact(&mut tail).is_ok()
-            {
+        if len <= 8192 {
+            let mut full = vec![0u8; len as usize];
+            if file.read_exact(&mut full).is_ok() {
+                visit(&full);
+            }
+        } else {
+            let mut head = vec![0u8; 4096];
+            if file.read_exact(&mut head).is_ok() {
+                visit(&head);
+            }
+            let mut tail = vec![0u8; 4096];
+            if file.seek(SeekFrom::End(-4096)).is_ok() && file.read_exact(&mut tail).is_ok() {
                 visit(&tail);
             }
         }
@@ -1479,6 +1482,91 @@ mod tests {
         // 文件内容变化 → 指纹变化。
         fs::write(root.path().join("main.py"), "print(2)\n").unwrap();
         assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
+    }
+
+    // 真实仓库的中等 index（4–8 KiB）：80 个文件恰好让 index 越过头部采样区，
+    // 又落在"小于等于 8KiB"区间——f075 的条目（偏移 >5KB）与校验和都在文件后半段，
+    // 同尺寸同 mtime 的暂存改写只能靠全量哈希失效（此前头尾采样会漏掉该区间）。
+    #[test]
+    fn diff_fingerprint_invalidates_on_medium_index_staging_change() {
+        let Some(root) = init_git_repo("diff-fingerprint-medium-index") else {
+            return;
+        };
+        for index in 1..=80 {
+            fs::write(
+                root.path().join(format!("f{index:03}")),
+                format!("content {index}\n"),
+            )
+            .unwrap();
+        }
+        git_output(root.path(), &["add", "."]).unwrap();
+        git_output(
+            root.path(),
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "-m",
+                "80 files",
+            ],
+        )
+        .unwrap();
+        // read-tree 剥去 add 留下的 TREE 扩展，基线态与篡改态随后都出自同一条
+        // update-index 重写路径，保证两次 index 尺寸完全一致。
+        git_output(root.path(), &["read-tree", "HEAD"]).unwrap();
+        let old_sha = git_output(root.path(), &["rev-parse", ":f075"]).unwrap();
+        let tampered_blob = std::env::temp_dir().join(format!(
+            "pinvou3-tampered-blob-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&tampered_blob, "tampered\n").unwrap();
+        let new_sha = git_output(
+            root.path(),
+            &["hash-object", "-w", tampered_blob.to_str().unwrap()],
+        )
+        .unwrap();
+        let _ = fs::remove_file(&tampered_blob);
+        let old_sha = old_sha.trim();
+        let new_sha = new_sha.trim();
+        let restage = |sha: &str| {
+            git_output(
+                root.path(),
+                &["update-index", "--cacheinfo", &format!("100644,{sha},f075")],
+            )
+            .unwrap();
+        };
+
+        // 先走一遍篡改→还原，让基线态同样是 update-index 的重写产物。
+        restage(new_sha);
+        restage(old_sha);
+        let index = root.path().join(".git/index");
+        let baseline = diff_fingerprint(root.path(), "f001");
+        // 前提守卫：index 必须落在头部采样之外、8KiB 之内的目标区间。
+        assert!(
+            baseline.index_size > 4096 && baseline.index_size <= 8192,
+            "index 尺寸 {} 不在 4–8KiB 目标区间",
+            baseline.index_size
+        );
+        let index_stamp = current_times(&index);
+
+        // 等价 update-index 改写暂存 blob：工作区不动，仅 index 后半段内容变化。
+        restage(new_sha);
+        apply_times(&index, index_stamp);
+        // 同尺寸守卫：尺寸若变化，失效就不来自内容哈希，本测试失去意义。
+        let after = diff_fingerprint(root.path(), "f001");
+        assert_eq!(after.index_size, baseline.index_size);
+        assert_eq!(after.index_modified, baseline.index_modified);
+        assert_ne!(after, baseline);
+        // 还原暂存内容 → 指纹回到基线（同内容不产生虚假失效）。
+        restage(old_sha);
+        apply_times(&index, index_stamp);
+        assert_eq!(diff_fingerprint(root.path(), "f001"), baseline);
     }
 
     #[test]
