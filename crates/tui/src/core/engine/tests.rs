@@ -9888,7 +9888,7 @@ impl crate::core::model_client::ModelClient for CompleteOnceThenBlockModelClient
                 canned::message_stop(),
             ];
             return Ok(Box::pin(futures_util::stream::iter(
-                events.into_iter().map(|event| Ok(event)),
+                events.into_iter().map(Ok),
             )));
         }
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
