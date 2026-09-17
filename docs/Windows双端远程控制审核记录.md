@@ -125,3 +125,97 @@
 - 命令层：`desktop_remote_capabilities` 只投影已安装工具与启用 Skill 的 id/显示名，并从 ACP 池读取 code agent readiness。
 - 验证：`cargo test remote_control::controller::capabilities` 4 通过 / 0 失败。
 - 结论：**REVIEW: PASS**。
+
+## 13. DEV-13：B 权威 Session、远程任务 ledger 与幂等执行
+
+审核轮次 1（为本轮实现的提交 59ab94a9；审核者=会话内独立复核角色）
+
+- 逐条核对：绑定 connection/lease/generation 的准入、`task_id + client_request_id` 幂等（同参回放/异参拒绝）、per-session turn lock、终态唯一且不可复活、dispatch 原子边界与 `result_unknown`、持久化失败失败关闭、重启后终态可证明、台账不含 prompt/宿主路径，均已由 `controller/task.rs` 用例覆盖（19 条）。
+- 发现（major，已修复）：`cancel()` 只把台账标记为 `cancel_requested`，从未取消执行器的 `CancellationToken`，取消进行中任务实际不生效（违反 RC-T-006 与「所有已接纳任务最终有可验证终态」）。
+  - 修复提交：`8e2e6445` — 服务维护 task_id→取消令牌注册表；`cancel()` 命中 `CancellationRequested` 时取消令牌；新增用例证明挂起执行器被真实中断并落 `cancelled` 终态。
+- 验证：`cargo test remote_control::controller::task` 19 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
+
+## 14. DEV-14：共享 transfer core、绑定与资源预算
+
+审核轮次 1（提交 046b3391）
+
+- 逐条核对：方向化 opaque handle（`ctr-up-`/`ctr-dn-`，`from_id` 由前缀推导方向）、连接/任务预算、块顺序与重复块幂等、滚动摘要与 mismatch 失败关闭、TTL 过期、按 task/connection/session 清理、Web handle 与 controller handle 类型隔离（`transfer_unknown`），均有用例（16 条）。
+- 发现（major，已修复，与 DEV-17/18 同源）：`expire()` 无任何调用方，见第 16 节。
+- 验证：`cargo test controller::transfer` 27 通过 / 0 失败（含后续新增用例）。
+- 结论：**REVIEW: PASS**。
+
+## 15. DEV-15：`temporary_model_package/v1` 构包、校验与全终态清理
+
+审核轮次 1（提交 35ca4293）
+
+- 逐条核对：v1 严格解析（未知字段/枚举/组合拒绝）、SavedModel→route 投影与不可导出原因、loopback/私网/metadata SSRF 拒绝、任务绑定、内存态存储与幂等释放、清理 hook 接入 DEV-13，均有用例（12 条）。
+- 发现（major，已修复）：任务提交路径未校验 `controller_temporary` 是否真装有与该任务绑定的临时包，存在「拿不到凭证仍提交」的口子，与 RC-M-006/RC-M-009 冲突。
+  - 修复提交：`7e296f7f` — 提交前要求存在 active_task == task_id 的临时包，否则 `model_package_missing`；新增用例覆盖无包、正确绑定与跨任务复用三种情形。
+- 登记缺口（未修，需后续任务）：临时模型包尚未注入引擎请求路径（B 还不能真正用 A 的凭证执行），属引擎层集成，需单独排期。
+- 验证：`cargo test temporary_model` 12 通过；`cargo test desktop_remote_task` 5 通过。
+- 结论：**REVIEW: PASS**（含 1 项已登记缺口）。
+
+## 16. DEV-16 / DEV-17 / DEV-18
+
+审核轮次 1（提交 21b0be5f、a870b176、c4647f7a）
+
+- DEV-16 逐条核对：绑定字段完整、首决定 CAS、同值幂等/异值 `permission_already_decided`、过期即拒绝、B/Local 调用 `permission_authority_invalid`、B stop 与 Allow 竞态的 dispatch 边界（先到拒绝 / 已提交只报 executed-or-unknown）、预览与范围脱敏，均有用例（12 + 3 条）。发现：无 blocker/major；登记缺口——审批请求尚未由执行路径产出并 dispatch 到 ACP，需引擎层接线。
+- DEV-17 逐条核对：upload 串接共享 core 与 staging、完成句柄一次性、重复块不重复落盘、非法块/摘要失败同时清 staging 与台账、目标路径由 SessionStore 私有根解析、文件名二次清洗，均有用例（20 + 3 条）。
+- DEV-18 逐条核对：opaque artifact ID 索引与 session 绑定、三档预览、分块下载顺序与摘要、源长度变化/跨 session/删除竞态失败关闭、投影不含路径，均有用例（8 + 3 条）。
+- 发现（major，已修复，DEV-17/18 同源）：`TransferRegistry::expire()` 无调用方，未完成或断线遗留传输不会在有界时间内清理（RC-F-003）。
+  - 修复提交：`9f74ba43` — upload/download 各自暴露 `expire()`（upload 同时 abort staging），两个运行时启动 60 秒周期回收；新增用例锁定 TTL 内不回收、过期恰好一次、预算归零、staging 清理与句柄失效。
+- 验证：`cargo test controller::transfer` 27 通过 / 0 失败。
+- 结论：**REVIEW: PASS**。
+
+## 17. DEV-19：权威事件 journal、快照恢复与 A 独立历史
+
+审核轮次 1（提交 5739c02d）
+
+- 逐条核对：epoch+单调 sequence、有界容量与字节预算、重复事件幂等、每任务唯一终态 CAS、gap→快照（含 base sequence 与 digest）、payload key allowlist 与凭证/路径脱敏；A 侧独立历史可持久化、原子写、损坏或版本不符失败关闭、去重且不复写首个终态、删除本地副本不影响 B，均有用例（9 + 8 + 3 条）。
+- 登记缺口（未修）：journal 目前只被任务状态 sink 填充，用户消息/流式文本/思考/工具/审批/附件/成果事件尚未由执行路径产出，需与引擎/执行适配一起接线。
+- 验证：`cargo test controller::journal` 9 通过；`controller::history` 8 通过；`desktop_remote_history` 3 通过。
+- 结论：**REVIEW: PASS**（含 1 项已登记缺口）。
+
+## 18. DEV-20：前端桥、独立状态域与迟到结果防护
+
+审核轮次 1（提交 5cf44980）
+
+- 逐条核对：lib.rs 单一注册点 manage B/A/能力/任务/模型/审批/附件/成果/历史状态并注册全部 desktop_remote_* 命令；启动执行一次重启收尾；前端 `remote-control-state.js` 以 intent+generation/lease 门丢弃迟到结果、能力快照按 connection+revision 丢弃、任务事件去重且不回退终态；bridge 不接触 API Key/credential_ref/SavedModel 正文；Web lane 挂空桩且 WebUI v2 契约不变，均有 node 契约用例（8 + 5 条）与 bridge 域契约锁定。
+- 发现：无 blocker/major。观察：`desktopRemoteControl` 域为桌面专属，`web_bridge_domain_contract` 已按 desktop-only 处理。
+- 验证：`node --test desktop_remote_state.test.mjs` 8 通过；bridge/web 域契约 5 通过；`npm run build:ui` 通过。
+- 结论：**REVIEW: PASS**。
+
+## 19. DEV-21 / DEV-22 / DEV-23：B 面板、A 连接壳与远程会话 UI
+
+审核轮次 1（提交 f2796d15、d38abd0b、9f18061e）
+
+- 逐条核对：B 面板含开关、7 位码+秒级倒计时（aria-live 节流）、刷新、全状态、主控设备、模型来源、预授权工作区、立即断开、停止远程任务与只读审批，且无 Allow/Approve 入口；A 连接壳做码归一化、统一失效文案、隐藏窗口≠断开、显式断开；远程会话窗口覆盖模型来源（仅传 opaque modelId）、模式由能力快照决定、任务状态三语映射、result_unknown 提示、审批 A 决定、成果下载与离线副本标识；三语词条与 `ui_language_coverage` 通过。
+- 发现（major，已修复，DEV-21 关联）：B 面板与命令面都依赖 watchdog，但见第 14 节 DEV-10 修复；面板本身不轮询。
+- 登记缺口（未修）：三个 UI 面未跑浏览器 smoke（puppeteer），当前证据为源码契约 + vite build；发布前需补 UI 冒烟与真机可访问性检查。
+- 验证：`controlled_device_panel_contract` 5、`connect_remote_device_contract` 5、`remote_conversation_contract` 5 通过；`npm run build:ui` 通过。
+- 结论：**REVIEW: PASS**（含 1 项已登记缺口）。
+
+## 20. DEV-24：遥测、审计、安全扫描与运维指标
+
+审核轮次 1（提交 9525e932）
+
+- 逐条核对：Relay 侧 `controller-telemetry.js` 与 Rust 侧 `controller/telemetry.rs` 都实现 stage/outcome/reason/latency 闭集、字段 allowlist 与身份/内容字段拒绝、匿名聚合、客户端去重、哨兵扫描（sk-*、Bearer、Authorization、私钥、vault://），并有用例（6 + 5 条）。
+- 登记缺口（未修）：两侧模块尚未在 server.js 端点与 app 事件点实际埋点调用，属「统一 schema 与门禁已就绪、调用点待接线」状态；已在 DEV-25 runbook 的门禁中登记。
+- 验证：`node --test controller-telemetry.test.js` 6 通过；`cargo test controller::telemetry` 5 通过。
+- 结论：**REVIEW: PASS**（含 1 项已登记缺口）。
+
+## 21. DEV-25：公网部署迁移、灰度、真实双机 E2E 与发布门禁
+
+审核轮次 1（提交 788d87b8）
+
+- 逐条核对：runbook 覆盖前置门禁命令、灰度步骤（registry 覆盖率、能力开关、自托管升级、容量限流、故障注入）、18.3 的 21 条旅程（并点名最易假通过的第 9～10/13/16/19/20/21 条）、监控阈值、回滚约束（只关能力、不删 registry/tombstone、拒绝裸 v2）与残余风险（受信 Relay，不抵御恶意主动 MITM）；`controller-release-gates.test.js` 把 runbook 章节、门禁命令、回滚不删持久状态、gateway 无旁路与遥测枚举固化为断言（6 条）。
+- 登记缺口（未修）：真实双机/公网 E2E 未执行（本环境无法自证）；feature flag 配置与 CI workflow 尚未落成可执行产物。
+- 验证：`node --test controller-release-gates.test.js` 6 通过。
+- 结论：**REVIEW: PASS**（含 2 项已登记缺口，发布前必须补齐）。
+
+## 22. 本轮汇总
+
+- 已修复并独立提交：`d5c020d4`（DEV-01 旁路守卫）、`f3872c54`（DEV-02 门禁行为验证）、`0ce3d2c0`（DEV-03 明文扫描）、`6e8f5a31`（DEV-06 hook 注入点）、`8e2e6445`（DEV-13 取消真正生效）、`ec85eb72`（DEV-10 watchdog 周期推进）、`9f74ba43`（DEV-17/18 传输周期回收）、`7e296f7f`（DEV-15 临时模型缺失失败关闭）。
+- 已登记但未修复（需引擎/部署层排期）：临时模型注入引擎、审批 dispatch 到 ACP、journal 事件源接线、遥测调用点接线、真实双机 E2E 与 feature flag/CI 产物、三个 UI 面的浏览器冒烟。
+- 最终回归：`cargo test remote_control::` 245 通过 / 0 失败；`architecture-guard` 通过。
