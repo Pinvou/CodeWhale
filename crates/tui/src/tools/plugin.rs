@@ -33,6 +33,17 @@ use super::spec::{
 
 use crate::config::ToolOverride;
 
+async fn drain_plugin_pipe<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut pipe: Option<R>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(pipe) = pipe.as_mut() {
+        use tokio::io::AsyncReadExt as _;
+        let _ = pipe.read_to_end(&mut buf).await;
+    }
+    buf
+}
+
 /// Timeout for plugin script execution. Plugin scripts are
 /// model-invoked interpreters in the same class as js_execution /
 /// code_execution (600s there): 120s killed healthy long-running
@@ -284,9 +295,12 @@ async fn run_plugin_child_raw(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // Kill the script if the timeout below drops the wait future;
-    // otherwise the plugin keeps running orphaned after we report the
-    // timeout.
+    // kill_on_drop is the cancel-path backstop: when the tool future is
+    // dropped and this function's child handle goes with it, the child is
+    // killed. The timeout path below cannot rely on that: dropping a
+    // `wait_with_output()` future does NOT kill the child (the handle is
+    // moved into the join), so the timeout arms kill explicitly instead of
+    // leaving the plugin script running orphaned.
     cmd.kill_on_drop(true);
 
     let mut child = cmd
@@ -301,12 +315,35 @@ async fn run_plugin_child_raw(
         })
     });
 
-    let output = tokio::time::timeout(PLUGIN_EXECUTION_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| ToolError::Timeout {
-            seconds: PLUGIN_EXECUTION_TIMEOUT.as_secs(),
-        })?
-        .map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    // Drain the pipes concurrently with the wait: a script blocked on a
+    // full pipe buffer would otherwise never exit, turning every timeout
+    // into a guaranteed kill.
+    let stdout_task = tokio::spawn(drain_plugin_pipe(stdout_pipe));
+    let stderr_task = tokio::spawn(drain_plugin_pipe(stderr_pipe));
+
+    let output = match tokio::time::timeout(PLUGIN_EXECUTION_TIMEOUT, child.wait()).await {
+        Ok(status) => {
+            let status = status.map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
+            let stdout = stdout_task
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("stdout reader: {e}")))?;
+            let stderr = stderr_task
+                .await
+                .map_err(|e| ToolError::execution_failed(format!("stderr reader: {e}")))?;
+            std::process::Output { status, stdout, stderr }
+        }
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(ToolError::Timeout {
+                seconds: PLUGIN_EXECUTION_TIMEOUT.as_secs(),
+            });
+        }
+    };
 
     if let Some(stdin_writer) = stdin_writer {
         let _ = stdin_writer.await;
