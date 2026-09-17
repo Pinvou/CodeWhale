@@ -9331,6 +9331,15 @@ async fn spawn_subagent_from_input(
     );
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace.clone();
+        if spawn_request.worktree.is_some() {
+            // A worktree child is an isolation boundary, not a wider
+            // session: its boundary is the worktree alone, so the parent's
+            // attached roots do not carry over (at base a worktree child
+            // could only resolve inside its worktree).
+            child_runtime.context.workspace_roots = Vec::new();
+        }
+        // An explicit `cwd:` swap without a worktree is non-isolating and
+        // keeps the parent's root set (disclosed in the PR description).
         // A worktree child gets a distinct workspace-scoped plugin catalog.
         // Reusing the parent's registry here would leak workspace plugins (and
         // their authority receipts) across the exact isolation boundary the

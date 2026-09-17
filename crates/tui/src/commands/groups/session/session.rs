@@ -177,7 +177,6 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
             model: forked.metadata.model.clone(),
             workspace: app.workspace.clone(),
             workspace_roots: forked.metadata.workspace_roots.clone(),
-
             mode: app.mode,
         },
     )
@@ -303,7 +302,6 @@ pub fn fork(app: &mut App) -> CommandResult {
             model: app.model.clone(),
             workspace: app.workspace.clone(),
             workspace_roots: parent.metadata.workspace_roots.clone(),
-
             mode: app.mode,
         },
     )
@@ -367,7 +365,6 @@ pub fn new_session(app: &mut App, arg: Option<&str>) -> CommandResult {
             model: app.model.clone(),
             workspace: app.workspace.clone(),
             workspace_roots: Vec::new(),
-
             mode: app.mode,
         },
     )

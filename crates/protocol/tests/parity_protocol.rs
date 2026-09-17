@@ -130,7 +130,11 @@ fn thread_resume_params_round_trip() {
                     PathBuf::from("/repo/main"),
                     PathBuf::from("/repo/shared"),
                 ]),
-                "an explicit root set round-trips, and is serialized (non-empty)"
+                "an explicit root set round-trips"
+            );
+            assert!(
+                encoded.contains(r#""workspace_roots":["/repo/main","/repo/shared"]"#),
+                "the encoded frame must actually carry the set: {encoded}"
             );
             assert!(params.persist_extended_history);
         }
@@ -156,6 +160,29 @@ fn thread_start_params_workspace_roots_round_trip() {
             assert_eq!(
                 params.workspace_roots,
                 vec![PathBuf::from("/repo/lib"), PathBuf::from("/repo/docs")]
+            );
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn thread_resume_params_explicit_empty_set_survives_the_wire() {
+    // The three-state resume contract rides on the wire distinguishing
+    // three shapes: absent key = None = inherit the persisted set;
+    // `[]` = Some(vec![]) = an explicit clear back to the bare cwd;
+    // non-empty = replace. A skip-attr or deserialize-adapter refactor
+    // that folds `[]` into `None` would silently degrade explicit-clear
+    // back to inherit - this pins the distinction on the wire itself.
+    let payload = r#"{"kind":"resume","thread_id":"t","workspace_roots":[]}"#;
+    let decoded: ThreadRequest = serde_json::from_str(payload).expect("deserialize explicit clear");
+    match &decoded {
+        ThreadRequest::Resume(params) => {
+            assert_eq!(params.workspace_roots, Some(Vec::new()));
+            let encoded = serde_json::to_string(&decoded).expect("re-encode");
+            assert!(
+                encoded.contains(r#""workspace_roots":[]"#),
+                "an explicit clear must re-encode with the key present: {encoded}"
             );
         }
         other => panic!("unexpected request: {other:?}"),

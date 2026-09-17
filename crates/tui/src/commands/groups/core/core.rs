@@ -181,7 +181,6 @@ pub fn clear(app: &mut App) -> CommandResult {
             model: app.model.clone(),
             workspace: app.workspace.clone(),
             workspace_roots: Vec::new(),
-
             mode: app.mode,
         },
     )

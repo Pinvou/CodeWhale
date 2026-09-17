@@ -463,60 +463,78 @@ impl ExecPolicyEngine {
             })
             .filter(|(_, rule)| rule.tool == tool)
             .filter(|(_, rule)| {
-                rule.workspace.as_deref().is_none_or(|workspace| {
-                    // An Allow rule widens auto-approval, so its workspace
-                    // scope keeps matching the primary root only: matching
-                    // every attached root would let a rule scoped to one
-                    // repository auto-approve the same command executed
-                    // against a different one (exec always runs in the
-                    // session cwd).
-                    if rule.action == PermissionAction::Allow {
-                        workspace_scope_matches(workspace, ctx.cwd)
+                // Which roots is this rule eligible against? A workspace-
+                // scoped rule is evaluated only against roots inside its
+                // scope; an Allow rule additionally keeps the primary-only
+                // narrowing on every filter (it widens auto-approval, so it
+                // may never reach into an attached root - exec always runs
+                // in the session cwd).
+                let candidate_idx: Vec<usize> = if rule.action == PermissionAction::Allow {
+                    // An Allow rule keeps the primary-only narrowing on
+                    // every filter regardless of whether it carries a
+                    // workspace: its rooted path and scope may never reach
+                    // into an attached root.
+                    if rule
+                        .workspace
+                        .as_deref()
+                        .is_none_or(|workspace| workspace_scope_matches(workspace, ctx.cwd))
+                    {
+                        vec![0]
                     } else {
-                        roots
-                            .iter()
-                            .any(|root| workspace_scope_matches(workspace, root))
+                        Vec::new()
                     }
-                })
-            })
-            .filter(|(_, rule)| match rule.command.as_deref() {
-                Some(command) if rule.command_exact => command.trim() == ctx.command.trim(),
-                Some(command) => self.arity_dict.allow_rule_matches(command, ctx.command),
-                None => true,
-            })
-            .filter(|(_, rule)| match (rule.path.as_deref(), ctx.path) {
-                (Some(pattern), Some(call_path)) => {
-                    // Workspace-relative normalization now runs per attached
-                    // root, so a rule naming a path under any single root
-                    // matches. Normalization fails for a call outside every
-                    // root, for a rule that names none, and on a POSIX host
-                    // for a Windows-spelled rule/call pair. A rule spelling
-                    // an ABSOLUTE path must still be able to match such a
-                    // call exactly, or pinned locations (a real home,
-                    // `/root`, a Windows profile) are unmatchable — the
-                    // fallback runs on the original call path regardless of
-                    // the per-root outcome, so relative semantics and
-                    // single-root behavior are unchanged.
-                    //
-                    // Like the workspace scope above, an Allow rule keeps its
-                    // rooted path matching on the primary root only.
-                    let rooted_roots = if rule.action == PermissionAction::Allow {
-                        &roots[..1]
-                    } else {
-                        &roots[..]
-                    };
-                    rooted_roots.iter().zip(&normalized_paths).any(
-                        |(root, normalized_path)| match (
-                            normalize_workspace_relative_path(pattern, root),
-                            normalized_path.as_deref(),
-                        ) {
-                            (Some(ws_rule), Some(ws_call)) => ws_rule == ws_call,
-                            _ => false,
-                        },
-                    ) || absolute_path_rule_matches(pattern, call_path)
+                } else {
+                    match rule.workspace.as_deref() {
+                        None => (0..roots.len()).collect(),
+                        Some(workspace) => roots
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, root)| workspace_scope_matches(workspace, root))
+                            .map(|(idx, _)| idx)
+                            .collect(),
+                    }
+                };
+                if candidate_idx.is_empty() {
+                    return false;
                 }
-                (Some(_), None) => false,
-                (None, _) => true,
+
+                let command_ok = match rule.command.as_deref() {
+                    Some(command) if rule.command_exact => command.trim() == ctx.command.trim(),
+                    Some(command) => self.arity_dict.allow_rule_matches(command, ctx.command),
+                    None => true,
+                };
+                if !command_ok {
+                    return false;
+                }
+                // The path filter runs against the SAME scoped candidate
+                // roots, not independently over every root: a rule scoped to
+                // repo R with a relative path fires only on a call that
+                // normalizes under R, never on the same relative path
+                // materialized under an unrelated root. Workspace-relative
+                // normalization fails for a call outside every candidate
+                // root, for a rule that names none, and on a POSIX host for
+                // a Windows-spelled rule/call pair. A rule spelling an
+                // ABSOLUTE path must still be able to match such a call
+                // exactly, or pinned locations (a real home, `/root`, a
+                // Windows profile) are unmatchable - the fallback runs on
+                // the original call path regardless of the per-root outcome,
+                // so relative semantics and single-root behavior are
+                // unchanged.
+                match (rule.path.as_deref(), ctx.path) {
+                    (Some(pattern), Some(call_path)) => {
+                        candidate_idx.iter().any(|&idx| {
+                            match (
+                                normalize_workspace_relative_path(pattern, &roots[idx]),
+                                normalized_paths[idx].as_deref(),
+                            ) {
+                                (Some(ws_rule), Some(ws_call)) => ws_rule == ws_call,
+                                _ => false,
+                            }
+                        }) || absolute_path_rule_matches(pattern, call_path)
+                    }
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
             })
             .max_by_key(|(layer, rule)| (*layer, rule.action, ask_rule_specificity(rule)))
             .map(|(_, rule)| (*rule).clone());
@@ -2575,6 +2593,58 @@ mod tests {
             })
             .unwrap();
         assert_eq!(unscoped.matched_rule, None);
+    }
+
+    #[test]
+    fn scoped_relative_path_rule_does_not_fire_under_unrelated_root() {
+        // Scope and path must pair per root: a rule scoped to /shared with
+        // a relative path fires only on a call under /shared, never on the
+        // same relative path materialized under an unrelated root. With two
+        // independent filters this matched via scope=/shared + path=/shared
+        // under the primary - over-blocking outside the rule's repo.
+        let rule = ToolAskRule {
+            tool: "edit_file".into(),
+            command: None,
+            command_exact: false,
+            path: Some("deploy/config.yaml".into()),
+            workspace: Some("/shared".into()),
+            action: PermissionAction::Deny,
+        };
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]);
+
+        // Negative: the same relative path under the unrelated primary root
+        // must not fire the /shared-scoped rule.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/workspace/deploy/config.yaml"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(
+            decision.matched_rule, None,
+            "scope + relative path must pair per root, not match independently: {decision:?}"
+        );
+
+        // Control: the same call under the scoped root fires the rule.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/shared/deploy/config.yaml"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
+            })
+            .unwrap();
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
     }
 
     #[test]
