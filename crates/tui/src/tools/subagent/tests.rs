@@ -21016,3 +21016,126 @@ async fn agent_claim_is_withheld_from_a_role_with_no_write_authority() {
         .to_string();
     assert!(refusal.contains("no write authority to widen"), "{refusal}");
 }
+
+// Regression: `load_skill` never sits in a child's first-turn active set —
+// skills are discovered through `tool_search`, and tool-free children lack
+// `tool_search` as well. The ## Skills block rendered into a child prompt
+// must therefore stay honest in all three child states: name tool_search as
+// the discovery path when it exists, stay truthful for allowlist children
+// that carry tool_search but no load_skill, and do not command a tool the
+// child cannot see (Pinvou #490 phantom-tool incident).
+#[test]
+fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
+    let tmp = tempdir().expect("tempdir");
+    let skill_dir = tmp
+        .path()
+        .join(".codewhale")
+        .join("skills")
+        .join("demo-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: A demo skill\n---\nDo the demo thing",
+    )
+    .unwrap();
+
+    let context = ToolContext::new(tmp.path());
+    let catalog = subagent_skill_catalog(&context);
+
+    assert!(catalog.contains("## Skills"), "catalog missing:\n{catalog}");
+    assert!(
+        catalog.contains("demo-skill"),
+        "catalog missing skill entry:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("`tool_search`"),
+        "child has no load_skill in its wire catalog; discovery must go through tool_search:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("activating it via `tool_search` first if it is not in your tool list"),
+        "child has no load_skill in its first-turn active set; the header must \
+         teach the tool_search activation path:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("if `tool_search` is absent or does not surface `load_skill`"),
+        "header must stay honest for tool-free and allowlist children that \
+         lack tool_search or load_skill:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("try `load_skill` directly anyway"),
+        "tool_search being absent does not make load_skill unreachable — a \
+         registered deferred tool hydrates on demand when called directly; \
+         the header must teach the direct-call fallback instead of declaring \
+         Skills unloadable:\n{catalog}"
+    );
+}
+
+// Worker records, takeover targets, and transcript artifact descriptions all
+// point the parent at `handle_read`, which is deferred on stock hosts; every
+// prose site that names it must carry the `tool_search` activation hint so
+// the parent is never commanded to call a tool it cannot see (Pinvou #490
+// phantom-tool class). Statuses whose recommended tool is `agent` (first-turn
+// active wherever children exist) or none are exempt.
+#[test]
+fn forkguard_worker_record_hints_teach_handle_read_activation() {
+    assert!(
+        HANDLE_READ_ACTIVATION_HINT.contains("`tool_search`"),
+        "shared hint must name the activation tool:\n{HANDLE_READ_ACTIVATION_HINT}"
+    );
+
+    let instructions = agent_transcript_inspect_instructions("worker_1");
+    assert!(
+        instructions.contains("with handle_read")
+            && instructions.contains(HANDLE_READ_ACTIVATION_HINT),
+        "takeover/projection inspect briefs must pair handle_read with the \
+         activation hint:\n{instructions}"
+    );
+
+    let transcript = default_subagent_artifacts("run_1")
+        .iter()
+        .find(|artifact| artifact.name == "transcript_handle")
+        .expect("transcript artifact must be listed")
+        .clone();
+    assert!(
+        transcript.description.contains("with handle_read")
+            && transcript.description.contains(HANDLE_READ_ACTIVATION_HINT),
+        "transcript artifact description must carry the activation hint:\n{}",
+        transcript.description
+    );
+
+    let default_action = default_agent_run_recommended_action();
+    assert!(
+        default_action.reason.contains(HANDLE_READ_ACTIVATION_HINT),
+        "default recommended action must carry the activation hint:\n{}",
+        default_action.reason
+    );
+
+    let spec = make_worker_spec("worker_1", PathBuf::from("."));
+    for status in [
+        AgentWorkerStatus::WaitingForUser,
+        AgentWorkerStatus::Completed,
+        AgentWorkerStatus::Failed,
+        AgentWorkerStatus::Interrupted,
+    ] {
+        let action = recommended_action_for_worker_status(status, &spec);
+        assert_eq!(action.tool.as_deref(), Some("handle_read"));
+        assert!(
+            action.reason.contains(HANDLE_READ_ACTIVATION_HINT),
+            "{status:?} recommends handle_read without the activation hint:\n{}",
+            action.reason
+        );
+    }
+
+    for status in [
+        AgentWorkerStatus::Queued,
+        AgentWorkerStatus::Starting,
+        AgentWorkerStatus::Running,
+        AgentWorkerStatus::ModelWait,
+        AgentWorkerStatus::RunningTool,
+    ] {
+        let action = recommended_action_for_worker_status(status, &spec);
+        assert_eq!(action.tool, None, "{status:?} must not recommend a tool");
+    }
+    let cancelled = recommended_action_for_worker_status(AgentWorkerStatus::Cancelled, &spec);
+    assert_eq!(cancelled.tool.as_deref(), Some("agent"));
+}
