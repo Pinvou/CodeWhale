@@ -682,6 +682,16 @@
         "file": "000068_approval_recovery_query_lease.up.sql",
         "version": 68,
         "sha256": "ad8cca5a43d773368c69017c78938e06e3c3eb21757930a124f210c30e646fda"
+      },
+      {
+        "file": "000069_entitlement_component_adjustment_policy_v2.down.sql",
+        "version": 69,
+        "sha256": "3a955fc49314a44318ebd20c2cf5694d1920bbc569a47c5826e2746f4ad1feaf"
+      },
+      {
+        "file": "000069_entitlement_component_adjustment_policy_v2.up.sql",
+        "version": 69,
+        "sha256": "5dfcd5e1f9e3f41206e594653cc6b55c0e1c3c015033e8d59a294f966710dd6e"
       }
     ],
     "billing": [

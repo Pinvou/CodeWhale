@@ -67,6 +67,20 @@ func buildPolicies() map[string]Policy {
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "provider_control_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark", "active_mapping_set_fingerprint"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
+	// The entitlement correction command keeps its v1 row as immutable history
+	// and moves to its own closed domain snapshot schema. Registering the v2
+	// metadata opens nothing: the command stays outside the executable set until
+	// every GSA-22 domain gate exists and activation is separately authorized.
+	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
+		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{
+			"package_id", "wallet_id", "payment_order_id", "payment_transaction_id", "source_component_id", "source_lot_id",
+			"source_type", "target_type", "amount_microcredits", "reason_code", "source_evidence_digest", "facts_digest", "policy_version",
+		},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
 	result["PAYMENT_PRODUCT_RESUME"] = Policy{
 		CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: Version, Mode: ApprovalRequired,
 		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
