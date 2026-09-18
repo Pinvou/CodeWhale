@@ -80,6 +80,8 @@
 | E2E-02 | 1 | PASS | A 端 claim、安全握手、租约安装与 B 端对称接管全部接线完成（三步 6 个提交）；审核中每步各修复 1 处，正式审核再修复 1 处：测试构造入口收口、在途失败不覆盖已有状态（A/B 两侧）、claim 后立即清除连接码。验证：`cargo test remote_control::controller::` 193 通过 / 0 失败，`cargo test remote_control::` 282 通过 / 0 失败，architecture-guard 通过。细节见第 5.3 节。 |
 | E2E-03 | 1 | PASS | A 端会话/能力/任务意图命令落地（2 个提交）：冻结 payload 与输入摘要由 Rust 构造并自检，前端只传 UI 字段；UI 状态持有 sessionId 与 capability revision。审核修复 2 处：会话重开复用引用、wire 快照映射进 UI 能力域。验证：`cargo test remote_control::` 289 通过 / 0 失败；4 个 node 契约文件 25 通过 / 0 失败；`npm run build:ui` 与 architecture-guard 通过。细节见第 6 节。 |
 | E2E-04 | 1 | PASS | 加密业务帧双向派发完成（5 个提交）：共享加密通道、A 端收发接线、B 端解密派发与加密回传、bridge 发送入口；同进程双端用例覆盖 A 发 task_submit → B 解密派发 → B 回传 task_status → A 投影。审核修复 1 处：任务校验改用活租约的真实协商能力（删除本地常量表）。验证：`cargo test remote_control::` 298 通过 / 0 失败；architecture-guard 通过。细节见第 7 节。 |
+| E2E-05 | 1 | PASS | 普通会话正文 journal 与 A 端 transcript 渲染完成（A 落库/投影、B 终态与正文产出、缺口回放与快照恢复、A 视图渲染）。细节见第 8.3 节。 |
+| E2E-06 | 1 | PASS | liveness / 恢复 / 清理闭环完成：A 心跳与 B watchdog（直接应答优先 + Relay 签名兜底）、双端显式断开、双端 resume 序列接线（A `22929522`，B `5b42e1d8`/`4bfa63e3`/`a345b6a0`）、B 停止/刷新/远端断开的任务与凭证清理端口（`1987dd2e`）。审核发现 2 处 minor 已修复（恢复帧租约绑定、清理 scope 语义，`6e84a097`）。验证：`cargo test remote_control::` 322 通过 / 0 失败；`cargo test remote_control::controller::` 229 通过 / 0 失败；architecture-guard 通过。细节见第 9.5 节。 |
 
 ## 4. 已登记决策与本轮已知限制
 
@@ -294,6 +296,21 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `22929522` | A 端运行时接线：断线改为「挂起通道 + 启动恢复」（不再 `clear`）；`ControllingLane::send_resume_control`（生产走敏感恢复队列）；manager 新增 `begin_resume`/`advance_resume`/`current_operation`/`send_resume_control` 与带 `activation_id` 的 `complete_resumed`；恢复预算 30 秒内未完成、相位错乱、对端确认失败或收到 Relay `error` 都会清空通道并投影 `endpoint_offline`；新增整条恢复序列用例（prepare/confirm/ready_ack 顺序 + resumed 后重开业务）与断线即发 prepare 的断言 |
 
 验证：`cargo test remote_control::` 320 通过 / 0 失败；`cargo test remote_control::controller::` 229 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
+
+### 9.5 E2E-06 正式审核记录（轮次 1，结论 PASS）
+
+审核提交范围：`50ed50244`、`8d5ae57f2`、`e8fea59db`、`8d372e8a9`、`4b0b0283e`、`a8a56a490`、`94141a2e8`、`f4c3ea9b`、`c686550d`、`75b30972`、`22929522`、`5b42e1d8`、`4bfa63e3`、`a345b6a0`、`1987dd2e`、`6e84a097`。
+
+- 目标差异核对：出口「有效 A 存活证据不超过 30 秒」由 A 端 3 秒心跳（`94141a2e8`）+ B watchdog 的直接应答优先 / Relay 签名兜底（`8d5ae57f2`、`e8fea59db`）覆盖；「停止/断开产生明确终态并清理远端任务」由双端显式断开（`8d372e8a9`，B 终结为 `stopped` 并保留用户工作区）与清理端口（`1987dd2e`：`RemoteTaskService::interrupt_generation` → 任务生命周期钩子回收临时模型凭证 / 待决权限 / 传输暂存）覆盖。断线恢复门（本任务此前唯一未实现的协议族）已双端接通：A 端 `22929522`，B 端 `5b42e1d8`/`4bfa63e3`/`a345b6a0`；两端都按 `disconnect → prepare → provisional → confirm → activation_ack → post_activation_liveness → ready_ack → resumed` 驱动各自 `ControllerResumeGate`。
+- 关键失败路径：本地 30 秒预算耗尽、相位错乱、对端 CONFIRM AEAD 验签失败、`controller_resumed` 材料复用（新令牌/指纹与旧值相同）、Relay `error` 帧——A/B 各有真实用例断言「清空通道 + 投影有界错误（A `endpoint_offline` / B `desktop_remote_resume_invalid`）+ 不留半恢复状态」。B 的 watchdog 仍是恢复期间的时间权威（恢复不得延长 A 的存活截止时间）；恢复期间业务帧一律不派发（A `business.suspend()`，B 的 `serve` 只走恢复处理函数）。
+- 敏感信息：恢复令牌只出现在内存与冻结帧内（`controller_resume_prepare.resume_token_b64` 是协议要求）；`ControllingResumeMaterial`/`ControlledResumeMaterial`/`ControlledResumeAttempt` 的 Debug 全部脱敏且不含令牌字段；CONFIRM 帧用握手 `resume` 秘密做 AEAD（AAD 绑租约五元组 + activation_id）；无新增日志/遥测调用点。
+- 跨 generation / lease 边界：恢复帧必须绑定当前租约五元组（见下方修复 1）；两端 gate 都绑定租约与原始 deadline，恢复材料一次性轮换；已核对 Relay `controller-lease.js:completeResume`——恢复**不改变**业务密钥派生输入，因此复用同一业务通道而不重新派生密钥（原假设已在 9.2 更正）。
+- 审核发现与处置（均为 minor，已在 `6e84a097` 修复）：
+  1. 入站恢复帧只按类型与 activation_id 处理，未校验租约/代际绑定 → 新增 `resume_frame_matches_lease`：旧代际/旧租约残留帧一律丢弃（不推进相位、也不终止候选，避免被被动 DoS），并补 B 端回归断言。
+  2. B 端清理端口忽略 `ControlledCleanupScope` → 只有涉及远端任务/待决权限/临时模型的清理才中断任务，纯凭证清理不再顺带打断任务。
+- 定向测试与守卫：`cargo test remote_control::` 322 通过 / 0 失败（含 A 端整条恢复序列 + 断线即发 prepare + B 端五帧顺序与旧代际丢弃 + B 端相位序列与顺序错乱失败关闭 + 三条清理路径）；`cargo test remote_control::controller::` 229 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
+- 登记缺口（非本轮 blocker）：① 真机双端断线恢复演练未执行（环境限制，随 E2E-08 登记为发布缺口）；② `DesktopControlledCleanup` 适配器无 Tauri 级测试（本仓库无 `mock_app` 先例），其触发面由 manager 侧 stop/refresh/远端断开三条路径用例覆盖，适配器逻辑为 `try_state` + `interrupt_generation` 直连。
+- 结论：**REVIEW: PASS**。下一步进入 E2E-07 剩余项（浏览器冒烟与正式审核）。
 
 ## 10. E2E-07 实施进度（进行中，未审核）
 
