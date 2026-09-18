@@ -33,7 +33,7 @@ use super::crypto::{
     transport_key_fingerprint,
 };
 use super::encrypted_lane::ControllingLaneState;
-use super::journal::{JournalEvent, MAX_EVENT_PAYLOAD_BYTES};
+use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::LeaseContext;
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
@@ -77,6 +77,10 @@ pub(crate) trait ControllingLane: Send {
 /// 独立历史，并把事件投影给 UI。feature 层只负责解密与校验。
 pub(crate) trait ControllingJournalSink: Send + Sync {
     fn publish(&self, event: &JournalEvent);
+
+    /// E2E-05 缺口恢复：权威快照原子替换 A 端本地副本（默认忽略，命令层实现
+    /// 为写入对应历史并广播）。
+    fn publish_snapshot(&self, _snapshot: &JournalSnapshot) {}
 }
 
 /// A 端 Relay 端口。入站帧由 `spawn_controller_transport` 的事件 sink 投递；
@@ -324,6 +328,8 @@ pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_task: &'a mut (dyn FnMut(Value) + Send),
     /// 解密并校验过的权威 journal 事件（E2E-05）：A 端据此写独立历史并渲染正文。
     pub(crate) on_journal: &'a mut (dyn FnMut(&JournalEvent) + Send),
+    /// 权威快照（E2E-05 缺口恢复）：A 端据此原子替换本地副本。
+    pub(crate) on_snapshot: &'a mut (dyn FnMut(&JournalSnapshot) + Send),
     /// E2E-06：待发送的 A 端心跳帧（明文控制帧，绑定当前租约）。
     pub(crate) on_liveness: &'a mut (dyn FnMut(Value) + Send),
 }
@@ -476,9 +482,43 @@ fn dispatch_inbound_frame(
                 }
             }
         }
+        "session_snapshot" => {
+            let Some(snapshot) = journal_snapshot_from_wire(&payload) else {
+                return;
+            };
+            // 快照原子替换本地副本：期望值推进到快照基准，后续事件从基准+1 连续。
+            journal.mark_snapshot(&snapshot);
+            (sinks.on_snapshot)(&snapshot);
+        }
         _ => {}
     }
 }
+
+/// wire `session_snapshot` → 权威快照。base64 体积与声明一致、摘要与快照本体
+/// 自带的 digest 一致才接受；事件条目沿用与增量事件相同的体积上限。
+fn journal_snapshot_from_wire(payload: &Value) -> Option<JournalSnapshot> {
+    let encoded = payload.get("snapshot_b64").and_then(Value::as_str)?;
+    let declared = payload
+        .get("snapshot_bytes")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<usize>().ok())?;
+    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    if raw.len() != declared || raw.len() > MAX_SNAPSHOT_BYTES {
+        return None;
+    }
+    let snapshot: JournalSnapshot = serde_json::from_slice(&raw).ok()?;
+    if payload.get("sha256").and_then(Value::as_str) != Some(snapshot.digest.as_str())
+        || payload.get("journal_epoch").and_then(Value::as_str) != Some(snapshot.epoch.as_str())
+        || payload.get("base_sequence").and_then(Value::as_str)
+            != Some(snapshot.sequence.to_string().as_str())
+    {
+        return None;
+    }
+    Some(snapshot)
+}
+
+/// 快照帧的硬上限：256 条事件 × 单条上限 + 信封开销。
+const MAX_SNAPSHOT_BYTES: usize = 256 * MAX_EVENT_PAYLOAD_BYTES;
 
 /// wire `journal_event` → 权威事件。`event_b64` 是事件本体（冻结的 camelCase
 /// 形状），明文侧还有 journal_epoch/event_sequence/event_kind 供缺口检测；三者
@@ -554,6 +594,21 @@ impl JournalExpectations {
             (event.epoch.clone(), event.sequence),
         );
         self.awaiting_replay.remove(&event.session_id);
+    }
+
+    /// 快照原子替换本端状态：期望值推进到快照基准，并解除在途回放标记。
+    /// 快照按会话归属由调用方决定（当前按快照内事件的会话集合推进）。
+    pub(crate) fn mark_snapshot(&mut self, snapshot: &JournalSnapshot) {
+        let sessions: Vec<String> = snapshot
+            .events
+            .iter()
+            .map(|event| event.session_id.clone())
+            .collect();
+        for session_id in sessions {
+            self.applied
+                .insert(session_id.clone(), (snapshot.epoch.clone(), snapshot.sequence));
+            self.awaiting_replay.remove(&session_id);
+        }
     }
 
     /// 需要请求回放时返回 (epoch, after)；该会话已有在途请求时返回 None。
@@ -706,6 +761,10 @@ pub(crate) async fn connect_controlling_device(
             // A 端独立历史由命令层端口写入（feature 层不反向依赖 app 层）。
             journal.publish(event);
         };
+        let mut on_snapshot = |snapshot: &JournalSnapshot| {
+            // E2E-05 缺口恢复：权威快照原子替换 A 的本地副本。
+            journal.publish_snapshot(snapshot);
+        };
         let mut on_liveness = |frame: Value| {
             // E2E-06 心跳：经当前认证 transport 的租约控制队列发送。
             let _ = device.send_authenticated_control(&frame);
@@ -715,6 +774,7 @@ pub(crate) async fn connect_controlling_device(
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(
@@ -1158,12 +1218,15 @@ mod tests {
         let mut on_task = |event: Value| tasks_seen.push(event);
         let mut journal_seen: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |event: &JournalEvent| journal_seen.push(event.clone());
+        let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
+        let mut on_snapshot = |snapshot: &JournalSnapshot| snapshots_seen.push(snapshot.clone());
         let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
@@ -1337,12 +1400,15 @@ mod tests {
         let mut on_task = |event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |event: &JournalEvent| journal_events.push(event.clone());
+        let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
+        let mut on_snapshot = |snapshot: &JournalSnapshot| snapshots_seen.push(snapshot.clone());
         let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
@@ -1591,12 +1657,15 @@ mod tests {
         let mut on_task = |event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |event: &JournalEvent| journal_events.push(event.clone());
+        let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
+        let mut on_snapshot = |snapshot: &JournalSnapshot| snapshots_seen.push(snapshot.clone());
         let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
@@ -1614,6 +1683,123 @@ mod tests {
         );
         assert_eq!(journal_events[0].kind, "assistant_delta");
         assert_eq!(journal_events[0].payload["text"], "hello from B");
+    }
+
+    /// E2E-05 缺口恢复：权威快照经加密通道到达后原子替换 A 的本地副本；摘要或
+    /// 基准不匹配的帧一律丢弃。
+    #[tokio::test]
+    async fn session_snapshot_frames_replace_the_local_copy() {
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let lease = lease_context(&reservation);
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "snapshot_journal_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: capabilities.clone(),
+                },
+            )
+            .unwrap();
+        let business = ControllingLaneState::default();
+        business
+            .install(HandshakeRole::A, &lease, a_session)
+            .unwrap();
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease, &capabilities)
+            .unwrap();
+
+        let snapshot = JournalSnapshot {
+            epoch: "epoch-9".to_owned(),
+            sequence: 7,
+            digest: "a".repeat(64),
+            events: vec![JournalEvent {
+                event_id: "event-1".to_owned(),
+                epoch: "epoch-9".to_owned(),
+                sequence: 7,
+                kind: "assistant_delta".to_owned(),
+                session_id: session.session_id.clone(),
+                task_id: None,
+                terminal_status: None,
+                payload: serde_json::json!({"text": "hello"}),
+            }],
+        };
+        let raw = serde_json::to_vec(&snapshot).unwrap();
+        let wire = |digest: &str, base: u64| {
+            serde_json::json!({
+                "v": 1,
+                "type": "session_snapshot",
+                "connection_id": lease.connection_id,
+                "controller_lease_id": lease.controller_lease_id,
+                "lease_epoch": lease.lease_epoch,
+                "relay_epoch": lease.relay_epoch,
+                "remote_control_generation": lease.remote_control_generation,
+                "request_id": "request-snapshot-1",
+                "session_id": session.session_id,
+                "journal_epoch": snapshot.epoch,
+                "base_sequence": base.to_string(),
+                "snapshot_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
+                "snapshot_bytes": raw.len().to_string(),
+                "sha256": digest,
+            })
+        };
+        let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
+        let good = responder
+            .seal("session_snapshot", &wire(&snapshot.digest, 7), &capabilities)
+            .unwrap();
+        let bad_digest = responder
+            .seal("session_snapshot", &wire(&"b".repeat(64), 7), &capabilities)
+            .unwrap();
+        let bad_base = responder
+            .seal("session_snapshot", &wire(&snapshot.digest, 6), &capabilities)
+            .unwrap();
+
+        let mut lane = TestLane {
+            events: VecDeque::from(vec![
+                ControllerLaneEvent::Frame(bad_digest.to_string()),
+                ControllerLaneEvent::Frame(bad_base.to_string()),
+                ControllerLaneEvent::Frame(good.to_string()),
+            ]),
+        };
+        let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |_: &ControllingSessionProjection| {};
+        let mut on_task = |_: Value| {};
+        let mut on_journal = |_: &JournalEvent| {};
+        let mut on_snapshot = |snapshot: &JournalSnapshot| snapshots_seen.push(snapshot.clone());
+        let mut on_liveness = |_: Value| {};
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
+        assert_eq!(snapshots_seen.len(), 1, "只有摘要与基准都正确的快照被接受");
+        assert_eq!(snapshots_seen[0].epoch, "epoch-9");
+        assert_eq!(snapshots_seen[0].sequence, 7);
     }
 
     /// E2E-05 缺口恢复：连续/首个事件落库，缺中间事件请求回放（同会话只保留一个
@@ -1764,12 +1950,14 @@ mod tests {
         let mut on_session = |_: &ControllingSessionProjection| {};
         let mut on_task = |_: Value| {};
         let mut on_journal = |_: &JournalEvent| {};
+        let mut on_snapshot = |_: &JournalSnapshot| {};
         let mut on_liveness = |frame: Value| frames.push(frame);
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
         let outcome = tokio::time::timeout(
