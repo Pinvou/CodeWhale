@@ -38,6 +38,7 @@ use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::LeaseContext;
 use super::resume::{
     build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
+    resume_frame_matches_lease,
 };
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
@@ -572,6 +573,11 @@ fn handle_resume_frame(
     let Some(lease) = resume.lease.clone() else {
         return ResumeOutcome::Failed;
     };
+    // 审核修复：Relay/A 的恢复帧必须绑定当前租约；旧代际或旧租约的残留帧一律
+    // 丢弃，既不推进相位也不终止候选。
+    if !resume_frame_matches_lease(&lease, &frame) {
+        return ResumeOutcome::Ignored;
+    }
     let request_id = || format!("request-resume-{}", Uuid::new_v4().simple());
     match kind {
         "controller_resume_provisional" => {

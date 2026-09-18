@@ -35,6 +35,7 @@ use super::protocol::{
 use super::resume::{
     build_controller_post_activation_liveness, build_controller_resume_activation_ack,
     build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
+    resume_frame_matches_lease,
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
@@ -1115,6 +1116,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
     let Some(lease) = resume.lease.clone() else {
         return ControlledResumeOutcome::Failed;
     };
+    // 审核修复：Relay/A 的恢复帧必须绑定当前租约；旧代际或旧租约的残留帧一律
+    // 丢弃，既不推进相位也不终止候选。
+    if !resume_frame_matches_lease(&lease, message) {
+        return ControlledResumeOutcome::Ignored;
+    }
     let role = super::relay_transport::ControllerRole::ControlledB;
     let now_b = controlled_monotonic_millis();
     let request_id = || format!("request-resume-{}", uuid::Uuid::new_v4().simple());
@@ -2194,7 +2200,15 @@ mod tests {
                 &manager,
                 &lane,
                 &mut resume,
-                &json!({"type": "controller_resume_provisional", "activation_id": activation}),
+                &json!({
+                    "type": "controller_resume_provisional",
+                    "activation_id": activation,
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
+                }),
             ),
             ControlledResumeOutcome::Progressed
         );
@@ -2206,6 +2220,25 @@ mod tests {
             handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
             ControlledResumeOutcome::Progressed
         );
+        // 审核回归：旧 generation 的恢复帧必须被丢弃且不影响相位。
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resume_activation_pending",
+                    "activation_id": activation,
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": "generation-stale",
+                }),
+            ),
+            ControlledResumeOutcome::Ignored
+        );
         // activation_pending → activation_ack + post_activation_liveness。
         assert_eq!(
             handle_controlled_resume_frame(
@@ -2216,6 +2249,11 @@ mod tests {
                 &json!({
                     "type": "controller_resume_activation_pending",
                     "activation_id": activation,
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
                 }),
             ),
             ControlledResumeOutcome::Progressed
@@ -2232,6 +2270,11 @@ mod tests {
                     "activation_id": activation,
                     "liveness_epoch_b": epoch_b,
                     "heartbeat_sequence_b": "1",
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
                 }),
             ),
             ControlledResumeOutcome::Progressed
@@ -2249,6 +2292,11 @@ mod tests {
                     "liveness_epoch_b": epoch_b,
                     "new_resume_token_b64": base64::engine::general_purpose::STANDARD
                         .encode([3_u8; 32]),
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
                 }),
             ),
             ControlledResumeOutcome::Completed

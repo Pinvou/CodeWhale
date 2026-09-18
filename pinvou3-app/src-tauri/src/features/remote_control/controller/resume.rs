@@ -516,6 +516,23 @@ pub(crate) fn build_controller_resume_ready_ack(
     Ok(frame)
 }
 
+/// E2E-06 审核修复：入站恢复帧必须绑定当前租约五元组。缺失或与当前租约不符的
+/// 帧一律丢弃（不推进相位、也不终止候选），避免旧代际/旧租约的残留帧被误用。
+pub(crate) fn resume_frame_matches_lease(lease: &LeaseContext, frame: &serde_json::Value) -> bool {
+    [
+        ("connection_id", lease.connection_id.as_str()),
+        ("controller_lease_id", lease.controller_lease_id.as_str()),
+        ("lease_epoch", lease.lease_epoch.as_str()),
+        ("relay_epoch", lease.relay_epoch.as_str()),
+        (
+            "remote_control_generation",
+            lease.remote_control_generation.as_str(),
+        ),
+    ]
+    .into_iter()
+    .all(|(field, expected)| frame.get(field).and_then(serde_json::Value::as_str) == Some(expected))
+}
+
 fn role_wire(role: ControllerRole) -> &'static str {
     match role {
         ControllerRole::ControllerA => "A",
