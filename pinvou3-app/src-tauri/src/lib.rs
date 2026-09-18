@@ -38,6 +38,7 @@ use crate::features::{
         controlled::ControlledDeviceManager,
         controlling::ControllingDeviceManager,
         controlling_session::ControllingSessionManager,
+        encrypted_lane::ControllingLaneState,
         permission::PermissionAuthority,
     },
     remote_control::RemoteControlManager,
@@ -1050,6 +1051,7 @@ pub fn run() {
                     commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
                     handle.manage(ControllingDeviceManager::default());
                     handle.manage(ControllingSessionManager::default());
+                    handle.manage(ControllingLaneState::default());
                     handle.manage(CapabilitySnapshotManager::default());
                     let temporary_models = commands::desktop_remote_model::shared_model_store();
                     handle.manage(temporary_models.clone());
@@ -1490,6 +1492,8 @@ pub fn run() {
             commands::desktop_remote_controller_session::desktop_remote_controller_apply_capability_snapshot,
             commands::desktop_remote_controller_session::desktop_remote_controller_task_intent,
             commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_intent,
+            commands::desktop_remote_controller_session::desktop_remote_controller_task_send,
+            commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_send,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
             commands::desktop_remote_task::desktop_remote_task_open_session,
             commands::desktop_remote_task::desktop_remote_task_switch_session,

@@ -295,7 +295,7 @@ impl ControllingLaneState {
 mod tests {
     use super::*;
     use crate::features::remote_control::controller::test_support::{
-        PairingFixture, lease_context, pairing_fixture, role_session_keys,
+        PairingFixture, lease_context, paired_session_keys, pairing_fixture, role_session_keys,
     };
     use crate::features::remote_control::controller::protocol::LeaseContext;
     use serde_json::json;
@@ -316,10 +316,7 @@ mod tests {
             b_keys,
             ..
         } = pairing_fixture("relay-key-lane");
-        let a_public = a_keys.public_key().to_bytes();
-        let b_public = b_keys.public_key().to_bytes();
-        let a_session = role_session_keys(ControllerRole::A, a_keys, b_public, &reservation);
-        let b_session = role_session_keys(ControllerRole::B, b_keys, a_public, &reservation);
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
         let lease = lease_context(&reservation);
         let a = EncryptedLane::new(ControllerRole::A, &lease, a_session).unwrap();
         let b = EncryptedLane::new(ControllerRole::B, &lease, b_session).unwrap();

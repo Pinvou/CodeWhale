@@ -10,7 +10,9 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::protocol::LeaseContext;
-use super::relay_transport::{ControllerRole, ControllerTransportSender};
+use super::relay_transport::{
+    ControllerRole, ControllerSendError, ControllerTransportSender,
+};
 use super::resume::ControllerResumeGate;
 
 const MAX_HISTORY_ENTRIES: usize = 256;
@@ -408,6 +410,20 @@ impl ControllingDeviceManager {
             lease.context.clone(),
             lease.negotiated_capabilities.clone(),
         ))
+    }
+
+    /// 发送一条已认证明文载荷对应的密文帧（E2E-04）。租约未安装或 transport
+    /// 已停止时失败关闭，绝不退回未加密通道。
+    pub(crate) fn send_authenticated_business(
+        &self,
+        frame: &serde_json::Value,
+    ) -> std::result::Result<(), ControllerSendError> {
+        let inner = self.inner.lock();
+        let transport = inner
+            .transport
+            .as_ref()
+            .ok_or(ControllerSendError::Unauthenticated)?;
+        transport.try_send_business(frame)
     }
 
     pub(crate) fn create_history(

@@ -242,41 +242,31 @@ impl ControllingSessionManager {
         let mut intents = self.intents.lock();
         let intent = find_intent(&mut intents, remote_ref)?;
         ensure_context(intent, lease)?;
-        let validated = validate_inbound_payload(intent, payload, "capability_snapshot")?;
-        let revision = validated
-            .get("capability_revision")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
-        if intent
-            .capability_revision
-            .is_some_and(|known| revision < known)
-        {
-            return Err(SessionError::new("capability_snapshot_stale"));
-        }
-        let modes = string_list(validated.get("modes"), MAX_MODES)?;
-        if modes.is_empty() {
-            return Err(SessionError::new("capability_snapshot_invalid"));
-        }
-        let mut workspace_ids = Vec::new();
-        for workspace in validated
-            .get("workspaces")
-            .and_then(Value::as_array)
-            .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?
-        {
-            let workspace_id = workspace
-                .get("workspace_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
-            workspace_ids.push(workspace_id.to_owned());
-            if workspace_ids.len() > MAX_WORKSPACES {
-                return Err(SessionError::new("capability_snapshot_invalid"));
-            }
-        }
-        intent.capability_revision = Some(revision);
-        intent.modes = modes;
-        intent.workspace_ids = workspace_ids;
-        Ok(intent.projection())
+        apply_snapshot_locked(intent, payload)
+    }
+
+    /// 按 lease 定位会话意图并应用快照（wire 入站帧不携带会话引用，绑定依据是
+    /// 租约五元组）。同一租约下存在多个会话时选择唯一匹配项。
+    pub(crate) fn apply_capability_snapshot_for_lease(
+        &self,
+        lease: &LeaseContext,
+        payload: &Value,
+    ) -> Result<ControllingSessionProjection> {
+        let mut intents = self.intents.lock();
+        let intent = intents
+            .iter_mut()
+            .find(|intent| &intent.lease == lease)
+            .ok_or_else(|| SessionError::new("session_not_found"))?;
+        apply_snapshot_locked(intent, payload)
+    }
+
+    /// 当前租约上的会话引用（心跳/恢复等按租约定位的场景使用）。
+    pub(crate) fn session_ref_for_lease(&self, lease: &LeaseContext) -> Option<String> {
+        self.intents
+            .lock()
+            .iter()
+            .find(|intent| &intent.lease == lease)
+            .map(|intent| intent.session_ref.clone())
     }
 
     /// 构造 `task_submit`：正文来自 UI，摘要与全部协议字段由 Rust 生成。
@@ -349,6 +339,49 @@ fn find_intent<'a>(
         .iter_mut()
         .find(|intent| intent.session_ref == remote_ref)
         .ok_or_else(|| SessionError::new("session_not_found"))
+}
+
+/// 校验并落地一份能力快照：形状/角色/租约由冻结运行时校验保证，revision 必须
+/// 单调不减，模式不能为空，工作区列表有界。
+fn apply_snapshot_locked(
+    intent: &mut SessionIntent,
+    payload: &Value,
+) -> Result<ControllingSessionProjection> {
+    let validated = validate_inbound_payload(intent, payload, "capability_snapshot")?;
+    let revision = validated
+        .get("capability_revision")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+    if intent
+        .capability_revision
+        .is_some_and(|known| revision < known)
+    {
+        return Err(SessionError::new("capability_snapshot_stale"));
+    }
+    let modes = string_list(validated.get("modes"), MAX_MODES)?;
+    if modes.is_empty() {
+        return Err(SessionError::new("capability_snapshot_invalid"));
+    }
+    let mut workspace_ids = Vec::new();
+    for workspace in validated
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?
+    {
+        let workspace_id = workspace
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+        workspace_ids.push(workspace_id.to_owned());
+        if workspace_ids.len() > MAX_WORKSPACES {
+            return Err(SessionError::new("capability_snapshot_invalid"));
+        }
+    }
+    intent.capability_revision = Some(revision);
+    intent.modes = modes;
+    intent.workspace_ids = workspace_ids;
+    Ok(intent.projection())
 }
 
 /// 会话绑定校验：lease 的五元组必须与意图创建时完全一致，否则视为陈旧

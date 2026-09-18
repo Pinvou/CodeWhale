@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use super::controlling_handshake::{ControllingHandshake, HandshakeError, JoinedLease};
+use super::crypto::SessionKeys;
 
 /// 端口抽象：`send` 交给传输层出站，`recv` 返回下一条入站报文。
 #[async_trait::async_trait]
@@ -44,11 +45,13 @@ pub(crate) enum ControllingStageEvent {
 /// 握手完成后的租约材料：租约身份来自 `controller_joined`，能力与 transcript
 /// 哈希来自验签后的 `controller_pairing_reserved`。调用方据此安装认证租约并
 /// 派生传输指纹；本模块不产生任何可安装材料以外的状态。
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct ControllingHandshakeOutcome {
     pub(crate) lease: JoinedLease,
     pub(crate) negotiated_capabilities: Vec<String>,
     pub(crate) transcript_hash: [u8; 32],
+    /// 会话密钥：握手的最终产物，只在调用方导入加密业务通道时使用一次。
+    pub(crate) session: SessionKeys,
 }
 
 fn kind(message: &Value) -> Option<&str> {
@@ -95,6 +98,8 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     let joined = next_of_type(port, "controller_joined").await?;
     let lease = handshake.accept_joined(&joined)?;
     on_stage(ControllingStageEvent::Joined)?;
+    // 会话密钥在 Joined 之后才可取用；此后握手对象不再持有密钥材料。
+    let session = handshake.take_session()?;
     let transcript_hash = handshake
         .transcript_hash()
         .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
@@ -102,6 +107,7 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
         lease,
         negotiated_capabilities: handshake.negotiated_capabilities().to_vec(),
         transcript_hash,
+        session,
     })
 }
 
@@ -385,8 +391,9 @@ mod tests {
                 .negotiated_capabilities
                 .contains(&"pairing_v1".to_owned())
         );
-        // worker 只负责编排；业务密钥仍在调用方用真实 LeaseBinding 派生。
-        assert!(a.take_session().is_ok());
+        // 会话密钥已随 outcome 交给调用方（安装加密业务通道时再用真实
+        // LeaseBinding 派生业务密钥），握手对象不再持有密钥材料。
+        assert!(a.take_session().is_err());
         let outbound_types: Vec<String> = port
             .outbound
             .borrow()

@@ -14,6 +14,8 @@ use crate::features::remote_control::controller::controlling_session::{
     ControllingIntentProjection, ControllingSessionManager, ControllingSessionProjection,
     SessionError,
 };
+use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
+use crate::features::remote_control::controller::relay_transport::ControllerSendError;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const SESSION_EVENT: &str = "desktop-remote-controller-session";
@@ -50,6 +52,21 @@ fn live_context(
 
 fn emit_session(app: &AppHandle, projection: &ControllingSessionProjection) {
     let _ = app.emit(SESSION_EVENT, projection);
+}
+
+/// 出站失败收敛为有界错误码（不把内部描述文本透传给前端）。
+fn send_error_code(error: ControllerSendError) -> String {
+    match error {
+        ControllerSendError::Unauthenticated => "controller_not_connected",
+        ControllerSendError::FrameTooLarge { .. }
+        | ControllerSendError::InvalidFrame(_)
+        | ControllerSendError::Serialization => "task_request_invalid",
+        ControllerSendError::ByteBudgetExhausted
+        | ControllerSendError::QueueFull(_)
+        | ControllerSendError::GenerationAlreadyBound
+        | ControllerSendError::Closed => "controller_lane_unavailable",
+    }
+    .to_owned()
 }
 
 #[tauri::command]
@@ -159,6 +176,52 @@ pub fn desktop_remote_controller_task_cancel_intent(
     sessions
         .task_cancel_intent(&remote_ref, &task_id, &lease)
         .map_err(session_error)
+}
+
+/// 发送任务：构造意图 → 加密 → 经认证 transport 发出（E2E-04）。
+#[tauri::command]
+pub fn desktop_remote_controller_task_send(
+    manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
+    business: State<'_, ControllingLaneState>,
+    remote_ref: String,
+    text: String,
+) -> Result<ControllingIntentProjection, String> {
+    ensure_supported(&manager)?;
+    let (lease, capabilities) = live_context(&manager)?;
+    let intent = sessions
+        .task_intent(&remote_ref, &text, &lease)
+        .map_err(session_error)?;
+    let frame = business
+        .seal("task_submit", &intent.payload, &capabilities)
+        .map_err(|error| error.code().to_owned())?;
+    manager
+        .send_authenticated_business(&frame)
+        .map_err(send_error_code)?;
+    Ok(intent)
+}
+
+/// 发送取消：构造取消意图 → 加密 → 经认证 transport 发出（E2E-04）。
+#[tauri::command]
+pub fn desktop_remote_controller_task_cancel_send(
+    manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
+    business: State<'_, ControllingLaneState>,
+    remote_ref: String,
+    task_id: String,
+) -> Result<ControllingIntentProjection, String> {
+    ensure_supported(&manager)?;
+    let (lease, capabilities) = live_context(&manager)?;
+    let intent = sessions
+        .task_cancel_intent(&remote_ref, &task_id, &lease)
+        .map_err(session_error)?;
+    let frame = business
+        .seal("task_cancel", &intent.payload, &capabilities)
+        .map_err(|error| error.code().to_owned())?;
+    manager
+        .send_authenticated_business(&frame)
+        .map_err(send_error_code)?;
+    Ok(intent)
 }
 
 #[cfg(test)]
