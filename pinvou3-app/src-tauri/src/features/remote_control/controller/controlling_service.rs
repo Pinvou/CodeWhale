@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::mpsc;
@@ -32,6 +33,7 @@ use super::crypto::{
     transport_key_fingerprint,
 };
 use super::encrypted_lane::ControllingLaneState;
+use super::journal::{JournalEvent, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::LeaseContext;
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
@@ -44,6 +46,8 @@ pub(crate) const CONTROLLER_STATUS_EVENT: &str = "desktop-remote-controller-stat
 pub(crate) const CONTROLLER_SESSION_EVENT: &str = "desktop-remote-controller-session";
 /// A 端任务状态事件（加密回传解密后的投影）。
 pub(crate) const CONTROLLER_TASK_EVENT: &str = "desktop-remote-task-status";
+/// A 端权威 journal 事件（E2E-05）：命令层据此写独立历史并投影正文。
+pub(crate) const CONTROLLER_JOURNAL_EVENT: &str = "desktop-remote-controller-journal";
 
 /// claim→joined 的本地上限。Relay 侧预留 10 秒、握手 20 秒（DEV-04），这里取
 /// 40 秒兜底：超过即失败关闭，不留下半租约，也不会无限停留在 connecting。
@@ -67,6 +71,12 @@ pub(crate) enum ControllerLaneEvent {
 #[async_trait::async_trait]
 pub(crate) trait ControllingLane: Send {
     async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent>;
+}
+
+/// A 端权威 journal 落库端口（E2E-05）：由命令层实现——按会话引用写入 A 的
+/// 独立历史，并把事件投影给 UI。feature 层只负责解密与校验。
+pub(crate) trait ControllingJournalSink: Send + Sync {
+    fn publish(&self, event: &JournalEvent);
 }
 
 /// A 端 Relay 端口。入站帧由 `spawn_controller_transport` 的事件 sink 投递；
@@ -312,6 +322,8 @@ pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_status: &'a mut (dyn FnMut(&ControllingStatus) + Send),
     pub(crate) on_session: &'a mut (dyn FnMut(&ControllingSessionProjection) + Send),
     pub(crate) on_task: &'a mut (dyn FnMut(Value) + Send),
+    /// 解密并校验过的权威 journal 事件（E2E-05）：A 端据此写独立历史并渲染正文。
+    pub(crate) on_journal: &'a mut (dyn FnMut(&JournalEvent) + Send),
 }
 
 /// 握手完成后的通道保活与业务帧派发：断线投影为 reconnecting 并清空业务通道
@@ -374,8 +386,37 @@ fn dispatch_inbound_frame(
                 (sinks.on_task)(event);
             }
         }
+        "journal_event" => {
+            if let Some(event) = journal_event_from_wire(&payload) {
+                (sinks.on_journal)(&event);
+            }
+        }
         _ => {}
     }
+}
+
+/// wire `journal_event` → 权威事件。`event_b64` 是事件本体（冻结的 camelCase
+/// 形状），明文侧还有 journal_epoch/event_sequence/event_kind 供缺口检测；三者
+/// 必须互相一致，否则丢弃。事件体积有硬上限。
+fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
+    let encoded = payload.get("event_b64").and_then(Value::as_str)?;
+    let declared = payload
+        .get("event_bytes")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<usize>().ok())?;
+    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    if raw.len() != declared || raw.len() > MAX_EVENT_PAYLOAD_BYTES {
+        return None;
+    }
+    let event: JournalEvent = serde_json::from_slice(&raw).ok()?;
+    if payload.get("journal_epoch").and_then(Value::as_str) != Some(event.epoch.as_str())
+        || payload.get("event_sequence").and_then(Value::as_str) != Some(event.sequence.to_string().as_str())
+        || payload.get("event_kind").and_then(Value::as_str) != Some(event.kind.as_str())
+        || payload.get("session_id").and_then(Value::as_str) != Some(event.session_id.as_str())
+    {
+        return None;
+    }
+    Some(event)
 }
 
 /// 任务状态投影（UI 任务域字段）；wire 的 `task_status` 只有状态与可选结果摘要。
@@ -401,6 +442,7 @@ pub(crate) async fn connect_controlling_device(
     manager: &ControllingDeviceManager,
     relay: &RemoteControlManager,
     operation: ControllerOperation,
+    journal: Arc<dyn ControllingJournalSink>,
 ) -> Result<ControllingStatus, String> {
     let code = manager
         .pending_code(operation.clone())
@@ -452,10 +494,15 @@ pub(crate) async fn connect_controlling_device(
         let mut on_task = |event: Value| {
             let _ = keeper.emit(CONTROLLER_TASK_EVENT, event);
         };
+        let mut on_journal = |event: &JournalEvent| {
+            // A 端独立历史由命令层端口写入（feature 层不反向依赖 app 层）。
+            journal.publish(event);
+        };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
+            on_journal: &mut on_journal,
         };
         serve_controlling_lane(
             &mut port,
@@ -896,15 +943,19 @@ mod tests {
             sessions_seen.push(projection.session_id.clone());
         };
         let mut on_task = |event: Value| tasks_seen.push(event);
+        let mut journal_seen: Vec<JournalEvent> = Vec::new();
+        let mut on_journal = |event: &JournalEvent| journal_seen.push(event.clone());
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
+            on_journal: &mut on_journal,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         assert_eq!(statuses, vec!["reconnecting".to_owned()]);
         assert!(sessions_seen.is_empty());
         assert!(tasks_seen.is_empty());
+        assert!(journal_seen.is_empty());
         assert_eq!(
             projection(&manager.status())["status"],
             "reconnecting",
@@ -972,6 +1023,7 @@ mod tests {
         let capabilities = vec![
             "encrypted_frames_v1".to_owned(),
             "pairing_v1".to_owned(),
+            "snapshot_journal_v1".to_owned(),
             "task_v1".to_owned(),
         ];
 
@@ -1068,10 +1120,13 @@ mod tests {
             session_projections.push(projection.capability_revision);
         };
         let mut on_task = |event: Value| task_events.push(event);
+        let mut journal_events: Vec<JournalEvent> = Vec::new();
+        let mut on_journal = |event: &JournalEvent| journal_events.push(event.clone());
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
+            on_journal: &mut on_journal,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
@@ -1087,6 +1142,7 @@ mod tests {
         assert_eq!(task_events[0]["sessionId"], session.session_id);
         assert_eq!(task_events[0]["resultDigest"], "0".repeat(64));
         assert_eq!(task_events[0]["outcomeUnknown"], false);
+        assert!(journal_events.is_empty());
     }
 
     /// 旧 generation 的响应方通道（同一会话密钥、另一份租约）。
@@ -1174,6 +1230,7 @@ mod tests {
         let capabilities = vec![
             "encrypted_frames_v1".to_owned(),
             "pairing_v1".to_owned(),
+            "snapshot_journal_v1".to_owned(),
             "task_v1".to_owned(),
         ];
 
@@ -1248,11 +1305,46 @@ mod tests {
             .seal(response_kind, &response, &capabilities)
             .unwrap();
 
+        // B 的权威 journal 事件（E2E-05）：正文与终态都以 journal_event 回传。
+        let journal_event = JournalEvent {
+            event_id: "event-0001".to_owned(),
+            epoch: "epoch-1".to_owned(),
+            sequence: 1,
+            kind: "assistant_delta".to_owned(),
+            session_id: session.session_id.clone(),
+            task_id: intent.task_id.clone(),
+            terminal_status: None,
+            payload: serde_json::json!({"text": "hello from B"}),
+        };
+        let raw = serde_json::to_vec(&journal_event).unwrap();
+        let journal_frame = b_lane
+            .seal(
+                "journal_event",
+                &serde_json::json!({
+                    "v": 1,
+                    "type": "journal_event",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "session_id": journal_event.session_id,
+                    "journal_epoch": journal_event.epoch,
+                    "event_sequence": journal_event.sequence.to_string(),
+                    "event_kind": journal_event.kind,
+                    "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
+                    "event_bytes": raw.len().to_string(),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+
         // A：保活任务解密并投影到任务状态域。
         let mut lane = TestLane {
-            events: VecDeque::from(vec![ControllerLaneEvent::Frame(
-                response_frame.to_string(),
-            )]),
+            events: VecDeque::from(vec![
+                ControllerLaneEvent::Frame(response_frame.to_string()),
+                ControllerLaneEvent::Frame(journal_frame.to_string()),
+            ]),
         };
         let mut task_events = Vec::new();
         let mut session_projections = Vec::new();
@@ -1261,10 +1353,13 @@ mod tests {
             session_projections.push(projection.session_id.clone());
         };
         let mut on_task = |event: Value| task_events.push(event);
+        let mut journal_events: Vec<JournalEvent> = Vec::new();
+        let mut on_journal = |event: &JournalEvent| journal_events.push(event.clone());
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
+            on_journal: &mut on_journal,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
@@ -1274,5 +1369,12 @@ mod tests {
         assert_eq!(task_events[0]["status"], "succeeded");
         assert_eq!(task_events[0]["sessionId"], session.session_id);
         assert_eq!(task_events[0]["resultDigest"], "0".repeat(64));
+        assert_eq!(
+            journal_events.len(),
+            1,
+            "正文事件必须解密并投影给 A 端历史/渲染"
+        );
+        assert_eq!(journal_events[0].kind, "assistant_delta");
+        assert_eq!(journal_events[0].payload["text"], "hello from B");
     }
 }

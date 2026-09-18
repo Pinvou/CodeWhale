@@ -16,6 +16,7 @@ use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
 use crate::features::remote_control::RemoteControlManager;
+use std::sync::Arc;
 
 const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -49,6 +50,7 @@ pub async fn desktop_remote_controller_connect(
     manager: State<'_, ControllingDeviceManager>,
     relay: State<'_, RemoteControlManager>,
     sessions: State<'_, ControllingSessionManager>,
+    history: State<'_, Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>,
     code: String,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
@@ -57,7 +59,14 @@ pub async fn desktop_remote_controller_connect(
     let operation = manager.connect(&code).map_err(controlling_error)?;
     let status = manager.status();
     emit_status(&app, &status);
-    connect_controlling_device(&app, &manager, relay.inner(), operation).await
+    let journal: Arc<dyn crate::features::remote_control::controller::controlling_service::ControllingJournalSink> =
+        Arc::new(
+            super::desktop_remote_history::DesktopControllerJournalSink::new(
+                app.clone(),
+                history.inner().clone(),
+            ),
+        );
+    connect_controlling_device(&app, &manager, relay.inner(), operation, journal).await
 }
 
 #[tauri::command]

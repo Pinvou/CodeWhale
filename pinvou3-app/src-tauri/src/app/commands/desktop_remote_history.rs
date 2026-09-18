@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::State;
+use tauri::{Emitter as _, State};
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::history::{
@@ -85,6 +85,47 @@ impl DesktopRemoteHistoryRuntime {
 }
 
 type HistoryState<'a> = State<'a, Arc<DesktopRemoteHistoryRuntime>>;
+
+/// E2E-05：A 端 journal 落库端口。把解密校验后的权威事件写进对应的本地历史
+/// （按会话引用定位；未绑定时只投影事件），并广播给前端渲染正文。
+pub(crate) struct DesktopControllerJournalSink {
+    app: tauri::AppHandle,
+    runtime: Arc<DesktopRemoteHistoryRuntime>,
+}
+
+impl DesktopControllerJournalSink {
+    pub(crate) fn new(
+        app: tauri::AppHandle,
+        runtime: Arc<DesktopRemoteHistoryRuntime>,
+    ) -> Self {
+        Self { app, runtime }
+    }
+}
+
+impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
+    for DesktopControllerJournalSink
+{
+    fn publish(&self, event: &JournalEvent) {
+        let history_id = self
+            .runtime
+            .store()
+            .find_by_session_reference(&event.session_id);
+        if let Some(history_id) = &history_id {
+            let _ = self.runtime.store().append_authenticated(
+                history_id,
+                event,
+                monotonic_millis(),
+            );
+        }
+        let _ = self.app.emit(
+            crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,
+            serde_json::json!({
+                "historyId": history_id,
+                "event": event,
+            }),
+        );
+    }
+}
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
     if controlled.is_supported() {

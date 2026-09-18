@@ -41,6 +41,9 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // E2E-03：B 端的权威 session / 任务台账（DEV-12/DEV-13）已实现，注册时
     // 一并声明 task_v1，使 A 的能力快照请求与任务请求能通过协商。
     "task_v1",
+    // E2E-05：B 的权威 journal（DEV-19）已实现，声明 snapshot_journal_v1 使
+    // journal_event / journal_replay 等正文事件能通过协商。
+    "snapshot_journal_v1",
 ];
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
 /// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。
