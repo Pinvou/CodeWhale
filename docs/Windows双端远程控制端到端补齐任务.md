@@ -320,3 +320,57 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 架构守卫与 UI 契约：`python scripts/architecture-guard.py`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run lint:ui`、前端契约测试全套。
 - 安全扫描：仓库已有的 `controller-telemetry`/日志脱敏用例 + `remote-control-relay` 契约测试；再跑一次敏感信息扫描（密钥/路径/内部地址不得进入 wire 与投影）。
 - 发布缺口登记：把第 4 节的全部登记项按「本轮 blocker / 已隐藏 / 后续排期」分类，并更新 `docs/Windows双端远程控制发布与回滚.md` 的门禁清单。
+
+## 12. 恢复点与实现地图（跨回合交接）
+
+> 本节的唯一用途：让任何新的执行回合无需重新侦察即可原样接上；每完成一步就更新「恢复点」。
+
+### 12.1 恢复点（NEXT）
+
+- **当前恢复点**：E2E-06 第 2 项「B 端恢复循环」。
+- **下一步动作**：给 `ControlledDeviceManager` 补恢复 API（`begin_resume`/`advance_resume`/`current_operation` + 带
+  `activation_id` 的 `complete_resumed`，驱动本端 `ControllerResumeGate`），随后在 `ControlledRelayWorker::serve`
+  的 joined 分支接恢复帧。
+- **B 端断线信号（已确认，无需再侦察）**：`RemoteControlManager::handle_connection`
+  （`manager/mod.rs:2114`）在 socket 状态变化时先 `forward_controller_relay_message` 投递
+  `{"type":"desktop_relay_connection","endpoint_id":…,"connected":false,"error":…}`，再更新 endpoint 状态；
+  worker 的 joined 分支目前忽略该帧。B 的通道本身不会关闭（持久 endpoint socket），因此**必须**用这个事件进入恢复，
+  不能等 `recv()` 返回 `None`。
+- **B 端出站**：worker 已有 `self.channel.try_send(Value)`（`relay_runtime.rs:322` 走 `send_controller_message`），
+  恢复帧直接走它即可；`build_controller_resume_prepare`/`build_controller_resume_ready_ack`（`resume.rs`）自带冻结校验，
+  确认帧由 `ControlledLaneState::seal_resume_confirm`（`encrypted_lane.rs`）产出，因此 B 端**不需要**新增敏感队列入口
+  （A 端当初需要是因为它走 WS transport 的通用队列）。
+- **B 端相位映射**（Relay `controller-resume.js` 实测顺序）：`disconnect` → `prepare` → 收到 provisional 后
+  `accept_provisional` 并回 `encrypted_resume_confirm` → 收到对端 confirm 后 `confirm` → 发
+  `controller_resume_activation_ack` 时 `acknowledge_activation` → 收到 `controller_resume_activation_pending` 后发
+  `controller_post_activation_liveness` 时 `send_post_activation_liveness(epoch_b)`（epoch 必须与旧值不同）→ 收到
+  `controller_post_activation_liveness_confirmed` 后发 `controller_resume_ready_ack` 时 `acknowledge_ready` →
+  收到 `controller_resumed` 后 `accept_resumed` 并重建 gate/watchdog（`controlled.rs:609` 已有目标状态形状）。
+
+### 12.2 实现地图
+
+| 关注点 | 文件与入口 |
+|---|---|
+| A 端状态机 | `controller/controlling.rs`（`ControllingDeviceManager`、`ControllerLease`、`ResumeStep`） |
+| A 端运行时 | `controller/controlling_service.rs`（`connect_controlling_device`、`serve_controlling_lane*`、`handle_resume_frame`） |
+| B 端状态机 | `controller/controlled.rs`（`ControlledDeviceManager`、`ControlledLease`、`mark_transport_disconnected`、`complete_resumed`） |
+| B 端运行时 | `controller/relay_runtime.rs`（`ControlledRelayWorker::{start,register_pairing,serve}`、`dispatch_business_frame`、`build_journal_event_payload`） |
+| 加密通道 | `controller/encrypted_lane.rs`（`EncryptedLane`、`*LaneState::{install,clear,suspend,activate,seal,open,seal_resume_confirm}`） |
+| 恢复状态机/构造 | `controller/resume.rs`（`ControllerResumeGate`、`build_controller_resume_*`、`new_resume_challenge`） |
+| 冻结协议 | `remote-control-relay/PROTOCOL.md`、`protocol-controller.js`、`fixture/controller-protocol-v1.json`、`controller/resume.rs` 的 schema 自检 |
+| Relay 恢复驱动 | `remote-control-relay/controller-resume.js`、`controller-router.js`（hooks）、`controller-lease.js:completeResume` |
+| B 端断线来源 | `manager/mod.rs:2114 handle_connection` → `desktop_relay_connection` 帧 |
+| 测试夹具 | `controller/test_support.rs`（`pairing_fixture`/`paired_session_keys`/`lease_context`/`signed_reservation`） |
+
+### 12.3 每步固定验证命令（改动范围决定取哪几条）
+
+```text
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib remote_control::
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib remote_control::controller::
+python scripts/architecture-guard.py
+npm --prefix pinvou3-app run build:ui
+npm --prefix pinvou3-app run lint:ui
+node --test pinvou3-app/tests/<相关契约>.test.mjs
+```
+
+全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
