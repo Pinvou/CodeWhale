@@ -351,7 +351,8 @@ pub(crate) async fn serve_controlling_lane(
 }
 
 /// E2E-06：心跳间隔（远小于 30 秒存活预算，丢一两次仍能续期）。
-pub(crate) const LIVENESS_HEARTBEAT_INTERVAL_MS: u64 = 10_000;
+/// 同时满足 Relay 侧 attestation 的新鲜度要求（observed_age ≤ 5 秒）。
+pub(crate) const LIVENESS_HEARTBEAT_INTERVAL_MS: u64 = 3_000;
 
 pub(crate) async fn serve_controlling_lane_with_interval(
     lane: &mut (impl ControllingLane + ?Sized),
