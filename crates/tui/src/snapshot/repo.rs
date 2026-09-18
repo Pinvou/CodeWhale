@@ -18,6 +18,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use wait_timeout::ChildExt as _;
+
 use crate::dependencies::ExternalTool;
 
 use super::paths::{ensure_snapshot_dir, snapshot_git_dir};
@@ -55,6 +57,16 @@ pub struct SnapshotRepo {
 }
 
 const STALE_TMP_PACK_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Age after which a leftover side-repo `index.lock` is treated as abandoned
+/// and removed on open. Every git invocation here is bounded by
+/// [`GIT_COMMAND_TIMEOUT`], and a SIGKILL on timeout cannot run git's lock
+/// cleanup — without this, one wedged `git add -A` poisons every later
+/// snapshot with a fast-failing lock. The side repo is private to this
+/// module, so a lock older than the command bound cannot belong to a live
+/// writer of ours; one hour (matching [`STALE_TMP_PACK_AGE`]) leaves wide
+/// margin.
+const STALE_INDEX_LOCK_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Maximum total snapshot storage in megabytes before pruning kicks in at
 /// snapshot time. Keeps the side repo from blowing up the user's disk during
@@ -275,13 +287,11 @@ impl SnapshotRepo {
             // and stores metadata in `.git`. We then continue to use
             // explicit `--git-dir` / `--work-tree` flags for every other
             // command so behaviour is invariant of cwd.
-            let init = crate::dependencies::Git::command()
-                .ok_or_else(|| io_other("git not found on PATH"))?
-                .arg("init")
-                .arg("--quiet")
-                .arg(parent)
-                .output()
-                .map_err(|e| io_other(format!("failed to spawn git init: {e}")))?;
+            let mut init_cmd = crate::dependencies::Git::command()
+                .ok_or_else(|| io_other("git not found on PATH"))?;
+            init_cmd.arg("init").arg("--quiet").arg(parent);
+            let init = run_bounded_git(&mut init_cmd, "init")
+                .map_err(|e| io_other(format!("failed to run git init: {e}")))?;
             if !init.status.success() {
                 return Err(io_other(format!(
                     "git init failed: {}",
@@ -313,6 +323,19 @@ impl SnapshotRepo {
                 target: "snapshot",
                 "failed to clean stale snapshot tmp_pack files: {err}"
             );
+        }
+        match clear_stale_index_lock(&git_dir, STALE_INDEX_LOCK_AGE) {
+            Ok(true) => tracing::warn!(
+                target: "snapshot",
+                "removed a stale index.lock from the snapshot side repo; a previous \
+                 snapshot likely timed out or wedged, and snapshots were silently \
+                 failing since then"
+            ),
+            Ok(false) => {}
+            Err(err) => tracing::debug!(
+                target: "snapshot",
+                "failed to clean a stale snapshot index.lock: {err}"
+            ),
         }
         Ok(Self { git_dir, work_tree })
     }
@@ -790,16 +813,17 @@ impl SnapshotRepo {
     /// age instead of stamping "now".
     fn commit_tree_preserving_date(&self, args: &[&str], timestamp: i64) -> io::Result<String> {
         let date = format!("{timestamp} +0000");
-        let out = crate::dependencies::Git::command()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?
+        let mut git = crate::dependencies::Git::command()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?;
+        let cmd = git
             .arg("--git-dir")
             .arg(&self.git_dir)
             .arg("--work-tree")
             .arg(&self.work_tree)
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)
-            .args(args)
-            .output()?;
+            .args(args);
+        let out = run_bounded_git(cmd, "commit-tree")?;
         if !out.status.success() {
             return Err(io_other(format!(
                 "commit-tree failed: {}",
@@ -944,6 +968,40 @@ fn cleanup_stale_pack_temps(git_dir: &Path, stale_age: Duration) -> io::Result<u
     cleanup_stale_pack_temps_in(&pack_dir, stale_age, SystemTime::now())
 }
 
+/// Remove `<git-dir>/index.lock` when it is older than `stale_age`. Returns
+/// whether a stale lock was removed. A fresh lock (any age below the bound)
+/// is left alone: it may belong to a git that is still running.
+fn clear_stale_index_lock(git_dir: &Path, stale_age: Duration) -> io::Result<bool> {
+    clear_stale_index_lock_in(&git_dir.join("index.lock"), stale_age, SystemTime::now())
+}
+
+fn clear_stale_index_lock_in(
+    lock_path: &Path,
+    stale_age: Duration,
+    now: SystemTime,
+) -> io::Result<bool> {
+    let Ok(metadata) = std::fs::metadata(lock_path) else {
+        return Ok(false);
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    let Ok(modified) = metadata.modified() else {
+        return Ok(false);
+    };
+    let Ok(age) = now.duration_since(modified) else {
+        return Ok(false);
+    };
+    if age < stale_age {
+        return Ok(false);
+    }
+    match std::fs::remove_file(lock_path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 fn cleanup_stale_pack_temps_in(
     pack_dir: &Path,
     stale_age: Duration,
@@ -983,19 +1041,201 @@ fn cleanup_stale_pack_temps_in(
     Ok(removed)
 }
 
+// Generous budget: `git add -A` on a large workspace is legitimately slow,
+// but a wedged git (stalled NFS/FUSE, hung hook) must not block the turn
+// pipeline forever — callers run this on the per-turn path and treat every
+// error as snapshot-disabled-with-warning. Tests use a tighter budget so a
+// regression that deadlocks a child on its own output fails in seconds
+// instead of hanging for the full window.
+#[cfg(not(test))]
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Grace granted to the pipe readers after git has exited. A clean git
+/// closes its own write ends, so EOF is already waiting; only a grandchild
+/// that inherited the pipes (a post-checkout hook, a `git gc` pack worker,
+/// a clean filter) can hold them past exit, and it must not hold the turn
+/// pipeline.
+const GIT_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Run a pre-configured git command under [`GIT_COMMAND_TIMEOUT`] with both
+/// pipes drained concurrently. Every git invocation in this module goes
+/// through here (or the thin [`run_git`] wrapper), so a wedged git —
+/// stalled NFS/FUSE, hung hook, uninterruptible kernel I/O — degrades the
+/// snapshot with an error instead of hanging the turn pipeline.
+///
+/// The timeout path kills the child and reaps it on a detached thread: on a
+/// hard-wedged mount git can sit in uninterruptible kernel I/O where even
+/// SIGKILL is deferred, and a blocking `wait()` would hang the pipeline
+/// exactly like the wedged git would. Killing without git's own cleanup
+/// leaves a fresh `index.lock` behind; `open_or_init` clears it once it is
+/// older than [`STALE_INDEX_LOCK_AGE`].
+fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Result<Output> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    // Drain both pipes while waiting: the restore path's `ls-tree -r` emits
+    // output that grows with workspace size, and a child blocked on a full
+    // pipe buffer would never exit, turning every such call into a
+    // guaranteed timeout. Mirrors the sandbox exec plumbing in
+    // crate::run_sandbox_command.
+    // Readers stream into shared buffers so a grace expiry below can still
+    // return what was captured; the completion channels carry a () once
+    // each reader has seen EOF.
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<()>();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<()>();
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stdout_thread = {
+        let buf = std::sync::Arc::clone(&stdout_buf);
+        std::thread::spawn(move || {
+            if let Some(mut reader) = stdout_pipe {
+                use std::io::Read as _;
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut buf) = buf.lock() {
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = stdout_tx.send(());
+        })
+    };
+    let stderr_thread = {
+        let buf = std::sync::Arc::clone(&stderr_buf);
+        std::thread::spawn(move || {
+            if let Some(mut reader) = stderr_pipe {
+                use std::io::Read as _;
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut buf) = buf.lock() {
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = stderr_tx.send(());
+        })
+    };
+
+    let Some(status) = child.wait_timeout(GIT_COMMAND_TIMEOUT)? else {
+        let _ = child.kill();
+        // Reap off the pipeline thread (see the doc comment): the kernel may
+        // not deliver the kill until an uninterruptible syscall returns.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        // Detach (don't join) the reader threads: killing the child closes
+        // only the child's write ends. A grandchild that inherited the
+        // pipes keeps them open, so read_to_end would never see EOF and
+        // joining here would block the turn pipeline past the timeout —
+        // exactly what this bound exists to prevent. The detached threads
+        // end on their own once the last write end closes.
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "git {subcommand} timed out after {}s",
+                GIT_COMMAND_TIMEOUT.as_secs()
+            ),
+        ));
+    };
+    // Bounded drain join, same grandchild rationale as the timeout arm: a
+    // clean git already closed its write ends so the readers deliver
+    // immediately; the grace only covers a pipe held open by an inherited
+    // copy. On expiry return what was captured, with a note on stderr.
+    let mut partial = false;
+    if stdout_rx.recv_timeout(GIT_PIPE_DRAIN_GRACE).is_err() {
+        partial = true;
+    }
+    if stderr_rx.recv_timeout(GIT_PIPE_DRAIN_GRACE).is_err() {
+        partial = true;
+    }
+    drop(stdout_thread);
+    drop(stderr_thread);
+    let stdout = stdout_buf.lock().map(|buf| buf.clone()).unwrap_or_default();
+    let mut stderr = stderr_buf.lock().map(|buf| buf.clone()).unwrap_or_default();
+    if partial {
+        // A reader never delivered within the grace: a grandchild is still
+        // holding at least one pipe. Say so instead of silently truncating.
+        if !stderr.is_empty() && stderr.last() != Some(&b'\n') {
+            stderr.push(b'\n');
+        }
+        stderr.extend_from_slice(
+            b"[codewhale] git output pipes did not close after git exited \
+              (kept open by a hook or subprocess?); captured output may be partial\n",
+        );
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output> {
-    crate::dependencies::Git::command()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?
+    let mut git = crate::dependencies::Git::command()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?;
+    let subcommand = args.first().copied().unwrap_or("git");
+    let cmd = git
         .arg("--git-dir")
         .arg(git_dir)
         .arg("--work-tree")
         .arg(work_tree)
-        .args(args)
-        .output()
+        .args(args);
+    run_bounded_git(cmd, subcommand)
 }
 
 fn io_other(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
+}
+
+#[cfg(all(test, unix))]
+mod bounded_git_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_git_returns_promptly_when_a_grandchild_holds_the_pipes() {
+        // The direct child (sh) exits after the echo; the backgrounded
+        // sleep inherits both pipes and holds them for 30s. The call must
+        // still return promptly with the output captured before the grace,
+        // annotated on stderr — not wait out the grandchild.
+        let started = std::time::Instant::now();
+        // A plain `sh` child exercises the same core the module's git
+        // commands run through, with a script that holds the pipes.
+        let mut sh = std::process::Command::new("sh");
+        sh.arg("-c").arg("echo bounded-git-grandchild; sleep 30 &");
+        let output = run_bounded_git(&mut sh, "sh").expect("sh must succeed");
+        let elapsed = started.elapsed();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("bounded-git-grandchild"),
+            "output captured before the grace must survive: {:?}",
+            output.stdout
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("git output pipes did not close after git exited"),
+            "the partial-output note must explain the early return: {:?}",
+            output.stderr
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "a pipe-holding grandchild must not hold the call past the grace; took {elapsed:?}"
+        );
+    }
 }
 
 /// Walk `workspace` and accumulate file sizes, returning `Some(total)`
@@ -1536,6 +1776,36 @@ mod tests {
     }
 
     #[test]
+    fn open_or_init_removes_a_stale_index_lock_only() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let workspace = repo.work_tree().to_path_buf();
+
+        // A SIGKILLed `git add -A` cannot clean its index.lock; a leftover
+        // one fast-fails every later snapshot. Only a lock older than the
+        // stale bound may be from a live git, so exactly the old one goes.
+        let stale = repo.git_dir().join("index.lock");
+        std::fs::write(&stale, b"stale").unwrap();
+        let old_time = SystemTime::now() - STALE_INDEX_LOCK_AGE - Duration::from_secs(60);
+        {
+            let file = File::options().write(true).open(&stale).unwrap();
+            file.set_times(FileTimes::new().set_modified(old_time))
+                .unwrap();
+        }
+
+        SnapshotRepo::open_or_init(&workspace).unwrap();
+
+        assert!(!stale.exists(), "stale index.lock should be removed");
+
+        // A fresh lock must survive the cleanup untouched.
+        let fresh = repo.git_dir().join("index.lock");
+        std::fs::write(&fresh, b"fresh").unwrap();
+        SnapshotRepo::open_or_init(&workspace).unwrap();
+        assert!(fresh.exists(), "fresh index.lock must be kept");
+        let _ = std::fs::remove_file(&fresh);
+    }
+
+    #[test]
     fn snapshot_respects_workspace_gitignore() {
         let tmp = tempdir().unwrap();
         let (repo, _home) = make_repo(tmp.path());
@@ -1932,5 +2202,26 @@ mod tests {
         assert_eq!(list[0].session_id.as_deref(), Some("sess-a"));
         assert_eq!(list[1].session_id, None);
         assert_eq!(list[1].label, "pre-turn:1");
+    }
+
+    #[test]
+    fn run_git_drains_output_larger_than_the_pipe_buffer() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        // ~5000 paths is well past the 64 KiB OS pipe buffer: a child that
+        // blocks on its own undrained output never exits and would die at
+        // the command timeout instead of returning the tree listing.
+        for i in 0..5000 {
+            std::fs::write(repo.work_tree().join(format!("file_{i:05}.txt")), b"x").unwrap();
+        }
+        let id = repo.snapshot("large-output").expect("snapshot");
+        let paths = repo
+            .tree_paths(id.as_str())
+            .expect("tree_paths must drain output instead of timing out");
+        assert!(
+            paths.len() >= 5000,
+            "expected every file in the tree listing, got {}",
+            paths.len()
+        );
     }
 }

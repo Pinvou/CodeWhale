@@ -544,27 +544,18 @@ where
 }
 const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
-const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
-const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(300);
-
-#[cfg(test)]
-static TEST_APPROVAL_DECISION_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+// Deliberately no wall-clock cap on external approval decisions: a human may
+// take arbitrarily long to review a command, and silently denying after a
+// timeout continues the turn under a decision the user never made. The wait
+// ends on turn interrupt or runtime shutdown instead (mirrors the engine-side
+// approval wait, which excludes approval time from the turn wall clock).
+// Dynamic (client-executed) tools legitimately run long, so their result wait
+// is generous; it still ends on turn interrupt.
+const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[cfg(test)]
 static TEST_DYNAMIC_TOOL_RESULT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-
-fn approval_decision_timeout() -> Duration {
-    #[cfg(test)]
-    {
-        let ms = TEST_APPROVAL_DECISION_TIMEOUT_MS.load(std::sync::atomic::Ordering::SeqCst);
-        if ms > 0 {
-            return Duration::from_millis(ms);
-        }
-    }
-    APPROVAL_DECISION_TIMEOUT
-}
 
 fn dynamic_tool_result_timeout() -> Duration {
     #[cfg(test)]
@@ -575,11 +566,6 @@ fn dynamic_tool_result_timeout() -> Duration {
         }
     }
     DYNAMIC_TOOL_RESULT_TIMEOUT
-}
-
-#[cfg(test)]
-pub(crate) fn set_test_approval_decision_timeout_ms(ms: u64) -> u64 {
-    TEST_APPROVAL_DECISION_TIMEOUT_MS.swap(ms, std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -3049,6 +3035,24 @@ pub struct RuntimeThreadManager {
     recovery_flush: Arc<Mutex<()>>,
     #[cfg(test)]
     snapshot_test_hook: Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<SnapshotTestPoint>>>>,
+}
+
+impl RuntimeThreadManager {
+    /// Request runtime shutdown: cancels the shared cancellation token that
+    /// turn monitoring and the unbounded external-approval wait observe, so
+    /// a manager being torn down resolves suspended *approval* waits
+    /// (as `approval.decided{interrupted:true}`) instead of leaving them
+    /// pending forever. Idempotent and safe to call more than once.
+    ///
+    /// Scope limits a host must know before relying on it: this only arms
+    /// the token — it does not abort in-flight turns (the engine keeps
+    /// running until its host stops it), and it does not resolve suspended
+    /// `request_user_input` waits, which observe the engine's token rather
+    /// than this one. There is no production caller yet; the exit is
+    /// exercised by tests until a host wires it up.
+    pub fn shutdown(&self) {
+        self.cancel_token.cancel();
+    }
 }
 
 #[derive(Debug)]
@@ -9285,9 +9289,53 @@ impl RuntimeThreadManager {
                         return Err(err);
                     }
                     drop(projection);
-                    let approval_timeout = approval_decision_timeout();
-                    match tokio::time::timeout(approval_timeout, rx).await {
-                        Ok(Ok(ExternalApprovalDecision::Allow { remember })) => {
+                    // Unbounded decision wait: a human may take arbitrarily
+                    // long to review a command, so there is no wall-clock cap
+                    // here (auto-denying would continue the turn under a
+                    // decision the user never made). The wait only ends early
+                    // on turn interrupt, runtime shutdown, or engine death —
+                    // without the last one, a crashed engine would leave the
+                    // pending approval (and this turn) suspended forever.
+                    let mut rx = rx;
+                    let mut interrupt_poll = tokio::time::interval(Duration::from_millis(500));
+                    interrupt_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    enum ApprovalWakeup {
+                        Decision(
+                            Result<
+                                ExternalApprovalDecision,
+                                tokio::sync::oneshot::error::RecvError,
+                            >,
+                        ),
+                        Interrupted,
+                    }
+                    let wakeup = loop {
+                        tokio::select! {
+                            biased;
+                            _ = self.cancel_token.cancelled() => {
+                                break ApprovalWakeup::Interrupted;
+                            }
+                            decision = &mut rx => {
+                                break ApprovalWakeup::Decision(decision);
+                            }
+                            _ = interrupt_poll.tick() => {
+                                // `tx_op.is_closed()` is a non-consuming
+                                // probe: the engine dropping its op receiver
+                                // means the engine task is gone.
+                                if engine.tx_op.is_closed()
+                                    || self
+                                        .is_interrupt_requested(&thread_id, &turn_id)
+                                        .await
+                                        .unwrap_or(false)
+                                {
+                                    break ApprovalWakeup::Interrupted;
+                                }
+                            }
+                        }
+                    };
+                    match wakeup {
+                        ApprovalWakeup::Decision(Ok(ExternalApprovalDecision::Allow {
+                            remember,
+                        })) => {
                             if remember {
                                 self.remember_thread_auto_approve(&thread_id).await;
                             }
@@ -9306,7 +9354,9 @@ impl RuntimeThreadManager {
                             .ok();
                             let _ = engine.approve_tool_call(id).await;
                         }
-                        Ok(Ok(ExternalApprovalDecision::Deny { remember })) => {
+                        ApprovalWakeup::Decision(Ok(ExternalApprovalDecision::Deny {
+                            remember,
+                        })) => {
                             self.emit_event(
                                 &thread_id,
                                 Some(&turn_id),
@@ -9322,24 +9372,15 @@ impl RuntimeThreadManager {
                             .ok();
                             let _ = engine.deny_tool_call(id).await;
                         }
-                        Ok(Err(_recv_err)) => {
+                        ApprovalWakeup::Decision(Err(_recv_err)) => {
                             self.cancel_pending_approval(&id);
                             let _ = engine.deny_tool_call(id).await;
                         }
-                        Err(_timeout) => {
+                        ApprovalWakeup::Interrupted => {
                             self.cancel_pending_approval(&id);
-                            self.emit_event(
-                                &thread_id,
-                                Some(&turn_id),
-                                None,
-                                "approval.timeout",
-                                json!({
-                                    "approval_id": id,
-                                    "timeout_secs": approval_timeout.as_secs(),
-                                }),
-                            )
-                            .await
-                            .ok();
+                            // Emit approval.decided so external clients can
+                            // clear the pending approval UI; the denial also
+                            // unblocks the engine if cancellation raced it.
                             self.emit_event(
                                 &thread_id,
                                 Some(&turn_id),
@@ -9349,7 +9390,7 @@ impl RuntimeThreadManager {
                                     "approval_id": id,
                                     "decision": "deny",
                                     "remember": false,
-                                    "timeout": true,
+                                    "interrupted": true,
                                 }),
                             )
                             .await

@@ -464,9 +464,13 @@ fn snapshot_with_label(
 #[allow(clippy::print_stderr)]
 fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error) {
     let message = error.to_string();
-    if !(message.contains("workspace too large for snapshots")
-        || message.contains("workspace snapshots are disabled"))
-    {
+    let size_gated = message.contains("workspace too large for snapshots")
+        || message.contains("workspace snapshots are disabled");
+    // A timed-out git is killed mid-write and leaves a fresh side-repo
+    // index.lock behind, so every snapshot fast-fails for about an hour.
+    // That must reach the user's stderr, not just the tracing log — silent
+    // undo-history loss is the §2.7 failure mode.
+    if !size_gated && error.kind() != std::io::ErrorKind::TimedOut {
         return;
     }
     use std::collections::HashSet;
@@ -483,10 +487,15 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
     // One prominent notice per workspace process lifetime — silent disable is
     // the §2.7 failure mode. Opt-in remains `[snapshots] max_workspace_gb`
     // (raise the cap or set 0 to disable the size gate).
+    let hint = if size_gated {
+        "  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in."
+    } else {
+        "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
+    };
     eprintln!(
-        "warning: workspace snapshots/undo are OFF for {}
+        "warning: workspace snapshots/undo are failing for {}
   {message}
-  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in.",
+{hint}",
         workspace.display()
     );
 }

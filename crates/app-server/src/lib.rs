@@ -1399,6 +1399,30 @@ async fn invalidate_runtime_bridge(state: &AppState) {
     *bridge = None;
 }
 
+// ── Runtime bridge deadlines ────────────────────────────────────────────
+
+/// Connect budget for one bridge request. The bridge talks to a runtime
+/// child this process spawned on loopback, so a connect that has not
+/// completed in 10s means the child's listener is wedged.
+const RUNTIME_BRIDGE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total budget for one bridging POST (`/v1/threads`, `/v1/threads/{id}/turns`).
+/// These requests enqueue work and return; the turn itself streams over SSE.
+/// Without a total, a runtime child that is alive but wedged (async workers
+/// starved by a blocking tool call, a lock deadlock in the turn-start path)
+/// hangs the request forever — and the inner bridge lock is held for the
+/// whole turn, so one hung request queues every later JSON-RPC message
+/// behind it. Mirrors the TUI client's non-streaming envelope.
+const RUNTIME_BRIDGE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// Idle budget between SSE chunks on the event stream. The runtime emits a
+/// keepalive every 15s, so silence beyond this means the child's event
+/// stream wedged; the idle bound catches it without capping the total
+/// duration of a live stream (a per-request total would ride the body and
+/// hard-cut long turns — the same trap the model client's stream-open path
+/// avoids).
+const RUNTIME_BRIDGE_SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl RuntimeBridge {
     async fn start(config_path: Option<&Path>) -> Result<Self> {
         install_rustls_crypto_provider();
@@ -1410,6 +1434,7 @@ impl RuntimeBridge {
         let mut bridge = Self {
             base_url: format!("http://127.0.0.1:{port}"),
             client: codewhale_release::platform_http_client_builder()
+                .connect_timeout(RUNTIME_BRIDGE_CONNECT_TIMEOUT)
                 .build()
                 .context("failed to build runtime API client")?,
             auth_token: Some(auth_token),
@@ -1487,7 +1512,10 @@ impl RuntimeBridge {
     }
 
     async fn request_json(&self, builder: reqwest::RequestBuilder) -> Result<Value> {
-        let response = builder.send().await?;
+        let response = builder
+            .timeout(RUNTIME_BRIDGE_REQUEST_TIMEOUT)
+            .send()
+            .await?;
         let status = response.status();
         let body = response.text().await?;
         if !status.is_success() {
@@ -1695,7 +1723,17 @@ impl RuntimeBridge {
         let mut buffer = Vec::new();
         let mut last_seq = since_seq;
 
-        while let Some(chunk) = response.chunk().await? {
+        // The event stream only ever pauses for the runtime's 15s
+        // keepalives; anything longer means the child wedged mid-stream.
+        // The idle bound re-arms per chunk, so a live stream of any length
+        // is never total-capped.
+        loop {
+            let chunk = tokio::time::timeout(RUNTIME_BRIDGE_SSE_IDLE_TIMEOUT, response.chunk())
+                .await
+                .context("runtime event stream stalled past the idle deadline")??;
+            let Some(chunk) = chunk else {
+                break;
+            };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_FRAME_BYTES {
                 bail!(

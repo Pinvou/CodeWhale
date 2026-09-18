@@ -141,7 +141,10 @@ pub trait RpcDispatcher: Send + Sync {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_STDOUT_LIMIT: usize = 8_192;
-const ROUND_TIMEOUT: Duration = Duration::from_secs(180);
+// 900s: inline rounds can include `sub_query` RPCs to the live model, which
+// legitimately think for minutes (same reasoning as the engine's stream idle
+// budget). This cap is a backstop, not the expected round duration.
+const ROUND_TIMEOUT: Duration = Duration::from_secs(900);
 #[cfg(not(windows))]
 const SPAWN_READY_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]

@@ -1357,6 +1357,16 @@ fn execute_tool_search_inner(
     })
 }
 
+pub(super) fn code_execution_timeout() -> Duration {
+    if cfg!(test) {
+        // Short enough that the kill test finishes fast, long enough that
+        // the happy-path scenario never approaches it.
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(600)
+    }
+}
+
 pub(super) async fn execute_code_execution_tool(
     input: &serde_json::Value,
     workspace: &Path,
@@ -1391,11 +1401,16 @@ pub(super) async fn execute_code_execution_tool(
         )
     })?;
     cmd.arg(&script_path).current_dir(workspace);
-
-    let output = tokio::time::timeout(Duration::from_secs(120), cmd.output())
-        .await
-        .map_err(|_| ToolError::Timeout { seconds: 120 })
-        .and_then(|res| res.map_err(|e| ToolError::execution_failed(e.to_string())))?;
+    // The shared runner pipes and drains stdout/stderr while the child runs,
+    // kills and reaps explicitly on timeout, and bounds the post-exit drain
+    // so a grandchild that inherited the pipes cannot hold the call.
+    let output = crate::tools::process::run_bounded_child(
+        &mut cmd,
+        None,
+        code_execution_timeout(),
+        "code_execution",
+    )
+    .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

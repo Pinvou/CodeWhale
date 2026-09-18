@@ -329,22 +329,6 @@ fn test_manager(data_dir: PathBuf) -> Result<RuntimeThreadManager> {
     )
 }
 
-struct ApprovalTimeoutGuard {
-    previous_ms: u64,
-}
-
-impl Drop for ApprovalTimeoutGuard {
-    fn drop(&mut self) {
-        set_test_approval_decision_timeout_ms(self.previous_ms);
-    }
-}
-
-fn test_approval_timeout_ms(ms: u64) -> ApprovalTimeoutGuard {
-    ApprovalTimeoutGuard {
-        previous_ms: set_test_approval_decision_timeout_ms(ms),
-    }
-}
-
 struct DynamicToolTimeoutGuard {
     previous_ms: u64,
 }
@@ -9770,8 +9754,7 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
 }
 
 #[tokio::test]
-async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<()> {
-    let _timeout_guard = test_approval_timeout_ms(25);
+async fn approval_pends_until_interrupt_and_next_turn_can_start() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
         .create_thread(CreateThreadRequest {
@@ -9811,45 +9794,65 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
 
     harness
         .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_turn_pending_approval".to_string(),
+            created_at: chrono::Utc::now(),
+            route: None,
+            submission_id: None,
+        })
+        .await?;
+    harness
+        .tx_event
         .send(EngineEvent::ApprovalRequired {
-            approval_key: "timeout_key".to_string(),
-            approval_grouping_key: "timeout_key".to_string(),
-            id: "tool_timeout".to_string(),
+            approval_key: "pending_key".to_string(),
+            approval_grouping_key: "pending_key".to_string(),
+            id: "tool_pending".to_string(),
             tool_name: "exec_command".to_string(),
-            description: "external timeout".to_string(),
+            description: "left unanswered".to_string(),
             input: serde_json::json!({}),
             intent_summary: None,
             approval_force_prompt: false,
         })
         .await?;
 
-    let decision = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
-        .await
-        .context("approval timeout should deny the engine")?;
-    assert_eq!(
-        decision,
-        Some(MockApprovalEvent::Denied {
-            id: "tool_timeout".to_string(),
-        })
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(manager.pending_approvals_count(), 1);
+
+    // No decision arrives: the wait is unbounded and must not auto-deny.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), harness.recv_approval_event())
+            .await
+            .is_err(),
+        "approval must not be auto-denied while the user is still deciding"
+    );
+
+    // Interrupting the turn is what resolves a pending approval.
+    manager.interrupt_turn(&thread.id, &turn.id).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+            .await
+            .is_ok_and(|event| {
+                event
+                    == Some(MockApprovalEvent::Denied {
+                        id: "tool_pending".to_string(),
+                    })
+            }),
+        "interrupting the turn should deny the pending approval"
     );
     assert_eq!(manager.pending_approvals_count(), 0);
 
     let events = manager.events_since(&thread.id, None)?;
     assert!(
         events.iter().any(|event| {
-            event.event == "approval.timeout"
-                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_timeout")
-        }),
-        "timeout event should be persisted"
-    );
-    assert!(
-        events.iter().any(|event| {
             event.event == "approval.decided"
-                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_timeout")
+                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_pending")
                 && event.payload.get("decision").and_then(Value::as_str) == Some("deny")
-                && event.payload.get("timeout").and_then(Value::as_bool) == Some(true)
+                && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
         }),
-        "timeout should also emit approval.decided so clients can clear pending UI"
+        "interrupted approval should emit approval.decided so clients can clear pending UI"
     );
 
     harness
@@ -9863,13 +9866,13 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
         })
         .await?;
     let terminal = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
-    assert_eq!(terminal.status, RuntimeTurnStatus::Completed);
+    assert_eq!(terminal.status, RuntimeTurnStatus::Interrupted);
 
     let _next = manager
         .start_turn(
             &thread.id,
             StartTurnRequest {
-                prompt: "after timeout".to_string(),
+                prompt: "after interrupt".to_string(),
                 input_summary: None,
                 model: None,
                 mode: None,
@@ -9882,7 +9885,164 @@ async fn approval_timeout_denies_clears_ui_and_next_turn_can_start() -> Result<(
         .await?;
     assert!(
         matches!(harness.rx_op.recv().await, Some(Op::SendMessage { .. })),
-        "thread should accept a fresh turn after approval timeout cleanup"
+        "thread should accept a fresh turn after the interrupted approval was cleaned up"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn approval_wait_ends_when_the_runtime_shuts_down() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let _turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "pending approval across shutdown".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_turn_shutdown".to_string(),
+            created_at: chrono::Utc::now(),
+            route: None,
+            submission_id: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "shutdown_key".to_string(),
+            approval_grouping_key: "shutdown_key".to_string(),
+            id: "tool_shutdown".to_string(),
+            tool_name: "exec_command".to_string(),
+            description: "unanswered across shutdown".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        })
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(manager.pending_approvals_count(), 1);
+
+    // Runtime shutdown is the documented second exit for the unbounded
+    // wait: the pending approval must be resolved so clients clear the
+    // pending UI instead of holding a phantom prompt forever.
+    manager.shutdown();
+
+    let decided = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+        .await
+        .context("shutdown should resolve the pending approval")?;
+    assert_eq!(
+        decided,
+        Some(MockApprovalEvent::Denied {
+            id: "tool_shutdown".to_string(),
+        })
+    );
+    assert_eq!(manager.pending_approvals_count(), 0);
+    let events = manager.events_since(&thread.id, None)?;
+    assert!(
+        events.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_shutdown")
+                && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
+        }),
+        "shutdown resolution should emit approval.decided with interrupted=true"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn approval_wait_ends_when_the_engine_dies() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let _turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "pending approval when the engine dies".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_turn_engine_death".to_string(),
+            created_at: chrono::Utc::now(),
+            route: None,
+            submission_id: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "death_key".to_string(),
+            approval_grouping_key: "death_key".to_string(),
+            id: "tool_engine_death".to_string(),
+            tool_name: "exec_command".to_string(),
+            description: "engine goes away mid-review".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        })
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(manager.pending_approvals_count(), 1);
+
+    // Engine death (op receiver gone) must be observable to the wait:
+    // otherwise the pending approval suspends the turn forever with no
+    // engine left to decide or settle it.
+    harness.rx_op.close();
+
+    let decided = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+        .await
+        .context("engine death should resolve the pending approval")?;
+    assert_eq!(
+        decided,
+        Some(MockApprovalEvent::Denied {
+            id: "tool_engine_death".to_string(),
+        })
+    );
+    assert_eq!(manager.pending_approvals_count(), 0);
+    let events = manager.events_since(&thread.id, None)?;
+    assert!(
+        events.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str)
+                    == Some("tool_engine_death")
+                && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
+        }),
+        "engine-death resolution should emit approval.decided with interrupted=true"
     );
 
     Ok(())
