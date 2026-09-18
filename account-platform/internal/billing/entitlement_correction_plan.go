@@ -7,11 +7,73 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
+
+func encodeEntitlementCorrectionProjection(value any) json.RawMessage {
+	encoded, _ := json.Marshal(value)
+	return encoded
+}
+
+// EntitlementCorrectionProofInput derives the closed proof-era projection of a
+// complete, unused entitlement component reclassification for a request that is
+// still being assembled. Every amount, component and digest comes from the
+// owner domain read path; the caller may only choose the non-empty reason code,
+// and the reason code never grants execution. Billing proof and the eventual
+// Billing write must still independently re-read the same facts, so this method
+// holds no authority of its own.
+func (r *PostgresRepository) EntitlementCorrectionProofInput(ctx context.Context, packageID, orderID uuid.UUID, reasonCode string) (approvalencoding.LegacyProofInput, error) {
+	if strings.TrimSpace(reasonCode) == "" {
+		return approvalencoding.LegacyProofInput{}, ErrConflict
+	}
+	plan, err := r.planEntitlementComponentCorrection(ctx, packageID, orderID)
+	if err != nil {
+		return approvalencoding.LegacyProofInput{}, err
+	}
+	critical, financial := entitlementCorrectionProofProjection(plan)
+	return approvalencoding.LegacyProofInput{
+		CommandType: entitlementComponentAdjustmentCommand, PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: "ENTITLEMENT_PACKAGE", TargetResourceID: plan.PackageID.String(),
+		NormalizedCommand: encodeEntitlementCorrectionProjection(map[string]any{
+			"package_id": plan.PackageID, "payment_order_id": plan.PaymentOrderID, "reason_code": reasonCode,
+		}),
+		CriticalResourceVersions: critical,
+		FinancialSnapshot:        financial,
+	}, nil
+}
+
+// entitlementCorrectionProofProjection is the single closed owner projection
+// shared by the request assembly path and the authoritative proof recomputation.
+// A target component does not exist before the first execution, so both target
+// identifiers stay explicitly null instead of becoming zero UUIDs.
+func entitlementCorrectionProofProjection(plan entitlementCorrectionReadPlan) (json.RawMessage, json.RawMessage) {
+	nullableID := func(value uuid.UUID) any {
+		if value == uuid.Nil {
+			return nil
+		}
+		return value
+	}
+	critical := encodeEntitlementCorrectionProjection(map[string]any{
+		"package_id": plan.PackageID, "wallet_id": plan.WalletID, "wallet_version": plan.WalletVersion,
+		"payment_order_id": plan.PaymentOrderID, "payment_transaction_id": plan.PaymentTransactionID,
+		"source_component_id": plan.SourceComponentID, "source_lot_id": plan.SourceLotID,
+		"target_component_id": nullableID(plan.TargetComponentID), "target_lot_id": nullableID(plan.TargetLotID),
+		"source_type": plan.Amounts.SourceType, "target_type": plan.Amounts.TargetType,
+		"amount_microcredits": plan.Amounts.Amount, "source_evidence_digest": plan.SourceEvidenceDigest,
+		"facts_digest": plan.FactsDigest, "policy_version": 2,
+	})
+	financial := encodeEntitlementCorrectionProjection(map[string]any{
+		"package_total_microcredits": plan.PackageTotal, "source_original_microcredits": plan.SourceOriginal,
+		"target_original_microcredits": plan.TargetOriginal,
+		"effective_total_microcredits": plan.SourceOriginal + plan.TargetOriginal,
+	})
+	return critical, financial
+}
 
 type entitlementCorrectionReadPlan struct {
 	PackageID            uuid.UUID

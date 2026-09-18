@@ -51,6 +51,18 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 	return repository, nil
 }
 
+// NewPostgresRepositoryWithPool binds the Billing repository to a pool the
+// caller owns. Production wiring uses NewPostgresRepository; this entry exists
+// for cross-domain integration fixtures that must place the Billing runtime
+// under the deployment session identity while another domain owns the database
+// lifecycle. It grants no authority of its own.
+func NewPostgresRepositoryWithPool(pool *pgxpool.Pool) *PostgresRepository {
+	return &PostgresRepository{
+		pool: pool, now: func() time.Time { return time.Now().UTC() },
+		paginationMetrics: newAdminPaginationMetrics(), paginationMaxStorageBytes: adminSnapshotMaxStorageBytes,
+	}
+}
+
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
 func (r *PostgresRepository) Close()                         { r.pool.Close() }
 

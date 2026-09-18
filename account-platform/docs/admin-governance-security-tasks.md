@@ -256,6 +256,8 @@ GSA-22 Account proof client路由切片（仍PARTIAL / REVIEW_PENDING）：Accou
 
 GSA-22 权益纠错consumer专属路由切片（仍PARTIAL / REVIEW_PENDING）：closed consumer registry新增`billing-entitlement-component-adjustment-executor-p2-v1`（Billing workload / policy v2 / Q+1启动），Account前向`000070`以authorization owner重写只读mapping/route函数，仅允许该命令的proof-era wire进入此durable并拒绝legacy wire；down保持55000前向禁止。同步OpenAPI canonical durable枚举、consumer wiring合同和query-only失败分类。真实Account迁移1→70与路由函数集成PASS，registry/recovery/合同定向测试PASS，manifest328项PASS；durable仍不在Billing服务启动集合，跨域E2E与activation未完成。
 
+GSA-22 跨域未激活门禁验证切片（仍PARTIAL / REVIEW_PENDING）：Account集成夹具改为生产同构的独立Billing数据库（库与`public`归`billing_schema_owner`、迁移以`billing_migrator`加`MIGRATION_ROLE=billing_service`应用1→58、运行期使用非超级用户`billing_service`会话），并以真实HTTP proof authority验证跨域门禁仍按部署状态闭合：Billing投影该命令为追加的v2/INACTIVE且保留不可变v1历史行，真实proof endpoint对闭合owner投影拒绝出证（`ErrApprovalProofUnavailable`），Account create/update以公开冲突结果拒绝、submit/approve以`ErrApprovalCommandNotExecutable`拒绝且完全不读取Billing activation、begin在缺少冻结consumer binding时失败关闭；两侧零副作用（无decision/outbox/execution/correction/proof claim/组件变化）。以schema owner提前激活该v2行时，Billing reader仍整表失败关闭（`ErrApprovalActivationUnavailable`），owner只读计划不受影响。本切片同时把Billing闭合owner投影抽为proof路径与夹具共用的单一实现，并新增受控连接池构造入口。真实Account+Billing组合PASS 19.50s。仍未完成：正向Account→Billing批准/消费/查证E2E必须先做“激活能力”决定（Billing `mayBeActive`、Account `billinggovernance`校验与静态executable集合三处门禁需同时放开，且默认仍INACTIVE、生产激活仍需GSA-38～40与独立授权）、业务页presenter与生产激活。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

@@ -138,27 +138,8 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		if err != nil {
 			return current, "", "", err
 		}
-		nullableID := func(value uuid.UUID) any {
-			if value == uuid.Nil {
-				return nil
-			}
-			return value
-		}
 		ownerState = plan.Amounts.SourceType + "->" + plan.Amounts.TargetType
-		current.CriticalResourceVersions = marshal(map[string]any{
-			"package_id": plan.PackageID, "wallet_id": plan.WalletID, "wallet_version": plan.WalletVersion,
-			"payment_order_id": plan.PaymentOrderID, "payment_transaction_id": plan.PaymentTransactionID,
-			"source_component_id": plan.SourceComponentID, "source_lot_id": plan.SourceLotID,
-			"target_component_id": nullableID(plan.TargetComponentID), "target_lot_id": nullableID(plan.TargetLotID),
-			"source_type": plan.Amounts.SourceType, "target_type": plan.Amounts.TargetType,
-			"amount_microcredits": plan.Amounts.Amount, "source_evidence_digest": plan.SourceEvidenceDigest,
-			"facts_digest": plan.FactsDigest, "policy_version": 2,
-		})
-		current.FinancialSnapshot = marshal(map[string]any{
-			"package_total_microcredits": plan.PackageTotal, "source_original_microcredits": plan.SourceOriginal,
-			"target_original_microcredits": plan.TargetOriginal,
-			"effective_total_microcredits": plan.SourceOriginal + plan.TargetOriginal,
-		})
+		current.CriticalResourceVersions, current.FinancialSnapshot = entitlementCorrectionProofProjection(plan)
 		if plan.PackageID != command.PackageID || plan.PaymentOrderID != command.PaymentOrderID {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
