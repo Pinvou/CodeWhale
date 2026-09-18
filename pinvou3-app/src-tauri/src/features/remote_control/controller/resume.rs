@@ -7,7 +7,9 @@
 
 use zeroize::{Zeroize, Zeroizing};
 
-use super::protocol::LeaseContext;
+use base64::Engine as _;
+
+use super::protocol::{LeaseContext, SenderRole, validate_controller_message_json};
 use super::relay_transport::ControllerRole;
 
 const RESUME_TOKEN_BYTES: usize = 32;
@@ -373,6 +375,98 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
+/// E2E-06：恢复期间本端传输挑战值（16 字节随机，base64）。
+/// 它只用于让 Relay 把两个角色的候选绑成同一个 activation_id。
+pub(crate) fn new_resume_challenge() -> Result<String> {
+    use ring::rand::{SecureRandom as _, SystemRandom};
+
+    let mut bytes = [0_u8; 16];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| ResumeStateError::new("controller_resume_entropy"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// E2E-06：构造 `controller_resume_prepare`（冻结 schema：租约五元组 +
+/// sender_role + resume_token_b64 + transport_challenge_b64 + original_deadline_ms）。
+/// `original_deadline_ms` 使用 Relay 在 `controller_joined` 下发的预算，绝不放大。
+pub(crate) fn build_controller_resume_prepare(
+    lease: &LeaseContext,
+    role: ControllerRole,
+    request_id: &str,
+    resume_token: &[u8; RESUME_TOKEN_BYTES],
+    transport_challenge_b64: &str,
+    original_deadline_ms: u64,
+) -> Result<serde_json::Value> {
+    if original_deadline_ms == 0 || transport_challenge_b64.is_empty() {
+        return Err(ResumeStateError::new("controller_resume_material_invalid"));
+    }
+    let frame = serde_json::json!({
+        "v": 1,
+        "type": "controller_resume_prepare",
+        "request_id": request_id,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "sender_role": role_wire(role),
+        "resume_token_b64": base64::engine::general_purpose::STANDARD.encode(resume_token),
+        "transport_challenge_b64": transport_challenge_b64,
+        "original_deadline_ms": original_deadline_ms.to_string(),
+    });
+    validate_controller_message_json(&frame.to_string(), sender_role(role))
+        .map_err(|_| ResumeStateError::new("controller_resume_frame_invalid"))?;
+    Ok(frame)
+}
+
+/// E2E-06：构造 `controller_resume_ready_ack`（A/B 各自独立 ack 同一 activation
+/// 与 B 的第一条 post-activation liveness）。字段来自 Relay 的 confirmed 帧，
+/// 因此只做形状与角色自检。
+pub(crate) fn build_controller_resume_ready_ack(
+    lease: &LeaseContext,
+    role: ControllerRole,
+    request_id: &str,
+    activation_id: &str,
+    liveness_epoch_b: &str,
+    heartbeat_sequence_b: &str,
+) -> Result<serde_json::Value> {
+    if activation_id.is_empty() || liveness_epoch_b.is_empty() || heartbeat_sequence_b.is_empty() {
+        return Err(ResumeStateError::new("controller_resume_frame_invalid"));
+    }
+    let frame = serde_json::json!({
+        "v": 1,
+        "type": "controller_resume_ready_ack",
+        "request_id": request_id,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "activation_id": activation_id,
+        "sender_role": role_wire(role),
+        "liveness_epoch_b": liveness_epoch_b,
+        "heartbeat_sequence_b": heartbeat_sequence_b,
+    });
+    validate_controller_message_json(&frame.to_string(), sender_role(role))
+        .map_err(|_| ResumeStateError::new("controller_resume_frame_invalid"))?;
+    Ok(frame)
+}
+
+fn role_wire(role: ControllerRole) -> &'static str {
+    match role {
+        ControllerRole::ControllerA => "A",
+        ControllerRole::ControlledB => "B",
+    }
+}
+
+fn sender_role(role: ControllerRole) -> SenderRole {
+    match role {
+        ControllerRole::ControllerA => SenderRole::ControllerA,
+        ControllerRole::ControlledB => SenderRole::ControlledB,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +809,91 @@ mod tests {
         b.accept_post_activation_liveness_confirmed("activation-0001", 8_000, Some(29_000))
             .unwrap();
         assert_eq!(b.phase(), ResumePhase::PostActivationLiveness);
+    }
+
+    /// E2E-06：出站恢复帧必须直接通过冻结 schema 校验，且畸形输入失败关闭；
+    /// 挑战值每次不同（16 字节随机）。
+    #[test]
+    fn resume_frames_match_the_frozen_contract_and_reject_malformed_input() {
+        let lease = lease();
+        let prepare = build_controller_resume_prepare(
+            &lease,
+            ControllerRole::ControllerA,
+            "request-resume-prepare-1",
+            &[3; 32],
+            &new_resume_challenge().unwrap(),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(prepare["type"], "controller_resume_prepare");
+        assert_eq!(prepare["sender_role"], "A");
+        assert_eq!(prepare["original_deadline_ms"], "30000");
+        assert_eq!(
+            prepare["resume_token_b64"],
+            base64::engine::general_purpose::STANDARD.encode([3_u8; 32])
+        );
+        assert_eq!(
+            build_controller_resume_prepare(
+                &lease,
+                ControllerRole::ControllerA,
+                "request-resume-prepare-1",
+                &[3; 32],
+                "",
+                30_000,
+            )
+            .unwrap_err()
+            .code,
+            "controller_resume_material_invalid"
+        );
+        assert_eq!(
+            build_controller_resume_prepare(
+                &lease,
+                ControllerRole::ControllerA,
+                "request-resume-prepare-1",
+                &[3; 32],
+                &new_resume_challenge().unwrap(),
+                0,
+            )
+            .unwrap_err()
+            .code,
+            "controller_resume_material_invalid"
+        );
+
+        let ready = build_controller_resume_ready_ack(
+            &lease,
+            ControllerRole::ControlledB,
+            "request-resume-ready-1",
+            "activation-0001",
+            "live-b-2",
+            "1",
+        )
+        .unwrap();
+        assert_eq!(ready["type"], "controller_resume_ready_ack");
+        assert_eq!(ready["sender_role"], "B");
+        assert_eq!(ready["heartbeat_sequence_b"], "1");
+        assert_eq!(
+            build_controller_resume_ready_ack(
+                &lease,
+                ControllerRole::ControlledB,
+                "request-resume-ready-1",
+                "",
+                "live-b-2",
+                "1",
+            )
+            .unwrap_err()
+            .code,
+            "controller_resume_frame_invalid"
+        );
+
+        let first = new_resume_challenge().unwrap();
+        let second = new_resume_challenge().unwrap();
+        assert_ne!(first, second, "恢复挑战必须每次重新生成");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(first)
+                .unwrap()
+                .len(),
+            16
+        );
     }
 }
