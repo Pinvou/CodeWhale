@@ -327,10 +327,15 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ### 12.1 恢复点（NEXT）
 
-- **当前恢复点**：E2E-06 第 2 项「B 端恢复循环」。
-- **下一步动作**：给 `ControlledDeviceManager` 补恢复 API（`begin_resume`/`advance_resume`/`current_operation` + 带
-  `activation_id` 的 `complete_resumed`，驱动本端 `ControllerResumeGate`），随后在 `ControlledRelayWorker::serve`
-  的 joined 分支接恢复帧。
+- **当前恢复点**：E2E-06 第 2 项「B 端恢复循环」——状态机侧（`5b42e1d8`）与出站帧构造（`4bfa63e3`）已完成。
+- **下一步动作（唯一剩余代码项）**：在 `ControlledRelayWorker::serve`（`relay_runtime.rs:345`）的 joined 分支接恢复：
+  用 `desktop_relay_connection{connected:false}` 触发 `mark_transport_disconnected(now_b)` + `begin_resume` + 发
+  `controller_resume_prepare`；按 §12.1 的相位映射处理 provisional / encrypted_resume_confirm /
+  activation_pending / post_activation_liveness_confirmed / controller_resumed，完成后 `activate` 业务通道；
+  B 的三个出站帧用 `build_controller_resume_activation_ack` / `build_controller_post_activation_liveness` /
+  `build_controller_resume_ready_ack`（B 的 liveness epoch 用 `live-b-<uuid>`，必须与旧值不同）。
+  测试建议：把这段逻辑抽成 `relay_runtime` 内的纯函数（输入端口 + manager + lanes + 帧字符串），用 `FakePort` 驱动整条
+  序列，再让 `serve` 调它。
 - **B 端断线信号（已确认，无需再侦察）**：`RemoteControlManager::handle_connection`
   （`manager/mod.rs:2114`）在 socket 状态变化时先 `forward_controller_relay_message` 投递
   `{"type":"desktop_relay_connection","endpoint_id":…,"connected":false,"error":…}`，再更新 endpoint 状态；
