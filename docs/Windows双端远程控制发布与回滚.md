@@ -29,6 +29,8 @@
 
 必须使用两台隔离 Windows 设备与生产等价 TLS/网关环境，逐条执行需求 18.3 的 21 个旅程；其中以下条目最容易假通过，需要保留可复现 trace（不含敏感正文）：
 
+> 逐条的前置、操作、预期观测点与 trace 字段见 `Windows双端远程控制双机演练清单.md`；无需部署的本地单机自测见 `scripts/remote-control-local-selftest.ps1`。
+
 - 旅程 9～10、19、21：断线恢复、30 秒预算、RTT/attestation 余量（24000ms / 19000ms）。
 - 旅程 11～12：第二个 A、Web/controller 交叉接入、Web-to-Web 既有接管。
 - 旅程 13：A 决定 / 超时 / B stop 竞态的唯一终态，B 侧不得出现 Allow。
