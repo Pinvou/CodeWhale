@@ -298,6 +298,8 @@ GSA-37 业务页闭合草稿切片（仍PENDING / PARTIAL）：新增 Portal 侧
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
+> 说明：本小节内穿插的“GSA-22 / GSA-37 / GSA-38 … 切片”与“设计类审核轮次发现”等段落是逐轮追加的审核与验证记录（正式记录见 §5）；为避免改写历史记录，此处保留原文，其中已被后续提交取代的事实以 §5 的“设计冻结轮”与“记录失效更正”为准。
+
 ### GSA-21～37：八类财务命令
 
 21/23/25/27/29/31/33/35 分别只交付对应命令的领域设计，逐项落实设计 §11：精确允许/禁止变化、权限/政策新版本、closed command/snapshot/proof/presenter、金额和组成守恒、补偿而非改写历史、外部证据、未知结果、CAS/幂等、迁移与回滚。设计提交推送后可进入对应实现，审核统一延后；需要用户决定的账务规则先给具体选项及影响，不猜填。每类创建独立领域设计文档，已有AUDIT_ONLY路径不升级冒充新命令。
@@ -336,6 +338,8 @@ APT-141 仅在归属的所有DESIGN与CODE子任务通过并提交后关闭；AP
 ## 5. 审核与验证记录
 
 设计冻结轮（2026-09-19，A 自检；独立审核待办）：按用户确认的首版范围把七个财务修复领域设计从“事实与决策门禁切片”补成可实现合同，逐类独立提交：GSA-23 账本修复 `09606393b`（仅归属错误等额冲正、`REVERSAL` 两腿、`entry_type` 账户类型契约）、GSA-25 应收核销 `e5101e2c7`（仅 `USAGE_OVERAGE`、允许部分核销、`settled` 语义澄清）、GSA-27 支付财务修复 `3a73e6316`（仅“已确认支付未入账”，复用既有 `RepairReviewedOrder` 写入者，执行期零 Provider 调用）、GSA-29 退款异常修复 `ea46a0e1d`（仅“Provider 已退款未冲销”，回收+短缺应收，登记 `PENDING→APPLIED` 新状态边）、GSA-31 拒付财务修复 `57ec3f354`（仅 BASE 短缺补偿，存在可撤销额度即拒绝）、GSA-33 对账财务修复 `1dbe3cfe3`（仅 `PROVIDER_PAID_INTERNAL_MISSING`，零账务效果结案+修复后再核对，含被拒方案记录）、GSA-35 用量结算修复 `b63c235a4`（仅少结算/未结算补记，登记 `usage_loss_reviews.RESOLVED_SETTLED` 新取值，绝不重发模型请求）。七份文档统一冻结：精确允许/禁止的变化、closed command/snapshot/proof/presenter、金额与组成守恒、补偿而非改写历史、外部证据与未知结果（`UNKNOWN_QUERY_ONLY`）、CAS/幂等与 result-first、失败分类与 DLQ 收口、权限与版本复用（v1/s1）及激活前只读守卫、前向迁移/N/N-1/回滚，以及逐类验收证据映射。同一轮附带修复 F3：前向 `000060` 放宽 `journal_entries.entry_type`（`REPAIR_CREDIT`/`FORCED_REFUND`）与 `receivables.source_type`（`FORCED_REFUND`）并让 `packages.go` 改用既有 `EXPIRY`，新增真实 PostgreSQL 回归（提交 `d253eeb0a`，Billing 真库整包 297.290s PASS、`go vet`、迁移清单 332 项通过）。验证：`node scripts/check-account-platform-tasks.mjs` 通过（143 任务 / 35 未完成目标 / 354 已完成目标保留），七类 activation 行与 production activation 全部保持 `INACTIVE`，未部署、未推送；独立审核员对七份文档的结论尚未取得，故状态为 `IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING`。
+
+记录失效更正（2026-09-19）：本文件早前逐轮追加的切片记录属于当时的仓库快照，其中以下事实已被后续提交取代，以冻结版设计文档为准——①“`entry_type` 白名单与写入者不一致（尚未修复）”：已由前向 `000060` 修复（提交 `d253eeb0a`），当前白名单含 `REPAIR_CREDIT`/`FORCED_REFUND`，`packages.go` 改用既有 `EXPIRY`，并新增真实 PostgreSQL 回归；②“`usage_hold_allocations` 主键为 `(hold_id,package_id)`、既有相关路径仅为 Token 用量对账”：主键已由 `000016` 改为 `(hold_id,component_id)` 并新增非空 `component_id`，相邻路径还包括 `BILLING_USAGE_HOLD_SAFE_RELEASE` 与 `usage_loss_reviews`（见 GSA-35 冻结版 §2/§3）；③“每订单至多一条支付交易”：`000024` 已把该唯一索引改为普通索引，当前不再是不变量（见 GSA-27 冻结版 §2/§7）；④审查轮次的 `payments.go` `repair=true` 越界写入结论：同 ① 已修复。§3 内穿插的历史切片记录按 §3 末尾说明保留原文，不再逐条回改。
 
 GSA-27 支付财务修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED）：新增[支付财务修复领域设计](payment-financial-repair-design.md)首版。事实：该命令只有Account v1策略元数据与Billing `('PAYMENT_FINANCIAL_REPAIR',1,1,'INACTIVE',1)`，静态不可执行且无handler/proof/executor/consumer；既有"已确认支付但未入账"修复由`reconciliation.go`的`MANUAL_REPAIR`路径完成（写`REPAIR_CREDIT` journal、钱包/package入账，并向`payment_order_repairs`追加一次性审计行：订单/交易/证据、actor、reason、provider快照、唯一package、`points_awarded>0`与`wallet_balance_before/after`上下界；唯一性在`000024`由订单改为交易，`UNIQUE(payment_transaction_id)`+组合外键，插入`ON CONFLICT (payment_transaction_id) DO NOTHING`）；拒付、退款/强制退款、延迟支付评审与对账案件各有独立路径。文档同时锁定账本不可改写不变量（见账本修复设计§2）并列出五项待用户决策（首版范围、外部证据、写入边界、未知结果与只读查证、幂等与限额），明确默认`INACTIVE`且不得改写历史账本或支付事实。本切片不改任何代码、迁移、合同或activation。
 
