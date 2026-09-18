@@ -16,7 +16,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 && loaded[index].Version != 58 && loaded[index].Version != 59 {
+		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 && loaded[index].Version != 58 && loaded[index].Version != 59 && loaded[index].Version != 60 {
 			continue
 		}
 		loaded[index].UpSQL = rewriteBillingPublicSchema(loaded[index].UpSQL, qualified)
@@ -26,11 +26,16 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 		if loaded[index].Version == 54 {
 			loaded[index].UpSQL = "GRANT USAGE ON SCHEMA " + qualified + " TO billing_service;\n" + loaded[index].UpSQL
 		}
-		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 || loaded[index].Version == 58 || loaded[index].Version == 59 {
+		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 || loaded[index].Version == 58 || loaded[index].Version == 59 || loaded[index].Version == 60 {
 			loaded[index].UpSQL += "\nRESET ROLE;"
 		}
 		if loaded[index].Version == 56 {
 			for _, table := range []string{"entitlement_packages", "wallets", "payment_orders", "payment_transactions", "entitlement_components", "credit_lots", "journal_entries"} {
+				loaded[index].UpSQL = "ALTER TABLE " + qualified + "." + table + " OWNER TO billing_service;\n" + loaded[index].UpSQL
+			}
+		}
+		if loaded[index].Version == 60 {
+			for _, table := range []string{"journal_entries", "receivables"} {
 				loaded[index].UpSQL = "ALTER TABLE " + qualified + "." + table + " OWNER TO billing_service;\n" + loaded[index].UpSQL
 			}
 		}

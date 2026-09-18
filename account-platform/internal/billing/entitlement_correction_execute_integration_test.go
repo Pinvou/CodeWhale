@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -205,11 +206,15 @@ has_table_privilege('billing_service',$1,'UPDATE'),has_table_privilege('billing_
 		t.Fatal(err)
 	}
 	defer connection.Close(context.Background())
-	if err := migrations.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "rollback migration 58") {
+	if len(loaded) == 0 {
+		t.Fatal("billing migration chain is empty")
+	}
+	head := loaded[len(loaded)-1].Version
+	if err := migrations.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "rollback migration "+strconv.FormatInt(head, 10)) {
 		t.Fatalf("forward-only migration down returned %v", err)
 	}
 	var latestVersion int64
-	if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latestVersion); err != nil || latestVersion != 58 {
+	if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&latestVersion); err != nil || latestVersion != head {
 		t.Fatalf("failed down changed migration version: %d err=%v", latestVersion, err)
 	}
 }

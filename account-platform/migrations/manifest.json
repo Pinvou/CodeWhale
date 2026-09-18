@@ -1284,6 +1284,16 @@
         "file": "000059_entitlement_component_adjustment_proof_claims.up.sql",
         "version": 59,
         "sha256": "61320c59c85b809eefad61842bce8bfdd2600b1c944fe199fd6172a44c6eb989"
+      },
+      {
+        "file": "000060_repair_journal_and_receivable_enums.down.sql",
+        "version": 60,
+        "sha256": "4f375283ca2cbe46afba8daac44a0c177acd8c87f68caa1676a98083879684da"
+      },
+      {
+        "file": "000060_repair_journal_and_receivable_enums.up.sql",
+        "version": 60,
+        "sha256": "159061bfd00cd057249247e292a5aaa96242becd506f845731b866c0c10c8bfb"
       }
     ],
     "payment-simulator": [

@@ -187,7 +187,7 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 	componentRows.Close()
 	if remaining > 0 {
 		entryID := uuid.Must(uuid.NewV7())
-		if err := insertJournal(ctx, tx, entryID, "EXPIRE", "expire:"+packageID.String(), "expire entitlement package", now); err != nil {
+		if err := insertJournal(ctx, tx, entryID, "EXPIRY", "expire:"+packageID.String(), "expire entitlement package", now); err != nil {
 			return false, err
 		}
 		walletAccount, err := walletLedgerAccount(ctx, tx, walletID)
