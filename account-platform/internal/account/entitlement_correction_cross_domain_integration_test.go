@@ -334,26 +334,25 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND s
 	requester = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-chain-requester")
 	approver = seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "entitlement-chain-approver")
 	approverPrincipal = approvalIntegrationPrincipal(approver)
-	requestID := seedAdvancementRequest(t, ctx, repository, requester.ID, policy, "DRAFT")
-	// The proof-era request must be seeded with the same closed typed form the
-	// Account approval writer freezes onto the wire: integers are canonical
-	// decimal strings, not JSON numbers.
-	if _, err := approvalencoding.LegacyProofInputFromArtifacts(artifacts); err != nil {
-		t.Fatal(err)
+	// The request is created through the same Account entry points the Portal
+	// business entry will call: closed draft -> submit -> independent approval.
+	draft := ApprovalDraft{
+		CommandType: policy.CommandType, IdempotencyKey: "entitlement-cross-domain-chain",
+		NormalizedCommand: frozen.NormalizedCommand, TargetResourceType: frozen.TargetResourceType,
+		TargetResourceID: frozen.TargetResourceID, Reason: "cross-domain entitlement correction",
+		RedactedEvidence: json.RawMessage(`[]`), ExpectedImpact: json.RawMessage(`{}`),
+		CriticalResourceVersions: frozen.CriticalResourceVersions, FinancialSnapshot: frozen.FinancialSnapshot,
 	}
-	if _, err := repository.pool.Exec(ctx, `UPDATE approval_requests SET normalized_command=$2,command_fingerprint=decode($3,'hex'),
-target_resource_type=$4,target_resource_id=$5 WHERE id=$1 AND status='DRAFT'`,
-		requestID, frozen.NormalizedCommand, artifacts.CommandDigest, frozen.TargetResourceType, frozen.TargetResourceID); err != nil {
-		t.Fatal(err)
+	created, err := repository.CreateApprovalDraft(ctx, requesterPrincipal, draft)
+	if err != nil {
+		t.Fatalf("cross-domain draft create: %v", err)
 	}
-	if _, err := repository.pool.Exec(ctx, `UPDATE approval_request_snapshots SET critical_resource_versions=$2,financial_snapshot=$3,snapshot_schema_version=2 WHERE approval_request_id=$1`,
-		requestID, frozen.CriticalResourceVersions, frozen.FinancialSnapshot); err != nil {
-		t.Fatal(err)
+	submitted, err := repository.SubmitApprovalRequest(ctx, requesterPrincipal, created.ID, created.Version)
+	if err != nil {
+		t.Fatalf("cross-domain draft submit: %v", err)
 	}
-	if _, err := repository.pool.Exec(ctx, `UPDATE approval_requests SET status='SUBMITTED',submitted_at=now(),version=version+1,updated_at=now() WHERE id=$1 AND status='DRAFT'`, requestID); err != nil {
-		t.Fatal(err)
-	}
-	approved, err := repository.DecideApprovalRequest(ctx, approverPrincipal, requestID, 2, "APPROVED", "cross-domain entitlement correction", frozen.CriticalResourceVersions)
+	requestID := submitted.ID
+	approved, err := repository.DecideApprovalRequest(ctx, approverPrincipal, requestID, submitted.Version, "APPROVED", "cross-domain entitlement correction", frozen.CriticalResourceVersions)
 	if err != nil || approved.Status != "APPROVED" {
 		t.Fatalf("cross-domain proof approval status=%s err=%v", approved.Status, err)
 	}
