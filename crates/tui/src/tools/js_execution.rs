@@ -218,8 +218,13 @@ pub async fn execute_js_execution_tool(
         Err(_elapsed) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
+            // Abort (don't join) the drain tasks: a grandchild that
+            // inherited the pipe keeps the write end open after the child
+            // dies, so read_to_end would never see EOF and joining here
+            // would hang the caller past the timeout. Aborting drops the
+            // read end, which hands grandchildren an EPIPE instead.
+            stdout_task.abort();
+            stderr_task.abort();
             return Err(ToolError::Timeout {
                 seconds: js_execution_timeout().as_secs(),
             });
@@ -472,5 +477,41 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
             attempts += 1;
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_returns_promptly_even_when_a_grandchild_holds_the_pipes() {
+        if !node_present() {
+            eprintln!("skipping: node not present");
+            return;
+        }
+        let workspace = tempdir().expect("workspace tempdir");
+        // The child spawns a grandchild that inherits stdout/stderr (so the
+        // pipe write ends outlive the child) and then blocks far past the
+        // execution timeout. After the child is killed, the drain readers
+        // cannot reach EOF until the grandchild exits — the timeout arm
+        // must return without waiting for them.
+        let code = "const { spawn } = require('child_process'); \
+                    const g = spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'] }); \
+                    console.log('grandchild ' + g.pid); \
+                    setTimeout(() => {}, 60000);";
+
+        let started = std::time::Instant::now();
+        let err = execute_js_execution_tool(&serde_json::json!({ "code": code }), workspace.path())
+            .await
+            .expect_err("a 60s sleep must hit the execution timeout");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "expected a timeout error; got {err:?}"
+        );
+        // Joining the un-EOF-able drain tasks would wait out the
+        // grandchild's full 30s sleep on top of the 5s test timeout;
+        // aborting them returns right after the kill.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "timeout must not wait for grandchildren holding the pipes; took {elapsed:?}"
+        );
     }
 }
