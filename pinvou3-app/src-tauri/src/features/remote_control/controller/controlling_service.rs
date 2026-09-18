@@ -366,6 +366,7 @@ pub(crate) async fn serve_controlling_lane_with_interval(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
     let mut sequence: u64 = 0;
+    let mut journal = JournalExpectations::default();
     loop {
         tokio::select! {
             biased;
@@ -384,7 +385,14 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                         (sinks.on_status)(&status);
                     }
                     ControllerLaneEvent::Frame(json) => {
-                        dispatch_inbound_frame(manager, sessions, business, &json, sinks);
+                        dispatch_inbound_frame(
+                            manager,
+                            sessions,
+                            business,
+                            &mut journal,
+                            &json,
+                            sinks,
+                        );
                     }
                 }
             }
@@ -412,6 +420,7 @@ fn dispatch_inbound_frame(
     manager: &ControllingDeviceManager,
     sessions: &ControllingSessionManager,
     business: &ControllingLaneState,
+    journal: &mut JournalExpectations,
     json: &str,
     sinks: &mut ControllingLaneSinks<'_>,
 ) {
@@ -441,8 +450,30 @@ fn dispatch_inbound_frame(
             }
         }
         "journal_event" => {
-            if let Some(event) = journal_event_from_wire(&payload) {
-                (sinks.on_journal)(&event);
+            let Some(event) = journal_event_from_wire(&payload) else {
+                return;
+            };
+            match journal_admission(journal.expected(&event.session_id), &event) {
+                JournalAdmission::Apply => {
+                    journal.mark_applied(&event);
+                    (sinks.on_journal)(&event);
+                }
+                JournalAdmission::Duplicate => {}
+                JournalAdmission::RequestReplay { epoch, after } => {
+                    if let Some((epoch, after)) =
+                        journal.begin_replay(&event.session_id, &epoch, after)
+                    {
+                        let _ = request_journal_replay(
+                            manager,
+                            business,
+                            &lease,
+                            &capabilities,
+                            &event.session_id,
+                            &epoch,
+                            after,
+                        );
+                    }
+                }
             }
         }
         _ => {}
@@ -471,6 +502,128 @@ fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
         return None;
     }
     Some(event)
+}
+
+/// A 端权威事件接纳判定：首个或连续事件才落库，缺中间事件时请求回放，重复忽略。
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum JournalAdmission {
+    Apply,
+    RequestReplay { epoch: String, after: u64 },
+    Duplicate,
+}
+
+/// 纯函数：依据本端已知的 (epoch, last_sequence) 与到达事件推导接纳动作。
+/// 换 epoch 时从该 epoch 的 0 号位请求回放（B 侧保留窗口不足会给快照）。
+pub(crate) fn journal_admission(
+    expected: Option<(&str, u64)>,
+    event: &JournalEvent,
+) -> JournalAdmission {
+    match expected {
+        None => JournalAdmission::Apply,
+        Some((epoch, _)) if epoch != event.epoch => JournalAdmission::RequestReplay {
+            epoch: event.epoch.clone(),
+            after: 0,
+        },
+        Some((_, last)) if event.sequence <= last => JournalAdmission::Duplicate,
+        Some((_, last)) if event.sequence == last.saturating_add(1) => JournalAdmission::Apply,
+        Some((_, last)) => JournalAdmission::RequestReplay {
+            epoch: event.epoch.clone(),
+            after: last,
+        },
+    }
+}
+
+/// 会话级 journal 期望值：已落库的 (epoch, sequence) 与正在等待回放的会话
+/// （同一会话只保留一个在途回放请求，避免缺口期间刷请求）。
+#[derive(Default)]
+pub(crate) struct JournalExpectations {
+    applied: std::collections::BTreeMap<String, (String, u64)>,
+    awaiting_replay: std::collections::BTreeSet<String>,
+}
+
+impl JournalExpectations {
+    pub(crate) fn expected(&self, session_id: &str) -> Option<(&str, u64)> {
+        self.applied
+            .get(session_id)
+            .map(|(epoch, sequence)| (epoch.as_str(), *sequence))
+    }
+
+    pub(crate) fn mark_applied(&mut self, event: &JournalEvent) {
+        self.applied.insert(
+            event.session_id.clone(),
+            (event.epoch.clone(), event.sequence),
+        );
+        self.awaiting_replay.remove(&event.session_id);
+    }
+
+    /// 需要请求回放时返回 (epoch, after)；该会话已有在途请求时返回 None。
+    pub(crate) fn begin_replay(
+        &mut self,
+        session_id: &str,
+        epoch: &str,
+        after: u64,
+    ) -> Option<(String, u64)> {
+        if !self.awaiting_replay.insert(session_id.to_owned()) {
+            return None;
+        }
+        Some((epoch.to_owned(), after))
+    }
+}
+
+/// 冻结形状的 `journal_replay_request`（A→B 加密业务帧）。
+pub(crate) fn build_journal_replay_request(
+    lease: &LeaseContext,
+    session_ref: &str,
+    journal_epoch: &str,
+    after_sequence: u64,
+    request_id: &str,
+) -> Result<Value, &'static str> {
+    if session_ref.is_empty()
+        || journal_epoch.is_empty()
+        || request_id.is_empty()
+        || request_id.len() > 128
+    {
+        return Err("journal_request_invalid");
+    }
+    Ok(serde_json::json!({
+        "v": 1,
+        "type": "journal_replay_request",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": request_id,
+        "session_id": session_ref,
+        "journal_epoch": journal_epoch,
+        "after_sequence": after_sequence.to_string(),
+    }))
+}
+
+/// 请求缺失区间的回放；失败不影响缺口事件的丢弃语义（下次事件仍会重试）。
+fn request_journal_replay(
+    manager: &ControllingDeviceManager,
+    business: &ControllingLaneState,
+    lease: &LeaseContext,
+    capabilities: &[String],
+    session_ref: &str,
+    journal_epoch: &str,
+    after_sequence: u64,
+) -> bool {
+    let request_id = format!("request-replay-{}", Uuid::new_v4().simple());
+    let Ok(payload) = build_journal_replay_request(
+        lease,
+        session_ref,
+        journal_epoch,
+        after_sequence,
+        &request_id,
+    ) else {
+        return false;
+    };
+    let Ok(frame) = business.seal("journal_replay_request", &payload, capabilities) else {
+        return false;
+    };
+    manager.send_authenticated_business(&frame).is_ok()
 }
 
 /// 任务状态投影（UI 任务域字段）；wire 的 `task_status` 只有状态与可选结果摘要。
@@ -1281,6 +1434,25 @@ mod tests {
             ) -> Result<Option<Value>, String> {
                 Ok(None)
             }
+
+            async fn replay_journal(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _journal_epoch: &str,
+                _after_sequence: u64,
+            ) -> Result<Vec<(String, Value)>, String> {
+                Ok(Vec::new())
+            }
+
+            async fn session_snapshot(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _request_id: &str,
+            ) -> Result<Value, String> {
+                Ok(serde_json::json!({"v": 1, "type": "session_snapshot"}))
+            }
         }
 
         let PairingFixture {
@@ -1359,11 +1531,11 @@ mod tests {
         let mut b_lane = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
         let (kind, payload) = b_lane.open(&frame, &capabilities).unwrap();
         assert_eq!(kind, "task_submit");
-        let (response_kind, response) =
-            dispatch_decrypted_payload(&TerminalPort, &lease, &kind, &payload)
-                .await
-                .unwrap()
-                .unwrap();
+        let responses = dispatch_decrypted_payload(&TerminalPort, &lease, &kind, &payload)
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 1);
+        let (response_kind, response) = responses.into_iter().next().unwrap();
         assert_eq!(response_kind, "task_status");
         let response_frame = b_lane
             .seal(response_kind, &response, &capabilities)
@@ -1442,6 +1614,106 @@ mod tests {
         );
         assert_eq!(journal_events[0].kind, "assistant_delta");
         assert_eq!(journal_events[0].payload["text"], "hello from B");
+    }
+
+    /// E2E-05 缺口恢复：连续/首个事件落库，缺中间事件请求回放（同会话只保留一个
+    /// 在途请求），重复事件忽略，换 epoch 从 0 号位重新回放。
+    #[test]
+    fn journal_gaps_are_detected_and_replayed_once() {
+        let event = |epoch: &str, sequence: u64| JournalEvent {
+            event_id: format!("event-{epoch}-{sequence}"),
+            epoch: epoch.to_owned(),
+            sequence,
+            kind: "assistant_delta".to_owned(),
+            session_id: "session-a".to_owned(),
+            task_id: None,
+            terminal_status: None,
+            payload: serde_json::json!({"text": "x"}),
+        };
+        assert_eq!(
+            journal_admission(None, &event("epoch-1", 1)),
+            JournalAdmission::Apply,
+            "首个事件直接落库"
+        );
+        assert_eq!(
+            journal_admission(Some(("epoch-1", 1)), &event("epoch-1", 2)),
+            JournalAdmission::Apply
+        );
+        assert_eq!(
+            journal_admission(Some(("epoch-1", 2)), &event("epoch-1", 2)),
+            JournalAdmission::Duplicate
+        );
+        assert_eq!(
+            journal_admission(Some(("epoch-1", 2)), &event("epoch-1", 5)),
+            JournalAdmission::RequestReplay {
+                epoch: "epoch-1".into(),
+                after: 2
+            }
+        );
+        assert_eq!(
+            journal_admission(Some(("epoch-1", 5)), &event("epoch-2", 1)),
+            JournalAdmission::RequestReplay {
+                epoch: "epoch-2".into(),
+                after: 0
+            }
+        );
+
+        // 期望值推进与在途请求去重。
+        let mut expectations = JournalExpectations::default();
+        assert!(expectations.expected("session-a").is_none());
+        expectations.mark_applied(&event("epoch-1", 1));
+        assert_eq!(expectations.expected("session-a"), Some(("epoch-1", 1)));
+        assert_eq!(
+            expectations.begin_replay("session-a", "epoch-1", 1),
+            Some(("epoch-1".to_owned(), 1))
+        );
+        assert_eq!(
+            expectations.begin_replay("session-a", "epoch-1", 1),
+            None,
+            "同一会话只保留一个在途回放请求"
+        );
+        // 回放落地后重新允许请求。
+        expectations.mark_applied(&event("epoch-1", 2));
+        assert_eq!(expectations.expected("session-a"), Some(("epoch-1", 2)));
+        assert!(expectations.begin_replay("session-a", "epoch-1", 2).is_some());
+    }
+
+    /// E2E-05 缺口恢复：回放请求必须是冻结形状且通过运行时校验（角色 A +
+    /// snapshot_journal_v1）。
+    #[test]
+    fn journal_replay_request_matches_the_frozen_contract() {
+        use crate::features::remote_control::controller::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
+        };
+
+        let PairingFixture { reservation, .. } = pairing_fixture(RELAY_KEY_ID);
+        let lease = lease_context(&reservation);
+        let payload = build_journal_replay_request(
+            &lease,
+            "session-a-ref",
+            "epoch-1",
+            7,
+            "request-replay-1",
+        )
+        .unwrap();
+        validate_controller_runtime_payload_json(
+            &payload.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease.clone()),
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".to_owned(),
+                    "pairing_v1".to_owned(),
+                    "snapshot_journal_v1".to_owned(),
+                    "task_v1".to_owned(),
+                ],
+            }),
+        )
+        .expect("回放请求必须满足冻结契约");
+        assert_eq!(payload["after_sequence"], "7");
+        assert_eq!(payload["journal_epoch"], "epoch-1");
+        assert_eq!(payload["session_id"], "session-a-ref");
+        assert!(build_journal_replay_request(&lease, "", "epoch-1", 0, "request-1").is_err());
     }
 
     /// E2E-06：保活任务按间隔发送 A 端心跳帧（序号单调、epoch 来自租约），且

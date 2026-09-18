@@ -623,16 +623,21 @@ impl ControlledRelayWorker {
         let Ok((payload_kind, payload)) = business.open(frame, &capabilities) else {
             return;
         };
-        let Ok(Some((response_kind, response))) =
+        let Ok(responses) =
             dispatch_decrypted_payload(self.business.as_ref(), &lease, &payload_kind, &payload)
                 .await
         else {
             return;
         };
-        let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
-            return;
-        };
-        let _ = self.channel.try_send(frame);
+        // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
+        for (response_kind, response) in responses {
+            let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
+                return;
+            };
+            if self.channel.try_send(frame).is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -715,6 +720,24 @@ pub(crate) trait ControlledBusinessPort: Send + Sync {
         session_ref: &str,
         task_id: &str,
     ) -> Result<Option<Value>, String>;
+
+    /// E2E-05 缺口恢复：按 `after_sequence` 回放权威事件；缺口太旧时返回一份
+    /// `session_snapshot`，因此返回的是 (wire payload_kind, payload) 列表。
+    async fn replay_journal(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        journal_epoch: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<(String, Value)>, String>;
+
+    /// E2E-05 缺口恢复：给出一份权威快照（`session_snapshot` wire 载荷）。
+    async fn session_snapshot(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        request_id: &str,
+    ) -> Result<Value, String>;
 }
 
 /// 解密后的业务帧派发（纯函数，便于测试）：按 payload_kind 调用业务端口，
@@ -724,7 +747,7 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
     lease: &LeaseContext,
     payload_kind: &str,
     payload: &Value,
-) -> Result<Option<(&'static str, Value)>, String> {
+) -> Result<Vec<(&'static str, Value)>, String> {
     match payload_kind {
         "capability_snapshot_request" => {
             let request_id = payload
@@ -739,7 +762,7 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
             let response = port
                 .capability_snapshot(lease, request_id, known_revision)
                 .await?;
-            Ok(Some(("capability_snapshot", response)))
+            Ok(vec![("capability_snapshot", response)])
         }
         "task_submit" => {
             let session_ref = payload
@@ -748,10 +771,10 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .ok_or_else(|| "task_request_invalid".to_owned())?
                 .to_owned();
             let response = port.submit_task(lease, &session_ref, payload).await?;
-            Ok(Some((
+            Ok(vec![(
                 "task_status",
                 rewrite_session_id(response, &session_ref)?,
-            )))
+            )])
         }
         "task_cancel" => {
             let session_ref = payload
@@ -764,15 +787,55 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .and_then(Value::as_str)
                 .ok_or_else(|| "task_request_invalid".to_owned())?;
             match port.cancel_task(lease, &session_ref, task_id).await? {
-                Some(response) => Ok(Some((
+                Some(response) => Ok(vec![(
                     "task_status",
                     rewrite_session_id(response, &session_ref)?,
-                ))),
-                None => Ok(None),
+                )]),
+                None => Ok(Vec::new()),
             }
         }
+        "journal_replay_request" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let journal_epoch = payload
+                .get("journal_epoch")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let after_sequence = payload
+                .get("after_sequence")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let frames = port
+                .replay_journal(lease, session_ref, journal_epoch, after_sequence)
+                .await?;
+            Ok(frames
+                .into_iter()
+                .filter_map(|(kind, payload)| match kind.as_str() {
+                    "journal_event" => Some(("journal_event", payload)),
+                    "session_snapshot" => Some(("session_snapshot", payload)),
+                    _ => None,
+                })
+                .collect())
+        }
+        "session_snapshot_request" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let snapshot = port
+                .session_snapshot(lease, session_ref, request_id)
+                .await?;
+            Ok(vec![("session_snapshot", snapshot)])
+        }
         // liveness / 审批 / 附件 / 成果等能力属后续任务：未知类型一律丢弃。
-        _ => Ok(None),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -1505,6 +1568,25 @@ mod tests {
                     "task_status": "cancelled",
                 })))
             }
+
+            async fn replay_journal(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _journal_epoch: &str,
+                _after_sequence: u64,
+            ) -> Result<Vec<(String, Value)>, String> {
+                Ok(Vec::new())
+            }
+
+            async fn session_snapshot(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _request_id: &str,
+            ) -> Result<Value, String> {
+                Ok(json!({"v": 1, "type": "session_snapshot"}))
+            }
         }
 
         let PairingFixture { reservation, .. } =
@@ -1515,20 +1597,21 @@ mod tests {
             crate::features::remote_control::controller::test_support::lease_context(&reservation);
         let port = StubPort;
 
-        let (kind, response) = dispatch_decrypted_payload(
+        let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "capability_snapshot_request",
             &json!({"request_id": "request-1", "known_revision": "4"}),
         )
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (kind, response) = frames.into_iter().next().unwrap();
         assert_eq!(kind, "capability_snapshot");
         assert_eq!(response["request_id"], "request-1");
         assert_eq!(response["capability_revision"], "5");
 
-        let (kind, response) = dispatch_decrypted_payload(
+        let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "task_submit",
@@ -1538,8 +1621,9 @@ mod tests {
             }),
         )
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (kind, response) = frames.into_iter().next().unwrap();
         assert_eq!(kind, "task_status");
         assert_eq!(response["task_id"], "task-0001");
         assert_eq!(
@@ -1547,15 +1631,16 @@ mod tests {
             "回包必须改写成 A 端的会话引用"
         );
 
-        let (kind, response) = dispatch_decrypted_payload(
+        let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "task_cancel",
             &json!({"task_id": "task-0001", "session_id": "session-a-ref"}),
         )
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (kind, response) = frames.into_iter().next().unwrap();
         assert_eq!(kind, "task_status");
         assert_eq!(response["session_id"], "session-a-ref");
 
@@ -1563,7 +1648,7 @@ mod tests {
         assert!(dispatch_decrypted_payload(&port, &lease, "journal_event", &json!({}))
             .await
             .unwrap()
-            .is_none());
+            .is_empty());
         assert_eq!(
             dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({"task_id": "t"}))
                 .await
