@@ -221,7 +221,29 @@ fn thread_params_without_workspace_roots_deserialize_to_empty() {
     let decoded: ThreadRequest =
         serde_json::from_str(legacy_fork).expect("deserialize legacy fork request");
     match decoded {
-        ThreadRequest::Fork(params) => assert!(params.workspace_roots.is_empty()),
+        // Absent must mean "inherit the parent's set": an empty `Some` would
+        // be read as an explicit clear and degrade a multi-root parent to
+        // the fork cwd.
+        ThreadRequest::Fork(params) => assert!(params.workspace_roots.is_none()),
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn thread_fork_params_explicit_empty_set_survives_the_wire() {
+    // Same three-state contract as resume: absent key = None = inherit,
+    // `[]` = Some(vec![]) = explicit clear, non-empty = replace.
+    let payload = r#"{"kind":"fork","thread_id":"t","workspace_roots":[]}"#;
+    let decoded: ThreadRequest = serde_json::from_str(payload).expect("deserialize explicit clear");
+    match &decoded {
+        ThreadRequest::Fork(params) => {
+            assert_eq!(params.workspace_roots, Some(Vec::new()));
+            let encoded = serde_json::to_string(&decoded).expect("re-encode");
+            assert!(
+                encoded.contains(r#""workspace_roots":[]"#),
+                "an explicit clear must re-encode with the key present: {encoded}"
+            );
+        }
         other => panic!("unexpected request: {other:?}"),
     }
 }

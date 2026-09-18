@@ -753,7 +753,9 @@ impl ThreadManager {
         }))
     }
 
-    /// Forks an existing thread into a new one, inheriting the parent's provider.
+    /// Forks an existing thread into a new one, inheriting the parent's
+    /// provider and — when the request does not carry a root set — its
+    /// accessible roots.
     pub fn fork_thread(
         &mut self,
         params: &ThreadForkParams,
@@ -764,6 +766,21 @@ impl ThreadManager {
             return Ok(None);
         };
         let parent_thread = to_protocol_thread(parent);
+        // `None` inherits the parent's set: the fork's cwd takes the primary
+        // slot and the parent's additional roots survive, the same
+        // primary-swap rule a cwd-only resume applies. A bare `thread/fork`
+        // is the historical shape, so reading an absent field as "no roots"
+        // would silently degrade a multi-root parent to `[cwd]`. `Some([])`
+        // stays an explicit clear.
+        let workspace_roots = match params.workspace_roots.as_deref() {
+            Some(roots) => roots.to_vec(),
+            None => parent_thread
+                .workspace_roots
+                .iter()
+                .filter(|root| root.as_path() != parent_thread.cwd)
+                .cloned()
+                .collect(),
+        };
         let new = self.spawn_thread_with_history(
             params
                 .model_provider
@@ -773,7 +790,7 @@ impl ThreadManager {
                 .cwd
                 .clone()
                 .unwrap_or_else(|| fallback_cwd.to_path_buf()),
-            &params.workspace_roots,
+            &workspace_roots,
             InitialHistory::Forked(vec![json!({
                 "type": "fork",
                 "from_thread_id": parent_thread.id
@@ -3457,6 +3474,93 @@ mod tests {
         assert_eq!(
             resumed.thread.workspace_roots,
             vec![PathBuf::from("/persisted")]
+        );
+    }
+
+    fn fork_params(thread_id: &str) -> ThreadForkParams {
+        ThreadForkParams {
+            thread_id: thread_id.to_string(),
+            path: None,
+            model: None,
+            model_provider: None,
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            workspace_roots: None,
+            persist_extended_history: false,
+        }
+    }
+
+    fn seed_multi_root_parent(name: &str) -> ThreadManager {
+        let store = temp_core_state(name);
+        let mut metadata = test_thread_metadata("thread-parent");
+        metadata.cwd = PathBuf::from("/repo/main");
+        metadata.workspace_roots = vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        ThreadManager::new(store)
+    }
+
+    #[test]
+    fn fork_without_roots_inherits_the_parent_set() {
+        let mut manager = seed_multi_root_parent("fork-roots-inherit");
+        let forked = manager
+            .fork_thread(&fork_params("thread-parent"), Path::new("/repo/main"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        // The historical bare `thread/fork` shape: the parent record is the
+        // only source of the set, so an absent field must inherit it.
+        assert_eq!(forked.thread.cwd, PathBuf::from("/repo/main"));
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")],
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread(&forked.thread.id)
+            .expect("read fork")
+            .expect("fork persisted");
+        assert_eq!(persisted.workspace_roots, forked.thread.workspace_roots);
+    }
+
+    #[test]
+    fn fork_with_cwd_only_swaps_primary_and_keeps_additional_roots() {
+        let mut manager = seed_multi_root_parent("fork-roots-cwd");
+        let mut params = fork_params("thread-parent");
+        params.cwd = Some(PathBuf::from("/repo/topic"));
+
+        let forked = manager
+            .fork_thread(&params, Path::new("/repo/main"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        // Primary-swap semantics, matching a cwd-only resume: the parent's
+        // cwd leaves the set and its additional roots survive.
+        assert_eq!(forked.thread.cwd, PathBuf::from("/repo/topic"));
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/repo/topic"), PathBuf::from("/repo/lib")],
+        );
+    }
+
+    #[test]
+    fn fork_with_explicit_empty_roots_clears_to_the_bare_cwd() {
+        let mut manager = seed_multi_root_parent("fork-roots-clear");
+        let mut params = fork_params("thread-parent");
+        params.workspace_roots = Some(Vec::new());
+
+        let forked = manager
+            .fork_thread(&params, Path::new("/repo/main"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main")],
+            "Some([]) is an explicit clear, distinct from None (inherit)"
         );
     }
 
