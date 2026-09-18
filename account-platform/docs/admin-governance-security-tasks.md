@@ -266,6 +266,8 @@ GSA-22 激活能力接线切片（1/4，仍PARTIAL / REVIEW_PENDING / NOT_DEPLOY
 
 GSA-22 激活能力接线切片（2/4，仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：Billing 服务启动专属 durable `billing-entitlement-component-adjustment-executor-p2-v1`，与 legacy `billing-command-executor-v1` 并行消费 `account.approval-command.authorized.v1`；该 durable 的 Q+1 起始序必须来自受信的 cutover 资源绑定（`events.ErrNATSResources` 表示尚未提供），因此未提供受信绑定时**不启动消费者**、只记录 `BILLING_ENTITLEMENT_CORRECTION_CONSUMER_NOT_PROVISIONED` 告警，其余错误仍然致命退出。这样生产现状不变（即使有人误翻 activation 行，也没有消费者执行），受控切换（GSA-38 收据/清单）就绪后自动开始消费。同步登记 deploy/authorization-entrypoints.json 事件入口（source/durable/subject/permission）。验证：`go build`/`go vet ./cmd/billing-service` PASS，授权覆盖门禁 PASS（374 HTTP routes、28 tasks、8 event entries、23 CLI）。
 
+GSA-22 激活能力接线切片（3/4，仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：新增[权益组成纠错受控激活手册](../deploy/runbooks/entitlement-correction-activation.md)，明确"能力就绪但默认未激活"的操作与证据契约：前置条件（GSA-38～40 适用项通过且有独立审核、授权人明确授权、专属 durable 受信绑定就绪且服务不再告警、Account 四入口仍失败关闭、一致性备份与停写窗口）、只读核验 SQL（v1/v2 行、零纠错效果与 proof claim、Account 无遗留 APPROVED/EXECUTING 与未消费事件）、以 `billing_schema_owner` 对 v2 行做一次 `version+1` 的激活、激活后五项验证（投影、Account 读取、真实 proof、durable 消费状态、一次性审批端到端演练并核对成对账本与幂等）、以及回滚（停止消费、翻回 `INACTIVE`、已执行事实不回滚、窗口内申请按 GSA-16 收敛）。本手册不含任何自动激活路径：不新增迁移、不改写已登记迁移或 manifest；未执行任何生产激活。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
