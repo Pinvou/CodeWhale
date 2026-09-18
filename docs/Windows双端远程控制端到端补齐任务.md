@@ -170,3 +170,36 @@
 ### 6.3 下一步
 
 E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节的登记项，特别是：`client_request_id` 复用规则、B 端会话映射（`RemoteSessionMap`）、`task_v1` 已协商、A 端 `controllerTaskIntent` 返回的 payload 直接交给加密派发。
+
+## 7. E2E-04 实施进度（进行中，未审核）
+
+### 7.1 已落地提交
+
+| 提交 | 内容 |
+|---|---|
+| `c0629c5c4` | 共享加密业务帧通道 `encrypted_lane.rs`：seal/open 两侧冻结校验（明文 → 加密 → 信封 / 信封 → 解密 → 明文）、有界失败分类、`ControllingLaneState` 单连接通道、`FrameDirection::wire` 提升可见性、test_support 增加 `handshake_binding`/`role_session_keys`/`lease_context`；5 条用例（双向往返无明文泄漏、重放窗口与篡改/方向/类型失败关闭、能力与跨 lease 失败关闭、通道未安装/清理失败关闭、异密钥对失败关闭） |
+| `800a83f75` | A 端收发接线：握手 outcome 带 `SessionKeys`（driver 在 Joined 后 `take_session`）；`complete_connected` 在安装认证租约的同一处安装加密通道；`send_authenticated_business`；保活任务改为解密+派发（capability_snapshot → 会话状态、task_status → 任务事件；异 generation/重放/伪造帧静默丢弃），事件出口收敛为 `ControllingLaneSinks`；新增 `desktop_remote_controller_task_send` / `_task_cancel_send`；`apply_capability_snapshot_for_lease` / `session_ref_for_lease`；1 条端到端派发用例 |
+
+验证基线：`cargo test remote_control::` 295 通过 / 0 失败；architecture-guard 通过。
+
+### 7.2 剩余步骤（按序执行，每步独立提交并审核）
+
+1. **B 端解密、派发与回传**（`controller/relay_runtime.rs` + `app/commands/desktop_remote_task.rs`）
+   - `ControlledHandshake::take_session` 的会话密钥安装到同一份 `ControllingLaneState`（角色 B）；
+   - `serve()` 握手完成后对 `encrypted_frame` 解密，按 payload_kind 派发：
+     `capability_snapshot_request` → 复用 B 的 `desktop_remote_capabilities_snapshot` 逻辑加密回传 `capability_snapshot`；
+     `task_submit` → 复用 `desktop_remote_task_submit` 的校验/派发逻辑（需把命令体抽成可复用函数），状态经 `task_status` 加密回传；
+     `task_cancel` → 复用 `desktop_remote_task_cancel`；
+   - **会话映射**：A 的 `session_id` 作为 ref，B 首次见到时调用 `RemoteTaskService::open_remote_session(ref, title, code_mode)` 建权威会话并交换 `session_id`；按第 4 节的决策，回传帧里的 `session_id` 统一改回 A 的 ref，保证两侧同一 wire 身份；
+   - 出站经 `ControllerRelayChannel::try_send`（B 的 v1 通道是桌面端 socket），并在发送前自行校验租约/生成代/帧上限。
+2. **同一进程双端集成用例**（E2E-04 出口）
+   - A 端 intent → 加密 → B 端解密 → B 任务接纳/执行（用测试用 executor）→ 状态加密回传 → A 端投影为任务事件；旧 lease/generation 帧丢弃；用例可直接复用 `encrypted_lane` 的双向通道与 `test_support::paired_session_keys`。
+3. **前端**：bridge 暴露 `controllerTaskSend` / `controllerTaskCancelSend`（只传 `remoteRef` 与正文/任务 id），E2E-07 再把会话视图的发送/取消切到这两个入口。
+
+### 7.3 下一步注意
+
+- B 侧派发函数不要复制 `desktop_remote_task_submit` 的命令体：抽成
+  `pub(crate) fn submit_decrypted_task(app: &AppHandle, payload: Value) -> Result<Value, String>`，
+  命令与 worker 共用，避免两条实现漂移。
+- A 端任务事件沿用 `desktop-remote-task-status`（与 B 侧本地任务事件同名，但两端是不同进程/状态域）。
+- `role_liveness_v1` / `resume_v1` 仍未在 B 注册能力中声明，E2E-06 处理心跳时一并补齐并补协商用例。
