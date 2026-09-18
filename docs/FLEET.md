@@ -234,7 +234,7 @@ v0.9.9 schema slim (#5324, #5123): the advertised surface no longer carries
 `model` or `thinking` — a child either runs as a `profile` (whose saved route
 and thinking tier it uses exactly) or inherits the operator's model. Removed
 fields stay parse-accepted for saved transcripts, ACP/MCP clients and fleet
-configs; see docs/SUBAGENTS.md for the advertised 12-field list and the
+configs; see docs/SUBAGENTS.md for the advertised 13-field list and the
 compat list.
 
 When a provider is configured, the review step also offers model-assisted
