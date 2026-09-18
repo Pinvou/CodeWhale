@@ -3489,7 +3489,6 @@ impl Engine {
                             system_prompt_override && self.session.system_prompt.is_some();
                         self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
                         self.session.model = model;
-                        let workspace_changed = self.session.workspace != workspace;
                         self.session.workspace = workspace.clone();
                         self.session.workspace_roots =
                             codewhale_core::normalize_workspace_roots(&workspace, &workspace_roots);
@@ -3505,18 +3504,17 @@ impl Engine {
                             // receipts from the previous workspace snapshot.
                             self.mcp_pool = None;
                         }
-                        // Project context derives from the primary root only;
-                        // an additional-roots update must not re-read it.
-                        if workspace_changed {
-                            let ctx = crate::project_context::load_project_context_with_parents(
-                                &workspace,
-                            );
-                            self.session.project_context = if ctx.has_instructions() {
-                                Some(ctx)
-                            } else {
-                                None
-                            };
-                        }
+                        // Base reloads the project context on every session
+                        // sync; keep that unconditional so mid-session
+                        // instruction edits are picked up on same-workspace
+                        // re-syncs. The loader reads the primary root only.
+                        let ctx =
+                            crate::project_context::load_project_context_with_parents(&workspace);
+                        self.session.project_context = if ctx.has_instructions() {
+                            Some(ctx)
+                        } else {
+                            None
+                        };
                         self.session.rebuild_working_set();
                         self.reconcile_restored_work_bindings().await;
                         self.emit_session_updated().await;
