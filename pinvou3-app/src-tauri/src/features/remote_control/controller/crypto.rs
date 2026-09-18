@@ -526,6 +526,42 @@ impl fmt::Debug for SessionKeys {
 }
 
 impl SessionKeys {
+    /// E2E-02 所需的冻结契约增量：receipt/Finished 阶段发生在 Relay 下发
+    /// `connection_id/controller_lease_id/lease_epoch` 之前，因此必须能在没有
+    /// `LeaseBinding` 的情况下拿到收据收发器。finished 密钥只依赖握手
+    /// transcript 与角色，本方法把这个事实固化进类型：它不接受任何租约参数。
+    pub(crate) fn finished_pair(
+        &self,
+        local_role: ControllerRole,
+    ) -> (FinishedSender, FinishedReceiver) {
+        let (sender_role, receiver_role, sender_key, receiver_key) = match local_role {
+            ControllerRole::A => (
+                ControllerRole::A,
+                ControllerRole::B,
+                &self.finished_a,
+                &self.finished_b,
+            ),
+            ControllerRole::B => (
+                ControllerRole::B,
+                ControllerRole::A,
+                &self.finished_b,
+                &self.finished_a,
+            ),
+        };
+        (
+            FinishedSender {
+                key: sender_key.clone(),
+                transcript_hash: self.transcript_hash,
+                sender: sender_role,
+            },
+            FinishedReceiver {
+                key: receiver_key.clone(),
+                transcript_hash: self.transcript_hash,
+                expected_sender: receiver_role,
+            },
+        )
+    }
+
     pub(crate) fn into_role_ciphers(
         self,
         local_role: ControllerRole,
@@ -1323,6 +1359,58 @@ mod tests {
             b.into_role_ciphers(ControllerRole::B, lease(epoch))
                 .unwrap(),
         )
+    }
+
+    /// E2E-02 契约：receipt 阶段必须能在没有租约身份时完成，而业务密钥
+    /// 必须依赖真实租约身份。两条不变量在同一条用例里锁死。
+    #[test]
+    fn finished_keys_ignore_the_lease_binding_while_business_keys_depend_on_it() {
+        let receipt = ReceiptSecret::from_test_bytes([9_u8; 32]);
+        let nonce = [3_u8; 12];
+
+        // 1) finished 收发器可以完全不借助 LeaseBinding 生成，且与
+        //    `into_role_ciphers` 产出的那一份逐字节一致。
+        let (via_pair_keys, peer_keys) = session_pair();
+        let (via_pair_sender, _) = via_pair_keys.finished_pair(ControllerRole::A);
+        let sealed_without_lease = via_pair_sender
+            .seal_with_nonce(&receipt, nonce)
+            .unwrap();
+
+        let (via_ciphers_keys, _) = session_pair();
+        let via_ciphers = via_ciphers_keys
+            .into_role_ciphers(ControllerRole::A, lease(7))
+            .unwrap();
+        let sealed_via_ciphers = via_ciphers
+            .finished_sender
+            .seal_with_nonce(&receipt, nonce)
+            .unwrap();
+        assert_eq!(
+            sealed_without_lease, sealed_via_ciphers,
+            "finished output must not depend on the lease binding"
+        );
+
+        // 2) 对端 B 仅凭同一 transcript 的 finished 收发器即可打开它。
+        let peer_receiver = peer_keys.finished_pair(ControllerRole::B).1;
+        peer_receiver.open(&sealed_without_lease).unwrap();
+
+        // 3) 反向约束：业务密钥必须随租约身份变化，且同身份稳定。
+        let root = [4_u8; 32];
+        let transcript_hash = [7_u8; 32];
+        let first = derive_business_key(&root, &transcript_hash, &lease(1), FrameDirection::AToB)
+            .unwrap()
+            .to_vec();
+        let same = derive_business_key(&root, &transcript_hash, &lease(1), FrameDirection::AToB)
+            .unwrap()
+            .to_vec();
+        let other_epoch =
+            derive_business_key(&root, &transcript_hash, &lease(2), FrameDirection::AToB)
+                .unwrap()
+                .to_vec();
+        assert_eq!(first, same, "the same lease identity must derive the same key");
+        assert_ne!(
+            first, other_epoch,
+            "business keys must be bound to the issued lease epoch"
+        );
     }
 
     fn code_binding() -> CodeWrapBinding {
