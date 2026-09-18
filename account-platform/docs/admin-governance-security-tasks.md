@@ -45,19 +45,19 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | DESIGN_COMPLETE / REVIEW_PENDING / IMPLEMENTED_UNDER_GSA22_UNACTIVATED / NOT_DEPLOYED |
 | GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
-| GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-24 | APT-141 | 账本修复实现与领域 E2E | GSA-23 | CODE | PENDING |
-| GSA-25 | APT-141 | 应收核销领域设计 | GSA-24 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-25 | APT-141 | 应收核销领域设计 | GSA-24 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-26 | APT-141 | 应收核销实现与领域 E2E | GSA-25 | CODE | PENDING |
-| GSA-27 | APT-141 | 支付财务修复领域设计 | GSA-26 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-27 | APT-141 | 支付财务修复领域设计 | GSA-26 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-28 | APT-141 | 支付财务修复实现与领域 E2E | GSA-27 | CODE | PENDING |
-| GSA-29 | APT-141 | 退款异常修复领域设计 | GSA-28 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-29 | APT-141 | 退款异常修复领域设计 | GSA-28 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-30 | APT-141 | 退款异常修复实现与领域 E2E | GSA-29 | CODE | PENDING |
-| GSA-31 | APT-141 | 拒付财务修复领域设计 | GSA-30 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-31 | APT-141 | 拒付财务修复领域设计 | GSA-30 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-32 | APT-141 | 拒付财务修复实现与领域 E2E | GSA-31 | CODE | PENDING |
-| GSA-33 | APT-141 | 对账财务修复领域设计 | GSA-32 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-33 | APT-141 | 对账财务修复领域设计 | GSA-32 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-34 | APT-141 | 对账财务修复实现与领域 E2E | GSA-33 | CODE | PENDING |
-| GSA-35 | APT-141 | 用量结算修复领域设计 | GSA-34 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
+| GSA-35 | APT-141 | 用量结算修复领域设计 | GSA-34 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-36 | APT-141 | 用量结算修复实现与领域 E2E | GSA-35 | CODE | PENDING |
 | GSA-37 | APT-142 | 八命令业务入口及审批 presenter 联调 | GSA-36, GSA-20 | CODE | PENDING |
 | GSA-38 | APT-143 | 切换/回滚工具、资源清单与只读 readiness | GSA-37 | CODE | IN_PROGRESS / READONLY_READY / NOT_ACTIVATED / NOT_DEPLOYED |
@@ -334,6 +334,8 @@ GSA-37 业务页闭合草稿切片（仍PENDING / PARTIAL）：新增 Portal 侧
 APT-141 仅在归属的所有DESIGN与CODE子任务通过并提交后关闭；APT-142 同理。APT-143 必须38～40全部通过且有实际环境/部署证据才能关闭。新目标此前未实现，本清单不能追认旧任务为完成证据。
 
 ## 5. 审核与验证记录
+
+设计冻结轮（2026-09-19，A 自检；独立审核待办）：按用户确认的首版范围把七个财务修复领域设计从“事实与决策门禁切片”补成可实现合同，逐类独立提交：GSA-23 账本修复 `09606393b`（仅归属错误等额冲正、`REVERSAL` 两腿、`entry_type` 账户类型契约）、GSA-25 应收核销 `e5101e2c7`（仅 `USAGE_OVERAGE`、允许部分核销、`settled` 语义澄清）、GSA-27 支付财务修复 `3a73e6316`（仅“已确认支付未入账”，复用既有 `RepairReviewedOrder` 写入者，执行期零 Provider 调用）、GSA-29 退款异常修复 `ea46a0e1d`（仅“Provider 已退款未冲销”，回收+短缺应收，登记 `PENDING→APPLIED` 新状态边）、GSA-31 拒付财务修复 `57ec3f354`（仅 BASE 短缺补偿，存在可撤销额度即拒绝）、GSA-33 对账财务修复 `1dbe3cfe3`（仅 `PROVIDER_PAID_INTERNAL_MISSING`，零账务效果结案+修复后再核对，含被拒方案记录）、GSA-35 用量结算修复 `b63c235a4`（仅少结算/未结算补记，登记 `usage_loss_reviews.RESOLVED_SETTLED` 新取值，绝不重发模型请求）。七份文档统一冻结：精确允许/禁止的变化、closed command/snapshot/proof/presenter、金额与组成守恒、补偿而非改写历史、外部证据与未知结果（`UNKNOWN_QUERY_ONLY`）、CAS/幂等与 result-first、失败分类与 DLQ 收口、权限与版本复用（v1/s1）及激活前只读守卫、前向迁移/N/N-1/回滚，以及逐类验收证据映射。同一轮附带修复 F3：前向 `000060` 放宽 `journal_entries.entry_type`（`REPAIR_CREDIT`/`FORCED_REFUND`）与 `receivables.source_type`（`FORCED_REFUND`）并让 `packages.go` 改用既有 `EXPIRY`，新增真实 PostgreSQL 回归（提交 `d253eeb0a`，Billing 真库整包 297.290s PASS、`go vet`、迁移清单 332 项通过）。验证：`node scripts/check-account-platform-tasks.mjs` 通过（143 任务 / 35 未完成目标 / 354 已完成目标保留），七类 activation 行与 production activation 全部保持 `INACTIVE`，未部署、未推送；独立审核员对七份文档的结论尚未取得，故状态为 `IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING`。
 
 GSA-27 支付财务修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED）：新增[支付财务修复领域设计](payment-financial-repair-design.md)首版。事实：该命令只有Account v1策略元数据与Billing `('PAYMENT_FINANCIAL_REPAIR',1,1,'INACTIVE',1)`，静态不可执行且无handler/proof/executor/consumer；既有"已确认支付但未入账"修复由`reconciliation.go`的`MANUAL_REPAIR`路径完成（写`REPAIR_CREDIT` journal、钱包/package入账，并向`payment_order_repairs`追加一次性审计行：订单/交易/证据、actor、reason、provider快照、唯一package、`points_awarded>0`与`wallet_balance_before/after`上下界；唯一性在`000024`由订单改为交易，`UNIQUE(payment_transaction_id)`+组合外键，插入`ON CONFLICT (payment_transaction_id) DO NOTHING`）；拒付、退款/强制退款、延迟支付评审与对账案件各有独立路径。文档同时锁定账本不可改写不变量（见账本修复设计§2）并列出五项待用户决策（首版范围、外部证据、写入边界、未知结果与只读查证、幂等与限额），明确默认`INACTIVE`且不得改写历史账本或支付事实。本切片不改任何代码、迁移、合同或activation。
 
