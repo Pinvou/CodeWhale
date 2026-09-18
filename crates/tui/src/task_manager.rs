@@ -734,6 +734,14 @@ pub enum TaskExecutionEvent {
         id: String,
         output: String,
     },
+    /// Emitted while a journal-tracked tool is in flight but the journal is
+    /// silent, so the worker supervisor's idle watchdog counts the window as
+    /// progress instead of idle. Supervisor-side liveness signal only: never
+    /// persisted and never shown on the task timeline.
+    ToolHeartbeat {
+        /// Journal item id of one in-flight tool.
+        id: String,
+    },
     ToolCompleted {
         id: String,
         name: String,
@@ -985,6 +993,19 @@ async fn drive_engine_turn(
         // so this runs throughout silent builds, test suites, and MCP calls.
         if !running_tools.is_empty() {
             guard.note_progress(Instant::now());
+            // The worker supervisor (run_task) feeds its own guard from the
+            // task-event channel and cannot see this journal-derived set, so
+            // without a heartbeat its idle deadline would still fire on the
+            // only production path that runs this loop. Publish the in-flight
+            // window on that channel; the heartbeat refreshes the supervisor's
+            // idle clock and is deliberately not persisted or surfaced.
+            emit_task_event(
+                &events,
+                TaskExecutionEvent::ToolHeartbeat {
+                    id: running_tools.iter().next().cloned().unwrap_or_default(),
+                },
+            )
+            .await;
         }
 
         match guard.evaluate(Instant::now(), cancel.is_cancelled(), false) {
@@ -2127,6 +2148,9 @@ impl TaskManager {
                     },
                 );
             }
+            // Supervisor-side liveness only: recording it would put a
+            // timeline entry behind every poll tick of a silent build.
+            TaskExecutionEvent::ToolHeartbeat { .. } => {}
             TaskExecutionEvent::ToolCompleted {
                 id,
                 name,
@@ -2636,6 +2660,7 @@ fn execution_event_is_progress(event: &TaskExecutionEvent) -> bool {
         TaskExecutionEvent::MessageDelta { .. }
             | TaskExecutionEvent::ToolStarted { .. }
             | TaskExecutionEvent::ToolProgress { .. }
+            | TaskExecutionEvent::ToolHeartbeat { .. }
             | TaskExecutionEvent::ToolCompleted { .. }
     )
 }
@@ -3067,6 +3092,36 @@ mod tests {
         );
         assert!(!loaded.timeline.is_empty());
         assert_eq!(loaded.checklist.items[0].content, "read fixture");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worker_supervisor_honors_tool_heartbeats_during_silent_tools() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let mut config = short_test_config(root);
+        config.execution_limits.wall_time = Duration::from_secs(2);
+        let manager =
+            TaskManager::start_with_executor(config, Arc::new(ToolHeartbeatExecutor)).await?;
+
+        let task = manager
+            .add_task(NewTaskRequest {
+                owner_session_id: Some("session-heartbeat".to_string()),
+                ..NewTaskRequest::from_prompt("silent build with heartbeats")
+            })
+            .await?;
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        assert_eq!(
+            finished.status,
+            TaskStatus::Completed,
+            "heartbeats from a silent in-flight tool must keep the worker idle watchdog fed"
+        );
+        assert!(
+            !finished
+                .timeline
+                .iter()
+                .any(|entry| entry.summary.contains("item_tool_hb")),
+            "heartbeats are supervisor-side liveness only and must not surface on the timeline"
+        );
         Ok(())
     }
 
@@ -4046,6 +4101,61 @@ mod tests {
         }
     }
 
+    /// Mirrors the fixed runtime contract: a ToolStarted edge, then a silent
+    /// window longer than the idle deadline fed only by ToolHeartbeat, then
+    /// completion. Pins the supervisor side of the heartbeat chain — the
+    /// worker idle watchdog must count heartbeats as progress.
+    struct ToolHeartbeatExecutor;
+
+    #[async_trait]
+    impl TaskExecutor for ToolHeartbeatExecutor {
+        async fn execute(
+            &self,
+            _task: ExecutionTask,
+            events: mpsc::Sender<TaskExecutionEvent>,
+            cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            let _ = events
+                .send(TaskExecutionEvent::ToolStarted {
+                    id: "tool_hb".to_string(),
+                    name: "exec_command".to_string(),
+                    input: serde_json::json!({}),
+                })
+                .await;
+            for _ in 0..12 {
+                sleep(Duration::from_millis(30)).await;
+                if cancel.is_cancelled() {
+                    return TaskExecutionResult {
+                        status: TaskStatus::Canceled,
+                        result_text: None,
+                        error: None,
+                        terminal_reason: TaskTerminalReason::Canceled,
+                    };
+                }
+                let _ = events
+                    .send(TaskExecutionEvent::ToolHeartbeat {
+                        id: "item_tool_hb".to_string(),
+                    })
+                    .await;
+            }
+            let _ = events
+                .send(TaskExecutionEvent::ToolCompleted {
+                    id: "tool_hb".to_string(),
+                    name: "exec_command".to_string(),
+                    success: true,
+                    output: "build ok".to_string(),
+                    metadata: None,
+                })
+                .await;
+            TaskExecutionResult {
+                status: TaskStatus::Completed,
+                result_text: Some("done".to_string()),
+                error: None,
+                terminal_reason: TaskTerminalReason::Completed,
+            }
+        }
+    }
+
     struct PromptRouterExecutor;
 
     #[async_trait]
@@ -4721,6 +4831,85 @@ mod tests {
         let result = drive.await?;
         assert_eq!(result.status, TaskStatus::Failed);
         assert_eq!(result.terminal_reason, TaskTerminalReason::IdleTimeout);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn silent_running_tool_heartbeats_the_worker_watchdog() -> Result<()> {
+        // The supervisor's guard (run_task) only sees task events, so the
+        // steady-state suppression must also publish the in-flight window on
+        // the event channel — otherwise the production path still idles out
+        // even though this loop's own guard is satisfied.
+        let runtime = Arc::new(test_runtime_manager().await?);
+        let thread = runtime
+            .create_thread(CreateThreadRequest::default())
+            .await?;
+        let (tx, mut rx) = mpsc::channel(64);
+        let runtime_for_drive = Arc::clone(&runtime);
+        let thread_id = thread.id.clone();
+        let drive = tokio::spawn(async move {
+            drive_engine_turn(
+                runtime_for_drive.as_ref(),
+                &thread_id,
+                "turn_heartbeat",
+                tx,
+                CancellationToken::new(),
+                TaskExecutionLimits {
+                    wall_time: Duration::from_secs(5),
+                    idle_progress: Duration::from_millis(80),
+                    cancel_grace: Duration::from_millis(500),
+                    persist_debounce: Duration::from_millis(10),
+                },
+            )
+            .await
+        });
+
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_heartbeat"),
+                "item.started",
+                json!({
+                    "item": { "id": "item_tool_hb", "status": "in_progress" },
+                    "tool": { "id": "call_build", "name": "exec_command", "input": {} }
+                }),
+            )
+            .await?;
+
+        let heartbeat = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Some(event @ TaskExecutionEvent::ToolHeartbeat { .. }) => break event,
+                    Some(_) => {}
+                    None => panic!("task event stream closed before any heartbeat"),
+                }
+            }
+        })
+        .await
+        .context("no ToolHeartbeat reached the worker channel while a tool was in flight")?;
+        let TaskExecutionEvent::ToolHeartbeat { id } = heartbeat else {
+            unreachable!("the loop only breaks on ToolHeartbeat")
+        };
+        assert_eq!(id, "item_tool_hb");
+
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_heartbeat"),
+                "item.completed",
+                json!({ "item": { "id": "item_tool_hb", "status": "completed" } }),
+            )
+            .await?;
+        runtime
+            .emit_event_for_test(
+                &thread.id,
+                Some("turn_heartbeat"),
+                "turn.completed",
+                json!({ "turn": { "status": "completed" } }),
+            )
+            .await?;
+        let result = drive.await?;
+        assert_eq!(result.status, TaskStatus::Completed);
         Ok(())
     }
 
