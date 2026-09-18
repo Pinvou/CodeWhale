@@ -4017,6 +4017,108 @@ async fn agent_roster_truncates_host_profiles_at_the_listing_cap() {
 }
 
 #[tokio::test]
+async fn agent_roster_profile_query_discovers_members_beyond_the_listing_cap() {
+    // The T7 discovery-contract regression: a spawnable profile past
+    // `ROSTER_HOST_PROFILE_LIMIT` never appears in the default listing, yet
+    // `profile_query` must surface it, and the discovered id must resolve at
+    // spawn — the model-facing answer to an exhausted 48-row listing page.
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for index in 0..50 {
+        let id = format!("exp-host-{index:03}");
+        let description = (index == 49).then(|| "Swahili localization reviewer".to_string());
+        fleet.profiles.insert(
+            id.clone(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.clone()),
+                role: codewhale_config::FleetRole {
+                    name: id,
+                    description,
+                    instructions: None,
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+    let mut runtime = stub_runtime();
+    let host_roster = std::sync::Arc::new(FleetRoster::from_host_config(&fleet));
+    runtime.host_agent_profiles = host_roster.clone();
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    async fn roster_payload(tool: &AgentTool, workspace: &std::path::Path, query: Value) -> Value {
+        let input = if query.is_null() {
+            json!({"action": "roster"})
+        } else {
+            json!({"action": "roster", "profile_query": query})
+        };
+        let result = tool
+            .execute(input, &ToolContext::new(workspace))
+            .await
+            .expect("roster action");
+        let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+        payload
+    }
+
+    // Default listing: the tail member is cut, exactly as the cap test pins.
+    let payload = roster_payload(&tool, tmp.path(), Value::Null).await;
+    assert_eq!(payload["host_profile_count"], json!(50));
+    assert_eq!(payload["host_profiles_truncated"], json!(true));
+    let listed: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert!(
+        !listed.contains(&"exp-host-049"),
+        "the unfiltered listing must cut the tail member: {listed:?}"
+    );
+
+    // A description keyword (case-insensitive) finds the tail member alone.
+    let payload = roster_payload(&tool, tmp.path(), json!("swahili")).await;
+    assert_eq!(payload["host_profile_count"], json!(1));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+    let listed: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert_eq!(listed, vec!["exp-host-049"]);
+
+    // Id substrings match case-insensitively too.
+    let payload = roster_payload(&tool, tmp.path(), json!("EXP-HOST-049")).await;
+    assert_eq!(payload["host_profile_count"], json!(1));
+
+    // Zero matches stay honest: empty list, zero count, no truncation flag.
+    let payload = roster_payload(&tool, tmp.path(), json!("nonexistent-topic")).await;
+    assert_eq!(payload["host_profiles"], json!([]));
+    assert_eq!(payload["host_profile_count"], json!(0));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+
+    // A blank keyword filters nothing (the full listing returns).
+    let payload = roster_payload(&tool, tmp.path(), json!("   ")).await;
+    assert_eq!(payload["host_profile_count"], json!(50));
+    assert_eq!(payload["host_profiles_truncated"], json!(true));
+
+    // End-to-end: the query-discovered id is exactly what spawn resolution
+    // accepts against the same host roster.
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": "exp-host-049",
+        "write_authority": "read_only"
+    }))
+    .expect("host profile request parses");
+    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_roster)
+        .expect("query-discovered profile must resolve at spawn")
+        .expect("host member is returned");
+    assert_eq!(resolved.id, "exp-host-049");
+    assert_eq!(request.profile.as_deref(), Some("exp-host-049"));
+}
+
+#[tokio::test]
 async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
     let tmp = tempdir().expect("tempdir");
     let mut fleet = codewhale_config::FleetConfigToml::default();
@@ -5119,7 +5221,8 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         );
     }
     assert!(agent_schema["properties"].get("role").is_none());
-    // #5324/#5123: the advertised surface is exactly 12 fields. Budgets,
+    // #5324/#5123: the advertised surface stays minimal — the 12 post-#5324
+    // fields plus the T7 roster discovery filter `profile_query`. Budgets,
     // model/thinking overrides, worktree-path knobs and spawn-contract
     // ceremony moved off the schema; the parser still accepts them for
     // replay compat (pinned by
@@ -5138,6 +5241,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "message",
         "name",
         "profile",
+        "profile_query",
         "prompt",
         "resume_from",
         "type",
@@ -5148,7 +5252,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     expected.sort_unstable();
     assert_eq!(
         advertised, expected,
-        "the agent tool must advertise exactly the 12-field surface: {}",
+        "the agent tool must advertise exactly the 13-field surface: {}",
         agent_schema["properties"]
     );
     for unadvertised in [
@@ -5522,6 +5626,15 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
             .unwrap_or_else(|| panic!("missing dependent schema for action {action}"))
     };
     assert_eq!(branch("start")["required"], json!(["prompt"]));
+    // T7: `profile_query` is roster-scoped discovery — the branch advertises
+    // it so models can see the filter is legal on the unscoped listing.
+    assert!(
+        branch("roster")["properties"]
+            .get("profile_query")
+            .is_some(),
+        "the roster branch must advertise profile_query: {}",
+        branch("roster")
+    );
     for action in ["message", "followup"] {
         assert_eq!(branch(action)["required"], json!(["message"]));
     }
