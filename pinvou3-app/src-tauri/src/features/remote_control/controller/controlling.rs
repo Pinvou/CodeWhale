@@ -426,6 +426,31 @@ impl ControllingDeviceManager {
         transport.try_send_business(frame)
     }
 
+    /// 发送一条租约内的控制帧（E2E-06 心跳等，明文但绑定当前租约）。
+    pub(crate) fn send_authenticated_control(
+        &self,
+        frame: &serde_json::Value,
+    ) -> std::result::Result<(), ControllerSendError> {
+        let inner = self.inner.lock();
+        let transport = inner
+            .transport
+            .as_ref()
+            .ok_or(ControllerSendError::Unauthenticated)?;
+        transport.try_send_authenticated_control(frame)
+    }
+
+    /// 当前租约的 A 端 liveness epoch（心跳帧的 epoch 字段）。
+    pub(crate) fn live_liveness_epoch(&self) -> Option<String> {
+        let inner = self.inner.lock();
+        if inner.phase != ControllingStatusKind::Connected {
+            return None;
+        }
+        inner
+            .lease
+            .as_ref()
+            .map(|lease| lease.liveness_epoch_a.clone())
+    }
+
     pub(crate) fn create_history(
         &self,
         title: &str,

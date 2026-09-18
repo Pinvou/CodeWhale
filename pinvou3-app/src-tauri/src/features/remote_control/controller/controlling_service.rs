@@ -324,6 +324,8 @@ pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_task: &'a mut (dyn FnMut(Value) + Send),
     /// 解密并校验过的权威 journal 事件（E2E-05）：A 端据此写独立历史并渲染正文。
     pub(crate) on_journal: &'a mut (dyn FnMut(&JournalEvent) + Send),
+    /// E2E-06：待发送的 A 端心跳帧（明文控制帧，绑定当前租约）。
+    pub(crate) on_liveness: &'a mut (dyn FnMut(Value) + Send),
 }
 
 /// 握手完成后的通道保活与业务帧派发：断线投影为 reconnecting 并清空业务通道
@@ -337,19 +339,70 @@ pub(crate) async fn serve_controlling_lane(
     business: &ControllingLaneState,
     sinks: &mut ControllingLaneSinks<'_>,
 ) {
-    while let Some(event) = lane.next_lane_event().await {
-        match event {
-            ControllerLaneEvent::Disconnected => {
-                // 断线后不再有可用租约/会话密钥：先清空业务通道，再投影状态。
-                business.clear();
-                let status = manager.mark_transport_disconnected();
-                (sinks.on_status)(&status);
+    serve_controlling_lane_with_interval(
+        lane,
+        manager,
+        sessions,
+        business,
+        sinks,
+        Duration::from_millis(LIVENESS_HEARTBEAT_INTERVAL_MS),
+    )
+    .await
+}
+
+/// E2E-06：心跳间隔（远小于 30 秒存活预算，丢一两次仍能续期）。
+pub(crate) const LIVENESS_HEARTBEAT_INTERVAL_MS: u64 = 10_000;
+
+pub(crate) async fn serve_controlling_lane_with_interval(
+    lane: &mut (impl ControllingLane + ?Sized),
+    manager: &ControllingDeviceManager,
+    sessions: &ControllingSessionManager,
+    business: &ControllingLaneState,
+    sinks: &mut ControllingLaneSinks<'_>,
+    heartbeat_interval: Duration,
+) {
+    let mut heartbeat = tokio::time::interval(heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    let mut sequence: u64 = 0;
+    loop {
+        tokio::select! {
+            biased;
+            _ = heartbeat.tick() => {
+                if let Some(frame) = next_liveness_frame(manager, &mut sequence) {
+                    (sinks.on_liveness)(frame);
+                }
             }
-            ControllerLaneEvent::Frame(json) => {
-                dispatch_inbound_frame(manager, sessions, business, &json, sinks);
+            event = lane.next_lane_event() => {
+                let Some(event) = event else { return };
+                match event {
+                    ControllerLaneEvent::Disconnected => {
+                        // 断线后不再有可用租约/会话密钥：先清空业务通道，再投影状态。
+                        business.clear();
+                        let status = manager.mark_transport_disconnected();
+                        (sinks.on_status)(&status);
+                    }
+                    ControllerLaneEvent::Frame(json) => {
+                        dispatch_inbound_frame(manager, sessions, business, &json, sinks);
+                    }
+                }
             }
         }
     }
+}
+
+/// 生成下一条心跳帧：只在存在活租约（connected）时产出，序号单调递增；租约
+/// 变更后序号从 1 重新开始（epoch 同步换新，接收侧按新 epoch 接受）。
+fn next_liveness_frame(manager: &ControllingDeviceManager, sequence: &mut u64) -> Option<Value> {
+    let (lease, _) = manager.live_runtime_context().ok()?;
+    let epoch = manager.live_liveness_epoch()?;
+    let next = sequence.checked_add(1)?;
+    let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
+        &lease, &epoch, next,
+    )
+    .ok()?;
+    *sequence = next;
+    Some(frame)
 }
 
 /// 解密并派发一条入站业务帧。任何一层不符（非加密帧、无活租约、解密/校验
@@ -485,6 +538,7 @@ pub(crate) async fn connect_controlling_device(
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
+        let device = manager.inner();
         let mut on_status = |status: &ControllingStatus| {
             let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
         };
@@ -498,11 +552,16 @@ pub(crate) async fn connect_controlling_device(
             // A 端独立历史由命令层端口写入（feature 层不反向依赖 app 层）。
             journal.publish(event);
         };
+        let mut on_liveness = |frame: Value| {
+            // E2E-06 心跳：经当前认证 transport 的租约控制队列发送。
+            let _ = device.send_authenticated_control(&frame);
+        };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(
             &mut port,
@@ -945,11 +1004,13 @@ mod tests {
         let mut on_task = |event: Value| tasks_seen.push(event);
         let mut journal_seen: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |event: &JournalEvent| journal_seen.push(event.clone());
+        let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         assert_eq!(statuses, vec!["reconnecting".to_owned()]);
@@ -1122,11 +1183,13 @@ mod tests {
         let mut on_task = |event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |event: &JournalEvent| journal_events.push(event.clone());
+        let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
@@ -1355,11 +1418,13 @@ mod tests {
         let mut on_task = |event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |event: &JournalEvent| journal_events.push(event.clone());
+        let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
+            on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
 
@@ -1376,5 +1441,84 @@ mod tests {
         );
         assert_eq!(journal_events[0].kind, "assistant_delta");
         assert_eq!(journal_events[0].payload["text"], "hello from B");
+    }
+
+    /// E2E-06：保活任务按间隔发送 A 端心跳帧（序号单调、epoch 来自租约），且
+    /// 只在 connected 时发送；未连接时没有帧可发。
+    #[tokio::test]
+    async fn keeper_emits_monotonic_liveness_heartbeats() {
+        struct PendingLane;
+
+        #[async_trait::async_trait]
+        impl ControllingLane for PendingLane {
+            async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
+                std::future::pending().await
+            }
+        }
+
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: LeaseContext {
+                        connection_id: "connection-0001".into(),
+                        controller_lease_id: "controller-lease-0001".into(),
+                        lease_epoch: "1".into(),
+                        relay_epoch: "epoch-test-1".into(),
+                        remote_control_generation: "generation-0001".into(),
+                    },
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "pairing_v1".into(),
+                        "role_liveness_v1".into(),
+                        "task_v1".into(),
+                    ],
+                },
+            )
+            .unwrap();
+        let sessions = ControllingSessionManager::default();
+        let business = ControllingLaneState::default();
+        let mut frames = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |_: &ControllingSessionProjection| {};
+        let mut on_task = |_: Value| {};
+        let mut on_journal = |_: &JournalEvent| {};
+        let mut on_liveness = |frame: Value| frames.push(frame);
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_liveness: &mut on_liveness,
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(150),
+            serve_controlling_lane_with_interval(
+                &mut PendingLane,
+                &manager,
+                &sessions,
+                &business,
+                &mut sinks,
+                Duration::from_millis(20),
+            ),
+        )
+        .await;
+        assert!(outcome.is_err(), "长连接保活任务不应自行结束");
+        assert!(frames.len() >= 2, "应按间隔持续发送心跳");
+        assert_eq!(frames[0]["type"], "controller_liveness");
+        assert_eq!(frames[0]["sender_role"], "A");
+        assert_eq!(frames[0]["liveness_epoch"], "live-a-1");
+        assert_eq!(frames[0]["heartbeat_sequence"], "1");
+        assert_eq!(frames[1]["heartbeat_sequence"], "2");
+        assert_eq!(frames[0]["connection_id"], "connection-0001");
+        assert_eq!(frames[0]["lease_epoch"], "1");
     }
 }

@@ -44,6 +44,9 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // E2E-05：B 的权威 journal（DEV-19）已实现，声明 snapshot_journal_v1 使
     // journal_event / journal_replay 等正文事件能通过协商。
     "snapshot_journal_v1",
+    // E2E-06：B 的 liveness watchdog（DEV-08）已实现，声明 role_liveness_v1 让
+    // A 端心跳帧与后续 challenge/attestation 能通过协商。
+    "role_liveness_v1",
 ];
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
 /// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。

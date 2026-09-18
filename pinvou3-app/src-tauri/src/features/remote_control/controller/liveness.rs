@@ -152,7 +152,7 @@ impl ControllerLivenessWatchdog {
         Ok(())
     }
 
-    /// Accept AEAD-authenticated direct A liveness plaintext. The validator
+/// Accept AEAD-authenticated direct A liveness plaintext. The validator
     /// binds the full lease context, epoch, role, sequence and challenge; this
     /// method additionally enforces the challenge's local RTT and deadline
     /// monotonicity.
@@ -329,6 +329,39 @@ impl ControllerLivenessWatchdog {
         }
         Ok(())
     }
+}
+
+/// E2E-06：A 端心跳帧（`controller_liveness`）。这是控制帧（不加密），Relay 与
+/// B 都以它作为「A 仍存活」的证据。序号必须单调递增且不能为 0，epoch 来自
+/// `controller_joined` 下发的租约身份。
+pub(crate) fn build_controller_liveness(
+    lease: &LeaseContext,
+    liveness_epoch_a: &str,
+    heartbeat_sequence: u64,
+) -> Result<serde_json::Value> {
+    if heartbeat_sequence == 0 || !is_valid_liveness_epoch(liveness_epoch_a) {
+        return Err(LivenessError::new("invalid_field", "controller_liveness"));
+    }
+    Ok(serde_json::json!({
+        "v": 1,
+        "type": "controller_liveness",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "sender_role": "A",
+        "liveness_epoch": liveness_epoch_a,
+        "heartbeat_sequence": heartbeat_sequence.to_string(),
+    }))
+}
+
+fn is_valid_liveness_epoch(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LIVENESS_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 pub(crate) fn direct_candidate_deadline(received_at_b: u64, measured_rtt_ms: u64) -> Result<u64> {
@@ -741,5 +774,40 @@ mod tests {
                 .code,
             "stale_context"
         );
+    }
+
+    /// E2E-06：A 端心跳帧必须通过冻结校验（角色 A + role_liveness_v1），序号单调
+    /// 且 epoch 合法；空 epoch 或 0 序号失败关闭。
+    #[test]
+    fn a_side_liveness_frame_matches_the_frozen_contract() {
+        use super::super::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_message_json,
+            validate_controller_runtime_message_json,
+        };
+
+        let lease = lease();
+        let frame = build_controller_liveness(&lease, "live-a-1", 1).unwrap();
+        validate_controller_message_json(&frame.to_string(), SenderRole::ControllerA).unwrap();
+        validate_controller_runtime_message_json(
+            &frame.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease.clone()),
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".to_owned(),
+                    "pairing_v1".to_owned(),
+                    "role_liveness_v1".to_owned(),
+                    "task_v1".to_owned(),
+                ],
+            }),
+        )
+        .expect("心跳帧必须通过运行时校验");
+        assert_eq!(frame["sender_role"], "A");
+        assert_eq!(frame["heartbeat_sequence"], "1");
+        assert_eq!(frame["liveness_epoch"], "live-a-1");
+
+        assert!(build_controller_liveness(&lease, "live-a-1", 0).is_err());
+        assert!(build_controller_liveness(&lease, "", 1).is_err());
+        assert!(build_controller_liveness(&lease, "live a", 1).is_err());
     }
 }
