@@ -1664,6 +1664,267 @@ mod tests {
         );
     }
 
+    /// E2E-08：完整旅程——连接 → 能力快照 → 普通文本任务（A 构造并封帧、B 解封
+    /// 校验）→ 权威 journal 正文与终态回流到 A → 显式断开 → 断开后旧 generation
+    /// 的残留帧一律丢弃、业务通道不再可用。
+    ///
+    /// B 侧真实的接纳/执行由 DEV-13 的服务用例覆盖；本用例聚焦「一条旅程里各段
+    /// 状态是否互相衔接」，因此 B 的回应帧按冻结形状直接产出。
+    #[tokio::test]
+    async fn full_journey_connect_snapshot_task_text_and_disconnect_drops_stale_frames() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-service-journey");
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let lease = lease_context(&reservation);
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "liveness-epoch-a-0001".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "pairing_v1".into(),
+                        "snapshot_journal_v1".into(),
+                        "task_v1".into(),
+                    ],
+                },
+            )
+            .unwrap();
+        let business = ControllingLaneState::default();
+        business
+            .install(HandshakeRole::A, &lease, a_session)
+            .unwrap();
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "snapshot_journal_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease, &capabilities)
+            .unwrap();
+        // 旅程第 2 段：B 的能力快照先落到 A 的会话状态（任务意图需要能力 revision）。
+        sessions
+            .apply_capability_snapshot(
+                &session.session_ref,
+                &json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-snapshot-1",
+                    "capability_revision": "4",
+                    "expires_at_ms": "30000",
+                    "modes": ["chat"],
+                    "tools": [],
+                    "skills": [],
+                    "workspaces": [],
+                }),
+                &lease,
+            )
+            .unwrap();
+
+        // A → B：真实任务意图（冻结 payload）封帧后必须能被 B 解封并校验。
+        let intent = sessions
+            .task_intent(&session.session_ref, "hello from A", &lease)
+            .unwrap();
+        let submit_frame = business
+            .seal("task_submit", &intent.payload, &capabilities)
+            .unwrap();
+        let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
+        let (kind, payload) = responder.open(&submit_frame, &capabilities).unwrap();
+        assert_eq!(kind, "task_submit");
+        assert_eq!(payload["type"], "task_submit");
+        assert_eq!(payload["input"]["text"], "hello from A");
+
+        // B → A：能力快照、终态与正文（journal_event）。
+        let snapshot_frame = responder
+            .seal(
+                "capability_snapshot",
+                &json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-snapshot-1",
+                    "capability_revision": "4",
+                    "expires_at_ms": "30000",
+                    "modes": ["chat"],
+                    "tools": [],
+                    "skills": [],
+                    "workspaces": [],
+                }),
+                &capabilities,
+            )
+            .unwrap();
+        let status_frame = responder
+            .seal(
+                "task_status",
+                &json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-status-1",
+                    "task_id": intent.task_id.clone().unwrap_or_default(),
+                    "session_id": session.session_id,
+                    "task_status": "succeeded",
+                    "result_digest": "0".repeat(64),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+        let text_event = JournalEvent {
+            event_id: "event-0001".to_owned(),
+            epoch: "epoch-1".to_owned(),
+            sequence: 1,
+            kind: "assistant_delta".to_owned(),
+            session_id: session.session_id.clone(),
+            task_id: intent.task_id.clone(),
+            terminal_status: None,
+            payload: json!({"text": "hello from B"}),
+        };
+        let raw = serde_json::to_vec(&text_event).unwrap();
+        let text_frame = responder
+            .seal(
+                "journal_event",
+                &json!({
+                    "v": 1,
+                    "type": "journal_event",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "session_id": text_event.session_id,
+                    "journal_epoch": text_event.epoch,
+                    "event_sequence": text_event.sequence.to_string(),
+                    "event_kind": text_event.kind,
+                    "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
+                    "event_bytes": raw.len().to_string(),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+
+        let mut lane = TestLane::with_events(vec![
+            ControllerLaneEvent::Frame(snapshot_frame.to_string()),
+            ControllerLaneEvent::Frame(status_frame.to_string()),
+            ControllerLaneEvent::Frame(text_frame.to_string()),
+        ]);
+        let mut session_projections = Vec::new();
+        let mut task_events = Vec::new();
+        let mut journal_seen: Vec<JournalEvent> = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |projection: &ControllingSessionProjection| {
+            session_projections.push(projection.capability_revision);
+        };
+        let mut on_task = |event: Value| task_events.push(event);
+        let mut on_journal = |event: &JournalEvent| journal_seen.push(event.clone());
+        let mut on_snapshot = |_: &JournalSnapshot| {};
+        let mut on_liveness = |_: Value| {};
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
+        assert_eq!(session_projections, vec![Some(4)], "能力快照必须落到会话状态");
+        assert_eq!(task_events.len(), 1);
+        assert_eq!(task_events[0]["status"], "succeeded");
+        assert_eq!(task_events[0]["sessionId"], session.session_id);
+        assert_eq!(journal_seen.len(), 1);
+        assert_eq!(journal_seen[0].payload["text"], "hello from B");
+
+        // 显式断开：本地回到 disconnected，业务通道被清空。
+        let status = manager.disconnect();
+        business.clear();
+        assert_eq!(projection(&status)["status"], "disconnected");
+        assert!(!business.is_installed());
+
+        // 断开后即使旧 generation 的残留帧到达，也不得产生任何投影。
+        let mut foreign_lease = lease.clone();
+        foreign_lease.remote_control_generation = "generation-other".into();
+        let mut foreign = EncryptedLane::new(
+            HandshakeRole::B,
+            &foreign_lease,
+            responder_session(&foreign_lease),
+        )
+        .unwrap();
+        let stale = foreign
+            .seal(
+                "task_status",
+                &json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "connection_id": foreign_lease.connection_id,
+                    "controller_lease_id": foreign_lease.controller_lease_id,
+                    "lease_epoch": foreign_lease.lease_epoch,
+                    "relay_epoch": foreign_lease.relay_epoch,
+                    "remote_control_generation": foreign_lease.remote_control_generation,
+                    "request_id": "request-status-2",
+                    "task_id": "task-0001",
+                    "session_id": session.session_id,
+                    "task_status": "succeeded",
+                    "result_digest": "0".repeat(64),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+        let mut stale_lane =
+            TestLane::with_events(vec![ControllerLaneEvent::Frame(stale.to_string())]);
+        let seen_before = task_events.len();
+        let mut stale_status = |_: &ControllingStatus| {};
+        let mut stale_session = |_: &ControllingSessionProjection| {};
+        let mut stale_task = |event: Value| task_events.push(event);
+        let mut stale_journal = |_: &JournalEvent| {};
+        let mut stale_snapshot = |_: &JournalSnapshot| {};
+        let mut stale_liveness = |_: Value| {};
+        let mut stale_sinks = ControllingLaneSinks {
+            on_status: &mut stale_status,
+            on_session: &mut stale_session,
+            on_task: &mut stale_task,
+            on_journal: &mut stale_journal,
+            on_snapshot: &mut stale_snapshot,
+            on_liveness: &mut stale_liveness,
+        };
+        serve_controlling_lane(
+            &mut stale_lane,
+            &manager,
+            &sessions,
+            &business,
+            &mut stale_sinks,
+        )
+        .await;
+        assert_eq!(task_events.len(), seen_before, "断开后的残留帧不得产生任务投影");
+        assert_eq!(journal_seen.len(), 1, "断开后的残留帧不得产生正文投影");
+    }
+
     /// E2E-06：A 端按 Relay/B 的帧顺序完成整条恢复序列：prepare → provisional →
     /// (对端 confirm) → activation_pending → post_activation_liveness_confirmed →
     /// ready_ack → resumed，且业务闸门在 resumed 之前始终关闭。
