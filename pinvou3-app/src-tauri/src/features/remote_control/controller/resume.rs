@@ -207,6 +207,36 @@ impl ControllerResumeGate {
         Ok(())
     }
 
+    /// E2E-06：A/B 都会收到 Relay 的 `controller_post_activation_liveness_confirmed`。
+    /// A 由 ActivationPending 进入 PostActivationLiveness；B 已经处于该相位
+    /// （它自己发出了 post-activation liveness），重复投递只做幂等确认，
+    /// 不得回退或延长任何相位。其他相位一律失败关闭。
+    pub(crate) fn accept_post_activation_liveness_confirmed(
+        &mut self,
+        activation_id: &str,
+        now_b: u64,
+        watchdog_deadline_b: Option<u64>,
+    ) -> Result<()> {
+        match self.phase {
+            ResumePhase::ActivationPending => {
+                self.expect_phase(ResumePhase::ActivationPending, now_b, watchdog_deadline_b)?;
+                self.require_activation(activation_id)?;
+                self.phase = ResumePhase::PostActivationLiveness;
+                Ok(())
+            }
+            ResumePhase::PostActivationLiveness => {
+                self.expect_phase(
+                    ResumePhase::PostActivationLiveness,
+                    now_b,
+                    watchdog_deadline_b,
+                )?;
+                self.require_activation(activation_id)?;
+                Ok(())
+            }
+            _ => self.terminate("controller_resume_phase_invalid"),
+        }
+    }
+
     /// Consume the old role material only with a complete, role-addressed
     /// final result. The new token and transport fingerprint become the only
     /// accepted values afterward.
@@ -575,5 +605,115 @@ mod tests {
             gate.prepare(26_000, Some(25_000)).unwrap_err().code,
             "controller_resume_phase_invalid"
         );
+    }
+
+    /// E2E-06：A 角色没有「发送 post-activation liveness」这一步，它靠 Relay 的
+    /// confirmed 帧从 ActivationPending 进入 PostActivationLiveness；B 角色重复
+    /// 收到同一 confirmed 帧必须幂等。
+    #[test]
+    fn controller_role_advances_on_relay_confirmation_and_b_is_idempotent() {
+        let mut a = ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease(),
+            [14; 32],
+            [15; 32],
+            30_000,
+        );
+        a.disconnect(1_000, Some(29_000)).unwrap();
+        a.prepare(2_000, Some(29_000)).unwrap();
+        a.accept_provisional("activation-0001", 3_000, Some(29_000))
+            .unwrap();
+        a.confirm("activation-0001", 4_000, Some(29_000)).unwrap();
+        a.accept_activation_pending("activation-0001", 5_000, Some(29_000))
+            .unwrap();
+        assert!(!a.is_business_allowed());
+        // 其他激活标识失败关闭（候选不可混淆）。
+        let mut wrong = ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease(),
+            [14; 32],
+            [15; 32],
+            30_000,
+        );
+        wrong.disconnect(1_000, Some(29_000)).unwrap();
+        wrong.prepare(2_000, Some(29_000)).unwrap();
+        wrong
+            .accept_provisional("activation-0001", 3_000, Some(29_000))
+            .unwrap();
+        wrong
+            .confirm("activation-0001", 4_000, Some(29_000))
+            .unwrap();
+        wrong
+            .accept_activation_pending("activation-0001", 5_000, Some(29_000))
+            .unwrap();
+        assert_eq!(
+            wrong
+                .accept_post_activation_liveness_confirmed("activation-0002", 6_000, Some(29_000))
+                .unwrap_err()
+                .code,
+            "controller_resume_activation_invalid"
+        );
+        assert_eq!(wrong.phase(), ResumePhase::Terminated);
+
+        // 相位不符（还没进入 ActivationPending）失败关闭。
+        let mut early = ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease(),
+            [14; 32],
+            [15; 32],
+            30_000,
+        );
+        early.disconnect(1_000, Some(29_000)).unwrap();
+        early.prepare(2_000, Some(29_000)).unwrap();
+        early
+            .accept_provisional("activation-0001", 3_000, Some(29_000))
+            .unwrap();
+        assert_eq!(
+            early
+                .accept_post_activation_liveness_confirmed("activation-0001", 4_000, Some(29_000))
+                .unwrap_err()
+                .code,
+            "controller_resume_phase_invalid"
+        );
+
+        a.accept_post_activation_liveness_confirmed("activation-0001", 6_000, Some(29_000))
+            .unwrap();
+        a.acknowledge_ready("activation-0001", 7_000, Some(29_000))
+            .unwrap();
+        a.accept_resumed(
+            "activation-0001",
+            "live-a-2",
+            [16; 32],
+            [17; 32],
+            8_000,
+            Some(29_000),
+        )
+        .unwrap();
+        assert!(a.is_business_allowed());
+        assert_eq!(a.resumed_liveness_epoch(), Some("live-a-2"));
+
+        let mut b = ControllerResumeGate::new(
+            ControllerRole::ControlledB,
+            lease(),
+            [18; 32],
+            [19; 32],
+            30_000,
+        );
+        b.disconnect(1_000, Some(29_000)).unwrap();
+        b.prepare(2_000, Some(29_000)).unwrap();
+        b.accept_provisional("activation-0001", 3_000, Some(29_000))
+            .unwrap();
+        b.confirm("activation-0001", 4_000, Some(29_000)).unwrap();
+        b.acknowledge_activation("activation-0001", 5_000, Some(29_000))
+            .unwrap();
+        b.send_post_activation_liveness("activation-0001", "live-b-2", 6_000, Some(29_000))
+            .unwrap();
+        // Relay 的 confirmed 帧对 B 是幂等确认（重复投递不改变相位）。
+        b.accept_post_activation_liveness_confirmed("activation-0001", 7_000, Some(29_000))
+            .unwrap();
+        assert_eq!(b.phase(), ResumePhase::PostActivationLiveness);
+        b.accept_post_activation_liveness_confirmed("activation-0001", 8_000, Some(29_000))
+            .unwrap();
+        assert_eq!(b.phase(), ResumePhase::PostActivationLiveness);
     }
 }
