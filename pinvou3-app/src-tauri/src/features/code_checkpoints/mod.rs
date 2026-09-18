@@ -1174,6 +1174,11 @@ mod tests {
         fn write(&self, relative: &str, content: &str) {
             let path = self.0.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // 先删后写：同一文件系统时间戳粒度内用等长内容重写文件时，stat
+            // （mtime/ctime/size/ino）与索引条目完全一致，git 会信任索引条目而
+            // 跳过内容重读——`add -A` 保留陈旧 blob，diff/restore 断言随机失败
+            // （2026-09-18 `rust-test` flake 的根因）。换新 inode 必然不匹配。
+            let _ = fs::remove_file(&path);
             fs::write(path, content).unwrap();
         }
 
