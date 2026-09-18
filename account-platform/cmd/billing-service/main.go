@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -120,6 +121,21 @@ func main() {
 		log.Fatal(err)
 	}
 	defer stopApprovalConsumer()
+	// The entitlement correction command keeps its own durable whose Q+1 start
+	// comes from the governed cutover receipt. Until that trusted binding exists
+	// the consumer is not started at all: the command stays closed even if an
+	// activation row were flipped, and the deployment keeps its current behavior.
+	entitlementConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-entitlement-component-adjustment-executor-p2-v1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if stopEntitlementConsumer, consumeErr := broker.ConsumeAuthorization(workerContext, "billing-entitlement-component-adjustment-executor-p2-v1", entitlementConsumer.Handle); consumeErr == nil {
+		defer stopEntitlementConsumer()
+	} else if errors.Is(consumeErr, events.ErrNATSResources) {
+		slog.Warn("BILLING_ENTITLEMENT_CORRECTION_CONSUMER_NOT_PROVISIONED")
+	} else {
+		log.Fatal(consumeErr)
+	}
 	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
 		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)
 		if consumeErr != nil {
