@@ -12067,6 +12067,12 @@ async fn build_direct_workflow_tool(
     let allow_shell = yolo || config.allow_shell();
     let shell_policy = shell_policy_for_mode(mode, allow_shell);
     let trusted = crate::workspace_trust::WorkspaceTrust::load_for(workspace);
+    // Headless workflow contexts are single-root: the caller reaches this
+    // builder with a workspace path and no root set, so an attached-root write
+    // of a multi-root session is denied here rather than held. Enforcement
+    // only (no display surface), byte-identical to base, and the same
+    // disclosed gap `Runtime::invoke_tool` carries; wiring a session's roots
+    // through is a scheduled follow-up.
     let mut context = crate::tools::ToolContext::with_auto_approve(
         workspace.to_path_buf(),
         yolo,

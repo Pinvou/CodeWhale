@@ -485,7 +485,7 @@ pub(crate) fn enforce_project_instruction_budget(ctx: &mut ProjectContext) {
 /// from the primary root only: additional roots grant filesystem access, not
 /// prompt authority. Widening this scan would inflate the prompt and shift the
 /// KV prefix-cache stable region with the root set, so any change must weigh
-/// that first (see `forkguard_workspace_roots_instructions_stay_primary_root_only`).
+/// that first (see `forkguard_workspace_roots_instruction_discovery_takes_only_the_primary_root`).
 #[cfg(test)]
 pub fn load_project_context(workspace: &Path) -> ProjectContext {
     load_project_context_with_imports(workspace, &foreign_instruction_imports())
@@ -1303,12 +1303,13 @@ mod tests {
     }
 
     #[test]
-    fn forkguard_workspace_roots_instructions_stay_primary_root_only() {
-        // Multi-root sessions grant additional roots filesystem access but
-        // never prompt authority: discovery runs against the primary root
-        // only, so an attached root's AGENTS.md must never enter the injected
-        // block (which would also shift the KV prefix-cache stable region
-        // with the root set).
+    fn forkguard_workspace_roots_instruction_discovery_takes_only_the_primary_root() {
+        // The multi-root discipline for instructions is structural: the
+        // discovery loader's signature admits exactly one root (`&Path`), so
+        // an attached root has no input channel into the injected block — the
+        // lock is the signature, not a runtime branch this test could flip.
+        // What this test does exercise is the consequence: the block comes
+        // from the primary root and stays byte-stable whatever else exists.
         let primary = tempdir().expect("primary root");
         let attached = tempdir().expect("attached root");
         fs::write(
@@ -1330,7 +1331,7 @@ mod tests {
 
         assert_eq!(
             with_attached.instructions, without_attached.instructions,
-            "an attached root must not change the injected instructions"
+            "the injected instructions are a function of the primary root alone"
         );
         let instructions = with_attached
             .instructions
