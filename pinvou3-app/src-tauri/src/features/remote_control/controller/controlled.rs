@@ -467,6 +467,34 @@ impl ControlledDeviceManager {
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))
     }
 
+    /// E2E-06：是否需要向对端/Relay 索取存活证据（watchdog 政策）。
+    pub(crate) fn liveness_evidence_needed(&self, now_b: u64) -> bool {
+        let inner = self.inner.lock();
+        inner
+            .watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.needs_evidence(now_b))
+    }
+
+    /// E2E-06：开启一次存活挑战（生成 + 登记）并返回 (challenge_id, challenge_b64)。
+    pub(crate) fn begin_liveness_challenge(
+        &self,
+        now_b: u64,
+    ) -> Result<(String, String)> {
+        let (challenge_id, challenge_b64) = super::liveness::new_liveness_challenge()
+            .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
+        {
+            let mut inner = self.inner.lock();
+            let Some(watchdog) = inner.watchdog.as_mut() else {
+                return Err(ControlledStateError::new("watchdog_unavailable"));
+            };
+            watchdog
+                .register_challenge(challenge_id.clone(), challenge_b64.clone(), now_b)
+                .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
+        }
+        Ok((challenge_id, challenge_b64))
+    }
+
     pub(crate) fn accept_direct_liveness(&self, json: &str, received_at_b: u64) -> Result<()> {
         let mut inner = self.inner.lock();
         let Some(context) = inner.lease_context.clone() else {
