@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`  
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00～E2E-04 完成并审核通过；E2E-05 全部落地（正文链路 + 缺口恢复 + A 渲染，见第 8 节）；E2E-06 已落地 A 心跳、B 存活证据兜底与双端显式断开，剩余 A 直接应答（需 liveness AEAD）与 resume 接线（见第 9 节）；E2E-07 已落地双端 UI 闭环与错误码回传，剩余浏览器冒烟与文案细化；E2E-08 待做。
+> 进度：E2E-00～E2E-04 完成并审核通过；E2E-05 完成（正文链路 + 缺口恢复 + A 渲染，见第 8 节）；E2E-06 已落地 A 心跳、B 存活证据（直接应答 + Relay 兜底）与双端显式断开，剩余 resume 序列与 B 停止/刷新清理核对（见第 9 节）；E2E-07 已落地双端 UI 闭环与错误码回传，剩余浏览器冒烟与文案细化；E2E-08 待做。
 
 ## 1. 执行规则
 
@@ -246,15 +246,11 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `8d372e8a9` | 双端显式断开：A 端 `build_controller_disconnect`（冻结形状 + 有界 reason）与 `send_disconnect`（仅 connected 且有 transport 时尽力发送，本地断开始终权威）；B 端 `accept_remote_disconnect`（只接受已连接/恢复中的代际，随后 `terminate_local(Stopped, 保留工作区)`）与 worker 的冻结校验 + 清理 + 广播；2 条用例 |
 | `4b0b0283e` | journal 缺口恢复双向：B 端 `replay_journal`/`session_snapshot` 与列表化派发（worker 逐帧加密回传、单次 ≤256 帧）；A 端 `journal_admission`/`JournalExpectations`（连续/重复/缺口/换 epoch）与 `journal_replay_request` 冻结构造 + 加密发送；4 条用例 |
 | `a8a56a490` | A 端权威快照恢复：解密校验快照（体积/摘要/epoch/基准）→ 推进期望值 → 经 `ControllingJournalSink::publish_snapshot` 交命令层 `apply_snapshot`；1 条用例 |
+| `94141a2e8` | A 端存活直接应答（liveness AEAD）：crypto 新增方向无关的 `liveness_root` 与 `LivenessCipher`（A 角色域 + 租约五元组派生，AAD 为冻结 `aad_binding`，nonce 前置）；EncryptedLane `seal_liveness`/`open_liveness`；A 保活任务应答 `controller_liveness_challenge_a`（共享单调序号、同一挑战只答一次）；B 解封后 `accept_direct_liveness` 续期并停止升级兜底；2 条用例 |
 
 ### 9.2 剩余步骤
 
-1. ~~**B 侧存活证据链**~~ 已完成兜底路径（`8d5ae57f2`、`e8fea59db`）；**剩余直接应答路径**：
-   - A 收到 `controller_liveness_challenge_a` 后要把 `controller_liveness_a` 明文（绑定连接/租约/epoch/角色/序号/挑战）用**独立于业务通道的 AAD**加密封装成
-     `encrypted_controller_liveness_a`（冻结 fixture 的 `aad_binding` 只有 connection/lease/role），
-     当前 crypto 尚无该封装/解封入口，需要先在 `crypto.rs` 补一条 liveness AEAD 路径（含固定向量与篡改用例），再在 A 保活任务里应答、B 收到后用
-     `ControlledDeviceManager::accept_direct_liveness` 续期；
-   - 在那之前，B 端始终走 Relay 签名兜底（`observed_age ≤ 5 秒`，A 心跳 3 秒一次）。
+1. ~~**B 侧存活证据链**~~ 已完成：兜底路径（`8d5ae57f2`、`e8fea59db`）+ 直接应答路径（`94141a2e8`）；A 心跳 3 秒一次，B 优先用直接证明续期，未及时到达才升级 Relay 签名兜底。
 2. **显式断开**：A 的 `disconnect` 在停止 worker 前发送 `controller_disconnect`；
    B 收到后终结当前租约（清空租约/凭证/任务，保留用户工作区授权）并投影明确终态
    （保守默认：`stopped`，因为 A 需要重新刷新取码）。
