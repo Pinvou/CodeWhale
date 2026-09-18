@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use base64::Engine as _;
 use hkdf::Hkdf;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{self, UnparsedPublicKey};
@@ -1163,6 +1164,7 @@ impl Serialize for SensitiveString {
 
 /// Opaque output of an authenticated enrollment/configuration loader. There is
 /// deliberately no raw JSON/string constructor in DEV-05.
+#[derive(Clone)]
 pub(crate) struct AuthenticatedRelayTrustConfig {
     keys: BTreeMap<String, [u8; 32]>,
 }
@@ -1177,6 +1179,54 @@ impl fmt::Debug for AuthenticatedRelayTrustConfig {
 }
 
 impl AuthenticatedRelayTrustConfig {
+    /// E2E-02 所需的冻结契约增量：生产构建需要一个受控入口把管理员预置的
+    /// Relay 签名公钥变成信任根。只接受严格 key id 与 32 字节公钥，任何
+    /// 缺失、畸形或重复都失败关闭；不接受用户输入，也不接受原始 JSON。
+    pub(crate) fn from_pinned_keys(
+        entries: impl IntoIterator<Item = (String, String)>,
+    ) -> CryptoResult<Self> {
+        let mut keys = BTreeMap::new();
+        for (key_id, encoded) in entries {
+            if key_id.is_empty()
+                || key_id.len() > 64
+                || !key_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(ControllerCryptoError::new(
+                    "invalid_pinned_key",
+                    "relay_signing_key_id",
+                ));
+            }
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|_| {
+                    ControllerCryptoError::new("invalid_pinned_key", "relay_signing_public_key")
+                })?;
+            if raw.len() != 32 {
+                return Err(ControllerCryptoError::new(
+                    "invalid_pinned_key",
+                    "relay_signing_public_key",
+                ));
+            }
+            let mut public_key = [0_u8; 32];
+            public_key.copy_from_slice(&raw);
+            if keys.insert(key_id, public_key).is_some() {
+                return Err(ControllerCryptoError::new(
+                    "invalid_pinned_key",
+                    "relay_signing_key_id",
+                ));
+            }
+        }
+        if keys.is_empty() {
+            return Err(ControllerCryptoError::new(
+                "relay_trust_unconfigured",
+                "relay_signing_public_key",
+            ));
+        }
+        Ok(Self { keys })
+    }
+
     #[cfg(test)]
     pub(super) fn from_test_enrollment(
         entries: impl IntoIterator<Item = (String, [u8; 32])>,
@@ -1185,6 +1235,34 @@ impl AuthenticatedRelayTrustConfig {
             keys: entries.into_iter().collect(),
         }
     }
+}
+
+/// Production trust-root entry point. The pin is deployment configuration
+/// (administrator-provisioned), never user input; a missing or malformed pin
+/// fails closed instead of degrading to an unauthenticated transcript.
+pub(crate) fn load_relay_trust_config(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> CryptoResult<AuthenticatedRelayTrustConfig> {
+    let key_id = lookup("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            ControllerCryptoError::new("relay_trust_unconfigured", "relay_signing_key_id")
+        })?;
+    let public_key = lookup("PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            ControllerCryptoError::new("relay_trust_unconfigured", "relay_signing_public_key")
+        })?;
+    AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.trim().to_owned(), public_key.trim().to_owned())])
+}
+
+/// Verifies a parsed `controller_pairing_reserved` transcript against the
+/// pinned trust root and returns the authenticated lease-install context.
+pub(crate) fn authenticate_relay_transcript(
+    trust: &AuthenticatedRelayTrustConfig,
+    parsed: ParsedTranscript,
+) -> Result<LeaseInstallValidationContext> {
+    TranscriptAuthenticator::new(trust.clone()).authenticate(parsed)
 }
 
 pub(crate) struct TranscriptAuthenticator {
@@ -1300,7 +1378,6 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use serde_json::Value;
 
     use super::super::protocol::parse_controller_pairing_transcript;
@@ -1716,6 +1793,109 @@ mod tests {
         require_zeroizing_array(&a.resume_secret);
         let ciphers = a.into_role_ciphers(ControllerRole::A, lease(1)).unwrap();
         require_zeroizing_array(&ciphers.resume_secret.0);
+    }
+
+    #[test]
+    fn pinned_trust_config_is_strict_about_shape() {
+        let key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
+        assert_eq!(
+            AuthenticatedRelayTrustConfig::from_pinned_keys(Vec::<(String, String)>::new())
+                .unwrap_err()
+                .code,
+            "relay_trust_unconfigured"
+        );
+        for (key_id, value) in [
+            ("bad id", key.clone()),
+            ("relay-key-1", "not-base64!".to_owned()),
+            (
+                "relay-key-1",
+                base64::engine::general_purpose::STANDARD.encode([7_u8; 31]),
+            ),
+        ] {
+            assert_eq!(
+                AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.to_owned(), value)])
+                    .unwrap_err()
+                    .code,
+                "invalid_pinned_key"
+            );
+        }
+        assert_eq!(
+            AuthenticatedRelayTrustConfig::from_pinned_keys([
+                ("relay-key-1".to_owned(), key.clone()),
+                ("relay-key-1".to_owned(), key.clone()),
+            ])
+            .unwrap_err()
+            .code,
+            "invalid_pinned_key"
+        );
+        assert!(
+            AuthenticatedRelayTrustConfig::from_pinned_keys([("relay-key-1".to_owned(), key)])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn relay_trust_loader_fails_closed_without_a_complete_pin() {
+        assert_eq!(
+            load_relay_trust_config(|_| None).unwrap_err().code,
+            "relay_trust_unconfigured"
+        );
+        assert_eq!(
+            load_relay_trust_config(|name| match name {
+                "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
+                _ => None,
+            })
+            .unwrap_err()
+            .code,
+            "relay_trust_unconfigured"
+        );
+        let public_key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
+        assert!(load_relay_trust_config(|name| match name {
+            "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
+            "PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64" => Some(public_key.clone()),
+            _ => None,
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn pinned_trust_config_authenticates_the_frozen_transcript() {
+        let fixture = fixture();
+        let vector = &fixture["lease_install_vector"]["verification_input"];
+        let message = serde_json::to_string(&vector["reserved_message"]).unwrap();
+        let trusted_key = fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]
+            ["public_key_b64"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            "relay-key-test-1".to_owned(),
+            trusted_key,
+        )])
+        .unwrap();
+        let context =
+            authenticate_relay_transcript(&trust, parse_controller_pairing_transcript(&message).unwrap())
+                .unwrap();
+        assert!(format!("{context:?}").contains("pairing-0001"));
+
+        let attacker_key = fixture["untrusted_authentication_inputs"][2]["value"]["public_key_b64"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let attacker = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            "relay-key-test-1".to_owned(),
+            attacker_key,
+        )])
+        .unwrap();
+        assert_eq!(
+            authenticate_relay_transcript(
+                &attacker,
+                parse_controller_pairing_transcript(&message).unwrap()
+            )
+            .unwrap_err()
+            .field,
+            "relay_signature_b64"
+        );
     }
 
     #[test]
