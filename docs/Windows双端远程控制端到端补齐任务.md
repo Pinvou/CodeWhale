@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`  
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 正文链路（A 落库/投影 + B 用户消息/回复/终态回传）与 E2E-06 第 1 步（A 心跳 + `role_liveness_v1` 协商）已落地待审核；剩余 E2E-05 缺口恢复与 UI 渲染、E2E-06 的 B 侧 challenge/attestation 与 resume、E2E-07、E2E-08。
+> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 正文链路（A 落库/投影 + B 用户消息/回复/终态回传）与 E2E-06 的 A 心跳、B 存活证据兜底已落地待审核；剩余 E2E-05 缺口恢复与 UI 渲染、E2E-06 的 A 直接应答（需 liveness AEAD）、显式断开、resume 与清理核对、E2E-07、E2E-08。
 
 ## 1. 执行规则
 
@@ -240,19 +240,17 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | 提交 | 内容 |
 |---|---|
 | `50ed50244` | A 端心跳：`liveness::build_controller_liveness`（冻结形状 + 非法输入失败关闭）、`ControllingDeviceManager::{live_liveness_epoch, send_authenticated_control}`、保活任务按 10 秒间隔发送单调序号心跳（间隔可注入）、B 注册能力补 `role_liveness_v1`；2 条用例（帧通过冻结校验；保活任务按间隔产出心跳且不自行结束） |
+| `8d5ae57f2` | B 端证据需求与挑战构造：`ControllerLivenessWatchdog::needs_evidence`（无证据/suspect/余量不足为真）、`build_liveness_challenge` / `build_liveness_attestation_request`（冻结校验 + 畸形输入失败关闭）、`new_liveness_challenge`（16 字节随机挑战值）、`ControlledDeviceManager::{liveness_evidence_needed, begin_liveness_challenge}`；2 条用例 |
+| `e8fea59db` | B 端证据轮询与兜底：保活循环改为 `select`（2 秒轮询 + 收包），按 `liveness_evidence_action` 发起挑战 / 升级为 Relay 签名 attestation（同一挑战只升级一次）/ 超时作废；收到 attestation 后用本端记录的请求时间续期 watchdog；A 心跳间隔收紧到 3 秒以满足 Relay attestation 新鲜度；1 条策略用例 |
 
 ### 9.2 剩余步骤
 
-1. **B 侧存活证据链**：B 的 watchdog（DEV-08）目前只能被动收证据，需要接线——
-   - 需要证据时（deadline 将尽）B 发 `controller_liveness_challenge_a` 挑战；
-   - A 收到挑战后把 `controller_liveness_a` 明文（绑定连接/租约/epoch/角色/序号/挑战）
-     用业务通道加密成 `encrypted_controller_liveness_a` 回传；B 解密后调用
+1. ~~**B 侧存活证据链**~~ 已完成兜底路径（`8d5ae57f2`、`e8fea59db`）；**剩余直接应答路径**：
+   - A 收到 `controller_liveness_challenge_a` 后要把 `controller_liveness_a` 明文（绑定连接/租约/epoch/角色/序号/挑战）用**独立于业务通道的 AAD**加密封装成
+     `encrypted_controller_liveness_a`（冻结 fixture 的 `aad_binding` 只有 connection/lease/role），
+     当前 crypto 尚无该封装/解封入口，需要先在 `crypto.rs` 补一条 liveness AEAD 路径（含固定向量与篡改用例），再在 A 保活任务里应答、B 收到后用
      `ControlledDeviceManager::accept_direct_liveness` 续期；
-   - 直接路径不可用时走 relay 签名兜底：B 发
-     `controller_liveness_attestation_request_a` → Relay 回
-     `controller_liveness_attestation_a` → `accept_liveness_attestation`。
-   注意 `ControllerLivenessWatchdog` 目前只在 `accept_*` / `state` 上暴露能力，
-   需要新增「何时该请求证据」的只读判断（例如 `needs_evidence(now_b)`）。
+   - 在那之前，B 端始终走 Relay 签名兜底（`observed_age ≤ 5 秒`，A 心跳 3 秒一次）。
 2. **显式断开**：A 的 `disconnect` 在停止 worker 前发送 `controller_disconnect`；
    B 收到后终结当前租约（清空租约/凭证/任务，保留用户工作区授权）并投影明确终态
    （保守默认：`stopped`，因为 A 需要重新刷新取码）。
