@@ -60,7 +60,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-35 | APT-141 | 用量结算修复领域设计 | GSA-34 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-36 | APT-141 | 用量结算修复实现与领域 E2E | GSA-35 | CODE | PENDING |
 | GSA-37 | APT-142 | 八命令业务入口及审批 presenter 联调 | GSA-36, GSA-20 | CODE | PENDING |
-| GSA-38 | APT-143 | 切换/回滚工具、资源清单与只读 readiness | GSA-37 | CODE | PENDING |
+| GSA-38 | APT-143 | 切换/回滚工具、资源清单与只读 readiness | GSA-37 | CODE | IN_PROGRESS / READONLY_READY / NOT_ACTIVATED / NOT_DEPLOYED |
 | GSA-39 | APT-143 | 生产等价集成、性能、N/N-1 与故障演练 | GSA-38 | CODE+ENV | PENDING |
 | GSA-40 | APT-143 | 授权后的逐命令灰度与生产证据归档 | GSA-39 | CODE+ENV | PENDING |
 
@@ -287,6 +287,8 @@ GSA-35 用量结算修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECOR
 GSA-22 业务页 presenter 只读切片（仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：用户确认受控激活路线后，先落地该命令的只读 presenter：`approvalPresenterAvailable` 增加 `ENTITLEMENT_COMPONENT_ADJUSTMENT` 的 `(policy_version=2, snapshot_schema_version=2)` 组合，`approvalV2Command` 仅在该命令的目标为合法 `ENTITLEMENT_PACKAGE` UUID 时返回闭合投影 `approvalEntitlementCorrectionSummary{PackageID}`，`approvalV2Detail` 从冻结的 normalized command 补充 `reason_code`，其余目标/版本一律 `DETAIL_PRESENTATION_UNAVAILABLE` 且不泄漏原始 JSON；Portal 审批中心详情为通用渲染，无需新增字段即可展示该可用性状态。新增单测覆盖合法目标可用与错误目标失败关闭，并在真实跨域 E2E 上用真实 Billing 投影断言 presenter 输出（package id 与 reason code）。验证：presenter 单测与跨域真实 PG 用例 PASS（10.920s）。仍未完成：业务页申请入口/草稿编辑（GSA-37）与生产激活。
 
 GSA-37 业务入口契约切片（仍PENDING / PARTIAL）：跨域 E2E 的请求创建改为走真实 Account 入口——用真实 Billing 闭合投影构造 `ApprovalDraft`（`package_id`/`payment_order_id`/`reason_code` 与 v2 critical/financial），依次调用 `CreateApprovalDraft` → `SubmitApprovalRequest` → `DecideApprovalRequest`（独立审批人、签名 proof），再经 outbox sidecar、生产 relay、专属 durable consumer 完成成对账本执行与终态确认。这验证了 Portal 业务入口将要调用的完整契约（闭合草稿、策略/executable/Billing activation 三重门禁、版本 CAS 与幂等键），此前该用例用 SQL 直接播种请求。真实 PG 用例 PASS 20.31s。仍未完成：Portal 表单页与草稿编辑 UI、三语文案与真实浏览器联调（依赖该命令在生产/联调环境被授权激活）。
+
+GSA-38 只读资源清单与 readiness 切片（IN_PROGRESS / READONLY_READY / NOT_ACTIVATED / NOT_DEPLOYED）：新增[权益纠错资源清单与只读 readiness](entitlement-correction-release-readiness.md)：冻结该命令激活/切换所需的资源清单（Billing `000056`–`000059`、Account `000069`/`000070`、executable 与 durable 注册表、Billing 消费者开关与受信收据引导、事件入口与权限、OpenAPI/合同、proof/执行/consumer 代码、presenter、受控激活手册、迁移清单 330 项）；给出七项**只读** readiness 检查（迁移账本、activation 行组合与投影、Account 四入口失败关闭且零副作用、proof 不可用且无 claim、消费者未启动且 Q+1 收据未包含、零效果基线、presenter 可用性），任何一步出现写入或状态推进即 NO-GO；并明确切换顺序（先放宽 claim 白名单、再受信收据与本命令消费者、再 Account、最后 Portal，激活仍由授权人按手册执行）与回滚边界（只允许停止消费者并把 v2 行翻回 `INACTIVE`，禁止破坏性数据库回滚，000059 down 为 forward-only）。本切片不含任何写入、激活或部署动作。
 
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
