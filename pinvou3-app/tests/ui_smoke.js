@@ -126,7 +126,6 @@ function injectSource() {
           : Promise.resolve(window.__LLMAPI_MODELS__ || {available_models:[],default_model:''});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
-        case 'get_codex_acp_status': return Promise.resolve({installed:false,node_supported:false,authenticated:false});
         case 'get_acp_agent_status': return Promise.resolve({agent_id:args.agentId||'codex',installed:true,node_supported:true,authenticated:true});
         case 'get_codex_acp_session_info': return Promise.resolve({session_id:args.sessionId,models:[],current_model_id:'',modes:null,config_options:[]});
         case 'get_codex_acp_timeline': return Promise.resolve([
