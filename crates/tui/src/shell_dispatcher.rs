@@ -13,7 +13,10 @@
 //! 2. **Quoting correctness** — each shell's argument-passing convention is
 //!    respected so quoted strings survive the spawn boundary intact.
 //! 3. **PowerShell safety** — non-interactive flags, temporary `.ps1` files
-//!    for multiline scripts, and explicit native `$LASTEXITCODE` capture.
+//!    for multiline scripts, explicit native `$LASTEXITCODE` capture, and a
+//!    process-scoped execution-policy bypass so a locked-down machine does not
+//!    refuse the tool's own temporary script (with an inline
+//!    `-EncodedCommand` form available as the Group Policy fallback).
 //! 4. **Terminal state** — foreground shell execution saves and restores
 //!    crossterm raw-mode so the TUI input pipeline is not broken after a
 //!    child process exits (issue #1690).
@@ -127,6 +130,27 @@ fn powershell_prefers_script_file(shell_command: &str) -> bool {
         || shell_command.contains("'''")
         || shell_command.contains("@'")
         || shell_command.contains("@\"")
+}
+
+/// Flags shared by every PowerShell invocation this dispatcher builds.
+///
+/// `-ExecutionPolicy Bypass` matters because the temp `.ps1` form is subject to
+/// the machine's execution policy (Windows client default `Restricted`,
+/// `AllSigned`, or `RemoteSigned` plus a Mark-of-the-Web script), so a hardened
+/// machine otherwise refuses a script this tool wrote itself before a single
+/// statement runs. The parameter only sets the *process* scope: it needs no
+/// administrator rights, leaves the user's own shells untouched, and the
+/// execution policy is not a security boundary. A Group Policy
+/// (`Get-ExecutionPolicy -List` MachinePolicy/UserPolicy) still overrides it,
+/// which is what `build_powershell_encoded_parts` covers.
+fn powershell_base_args() -> Vec<String> {
+    vec![
+        "-NoLogo".to_string(),
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+    ]
 }
 
 /// Wrap a model/user PowerShell command so native program failures surface
@@ -313,11 +337,7 @@ impl ShellDispatcher {
     pub fn build_command_parts(&self, shell_command: &str) -> (String, Vec<String>) {
         let program = self.kind.binary().to_string();
         if self.kind.is_powershell() {
-            let mut args = vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-            ];
+            let mut args = powershell_base_args();
             if powershell_prefers_script_file(shell_command) {
                 // Complex multiline / heavily quoted scripts: write a temp
                 // .ps1 and invoke with -File so quoting stays structured.
@@ -346,6 +366,33 @@ impl ShellDispatcher {
             ]
         };
         (program, args)
+    }
+
+    /// Build PowerShell `program + args` that carry `shell_command` as an
+    /// `-EncodedCommand` payload (UTF-16LE, base64).
+    ///
+    /// Nothing touches the disk, so the execution policy cannot refuse it (the
+    /// policy governs script *files*), and a base64 argument needs neither
+    /// quoting nor a BOM. Returns `None` for a non-PowerShell shell, and the
+    /// caller then keeps the original invocation.
+    pub fn build_powershell_encoded_parts(
+        &self,
+        shell_command: &str,
+    ) -> Option<(String, Vec<String>)> {
+        if !self.kind.is_powershell() {
+            return None;
+        }
+        use base64::Engine as _;
+
+        let payload = powershell_exit_aware_command(shell_command);
+        let mut utf16 = Vec::with_capacity(payload.len() * 2);
+        for unit in payload.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let mut args = powershell_base_args();
+        args.push("-EncodedCommand".to_string());
+        args.push(base64::engine::general_purpose::STANDARD.encode(utf16));
+        Some((self.kind.binary().to_string(), args))
     }
 
     /// Build a `Command` from separate program + args (bypasses the shell).
@@ -623,6 +670,10 @@ mod tests {
         assert!(args.contains(&"-NoLogo"));
         assert!(args.contains(&"-NoProfile"));
         assert!(args.contains(&"-NonInteractive"));
+        assert!(
+            args.contains(&"-ExecutionPolicy") && args.contains(&"Bypass"),
+            "the temp -File form needs the process-scoped bypass: {args:?}"
+        );
         assert!(args.contains(&"-Command"));
         assert!(
             args.iter().any(|a| a.contains("echo hello")),
@@ -643,6 +694,11 @@ mod tests {
         let (program, args) = dispatcher.build_command_parts(script);
         assert!(program.contains("pwsh"));
         assert!(args.iter().any(|a| a == "-File"), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "-ExecutionPolicy")
+                && args.iter().any(|arg| arg == "Bypass"),
+            "the temp -File form needs the process-scoped bypass: {args:?}"
+        );
         let path = args
             .iter()
             .find(|a| a.ends_with(".ps1"))
@@ -660,6 +716,52 @@ mod tests {
         assert!(remove_at < exit_at, "self-delete must precede exit");
         // Cleanup temp script created by the builder (the test never runs it).
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn powershell_encoded_fallback_avoids_the_script_file() {
+        let dispatcher = ShellDispatcher {
+            kind: ShellKind::Pwsh,
+        };
+        // The fallback exists for exactly the payloads the temp `-File` form
+        // handles: multiline, quote-heavy, non-ASCII.
+        let script = "Write-Output '中文-ok'\nWrite-Output \"a 'b' c\"";
+        let (program, args) = dispatcher
+            .build_powershell_encoded_parts(script)
+            .expect("pwsh encoded parts");
+        assert!(program.contains("pwsh"));
+        assert!(!args.iter().any(|a| a == "-File"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-EncodedCommand"), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "-ExecutionPolicy")
+                && args.iter().any(|arg| arg == "Bypass")
+        );
+
+        use base64::Engine as _;
+        let payload = args.last().expect("encoded payload");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("payload is base64");
+        let units: Vec<u16> = decoded
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16(&units).expect("payload is UTF-16LE");
+        assert!(text.contains("Write-Output '中文-ok'"), "{text}");
+        assert!(text.contains("$LASTEXITCODE"), "{text}");
+    }
+
+    #[test]
+    fn powershell_encoded_fallback_is_none_for_other_shells() {
+        for kind in [ShellKind::Bash, ShellKind::Cmd, ShellKind::Sh] {
+            let dispatcher = ShellDispatcher { kind };
+            assert!(
+                dispatcher
+                    .build_powershell_encoded_parts("echo hi")
+                    .is_none(),
+                "only PowerShell has an encoded form"
+            );
+        }
     }
 
     #[test]

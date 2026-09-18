@@ -112,25 +112,63 @@ impl CommandSpec {
 
         #[cfg(windows)]
         let (program, args) = {
-            // Force UTF-8 output. cmd.exe uses chcp; PowerShell sets the
-            // console output encoding directly. See issue #982.
-            let kind = dispatcher.kind();
-            let cmd = if matches!(
-                kind,
-                crate::shell_dispatcher::ShellKind::Pwsh
-                    | crate::shell_dispatcher::ShellKind::WindowsPowerShell
-            ) {
-                format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}")
-            } else if matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
-                format!("chcp 65001 >NUL & {command}")
-            } else {
-                command.to_string()
-            };
+            let cmd = Self::windows_shell_text(dispatcher.kind(), command);
             dispatcher.build_command_parts(&cmd)
         };
         #[cfg(not(windows))]
         let (program, args) = dispatcher.build_command_parts(command);
 
+        Self::from_shell_parts(program, args, cwd, timeout, command)
+    }
+
+    /// Like [`CommandSpec::shell`], but forces the PowerShell
+    /// `-EncodedCommand` form: the script travels as a UTF-16LE base64
+    /// argument instead of a temp `.ps1`, so the Windows execution policy
+    /// (which governs script files) cannot refuse it and no quoting or BOM
+    /// handling is involved. Returns `None` when the detected shell is not
+    /// PowerShell, and the caller then keeps the original invocation.
+    pub fn powershell_encoded_shell(
+        command: &str,
+        cwd: PathBuf,
+        timeout: Duration,
+    ) -> Option<Self> {
+        let dispatcher = crate::shell_dispatcher::global_dispatcher();
+
+        #[cfg(windows)]
+        let cmd = Self::windows_shell_text(dispatcher.kind(), command);
+        #[cfg(not(windows))]
+        let cmd = command.to_string();
+
+        let (program, args) = dispatcher.build_powershell_encoded_parts(&cmd)?;
+        Some(Self::from_shell_parts(program, args, cwd, timeout, command))
+    }
+
+    /// The exact command text the platform shell receives. Both shell
+    /// constructors must agree on it: cmd.exe needs `chcp` while PowerShell
+    /// sets the console output encoding directly (issue #982). The prefix
+    /// keys on the PowerShell *family*, not on the two detected variants, so a
+    /// custom PowerShell path (accepted by `is_powershell`) keeps the UTF-8
+    /// output contract on both the normal and the encoded retry path.
+    #[cfg(windows)]
+    fn windows_shell_text(kind: &crate::shell_dispatcher::ShellKind, command: &str) -> String {
+        if kind.is_powershell() {
+            format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}")
+        } else if matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
+            format!("chcp 65001 >NUL & {command}")
+        } else {
+            command.to_string()
+        }
+    }
+
+    /// Shared construction for both shell forms, so the two cannot drift on the
+    /// default env, the policy slot, or the displayed command.
+    fn from_shell_parts(
+        program: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        timeout: Duration,
+        requested_command: &str,
+    ) -> Self {
         let env = {
             #[cfg(windows)]
             {
@@ -150,7 +188,7 @@ impl CommandSpec {
             timeout,
             sandbox_policy: SandboxPolicy::default(),
             justification: None,
-            requested_command: Some(command.to_string()),
+            requested_command: Some(requested_command.to_string()),
         }
     }
 
@@ -906,6 +944,45 @@ mod tests {
         assert_eq!(
             env.get("PYTHONIOENCODING").map(String::as_str),
             Some("utf-8")
+        );
+    }
+
+    // The UTF-8 output contract keys on the PowerShell family: a custom
+    // PowerShell path is accepted by `is_powershell`, so it must get the prefix
+    // on both the normal shell spec and the encoded fallback.
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_text_matches_the_shell_family() {
+        use crate::shell_dispatcher::ShellKind;
+
+        let command = "Write-Output 'x'";
+        let prefix = "[Console]::OutputEncoding";
+        for kind in [ShellKind::Pwsh, ShellKind::WindowsPowerShell] {
+            assert!(
+                CommandSpec::windows_shell_text(&kind, command).starts_with(prefix),
+                "{kind:?} must keep the UTF-8 contract"
+            );
+        }
+        let custom_powershell = ShellKind::Custom {
+            binary: r"C:\Tools\pwsh.exe".to_string(),
+            flag: "-c".to_string(),
+        };
+        assert!(
+            CommandSpec::windows_shell_text(&custom_powershell, command).starts_with(prefix),
+            "a custom PowerShell path must keep the UTF-8 contract"
+        );
+        assert!(
+            CommandSpec::windows_shell_text(&ShellKind::Cmd, command).starts_with("chcp 65001"),
+            "cmd.exe switches the code page instead"
+        );
+        let custom_bash = ShellKind::Custom {
+            binary: "bash".to_string(),
+            flag: "-c".to_string(),
+        };
+        assert_eq!(
+            CommandSpec::windows_shell_text(&custom_bash, command),
+            command,
+            "a non-PowerShell custom shell keeps the raw command"
         );
     }
 
