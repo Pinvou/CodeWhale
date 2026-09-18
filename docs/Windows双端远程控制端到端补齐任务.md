@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`  
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 的正文链路（A 落库/投影 + B 用户消息/回复/终态回传）已落地待审核，剩余缺口恢复与 UI 渲染。当前位于 E2E-05 → E2E-06。
+> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 正文链路（A 落库/投影 + B 用户消息/回复/终态回传）与 E2E-06 第 1 步（A 心跳 + `role_liveness_v1` 协商）已落地待审核；剩余 E2E-05 缺口恢复与 UI 渲染、E2E-06 的 B 侧 challenge/attestation 与 resume、E2E-07、E2E-08。
 
 ## 1. 执行规则
 
@@ -230,3 +230,38 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 失败路径：`event_b64` 体积/声明不一致、epoch/序号/会话不符、未映射内部类型、非远程会话、通道未就位、未协商 `snapshot_journal_v1` 都静默丢弃（不产生半状态）。
 - 敏感信息：正文只进权威 journal 与 A 独立历史（本地），wire 明文只有 epoch/序号/类型；无凭证、无路径、无主机信息。
 - 待补证据：缺口恢复用例与前端渲染用例（分别在剩余步骤 2、3 完成）。
+
+## 9. E2E-06 实施进度（进行中，未审核）
+
+出口：有效 A 存活证据不超过 30 秒；停止/断开产生明确终态并清理远端任务。
+
+### 9.1 已落地
+
+| 提交 | 内容 |
+|---|---|
+| `50ed50244` | A 端心跳：`liveness::build_controller_liveness`（冻结形状 + 非法输入失败关闭）、`ControllingDeviceManager::{live_liveness_epoch, send_authenticated_control}`、保活任务按 10 秒间隔发送单调序号心跳（间隔可注入）、B 注册能力补 `role_liveness_v1`；2 条用例（帧通过冻结校验；保活任务按间隔产出心跳且不自行结束） |
+
+### 9.2 剩余步骤
+
+1. **B 侧存活证据链**：B 的 watchdog（DEV-08）目前只能被动收证据，需要接线——
+   - 需要证据时（deadline 将尽）B 发 `controller_liveness_challenge_a` 挑战；
+   - A 收到挑战后把 `controller_liveness_a` 明文（绑定连接/租约/epoch/角色/序号/挑战）
+     用业务通道加密成 `encrypted_controller_liveness_a` 回传；B 解密后调用
+     `ControlledDeviceManager::accept_direct_liveness` 续期；
+   - 直接路径不可用时走 relay 签名兜底：B 发
+     `controller_liveness_attestation_request_a` → Relay 回
+     `controller_liveness_attestation_a` → `accept_liveness_attestation`。
+   注意 `ControllerLivenessWatchdog` 目前只在 `accept_*` / `state` 上暴露能力，
+   需要新增「何时该请求证据」的只读判断（例如 `needs_evidence(now_b)`）。
+2. **显式断开**：A 的 `disconnect` 在停止 worker 前发送 `controller_disconnect`；
+   B 收到后终结当前租约（清空租约/凭证/任务，保留用户工作区授权）并投影明确终态
+   （保守默认：`stopped`，因为 A 需要重新刷新取码）。
+3. **断线恢复门**：A/B 的 resume 序列（DEV-09 已有状态机与 Relay hooks）尚未接线；
+   需要 A/B 客户端把 `controller_resume_prepare`/`encrypted_resume_confirm`/
+   `controller_resume_activation_ack`/`controller_post_activation_liveness`/
+   `controller_resume_ready_ack` 接到各自的 `ControllerResumeGate`，并在
+   `controller_resumed` 后重新派生业务密钥（租约 epoch 变化）。
+4. **B 停止/刷新清理闭环**：把 `ControlledDeviceManager::register_cleanup_sink`
+   接到任务/权限/传输/临时模型注册表（`RemoteTaskHooks` 的清理入口），确保
+   stop/refresh/远端断开都会清空远端任务与凭证；当前 `fail_operation` 已触发
+   cleanup sinks，但 `stop`/`disconnect_now` 与远端断开路径需要逐一核对。
