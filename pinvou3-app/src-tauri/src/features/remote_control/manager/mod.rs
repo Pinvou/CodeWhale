@@ -901,6 +901,13 @@ impl RemoteControlManager {
             .ok_or_else(|| "desktop_relay_inactive".to_owned())
     }
 
+    /// A 端控制通道使用的 Relay WebSocket 地址（E2E-02）。与 WebUI v2 的
+    /// desktop endpoint 共用同一份配置；`PINVOU_REMOTE_RUNTIME_RELAY_WS_URL`
+    /// 只覆盖本次运行，绝不写回持久配置。
+    pub fn controller_relay_ws_url(&self) -> String {
+        persistence::controller_relay_ws_url()
+    }
+
     /// Close the generation-bound controller lane without touching the legacy
     /// desktop endpoint. The synthetic message lets the worker leave its recv
     /// loop deterministically; dropping the stored sender then closes it.

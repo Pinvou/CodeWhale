@@ -493,7 +493,7 @@ impl ControllerTransportSender {
     }
 }
 
-struct ControllerTransportReceiver {
+pub(crate) struct ControllerTransportReceiver {
     control_rx: mpsc::Receiver<QueuedFrame>,
     business_rx: mpsc::Receiver<QueuedFrame>,
 }
@@ -517,7 +517,7 @@ impl ControllerTransportReceiver {
 /// 测试用便捷构造：新建一个独立 generation 单元格。生产调用必须走
 /// `spawn_controller_transport`，否则 transport 任务与配置不会共享绑定结果。
 #[cfg(test)]
-fn transport_channels(
+pub(crate) fn transport_channels(
     role: ControllerRole,
     remote_control_generation: impl Into<String>,
     control_capacity: usize,

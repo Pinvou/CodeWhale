@@ -49,16 +49,107 @@ pub(crate) enum HandshakeStage {
     Joined,
 }
 
-/// Relay 在 `controller_joined` 中下发的租约身份。业务密钥仍由调用方用
-/// `into_role_ciphers` 在拿到真实 `LeaseBinding` 之后派生。
-#[derive(Debug, Clone, Eq, PartialEq)]
+/// Relay 在 `controller_joined` 中下发的租约身份（A/B 共用）。业务密钥仍由
+/// 调用方用 `into_role_ciphers` 在拿到真实 `LeaseBinding` 之后派生。
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct JoinedLease {
     pub(crate) connection_id: String,
     pub(crate) controller_lease_id: String,
     pub(crate) lease_epoch: u64,
     pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
-    pub(crate) resume_token_b64: String,
+    pub(crate) liveness_epoch_a: String,
+    pub(crate) resume_deadline_ms: u64,
+    pub(crate) resume_token: [u8; RESUME_TOKEN_BYTES],
+}
+
+/// `resume_token` 是恢复凭证：Debug 只允许出现脱敏占位，绝不打印明文或
+/// base64 形式。
+impl std::fmt::Debug for JoinedLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JoinedLease")
+            .field("connection_id", &self.connection_id)
+            .field("controller_lease_id", &self.controller_lease_id)
+            .field("lease_epoch", &self.lease_epoch)
+            .field("relay_epoch", &self.relay_epoch)
+            .field(
+                "remote_control_generation",
+                &self.remote_control_generation,
+            )
+            .field("liveness_epoch_a", &self.liveness_epoch_a)
+            .field("resume_deadline_ms", &self.resume_deadline_ms)
+            .field("resume_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// `controller_joined` 的租约恢复凭证字节数（协议固定 32 字节）。
+pub(crate) const RESUME_TOKEN_BYTES: usize = 32;
+
+/// A/B 共用的 `controller_joined` 校验：先做 Relay 角色与形状校验，再逐项核对
+/// 调用方已经认证过的 transcript 绑定，最后解析出租约身份与恢复材料。任何
+/// 缺失、非规范整数、非 32 字节 token 或绑定不符都失败关闭，且不产生部分
+/// 租约材料。
+pub(crate) fn validate_joined_lease(
+    message: &Value,
+    pairing_id: &str,
+    reservation_id: &str,
+    relay_epoch: &str,
+    transcript_hash_hex: &str,
+) -> std::result::Result<JoinedLease, &'static str> {
+    let validated = validate_controller_message_json(&message.to_string(), SenderRole::Relay)
+        .map_err(|_| "controller_joined_invalid")?;
+    if validated.get("type").and_then(Value::as_str) != Some("controller_joined") {
+        return Err("controller_joined_invalid");
+    }
+    for (field, expected) in [
+        ("pairing_id", pairing_id),
+        ("reservation_id", reservation_id),
+        ("relay_epoch", relay_epoch),
+        ("transcript_hash", transcript_hash_hex),
+    ] {
+        if validated.get(field).and_then(Value::as_str) != Some(expected) {
+            return Err("controller_joined_binding_mismatch");
+        }
+    }
+    let string = |field: &'static str| -> std::result::Result<String, &'static str> {
+        validated
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or("controller_joined_invalid")
+    };
+    let lease_epoch = string("lease_epoch")?
+        .parse::<u64>()
+        .map_err(|_| "controller_joined_invalid")?;
+    let resume_deadline_ms = string("resume_deadline_ms")?
+        .parse::<u64>()
+        .map_err(|_| "controller_joined_invalid")?;
+    if lease_epoch == 0 || resume_deadline_ms == 0 {
+        return Err("controller_joined_invalid");
+    }
+    let raw_token = base64::engine::general_purpose::STANDARD
+        .decode(
+            validated
+                .get("resume_token_b64")
+                .and_then(Value::as_str)
+                .ok_or("controller_joined_invalid")?,
+        )
+        .map_err(|_| "controller_joined_invalid")?;
+    let resume_token: [u8; RESUME_TOKEN_BYTES] = raw_token
+        .try_into()
+        .map_err(|_| "controller_joined_invalid")?;
+    Ok(JoinedLease {
+        connection_id: string("connection_id")?,
+        controller_lease_id: string("controller_lease_id")?,
+        lease_epoch,
+        relay_epoch: string("relay_epoch")?,
+        remote_control_generation: string("remote_control_generation")?,
+        liveness_epoch_a: string("liveness_epoch_a")?,
+        resume_deadline_ms,
+        resume_token,
+    })
 }
 
 pub(crate) struct ControllingHandshake {
@@ -69,6 +160,8 @@ pub(crate) struct ControllingHandshake {
     trust: AuthenticatedRelayTrustConfig,
     binding: Option<HandshakeBinding>,
     transcript_hash_hex: String,
+    transcript_hash: Option<[u8; 32]>,
+    negotiated_capabilities: Vec<String>,
     pairing_id: String,
     reservation_id: String,
     relay_epoch: String,
@@ -97,6 +190,8 @@ impl ControllingHandshake {
             trust,
             binding: None,
             transcript_hash_hex: String::new(),
+            transcript_hash: None,
+            negotiated_capabilities: Vec::new(),
             pairing_id: String::new(),
             reservation_id: String::new(),
             relay_epoch: String::new(),
@@ -169,6 +264,8 @@ impl ControllingHandshake {
             .commitment(&binding, ControllerRole::A)
             .map_err(|_| HandshakeError::new("controller_commitment_failed"))?;
         self.transcript_hash_hex = hex_lower(&transcript_hash);
+        self.transcript_hash = Some(transcript_hash);
+        self.negotiated_capabilities = context.negotiated_capabilities().to_vec();
         self.pairing_id = context.pairing_id().to_owned();
         self.reservation_id = context.reservation_id().to_owned();
         self.relay_epoch = context.relay_epoch().to_owned();
@@ -275,43 +372,31 @@ impl ControllingHandshake {
     /// `take_session` 派生业务密钥并安装租约。
     pub(crate) fn accept_joined(&mut self, message: &Value) -> Result<JoinedLease> {
         self.require_stage(HandshakeStage::FinishedSent)?;
-        let validated = validate_controller_message_json(&message.to_string(), SenderRole::Relay)
-            .map_err(|_| HandshakeError::new("controller_joined_invalid"))?;
-        if validated.get("type").and_then(Value::as_str) != Some("controller_joined") {
-            return Err(HandshakeError::new("controller_joined_invalid"));
-        }
-        for (field, expected) in [
-            ("pairing_id", self.pairing_id.as_str()),
-            ("reservation_id", self.reservation_id.as_str()),
-            ("relay_epoch", self.relay_epoch.as_str()),
-            ("transcript_hash", self.transcript_hash_hex.as_str()),
-        ] {
-            if validated.get(field).and_then(Value::as_str) != Some(expected) {
-                return Err(HandshakeError::new("controller_joined_binding_mismatch"));
-            }
-        }
-        let string = |field: &'static str| -> Result<String> {
-            validated
-                .get(field)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| HandshakeError::new("controller_joined_invalid"))
-        };
-        let lease_epoch = string("lease_epoch")?
-            .parse::<u64>()
-            .map_err(|_| HandshakeError::new("controller_joined_invalid"))?;
-        if lease_epoch == 0 {
-            return Err(HandshakeError::new("controller_joined_invalid"));
-        }
+        let lease = validate_joined_lease(
+            message,
+            &self.pairing_id,
+            &self.reservation_id,
+            &self.relay_epoch,
+            &self.transcript_hash_hex,
+        )
+        .map_err(HandshakeError::new)?;
         self.stage = HandshakeStage::Joined;
-        Ok(JoinedLease {
-            connection_id: string("connection_id")?,
-            controller_lease_id: string("controller_lease_id")?,
-            lease_epoch,
-            relay_epoch: string("relay_epoch")?,
-            remote_control_generation: string("remote_control_generation")?,
-            resume_token_b64: string("resume_token_b64")?,
-        })
+        Ok(lease)
+    }
+
+    /// 验签 transcript 里 B 拥有的 generation（绑定 transport 用）。
+    pub(crate) fn remote_control_generation(&self) -> &str {
+        &self.generation
+    }
+
+    /// Relay 在 transcript 中协商出的能力集合（安装租约的准入上下文）。
+    pub(crate) fn negotiated_capabilities(&self) -> &[String] {
+        &self.negotiated_capabilities
+    }
+
+    /// 认证 transcript 的哈希原始字节；只在本端验签成功后可用。
+    pub(crate) fn transcript_hash(&self) -> Option<[u8; 32]> {
+        self.transcript_hash
     }
 
     /// 握手成功后交出会话密钥，供调用方用真实 `LeaseBinding` 派生业务密钥。

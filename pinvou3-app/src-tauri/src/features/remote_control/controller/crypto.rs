@@ -1272,6 +1272,23 @@ pub(crate) fn authenticate_relay_transcript(
     TranscriptAuthenticator::new(trust.clone()).authenticate(parsed)
 }
 
+/// E2E-02：受控的传输密钥指纹来源。冻结协议只向双方下发同一份签名
+/// transcript，因此用 `transcript_hash` 做 IKM、按角色域分离派生一个稳定的
+/// 指纹；它不承载密钥材料，只在本地 resume gate 中用于证明「同一份认证
+/// transcript 的同一角色」，不会跨角色相等，也不会与任何会话密钥相同。
+pub(crate) fn transport_key_fingerprint(
+    transcript_hash: [u8; 32],
+    role: ControllerRole,
+) -> CryptoResult<[u8; 32]> {
+    let fingerprint = hkdf_expand(
+        &transcript_hash,
+        b"pinvou-controller-transport-salt-v1",
+        b"pinvou-controller-transport-fingerprint-v1",
+        &[role.wire()],
+    )?;
+    Ok(*fingerprint)
+}
+
 pub(crate) struct TranscriptAuthenticator {
     trust: AuthenticatedRelayTrustConfig,
 }
@@ -2291,5 +2308,25 @@ mod tests {
                 "this over-limit rejected candidate ran exactly one instance drop"
             );
         }
+    }
+
+    /// E2E-02：传输指纹必须确定、与 transcript 绑定且按角色域分离，否则
+    /// resume gate 会把两个角色、两份 transcript 误判成同一个上下文。
+    #[test]
+    fn transport_key_fingerprint_is_deterministic_and_role_bound() {
+        let transcript = [0x5a_u8; 32];
+        let a_first = transport_key_fingerprint(transcript, ControllerRole::A).unwrap();
+        let a_second = transport_key_fingerprint(transcript, ControllerRole::A).unwrap();
+        let b_role = transport_key_fingerprint(transcript, ControllerRole::B).unwrap();
+        let other_transcript =
+            transport_key_fingerprint([0x5b_u8; 32], ControllerRole::A).unwrap();
+        assert_eq!(a_first, a_second, "the same binding must derive the same value");
+        assert_ne!(a_first, b_role, "roles must be domain separated");
+        assert_ne!(
+            a_first, other_transcript,
+            "a different transcript must not share a fingerprint"
+        );
+        assert_ne!(a_first, [0_u8; 32]);
+        assert_ne!(a_first, transcript, "the fingerprint is not the raw transcript");
     }
 }

@@ -14,6 +14,17 @@ use super::controlling_handshake::{ControllingHandshake, HandshakeError, JoinedL
 pub(crate) trait ControllingRelayPort: Send {
     fn send(&self, message: Value) -> Result<(), String>;
     async fn recv(&mut self) -> Option<Value>;
+
+    /// Relay 明确返回的公共错误码（若有）。端口实现负责把它收敛到冻结的
+    /// 公共错误闭集，状态所有者据此向用户给出有限错误。
+    fn relay_error_code(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// 通道是否已断开。用于把失败映射为「对端不可达」而不是协议错误。
+    fn lane_disconnected(&self) -> bool {
+        false
+    }
 }
 
 /// worker 向状态所有者投影的阶段事件。
@@ -21,12 +32,23 @@ pub(crate) trait ControllingRelayPort: Send {
 pub(crate) enum ControllingStageEvent {
     /// claim 已发出（本地进入 connecting）。
     ClaimSent,
-    /// transcript 已验签、预留已建立（本地进入 handshake）。
-    Reserved,
+    /// transcript 已验签、预留已建立（本地进入 handshake）。事件携带验签后的
+    /// generation：A 端据此一次性绑定 transport，之后才能安装租约。
+    Reserved { remote_control_generation: String },
     /// 本端 Finished 已发出。
     FinishedSent,
     /// 收到 controller_joined，租约身份可用。
     Joined,
+}
+
+/// 握手完成后的租约材料：租约身份来自 `controller_joined`，能力与 transcript
+/// 哈希来自验签后的 `controller_pairing_reserved`。调用方据此安装认证租约并
+/// 派生传输指纹；本模块不产生任何可安装材料以外的状态。
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ControllingHandshakeOutcome {
+    pub(crate) lease: JoinedLease,
+    pub(crate) negotiated_capabilities: Vec<String>,
+    pub(crate) transcript_hash: [u8; 32],
 }
 
 fn kind(message: &Value) -> Option<&str> {
@@ -36,29 +58,32 @@ fn kind(message: &Value) -> Option<&str> {
 /// 按协议顺序推进 A 端握手，直到 `controller_joined`。
 ///
 /// 任何未知类型、顺序错乱、绑定不匹配或验签失败都会立即返回错误，且不会
-/// 产生任何可安装的租约材料。
+/// 产生任何可安装的租约材料。阶段回调返回错误时立即中止（例如本地
+/// generation 绑定失败或操作已被新的连接取代）。
 pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     port: &mut P,
     handshake: &mut ControllingHandshake,
-    mut on_stage: impl FnMut(ControllingStageEvent),
-) -> Result<JoinedLease, HandshakeError> {
+    mut on_stage: impl FnMut(ControllingStageEvent) -> Result<(), HandshakeError>,
+) -> Result<ControllingHandshakeOutcome, HandshakeError> {
     let claim = handshake.claim()?;
     port.send(claim).map_err(|_| HandshakeError::new("controller_claim_failed"))?;
-    on_stage(ControllingStageEvent::ClaimSent);
+    on_stage(ControllingStageEvent::ClaimSent)?;
 
     // 1) 等 controller_pairing_reserved，产出本端 commit。
     let reserved = next_of_type(port, "controller_pairing_reserved").await?;
     let commit = handshake.accept_reserved(&reserved)?;
     port.send(commit)
         .map_err(|_| HandshakeError::new("controller_commit_failed"))?;
-    on_stage(ControllingStageEvent::Reserved);
+    on_stage(ControllingStageEvent::Reserved {
+        remote_control_generation: handshake.remote_control_generation().to_owned(),
+    })?;
 
     // 2) 等对端 commit，产出本端 Finished。
     let peer_commit = next_of_type(port, "finished_receipt_commit").await?;
     let finished = handshake.accept_peer_commitment(&peer_commit)?;
     port.send(finished)
         .map_err(|_| HandshakeError::new("controller_finished_failed"))?;
-    on_stage(ControllingStageEvent::FinishedSent);
+    on_stage(ControllingStageEvent::FinishedSent)?;
 
     // 3) 等对端 Finished，产出本端 receipt ack。
     let peer_finished = next_of_type(port, "encrypted_handshake_finished").await?;
@@ -69,8 +94,15 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     // 4) 等 controller_joined：只有到这里才产生租约身份。
     let joined = next_of_type(port, "controller_joined").await?;
     let lease = handshake.accept_joined(&joined)?;
-    on_stage(ControllingStageEvent::Joined);
-    Ok(lease)
+    on_stage(ControllingStageEvent::Joined)?;
+    let transcript_hash = handshake
+        .transcript_hash()
+        .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+    Ok(ControllingHandshakeOutcome {
+        lease,
+        negotiated_capabilities: handshake.negotiated_capabilities().to_vec(),
+        transcript_hash,
+    })
 }
 
 async fn next_of_type<P: ControllingRelayPort>(
@@ -176,12 +208,56 @@ mod tests {
         let mut stages = Vec::new();
         let error = drive_controlling_handshake(&mut port, &mut handshake, |event| {
             stages.push(event);
+            Ok(())
         })
         .await
         .unwrap_err();
         assert_eq!(error.code, "controller_handshake_rejected");
         assert_eq!(stages, vec![ControllingStageEvent::ClaimSent]);
         assert_eq!(handshake.stage(), HandshakeStage::Claimed);
+    }
+
+    /// 阶段回调（例如 transport generation 绑定或本地状态投影）失败时必须
+    /// 立即中止：不继续推进握手，也不产生任何可安装的租约材料。
+    #[tokio::test]
+    async fn stage_callback_failure_aborts_before_any_lease_material() {
+        let (trust, relay_key, key_id) = signed_relay();
+        let a_keys = HandshakeKeyPair::generate().unwrap();
+        let b_keys = HandshakeKeyPair::generate().unwrap();
+        let encoded = |bytes: [u8; 32]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let reserved = signed_reservation(
+            &relay_key,
+            &key_id,
+            &encoded(a_keys.public_key().to_bytes()),
+            &encoded(b_keys.public_key().to_bytes()),
+        );
+        let mut handshake = ControllingHandshake::new(
+            reserved["request_id"].as_str().unwrap(),
+            "claim-0001",
+            "2345678",
+            a_keys,
+            trust,
+        );
+        let mut port = FakePort {
+            inbound: VecDeque::from(vec![reserved]),
+            outbound: Vec::new(),
+        };
+        let error = drive_controlling_handshake(&mut port, &mut handshake, |event| {
+            match event {
+                ControllingStageEvent::Reserved { .. } => {
+                    Err(HandshakeError::new("controller_generation_bind_failed"))
+                }
+                _ => Ok(()),
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "controller_generation_bind_failed");
+        assert_eq!(handshake.stage(), HandshakeStage::Reserved);
+        assert!(
+            handshake.take_session().is_err(),
+            "an aborted stage must not yield installable lease material"
+        );
     }
 
     /// 正向路径：端口按协议顺序投喂 B 侧协商结果，worker 走到 Joined。
@@ -274,19 +350,40 @@ mod tests {
             outbound: RefCell::new(Vec::new()),
         };
         let mut stages = Vec::new();
-        let lease = drive_controlling_handshake(&mut port, &mut a, |event| stages.push(event))
-            .await
-            .unwrap();
+        let outcome = drive_controlling_handshake(&mut port, &mut a, |event| {
+            stages.push(event);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let lease = outcome.lease;
         assert_eq!(lease.controller_lease_id, "controller-lease-0001");
         assert_eq!(lease.lease_epoch, 1);
         assert_eq!(
             stages,
             vec![
                 ControllingStageEvent::ClaimSent,
-                ControllingStageEvent::Reserved,
+                ControllingStageEvent::Reserved {
+                    remote_control_generation: "generation-0001".into(),
+                },
                 ControllingStageEvent::FinishedSent,
                 ControllingStageEvent::Joined,
             ]
+        );
+        assert_eq!(lease.liveness_epoch_a, "liveness-epoch-a-0001");
+        assert_eq!(lease.resume_deadline_ms, 30_000);
+        assert_eq!(lease.resume_token, [7_u8; 32]);
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(
+            !debug.contains(&base64::engine::general_purpose::STANDARD.encode(lease.resume_token)),
+            "恢复凭证不得出现在 Debug 输出里"
+        );
+        assert_eq!(outcome.transcript_hash.len(), 32);
+        assert!(
+            outcome
+                .negotiated_capabilities
+                .contains(&"pairing_v1".to_owned())
         );
         // worker 只负责编排；业务密钥仍在调用方用真实 LeaseBinding 派生。
         assert!(a.take_session().is_ok());

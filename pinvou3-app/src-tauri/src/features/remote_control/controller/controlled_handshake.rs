@@ -13,6 +13,7 @@ use super::crypto::{
     FinishedSender, HandshakeBinding, HandshakeKeyPair, HandshakePublicKey, ReceiptSecret,
     SessionKeys,
 };
+use super::controlling_handshake::{validate_joined_lease, JoinedLease};
 use super::protocol::{
     parse_controller_pairing_transcript, validate_controller_message_json, SenderRole,
 };
@@ -36,6 +37,7 @@ pub(crate) enum ControlledHandshakeStage {
     PeerCommitted,
     Finished,
     Acked,
+    Joined,
 }
 
 pub(crate) struct ControlledHandshake {
@@ -45,6 +47,7 @@ pub(crate) struct ControlledHandshake {
     relay_epoch: String,
     generation: String,
     transcript_hash_hex: String,
+    transcript_hash: [u8; 32],
     binding: HandshakeBinding,
     finished_sender: Option<FinishedSender>,
     finished_receiver: Option<FinishedReceiver>,
@@ -95,6 +98,7 @@ impl ControlledHandshake {
             relay_epoch: context.relay_epoch().to_owned(),
             generation: context.remote_control_generation().to_owned(),
             transcript_hash_hex: hex_lower(&transcript_hash),
+            transcript_hash,
             binding,
             finished_sender: Some(finished_sender),
             finished_receiver: Some(finished_receiver),
@@ -209,6 +213,29 @@ impl ControlledHandshake {
         self.session
             .take()
             .ok_or_else(|| ControlledHandshakeError::new("controller_handshake_stage_invalid"))
+    }
+
+    /// 处理 Relay 的 `controller_joined`：双收据完成后才允许，返回租约身份与
+    /// 恢复材料（与 A 端共用同一份校验与解析）。
+    pub(crate) fn accept_joined(&mut self, message: &Value) -> Result<JoinedLease> {
+        if self.stage != ControlledHandshakeStage::Acked {
+            return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
+        }
+        let lease = validate_joined_lease(
+            message,
+            &self.pairing_id,
+            &self.reservation_id,
+            &self.relay_epoch,
+            &self.transcript_hash_hex,
+        )
+        .map_err(ControlledHandshakeError::new)?;
+        self.stage = ControlledHandshakeStage::Joined;
+        Ok(lease)
+    }
+
+    /// 验签 transcript 的哈希原始字节（B 端派生传输指纹用）。
+    pub(crate) fn transcript_hash(&self) -> [u8; 32] {
+        self.transcript_hash
     }
 
     fn assert_peer_envelope(
