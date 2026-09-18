@@ -73,6 +73,12 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
+      listen("desktop-remote-controller-journal", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyJournalEvent(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
     }
 
     function stop() {
@@ -105,6 +111,7 @@
         pairingCode: payload.pairingCode || null,
         expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
         deviceName: payload.deviceName || null,
+        controllerDeviceName: payload.controllerDeviceName || null,
         workspaces: payload.workspaces || null,
         error: payload.lastError || null,
       }));
@@ -233,6 +240,12 @@
     function controllerCapabilityRequest(remoteRef) {
       ensureAvailable();
       return invoke("desktop_remote_controller_capability_request", { remoteRef: remoteRef });
+    }
+
+    /** E2E-04：构造并加密发送能力快照请求（A 端拿到 revision 后才能发任务）。 */
+    function controllerCapabilitySend(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_capability_send", { remoteRef: remoteRef });
     }
 
     function controllerApplyCapabilitySnapshot(remoteRef, payload) {
@@ -606,6 +619,7 @@
       controllerSessionState: controllerSessionState,
       controllerSessionClose: controllerSessionClose,
       controllerCapabilityRequest: controllerCapabilityRequest,
+      controllerCapabilitySend: controllerCapabilitySend,
       controllerApplyCapabilitySnapshot: controllerApplyCapabilitySnapshot,
       controllerTaskIntent: controllerTaskIntent,
       controllerTaskCancelIntent: controllerTaskCancelIntent,

@@ -1499,6 +1499,7 @@ pub fn run() {
             commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_intent,
             commands::desktop_remote_controller_session::desktop_remote_controller_task_send,
             commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_send,
+            commands::desktop_remote_controller_session::desktop_remote_controller_capability_send,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
             commands::desktop_remote_task::desktop_remote_task_open_session,
             commands::desktop_remote_task::desktop_remote_task_switch_session,

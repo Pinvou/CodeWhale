@@ -27,8 +27,14 @@ export function countdownSeconds(expiresAtMs, nowMs) {
 
 function statusKey(status) {
   switch (status) {
+    // 后端 ControlledStatusKind（snake_case）与 DEV-21 早期拼写的兼容映射。
+    case 'disabled':
+    case 'idle': return 'statusIdle';
+    case 'reserving':
     case 'registering': return 'statusRegistering';
+    case 'waiting_connection':
     case 'waiting_for_pairing': return 'statusWaiting';
+    case 'safety_handshake':
     case 'pairing_reserved': return 'statusReserved';
     case 'handshake_pending': return 'statusHandshake';
     case 'connected': return 'statusConnected';
@@ -36,12 +42,31 @@ function statusKey(status) {
     case 'resume_provisional':
     case 'resume_activated_pending_liveness':
       return 'statusReconnecting';
+    case 'refreshing':
     case 'stopping': return 'statusStopping';
     case 'stopped': return 'statusStopped';
     case 'error': return 'statusError';
     default: return 'statusIdle';
   }
 }
+
+/** 进行中的状态：只有这些状态才允许刷新/停止/立即断开。 */
+const ACTIVE_STATUSES = [
+  'reserving',
+  'registering',
+  'waiting_connection',
+  'waiting_for_pairing',
+  'safety_handshake',
+  'pairing_reserved',
+  'handshake_pending',
+  'connected',
+  'reconnecting',
+  'refreshing',
+  'stopping',
+];
+
+/** 正在展示连接码的状态。 */
+const CODE_STATUSES = ['waiting_connection', 'waiting_for_pairing'];
 
 export default function ControlledDevicePanel({ t, bs, supported }) {
   const copy = (t && t.controlledDevice) || {};
@@ -52,7 +77,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   const [error, setError] = useState(null);
   const liveRef = useRef(null);
 
-  const active = status !== 'idle' && status !== 'stopped' && status !== 'error';
+  const active = ACTIVE_STATUSES.includes(status);
   const seconds = countdownSeconds(device.expiresAtMs, now);
   const announce = useMemo(() => {
     if (!device.expiresAtMs || seconds <= 0) return null;
@@ -109,7 +134,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         </span>
       </div>
 
-      {status === 'waiting_for_pairing' && device.pairingCode && (
+      {CODE_STATUSES.includes(status) && device.pairingCode && (
         <div className="settings-row" role="group" aria-labelledby="controlled-device-code">
           <span id="controlled-device-code">{copy.codeLabel}</span>
           <output
@@ -157,7 +182,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
 
       <div className="settings-row">
         <span>{copy.deviceLabel}</span>
-        <span>{device.deviceName || copy.deviceUnknown}</span>
+        <span>{device.controllerDeviceName || copy.deviceUnknown}</span>
       </div>
 
       <div className="settings-row">

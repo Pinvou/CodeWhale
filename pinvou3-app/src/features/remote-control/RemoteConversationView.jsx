@@ -15,6 +15,7 @@ export default function RemoteConversationView({ t, bs }) {
   const capabilities = (bs && bs.remoteCapabilities) || null;
   const models = (bs && bs.remoteModels) || [];
   const tasks = (bs && bs.tasks) || [];
+  const transcript = (bs && bs.transcript) || [];
   const permissions = (bs && bs.remotePermissions) || [];
   const histories = (bs && bs.remoteHistories) || [];
   const [modelSource, setModelSource] = useState('controlled_device');
@@ -43,22 +44,26 @@ export default function RemoteConversationView({ t, bs }) {
 
   const remote = bridge && bridge.available ? bridge.desktopRemoteControl : null;
 
+  // E2E-07：连接建立后先开远程会话意图，再索取能力快照（拿到 revision 才允许
+  // 构造任务）；两者都失败关闭，不暴露半通路。
+  const sessionRef = connection.sessionRef || null;
+  const connected = connection.status === 'connected';
+  useEffect(() => {
+    if (!remote || !connected || sessionRef) return;
+    remote.controllerSessionOpen(copy.title || 'remote', 'chat').catch(function () {});
+  }, [remote, connected, sessionRef, copy.title]);
+  useEffect(() => {
+    if (!remote || !sessionRef || connection.capabilityRevision != null) return;
+    remote.controllerCapabilitySend(sessionRef).catch(function () {});
+  }, [remote, sessionRef, connection.capabilityRevision]);
+
   const send = async () => {
-    if (!remote || !draft.trim()) return;
+    if (!remote || !draft.trim() || !sessionRef) return;
     setBusy(true);
     setError(null);
     try {
-      const taskId = `task-${Date.now().toString(36)}`;
-      const payload = {
-        connectionId: connection.connectionId,
-        leaseEpoch: connection.leaseEpoch,
-        taskId,
-        sessionId: connection.sessionId,
-        modelSource,
-        mode,
-        input: { text: draft.trim() },
-      };
-      await remote.submitRemoteTask(payload, modelSource === 'controller_temporary' ? selectedModelId : null);
+      // E2E-04：只传会话引用与正文；协议字段与输入摘要全部由 Rust 构造并加密。
+      await remote.controllerTaskSend(sessionRef, draft.trim());
       setDraft('');
     } catch (failure) {
       setError((failure && failure.code) || 'errorGeneric');
@@ -116,46 +121,28 @@ export default function RemoteConversationView({ t, bs }) {
         </section>
       )}
 
-      <section aria-labelledby="remote-model-source-title" className="mb-3">
-        <h3 id="remote-model-source-title" className="text-[12px] font-medium">{copy.modelPickerTitle}</h3>
-        <label className="mr-3 text-[11px]">
-          <input
-            type="radio"
-            name="remote-model-source"
-            checked={modelSource === 'controlled_device'}
-            onChange={() => setModelSource('controlled_device')}
-          />
-          {copy.modelSourceDevice}
-        </label>
-        <label className="text-[11px]">
-          <input
-            type="radio"
-            name="remote-model-source"
-            checked={modelSource === 'controller_temporary'}
-            onChange={() => setModelSource('controller_temporary')}
-          />
-          {copy.modelSourceMine}
-        </label>
-        {modelSource === 'controller_temporary' && (
-          <ul className="mt-1 text-[11px]">
-            {models.map((model) => (
-              <li key={model.modelId}>
-                <label>
-                  <input
-                    type="radio"
-                    name="remote-model"
-                    disabled={!model.exportable}
-                    checked={selectedModelId === model.modelId}
-                    onChange={() => setSelectedModelId(model.modelId)}
-                  />
-                  {model.displayName}
-                  {!model.exportable && <span className="opacity-60"> · {copy.modelNotExportable}</span>}
-                </label>
-              </li>
-            ))}
-          </ul>
+      {/* E2E-07 首版能力开关：A 临时模型（含模型导出列表）保持隐藏，模型来源固定为
+          B 本机模型；能力开放后再恢复选择器。 */}
+      <p className="mb-3 text-[11px] opacity-70">
+        {copy.modelPickerTitle}: {copy.modelSourceDevice}
+      </p>
+
+      <ol className="remote-transcript" aria-live="polite">
+        {transcript.length === 0 && (
+          <li className="text-[12px] opacity-70">{copy.transcriptEmpty || copy.empty}</li>
         )}
-      </section>
+        {transcript.map((entry) => (
+          <li
+            key={`${entry.sessionId}:${entry.epoch}:${entry.sequence}`}
+            className="mb-1 text-[12px]"
+          >
+            <span className="mr-2 rounded-full bg-black/5 px-2 py-0.5 text-[10px] dark:bg-white/10">
+              {entry.role === 'user' ? copy.localBadge : copy.remoteBadge}
+            </span>
+            <span className="whitespace-pre-wrap break-words">{entry.text}</span>
+          </li>
+        ))}
+      </ol>
 
       <ol className="remote-tasks" aria-live="polite">
         {tasks.length === 0 && <li className="text-[12px] opacity-70">{copy.empty}</li>}
@@ -245,7 +232,12 @@ export default function RemoteConversationView({ t, bs }) {
           {busy ? copy.sending : copy.send}
         </button>
         {activeTask && (
-          <button type="button" onClick={() => remote && remote.cancelRemoteTask(activeTask.taskId)}>
+          <button
+            type="button"
+            onClick={() => remote && sessionRef && remote
+              .controllerTaskCancelSend(sessionRef, activeTask.taskId)
+              .catch(function () {})}
+          >
             {copy.cancel}
           </button>
         )}
