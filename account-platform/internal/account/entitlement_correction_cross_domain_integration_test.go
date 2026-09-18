@@ -2,18 +2,77 @@ package account
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"encoding/pem"
+
 	billingdomain "github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
+	"github.com/google/uuid"
 )
+
+// configureEntitlementProofIdentity gives the real Billing proof authority the
+// signed Account workload identity it requires, and returns the token the
+// Account proof client presents. The rule grants only the proof read permission.
+func configureEntitlementProofIdentity(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jwks" {
+			http.NotFound(w, r)
+			return
+		}
+		modulus := base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes())
+		exponent := base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1})
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{
+			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "approval-executor", "n": modulus, "e": exponent,
+		}}})
+	}))
+	t.Cleanup(issuer.Close)
+	caFile := filepath.Join(t.TempDir(), "issuer-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: issuer.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	audience := "entitlement-cross-domain-integration"
+	subject := uuid.NewString()
+	rules, err := json.Marshal([]map[string]any{{
+		"subject": subject, "service": "account-service",
+		"permissions": []string{"internal.billing.approval-proof.read", "internal.billing.approval-activation.read"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", caFile)
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", issuer.URL)
+	t.Setenv("WORKLOAD_IDENTITY_AUDIENCE", audience)
+	t.Setenv("WORKLOAD_IDENTITY_JWKS_URL", issuer.URL+"/jwks")
+	t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(rules))
+	now := time.Now().UTC()
+	token, err := signApprovalExecutorJWT(key, map[string]any{
+		"iss": issuer.URL, "sub": subject, "aud": audience, "exp": now.Add(time.Minute).Unix(), "iat": now.Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
 
 // TestEntitlementCorrectionCrossDomainActivationPostgresIntegration runs the
 // real Account and Billing databases with the real Billing HTTP activation and
@@ -34,9 +93,10 @@ func TestEntitlementCorrectionCrossDomainActivationPostgresIntegration(t *testin
 
 	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL, 0)
 	billingRepository, billingPool, billingConnection := newEntitlementCrossDomainBillingFixture(t, ctx, billingURL)
+	proofToken := configureEntitlementProofIdentity(t)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepository).Handler("account-proof-test"))
 	t.Cleanup(billingServer.Close)
-	activationReader, err := billinggovernance.NewClient(billingServer.URL, "account-proof-test")
+	activationReader, err := billinggovernance.NewClient(billingServer.URL, proofToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +127,17 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND s
 	frozen, err := billingRepository.EntitlementCorrectionProofInput(ctx, entitlementCrossDomainPackageID, entitlementCrossDomainOrderID, "ORIGINAL_SPLIT_MISMATCH")
 	if err != nil {
 		t.Fatal(err)
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := proofSource.Proof(ctx, uuid.New(), artifacts); !errors.Is(err, ErrApprovalProofUnavailable) {
+		t.Fatalf("inactive cross-domain proof did not fail closed: %v", err)
 	}
 	if err := repository.requireApprovalAdvancement(ctx, policy); !errors.Is(err, ErrBillingGovernanceInactive) {
 		t.Fatalf("inactive cross-domain advancement: %v", err)
@@ -139,6 +210,14 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2 AND s
 	projected, ok := snapshot.Find(policy.CommandType, 2, 2)
 	if !ok || projected.State != "ACTIVE" {
 		t.Fatalf("Account reader did not observe the activated projection: %#v", projected)
+	}
+	proof, err := proofSource.Proof(ctx, uuid.New(), artifacts)
+	if err != nil || proof.Response.Verdict != "ALLOW" || proof.Response.ReasonCode != "PROOF_VALID" {
+		t.Fatalf("activated cross-domain proof=%+v err=%v", proof.Response, err)
+	}
+	var proofClaims int64
+	if err := billingPool.QueryRow(ctx, `SELECT count(*) FROM billing_approval_proof_claims`).Scan(&proofClaims); err != nil || proofClaims != 0 {
+		t.Fatalf("proof issuance wrote a claim: %d err=%v", proofClaims, err)
 	}
 
 	// Rolling the activation row back closes the command again with no history
