@@ -38,9 +38,10 @@
 #      zero active swap (probe data: some ubuntu-22.04 boots ship /swapfile
 #      but leave it inactive), activate it so a zram failure degrades to
 #      "plain swap" instead of "7.8 GiB RAM and nothing else".
-#   4. zswap in front of whatever swap remains, enabled only when no
-#      /dev/zram swap is active, so the "compress in RAM first" layer
-#      exists exactly once.
+#   4. zswap in front of whatever swap remains: enabled only when no
+#      /dev/zram swap is active, and disabled again when zram is active
+#      (stock Ubuntu kernels ship zswap enabled by default), so the
+#      "compress in RAM first" layer exists exactly once.
 #
 # Environment switches:
 #   PINVOU3_CI_DISABLE_ZRAM=1      skip zram entirely (explicit opt-out for
@@ -69,13 +70,22 @@ set -uo pipefail
 log() { echo "[memory-setup] $*"; }
 # Surface degradation warnings as GitHub step annotations when running in
 # Actions: the workflow-side wrapper only annotates the outer 240s timeout,
-# so an in-script degradation would otherwise be step-log-only. Outside
-# Actions (self-hosted debugging) keep plain stderr text.
+# so an in-script degradation would otherwise be step-log-only. Every call
+# site passes GITHUB_ACTIONS through sudo (--preserve-env) so this branch
+# actually engages; outside Actions (manual runs) keep plain stderr text.
 if [[ ${GITHUB_ACTIONS:-} == true ]]; then
-  warn() { echo "::warning::[memory-setup] $*" >&2; }
+  # Workflow commands are single-line: captured stderr (multi-line tool
+  # output) must be folded or the annotation is cut at the first newline.
+  warn() { echo "::warning::[memory-setup] ${*//$'\n'/ }" >&2; }
 else
   warn() { echo "[memory-setup] WARNING: $*" >&2; }
 fi
+
+# Steps that normally recover a few lines later (first modprobe miss on
+# hosted images, and the image-swap pre-activation belonging to that same
+# recovery) must not burn a standing ::warning annotation on every job;
+# keep them visible in the log only. Unrecovered failures still use warn.
+warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }
 
 if [[ ${EUID} -ne 0 ]]; then
   warn "must run as root (invoke as: sudo bash scripts/ci-memory-setup.sh)"
@@ -126,14 +136,14 @@ setup_zram() {
   # in the warning so the actual failure reason survives in the log.
   local modprobe_err
   if ! modprobe_err="$(run_to 60 modprobe zram 2>&1)"; then
-    warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}}; installing linux-modules-extra-$(uname -r) and retrying"
+    warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}}; installing linux-modules-extra-$(uname -r) and retrying"
     # The module-install path (apt-get, up to minutes) is the slowest stretch
     # of this script and the only one the workflow-side `timeout 240` can
     # realistically interrupt. Activate the image swapfile BEFORE it, so a
     # mid-apt kill degrades to "plain swap" and never to zero swap; if zram
     # comes up afterwards it simply takes over as the higher-priority layer.
     if ! any_swap_active; then
-      warn "no swap active; activating the image swapfile before the slow module install"
+      warn_recoverable "no swap active; activating the image swapfile before the slow module install"
       activate_image_swap_fallback
     fi
     if ! run_to 120 apt-get update -qq; then
@@ -269,7 +279,8 @@ setup_disk_swap() {
     # swapoff of a large active swapfile can take minutes; the cap keeps it
     # bounded and on timeout the swap simply stays active (kept below).
     if run_to 120 swapoff /mnt/swapfile 2>/dev/null; then
-      rm -f /mnt/swapfile
+      # Only claim removal in removed_note if it actually happened.
+      rm -f /mnt/swapfile || removed_note=""
       removed_note=" (the previous /mnt/swapfile was removed)"
     else
       warn "could not swapoff the active /mnt/swapfile; keeping it as is instead of rebuilding"
@@ -359,7 +370,8 @@ fi
 if swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'; then
   # Keep the "compress in RAM first" layer to exactly one: stock Ubuntu
   # kernels ship zswap enabled by default, and left on it would sit in
-  # front of zram and compress every swapped page twice (zstd, then lz4).
+  # front of zram and compress every swapped page twice (zswap's default
+  # compressor, then lz4 again).
   if [[ -d /sys/module/zswap/params ]]; then
     if echo 0 >/sys/module/zswap/params/enabled 2>/dev/null; then
       log "zswap disabled (zram is the single compress-in-RAM layer)"

@@ -566,7 +566,7 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         self.assertIn(
-            'sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+            'sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
             rust_test,
         )
         self.assertNotIn("ci-memguard", self.pr_workflow)
@@ -620,10 +620,13 @@ class CiGatePolicyTests(unittest.TestCase):
             # 一道防线)。漏写包装的 job 挂死时会烧满整个 job 时限,守卫
             # 在此强制每个调用点结构一致。
             self.assertIn(
-                'run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+                'run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
                 job,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
-                " 'timeout --kill-after=15 240' (userspace hang backstop)",
+                " 'timeout --kill-after=15 240' (userspace hang backstop) and"
+                " pass GITHUB_ACTIONS through sudo (sudo env_reset strips it,"
+                " which would silently disable the script's ::warning"
+                " annotations)",
             )
             self.assertIn(
                 '|| echo "::warning::ci-memory-setup',
@@ -631,6 +634,31 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
                 " (degrade to stock runner memory with a ::warning)",
             )
+
+    def test_memory_setup_script_pins_annotations_and_honest_degradation(self):
+        # #1149 复审跟进:此前该脚本只有 workflow 调用结构被钉住,脚本内容
+        # 零覆盖——「声称保留实已删除」这类误导文案的回归现有测试抓不住。
+        # 这里钉住三类锚点:zswap 关闭(压缩在内存中的层只允许存在一份)、
+        # ::warning:: 注解及其单行约束、诚实失败文案。
+        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        # zram 激活时必须显式关闭 zswap,否则存量 Ubuntu 内核默认开启的
+        # zswap 会在 zram 前对每个换出页双重压缩。
+        self.assertIn("echo 0 >/sys/module/zswap/params/enabled", source)
+        # Actions 下降级告警必须是步骤注解,且注解载荷必须折叠换行
+        # (workflow command 是单行协议,换行处会被截断)。
+        self.assertIn('echo "::warning::[memory-setup] ${*//$', source)
+        self.assertIn("${*//$'\\n'/ }", source)
+        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活)只进日志,
+        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。
+        self.assertIn("warn_recoverable() {", source)
+        self.assertIn(
+            'warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
+            source,
+        )
+        # 磁盘 swap 重建失败必须携带诊断与 removed_note,且不得再出现
+        # 「声称保留既有 swap 配置」的旧误导文案。
+        self.assertIn("removed_note", source)
+        self.assertNotIn("keeping the existing swap configuration", source)
 
     def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):
         # 发布构建 job(单盘 hosted runner,x64 开机仅 ~13-14G 可用)必须在
