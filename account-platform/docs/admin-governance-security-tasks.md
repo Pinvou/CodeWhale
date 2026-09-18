@@ -51,7 +51,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-26 | APT-141 | 应收核销实现与领域 E2E | GSA-25 | CODE | PENDING |
 | GSA-27 | APT-141 | 支付财务修复领域设计 | GSA-26 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-28 | APT-141 | 支付财务修复实现与领域 E2E | GSA-27 | CODE | PENDING |
-| GSA-29 | APT-141 | 退款异常修复领域设计 | GSA-28 | DESIGN | PENDING |
+| GSA-29 | APT-141 | 退款异常修复领域设计 | GSA-28 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-30 | APT-141 | 退款异常修复实现与领域 E2E | GSA-29 | CODE | PENDING |
 | GSA-31 | APT-141 | 拒付财务修复领域设计 | GSA-30 | DESIGN | PENDING |
 | GSA-32 | APT-141 | 拒付财务修复实现与领域 E2E | GSA-31 | CODE | PENDING |
@@ -275,6 +275,8 @@ GSA-22 proof-era Billing 授权顺序修复切片：真实跨域 E2E 首次把 p
 GSA-22 正向跨域领域 E2E 切片（仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：真实 Account+Billing 库跑通 activation→签名 proof 审批→授权 outbox sidecar→生产 relay（`ClaimFrozen`/`ProcessFrozen`）→专属 durable raw consumer→Billing 成对账本→Account `EXECUTED`/`TERMINAL_CONFIRMED`→同事件重放幂等的全链路（定向用例 PASS 30.21s，清理后复跑 PASS 13.16s）。过程中修复四个真实产品缺口：①proof-era Billing 必须先 grant 再 begin（`1cb18056`）；②消费者闭合目标校验漏本命令（`50964037`）；③`ClaimBillingApprovalProof` 硬编码 `SnapshotSchemaVersion=1` 且 `FOR SHARE` 需要运行时没有的 UPDATE 权限（改为按命令取闭合 schema 版本、claim 只依赖唯一约束与前后 activation 复读）；④proof claim 的 `command_type` CHECK（`000055`）不含本命令，按"迁移不可改"新增前向 `000059` 放宽该约束（guard 校验迁移身份、schema owner 分离与 v2 activation 行；down forward-only），并登记 migration manifest（330 项）。另外消费者按设计用 `approvalencoding.LegacyExecutionInput` 把 typed wire 归一化回领域 JSON 数字契约，再交给 Account/领域与 `validApprovedAuthorizationCommand` 比较（原本直接使用 typed 值会导致 begin `RESOURCE_VERSION_CHANGED`）。仍未完成：业务页 presenter 与生产激活（activation 行仍 `INACTIVE`，未部署）。
 
 GSA-27 支付财务修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED）：新增[支付财务修复领域设计](payment-financial-repair-design.md)首版。事实：该命令只有Account v1策略元数据与Billing `('PAYMENT_FINANCIAL_REPAIR',1,1,'INACTIVE',1)`，静态不可执行且无handler/proof/executor/consumer；既有"已确认支付但未入账"修复由`reconciliation.go`的`MANUAL_REPAIR`路径完成（写`REPAIR_CREDIT` journal、钱包/package入账，并向`payment_order_repairs`追加一次性审计行：订单/交易/证据、actor、reason、provider快照、唯一package、`points_awarded>0`与`wallet_balance_before/after`上下界，`ON CONFLICT (payment_transaction_id) DO NOTHING`）；拒付、退款/强制退款、延迟支付评审与对账案件各有独立路径。文档同时锁定账本不可改写不变量（见账本修复设计§2）并列出五项待用户决策（首版范围、外部证据、写入边界、未知结果与只读查证、幂等与限额），明确默认`INACTIVE`且不得改写历史账本或支付事实。本切片不改任何代码、迁移、合同或activation。
+
+GSA-29 退款异常修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED）：新增[退款异常修复领域设计](refund-exception-repair-design.md)首版。事实：该命令只有Account v1策略元数据与Billing `('REFUND_EXCEPTION_REPAIR',1,1,'INACTIVE',1)`，静态不可执行且无handler/proof/executor/consumer；普通退款由`refunds`三重唯一键（`merchant_refund_no`/`channel_refund_id`/`idempotency_key`）与`REQUESTED/SUCCEEDED/FAILED/MANUAL_REVIEW`状态机冻结，金额按package当前有效组件（BASE可退、BONUS不可退）并受未结应收阻塞；强制退款由`forced_refund_cases`（唯一`payment_evidence_id`、`provider_refund_id`、`entitlement_snapshot`、`REVIEW_REQUIRED/RESOLVED`、`UNIQUE(payment_transaction_id,provider_refund_id)`与组合外键）承载，拒付与退款消费者另有独立路径。文档锁定账本不可改写不变量并列出五项待用户决策（首版范围、外部证据、写入边界、未知结果与只读查证、幂等与限额），明确默认`INACTIVE`、不得开放普通退款入口、不得改写历史退款/账本或支付事实。本切片不改任何代码、迁移、合同或activation。
 
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
