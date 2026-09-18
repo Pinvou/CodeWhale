@@ -394,6 +394,8 @@ func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) 
 		return event.TargetResourceType == "PAYMENT_PROVIDER_CONTROL" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	case "PAYMENT_PRODUCT_RESUME":
 		return event.TargetResourceType == "PAYMENT_PRODUCT_CONTROL" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
+	case entitlementComponentAdjustmentCommand:
+		return event.TargetResourceType == "ENTITLEMENT_PACKAGE" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	default:
 		return false
 	}
