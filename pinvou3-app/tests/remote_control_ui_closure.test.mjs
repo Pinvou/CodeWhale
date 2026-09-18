@@ -113,3 +113,27 @@ test('the bridge subscribes the journal stream and exposes the A-side commands',
   }
   assert.ok(bridge.includes('desktop_remote_controller_capability_send'));
 });
+
+test('bounded command failures keep their code for the UI copy', () => {
+  const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
+  assert.ok(bridge.includes('function asBoundedError'), 'bounded errors are restored');
+  assert.ok(bridge.includes('error.code = text'));
+  // A 端连接/会话/能力/任务/断开路径都必须恢复错误码。
+  for (const command of [
+    'desktop_remote_controller_connect',
+    'desktop_remote_controller_disconnect',
+    'desktop_remote_controller_session_open',
+    'desktop_remote_controller_capability_send',
+    'desktop_remote_controller_task_send',
+    'desktop_remote_controller_task_cancel_send',
+    'desktop_remote_controller_apply_capability_snapshot',
+  ]) {
+    const index = bridge.indexOf(`"${command}"`);
+    assert.ok(index >= 0, `${command} must be invoked`);
+    const chain = bridge.slice(index, index + 700);
+    assert.ok(
+      chain.includes('asBoundedError'),
+      `${command} must map failures to a bounded error code`,
+    );
+  }
+});

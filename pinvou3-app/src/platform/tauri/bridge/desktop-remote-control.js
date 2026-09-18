@@ -189,7 +189,19 @@
       var intent = controllerIntent();
       return invoke("desktop_remote_controller_connect", { code: code }).then(function (result) {
         return applyController(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /**
+     * A 端命令以有界错误码失败；Tauri 把 `Err(String)` 变成只有 message 的错误，
+     * 这里把码恢复成 `error.code`，UI 才能给出对应的三语文案而不是笼统兜底。
+     */
+    function asBoundedError(failure) {
+      var raw = (failure && failure.code) || (failure && failure.message) || "";
+      var text = String(raw || "desktop_remote_control_failed");
+      var error = new Error(text);
+      error.code = text;
+      return error;
     }
 
     function controllerDisconnect() {
@@ -197,7 +209,7 @@
       var intent = controllerIntent();
       return invoke("desktop_remote_controller_disconnect", {}).then(function (result) {
         return applyController(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controllerStatus() {
@@ -224,7 +236,7 @@
         mode: mode || "chat",
       }).then(function (result) {
         return applyControllerSession(result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controllerSessionState(remoteRef) {
@@ -245,7 +257,8 @@
     /** E2E-04：构造并加密发送能力快照请求（A 端拿到 revision 后才能发任务）。 */
     function controllerCapabilitySend(remoteRef) {
       ensureAvailable();
-      return invoke("desktop_remote_controller_capability_send", { remoteRef: remoteRef });
+      return invoke("desktop_remote_controller_capability_send", { remoteRef: remoteRef })
+        .catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controllerApplyCapabilitySnapshot(remoteRef, payload) {
@@ -259,7 +272,7 @@
         // 约定映射；wire 字段名不会泄漏到状态。
         publish(logic.applyCapabilities(current(), capabilitySnapshotForUi(body)));
         return applyControllerSession(result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function descriptorList(value, idKey) {
@@ -317,7 +330,7 @@
       return invoke("desktop_remote_controller_task_send", {
         remoteRef: remoteRef,
         text: String(text || ""),
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controllerTaskCancelSend(remoteRef, taskId) {
@@ -325,7 +338,7 @@
       return invoke("desktop_remote_controller_task_cancel_send", {
         remoteRef: remoteRef,
         taskId: taskId,
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function applyControllerSession(result) {
