@@ -1307,7 +1307,8 @@
   }
 
   // The same Rust owner guards both button/shortcut starts and cross-window Alt routing.
-  // Missing native support fails closed before microphone acquisition.  function currentVoiceWindowLabel() {
+  // Missing native support fails closed before microphone acquisition.
+  function currentVoiceWindowLabel() {
     try {
       const windowApi = window.__TAURI__ && window.__TAURI__.window;
       if (!windowApi || typeof windowApi.getCurrentWindow !== "function") return "";
