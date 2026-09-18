@@ -73,8 +73,10 @@ impl ToolSpec for ImageOcrTool {
 /// tool occupied an executor thread (and the turn) for as long as the
 /// backend felt like taking. The bounded wrapper runs the sync work on the
 /// blocking pool and hands control back to the caller when the deadline
-/// fires; a wedged backend keeps its blocking thread until it returns, but
-/// the tool call itself is bounded.
+/// fires; a wedged backend keeps its blocking thread (and any tesseract
+/// child it spawned) running until it returns on its own, but the tool
+/// call itself is bounded. Known, disclosed trade-off: neither the FFI
+/// call nor the orphaned child can be killed mid-flight.
 const OCR_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) async fn ocr_image_path_bounded(image_path: PathBuf) -> Result<String, ToolError> {

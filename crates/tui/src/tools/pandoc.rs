@@ -60,15 +60,15 @@ pub(crate) const SUPPORTED_TARGET_FORMATS: &[&str] = &[
     "asciidoc",   // AsciiDoc
 ];
 
-/// Tool implementing `pandoc_convert`. Converts a source file into
-/// a target format and either writes the output to disk or returns
-/// the converted text inline.
 /// Wall-clock bound for one pandoc conversion: a pathological document
 /// (giant epub, pathological LaTeX) otherwise blocked an executor thread
 /// for as long as pandoc felt like taking. Mirrors the 600s interpreter
 /// budget used by js_execution / code_execution.
 const PANDOC_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Tool implementing `pandoc_convert`. Converts a source file into
+/// a target format and either writes the output to disk or returns
+/// the converted text inline.
 pub struct PandocConvertTool;
 
 #[async_trait]
