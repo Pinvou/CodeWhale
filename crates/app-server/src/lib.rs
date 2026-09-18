@@ -205,6 +205,10 @@ struct RuntimeBridge {
 struct RuntimeThreadHint {
     model: Option<String>,
     workspace: Option<PathBuf>,
+    /// Accessible roots declared on the stdio thread record. The hint is the
+    /// only carrier between that record and the runtime thread every bridged
+    /// turn actually executes on.
+    workspace_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1333,6 +1337,15 @@ async fn record_stdio_thread_hint(state: &AppState, response: &ThreadResponse) {
         RuntimeThreadHint {
             model: response.model.clone(),
             workspace: response.cwd.clone(),
+            // A `thread/start` declaring `workspace_roots` stores the full set
+            // on the parent record; the turn-executing runtime thread is
+            // created from this hint, so dropping the set here would deny or
+            // prompt writes under attached roots while `thread/read` still
+            // reports them.
+            workspace_roots: response
+                .thread
+                .as_ref()
+                .map_or_else(Vec::new, |thread| thread.workspace_roots.clone()),
         },
     );
 }
@@ -1510,7 +1523,7 @@ impl RuntimeBridge {
         }
         let hint = hint.unwrap_or_default();
         let runtime_thread_id = self
-            .create_runtime_thread(hint.model, hint.workspace)
+            .create_runtime_thread(hint.model, hint.workspace, hint.workspace_roots)
             .await?;
         self.thread_map
             .insert(stdio_thread_id.to_string(), runtime_thread_id.clone());
@@ -1529,16 +1542,25 @@ impl RuntimeBridge {
         &mut self,
         model: Option<String>,
         workspace: Option<PathBuf>,
+        workspace_roots: Vec<PathBuf>,
     ) -> Result<String> {
+        let mut body = json!({
+            "model": model,
+            "workspace": workspace,
+            "mode": "agent",
+            "archived": false,
+        });
+        if !workspace_roots.is_empty() {
+            // Every bridged turn runs on this runtime thread, not on the
+            // stdio record that declared the roots, so the set has to travel
+            // with the create request. An empty set stays off the wire: it
+            // degenerates to the workspace root on the runtime side.
+            body["workspace_roots"] = json!(workspace_roots);
+        }
         let record = self
             .request_json(
                 self.authed(self.client.post(format!("{}/v1/threads", self.base_url)))
-                    .json(&json!({
-                        "model": model,
-                        "workspace": workspace,
-                        "mode": "agent",
-                        "archived": false,
-                    })),
+                    .json(&body),
             )
             .await?;
         let thread_id = extract_runtime_thread_id(&record)?.to_string();
@@ -3166,6 +3188,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_thread_start_records_the_declared_roots_in_the_hint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+
+        let started = dispatch_stdio_request(
+            &state,
+            "thread/start",
+            json!({
+                "cwd": "/tmp/codewhale-primary",
+                "workspace_roots": ["/tmp/codewhale-shared"]
+            }),
+        )
+        .await
+        .expect("start thread");
+        let thread_id = started.result["thread_id"]
+            .as_str()
+            .expect("thread id")
+            .to_string();
+
+        let hints = state.stdio_thread_hints.lock().await;
+        let hint = hints.get(&thread_id).expect("hint recorded");
+        assert_eq!(
+            hint.workspace_roots,
+            vec![
+                PathBuf::from("/tmp/codewhale-primary"),
+                PathBuf::from("/tmp/codewhale-shared")
+            ],
+            "the hint is the only way the declared set reaches the runtime thread"
+        );
+        assert_eq!(
+            hint.workspace.as_deref(),
+            Some(Path::new("/tmp/codewhale-primary"))
+        );
+    }
+
+    #[tokio::test]
     async fn stdio_resume_of_missing_thread_fails_without_clobbering_the_hint() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
@@ -3182,6 +3242,7 @@ mod tests {
                 RuntimeThreadHint {
                     model: Some("deepseek-v4-pro".to_string()),
                     workspace: Some(workspace.clone()),
+                    ..RuntimeThreadHint::default()
                 },
             );
         }
@@ -3514,6 +3575,13 @@ mod tests {
         async fn create_thread(Json(body): Json<Value>) -> Json<Value> {
             assert_eq!(body["model"], "deepseek-v4");
             assert_eq!(body["workspace"], "/tmp/codewhale-stdio");
+            // A multi-root stdio thread must create a multi-root runtime
+            // thread: this is the only place the declared set can reach the
+            // thread every bridged turn executes on.
+            assert_eq!(
+                body["workspace_roots"],
+                json!(["/tmp/codewhale-stdio", "/tmp/codewhale-shared"])
+            );
             Json(json!({
                 "id": "thr_runtime",
                 "model": body["model"].clone(),
@@ -3540,6 +3608,10 @@ mod tests {
                 Some(RuntimeThreadHint {
                     model: Some("deepseek-v4".to_string()),
                     workspace: Some(PathBuf::from("/tmp/codewhale-stdio")),
+                    workspace_roots: vec![
+                        PathBuf::from("/tmp/codewhale-stdio"),
+                        PathBuf::from("/tmp/codewhale-shared"),
+                    ],
                 }),
             )
             .await
@@ -3552,6 +3624,46 @@ mod tests {
             bridge.thread_map.get("legacy_thread").map(String::as_str),
             Some("thr_runtime")
         );
+    }
+
+    #[tokio::test]
+    async fn stdio_runtime_bridge_omits_an_empty_root_set() {
+        async fn create_thread(Json(body): Json<Value>) -> Json<Value> {
+            assert!(
+                body.get("workspace_roots").is_none(),
+                "a single-root hint must keep the historical frame: {body}"
+            );
+            Json(json!({ "id": "thr_single" }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let app = Router::new().route("/v1/threads", post(create_thread));
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test runtime");
+        });
+
+        let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+        let runtime_id = bridge
+            .ensure_runtime_thread(
+                "single_root_thread",
+                Some(RuntimeThreadHint {
+                    model: Some("deepseek-v4".to_string()),
+                    workspace: Some(PathBuf::from("/tmp/codewhale-single")),
+                    workspace_roots: Vec::new(),
+                }),
+            )
+            .await
+            .expect("runtime thread");
+        server.abort();
+        let _ = server.await;
+
+        assert_eq!(runtime_id, "thr_single");
     }
 
     // ── prompt routing runs a real turn ────────────────────────────────
