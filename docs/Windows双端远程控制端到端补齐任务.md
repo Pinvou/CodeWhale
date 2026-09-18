@@ -259,6 +259,14 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
    `controller_resume_activation_ack`/`controller_post_activation_liveness`/
    `controller_resume_ready_ack` 接到各自的 `ControllerResumeGate`，并在
    `controller_resumed` 后重新派生业务密钥（租约 epoch 变化）。
+   - 本轮已落地的前置（见 9.4）：B 注册补 `resume_v1`、恢复确认 AEAD、通道
+     挂起/激活、A 端相位推进、出站帧构造；**剩余**为 A/B 两侧运行时循环接线
+     （断线后驱动 `ControllerResumeGate` 并按序收发六种恢复帧）。
+   - 已核对 Relay `controller-lease.js:completeResume`：恢复**不改变**
+     `lease_epoch`/`connection_id` 等业务密钥派生输入，只轮换 liveness epoch、
+     恢复令牌与 deadline。因此 `controller_resumed` 后无需重新派生业务密钥，
+     复用同一 lease 上下文与其业务通道即可；任务文档原先「租约 epoch 变化」
+     的假设不成立，此处按实测行为登记更正。
 4. **B 停止/刷新清理闭环**：把 `ControlledDeviceManager::register_cleanup_sink`
    接到任务/权限/传输/临时模型注册表（`RemoteTaskHooks` 的清理入口），确保
    stop/refresh/远端断开都会清空远端任务与凭证；当前 `fail_operation` 已触发
@@ -269,6 +277,16 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | 提交 | 内容 |
 |---|---|
 | `8d372e8a9` | 显式断开闭环（见 9.1 说明） |
+
+### 9.4 本轮 resume 接线进展（E2E-06 第 3 步）
+
+| 提交 | 内容 |
+|---|---|
+| `f4c3ea9b` | B 端注册声明 `resume_v1`；新增「A claim 与 B 注册能力族一致」用例，锁定七族交集不再静默缺项 |
+| `c686550d` | 恢复原语：`ResumeConfirmCipher`（resume 秘密 AEAD，AAD 绑租约五元组 + activation_id，明文带域标签/activation_id/发送角色，并派生恢复后轮换指纹）；`EncryptedLane` 保留密钥材料并新增 `suspend`/`activate`（恢复期业务与存活帧失败关闭，确认帧不受影响）；敏感恢复队列放行 `controller_resume_ready_ack`；`ControllerResumeGate` 补 A 角色相位推进（Relay confirmed → PostActivationLiveness，B 侧幂等） |
+| `75b30972` | 恢复出站帧纯构造：`new_resume_challenge`/`build_controller_resume_prepare`/`build_controller_resume_ready_ack`，逐帧过冻结 schema，畸形输入失败关闭 |
+
+验证：`cargo test remote_control::` 319 通过 / 0 失败；`cargo test remote_control::controller::` 228 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
 
 ## 10. E2E-07 实施进度（进行中，未审核）
 
