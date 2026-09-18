@@ -1,6 +1,7 @@
 pub(crate) mod capabilities;
 pub(crate) mod controlled;
 pub(crate) mod controlling;
+pub(crate) mod controlling_handshake;
 pub(crate) mod crypto;
 pub(crate) mod history;
 pub(crate) mod journal;

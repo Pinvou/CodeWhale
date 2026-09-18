@@ -1,0 +1,559 @@
+//! A 端 claim 与安全握手序列（E2E-02）。
+//!
+//! 本模块只负责「按冻结协议推进握手状态」：不拥有网络、不拥有连接状态。
+//! 调用方（`desktop_remote_controller` 的 worker）把消息喂进来、把返回的
+//! 消息发出去。顺序错乱、角色不符、绑定不匹配、验签失败一律失败关闭，
+//! 且半握手不会产生任何可安装的租约材料。
+
+use base64::Engine as _;
+use serde_json::{json, Value};
+
+use super::crypto::{
+    authenticate_relay_transcript, AuthenticatedRelayTrustConfig, ControllerRole, FinishedReceiver,
+    FinishedSender, HandshakeBinding, HandshakeKeyPair, HandshakePublicKey, ReceiptSecret,
+    SessionKeys,
+};
+use super::protocol::{
+    parse_controller_pairing_transcript, validate_controller_message_json, SenderRole,
+};
+
+/// A 端 claim 声明的能力集合（与冻结协议常量保持一致的最小集）。
+const CLAIM_CAPABILITIES: &[&str] = &[
+    "pairing_v1",
+    "encrypted_frames_v1",
+    "finished_receipt_v1",
+    "role_liveness_v1",
+    "resume_v1",
+];
+const RESERVATION_TIMEOUT_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct HandshakeError {
+    pub(crate) code: &'static str,
+}
+
+impl HandshakeError {
+    fn new(code: &'static str) -> Self {
+        Self { code }
+    }
+}
+
+type Result<T> = std::result::Result<T, HandshakeError>;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum HandshakeStage {
+    Claimed,
+    Reserved,
+    CommitSent,
+    FinishedSent,
+    Joined,
+}
+
+/// Relay 在 `controller_joined` 中下发的租约身份。业务密钥仍由调用方用
+/// `into_role_ciphers` 在拿到真实 `LeaseBinding` 之后派生。
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct JoinedLease {
+    pub(crate) connection_id: String,
+    pub(crate) controller_lease_id: String,
+    pub(crate) lease_epoch: u64,
+    pub(crate) relay_epoch: String,
+    pub(crate) remote_control_generation: String,
+    pub(crate) resume_token_b64: String,
+}
+
+pub(crate) struct ControllingHandshake {
+    request_id: String,
+    claim_request_id: String,
+    pairing_code: String,
+    handshake: Option<HandshakeKeyPair>,
+    trust: AuthenticatedRelayTrustConfig,
+    binding: Option<HandshakeBinding>,
+    transcript_hash_hex: String,
+    pairing_id: String,
+    reservation_id: String,
+    relay_epoch: String,
+    generation: String,
+    session: Option<SessionKeys>,
+    finished: Option<(FinishedSender, FinishedReceiver)>,
+    receipt: Option<ReceiptSecret>,
+    peer_commitment: Option<String>,
+    stage: HandshakeStage,
+}
+
+impl ControllingHandshake {
+    pub(crate) fn new(
+        request_id: impl Into<String>,
+        claim_request_id: impl Into<String>,
+        pairing_code: impl Into<String>,
+        handshake: HandshakeKeyPair,
+        trust: AuthenticatedRelayTrustConfig,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            claim_request_id: claim_request_id.into(),
+            pairing_code: pairing_code.into(),
+            handshake: Some(handshake),
+            trust,
+            binding: None,
+            transcript_hash_hex: String::new(),
+            pairing_id: String::new(),
+            reservation_id: String::new(),
+            relay_epoch: String::new(),
+            generation: String::new(),
+            session: None,
+            finished: None,
+            receipt: None,
+            peer_commitment: None,
+            stage: HandshakeStage::Claimed,
+        }
+    }
+
+    pub(crate) fn stage(&self) -> HandshakeStage {
+        self.stage
+    }
+
+    /// `controller_pairing_claim`：声明本端握手公钥与所需能力。
+    pub(crate) fn claim(&self) -> Result<Value> {
+        let handshake = self
+            .handshake
+            .as_ref()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let value = json!({
+            "v": 1,
+            "type": "controller_pairing_claim",
+            "request_id": self.request_id,
+            "claim_request_id": self.claim_request_id,
+            "pairing_code": self.pairing_code,
+            "handshake_public_key_b64": base64::engine::general_purpose::STANDARD
+                .encode(handshake.public_key().to_bytes()),
+            "key_algorithm": "x25519",
+            "capabilities": CLAIM_CAPABILITIES,
+        });
+        validate_controller_message_json(&value.to_string(), SenderRole::ControllerA)
+            .map_err(|_| HandshakeError::new("controller_claim_invalid"))
+    }
+
+    /// 处理 `controller_pairing_reserved`：验签 transcript、派生会话密钥、
+    /// 生成 receipt 并返回 `finished_receipt_commit`。
+    pub(crate) fn accept_reserved(&mut self, message: &Value) -> Result<Value> {
+        self.require_stage(HandshakeStage::Claimed)?;
+        let parsed = parse_controller_pairing_transcript(&message.to_string())
+            .map_err(|_| HandshakeError::new("controller_transcript_invalid"))?;
+        let context = authenticate_relay_transcript(&self.trust, parsed)
+            .map_err(|_| HandshakeError::new("controller_transcript_untrusted"))?;
+        let transcript_hash = context
+            .transcript_hash_bytes()
+            .map_err(|_| HandshakeError::new("controller_transcript_invalid"))?;
+        let binding = HandshakeBinding::new(
+            context.relay_epoch(),
+            context.pairing_id(),
+            context.reservation_id(),
+            transcript_hash,
+        )
+        .map_err(|_| HandshakeError::new("controller_transcript_invalid"))?;
+        let peer = decode_public_key(context.peer_handshake_public_key_b64())
+            .ok_or_else(|| HandshakeError::new("controller_transcript_invalid"))?;
+        let keypair = self
+            .handshake
+            .take()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let session = keypair
+            .into_session_keys(peer, &binding)
+            .map_err(|_| HandshakeError::new("controller_handshake_key_invalid"))?;
+        let finished = session.finished_pair(ControllerRole::A);
+        let receipt = ReceiptSecret::generate()
+            .map_err(|_| HandshakeError::new("controller_receipt_generation_failed"))?;
+        let commitment = receipt
+            .commitment(&binding, ControllerRole::A)
+            .map_err(|_| HandshakeError::new("controller_commitment_failed"))?;
+        self.transcript_hash_hex = hex_lower(&transcript_hash);
+        self.pairing_id = context.pairing_id().to_owned();
+        self.reservation_id = context.reservation_id().to_owned();
+        self.relay_epoch = context.relay_epoch().to_owned();
+        self.generation = context.remote_control_generation().to_owned();
+        let commit = self.envelope(
+            "finished_receipt_commit",
+            json!({ "sender_role": "A", "commitment": hex_lower(&commitment) }),
+        )?;
+        self.binding = Some(binding);
+        self.session = Some(session);
+        self.finished = Some(finished);
+        self.receipt = Some(receipt);
+        self.stage = HandshakeStage::Reserved;
+        validate_controller_message_json(&commit.to_string(), SenderRole::ControllerA)
+            .map_err(|_| HandshakeError::new("controller_commit_invalid"))
+    }
+
+    /// 处理对端 `finished_receipt_commit` 并返回 `encrypted_handshake_finished`。
+    pub(crate) fn accept_peer_commitment(&mut self, message: &Value) -> Result<Value> {
+        self.require_stage(HandshakeStage::Reserved)?;
+        self.assert_peer_envelope(message, "finished_receipt_commit", "B")?;
+        let commitment = message
+            .get("commitment")
+            .and_then(Value::as_str)
+            .filter(|value| is_lower_hex(value, 64))
+            .ok_or_else(|| HandshakeError::new("controller_commit_invalid"))?
+            .to_owned();
+        let (sender, _) = self
+            .finished
+            .take()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let receipt = self
+            .receipt
+            .as_ref()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let sealed = sender
+            .seal(receipt)
+            .map_err(|_| HandshakeError::new("controller_finished_seal_failed"))?;
+        let finished = self.envelope(
+            "encrypted_handshake_finished",
+            json!({
+                "sender_role": "A",
+                "ciphertext_b64": base64::engine::general_purpose::STANDARD.encode(&sealed),
+                "ciphertext_bytes": sealed.len().to_string(),
+            }),
+        )?;
+        self.peer_commitment = Some(commitment);
+        self.stage = HandshakeStage::CommitSent;
+        validate_controller_message_json(&finished.to_string(), SenderRole::ControllerA)
+            .map_err(|_| HandshakeError::new("controller_finished_invalid"))
+    }
+
+    /// 处理对端 `encrypted_handshake_finished`：校验 receipt commitment 与
+    /// 握手期提交一致后返回 `finished_receipt_ack`。
+    pub(crate) fn accept_peer_finished(&mut self, message: &Value) -> Result<Value> {
+        self.require_stage(HandshakeStage::CommitSent)?;
+        self.assert_peer_envelope(message, "encrypted_handshake_finished", "B")?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(
+                message
+                    .get("ciphertext_b64")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| HandshakeError::new("controller_finished_invalid"))?,
+            )
+            .map_err(|_| HandshakeError::new("controller_finished_invalid"))?;
+        let binding = self
+            .binding
+            .clone()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let (_, receiver) = self
+            .finished
+            .take()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let peer_receipt = receiver
+            .open(&ciphertext)
+            .map_err(|_| HandshakeError::new("controller_finished_invalid"))?;
+        let commitment = peer_receipt
+            .commitment(&binding, ControllerRole::B)
+            .map_err(|_| HandshakeError::new("controller_commitment_failed"))?;
+        if self.peer_commitment.as_deref() != Some(hex_lower(&commitment).as_str()) {
+            return Err(HandshakeError::new("controller_commitment_mismatch"));
+        }
+        let receipt = self
+            .receipt
+            .as_ref()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
+        let ack = self.envelope(
+            "finished_receipt_ack",
+            json!({
+                "sender_role": "A",
+                "receiver_role": "B",
+                "receipt_secret_b64": receipt.to_base64(),
+            }),
+        )?;
+        self.stage = HandshakeStage::FinishedSent;
+        validate_controller_message_json(&ack.to_string(), SenderRole::ControllerA)
+            .map_err(|_| HandshakeError::new("controller_ack_invalid"))
+    }
+
+    /// 处理 `controller_joined`：只有走到这里才产生租约身份，调用方随后用
+    /// `take_session` 派生业务密钥并安装租约。
+    pub(crate) fn accept_joined(&mut self, message: &Value) -> Result<JoinedLease> {
+        self.require_stage(HandshakeStage::FinishedSent)?;
+        let validated = validate_controller_message_json(&message.to_string(), SenderRole::Relay)
+            .map_err(|_| HandshakeError::new("controller_joined_invalid"))?;
+        if validated.get("type").and_then(Value::as_str) != Some("controller_joined") {
+            return Err(HandshakeError::new("controller_joined_invalid"));
+        }
+        for (field, expected) in [
+            ("pairing_id", self.pairing_id.as_str()),
+            ("reservation_id", self.reservation_id.as_str()),
+            ("relay_epoch", self.relay_epoch.as_str()),
+            ("transcript_hash", self.transcript_hash_hex.as_str()),
+        ] {
+            if validated.get(field).and_then(Value::as_str) != Some(expected) {
+                return Err(HandshakeError::new("controller_joined_binding_mismatch"));
+            }
+        }
+        let string = |field: &'static str| -> Result<String> {
+            validated
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| HandshakeError::new("controller_joined_invalid"))
+        };
+        let lease_epoch = string("lease_epoch")?
+            .parse::<u64>()
+            .map_err(|_| HandshakeError::new("controller_joined_invalid"))?;
+        if lease_epoch == 0 {
+            return Err(HandshakeError::new("controller_joined_invalid"));
+        }
+        self.stage = HandshakeStage::Joined;
+        Ok(JoinedLease {
+            connection_id: string("connection_id")?,
+            controller_lease_id: string("controller_lease_id")?,
+            lease_epoch,
+            relay_epoch: string("relay_epoch")?,
+            remote_control_generation: string("remote_control_generation")?,
+            resume_token_b64: string("resume_token_b64")?,
+        })
+    }
+
+    /// 握手成功后交出会话密钥，供调用方用真实 `LeaseBinding` 派生业务密钥。
+    pub(crate) fn take_session(&mut self) -> Result<SessionKeys> {
+        self.require_stage(HandshakeStage::Joined)?;
+        self.session
+            .take()
+            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))
+    }
+
+    fn require_stage(&self, expected: HandshakeStage) -> Result<()> {
+        if self.stage == expected {
+            Ok(())
+        } else {
+            Err(HandshakeError::new("controller_handshake_stage_invalid"))
+        }
+    }
+
+    fn assert_peer_envelope(
+        &self,
+        message: &Value,
+        kind: &'static str,
+        role: &'static str,
+    ) -> Result<()> {
+        let validated = validate_controller_message_json(&message.to_string(), SenderRole::ControlledB)
+            .map_err(|_| HandshakeError::new("controller_handshake_rejected"))?;
+        if validated.get("type").and_then(Value::as_str) != Some(kind)
+            || validated.get("sender_role").and_then(Value::as_str) != Some(role)
+        {
+            return Err(HandshakeError::new("controller_handshake_rejected"));
+        }
+        for (field, expected) in [
+            ("pairing_id", self.pairing_id.as_str()),
+            ("reservation_id", self.reservation_id.as_str()),
+            ("relay_epoch", self.relay_epoch.as_str()),
+            ("transcript_hash", self.transcript_hash_hex.as_str()),
+        ] {
+            if validated.get(field).and_then(Value::as_str) != Some(expected) {
+                return Err(HandshakeError::new("controller_handshake_binding_mismatch"));
+            }
+        }
+        Ok(())
+    }
+
+    fn envelope(&self, kind: &'static str, extra: Value) -> Result<Value> {
+        let mut object = json!({
+            "v": 1,
+            "type": kind,
+            "request_id": self.request_id,
+            "pairing_id": self.pairing_id,
+            "reservation_id": self.reservation_id,
+            "remote_control_generation": self.generation,
+            "relay_epoch": self.relay_epoch,
+            "transcript_hash": self.transcript_hash_hex,
+        });
+        let extra = extra
+            .as_object()
+            .ok_or_else(|| HandshakeError::new("controller_message_invalid"))?;
+        for (key, value) in extra {
+            object[key.as_str()] = value.clone();
+        }
+        Ok(object)
+    }
+}
+
+fn decode_public_key(encoded: &str) -> Option<HandshakePublicKey> {
+    let raw = base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()).ok()?;
+    let bytes: [u8; 32] = raw.try_into().ok()?;
+    Some(HandshakePublicKey::from_bytes(bytes))
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trust_fixture() -> (AuthenticatedRelayTrustConfig, Value) {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let key = fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]
+            ["public_key_b64"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            "relay-key-test-1".to_owned(),
+            key,
+        )])
+        .unwrap();
+        (
+            trust,
+            fixture["lease_install_vector"]["verification_input"]["reserved_message"].clone(),
+        )
+    }
+
+    fn new_handshake(trust: AuthenticatedRelayTrustConfig) -> ControllingHandshake {
+        ControllingHandshake::new(
+            "request-claim-0001",
+            "claim-0001",
+            "2345678",
+            HandshakeKeyPair::generate().unwrap(),
+            trust,
+        )
+    }
+
+    #[test]
+    fn claim_is_protocol_valid_and_carries_the_local_handshake_key() {
+        let (trust, _) = trust_fixture();
+        let handshake = new_handshake(trust);
+        let claim = handshake.claim().unwrap();
+        validate_controller_message_json(&claim.to_string(), SenderRole::ControllerA).unwrap();
+        assert_eq!(claim["claim_request_id"], json!("claim-0001"));
+        assert_eq!(claim["pairing_code"], json!("2345678"));
+        assert_eq!(claim["key_algorithm"], json!("x25519"));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(claim["handshake_public_key_b64"].as_str().unwrap())
+                .unwrap()
+                .len(),
+            32
+        );
+    }
+
+    #[test]
+    fn out_of_order_steps_fail_closed_without_touching_state() {
+        let (trust, reserved) = trust_fixture();
+        let mut handshake = new_handshake(trust);
+        assert_eq!(
+            handshake.accept_peer_commitment(&reserved).unwrap_err().code,
+            "controller_handshake_stage_invalid"
+        );
+        assert_eq!(
+            handshake.accept_joined(&reserved).unwrap_err().code,
+            "controller_handshake_stage_invalid"
+        );
+        assert_eq!(handshake.stage(), HandshakeStage::Claimed);
+        assert_eq!(
+            handshake.take_session().unwrap_err().code,
+            "controller_handshake_stage_invalid"
+        );
+    }
+
+    #[test]
+    fn untrusted_and_malformed_reservations_are_rejected() {
+        let (trust, reserved) = trust_fixture();
+        let attacker = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            "relay-key-test-1".to_owned(),
+            base64::engine::general_purpose::STANDARD.encode([9_u8; 32]),
+        )])
+        .unwrap();
+        let mut handshake = new_handshake(attacker);
+        assert_eq!(
+            handshake.accept_reserved(&reserved).unwrap_err().code,
+            "controller_transcript_untrusted"
+        );
+        assert_eq!(handshake.stage(), HandshakeStage::Claimed);
+
+        let mut handshake = new_handshake(trust);
+        assert_eq!(
+            handshake
+                .accept_reserved(&json!({ "v": 1, "type": "controller_pairing_reserved" }))
+                .unwrap_err()
+                .code,
+            "controller_transcript_invalid"
+        );
+    }
+
+    #[test]
+    fn trusted_reservation_derives_a_commit_without_any_lease_material() {
+        let (trust, reserved) = trust_fixture();
+        let mut handshake = new_handshake(trust);
+        let commit = handshake.accept_reserved(&reserved).unwrap();
+        validate_controller_message_json(&commit.to_string(), SenderRole::ControllerA).unwrap();
+        assert_eq!(commit["type"], json!("finished_receipt_commit"));
+        assert_eq!(commit["sender_role"], json!("A"));
+        assert!(is_lower_hex(commit["commitment"].as_str().unwrap(), 64));
+        assert_eq!(handshake.stage(), HandshakeStage::Reserved);
+        // 半握手不产出任何可安装的租约材料。
+        assert_eq!(
+            handshake
+                .accept_joined(&json!({ "v": 1, "type": "controller_joined" }))
+                .unwrap_err()
+                .code,
+            "controller_handshake_stage_invalid"
+        );
+        assert_eq!(
+            handshake.take_session().unwrap_err().code,
+            "controller_handshake_stage_invalid"
+        );
+    }
+
+    #[test]
+    fn peer_commitment_must_match_before_any_ack_is_produced() {
+        let (trust, reserved) = trust_fixture();
+        let mut handshake = new_handshake(trust);
+        handshake.accept_reserved(&reserved).unwrap();
+        let forged = json!({
+            "v": 1,
+            "type": "finished_receipt_commit",
+            "request_id": "request-claim-0001",
+            "pairing_id": handshake.pairing_id,
+            "reservation_id": handshake.reservation_id,
+            "remote_control_generation": handshake.generation,
+            "relay_epoch": handshake.relay_epoch,
+            "transcript_hash": handshake.transcript_hash_hex,
+            "sender_role": "B",
+            "commitment": "0".repeat(64),
+        });
+        let finished = handshake.accept_peer_commitment(&forged).unwrap();
+        validate_controller_message_json(&finished.to_string(), SenderRole::ControllerA).unwrap();
+        assert_eq!(finished["sender_role"], json!("A"));
+        assert!(finished["ciphertext_b64"].as_str().is_some());
+
+        // 对端 Finished 无法用任意密文伪造：直接喂随机密文必须失败关闭。
+        let mut forged_finished = finished.clone();
+        forged_finished["ciphertext_b64"] =
+            json!(base64::engine::general_purpose::STANDARD.encode([1_u8; 64]));
+        forged_finished["ciphertext_bytes"] = json!("64");
+        let mut racing = handshake;
+        let error = racing.accept_peer_finished(&forged_finished).unwrap_err();
+        assert!(
+            matches!(
+                error.code,
+                "controller_finished_invalid"
+                    | "controller_handshake_rejected"
+                    | "controller_handshake_binding_mismatch"
+            ),
+            "a forged Finished must fail closed, got {}",
+            error.code
+        );
+    }
+}
