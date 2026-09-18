@@ -91,6 +91,57 @@ func TestApprovalProofClientBoundsAndIdentity(t *testing.T) {
 	}
 }
 
+func TestApprovalProofClientRoutesEntitlementCorrectionToBilling(t *testing.T) {
+	targetType, targetID, normalized, critical, financial, _, _ := approvalAdvancementClosedSnapshot("ENTITLEMENT_COMPONENT_ADJUSTMENT")
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: targetType, TargetResourceID: targetID,
+		NormalizedCommand: json.RawMessage(normalized), CriticalResourceVersions: json.RawMessage(critical), FinancialSnapshot: json.RawMessage(financial),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := uuid.New()
+	issued := time.Now().UTC().Truncate(time.Millisecond)
+	response := approvalencoding.ProofResponse{
+		ApprovalRequestID: requestID, CommandType: artifacts.CommandType, PolicyVersion: artifacts.PolicyVersion,
+		CommandDigest: artifacts.CommandDigest, SnapshotDigest: artifacts.SnapshotDigest,
+		ProofSchemaVersion: approvalencoding.ProofSchemaVersion, DomainRevision: "1:" + strings.Repeat("a", 64),
+		Verdict: "ALLOW", ReasonCode: "PROOF_VALID", IssuedAt: issued, ExpiresAt: issued.Add(time.Minute),
+	}
+	encoded, err := approvalencoding.EncodeProofResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenCalls := 0
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		tokenCalls++
+	}))
+	defer tokenServer.Close()
+	billingCalls := 0
+	billingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		billingCalls++
+		if r.URL.Path != "/internal/v1/approval-command-proofs" {
+			t.Errorf("Billing proof path=%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(encoded)
+	}))
+	defer billingServer.Close()
+	source, err := NewHTTPApprovalProofSource(tokenServer.URL, billingServer.URL, "account-service-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := source.Proof(context.Background(), requestID, artifacts)
+	if err != nil || result.Response.Verdict != "ALLOW" || result.Digest == "" || billingCalls != 1 || tokenCalls != 0 {
+		t.Fatalf("entitlement proof result=%+v billing=%d token=%d err=%v", result, billingCalls, tokenCalls, err)
+	}
+	if approvalProofReasonAllowed("ENTITLEMENT_COMPONENT_ADJUSTMENT", "DENY", "SNAPSHOT_MISMATCH") != true ||
+		approvalProofReasonAllowed("ENTITLEMENT_COMPONENT_ADJUSTMENT", "DENY", "UNKNOWN") {
+		t.Fatal("entitlement proof deny reasons are not closed")
+	}
+}
+
 func TestApprovalProofClientFailureClasses(t *testing.T) {
 	artifacts, golden := approvalProofClientFixture(t)
 	requestID := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")

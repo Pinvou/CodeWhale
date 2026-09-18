@@ -252,6 +252,8 @@ GSA-22 Billing 执行/consumer 成对账本切片（仍PARTIAL / REVIEW_PENDING�
 
 GSA-22 Account 集成夹具与授权链修复切片（仍PARTIAL / REVIEW_PENDING）：Token owner 集成夹具改为每个用例创建生产同构的独立Account数据库，按`account_migrator/account_service`真实身份应用迁移1→69，保留public、`account_approval_control`与`account_approval_authorization`生产schema名，并为运行时和approval writer建立低权限会话身份；旧迁移43用例保留原降级断言，完整链用例校验迁移身份、v2策略与固定授权schema。Approval advancement/snapshot/Billing activation旧契约同步到当前防枚举、组织单一owner、legacy授权outbox/sidecar、发布状态和执行binding门禁；历史已批准夹具通过唯一legacy writer seam生成冻结授权事件，不再伪造缺失事实。真实PG五项合跑PASS 32.975s（advancement、snapshot、Billing activation、Token owner、迁移1→69），迁移51+阻塞解除；Account→Billing领域E2E、业务页presenter和activation仍待完成。
 
+GSA-22 Account proof client路由切片（仍PARTIAL / REVIEW_PENDING）：Account HTTP proof reader将`ENTITLEMENT_COMPONENT_ADJUSTMENT`加入Billing authority路由与`PROOF_VALID`/closed DENY reason白名单，双服务端单测证明该命令只访问Billing proof endpoint且Token endpoint零调用；不改变其它六命令路由、proof wire、2秒 deadline或64KiB预算。该切片只打通Account→Billing proof入口，跨库领域E2E与业务presenter仍待完成。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
