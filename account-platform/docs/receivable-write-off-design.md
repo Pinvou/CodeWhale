@@ -31,6 +31,8 @@
 | 证据要求 | 仅领域内既有持久事实 / 需要外部或人工证据记录 | 决定 proof 是否可离线重算、是否需要新的证据表与归档 |
 | 账本形式 | 只写 `receivable_allocations` 与对应平衡 journal（应收账户对向） | 决定 journal `entry_type` 选择（沿用 `ADJUSTMENT`/`REVERSAL`）与是否需要新白名单 |
 | 幂等与恢复 | `source_reference` 单次语义 + GSA-16 分类，结果未知只读查证 | 决定 executor/consumer 的 result-first 读取、幂等键与 DLQ 收口 |
+| 权限与版本 | (a) 复用现有 permission/policy 版本；(b) 新增专用 permission 或 policy 版本 | 决定是否需要 Account/Billing 迁移、合同与灰度顺序 |
+| 核销推进规则 | 全额一次核销 / 允许多次部分核销（`status` 与 `settled_at` 的推进条件） | 决定 CAS 目标与分配唯一键的使用方式 |
 
 无论选择哪一项：默认保持 `INACTIVE`，只有本类设计、实现、recovery 与发布门禁全部通过并取得独立激活授权后才可激活；不得改写 `receivables` 的既有不变量（`settled+outstanding=original`、`status` 与 `outstanding` 的等价关系）或历史账本。
 

@@ -37,6 +37,8 @@
 | 事实证据 | (a) 仅领域内既有持久事实；(b) 需要外部对账/支付证据；(c) 需要运维人工确认记录 | 决定 proof 是否可离线重算、是否需要新的证据表与归档 |
 | 写入边界 | (a) 只允许 journal/posting 层纠正；(b) 允许同时调整 wallet/credit lot/package 有效量 | 决定是否触碰余额守恒、退款/拒付/应收归属与消费顺序 |
 | 幂等与恢复 | 沿用 `business_reference` 单次语义 + GSA-16 分类，是否允许“结果未知时只读查证” | 决定 executor/consumer 的 result-first 读取与 DLQ 收口 |
+| 权限与版本 | (a) 复用现有 permission/policy 版本；(b) 新增专用 permission 或 policy 版本 | 决定是否需要 Account/Billing 迁移、合同与灰度顺序 |
+| journal `entry_type` | (a) 前向迁移放宽白名单（加入 `EXPIRE`/`REPAIR_CREDIT`/`FORCED_REFUND`）；(b) 改用既有取值；(c) 先修 `receivables` 来源枚举再定 | 决定既有包过期/补记/强制退款路径能否恢复（见 §2 缺陷） |
 | 金额与次数 | 单笔上限、同一目标可修复次数、是否需要冷却窗口 | 决定是否新增限额表与并发门禁 |
 
 无论选择哪一项：默认保持 `INACTIVE`，只有本类设计、实现、recovery 与发布门禁全部通过并取得独立激活授权后才可激活，且不得改写历史账本。

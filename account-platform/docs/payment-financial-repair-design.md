@@ -33,6 +33,8 @@
 | 写入边界 | (a) 只写 journal/posting；(b) 允许同时补钱包/credit lot/package 有效量 | 决定是否触碰余额守恒、退款/拒付归属与消费顺序 |
 | 未知结果 | 沿用 GSA-16 分类，结果未知只读查证、绝不盲重放；是否需要"零效果"证明才允许重试 | 决定 executor/consumer 的 result-first 读取与 DLQ 收口 |
 | 幂等与限额 | 单笔上限、同一订单/交易可修复次数、冷却窗口 | 决定是否新增限额表与并发门禁 |
+| 权限与版本 | (a) 复用现有 permission/policy 版本；(b) 新增专用 permission 或 policy 版本 | 决定是否需要 Account/Billing 迁移、合同与灰度顺序 |
+| 既有补记路径处置 | (a) 前向放宽 `entry_type` 白名单恢复 `MANUAL_REPAIR`；(b) 改用既有取值；(c) 由本命令替代并停用该路径 | 决定本命令范围是否覆盖「已确认支付未入账」场景 |
 
 无论选择哪一项：默认保持 `INACTIVE`，只有本类设计、实现、recovery 与发布门禁全部通过并取得独立激活授权后才可激活；不得改写历史账本或历史支付事实。
 
