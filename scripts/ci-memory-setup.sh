@@ -77,16 +77,20 @@ log() { echo "[memory-setup] $*"; }
 # actually engages; outside Actions (manual runs) keep plain stderr text.
 if [[ ${GITHUB_ACTIONS:-} == true ]]; then
   # Workflow commands are single-line: captured stderr (multi-line tool
-  # output) must be folded or the annotation is cut at the first newline.
-  warn() { echo "::warning::[memory-setup] ${*//$'\n'/ }" >&2; }
+  # output) must be folded or the annotation is cut at the first newline
+  # (a stray CR splits lines too — the runner's .NET line reader treats
+  # it as a terminator, which could forge a second workflow command).
+  warn() { echo "::warning::[memory-setup] ${*//[$'\r\n']/ }" >&2; }
 else
   warn() { echo "[memory-setup] WARNING: $*" >&2; }
 fi
 
 # Steps that normally recover a few lines later (first modprobe miss on
-# hosted images, and the image-swap pre-activation belonging to that same
-# recovery) must not burn a standing ::warning annotation on every job;
-# keep them visible in the log only. Unrecovered failures still use warn.
+# hosted images, the image-swap pre-activation belonging to that same
+# recovery, the as-is swapon retry, and the last-resort image-swapfile
+# attempt after all layers fail) must not burn a standing ::warning
+# annotation on every job; keep them visible in the log only.
+# Unrecovered failures still use warn.
 warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -387,7 +391,11 @@ else
 fi
 
 if ! any_swap_active; then
-  warn "no active swap after all layers; trying the image-provided swapfile"
+  # The last-resort retry usually activates an image swapfile (success logs
+  # its own line) and its terminal failure already annotates inside the
+  # function; annotating here too would leave a standing marker on every
+  # swapless job, against the recoverable-noise policy.
+  warn_recoverable "no active swap after all layers; trying the image-provided swapfile"
   activate_image_swap_fallback
 fi
 

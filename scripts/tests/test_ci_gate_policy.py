@@ -639,6 +639,50 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
                 " (degrade to stock runner memory with a ::warning)",
             )
+        # 透传与非致命包装契约必须覆盖所有 workflow 的调用点,不只
+        # pr-check:其余文件任何一处缩水,都会让注解/应急开关在该 workflow
+        # 静默失效(2026-09-18 复审:缩水 release-packages 调用点时,仅扫
+        # pr-check 的守卫 27 项全绿)。
+        workflows_dir = ROOT / ".github/workflows"
+        workflow_paths = sorted(workflows_dir.glob("*.yml")) + sorted(
+            workflows_dir.glob("*.yaml")
+        )
+        call_line = (
+            "run: timeout --kill-after=15 240 sudo --preserve-env="
+            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP"
+            ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
+        )
+        total_call_sites = 0
+        for workflow_path in workflow_paths:
+            text = workflow_path.read_text(encoding="utf-8")
+            call_sites = text.count(
+                'bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
+            )
+            if call_sites == 0:
+                continue
+            total_call_sites += call_sites
+            self.assertEqual(
+                text.count(call_line),
+                call_sites,
+                f"{workflow_path.name}: every ci-memory-setup call site must"
+                " hard-cap with 'timeout --kill-after=15 240' and pass"
+                " GITHUB_ACTIONS and the PINVOU3_CI_* emergency switches"
+                " through sudo (sudo env_reset strips them, silently"
+                " disabling ::warning annotations and the standing opt-out)",
+            )
+            self.assertEqual(
+                text.count('|| echo "::warning::ci-memory-setup'),
+                call_sites,
+                f"{workflow_path.name}: every ci-memory-setup call site must"
+                " stay non-fatal (degrade to stock runner memory with a"
+                " ::warning)",
+            )
+        self.assertGreaterEqual(
+            total_call_sites,
+            19,
+            "ci-memory-setup call sites across workflows must not shrink"
+            " without updating this contract",
+        )
 
     def test_memory_setup_script_pins_annotations_and_honest_degradation(self):
         # #1149 复审跟进:此前该脚本只有 workflow 调用结构被钉住,脚本内容
@@ -649,13 +693,15 @@ class CiGatePolicyTests(unittest.TestCase):
         # zram 激活时必须显式关闭 zswap,否则存量 Ubuntu 内核默认开启的
         # zswap 会在 zram 前对每个换出页双重压缩。
         self.assertIn("echo 0 >/sys/module/zswap/params/enabled", source)
-        # Actions 下降级告警必须是步骤注解,且注解载荷必须折叠换行
-        # (workflow command 是单行协议,换行处会被截断)。
-        self.assertIn('echo "::warning::[memory-setup] ${*//$', source)
-        self.assertIn("${*//$'\\n'/ }", source)
+        # Actions 下降级告警必须是步骤注解,且注解载荷必须折叠换行与 CR
+        # (workflow command 是单行协议,换行处会被截断;runner 的 .NET 行
+        # 读取器同样把孤立 CR 当行终止,可伪造第二条 workflow command)。
+        self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
+        self.assertIn("${*//[$'\\r\\n']/ }", source)
         # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活、镜像 swap
-        # as-is 失败后的重试)只进日志,不得注解化,否则每个 job 都会常驻
-        # 黄标稀释真告警。函数体全文钉死:改回 ::warning:: 注解即红。
+        # as-is 失败后的重试、全层失败后的镜像 swapfile 兜底重试)只进日志,
+        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
+        # 改回 ::warning:: 注解即红。
         self.assertIn(
             'warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }',
             source,
@@ -672,6 +718,11 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn(
             'warn_recoverable "swapon ${cand} failed as is; trying chmod 600'
             " + mkswap + swapon once\"",
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "no active swap after all layers; trying the'
+            ' image-provided swapfile"',
             source,
         )
         # 磁盘 swap 重建失败必须携带诊断,且 removed_note 只允许出现在 rm
