@@ -728,8 +728,7 @@ impl StateStore {
                 thread.git_branch,
                 thread.git_origin_url,
                 thread.memory_mode,
-                serde_json::to_string(&thread.workspace_roots)
-                    .unwrap_or_else(|_| "[]".to_string()),
+                workspace_roots_to_json(&thread.workspace_roots),
             ],
         )
         .context("failed to upsert thread metadata")?;
@@ -2069,6 +2068,27 @@ fn workspace_roots_from_json(raw: Option<String>) -> Vec<PathBuf> {
                 "invalid workspace_roots JSON on threads row; treating as empty"
             );
             Vec::new()
+        }
+    }
+}
+
+/// Serialize the root set for the `threads` column.
+///
+/// A path that cannot be represented in the JSON column (non-UTF-8 on Unix)
+/// is the one direction that can lose the set. Degrading to an empty list
+/// keeps the thread writable — an upsert failure would cost the whole record
+/// — but it must not be silent: the reader only warns on malformed JSON, so
+/// without this the loss is invisible.
+fn workspace_roots_to_json(roots: &[PathBuf]) -> String {
+    match serde_json::to_string(roots) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::warn!(
+                target: "codewhale_state",
+                %error,
+                "workspace_roots could not be serialized; persisting an empty set"
+            );
+            "[]".to_string()
         }
     }
 }

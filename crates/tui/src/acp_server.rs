@@ -749,9 +749,12 @@ fn prepare_acp_tool_admission(
         }
     }
 
-    if let Some(repo_law) =
-        crate::repo_law::repo_law_plan_decision(workspace, &call.name, &prepared.input)
-    {
+    if let Some(repo_law) = crate::repo_law::repo_law_plan_decision(
+        workspace,
+        &registry.context().workspace_roots,
+        &call.name,
+        &prepared.input,
+    ) {
         match repo_law {
             crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
                 permission_reason = Some(reason);
