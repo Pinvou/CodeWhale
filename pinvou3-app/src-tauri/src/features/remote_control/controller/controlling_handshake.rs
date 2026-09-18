@@ -33,7 +33,7 @@ pub(crate) struct HandshakeError {
 }
 
 impl HandshakeError {
-    fn new(code: &'static str) -> Self {
+    pub(crate) fn new(code: &'static str) -> Self {
         Self { code }
     }
 }
