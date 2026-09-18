@@ -111,27 +111,7 @@ pub fn js_execution_tool_definition() -> Tool {
     }
 }
 
-/// Run the model-provided JavaScript and return the captured
-/// stdout / stderr / return_code payload. Mirrors
-/// `execute_code_execution_tool` exactly — same tempfile pattern,
-/// same 600-second timeout, same error shape — so the surfaces
-/// stay interchangeable from the model's point of view.
-///
-/// Tempfile lives only for the duration of this execution; `Drop`
-/// removes it. We use the `.js` extension so any source-map /
-/// shebang / encoding-sniffer logic in the interpreter behaves
-/// normally.
-async fn drain_pipe<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    mut pipe: Option<R>,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Some(pipe) = pipe.as_mut() {
-        use tokio::io::AsyncReadExt as _;
-        let _ = pipe.read_to_end(&mut buf).await;
-    }
-    buf
-}
-
+/// Wall-clock budget for one `js_execution` call.
 fn js_execution_timeout() -> Duration {
     if cfg!(test) {
         // Short enough that the kill test finishes fast, long enough that
@@ -142,6 +122,16 @@ fn js_execution_timeout() -> Duration {
     }
 }
 
+/// Run the model-provided JavaScript and return the captured
+/// stdout / stderr / return_code payload. Mirrors
+/// `execute_code_execution_tool` exactly — same tempfile pattern,
+/// same 600-second timeout, same error shape — so the surfaces
+/// stay interchangeable from the model's point of view.
+///
+/// Tempfile lives only for the duration of this execution; `Drop`
+/// removes it. We use the `.js` extension so any source-map /
+/// shebang / encoding-sniffer logic in the interpreter behaves
+/// normally.
 pub async fn execute_js_execution_tool(
     input: &Value,
     workspace: &Path,
@@ -176,60 +166,12 @@ pub async fn execute_js_execution_tool(
     if std::env::var_os("NODE_USE_ENV_PROXY").is_none() {
         cmd.env("NODE_USE_ENV_PROXY", "1");
     }
-    // keep_on_drop is the cancel-path backstop: when the turn is
-    // interrupted this whole future is dropped and the owned child handle
-    // drops with it, which kills the child. The timeout path below cannot
-    // rely on that: dropping a `wait_with_output()` future does NOT kill
-    // the child (the handle is moved into the join), so the timeout arms
-    // kill explicitly instead of leaving node running orphaned.
-    cmd.kill_on_drop(true);
-    // `Command::output()` used to install these pipes itself; now that we
-    // spawn and wait explicitly, pipe stdout/stderr so the output is
-    // captured (and drained concurrently below).
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    // Drain the pipes concurrently with the wait: a child blocked on a full
-    // pipe buffer would otherwise never exit, turning every timeout into a
-    // guaranteed kill.
-    let stdout_task = tokio::spawn(drain_pipe(stdout_pipe));
-    let stderr_task = tokio::spawn(drain_pipe(stderr_pipe));
-
-    let output = match tokio::time::timeout(js_execution_timeout(), child.wait()).await {
-        Ok(status) => {
-            let status = status.map_err(|e| ToolError::execution_failed(e.to_string()))?;
-            let stdout = stdout_task
-                .await
-                .map_err(|e| ToolError::execution_failed(format!("stdout reader: {e}")))?;
-            let stderr = stderr_task
-                .await
-                .map_err(|e| ToolError::execution_failed(format!("stderr reader: {e}")))?;
-            std::process::Output {
-                status,
-                stdout,
-                stderr,
-            }
-        }
-        Err(_elapsed) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            // Abort (don't join) the drain tasks: a grandchild that
-            // inherited the pipe keeps the write end open after the child
-            // dies, so read_to_end would never see EOF and joining here
-            // would hang the caller past the timeout. Aborting drops the
-            // read end, which hands grandchildren an EPIPE instead.
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(ToolError::Timeout {
-                seconds: js_execution_timeout().as_secs(),
-            });
-        }
-    };
+    // The shared runner pipes and drains stdout/stderr while the child runs,
+    // kills and reaps explicitly on timeout, and bounds the post-exit drain
+    // so a grandchild that inherited the pipes cannot hold the call.
+    let output =
+        super::process::run_bounded_child(&mut cmd, None, js_execution_timeout(), "js_execution")
+            .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

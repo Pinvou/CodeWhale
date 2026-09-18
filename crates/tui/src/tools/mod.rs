@@ -44,6 +44,7 @@ pub mod pandoc;
 mod pdf;
 pub mod plan;
 pub mod plugin;
+pub(crate) mod process;
 pub mod project;
 pub mod read_media;
 pub mod registry;

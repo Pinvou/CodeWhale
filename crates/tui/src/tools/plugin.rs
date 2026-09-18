@@ -25,24 +25,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
 
 use crate::config::ToolOverride;
-
-async fn drain_plugin_pipe<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    mut pipe: Option<R>,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Some(pipe) = pipe.as_mut() {
-        use tokio::io::AsyncReadExt as _;
-        let _ = pipe.read_to_end(&mut buf).await;
-    }
-    buf
-}
 
 /// Timeout for plugin script execution. Plugin scripts are
 /// model-invoked interpreters in the same class as js_execution /
@@ -297,76 +285,19 @@ async fn run_plugin_child_raw(
     label: &str,
     input: Value,
 ) -> Result<ToolResult, ToolError> {
-    let input_bytes = serde_json::to_vec(&input)
-        .map_err(|e| ToolError::invalid_input(format!("failed to serialize input: {e}")))?;
+    let input_bytes = super::process::stdin_json(&input)?;
 
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    // kill_on_drop is the cancel-path backstop: when the tool future is
-    // dropped and this function's child handle goes with it, the child is
-    // killed. The timeout path below cannot rely on that: dropping a
-    // `wait_with_output()` future does NOT kill the child (the handle is
-    // moved into the join), so the timeout arms kill explicitly instead of
-    // leaving the plugin script running orphaned.
-    cmd.kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ToolError::execution_failed(format!("failed to spawn {label}: {e}")))?;
-
-    let stdin_writer = child.stdin.take().map(|mut stdin| {
-        tokio::spawn(async move {
-            if stdin.write_all(&input_bytes).await.is_ok() {
-                let _ = stdin.shutdown().await;
-            }
-        })
-    });
-
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    // Drain the pipes concurrently with the wait: a script blocked on a
-    // full pipe buffer would otherwise never exit, turning every timeout
-    // into a guaranteed kill.
-    let stdout_task = tokio::spawn(drain_plugin_pipe(stdout_pipe));
-    let stderr_task = tokio::spawn(drain_plugin_pipe(stderr_pipe));
-
-    let output = match tokio::time::timeout(plugin_execution_timeout(), child.wait()).await {
-        Ok(status) => {
-            let status =
-                status.map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
-            let stdout = stdout_task
-                .await
-                .map_err(|e| ToolError::execution_failed(format!("stdout reader: {e}")))?;
-            let stderr = stderr_task
-                .await
-                .map_err(|e| ToolError::execution_failed(format!("stderr reader: {e}")))?;
-            std::process::Output {
-                status,
-                stdout,
-                stderr,
-            }
-        }
-        Err(_elapsed) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            // Abort (don't join) the drain tasks: a grandchild that
-            // inherited the pipe keeps the write end open after the child
-            // dies, so read_to_end would never see EOF and joining here
-            // would hang the caller past the timeout. Aborting drops the
-            // read end, which hands grandchildren an EPIPE instead.
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(ToolError::Timeout {
-                seconds: plugin_execution_timeout().as_secs(),
-            });
-        }
-    };
-
-    if let Some(stdin_writer) = stdin_writer {
-        let _ = stdin_writer.await;
-    }
+    // The shared runner pipes and drains stdout/stderr while the child runs,
+    // writes the stdin payload, kills and reaps explicitly on timeout, and
+    // bounds the post-exit drain so a grandchild that inherited the pipes
+    // cannot hold the call.
+    let output = super::process::run_bounded_child(
+        cmd,
+        Some(input_bytes),
+        plugin_execution_timeout(),
+        label,
+    )
+    .await?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
