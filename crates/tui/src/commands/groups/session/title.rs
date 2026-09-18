@@ -160,6 +160,15 @@ pub(crate) fn set_window_title_with_manager(
         .metadata
         .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     session.metadata.workspace.clone_from(&app.workspace);
+    // The paired set travels with the workspace it belongs to, exactly as in
+    // `/rename`: syncing only the primary would let a `/title` after a `/cd`
+    // whose direct save failed rewrite `workspace: new` next to the stale
+    // pre-switch set — and `/title` then quit is durable, since no turn
+    // checkpoint follows to heal it.
+    session
+        .metadata
+        .workspace_roots
+        .clone_from(&app.workspace_roots);
     session.metadata.mode = Some(app.mode.as_setting().to_string());
     app.sync_cost_to_metadata(&mut session.metadata);
     session.window_title = title.clone();
@@ -246,6 +255,45 @@ mod tests {
         let reloaded = manager.load_session("title-test").unwrap();
         assert_eq!(reloaded.window_title.as_deref(), Some("parallel-task"));
         assert_eq!(reloaded.metadata.title, "Original Name");
+    }
+
+    #[test]
+    fn set_title_stamps_the_live_workspace_roots() {
+        let tmp = TempDir::new().unwrap();
+        let manager = make_session_manager(&tmp);
+        let mut app = make_app(&tmp);
+        let new_workspace = tmp.path().join("after-cd");
+        let shared = tmp.path().join("shared");
+        let mut session = create_saved_session_with_mode(
+            &[],
+            "deepseek-v4-pro",
+            &tmp.path().join("before-cd"),
+            0,
+            None,
+            None,
+        );
+        session.metadata.id = "title-roots".to_string();
+        // The disk record still carries the pre-`/cd` pair, the shape a
+        // failed direct save leaves behind.
+        session.metadata.workspace_roots = vec![tmp.path().join("before-cd"), shared.clone()];
+        manager.save_session(&session).unwrap();
+
+        app.current_session_id = Some("title-roots".to_string());
+        app.workspace = new_workspace.clone();
+        app.workspace_roots = vec![new_workspace.clone(), shared.clone()];
+
+        let result =
+            set_window_title_with_manager(&mut app, Some("after-cd-task".to_string()), &manager);
+        assert!(!result.is_error, "unexpected error: {:?}", result.message);
+
+        let reloaded = manager.load_session("title-roots").unwrap();
+        assert_eq!(reloaded.metadata.workspace, new_workspace);
+        assert_eq!(
+            reloaded.metadata.workspace_roots,
+            vec![new_workspace, shared],
+            "a /title save must pair the new workspace with the live root set, \
+             or the abandoned directory re-enters on the next resume"
+        );
     }
 
     #[test]
