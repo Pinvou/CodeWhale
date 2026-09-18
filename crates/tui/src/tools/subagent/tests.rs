@@ -10648,6 +10648,40 @@ fn subagent_failure_message_preserves_error_chain() {
 }
 
 #[test]
+fn forkguard_quota_exhausted_skips_rate_limit_governor_and_stays_fatal() {
+    // PR#43 follow-up: only LlmError::RateLimited feeds the rate-limit
+    // governor's sliding window. A quota-exhausted provider response is a
+    // billing condition, not a transient throttle: it must produce no
+    // governor event and keep the existing fatal (non-retryable) path.
+    let quota_err = anyhow::Error::new(crate::llm_client::LlmError::from_http_response(
+        402,
+        r#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}"#,
+    ));
+    assert!(
+        matches!(
+            quota_err.downcast_ref::<crate::llm_client::LlmError>(),
+            Some(crate::llm_client::LlmError::QuotaExhausted(_))
+        ),
+        "test input must classify as quota exhaustion: {quota_err:#}"
+    );
+    assert!(
+        !is_governor_reported_rate_limit(&quota_err),
+        "quota exhaustion must not feed the rate-limit governor: {quota_err:#}"
+    );
+    assert!(
+        retryable_subagent_provider_failure(&quota_err, 1).is_none(),
+        "quota exhaustion keeps the fatal (non-retryable) path: {quota_err:#}"
+    );
+
+    // Control: a genuine 429 is the error class the governor observes.
+    let rate_limited_err = anyhow::Error::new(crate::llm_client::LlmError::RateLimited {
+        message: "please slow down".to_string(),
+        retry_after: None,
+    });
+    assert!(is_governor_reported_rate_limit(&rate_limited_err));
+}
+
+#[test]
 fn annotate_child_model_error_adds_actionable_hint() {
     // #2653: a bare provider 403 becomes actionable by naming the model and the
     // recovery path, while unrelated errors pass through unchanged.

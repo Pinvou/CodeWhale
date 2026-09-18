@@ -3351,7 +3351,7 @@ impl Engine {
                         self.config.subagent_api_timeout = Duration::from_secs(api_timeout_secs);
                         self.config.subagent_heartbeat_timeout =
                             Duration::from_secs(heartbeat_timeout_secs);
-                        let launch_gate_applied = {
+                        {
                             let mut manager = self.subagent_manager.write().await;
                             manager.update_runtime_limits(
                                 self.config.max_subagents,
@@ -3359,21 +3359,15 @@ impl Engine {
                                 self.config.subagent_heartbeat_timeout,
                                 self.config.launch_concurrency,
                                 self.config.subagent_token_budget,
-                            )
-                        };
-                        let launch_note = if launch_gate_applied {
-                            ""
-                        } else {
-                            "; launch_concurrency takes full effect after active sub-agents finish or the session restarts"
-                        };
+                            );
+                        }
                         let _ = self
                             .tx_event
                             .send(Event::status(format!(
-                                "Sub-agent runtime updated: enabled={enabled}, max_subagents={}, launch_concurrency={}, max_depth={}{}",
+                                "Sub-agent runtime updated: enabled={enabled}, max_subagents={}, launch_concurrency={}, max_depth={}",
                                 self.config.max_subagents,
                                 self.config.launch_concurrency,
                                 self.config.max_spawn_depth,
-                                launch_note
                             )))
                             .await;
                     }
