@@ -27,6 +27,20 @@ use serde_json::Value;
 
 use super::AppState;
 
+// ── Upstream deadlines ─────────────────────────────────────────────────
+
+/// Connect budget for the upstream forward. Matches the connect family
+/// used across the TUI client (vision, installs, DNS pre-flight).
+const UPSTREAM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total budget for one upstream forward, connect through body end. The
+/// handler rejects streaming (`stream: true`) and reads the full upstream
+/// body, so without a client-level total a provider that accepts the
+/// connection and stalls — or trickles the body — wedges this handler (and
+/// the caller's connection) indefinitely. 1800s mirrors the TUI client's
+/// non-streaming envelope for the same request class.
+const UPSTREAM_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
 // ── Resolved endpoint ──────────────────────────────────────────────────
 
 /// Everything needed to forward a single chat-completions request upstream.
@@ -373,8 +387,12 @@ pub(crate) async fn chat_completions_handler(
             .into_response();
     }
 
-    // Build upstream request.
+    // Build upstream request. The shared platform builder sets no timeouts,
+    // so the proxy would hang forever on an accept-and-stall upstream;
+    // bound both the connect and the whole non-streaming round trip.
     let upstream_req = codewhale_release::platform_http_client_builder()
+        .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+        .timeout(UPSTREAM_TOTAL_TIMEOUT)
         .build()
         .map_err(|e| {
             (

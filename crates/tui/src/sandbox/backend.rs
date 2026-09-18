@@ -67,6 +67,14 @@ pub trait SandboxBackend: Send + Sync {
 
 use crate::config::Config;
 
+/// Total budget for one OpenSandbox HTTP exec. The request *is* the remote
+/// command: connect, execution, and response transfer all sit under this
+/// client-level deadline. 600s matches the Bash tool's foreground cap — a
+/// remote sandbox command is the same class of work (builds, test runs),
+/// and the previous hardcoded 30s cut legitimate long commands off at the
+/// HTTP layer with no way to raise it.
+const OPEN_SANDBOX_EXEC_TIMEOUT_SECS: u64 = 600;
+
 /// Create the configured sandbox backend from config.
 ///
 /// Returns `None` when no external sandbox backend is configured (i.e. the
@@ -88,7 +96,11 @@ pub fn create_backend(config: &Config) -> Result<Option<Box<dyn SandboxBackend>>
                 .clone()
                 .unwrap_or_else(|| "http://localhost:8080".to_string());
             let api_key = config.sandbox_api_key.clone();
-            let backend = super::opensandbox::OpenSandboxBackend::new(base_url, api_key, 30)?;
+            let backend = super::opensandbox::OpenSandboxBackend::new(
+                base_url,
+                api_key,
+                OPEN_SANDBOX_EXEC_TIMEOUT_SECS,
+            )?;
             Ok(Some(Box::new(backend)))
         }
     }
