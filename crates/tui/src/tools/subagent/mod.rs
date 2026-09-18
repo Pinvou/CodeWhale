@@ -8231,6 +8231,11 @@ pub fn new_shared_subagent_manager_with_state_root_and_timeout(
 /// `host_profile_count` so the model can tell when the listing was cut.
 const ROSTER_HOST_PROFILE_LIMIT: usize = 48;
 
+/// Upper bound for the roster `profile_query` keyword. Anything longer can
+/// never be a useful substring of an id or description; bound it like every
+/// other model-supplied identity string.
+const ROSTER_PROFILE_QUERY_MAX_CHARS: usize = 256;
+
 /// Start a child agent task through a single simplified model-facing surface.
 pub struct AgentTool {
     manager: SharedSubAgentManager,
@@ -8413,7 +8418,7 @@ impl ToolSpec for AgentTool {
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
             "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
-            "Use action=roster to inspect the Fleet roles and the host-presented prompt-only profiles (if any), with their descriptions, before choosing a type or profile. ",
+            "Use action=roster to inspect the Fleet roles and the host-presented prompt-only profiles (if any), with their descriptions, before choosing a type or profile. The host-profile listing is capped and unpaged — search a large pool with profile_query. ",
             "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
@@ -8427,8 +8432,9 @@ impl ToolSpec for AgentTool {
         )
     }
 
-    /// Advertised `agent` schema: exactly 12 fields (#5324, #5123) —
-    /// action, prompt, type, profile, name, agent_id, message, until,
+    /// Advertised `agent` schema: exactly 13 fields (#5324, #5123; T7 added
+    /// `profile_query`, the roster host-profile keyword filter) — action,
+    /// prompt, type, profile, profile_query, name, agent_id, message, until,
     /// detached, worktree, write_roots, resume_from — plus the
     /// action-discriminated `dependentSchemas` tree. Every field removed
     /// from this schema (budgets, model/thinking overrides, worktree-path
@@ -8452,7 +8458,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "roster", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "cancel"],
-                    "description": "start launches a turn-owned worker and returns immediately. roster lists the Fleet roles plus any host-presented prompt-only profiles, with descriptions. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). cancel permanently cancels a running child."
+                    "description": "start launches a turn-owned worker and returns immediately. roster lists the Fleet roles plus any host-presented prompt-only profiles, with descriptions; profile_query filters host profiles by keyword. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -8488,6 +8494,10 @@ impl ToolSpec for AgentTool {
                     "type": "string",
                     "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. There is no per-call model override on this surface."
                 },
+                "profile_query": {
+                    "type": "string",
+                    "description": "For action=roster, optional case-insensitive keyword filter over host-presented profile ids and descriptions. The host-profile listing is capped and unpaged, so search a large pool with this filter; matches are reported with host_profile_count and host_profiles_truncated."
+                },
                 "worktree": {
                     "type": "boolean",
                     "description": "When true, create a fresh git worktree and branch for this child before it starts. Use for parallel edit tasks that must not collide with the parent checkout."
@@ -8513,7 +8523,10 @@ impl ToolSpec for AgentTool {
                             "required": ["prompt"]
                         },
                         {
-                            "properties": {"action": {"const": "roster"}}
+                            "properties": {
+                                "action": {"const": "roster"},
+                                "profile_query": {}
+                            }
                         },
                         {
                             "properties": {"action": {"const": "status"}}
@@ -8668,13 +8681,22 @@ impl ToolSpec for AgentTool {
                 // origin, prompt-only, no built-in role-token shadow, bounded
                 // selector), so the listing never advertises an id spawn would
                 // refuse. Sort by member_id and cap the listing to keep the
-                // payload bounded.
+                // payload bounded. There is no pagination on this surface, so
+                // `profile_query` is the traversal channel: it narrows the
+                // spawnable pool before the cap, which keeps members past the
+                // listing cap discoverable instead of silently unreachable.
+                let profile_query = roster_profile_query(&input);
                 let mut host_members: Vec<&crate::fleet::profile::AgentProfile> = self
                     .runtime
                     .host_agent_profiles
                     .members()
                     .iter()
                     .filter(|member| is_spawnable_host_profile(member))
+                    .filter(|member| {
+                        profile_query
+                            .as_deref()
+                            .is_none_or(|needle| member_matches_profile_query(member, needle))
+                    })
                     .collect();
                 // Same case-insensitive collation as `FleetRoster::from_host_config`.
                 host_members.sort_by_key(|member| member.id.to_ascii_lowercase());
@@ -8706,7 +8728,7 @@ impl ToolSpec for AgentTool {
                     "host_profiles": host_profiles,
                     "host_profile_count": host_profile_count,
                     "host_profiles_truncated": host_profiles_truncated,
-                    "selector_help": "Use type:<role> with one of the listed roles. host_profiles are prompt-only profiles presented by the embedding host for this session; select one with profile=<member_id>. Ambient saved members are not available to this tool.",
+                    "selector_help": "Use type:<role> with one of the listed roles. host_profiles are prompt-only profiles presented by the embedding host for this session; select one with profile=<member_id>. When host_profiles_truncated is true, narrow the listing with profile_query instead of paging. Ambient saved members are not available to this tool.",
                 });
                 let mut result = ToolResult::json(&payload)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
@@ -13145,6 +13167,38 @@ fn is_spawnable_host_profile(member: &crate::fleet::profile::AgentProfile) -> bo
         && host_profile_is_prompt_only(member)
         && FleetRole::from_str(&member.id).is_none()
         && validate_roster_selector(&member.id, "profile").is_ok()
+}
+
+/// Read the roster `profile_query` keyword: trimmed, bounded, empty-to-None.
+/// Lenient by convention — a non-string value filters nothing rather than
+/// failing the read-only listing.
+fn roster_profile_query(input: &Value) -> Option<String> {
+    let query = input.get("profile_query")?.as_str()?.trim();
+    if query.is_empty() {
+        return None;
+    }
+    Some(query.chars().take(ROSTER_PROFILE_QUERY_MAX_CHARS).collect())
+}
+
+/// Case-insensitive substring match against the member id and the exact
+/// description the listing displays (before output bounding, so a keyword
+/// past `bounded_identity_field`'s cut still matches).
+fn member_matches_profile_query(
+    member: &crate::fleet::profile::AgentProfile,
+    needle: &str,
+) -> bool {
+    let needle = needle.to_lowercase();
+    if member.id.to_lowercase().contains(&needle) {
+        return true;
+    }
+    member
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| member.profile.role.name.trim())
+        .to_lowercase()
+        .contains(&needle)
 }
 
 /// Resolve the `profile` spawn parameter against the closed role set or an
