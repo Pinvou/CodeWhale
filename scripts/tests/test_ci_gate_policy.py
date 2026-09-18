@@ -736,6 +736,32 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertNotIn("keeping the existing swap configuration", source)
 
+    def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
+        # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
+        # 三处调用点裸调(check_only 门禁、下载复核、二进制落位前),失配若
+        # 零输出退出,门禁只剩 "exit code 1"。诊断内建在 verify_file,任何
+        # 调用点都无法静默化;下载前的探测调用自行 >/dev/null 2>&1 抑制。
+        source = (ROOT / "scripts" / "fetch-connectors.sh").read_text(
+            encoding="utf-8"
+        )
+        # 失配必须携带期望/实际值(文件缺失单列),并显式 return 1。
+        self.assertIn(
+            'echo "sha256 校验失败: $1（期望 $2，实际 $(compute_sha256 "$1")）"',
+            source,
+        )
+        self.assertIn('echo "sha256 校验失败: $1（文件缺失，期望 $2）"', source)
+        self.assertIn('[[ "$(compute_sha256 "$1")" == "$2" ]]', source)
+        self.assertIn("return 1", source)
+        # 三处裸调 + 下载前探测调用,校验点不得悄悄减少。
+        self.assertEqual(
+            source.count("verify_file "),
+            4,
+            "fetch-connectors.sh must keep verifying: check_only gate,"
+            " pre-download probe, post-download recheck, and pre-install"
+            " binary check",
+        )
+
+
     def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):
         # 发布构建 job(单盘 hosted runner,x64 开机仅 ~13-14G 可用)必须在
         # 工具链/缓存/依赖落盘之前清理未使用预装 SDK,并在装系统依赖后
