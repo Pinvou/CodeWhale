@@ -43,12 +43,18 @@ pub(crate) enum RepoLawPlanDecision {
 ///
 /// `workspace_roots` carries the roots attached beside the primary; an empty
 /// set (a host that never materialized one) keeps exactly the single-root
-/// behavior. Each root is judged in its own namespace — a root's constitution
-/// holds writes under that root — because the globs are workspace-relative
-/// and two roots can carry different laws. Law can only add holds, so the
-/// strongest decision across roots wins. Returns `None` for tools without
-/// write targets, roots without enforceable law, and writes outside every
-/// protected glob.
+/// behavior. Each root is judged in its own namespace because the globs are
+/// workspace-relative and two roots can carry different laws, so a root's
+/// constitution holds the writes that land under it.
+///
+/// A *relative* target is judged against every root, not only the one
+/// execution will resolve it under: `push_normalized` keeps the relative tail
+/// per root, so an attached root's law can hold a write that execution would
+/// place under the primary. That direction is deliberate and fail-closed —
+/// the worst case is an extra prompt or block, never a missed hold — and
+/// `strongest_hold_wins_across_roots` pins it. Returns `None` for tools
+/// without write targets, roots without enforceable law, and writes outside
+/// every protected glob.
 pub(crate) fn repo_law_plan_decision(
     workspace: &Path,
     workspace_roots: &[PathBuf],
