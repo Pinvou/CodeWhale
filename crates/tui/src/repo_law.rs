@@ -18,11 +18,11 @@
 //! - Only the repo-local constitution participates. The user-global
 //!   constitution stays advisory prose and never reaches this module.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::project_context::{RepoLawAction, RepoLawRule, load_repo_law_rules};
+use crate::project_context::{RepoLawAction, load_repo_law_rules};
 use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
 /// Semantic write actions whose inputs name filesystem targets we can hold.
@@ -39,11 +39,19 @@ pub(crate) enum RepoLawPlanDecision {
     Block(String),
 }
 
-/// Evaluate the workspace's repo law against a proposed tool call. Returns
-/// `None` for tools without write targets, workspaces without enforceable
-/// law, and writes outside every protected glob.
+/// Evaluate the accessible roots' repo law against a proposed tool call.
+///
+/// `workspace_roots` carries the roots attached beside the primary; an empty
+/// set (a host that never materialized one) keeps exactly the single-root
+/// behavior. Each root is judged in its own namespace — a root's constitution
+/// holds writes under that root — because the globs are workspace-relative
+/// and two roots can carry different laws. Law can only add holds, so the
+/// strongest decision across roots wins. Returns `None` for tools without
+/// write targets, roots without enforceable law, and writes outside every
+/// protected glob.
 pub(crate) fn repo_law_plan_decision(
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     tool_name: &str,
     tool_input: &Value,
 ) -> Option<RepoLawPlanDecision> {
@@ -57,39 +65,42 @@ pub(crate) fn repo_law_plan_decision(
     if !WRITE_POLICY_ACTIONS.contains(&policy_action) {
         return None;
     }
-    let targets = write_target_paths(workspace, tool_input);
-    if targets.is_empty() {
-        return None;
-    }
-    let rules = load_repo_law_rules(workspace);
-    if rules.is_empty() {
-        return None;
-    }
 
-    // Strongest action wins across all (rule, target) matches.
-    let mut hold: Option<(&RepoLawRule, &str)> = None;
-    for rule in &rules {
-        for target in &targets {
-            if rule.globs.is_match(target) {
-                let stronger = matches!(rule.action, RepoLawAction::Block) || hold.is_none();
-                let already_blocking = hold
-                    .as_ref()
-                    .is_some_and(|(held, _)| matches!(held.action, RepoLawAction::Block));
-                if stronger && !already_blocking {
-                    hold = Some((rule, target.as_str()));
+    // Strongest action wins across all (root, rule, target) matches. The
+    // reason is built where the match is found so the borrow does not have to
+    // outlive the per-root rule set.
+    let mut hold: Option<(bool, String)> = None;
+    for root in codewhale_core::normalize_workspace_roots(workspace, workspace_roots) {
+        let targets = write_target_paths(&root, tool_input);
+        if targets.is_empty() {
+            continue;
+        }
+        let rules = load_repo_law_rules(&root);
+        for rule in &rules {
+            for target in &targets {
+                if !rule.globs.is_match(target) {
+                    continue;
+                }
+                let blocking = matches!(rule.action, RepoLawAction::Block);
+                let already_blocking = hold.as_ref().is_some_and(|(blocking, _)| *blocking);
+                if (blocking || hold.is_none()) && !already_blocking {
+                    hold = Some((
+                        blocking,
+                        format!(
+                            "Repo law holds this write: \"{}\" protects {} (matched {target}, .codewhale/constitution.json)",
+                            rule.text,
+                            rule.patterns.join(", ")
+                        ),
+                    ));
                 }
             }
         }
     }
-    let (rule, target) = hold?;
-    let protects = rule.patterns.join(", ");
-    let reason = format!(
-        "Repo law holds this write: \"{}\" protects {protects} (matched {target}, .codewhale/constitution.json)",
-        rule.text
-    );
-    Some(match rule.action {
-        RepoLawAction::Ask => RepoLawPlanDecision::ForcePrompt(reason),
-        RepoLawAction::Block => RepoLawPlanDecision::Block(reason),
+    let (blocking, reason) = hold?;
+    Some(if blocking {
+        RepoLawPlanDecision::Block(reason)
+    } else {
+        RepoLawPlanDecision::ForcePrompt(reason)
     })
 }
 
@@ -219,6 +230,16 @@ mod tests {
         std::fs::write(dir.join("constitution.json"), body).unwrap();
     }
 
+    /// Single-root call, the shape every host without a materialized root set
+    /// uses.
+    fn decide(
+        workspace: &Path,
+        tool_name: &str,
+        tool_input: &Value,
+    ) -> Option<RepoLawPlanDecision> {
+        repo_law_plan_decision(workspace, &[], tool_name, tool_input)
+    }
+
     const LAW: &str = r#"{
         "authority": ["AGENTS.md"],
         "protected_invariants": [
@@ -236,7 +257,7 @@ mod tests {
             r#"{"protected_invariants": ["Prose only, no paths."]}"#,
         );
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "src/main.rs", "content": "x"}),
@@ -249,7 +270,7 @@ mod tests {
     fn block_action_denies_protected_write() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": "crates/protocol/wire.rs", "content": "x"}),
@@ -266,7 +287,7 @@ mod tests {
     fn ask_action_force_prompts_and_names_the_law() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "edit_file",
             &json!({"path": "CHANGELOG.md", "old": "a", "new": "b"}),
@@ -285,7 +306,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
 
-        let blocked = repo_law_plan_decision(
+        let blocked = decide(
             tmp.path(),
             "File",
             &json!({
@@ -296,7 +317,7 @@ mod tests {
         );
         assert!(matches!(blocked, Some(RepoLawPlanDecision::Block(_))));
 
-        let held = repo_law_plan_decision(
+        let held = decide(
             tmp.path(),
             "File",
             &json!({
@@ -314,7 +335,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "src/main.rs", "content": "x"}),
@@ -322,7 +343,7 @@ mod tests {
             None
         );
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "read_file",
                 &json!({"path": "crates/protocol/wire.rs"}),
@@ -336,28 +357,28 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         // Canonical replace[].path shape.
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"replace": [{"path": "crates/protocol/msg.rs"}]}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
         // Legacy changes[].path shape must receive the same hold.
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"changes": [{"path": "crates/protocol/msg.rs"}]}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
         // unified diff shape
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"patch": "--- a/crates/protocol/msg.rs\n+++ b/crates/protocol/msg.rs\n@@\n"}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
         // codex envelope shape
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"patch": "*** Begin Patch\n*** Update File: crates/protocol/msg.rs\n*** End Patch\n"}),
@@ -375,7 +396,7 @@ mod tests {
                 { "text": "never", "paths": ["docs/frozen/**"], "action": "block" }
             ]}"#,
         );
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": "docs/frozen/spec.md", "content": "x"}),
@@ -388,13 +409,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         let absolute = tmp.path().join("crates/protocol/wire.rs");
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": absolute.to_string_lossy(), "content": "x"}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": "./CHANGELOG.md", "content": "x"}),
@@ -410,7 +431,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), "{ not json");
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "crates/protocol/wire.rs", "content": "x"}),
@@ -424,7 +445,7 @@ mod tests {
             ]}"#,
         );
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "crates/protocol/wire.rs", "content": "x"}),
@@ -443,7 +464,7 @@ mod tests {
             "x/../crates/protocol/wire.rs",
             "./crates/protocol/wire.rs",
         ] {
-            let decision = repo_law_plan_decision(
+            let decision = decide(
                 tmp.path(),
                 "write_file",
                 &json!({ "path": path, "content": "x" }),
@@ -459,7 +480,7 @@ mod tests {
     fn fim_edit_is_gated_like_other_write_tools() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "fim_edit",
             &json!({ "path": "crates/protocol/wire.rs", "prefix": "a", "suffix": "b" }),
@@ -475,7 +496,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         // no a/ or b/ prefix
-        let d = repo_law_plan_decision(
+        let d = decide(
             tmp.path(),
             "apply_patch",
             &json!({ "patch": "--- crates/protocol/wire.rs\n+++ crates/protocol/wire.rs\n@@\n" }),
@@ -485,7 +506,7 @@ mod tests {
             "no-prefix: {d:?}"
         );
         // deletion: +++ /dev/null, target is the old path
-        let d = repo_law_plan_decision(
+        let d = decide(
             tmp.path(),
             "apply_patch",
             &json!({ "patch": "--- a/crates/protocol/wire.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" }),
@@ -495,7 +516,7 @@ mod tests {
             "deletion: {d:?}"
         );
         // tab-timestamp suffix on the header
-        let d = repo_law_plan_decision(
+        let d = decide(
             tmp.path(),
             "apply_patch",
             &json!({ "patch": "--- a/x\t2026-01-01\n+++ b/crates/protocol/wire.rs\t2026-01-01 10:00:00\n@@\n" }),
@@ -510,12 +531,84 @@ mod tests {
     fn no_law_file_means_no_holds() {
         let tmp = TempDir::new().unwrap();
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "anything.rs", "content": "x"}),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn attached_root_law_holds_writes_under_that_root() {
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(primary.path(), LAW);
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        let roots = vec![attached.path().to_path_buf()];
+
+        // Root-relative globs stay root-relative: the primary's
+        // `crates/protocol/**` must not fire on a same-shaped path under an
+        // attached root just because the tail happens to look alike.
+        assert_eq!(
+            repo_law_plan_decision(
+                primary.path(),
+                &roots,
+                "write_file",
+                &json!({
+                    "path": attached.path().join("crates/protocol/wire.rs"),
+                    "content": "x"
+                }),
+            ),
+            None
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &roots,
+            "write_file",
+            &json!({"path": attached.path().join("vendor/lib.rs"), "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!("expected the attached root's law to block, got {decision:?}");
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn strongest_hold_wins_across_roots() {
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            primary.path(),
+            r#"{"protected_invariants": [
+                { "text": "ask in primary", "paths": ["shared/**"] }
+            ]}"#,
+        );
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "block in attached", "paths": ["shared/**"], "action": "block" }
+            ]}"#,
+        );
+
+        // The same relative target matches an Ask in the primary and a Block
+        // in the attached root; law can only add holds, so the Block wins.
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "shared/lib.rs", "content": "x"}),
+        );
+        assert!(
+            matches!(decision, Some(RepoLawPlanDecision::Block(_))),
+            "{decision:?}"
         );
     }
 }

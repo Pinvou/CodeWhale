@@ -3830,10 +3830,13 @@ impl Engine {
             // Repo law: protected invariants with path globs compile into
             // mechanical write holds. Like the safety floor, law is not
             // bypassable by mode — it can only add holds, never remove
-            // one, so this cannot weaken any gate above.
+            // one, so this cannot weaken any gate above. Each accessible root
+            // carries its own constitution: a write under an attached root is
+            // judged against that root's law, not only the primary's.
             if blocked_error.is_none()
                 && let Some(decision) = crate::repo_law::repo_law_plan_decision(
                     &self.session.workspace,
+                    &self.session.workspace_roots,
                     &tool_name,
                     &tool_input,
                 )
