@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -107,7 +106,24 @@ func main() {
 	}
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
-	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor", events.NATSConfig{Environment: cfg.Environment, CAFile: os.Getenv("NATS_CA_FILE")})
+	// The dedicated entitlement durable is the only Q+1 authorization consumer
+	// Billing owns. It starts only when the deployment explicitly enables it and
+	// supplies independently trusted manifest/receipt artifacts; the missing or
+	// partial case is a hard startup failure instead of a silent half-open
+	// consumer. The deployed activation row stays INACTIVE until a separately
+	// authorized activation step, so this wiring opens no command by itself.
+	entitlementConsumerEnabled, err := optionalBooleanEnvironment("BILLING_ENTITLEMENT_CONSUMER_ENABLED", false)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var approvalConsumerResources *events.ApprovalConsumerResourceBinding
+	if entitlementConsumerEnabled {
+		approvalConsumerResources, err = billingApprovalConsumerResources(time.Now().UTC())
+		if err != nil {
+			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+	}
+	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor", events.NATSConfig{Environment: cfg.Environment, CAFile: os.Getenv("NATS_CA_FILE"), ApprovalConsumerResources: approvalConsumerResources})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -121,20 +137,16 @@ func main() {
 		log.Fatal(err)
 	}
 	defer stopApprovalConsumer()
-	// The entitlement correction command keeps its own durable whose Q+1 start
-	// comes from the governed cutover receipt. Until that trusted binding exists
-	// the consumer is not started at all: the command stays closed even if an
-	// activation row were flipped, and the deployment keeps its current behavior.
-	entitlementConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-entitlement-component-adjustment-executor-p2-v1")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if stopEntitlementConsumer, consumeErr := broker.ConsumeAuthorization(workerContext, "billing-entitlement-component-adjustment-executor-p2-v1", entitlementConsumer.Handle); consumeErr == nil {
+	if entitlementConsumerEnabled {
+		entitlementConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-entitlement-component-adjustment-executor-p2-v1")
+		if err != nil {
+			log.Fatal(err)
+		}
+		stopEntitlementConsumer, err := broker.ConsumeAuthorization(workerContext, "billing-entitlement-component-adjustment-executor-p2-v1", entitlementConsumer.Handle)
+		if err != nil {
+			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
 		defer stopEntitlementConsumer()
-	} else if errors.Is(consumeErr, events.ErrNATSResources) {
-		slog.Warn("BILLING_ENTITLEMENT_CORRECTION_CONSUMER_NOT_PROVISIONED")
-	} else {
-		log.Fatal(consumeErr)
 	}
 	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
 		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)
