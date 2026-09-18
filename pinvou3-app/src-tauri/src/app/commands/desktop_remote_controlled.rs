@@ -15,6 +15,8 @@ use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
 };
+use crate::features::remote_control::controller::relay_runtime::ControlledRelayWorker;
+use crate::features::remote_control::RemoteControlManager;
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -96,9 +98,10 @@ fn emit_status(app: &AppHandle, status: &ControlledStatus) {
 }
 
 #[tauri::command]
-pub fn desktop_remote_controlled_start(
+pub async fn desktop_remote_controlled_start(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
     device_name: Option<String>,
     workspaces: Vec<DesktopControlledWorkspaceInput>,
 ) -> Result<ControlledStatus, String> {
@@ -107,17 +110,47 @@ pub fn desktop_remote_controlled_start(
     manager
         .start(device_name.as_deref(), workspaces)
         .map_err(controlled_error)?;
-    let status = manager.status();
-    emit_status(&app, &status);
-    Ok(status)
+    let operation = manager
+        .current_operation()
+        .ok_or_else(|| "desktop_remote_generation_unavailable".to_owned())?;
+    let done = match ControlledRelayWorker::start(
+        app.clone(),
+        relay.inner().clone(),
+        operation.clone(),
+    )
+    .await
+    {
+        Ok(done) => done,
+        Err(error) => {
+            let bounded = error
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+                .take(64)
+                .collect::<String>();
+            let status = manager
+                .fail_operation(operation, bounded)
+                .map_err(controlled_error)?;
+            emit_status(&app, &status);
+            return Err(error);
+        }
+    };
+    match done.await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("pairing_registration_failed".to_owned()),
+    }
 }
 
 #[tauri::command]
 pub fn desktop_remote_controlled_refresh(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    if let Some(generation) = manager.current_generation() {
+        relay.stop_controller_relay(&generation);
+    }
     manager.begin_refresh().map_err(controlled_error)?;
     let status = manager.status();
     emit_status(&app, &status);
@@ -128,8 +161,12 @@ pub fn desktop_remote_controlled_refresh(
 pub fn desktop_remote_controlled_stop(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    if let Some(generation) = manager.current_generation() {
+        relay.stop_controller_relay(&generation);
+    }
     let status = manager.stop();
     emit_status(&app, &status);
     Ok(status)
@@ -139,8 +176,12 @@ pub fn desktop_remote_controlled_stop(
 pub fn desktop_remote_controlled_disconnect_now(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    if let Some(generation) = manager.current_generation() {
+        relay.stop_controller_relay(&generation);
+    }
     let status = manager.disconnect_now();
     emit_status(&app, &status);
     Ok(status)

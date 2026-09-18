@@ -43,6 +43,12 @@ pub(crate) struct ControlledOperation {
     generation: String,
 }
 
+impl ControlledOperation {
+    pub(crate) fn generation(&self) -> &str {
+        &self.generation
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ControlledStateError {
     pub(crate) code: &'static str,
@@ -154,7 +160,7 @@ pub(crate) struct ControlledStatus {
     code_mode_allowed: bool,
     watchdog_deadline_b: Option<u64>,
     watchdog_suspect: bool,
-    error_code: Option<&'static str>,
+    error_code: Option<String>,
 }
 
 impl std::fmt::Debug for ControlledStatus {
@@ -220,7 +226,7 @@ struct Inner {
     last_observed_now_b: u64,
     transport: Option<ControllerTransportSender>,
     workspaces: Vec<WorkspaceAuthorization>,
-    error_code: Option<&'static str>,
+    error_code: Option<String>,
 }
 
 #[derive(Default)]
@@ -300,6 +306,14 @@ impl ControlledDeviceManager {
             .registration_request_id
             .clone()
             .ok_or_else(|| ControlledStateError::new("registration_request_unavailable"))
+    }
+
+    pub(crate) fn current_operation(&self) -> Option<ControlledOperation> {
+        current_operation(&self.inner.lock())
+    }
+
+    pub(crate) fn current_generation(&self) -> Option<String> {
+        self.inner.lock().generation.clone()
     }
 
     pub(crate) fn complete_registration(
@@ -422,7 +436,7 @@ impl ControlledDeviceManager {
             if let Some(gate) = inner.resume_gate.as_mut() {
                 if gate.disconnect(now_b, deadline).is_err() {
                     inner.phase = ControlledStatusKind::Error;
-                    inner.error_code = Some("desktop_remote_resume_invalid");
+                    inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
                 } else {
                     inner.phase = ControlledStatusKind::Reconnecting;
                 }
@@ -536,7 +550,7 @@ impl ControlledDeviceManager {
         clear_sensitive(&mut inner, u64::MAX, true);
         inner.device_name = None;
         inner.phase = ControlledStatusKind::Error;
-        inner.error_code = Some("desktop_remote_refresh_failed");
+        inner.error_code = Some("desktop_remote_refresh_failed".to_owned());
         drop(inner);
         self.notify_cleanup(&generation);
         Ok(self.status())
@@ -545,7 +559,7 @@ impl ControlledDeviceManager {
     pub(crate) fn fail_operation(
         &self,
         operation: ControlledOperation,
-        error_code: &'static str,
+        error_code: String,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -625,7 +639,7 @@ impl ControlledDeviceManager {
             if watchdog_state == Some(LivenessWatchdogState::Expired) {
                 clear_sensitive(&mut inner, now_b, true);
                 inner.phase = ControlledStatusKind::Error;
-                inner.error_code = Some("desktop_remote_watchdog_expired");
+                inner.error_code = Some("desktop_remote_watchdog_expired".to_owned());
                 expired = true;
             } else {
                 expired = false;
@@ -736,7 +750,7 @@ impl ControlledDeviceManager {
             clear_sensitive(&mut inner, u64::MAX, clear_workspaces);
             inner.device_name = None;
             inner.phase = phase;
-            inner.error_code = (phase == ControlledStatusKind::Error).then_some(error_code);
+            inner.error_code = (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
         }
         self.notify_cleanup(&generation);
         self.status()
@@ -879,7 +893,7 @@ fn status_locked(inner: &Inner) -> ControlledStatus {
             .as_ref()
             .and_then(|watchdog| watchdog.deadline_b()),
         watchdog_suspect: watchdog_state == Some(LivenessWatchdogState::Suspect),
-        error_code: inner.error_code,
+        error_code: inner.error_code.clone(),
     }
 }
 
@@ -1111,7 +1125,7 @@ mod tests {
         );
         let status = manager.poll_watchdog(31_000);
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code, Some("desktop_remote_watchdog_expired"));
+        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_watchdog_expired"));
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
     }
@@ -1168,7 +1182,7 @@ mod tests {
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code, Some("desktop_remote_refresh_failed"));
+        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_refresh_failed"));
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         assert_eq!(

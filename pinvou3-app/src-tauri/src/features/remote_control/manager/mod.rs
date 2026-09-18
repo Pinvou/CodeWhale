@@ -213,6 +213,21 @@ const RUST_FORWARDED_EVENTS: &[&str] = &[
 /// 一律不转发。
 pub type CodeSessionPredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+fn controller_relay_message(value: &Value) -> bool {
+    let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    matches!(
+        kind,
+        "desktop_endpoint_registered" | "desktop_relay_connection" | "error"
+    ) || kind.starts_with("controller_")
+        || matches!(
+            kind,
+            "finished_receipt_commit"
+                | "finished_receipt_ack"
+                | "encrypted_handshake_finished"
+                | "encrypted_frame"
+        )
+}
+
 #[derive(Clone)]
 pub struct RemoteControlManager {
     app: AppHandle,
@@ -249,6 +264,8 @@ struct Inner {
     web_session_downloads: HashMap<String, WebSessionDownload>,
     web_session_download_order: VecDeque<String>,
     pending_revocations_in_flight: HashSet<String>,
+    controller_relay_generation: Option<String>,
+    controller_inbound: Option<tokio::sync::mpsc::Sender<Value>>,
     /// 原生代码会话判定；None = 未注入（不过滤，启动早期行为不变）。
     code_session_predicate: Option<CodeSessionPredicate>,
 }
@@ -277,8 +294,39 @@ impl Default for Inner {
             web_session_downloads: HashMap::new(),
             web_session_download_order: VecDeque::new(),
             pending_revocations_in_flight: HashSet::new(),
+            controller_relay_generation: None,
+            controller_inbound: None,
             code_session_predicate: None,
         }
+    }
+}
+
+/// Exclusive desktop-controller lane over the already-authenticated desktop
+/// endpoint socket. Dropping the receiver clears the lane; this prevents an old
+/// B generation from consuming or rejecting messages intended for its successor.
+pub struct ControllerRelayChannel {
+    manager: RemoteControlManager,
+    generation: String,
+    receiver: tokio::sync::mpsc::Receiver<Value>,
+}
+
+impl ControllerRelayChannel {
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+
+    pub async fn recv(&mut self) -> Option<Value> {
+        self.receiver.recv().await
+    }
+
+    pub fn try_send(&self, message: Value) -> Result<(), String> {
+        self.manager.send_controller_message(&self.generation, message)
+    }
+}
+
+impl Drop for ControllerRelayChannel {
+    fn drop(&mut self) {
+        self.manager.clear_controller_channel(&self.generation);
     }
 }
 
@@ -787,6 +835,119 @@ impl RemoteControlManager {
         validate_config(&config)?;
         self.activate(config)?;
         Ok(true)
+    }
+
+    /// Bind the Windows controller-v1 lane to the process-owned desktop
+    /// endpoint. The endpoint remains the same socket used by WebUI v2; the
+    /// Relay's interaction slot, not a second socket, enforces client mutual
+    /// exclusion. A controller generation owns exactly one inbound channel.
+    pub async fn start_controller_relay(&self, generation: &str) -> Result<ControllerRelayChannel, String> {
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Value>(128);
+        let synthetic_registration;
+        {
+            let mut inner = self.inner.lock();
+            if inner.controller_inbound.is_some() {
+                return Err("desktop_controller_relay_busy".to_owned());
+            }
+            inner.controller_relay_generation = Some(generation.to_owned());
+            inner.controller_inbound = Some(sender.clone());
+            synthetic_registration = inner.endpoint.as_ref().map(|endpoint| {
+                json!({
+                    "v": 2,
+                    "type": "desktop_endpoint_registered",
+                    "endpoint_id": endpoint.config.endpoint_id,
+                    "web_client_connected": endpoint.web_client_connected,
+                    "lease_id": endpoint.lease_id,
+                })
+            });
+        }
+
+        if let Err(error) = self.start(false) {
+            self.clear_controller_channel(generation);
+            return Err(error);
+        }
+
+        // If the persistent endpoint was already active there will be no second
+        // desktop_endpoint_registered event. Replay a local projection so the
+        // caller can safely wait for one registration signal in both cases.
+        let already_registered = {
+            let inner = self.inner.lock();
+            inner
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay)
+        };
+        if already_registered {
+            if let Some(message) = synthetic_registration {
+                let _ = sender.send(message).await;
+            }
+        }
+        Ok(ControllerRelayChannel {
+            manager: self.clone(),
+            generation: generation.to_owned(),
+            receiver,
+        })
+    }
+
+    pub fn controller_endpoint_id(&self) -> Result<String, String> {
+        self.inner
+            .lock()
+            .endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.config.endpoint_id.clone())
+            // Bounded snake_case code: the UI/telemetry surface must never receive
+            // prose, and `sanitize_error` would otherwise mangle a sentence into a
+            // meaningless identifier.
+            .ok_or_else(|| "desktop_relay_inactive".to_owned())
+    }
+
+    /// Close the generation-bound controller lane without touching the legacy
+    /// desktop endpoint. The synthetic message lets the worker leave its recv
+    /// loop deterministically; dropping the stored sender then closes it.
+    pub fn stop_controller_relay(&self, generation: &str) {
+        let sender = {
+            let inner = self.inner.lock();
+            if inner.controller_relay_generation.as_deref() != Some(generation) {
+                return;
+            }
+            inner.controller_inbound.clone()
+        };
+        if let Some(sender) = sender {
+            let _ = sender.try_send(json!({
+                "type": "desktop_controller_stop",
+                "remote_control_generation": generation,
+            }));
+        }
+        self.clear_controller_channel(generation);
+    }
+
+    fn clear_controller_channel(&self, generation: &str) {
+        let mut inner = self.inner.lock();
+        if inner
+            .controller_relay_generation
+            .as_deref()
+            .is_some_and(|current| current == generation)
+        {
+            inner.controller_relay_generation = None;
+            inner.controller_inbound = None;
+        }
+    }
+
+    fn send_controller_message(&self, generation: &str, message: Value) -> Result<(), String> {
+        let sender = {
+            let inner = self.inner.lock();
+            if inner.controller_relay_generation.as_deref() != Some(generation) {
+                return Err("desktop_controller_generation_stale".to_owned());
+            }
+            inner
+                .endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.sender.clone())
+                .ok_or_else(|| "desktop relay endpoint is not active".to_owned())?
+        };
+        sender
+            .try_send(RelayOutbound::Message(message))
+            .map_err(|_| "desktop relay task has stopped".to_owned())
     }
 
     /// Enable WebUI access. Repeated calls return the same persistent endpoint
@@ -1918,6 +2079,12 @@ impl RemoteControlManager {
     }
 
     fn handle_connection(&self, endpoint_id: &str, connected: bool, error: Option<String>) {
+        self.forward_controller_relay_message(&json!({
+            "type": "desktop_relay_connection",
+            "endpoint_id": endpoint_id,
+            "connected": connected,
+            "error": error,
+        }));
         {
             let mut inner = self.inner.lock();
             let Some(endpoint) = inner.endpoint.as_mut() else {
@@ -1940,14 +2107,37 @@ impl RemoteControlManager {
         self.emit_status();
     }
 
+    fn forward_controller_relay_message(&self, value: &Value) {
+        if !controller_relay_message(value) {
+            return;
+        }
+        let sender = self.inner.lock().controller_inbound.clone();
+        if let Some(sender) = sender {
+            let _ = sender.try_send(value.clone());
+        }
+    }
+
     fn handle_relay_message(&self, value: Value) {
         let endpoint_id = value
             .get("endpoint_id")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // Controller-v1 peer messages intentionally omit endpoint_id: the
+        // desktop socket is already authenticated and the router binds it to an
+        // endpoint. Route those frames only to the controller lane instead of
+        // misclassifying them as legacy broadcast messages.
+        if controller_relay_message(&value)
+            && (endpoint_id.is_empty()
+                || value.get("type").and_then(Value::as_str)
+                    != Some("desktop_endpoint_registered"))
+        {
+            self.forward_controller_relay_message(&value);
+            return;
+        }
         if !self.is_current_endpoint(endpoint_id) {
             return;
         }
+        self.forward_controller_relay_message(&value);
         match value
             .get("type")
             .and_then(Value::as_str)
@@ -2919,6 +3109,25 @@ mod tests {
 
         assert!(is_event_subscribed(&subscriptions, "session:deleted"));
         assert!(!is_event_subscribed(&subscriptions, "session:list_changed"));
+    }
+
+    #[test]
+    fn controller_messages_have_a_dedicated_relay_lane() {
+        assert!(controller_relay_message(&json!({
+            "type": "desktop_endpoint_registered"
+        })));
+        assert!(controller_relay_message(&json!({
+            "type": "controller_pairing_reserved"
+        })));
+        assert!(controller_relay_message(&json!({
+            "type": "encrypted_frame"
+        })));
+        assert!(!controller_relay_message(&json!({
+            "type": "rpc_request"
+        })));
+        assert!(!controller_relay_message(&json!({
+            "type": "chat:delta"
+        })));
     }
 
     #[test]
