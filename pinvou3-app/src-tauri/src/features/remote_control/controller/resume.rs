@@ -426,6 +426,63 @@ pub(crate) fn build_controller_resume_prepare(
     Ok(frame)
 }
 
+/// E2E-06：构造 B 端的 `controller_resume_activation_ack`（确认接受候选，字段与
+/// prepare 同族 + activation_id + original_deadline_ms）。
+pub(crate) fn build_controller_resume_activation_ack(
+    lease: &LeaseContext,
+    request_id: &str,
+    activation_id: &str,
+    original_deadline_ms: u64,
+) -> Result<serde_json::Value> {
+    if activation_id.is_empty() || original_deadline_ms == 0 {
+        return Err(ResumeStateError::new("controller_resume_frame_invalid"));
+    }
+    let frame = serde_json::json!({
+        "v": 1,
+        "type": "controller_resume_activation_ack",
+        "request_id": request_id,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "activation_id": activation_id,
+        "original_deadline_ms": original_deadline_ms.to_string(),
+    });
+    validate_controller_message_json(&frame.to_string(), SenderRole::ControlledB)
+        .map_err(|_| ResumeStateError::new("controller_resume_frame_invalid"))?;
+    Ok(frame)
+}
+
+/// E2E-06：构造 B 端的 `controller_post_activation_liveness`（第一条激活后存活
+/// 证据，序号固定为 1，epoch 必须与旧值不同）。
+pub(crate) fn build_controller_post_activation_liveness(
+    lease: &LeaseContext,
+    request_id: &str,
+    activation_id: &str,
+    liveness_epoch_b: &str,
+) -> Result<serde_json::Value> {
+    if activation_id.is_empty() || liveness_epoch_b.is_empty() {
+        return Err(ResumeStateError::new("controller_resume_frame_invalid"));
+    }
+    let frame = serde_json::json!({
+        "v": 1,
+        "type": "controller_post_activation_liveness",
+        "request_id": request_id,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "activation_id": activation_id,
+        "liveness_epoch_b": liveness_epoch_b,
+        "heartbeat_sequence_b": "1",
+    });
+    validate_controller_message_json(&frame.to_string(), SenderRole::ControlledB)
+        .map_err(|_| ResumeStateError::new("controller_resume_frame_invalid"))?;
+    Ok(frame)
+}
+
 /// E2E-06：构造 `controller_resume_ready_ack`（A/B 各自独立 ack 同一 activation
 /// 与 B 的第一条 post-activation liveness）。字段来自 Relay 的 confirmed 帧，
 /// 因此只做形状与角色自检。
@@ -900,6 +957,52 @@ mod tests {
                 .unwrap()
                 .len(),
             16
+        );
+
+        // E2E-06：B 端的两个专属出站帧也必须直接过冻结 schema。
+        let activation_ack = build_controller_resume_activation_ack(
+            &lease,
+            "request-resume-ack-1",
+            "activation-0001",
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(activation_ack["type"], "controller_resume_activation_ack");
+        assert_eq!(activation_ack["original_deadline_ms"], "30000");
+        assert_eq!(
+            build_controller_resume_activation_ack(
+                &lease,
+                "request-resume-ack-1",
+                "",
+                30_000,
+            )
+            .unwrap_err()
+            .code,
+            "controller_resume_frame_invalid"
+        );
+        let post_liveness = build_controller_post_activation_liveness(
+            &lease,
+            "request-resume-liveness-1",
+            "activation-0001",
+            "live-b-2",
+        )
+        .unwrap();
+        assert_eq!(
+            post_liveness["type"],
+            "controller_post_activation_liveness"
+        );
+        assert_eq!(post_liveness["heartbeat_sequence_b"], "1");
+        assert_eq!(post_liveness["liveness_epoch_b"], "live-b-2");
+        assert_eq!(
+            build_controller_post_activation_liveness(
+                &lease,
+                "request-resume-liveness-1",
+                "activation-0001",
+                "",
+            )
+            .unwrap_err()
+            .code,
+            "controller_resume_frame_invalid"
         );
     }
 }
