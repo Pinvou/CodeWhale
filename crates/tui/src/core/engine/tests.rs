@@ -19172,6 +19172,9 @@ async fn code_execution_scenario() {
     }
 }
 
+// The pid-liveness assertion polls the process via libc, which is only a
+// dependency on unix targets — same gate as the js/plugin kill tests.
+#[cfg(unix)]
 #[tokio::test]
 async fn code_execution_timeout_kills_the_interpreter_instead_of_orphaning_it() {
     // The kill path needs a real interpreter; skip where python is absent.
