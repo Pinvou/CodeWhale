@@ -260,8 +260,14 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
    `controller_resume_ready_ack` 接到各自的 `ControllerResumeGate`，并在
    `controller_resumed` 后重新派生业务密钥（租约 epoch 变化）。
    - 本轮已落地的前置（见 9.4）：B 注册补 `resume_v1`、恢复确认 AEAD、通道
-     挂起/激活、A 端相位推进、出站帧构造；**剩余**为 A/B 两侧运行时循环接线
-     （断线后驱动 `ControllerResumeGate` 并按序收发六种恢复帧）。
+     挂起/激活、A 端相位推进、出站帧构造、**A 端运行时循环接线**（断线即挂起
+     通道并按序发出 prepare/confirm/ready_ack、接受 resumed 后重开业务闸门）。
+     **剩余**：B 端运行时循环接线——B 目前仍只在断线时投影 `reconnecting`，
+     未驱动本端 `ControllerResumeGate` 的 prepare/provisional/confirm/
+     activation_ack/post_activation_liveness/ready_ack/resumed 序列，也未把
+     `controller_resume_activation_ack`/`controller_post_activation_liveness`
+     帧发到 Relay；因此当前双端断线后恢复无法完成（A 端会在预算内失败关闭并
+     投影 `endpoint_offline`，属保守行为，不会留下半恢复状态）。
    - 已核对 Relay `controller-lease.js:completeResume`：恢复**不改变**
      `lease_epoch`/`connection_id` 等业务密钥派生输入，只轮换 liveness epoch、
      恢复令牌与 deadline。因此 `controller_resumed` 后无需重新派生业务密钥，
@@ -285,8 +291,9 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `f4c3ea9b` | B 端注册声明 `resume_v1`；新增「A claim 与 B 注册能力族一致」用例，锁定七族交集不再静默缺项 |
 | `c686550d` | 恢复原语：`ResumeConfirmCipher`（resume 秘密 AEAD，AAD 绑租约五元组 + activation_id，明文带域标签/activation_id/发送角色，并派生恢复后轮换指纹）；`EncryptedLane` 保留密钥材料并新增 `suspend`/`activate`（恢复期业务与存活帧失败关闭，确认帧不受影响）；敏感恢复队列放行 `controller_resume_ready_ack`；`ControllerResumeGate` 补 A 角色相位推进（Relay confirmed → PostActivationLiveness，B 侧幂等） |
 | `75b30972` | 恢复出站帧纯构造：`new_resume_challenge`/`build_controller_resume_prepare`/`build_controller_resume_ready_ack`，逐帧过冻结 schema，畸形输入失败关闭 |
+| `22929522` | A 端运行时接线：断线改为「挂起通道 + 启动恢复」（不再 `clear`）；`ControllingLane::send_resume_control`（生产走敏感恢复队列）；manager 新增 `begin_resume`/`advance_resume`/`current_operation`/`send_resume_control` 与带 `activation_id` 的 `complete_resumed`；恢复预算 30 秒内未完成、相位错乱、对端确认失败或收到 Relay `error` 都会清空通道并投影 `endpoint_offline`；新增整条恢复序列用例（prepare/confirm/ready_ack 顺序 + resumed 后重开业务）与断线即发 prepare 的断言 |
 
-验证：`cargo test remote_control::` 319 通过 / 0 失败；`cargo test remote_control::controller::` 228 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
+验证：`cargo test remote_control::` 320 通过 / 0 失败；`cargo test remote_control::controller::` 229 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
 
 ## 10. E2E-07 实施进度（进行中，未审核）
 
