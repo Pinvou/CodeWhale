@@ -3,7 +3,17 @@ scripts/validate-commit-msg.py text eol=lf
 # Shell 脚本必须 LF:core.autocrlf=true 的 Windows checkout 会把 .sh 转成 CRLF,
 # 严格模式的 bash 读到 \r 直接失败(fork-guard.sh 等 PR 门控脚本跑不起来)。
 *.sh text eol=lf
+# .sh 会 source 的 .env 同理：变量值末尾带上 \r 之后，git fetch 会报 invalid refspec、
+# 路径拼接会多出一个不可见字符。上面那条规则漏了这类文件。
+*.env text eol=lf
 pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/pinvou-knowledge-host-helper text eol=lf
+# 同理，下面这些 shell 脚本也**故意不带扩展名**，上面按扩展名匹配的规则
+# （*.sh 等）一条都盖不到。CRLF 会让 shebang 变成 `#!/bin/sh\r`，内核把
+# 那个 \r 当成解释器路径的一部分，报错是 ENOENT/「never executed」，从头到
+# 尾不会提换行符。新增此类脚本时记得在这里加一行。
+pinvou3-app/src-tauri/scripts/rustc-stack-wrapper text eol=lf
+pinvou3-app/src-tauri/resources/common/bundle/eip/bin/eip text eol=lf
+pinvou3-app/src-tauri/resources/common/bundle/zhidao/bin/zhidao text eol=lf
 # 编译期 include_str! 内嵌并按 "\n\n" 切分/golden 字节测试锁定:autocrlf=true 的
 # Windows checkout 转成 CRLF 后 split_once("\n\n") 直接 panic。
 pinvou3-app/src-tauri/resources/common/bundle/instructions-*.md text eol=lf
