@@ -1,4 +1,4 @@
-pub(crate) mod capabilities;
+﻿pub(crate) mod capabilities;
 pub(crate) mod controlled;
 pub(crate) mod controlled_handshake;
 pub(crate) mod controlling;
@@ -6,6 +6,7 @@ pub(crate) mod controlling_handshake;
 pub(crate) mod controlling_runtime;
 pub(crate) mod controlling_service;
 pub(crate) mod controlling_session;
+pub(crate) mod encrypted_lane;
 pub(crate) mod crypto;
 pub(crate) mod history;
 pub(crate) mod journal;
