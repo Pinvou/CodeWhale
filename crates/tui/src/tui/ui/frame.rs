@@ -713,6 +713,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         model: app.model.clone(),
         active_route_limits: app.active_route_limits,
         workspace: app.workspace.clone(),
+        workspace_roots: app.workspace_roots.clone(),
         // The App owns the session id (claimed before the Runtime store lock
         // and used for every checkpoint/autosave); the engine adopts it so the
         // engine conversation and the persisted session are the same record.
@@ -908,6 +909,10 @@ pub(crate) fn build_session_snapshot(
             Some(app.mode.as_setting()),
         )
     };
+    // Autosave must rewrite the roots the session runs with, not an empty
+    // set: an erased `workspace_roots` here durably degrades a multi-root
+    // session on disk.
+    session.metadata.workspace_roots = app.workspace_roots.clone();
     let computed_title = session.metadata.title.clone();
     if let Some(cached) = app
         .current_session_metadata

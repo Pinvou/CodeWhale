@@ -1163,6 +1163,13 @@ pub(crate) async fn handle_view_events(
                                 continue;
                             }
                         };
+                        // Seed only after the fallible restore succeeded: the
+                        // persisted metadata is the target session's roots,
+                        // and the respawned engine plus every re-sync read
+                        // this field. Without it, switching sessions either
+                        // leaks the previous session's set into this one or
+                        // silently strips this session's persisted set.
+                        app.workspace_roots = session.metadata.workspace_roots.clone();
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;
@@ -1185,6 +1192,7 @@ pub(crate) async fn handle_view_events(
                                 system_prompt_override: false,
                                 model: app.model.clone(),
                                 workspace: app.workspace.clone(),
+                                workspace_roots: app.workspace_roots.clone(),
                                 mode: app.mode,
                             })
                             .await;
@@ -2216,6 +2224,7 @@ pub(crate) async fn handle_view_events(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
+                            workspace_roots: app.workspace_roots.clone(),
                             mode: app.mode,
                         })
                         .await;

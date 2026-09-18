@@ -91,6 +91,13 @@ pub struct Thread {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     pub cwd: PathBuf,
+    // Omitted only when the set is genuinely empty: legacy rows and the
+    // protocol-parity fixture hit this, but both spawn paths persist at
+    // least the cwd, so a thread created by this build always carries the
+    // key (an additive field legacy decoders tolerate). Decode still
+    // defaults via `default`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<PathBuf>,
     pub cli_version: String,
     pub source: SessionSource,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +150,8 @@ pub struct ThreadStartParams {
     pub model_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<PathBuf>,
     #[serde(default)]
     pub persist_extended_history: bool,
 }
@@ -172,6 +181,11 @@ pub struct ThreadResumeParams {
     pub developer_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<String>,
+    /// `None` (or absent) inherits the persisted set; `Some(roots)` replaces
+    /// it wholesale — `Some([])` is an explicit clear back to the bare cwd,
+    /// matching upstream codex's `Option<Vec>` semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub persist_extended_history: bool,
 }
@@ -197,6 +211,13 @@ pub struct ThreadForkParams {
     pub base_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_instructions: Option<String>,
+    /// `None` (or absent) inherits the parent thread's set, with the fork's
+    /// cwd taking the primary slot; `Some(roots)` replaces it wholesale —
+    /// `Some([])` is an explicit clear back to the bare cwd. The field is
+    /// new, so a bare `thread/fork` (the historical shape) must inherit
+    /// rather than silently degrade a multi-root parent to the fallback cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub persist_extended_history: bool,
 }

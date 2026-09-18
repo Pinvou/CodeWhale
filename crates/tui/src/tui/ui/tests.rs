@@ -6596,6 +6596,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             model_provider: "deepseek".to_string(),
             model_provider_id: None,
             workspace: PathBuf::from("/tmp/resume-recovery"),
+            workspace_roots: Vec::new(),
             mode: Some("yolo".to_string()),
             cost: crate::session_manager::SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -20719,6 +20720,7 @@ async fn approval_decision_persists_ask_rules_to_permissions_file() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnFailure,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })
         .expect("check persisted runtime policy");
     assert!(decision.requires_approval);
@@ -20775,6 +20777,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnRequest,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })
         .expect("check persisted allow");
     assert_eq!(
@@ -20792,6 +20795,7 @@ async fn approval_decision_persists_exact_workspace_allow_rule() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnRequest,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })
         .expect("check expanded command");
     assert!(expanded.requires_approval);

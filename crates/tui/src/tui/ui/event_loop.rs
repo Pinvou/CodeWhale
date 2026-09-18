@@ -586,6 +586,11 @@ pub async fn run_tui(
                 Ok(goal) => {
                     match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
                         Ok(()) => {
+                            // The engine below is built and synced from App
+                            // state: without this seed, a multi-root session
+                            // resumed from the CLI runs single-root for the
+                            // whole process lifetime.
+                            app.workspace_roots = saved.metadata.workspace_roots.clone();
                             app.status_message = Some(format!(
                                 "Resumed session: {}",
                                 crate::session_manager::truncate_id(&saved.metadata.id)
@@ -730,6 +735,7 @@ pub async fn run_tui(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: app.workspace_roots.clone(),
                 mode: app.mode,
             })
             .await;
@@ -1145,6 +1151,7 @@ async fn submit_decided_composer_input(
                     system_prompt_override: false,
                     model: app.model.clone(),
                     workspace: app.workspace.clone(),
+                    workspace_roots: app.workspace_roots.clone(),
                     mode: app.mode,
                 })
                 .await;
@@ -3694,6 +3701,7 @@ pub(crate) async fn run_event_loop(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: app.workspace_roots.clone(),
                         mode: app.mode,
                     })
                     .await;

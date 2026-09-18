@@ -159,6 +159,11 @@ pub struct SessionMetadata {
     pub model_provider_id: Option<String>,
     /// Workspace directory
     pub workspace: PathBuf,
+    /// Additional workspace roots attached to this session; `workspace` is
+    /// always the primary root. Sessions written before multi-root support
+    /// have no key and load as an empty set (single-root behavior).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<PathBuf>,
     /// Optional mode label (agent/plan/etc.)
     #[serde(default)]
     pub mode: Option<String>,
@@ -896,6 +901,7 @@ impl SavedSession {
             model_provider: default_model_provider(),
             model_provider_id: None,
             workspace,
+            workspace_roots: Vec::new(),
             mode: None,
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -1668,6 +1674,16 @@ impl SessionManager {
         metadata.created_at = persisted.created_at;
         metadata.parent_session_id = persisted.parent_session_id;
         metadata.forked_from_message_count = persisted.forked_from_message_count;
+        // The persisted set is the authority only against roots-blind
+        // writers: an empty incoming set may mean "rebuilt without knowing
+        // about multi-root", so the persisted set wins there. A non-empty
+        // incoming set is a deliberate live-owner mutation (a `/cd` primary
+        // swap, or a snapshot stamped from the loaded session) and must
+        // survive the merge - overwriting it would durably revert the swap
+        // and resurrect abandoned directories on the next resume.
+        if metadata.workspace_roots.is_empty() {
+            metadata.workspace_roots = persisted.workspace_roots;
+        }
         true
     }
 
@@ -2221,6 +2237,7 @@ pub fn create_saved_session_with_id_and_mode(
             model_provider: default_model_provider(),
             model_provider_id: None,
             workspace: workspace.to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: mode.map(str::to_string),
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -2627,6 +2644,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_roots_default_for_legacy_sessions_and_round_trip() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let messages = vec![make_test_message("user", "hi")];
+        let session = create_saved_session_with_id_and_mode(
+            "roots-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            None,
+        );
+
+        // A session written before multi-root support has no workspace_roots
+        // key; it must load as an empty (single-root) set, and a roots-less
+        // session must keep that key off the wire.
+        let mut value = serde_json::to_value(&session).expect("serialize session");
+        let metadata = value.get_mut("metadata").expect("metadata object");
+        assert!(metadata.get("workspace_roots").is_none());
+        let metadata = metadata.take();
+        let mut metadata: SessionMetadata =
+            serde_json::from_value(metadata).expect("legacy metadata decodes");
+        assert!(metadata.workspace_roots.is_empty());
+
+        // Roots survive a save/load round-trip byte-faithfully.
+        metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("shared")];
+        let mut session = session;
+        session.metadata = metadata;
+        manager.save_session(&session).expect("save session");
+        let loaded = manager.load_session("roots-session").expect("load session");
+        assert_eq!(
+            loaded.metadata.workspace_roots,
+            vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
+    #[test]
+    fn workspace_switch_survives_autosave_merge_and_restart() {
+        // /cd round trip: disk holds the pre-switch state; the live owner
+        // swaps the primary (/A -> /C, roots [/A,/B] -> [/C,/B]); the
+        // autosave stamps the live set and merges against disk; the
+        // restart+resume re-normalizes. The abandoned directory must not
+        // resurrect as a writable root.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("a");
+        let messages = vec![make_test_message("user", "hi")];
+        let mut session = create_saved_session_with_id_and_mode(
+            "switch-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        session.metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("b")];
+        manager
+            .save_session(&session)
+            .expect("save pre-switch session");
+
+        // The /cd swap in memory: new primary, old primary leaves the set.
+        let mut live = manager
+            .load_session("switch-session")
+            .expect("load for switch");
+        let new_workspace = tmp.path().join("c");
+        live.metadata.workspace = new_workspace.clone();
+        live.metadata.workspace_roots = vec![new_workspace.clone(), tmp.path().join("b")];
+
+        // Autosave: stamp the live set, then merge against disk exactly as
+        // build_session_snapshot does.
+        live.metadata.total_tokens = 5;
+        assert!(manager.merge_persisted_lifecycle(&mut live.metadata));
+        manager.save_session(&live).expect("autosave");
+
+        // Restart + resume: reload, then re-normalize the way the engine
+        // resolves roots on resume.
+        let resumed = manager.load_session("switch-session").expect("reload");
+        assert_eq!(resumed.metadata.workspace, new_workspace);
+        assert_eq!(
+            resumed.metadata.workspace_roots,
+            vec![new_workspace, tmp.path().join("b")],
+            "the abandoned directory must not resurrect as a writable root"
+        );
+    }
+
+    #[test]
+    fn merge_persisted_lifecycle_restores_persisted_workspace_roots() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let messages = vec![make_test_message("user", "hi")];
+        let mut session = create_saved_session_with_id_and_mode(
+            "merge-roots-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        session.metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("shared")];
+        manager.save_session(&session).expect("save session");
+
+        // A host without multi-root awareness rebuilds the metadata through
+        // the historical constructor and would rewrite the file with an
+        // empty root set; the lifecycle merge must restore the persisted
+        // set instead of letting that rewrite erase it.
+        let mut rewritten = create_saved_session_with_id_and_mode(
+            session.metadata.id.clone(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        assert!(rewritten.metadata.workspace_roots.is_empty());
+        assert!(manager.merge_persisted_lifecycle(&mut rewritten.metadata));
+        assert_eq!(
+            rewritten.metadata.workspace_roots,
+            vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
     /// Coverage state round-trips with the money it qualifies, and a session
     /// written before coverage existed is detected as *unknown* rather than being
     /// read as a complete total covering zero turns (#4318).
@@ -2853,6 +2998,7 @@ mod tests {
                 model_provider: "deepseek".to_string(),
                 model_provider_id: None,
                 workspace: workspace.to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: None,
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
@@ -2894,6 +3040,7 @@ mod tests {
                 model_provider: "deepseek".to_string(),
                 model_provider_id: None,
                 workspace: workspace.to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: Some("yolo".to_string()),
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,

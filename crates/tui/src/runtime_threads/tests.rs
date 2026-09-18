@@ -398,6 +398,7 @@ fn sample_thread(thread_id: &str) -> ThreadRecord {
         reasoning_effort: None,
         allowed_tools: None,
         workspace: PathBuf::from("."),
+        workspace_roots: Vec::new(),
         mode: AppMode::Agent.as_setting().to_string(),
         permission_posture: Some("ask".to_string()),
         allow_shell: false,
@@ -5840,6 +5841,74 @@ async fn update_thread_workspace_rejects_empty_path() -> Result<()> {
 }
 
 #[tokio::test]
+async fn update_thread_roots_rejects_active_turn() -> Result<()> {
+    // The fence covers `workspace_changed || roots_changed`; this pins the
+    // roots leg on its own: a mid-turn root-set replacement is deferred
+    // exactly like a mid-turn workspace swap.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-roots-active");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(workspace.clone()),
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+    {
+        let mut active = manager.active.lock().await;
+        let state = active.engines.get_mut(&thread.id).expect("mock engine");
+        state.active_turn = Some(ActiveTurnState {
+            turn_id: "turn_live_roots".to_string(),
+            interrupt_requested: false,
+            compaction_id: None,
+        });
+    }
+
+    let roots_before = thread.workspace_roots.clone();
+    let err = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(vec![std::path::PathBuf::from("/shared")]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await
+        .expect_err("roots update during active turn must fail");
+
+    assert!(format!("{err:#}").contains("active turn"));
+    let persisted = manager.store.load_thread(&thread.id)?;
+    assert_eq!(
+        persisted.workspace_roots, roots_before,
+        "rejected update must not touch the persisted root set"
+    );
+    {
+        let active = manager.active.lock().await;
+        assert!(
+            active.engines.contains_key(&thread.id),
+            "active engine should stay cached after rejected update"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx_op.recv())
+            .await
+            .is_err(),
+        "a rejected roots update must not reach the engine"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let old_workspace = std::env::temp_dir().join("codewhale-runtime-active-old");
@@ -5899,6 +5968,213 @@ async fn update_thread_workspace_rejects_active_turn() -> Result<()> {
             .await
             .is_err(),
         "rejected workspace update must not shut down the active engine"
+    );
+    Ok(())
+}
+
+#[test]
+fn thread_record_workspace_roots_default_for_legacy_json() {
+    let thread = sample_thread("thr_roots");
+    let mut value = serde_json::to_value(&thread).expect("serialize thread");
+    assert!(
+        value.get("workspace_roots").is_none(),
+        "an empty root set must stay off the wire"
+    );
+    let decoded: ThreadRecord =
+        serde_json::from_value(value.clone()).expect("legacy thread decodes");
+    assert!(decoded.workspace_roots.is_empty());
+
+    value["workspace_roots"] = serde_json::json!(["/repo", "/repo/lib"]);
+    let decoded: ThreadRecord = serde_json::from_value(value).expect("thread with roots decodes");
+    assert_eq!(
+        decoded.workspace_roots,
+        vec![PathBuf::from("/repo"), PathBuf::from("/repo/lib")]
+    );
+}
+
+#[tokio::test]
+async fn create_thread_normalizes_workspace_roots() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-create-roots-ws");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            workspace_roots: vec![
+                PathBuf::from("/shared"),
+                workspace.clone(),
+                PathBuf::from("/dup"),
+                PathBuf::from("/dup"),
+            ],
+            ..Default::default()
+        })
+        .await?;
+
+    // The workspace is the primary root and leads; additional roots dedupe
+    // in request order.
+    assert_eq!(
+        thread.workspace_roots,
+        vec![
+            workspace.clone(),
+            PathBuf::from("/shared"),
+            PathBuf::from("/dup")
+        ]
+    );
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        thread.workspace_roots,
+        "the normalized set must be the persisted set"
+    );
+    Ok(())
+}
+
+#[test]
+fn forkguard_workspace_roots_thread_record_persists_and_legacy_defaults_empty() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut thread = sample_thread("thr_roots_forkguard");
+    let roots = vec![PathBuf::from("/repo"), PathBuf::from("/shared")];
+    thread.workspace_roots = roots.clone();
+    manager.store.save_thread(&thread)?;
+
+    // The root set survives a durable save→load round trip unchanged.
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        roots
+    );
+
+    // A record serialized without the key (pre-multi-root shape) loads as an
+    // empty, single-root set.
+    let mut legacy = serde_json::to_value(&thread)?;
+    legacy
+        .as_object_mut()
+        .expect("thread serializes as object")
+        .remove("workspace_roots");
+    let legacy: ThreadRecord = serde_json::from_value(legacy)?;
+    assert!(legacy.workspace_roots.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn update_thread_workspace_roots_replace_set_and_are_idempotent() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-roots-primary");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(workspace.clone()),
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+
+    let roots = vec![
+        std::env::temp_dir().join("codewhale-runtime-roots-shared-a"),
+        std::env::temp_dir().join("codewhale-runtime-roots-shared-b"),
+    ];
+    let updated = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(roots.clone()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+
+    // Explicit roots replace the whole set; the workspace stays primary.
+    let mut expected = vec![workspace.clone()];
+    expected.extend(roots.iter().cloned());
+    assert_eq!(updated.workspace_roots, expected);
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        expected
+    );
+
+    let events = manager.events_since(&thread.id, None)?;
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| event.event == "thread.updated")
+        .expect("thread.updated event");
+    assert_eq!(
+        event
+            .payload
+            .get("changes")
+            .and_then(|changes| changes.get("workspace_roots")),
+        Some(&serde_json::to_value(&expected)?)
+    );
+
+    // Re-applying the same roots is a no-op: no change receipt, no timestamp
+    // bump.
+    let reapplied = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(roots),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    assert_eq!(reapplied.workspace_roots, expected);
+    assert_eq!(reapplied.updated_at, updated.updated_at);
+    Ok(())
+}
+
+#[tokio::test]
+async fn update_thread_workspace_only_keeps_additional_roots() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let old_workspace = std::env::temp_dir().join("codewhale-runtime-roots-old");
+    let new_workspace = std::env::temp_dir().join("codewhale-runtime-roots-new");
+    let shared = std::env::temp_dir().join("codewhale-runtime-roots-shared");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(old_workspace.clone()),
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(vec![shared.clone()]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+
+    let updated = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace: Some(new_workspace.clone()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+
+    // The new workspace takes over the primary slot; the old workspace leaves
+    // the set while additional roots survive.
+    assert_eq!(updated.workspace, new_workspace);
+    assert_eq!(
+        updated.workspace_roots,
+        vec![new_workspace.clone(), shared.clone()]
+    );
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        vec![new_workspace, shared]
     );
     Ok(())
 }
@@ -10908,6 +11184,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         reasoning_effort: None,
         allowed_tools: None,
         workspace: PathBuf::from("."),
+        workspace_roots: Vec::new(),
         mode: "agent".to_string(),
         permission_posture: None,
         allow_shell: false,

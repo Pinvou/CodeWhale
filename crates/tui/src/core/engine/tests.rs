@@ -8656,6 +8656,7 @@ fn auto_review_plan_decision(
         approval_mode,
         workspace_trusted,
         workspace,
+        &[],
     );
     auto_review_plan_decision_for_context(policy, &context)
 }
@@ -9003,6 +9004,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
             ask.1,
             ask.2,
             workspace,
+            &[],
             tool,
             input,
             ApprovalRequirement::Suggest,
@@ -9063,6 +9065,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
                 approval_mode,
                 auto_approve,
                 workspace,
+                &[],
                 "write_file",
                 &json!({"path": "src/main.rs"}),
                 ApprovalRequirement::Suggest,
@@ -9077,6 +9080,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
         ask.1,
         ask.2,
         workspace,
+        &[],
         "write_file",
         &json!({"path": "src/main.rs"}),
         ApprovalRequirement::Required,
@@ -9407,6 +9411,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9430,6 +9435,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Never,
         );
 
@@ -9452,6 +9458,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "git status"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9471,6 +9478,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         "Bash",
         &json!({"action": "run", "command": "cargo test --workspace"}),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Auto,
     );
 
@@ -9499,6 +9507,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         Some(ToolAskRuleDecision::Allow)
@@ -9509,6 +9518,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         None
@@ -9519,6 +9529,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/other"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         None
@@ -9540,6 +9551,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9563,6 +9575,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "/repo/secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9586,6 +9599,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Never,
         );
 
@@ -9608,6 +9622,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "docs/readme.md"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9627,6 +9642,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         "File",
         &json!({"action": "write", "path": "src/lib.rs", "content": "new\n"}),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Auto,
     );
 
@@ -9664,6 +9680,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
@@ -9678,6 +9695,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(partially_allowed, None);
@@ -12991,6 +13009,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             "write_file",
             &tool_input,
             workspace.path(),
+            &[],
             crate::tui::approval::ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
@@ -13284,6 +13303,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             "exec_shell",
             &tool_input,
             workspace.path(),
+            &[],
             crate::tui::approval::ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
@@ -14656,6 +14676,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
             ApprovalMode::Suggest,
             None,
             &workspace,
+            &[],
             SandboxNetworkAccess::Restricted,
         ),
         SandboxPolicy::ReadOnly
@@ -14667,6 +14688,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         ApprovalMode::Suggest,
         None,
         &workspace,
+        &[],
         SandboxNetworkAccess::Restricted,
     ) {
         SandboxPolicy::WorkspaceWrite {
@@ -14689,6 +14711,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         ApprovalMode::Suggest,
         None,
         &workspace,
+        &[],
         SandboxNetworkAccess::Allowed,
     ) {
         SandboxPolicy::WorkspaceWrite { network_access, .. } => {
@@ -14707,6 +14730,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
             ApprovalMode::Bypass,
             None,
             &workspace,
+            &[],
             SandboxNetworkAccess::Restricted,
         ),
         SandboxPolicy::DangerFullAccess
@@ -15574,6 +15598,7 @@ async fn sync_session_restores_current_mode() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Plan,
         })
         .await
@@ -15652,6 +15677,7 @@ async fn sync_session_without_prompt_repins_full_system_prompt_on_next_turn() {
             system_prompt_override: false,
             model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
             workspace: workspace.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -15733,6 +15759,7 @@ async fn sync_session_same_id_does_not_finalize_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -15753,6 +15780,7 @@ async fn sync_session_same_id_does_not_finalize_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -15794,6 +15822,7 @@ async fn sync_session_different_id_finalizes_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -15817,6 +15846,7 @@ async fn sync_session_different_id_finalizes_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -15883,6 +15913,7 @@ async fn sync_session_migrates_one_checkpoint_and_strips_its_system_carrier() {
                 system_prompt_override: true,
                 model: "deepseek-v4-pro".to_string(),
                 workspace: tmp.path().to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: AppMode::Agent,
             })
             .await
@@ -15966,6 +15997,7 @@ async fn sync_session_projects_persisted_subagent_handoff_for_headless_restore()
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16029,6 +16061,107 @@ async fn session_snapshot_omits_id_for_legacy_root_custom_route() {
 
     assert_eq!(snapshot.model_provider, "custom");
     assert_eq!(snapshot.model_provider_id, None);
+    run.abort();
+}
+
+#[test]
+fn tool_context_for_turn_materializes_session_workspace_roots() {
+    let tmp = tempdir().expect("tempdir");
+    let shared = tempdir().expect("shared root");
+    let expected = vec![tmp.path().to_path_buf(), shared.path().to_path_buf()];
+
+    let mut config = deterministic_engine_config(tmp.path());
+    config.workspace_roots = vec![shared.path().to_path_buf()];
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let ctx = engine.build_tool_context(AppMode::Agent, false);
+    assert_eq!(ctx.workspace_roots, expected);
+    match &ctx.elevated_sandbox_policy {
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) => {
+            assert_eq!(writable_roots, &expected);
+        }
+        other => panic!("agent turn must carry a workspace-write policy: {other:?}"),
+    }
+
+    // No configured roots: the session degenerates to the primary root and
+    // the materialized policy is byte-identical to the historical shape.
+    let (engine, _handle) =
+        Engine::new(deterministic_engine_config(tmp.path()), &Config::default());
+    let ctx = engine.build_tool_context(AppMode::Agent, false);
+    assert_eq!(ctx.workspace_roots, vec![tmp.path().to_path_buf()]);
+    match &ctx.elevated_sandbox_policy {
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) => {
+            assert_eq!(writable_roots, &vec![tmp.path().to_path_buf()]);
+        }
+        other => panic!("agent turn must carry a workspace-write policy: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sync_session_replaces_workspace_roots_for_the_next_turn() {
+    let tmp = tempdir().expect("tempdir");
+    let shared = tempdir().expect("shared root");
+    let (engine, handle) = Engine::new(deterministic_engine_config(tmp.path()), &Config::default());
+    let run = tokio::spawn(engine.run());
+
+    // A roots-only sync (same primary workspace) swaps the materialized set.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("roots-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: vec![shared.path().to_path_buf()],
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.workspace_roots,
+        vec![tmp.path().to_path_buf(), shared.path().to_path_buf()],
+        "next turn must materialize the replaced root set"
+    );
+
+    // A later sync with no roots configured falls back to the primary root.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("roots-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session without roots");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(snapshot.workspace_roots, vec![tmp.path().to_path_buf()]);
+
     run.abort();
 }
 
@@ -16101,6 +16234,7 @@ async fn edit_last_turn_preserves_current_mode() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16258,6 +16392,7 @@ async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16371,6 +16506,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16474,6 +16610,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -17328,6 +17465,100 @@ fn working_set_reaches_model_as_turn_metadata() {
     assert!(text.starts_with("<turn_meta>\n"));
     assert!(text.contains(WORKING_SET_SUMMARY_MARKER));
     assert!(text.contains("src/lib.rs"));
+}
+
+fn turn_meta_text(engine: &mut Engine, input: &str) -> String {
+    let user_msg = engine.user_text_message_with_turn_metadata(input.to_string());
+    user_msg
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } if text.starts_with("<turn_meta>") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("turn metadata block")
+}
+
+#[test]
+fn forkguard_workspace_roots_turn_meta_lists_attached_roots() {
+    let tmp = tempdir().expect("tempdir");
+    let shared_a = tempdir().expect("shared a");
+    let shared_b = tempdir().expect("shared b");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        workspace_roots: vec![shared_a.path().to_path_buf(), shared_b.path().to_path_buf()],
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let first = turn_meta_text(&mut engine, "one");
+    let expected_line = format!(
+        "Accessible folders: {}, {}",
+        shared_a.path().display(),
+        shared_b.path().display()
+    );
+    assert!(first.contains(&expected_line), "{first}");
+    // The line sits immediately after the workspace line (the model reads the
+    // primary root there and the attached roots here).
+    let workspace_pos = first.find("Current workspace:").expect("workspace line");
+    let folders_pos = first.find("Accessible folders:").expect("folders line");
+    assert!(folders_pos > workspace_pos);
+    assert!(
+        !first[workspace_pos..folders_pos].contains("Current permission posture:"),
+        "the folders line must precede the posture lines: {first}"
+    );
+    // A stable root set renders the line byte-identically every turn.
+    let second = turn_meta_text(&mut engine, "two");
+    assert_eq!(
+        first
+            .lines()
+            .find(|line| line.starts_with("Accessible folders:")),
+        second
+            .lines()
+            .find(|line| line.starts_with("Accessible folders:")),
+    );
+}
+
+#[test]
+fn turn_meta_omits_accessible_folders_for_single_root() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let text = turn_meta_text(&mut engine, "hello");
+    assert!(
+        !text.contains("Accessible folders:"),
+        "single-root sessions keep the historical block byte shape: {text}"
+    );
+}
+
+#[test]
+fn turn_meta_accessible_folders_truncates_long_root_sets() {
+    let tmp = tempdir().expect("tempdir");
+    let roots: Vec<PathBuf> = (0..7)
+        .map(|index| tmp.path().join(format!("root-{index}")))
+        .collect();
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        workspace_roots: roots.clone(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let text = turn_meta_text(&mut engine, "hello");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Accessible folders:"))
+        .expect("folders line");
+    // At most five attached roots listed, the rest folded into a count.
+    assert!(line.contains("root-0") && line.contains("root-4"), "{line}");
+    assert!(!line.contains("root-5"), "{line}");
+    assert!(line.ends_with("… (+2 more)"), "{line}");
 }
 
 #[test]

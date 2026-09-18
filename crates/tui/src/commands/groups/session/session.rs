@@ -40,6 +40,14 @@ pub fn save(app: &mut App, path: Option<&str>) -> CommandResult {
         Err(err) => return CommandResult::error(format!("Failed to snapshot Work state: {err}")),
     };
     session.last_auto_route = app.auto_route_for_persistence();
+    // Stamp the live root set before the write, exactly like the fork paths
+    // and `build_session_snapshot`: the freshly built metadata carries an
+    // empty set, and an explicit-path `/save` has no later autosave to heal
+    // it — `/save` followed by quit durably degrades a multi-root session.
+    session
+        .metadata
+        .workspace_roots
+        .clone_from(&app.workspace_roots);
     let save_path = explicit_save_path.unwrap_or_else(|| {
         let dir = crate::session_manager::default_sessions_dir()
             .unwrap_or_else(|_| app.workspace.clone());
@@ -147,6 +155,23 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
     forked.artifacts = source_session.artifacts.clone();
     forked.work_state = source_session.work_state.clone();
     forked.last_auto_route = source_session.last_auto_route.clone();
+    // The fork is anchored to the current workspace, so it takes the same
+    // primary-swap semantics `/cd` and the runtime PATCH workspace-only
+    // branch apply: the source's primary directory leaves the set — it is
+    // not this fork's directory — and the source's additional roots survive,
+    // re-normalized against the fork's own workspace. Stamping the source
+    // set verbatim would persist `workspace: <current>` next to a set led by
+    // the abandoned directory, which engine-side normalization then re-admits
+    // as a writable root on the next resume.
+    let additional_roots: Vec<std::path::PathBuf> = source_session
+        .metadata
+        .workspace_roots
+        .iter()
+        .filter(|root| **root != source_session.metadata.workspace)
+        .cloned()
+        .collect();
+    forked.metadata.workspace_roots =
+        codewhale_core::normalize_workspace_roots(&app.workspace, &additional_roots);
     if let Err(err) = manager.save_session(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
     }
@@ -171,6 +196,7 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
                 .map(|s| crate::models::SystemPrompt::Text(s.clone())),
             model: forked.metadata.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: forked.metadata.workspace_roots.clone(),
             mode: app.mode,
         },
     )
@@ -223,6 +249,11 @@ pub fn fork(app: &mut App) -> CommandResult {
             .clone_from(&cached.parent_session_id);
         parent.metadata.forked_from_message_count = cached.forked_from_message_count;
     }
+    // The freshly constructed metadata has empty roots; the live App state
+    // is the current set for this session (it supersedes the cached copy,
+    // which the App itself wrote at the last snapshot). Stamp it before the
+    // save for the same durable-erasure reason as above.
+    parent.metadata.workspace_roots = app.workspace_roots.clone();
     app.sync_cost_to_metadata(&mut parent.metadata);
     parent.context_references = app.session_context_references.clone();
     parent.artifacts = app.session_artifacts.clone();
@@ -258,6 +289,7 @@ pub fn fork(app: &mut App) -> CommandResult {
         j.spawn_depth = parent.metadata.spawn_depth;
     }
     forked.metadata.mark_forked_from(&parent.metadata);
+    forked.metadata.workspace_roots = parent.metadata.workspace_roots.clone();
     forked.context_references = app.session_context_references.clone();
     forked.artifacts = app.session_artifacts.clone();
     forked.work_state = work_state;
@@ -289,6 +321,7 @@ pub fn fork(app: &mut App) -> CommandResult {
             system_prompt: app.system_prompt.clone(),
             model: app.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: parent.metadata.workspace_roots.clone(),
             mode: app.mode,
         },
     )
@@ -351,6 +384,7 @@ pub fn new_session(app: &mut App, arg: Option<&str>) -> CommandResult {
             system_prompt: None,
             model: app.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: app.mode,
         },
     )
@@ -662,6 +696,73 @@ mod tests {
             route.effective_reasoning_effort,
             Some(crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable)
         );
+    }
+
+    #[test]
+    fn save_stamps_the_live_workspace_roots() {
+        let tmpdir = TempDir::new().unwrap();
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        let save_path = tmpdir.path().join("roots_session.json");
+        app.workspace_roots = vec![app.workspace.clone(), tmpdir.path().join("shared")];
+
+        let result = save(&mut app, Some(save_path.to_str().unwrap()));
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let saved: crate::session_manager::SavedSession =
+            serde_json::from_str(&std::fs::read_to_string(&save_path).unwrap()).unwrap();
+        assert_eq!(
+            saved.metadata.workspace_roots,
+            vec![app.workspace.clone(), tmpdir.path().join("shared")],
+            "an explicit-path /save must persist the live set, or /save-then-quit degrades it"
+        );
+        assert_eq!(saved.metadata.workspace, app.workspace);
+    }
+
+    #[test]
+    fn fork_from_session_swaps_the_primary_and_keeps_additional_roots() {
+        let tmpdir = TempDir::new().unwrap();
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.workspace = tmpdir.path().join("current");
+        app.workspace_roots = vec![app.workspace.clone()];
+
+        let manager = crate::session_manager::SessionManager::default_location().unwrap();
+        let abandoned = tmpdir.path().join("abandoned");
+        let shared = tmpdir.path().join("shared");
+        let mut source = create_saved_session_with_id_and_mode(
+            "source-session".to_string(),
+            &[crate::models::Message {
+                role: Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "fork me elsewhere".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            &app.model,
+            &abandoned,
+            0,
+            None,
+            Some(app.mode.label()),
+        );
+        source.metadata.workspace_roots = vec![abandoned.clone(), shared.clone()];
+        manager.save_session(&source).unwrap();
+
+        let result = fork_from_session(&mut app, "source-session");
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let fork = manager
+            .load_session(app.current_session_id.as_deref().expect("fork id"))
+            .expect("fork persisted");
+        assert_eq!(fork.metadata.workspace, app.workspace);
+        assert_eq!(
+            fork.metadata.workspace_roots,
+            vec![app.workspace.clone(), shared],
+            "the fork's primary is its own workspace; the abandoned primary must not re-enter"
+        );
+        drop(home_guard);
     }
 
     #[test]

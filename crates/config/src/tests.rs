@@ -722,6 +722,7 @@ fn config_store_exec_policy_engine_uses_sibling_permissions() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
             sandbox_mode: Some("workspace-write"),
+            workspace_roots: Vec::new(),
         })
         .expect("policy check");
 
@@ -854,6 +855,7 @@ fn config_store_appends_exact_workspace_allow_rules() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnRequest,
             sandbox_mode: Some("workspace-write"),
+            workspace_roots: Vec::new(),
         })
         .expect("check exact grant");
     assert_eq!(
@@ -871,6 +873,7 @@ fn config_store_appends_exact_workspace_allow_rules() {
             path: None,
             ask_for_approval: codewhale_execpolicy::AskForApproval::OnRequest,
             sandbox_mode: Some("workspace-write"),
+            workspace_roots: Vec::new(),
         })
         .expect("check extra args");
     assert!(extra_args.requires_approval);

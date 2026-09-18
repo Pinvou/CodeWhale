@@ -1096,6 +1096,7 @@ pub(crate) async fn apply_provider_fallback_switch(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: app.workspace_roots.clone(),
                 mode: app.mode,
             })
             .await;
@@ -1210,6 +1211,12 @@ pub(crate) async fn apply_command_result(
                         return Ok(false);
                     }
                 };
+                // The persisted metadata is the only roots source in the TUI
+                // (no multi-root UI): seed the app state only after every
+                // fallible restore step has succeeded, so a failed load
+                // cannot leave the *current* session's engine inheriting a
+                // foreign root set through the next routine re-sync.
+                app.workspace_roots = session.metadata.workspace_roots.clone();
                 sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                 if respawn {
                     let _ = engine_handle.send(Op::Shutdown).await;
@@ -1231,6 +1238,7 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: app.workspace_roots.clone(),
                         mode: app.mode,
                     })
                     .await;
@@ -1262,6 +1270,7 @@ pub(crate) async fn apply_command_result(
                 system_prompt,
                 model,
                 workspace,
+                workspace_roots,
                 mode,
             } => {
                 let mut session_id = session_id;
@@ -1276,6 +1285,14 @@ pub(crate) async fn apply_command_result(
                     apply_workspace_runtime_state(app, config, workspace.clone());
                     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
                 }
+                // The action is the roots authority for this transition (a
+                // fork carries the parent's set, a new session carries an
+                // empty one). Record it in the same step as the workspace
+                // above: the provider restore below can fail and return
+                // early, and leaving the previous session's set paired with
+                // the new workspace would make every later re-sync send a
+                // workspace whose primary root is the old directory.
+                app.workspace_roots = workspace_roots.clone();
                 let provider_changed = config.api_provider() != app.api_provider
                     || config.provider_identity_for(config.api_provider())
                         != app.provider_identity_for_persistence();
@@ -1322,6 +1339,7 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model,
                         workspace,
+                        workspace_roots,
                         mode,
                     })
                     .await;
@@ -1399,6 +1417,7 @@ pub(crate) async fn apply_command_result(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
+                            workspace_roots: app.workspace_roots.clone(),
                             mode: app.mode,
                         })
                         .await;
@@ -2286,6 +2305,7 @@ pub(crate) async fn apply_command_result(
                                     system_prompt_override: false,
                                     model: app.model.clone(),
                                     workspace: app.workspace.clone(),
+                                    workspace_roots: app.workspace_roots.clone(),
                                     mode: app.mode,
                                 })
                                 .await;

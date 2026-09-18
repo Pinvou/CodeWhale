@@ -819,6 +819,7 @@ impl App {
             reasoning_effort_preference,
             last_effective_reasoning_effort: None,
             workspace,
+            workspace_roots: Vec::new(),
             workflow_config: config.workflow_config(),
             goal_max_continuations: config.goal_max_continuations(),
             goal_continuation_waiting: false,

@@ -8400,6 +8400,12 @@ fn fork_session(
     );
     forked.metadata.copy_cost_from(&saved.metadata);
     forked.metadata.mark_forked_from(&saved.metadata);
+    // The fork continues the same conversation over the same accessible
+    // set: stamp the source's roots before the save. Without it the freshly
+    // constructed (empty) metadata persists, and the disk-authority
+    // lifecycle merge keeps re-erasing any later correction - the same
+    // sticky erasure the in-app `/fork` stamp prevents.
+    forked.metadata.workspace_roots = saved.metadata.workspace_roots.clone();
     manager.save_session(&forked)?;
 
     let source_title = saved.metadata.title.trim();
@@ -12061,6 +12067,12 @@ async fn build_direct_workflow_tool(
     let allow_shell = yolo || config.allow_shell();
     let shell_policy = shell_policy_for_mode(mode, allow_shell);
     let trusted = crate::workspace_trust::WorkspaceTrust::load_for(workspace);
+    // Headless workflow contexts are single-root: the caller reaches this
+    // builder with a workspace path and no root set, so an attached-root write
+    // of a multi-root session is denied here rather than held. Enforcement
+    // only (no display surface), byte-identical to base, and the same
+    // disclosed gap `Runtime::invoke_tool` carries; wiring a session's roots
+    // through is a scheduled follow-up.
     let mut context = crate::tools::ToolContext::with_auto_approve(
         workspace.to_path_buf(),
         yolo,
@@ -12085,6 +12097,7 @@ async fn build_direct_workflow_tool(
         },
         config.sandbox_mode.as_deref(),
         workspace,
+        &[],
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
     ));
     let network_policy = config.network.clone().map(|network| {
@@ -12384,6 +12397,7 @@ fn persist_exec_session(
     model: &str,
     provider_route: PersistedProviderRoute<'_>,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     system_prompt: &Option<SystemPrompt>,
     session_id: Option<&str>,
     total_tokens: u64,
@@ -12427,6 +12441,7 @@ fn persist_exec_session(
         provider_route.kind,
         provider_route.id,
         workspace,
+        workspace_roots,
     );
     let id = saved.metadata.id.clone();
     manager
@@ -12441,12 +12456,14 @@ fn stamp_exec_session_metadata(
     model_provider_kind: &str,
     model_provider_id: Option<&str>,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
 ) {
     saved.metadata.model = model.to_string();
     saved
         .metadata
         .set_model_provider_route(model_provider_kind, model_provider_id);
     saved.metadata.workspace = workspace.to_path_buf();
+    saved.metadata.workspace_roots = workspace_roots.to_vec();
     saved.metadata.mode = Some("exec".to_string());
 }
 
@@ -16273,6 +16290,7 @@ api_key = "test-only-key"
             crate::config::ApiProvider::Custom.as_str(),
             Some("custom-b"),
             Path::new("/tmp/exec-resume"),
+            &[PathBuf::from("/tmp/exec-resume-shared")],
         );
 
         let mut next_config = custom_exec_config("custom-a");
@@ -16285,6 +16303,18 @@ api_key = "test-only-key"
             Some("custom-b")
         );
         assert_eq!(persisted.metadata.model, "model-b");
+        // The stamp must carry the root set, not only the primary: a resumed
+        // multi-root exec that dropped it would persist single-root and the
+        // next `exec --resume` would run degraded.
+        assert_eq!(
+            persisted.metadata.workspace_roots,
+            vec![PathBuf::from("/tmp/exec-resume-shared")],
+            "the exec stamp must write the root set it was given"
+        );
+        assert_eq!(
+            persisted.metadata.workspace,
+            PathBuf::from("/tmp/exec-resume")
+        );
         assert_eq!(next_config.provider.as_deref(), Some("custom-b"));
         assert_eq!(resumed_model, "model-b");
     }
@@ -16305,6 +16335,7 @@ api_key = "test-only-key"
             crate::config::ApiProvider::Custom.as_str(),
             None,
             Path::new("/tmp/exec-root"),
+            &[],
         );
 
         assert_eq!(saved.metadata.model_provider, "custom");

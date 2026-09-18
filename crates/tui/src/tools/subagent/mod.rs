@@ -9322,6 +9322,15 @@ async fn spawn_subagent_from_input(
     );
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace.clone();
+        if spawn_request.worktree.is_some() {
+            // A worktree child is an isolation boundary, not a wider
+            // session: its boundary is the worktree alone, so the parent's
+            // attached roots do not carry over (at base a worktree child
+            // could only resolve inside its worktree).
+            child_runtime.context.workspace_roots = Vec::new();
+        }
+        // An explicit `cwd:` swap without a worktree is non-isolating and
+        // keeps the parent's root set (disclosed in the PR description).
         // A worktree child gets a distinct workspace-scoped plugin catalog.
         // Reusing the parent's registry here would leak workspace plugins (and
         // their authority receipts) across the exact isolation boundary the
@@ -14352,6 +14361,7 @@ impl SubAgentToolRegistry {
             approval_mode,
             workspace_trusted,
             Some(&workspace),
+            &self.gate_runtime.context.workspace_roots,
         );
         let (decision, _audit) = auto_review_plan_decision_for_context(
             &self.gate_runtime.auto_review_policy,
@@ -14732,6 +14742,7 @@ impl SubAgentToolRegistry {
         }
         crate::core::authority::paths_within_workspace_write_carve_out(
             &self.registry.context().workspace,
+            &self.registry.context().workspace_roots,
             &raw_mutation_target_paths(name, input),
         )
     }
@@ -15310,6 +15321,7 @@ impl SubAgentToolRegistry {
             name,
             &input,
             &self.registry.context().workspace,
+            &self.registry.context().workspace_roots,
             crate::tui::approval::ApprovalMode::Auto,
         )
         .or_else(|| {
@@ -15318,6 +15330,7 @@ impl SubAgentToolRegistry {
                 name,
                 &input,
                 &self.registry.context().workspace,
+                &self.registry.context().workspace_roots,
                 crate::tui::approval::ApprovalMode::Auto,
             )
         });
