@@ -32,6 +32,11 @@ const CLAIM_CAPABILITIES: &[&str] = &[
     "task_v1",
     "snapshot_journal_v1",
 ];
+
+/// A 端 claim 声明的能力集合（供「A claim 与 B 注册同族」的一致性测试使用）。
+pub(crate) fn claim_capabilities() -> &'static [&'static str] {
+    CLAIM_CAPABILITIES
+}
 const RESERVATION_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Eq, PartialEq)]

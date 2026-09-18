@@ -47,7 +47,16 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // E2E-06：B 的 liveness watchdog（DEV-08）已实现，声明 role_liveness_v1 让
     // A 端心跳帧与后续 challenge/attestation 能通过协商。
     "role_liveness_v1",
+    // E2E-06：B 的 resume 状态机（Relay controller-resume hooks 与本地
+    // ControllerResumeGate）已可运行，声明 resume_v1 让双端协商交集包含恢复族；
+    // 否则 A 端声明的 resume_v1 会被交集运算静默剔除。
+    "resume_v1",
 ];
+
+/// 注册声明的能力集合（供「A claim 与 B 注册同族」的一致性测试使用）。
+pub(crate) fn registration_capabilities() -> &'static [&'static str] {
+    REGISTRATION_CAPABILITIES
+}
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
 /// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。
 const HANDSHAKE_FAILED: &str = "invalid_message";
@@ -1179,6 +1188,33 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    /// E2E-06：双方声明的能力族必须一致——Relay 的协商是「A claim ∩ B 注册」，
+    /// 任一侧漏声明都会让整族能力静默失效（resume_v1 是本轮新增的族）。
+    #[test]
+    fn both_roles_declare_the_same_frozen_capability_families() {
+        let mut claim = super::super::controlling_handshake::claim_capabilities().to_vec();
+        let mut registration = super::registration_capabilities().to_vec();
+        assert_eq!(
+            claim.len(),
+            registration.len(),
+            "A claim 与 B 注册声明的能力族数量必须一致"
+        );
+        claim.sort_unstable();
+        registration.sort_unstable();
+        assert_eq!(claim, registration, "A claim 与 B 注册声明的能力集合必须一致");
+        for family in [
+            "pairing_v1",
+            "encrypted_frames_v1",
+            "finished_receipt_v1",
+            "role_liveness_v1",
+            "resume_v1",
+            "task_v1",
+            "snapshot_journal_v1",
+        ] {
+            assert!(claim.contains(&family), "A 端未声明 {family}");
+        }
     }
 
     #[test]
