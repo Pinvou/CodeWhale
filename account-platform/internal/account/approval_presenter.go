@@ -88,12 +88,22 @@ type approvalCredentialSummary struct {
 	TokenAccountID uuid.UUID `json:"token_account_id"`
 }
 
+// approvalEntitlementCorrectionSummary is the closed read-only projection of
+// the entitlement component correction command: only the target package and the
+// operator-chosen reason code are presented, never caller-supplied amounts.
+type approvalEntitlementCorrectionSummary struct {
+	PackageID  uuid.UUID `json:"package_id"`
+	ReasonCode string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_PROVIDER_RESUME":
 		return policyVersion == 2 && snapshotVersion == 1
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		return policyVersion == 2 && snapshotVersion == 2
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
 	default:
@@ -167,6 +177,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalProductSummary{ProductID: value}
+	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+		if item.TargetResourceType != "ENTITLEMENT_PACKAGE" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalEntitlementCorrectionSummary{PackageID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -224,6 +243,8 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			TargetLifecycle        string    `json:"target_lifecycle"`
 			EffectiveAt            *string   `json:"effective_at"`
 			TokenAccountID         uuid.UUID `json:"token_account_id"`
+			PackageID              uuid.UUID `json:"package_id"`
+			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -250,6 +271,9 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		command = target
 	case approvalCredentialSummary:
 		target.TokenAccountID = proof.Normalized.TokenAccountID
+		command = target
+	case approvalEntitlementCorrectionSummary:
+		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target
 	default:
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable

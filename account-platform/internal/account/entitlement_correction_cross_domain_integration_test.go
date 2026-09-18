@@ -147,43 +147,6 @@ func (delivery *entitlementCrossDomainDelivery) PublishDeadLetter(context.Contex
 // activation flips the appended v2 row, the Account reader and the real proof
 // authority both honor it, and flipping the row back closes the command again.
 
-// entitlementCrossDomainGateProbe logs every Account-side authorization call the
-// billing consumer makes so a swallowed consumer error names its exact step.
-type entitlementCrossDomainGateProbe struct {
-	*billingdomain.HTTPApprovalExecutionGate
-	t *testing.T
-}
-
-func (probe *entitlementCrossDomainGateProbe) ResolveAuthorizationRoute(ctx context.Context, eventID uuid.UUID) (billingdomain.ApprovalAuthorizationRoute, error) {
-	value, err := probe.HTTPApprovalExecutionGate.ResolveAuthorizationRoute(ctx, eventID)
-	probe.t.Logf("gate route err=%v", err)
-	return value, err
-}
-
-func (probe *entitlementCrossDomainGateProbe) ResolveAuthorizationBinding(ctx context.Context, eventID uuid.UUID, durable string) (billingdomain.ApprovalAuthorizationBinding, error) {
-	value, err := probe.HTTPApprovalExecutionGate.ResolveAuthorizationBinding(ctx, eventID, durable)
-	probe.t.Logf("gate binding err=%v", err)
-	return value, err
-}
-
-func (probe *entitlementCrossDomainGateProbe) ObserveAuthorizationDelivery(ctx context.Context, binding billingdomain.ApprovalAuthorizationBinding, stream string, sequence approvalconsumer.Sequence) (billingdomain.ApprovalAuthorizationDeliveryState, error) {
-	value, err := probe.HTTPApprovalExecutionGate.ObserveAuthorizationDelivery(ctx, binding, stream, sequence)
-	probe.t.Logf("gate observe state=%s err=%v", value.State, err)
-	return value, err
-}
-
-func (probe *entitlementCrossDomainGateProbe) GrantAuthorizationAttempt(ctx context.Context, binding billingdomain.ApprovalAuthorizationBinding, version int64) (billingdomain.ApprovalAuthorizationDeliveryState, error) {
-	value, err := probe.HTTPApprovalExecutionGate.GrantAuthorizationAttempt(ctx, binding, version)
-	probe.t.Logf("gate grant state=%s attempts=%d err=%v", value.State, value.DomainAttemptCount, err)
-	return value, err
-}
-
-func (probe *entitlementCrossDomainGateProbe) BeginAuthorized(ctx context.Context, binding billingdomain.ApprovalAuthorizationBinding, jobRunID string, observedVersions, observedFinancialSnapshot json.RawMessage) (billingdomain.ApprovedCommand, error) {
-	value, err := probe.HTTPApprovalExecutionGate.BeginAuthorized(ctx, binding, jobRunID, observedVersions, observedFinancialSnapshot)
-	probe.t.Logf("gate begin command=%s err=%v", value.CommandType, err)
-	return value, err
-}
-
 // retryWhileWriterUnavailable absorbs the isolated fixture's short approval
 // writer readiness window; the assertion under test is the governance error.
 func retryWhileWriterUnavailable(t *testing.T, ctx context.Context, repository *PostgresRepository, call func() error) error {
@@ -248,6 +211,25 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND s
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(frozen)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The closed read-only presenter must render exactly the frozen projection
+	// the command was approved with: the target package and the reason code.
+	presented := ApprovalRequest{
+		CommandType: policy.CommandType, PolicyVersion: policy.PolicyVersion, SnapshotSchemaVersion: policy.SnapshotSchemaVersion,
+		TargetResourceType: frozen.TargetResourceType, TargetResourceID: frozen.TargetResourceID,
+		NormalizedCommand: frozen.NormalizedCommand, CriticalResourceVersions: frozen.CriticalResourceVersions,
+		FinancialSnapshot: frozen.FinancialSnapshot,
+	}
+	if summary := approvalV2Summary(presented); summary.DetailAvailability != "AVAILABLE" {
+		t.Fatalf("cross-domain presenter unavailable: %+v", summary)
+	}
+	detail, err := approvalV2Detail(presented, 1)
+	if err != nil {
+		t.Fatalf("cross-domain presenter detail: %v", err)
+	}
+	if command, ok := detail.Command.(approvalEntitlementCorrectionSummary); !ok ||
+		command.PackageID != entitlementCrossDomainPackageID || command.ReasonCode != "ORIGINAL_SPLIT_MISMATCH" {
+		t.Fatalf("cross-domain presenter command=%#v", detail.Command)
 	}
 	proofSource, err := NewHTTPApprovalProofSource("http://127.0.0.1", billingServer.URL, proofToken)
 	if err != nil {
@@ -430,7 +412,7 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 	}); err != nil {
 		t.Fatalf("authorization wire decode route=%+v err=%v", route, err)
 	}
-	consumer, err := billingdomain.NewAuthorizationCommandConsumer(billingdomain.NewService(billingRepository), &entitlementCrossDomainGateProbe{HTTPApprovalExecutionGate: gate, t: t}, descriptor.Durable)
+	consumer, err := billingdomain.NewAuthorizationCommandConsumer(billingdomain.NewService(billingRepository), gate, descriptor.Durable)
 	if err != nil {
 		t.Fatal(err)
 	}

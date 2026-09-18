@@ -284,6 +284,8 @@ GSA-33 对账财务修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECOR
 
 GSA-35 用量结算修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED）：新增[用量结算修复领域设计](usage-settlement-repair-design.md)首版。事实：该命令只有Account v1策略元数据与Billing `('USAGE_SETTLEMENT_REPAIR',1,1,'INACTIVE',1)`，静态不可执行且无handler/proof/executor/consumer；`usage_holds`（`ACTIVE/COMMITTED/RELEASED/EXPIRED/REVIEW`、`max_microcredits>0`、可选`actual_microcredits>=0`）与`usage_hold_allocations`（`PRIMARY KEY(hold_id,package_id)`、`reserved>0`、`settled/released>=0`、`CHECK settled+released<=reserved`）承载多package预留与结算，结算写`USAGE` journal并按信用lot扣减；既有相关路径仅为Token用量对账与结算收敛，不提供可申请/可审批/可证明的修复命令。文档明确**绝不重发模型请求**、与账本修复/权益纠错的先后与互斥，并列出五项待用户决策（首版范围、事实证据、写入边界、未知结果与只读查证、幂等与限额）；默认`INACTIVE`。本切片不改任何代码、迁移、合同或activation。
 
+GSA-22 业务页 presenter 只读切片（仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：用户确认受控激活路线后，先落地该命令的只读 presenter：`approvalPresenterAvailable` 增加 `ENTITLEMENT_COMPONENT_ADJUSTMENT` 的 `(policy_version=2, snapshot_schema_version=2)` 组合，`approvalV2Command` 仅在该命令的目标为合法 `ENTITLEMENT_PACKAGE` UUID 时返回闭合投影 `approvalEntitlementCorrectionSummary{PackageID}`，`approvalV2Detail` 从冻结的 normalized command 补充 `reason_code`，其余目标/版本一律 `DETAIL_PRESENTATION_UNAVAILABLE` 且不泄漏原始 JSON；Portal 审批中心详情为通用渲染，无需新增字段即可展示该可用性状态。新增单测覆盖合法目标可用与错误目标失败关闭，并在真实跨域 E2E 上用真实 Billing 投影断言 presenter 输出（package id 与 reason code）。验证：presenter 单测与跨域真实 PG 用例 PASS（10.920s）。仍未完成：业务页申请入口/草稿编辑（GSA-37）与生产激活。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
