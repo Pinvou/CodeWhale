@@ -110,6 +110,11 @@ pub async fn desktop_remote_controlled_start(
         app.clone(),
         relay.inner().clone(),
         operation.clone(),
+        std::sync::Arc::new(
+            super::desktop_remote_controller_business::DesktopControlledBusiness {
+                app: app.clone(),
+            },
+        ),
     )
     .await
     {

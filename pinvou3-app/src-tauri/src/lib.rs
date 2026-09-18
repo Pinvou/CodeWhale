@@ -39,6 +39,7 @@ use crate::features::{
         controlling::ControllingDeviceManager,
         controlling_session::ControllingSessionManager,
         encrypted_lane::ControllingLaneState,
+        encrypted_lane::ControlledLaneState,
         permission::PermissionAuthority,
     },
     remote_control::RemoteControlManager,
@@ -1052,6 +1053,7 @@ pub fn run() {
                     handle.manage(ControllingDeviceManager::default());
                     handle.manage(ControllingSessionManager::default());
                     handle.manage(ControllingLaneState::default());
+                    handle.manage(ControlledLaneState::default());
                     handle.manage(CapabilitySnapshotManager::default());
                     let temporary_models = commands::desktop_remote_model::shared_model_store();
                     handle.manage(temporary_models.clone());

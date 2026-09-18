@@ -24,8 +24,9 @@ use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
 use super::crypto::{
     AuthenticatedRelayTrustConfig, CodeWrapBinding, CodeWrapKeyPair, ControllerRole as HandshakeRole,
-    HandshakeKeyPair, load_relay_trust_config, transport_key_fingerprint,
+    HandshakeKeyPair, SessionKeys, load_relay_trust_config, transport_key_fingerprint,
 };
+use super::encrypted_lane::ControlledLaneState;
 use super::protocol::LeaseContext;
 use super::protocol::{
     validate_controller_message_json, validate_controller_registration_message_json,
@@ -63,6 +64,8 @@ pub(crate) struct ControlledRelayWorker {
     /// 注册阶段声明、握手接管时一次性移交给 `ControlledHandshakeDriver`。
     handshake: Option<HandshakeKeyPair>,
     channel: crate::features::remote_control::manager::ControllerRelayChannel,
+    /// 业务派发端口：由命令层注入（能力快照 / 任务接纳 / 取消）。
+    business: std::sync::Arc<dyn ControlledBusinessPort>,
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -99,6 +102,7 @@ pub(crate) enum RegistrationStep {
 pub(crate) struct ControlledHandshakeOutcome {
     pub(crate) lease: JoinedLease,
     pub(crate) transcript_hash: [u8; 32],
+    pub(crate) negotiated_capabilities: Vec<String>,
 }
 
 /// B 端握手推进器（E2E-02 第 3 步）：不含网络、不含 Tauri，只按冻结顺序把
@@ -186,7 +190,17 @@ impl ControlledHandshakeDriver {
         Ok(ControlledHandshakeOutcome {
             lease,
             transcript_hash: handshake.transcript_hash(),
+            negotiated_capabilities: handshake.negotiated_capabilities().to_vec(),
         })
+    }
+
+    /// 双收据完成后取出会话密钥（用于安装加密业务通道）；只允许成功一次。
+    pub(crate) fn take_session(&mut self) -> Result<SessionKeys, &'static str> {
+        let handshake = self
+            .handshake
+            .as_mut()
+            .ok_or("controller_handshake_stage_invalid")?;
+        handshake.take_session().map_err(|error| error.code)
     }
 }
 
@@ -224,6 +238,7 @@ impl ControlledRelayWorker {
         app: AppHandle,
         relay: RemoteControlManager,
         operation: ControlledOperation,
+        business: std::sync::Arc<dyn ControlledBusinessPort>,
     ) -> Result<
         oneshot::Receiver<Result<ControlledStatus, String>>,
         String,
@@ -241,6 +256,7 @@ impl ControlledRelayWorker {
             code_wrap,
             handshake: Some(handshake),
             channel,
+            business,
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -320,6 +336,9 @@ impl ControlledRelayWorker {
         let mut joined = false;
         while let Some(message) = self.channel.recv().await {
             if joined {
+                if message.get("type").and_then(Value::as_str) == Some("encrypted_frame") {
+                    self.dispatch_business_frame(&message).await;
+                }
                 continue;
             }
             let result = match message.get("type").and_then(Value::as_str) {
@@ -389,6 +408,19 @@ impl ControlledRelayWorker {
             .map_err(|code| code.to_owned())?;
         let lease = controlled_lease_from_outcome(outcome, controlled_monotonic_millis())?;
         let manager = self.app.state::<ControlledDeviceManager>();
+        // 加密业务通道先于 connected 就位：状态一旦是 connected，业务帧既有租约
+        // 准入也有会话密钥可用。
+        let Ok(session) = driver.take_session() else {
+            return Err(self.fail_completed_handshake(&manager));
+        };
+        let business = self.app.state::<ControlledLaneState>();
+        business.clear();
+        if business
+            .install(super::crypto::ControllerRole::B, &lease.context, session)
+            .is_err()
+        {
+            return Err(self.fail_completed_handshake(&manager));
+        }
         let status = manager
             .complete_connected(self.operation.clone(), lease)
             .map_err(|error| error.code.to_owned())?;
@@ -396,8 +428,20 @@ impl ControlledRelayWorker {
         Ok(())
     }
 
-    /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
-    /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
+    /// 握手成功后本地收尾失败（无权安装会话密钥/状态竞争）：失败关闭并返回
+    /// 有界错误码，绝不留下「connected 但无业务通道」的状态。
+    fn fail_completed_handshake(&self, manager: &ControlledDeviceManager) -> String {
+        let business = self.app.state::<ControlledLaneState>();
+        business.clear();
+        if let Ok(status) = manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
+        {
+            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+        }
+        HANDSHAKE_FAILED.to_owned()
+    }
+
+/// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
+/// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
@@ -409,6 +453,130 @@ impl ControlledRelayWorker {
             let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
         }
     }
+
+    /// 已认证业务帧：解密 → 派发 → 用同一通道加密回包。任何一层不符（无活租约、
+    /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
+    /// `task_status` 由命令层决定（这里只负责通道语义）。
+    async fn dispatch_business_frame(&self, frame: &Value) {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+            return;
+        };
+        let business = self.app.state::<ControlledLaneState>();
+        let Ok((payload_kind, payload)) = business.open(frame, &capabilities) else {
+            return;
+        };
+        let Ok(Some((response_kind, response))) =
+            dispatch_decrypted_payload(self.business.as_ref(), &lease, &payload_kind, &payload)
+                .await
+        else {
+            return;
+        };
+        let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
+            return;
+        };
+        let _ = self.channel.try_send(frame);
+    }
+}
+
+/// B 端业务端口：worker 只负责解密/映射/回传，真正的业务（能力快照、任务
+/// 接纳与取消）由命令层实现，避免两条实现漂移。
+#[async_trait::async_trait]
+pub(crate) trait ControlledBusinessPort: Send + Sync {
+    /// 构造 wire `capability_snapshot`（`known_revision` 命中未过期快照时复用）。
+    async fn capability_snapshot(
+        &self,
+        lease: &LeaseContext,
+        request_id: &str,
+        known_revision: u64,
+    ) -> Result<Value, String>;
+
+    /// 接纳/派发一条 `task_submit`，返回该任务的 wire `task_status` 载荷。
+    /// `session_ref` 是 A 端声明并在 wire 上使用的会话引用。
+    async fn submit_task(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        payload: &Value,
+    ) -> Result<Value, String>;
+
+    /// 取消一条任务，返回 wire `task_status` 载荷（若服务不产出则返回 None）。
+    async fn cancel_task(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        task_id: &str,
+    ) -> Result<Option<Value>, String>;
+}
+
+/// 解密后的业务帧派发（纯函数，便于测试）：按 payload_kind 调用业务端口，
+/// 并把回包里的 `session_id` 统一改写回 A 端的会话引用，保证两侧同一 wire 身份。
+pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Sized>(
+    port: &P,
+    lease: &LeaseContext,
+    payload_kind: &str,
+    payload: &Value,
+) -> Result<Option<(&'static str, Value)>, String> {
+    match payload_kind {
+        "capability_snapshot_request" => {
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let known_revision = payload
+                .get("known_revision")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let response = port
+                .capability_snapshot(lease, request_id, known_revision)
+                .await?;
+            Ok(Some(("capability_snapshot", response)))
+        }
+        "task_submit" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?
+                .to_owned();
+            let response = port.submit_task(lease, &session_ref, payload).await?;
+            Ok(Some((
+                "task_status",
+                rewrite_session_id(response, &session_ref)?,
+            )))
+        }
+        "task_cancel" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?
+                .to_owned();
+            let task_id = payload
+                .get("task_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            match port.cancel_task(lease, &session_ref, task_id).await? {
+                Some(response) => Ok(Some((
+                    "task_status",
+                    rewrite_session_id(response, &session_ref)?,
+                ))),
+                None => Ok(None),
+            }
+        }
+        // liveness / 审批 / 附件 / 成果等能力属后续任务：未知类型一律丢弃。
+        _ => Ok(None),
+    }
+}
+
+fn rewrite_session_id(mut payload: Value, session_ref: &str) -> Result<Value, String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "task_request_invalid".to_owned())?;
+    object.insert(
+        "session_id".to_owned(),
+        Value::String(session_ref.to_owned()),
+    );
+    Ok(payload)
 }
 
 /// 由 `controller_joined` 材料构造 B 端租约（纯函数）。传输指纹与 A 端使用
@@ -432,6 +600,7 @@ fn controlled_lease_from_outcome(
         resume_deadline_b: outcome.lease.resume_deadline_ms,
         resume_token: outcome.lease.resume_token,
         transport_key_fingerprint: fingerprint,
+        negotiated_capabilities: outcome.negotiated_capabilities.clone(),
         // 冻结协议 v1 不携带主控设备显示名（controller_joined 无该字段）：首版
         // 留空，由 UI 的 i18n 兜底文案显示未知设备，真实来源待协议扩展。
         controller_device_name: String::new(),
@@ -990,6 +1159,133 @@ mod tests {
         assert!(
             !debug.contains(&base64::engine::general_purpose::STANDARD.encode(resume_token)),
             "恢复凭证不得出现在 Debug 输出里"
+        );
+        assert_eq!(
+            lease.negotiated_capabilities,
+            vec![
+                "encrypted_frames_v1".to_owned(),
+                "pairing_v1".to_owned(),
+                "task_v1".to_owned()
+            ]
+        );
+    }
+
+    /// E2E-04：解密后的业务帧按 payload_kind 派发，回包里的 session_id 统一改写
+    /// 回 A 端的会话引用；未知类型与畸形载荷不产生任何动作。
+    #[tokio::test]
+    async fn decrypted_payloads_dispatch_and_rewrite_the_session_reference() {
+        struct StubPort;
+
+        #[async_trait::async_trait]
+        impl ControlledBusinessPort for StubPort {
+            async fn capability_snapshot(
+                &self,
+                _lease: &LeaseContext,
+                request_id: &str,
+                known_revision: u64,
+            ) -> Result<Value, String> {
+                Ok(json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "request_id": request_id,
+                    "capability_revision": (known_revision + 1).to_string(),
+                }))
+            }
+
+            async fn submit_task(
+                &self,
+                _lease: &LeaseContext,
+                session_ref: &str,
+                payload: &Value,
+            ) -> Result<Value, String> {
+                // B 权威会话 id 与 A 的引用不同，由派发层改写回去。
+                Ok(json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "task_id": payload["task_id"],
+                    "session_id": format!("{session_ref}-authoritative"),
+                    "task_status": "succeeded",
+                }))
+            }
+
+            async fn cancel_task(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                task_id: &str,
+            ) -> Result<Option<Value>, String> {
+                Ok(Some(json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "task_id": task_id,
+                    "session_id": "session-authoritative",
+                    "task_status": "cancelled",
+                })))
+            }
+        }
+
+        let PairingFixture { reservation, .. } =
+            crate::features::remote_control::controller::test_support::pairing_fixture(
+                "relay-key-dispatch",
+            );
+        let lease =
+            crate::features::remote_control::controller::test_support::lease_context(&reservation);
+        let port = StubPort;
+
+        let (kind, response) = dispatch_decrypted_payload(
+            &port,
+            &lease,
+            "capability_snapshot_request",
+            &json!({"request_id": "request-1", "known_revision": "4"}),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(kind, "capability_snapshot");
+        assert_eq!(response["request_id"], "request-1");
+        assert_eq!(response["capability_revision"], "5");
+
+        let (kind, response) = dispatch_decrypted_payload(
+            &port,
+            &lease,
+            "task_submit",
+            &json!({
+                "task_id": "task-0001",
+                "session_id": "session-a-ref",
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(kind, "task_status");
+        assert_eq!(response["task_id"], "task-0001");
+        assert_eq!(
+            response["session_id"], "session-a-ref",
+            "回包必须改写成 A 端的会话引用"
+        );
+
+        let (kind, response) = dispatch_decrypted_payload(
+            &port,
+            &lease,
+            "task_cancel",
+            &json!({"task_id": "task-0001", "session_id": "session-a-ref"}),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(kind, "task_status");
+        assert_eq!(response["session_id"], "session-a-ref");
+
+        // 未知类型丢弃；缺字段的载荷失败关闭。
+        assert!(dispatch_decrypted_payload(&port, &lease, "journal_event", &json!({}))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({"task_id": "t"}))
+                .await
+                .unwrap_err(),
+            "task_request_invalid"
         );
     }
 }

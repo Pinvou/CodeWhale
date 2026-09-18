@@ -243,11 +243,11 @@ fn map_validation_failure(error: super::protocol::ControllerProtocolError) -> La
 
 /// 一条连接上唯一的加密业务通道（内存态，断开即清空）。
 #[derive(Default)]
-pub(crate) struct ControllingLaneState {
+struct LaneStore {
     lane: Mutex<Option<EncryptedLane>>,
 }
 
-impl ControllingLaneState {
+impl LaneStore {
     /// 安装（或替换）通道：只有完整握手 + 租约安装之后才允许调用。
     pub(crate) fn install(
         &self,
@@ -290,6 +290,57 @@ impl ControllingLaneState {
         lane.open(frame, negotiated_capabilities)
     }
 }
+
+/// 同一个 app 进程可能同时「主控某台设备」并「被某台设备控制」，两条连接各有
+/// 自己的会话密钥与序号，因此 A/B 各持一份独立状态（Tauri 按类型管理）。
+macro_rules! lane_state {
+    ($name:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Default)]
+        pub(crate) struct $name {
+            store: LaneStore,
+        }
+
+        impl $name {
+            pub(crate) fn install(
+                &self,
+                role: ControllerRole,
+                lease: &super::protocol::LeaseContext,
+                session: SessionKeys,
+            ) -> Result<(), LaneFailure> {
+                self.store.install(role, lease, session)
+            }
+
+            pub(crate) fn clear(&self) {
+                self.store.clear()
+            }
+
+            pub(crate) fn is_installed(&self) -> bool {
+                self.store.is_installed()
+            }
+
+            pub(crate) fn seal(
+                &self,
+                payload_kind: &str,
+                payload: &Value,
+                negotiated_capabilities: &[String],
+            ) -> Result<Value, LaneFailure> {
+                self.store.seal(payload_kind, payload, negotiated_capabilities)
+            }
+
+            pub(crate) fn open(
+                &self,
+                frame: &Value,
+                negotiated_capabilities: &[String],
+            ) -> Result<(String, Value), LaneFailure> {
+                self.store.open(frame, negotiated_capabilities)
+            }
+        }
+    };
+}
+
+lane_state!(ControllingLaneState, "A 端（主控）加密业务通道状态。");
+lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。");
 
 #[cfg(test)]
 mod tests {

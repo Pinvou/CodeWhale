@@ -1102,4 +1102,177 @@ mod tests {
         );
         b
     }
+
+    /// E2E-04 出口：同一进程内完成「A 发加密任务 → B 解密派发 → B 加密回传 →
+    /// A 解密投影」的普通文本任务闭环（B 的接纳/执行由 DEV-13 的服务用例覆盖，
+    /// 这里用端口桩返回冻结形状的 task_status）。
+    #[tokio::test]
+    async fn dual_end_task_round_trip_lands_in_a_side_state() {
+        use crate::features::remote_control::controller::relay_runtime::{
+            ControlledBusinessPort, dispatch_decrypted_payload,
+        };
+
+        struct TerminalPort;
+
+        #[async_trait::async_trait]
+        impl ControlledBusinessPort for TerminalPort {
+            async fn capability_snapshot(
+                &self,
+                _lease: &LeaseContext,
+                request_id: &str,
+                known_revision: u64,
+            ) -> Result<Value, String> {
+                Ok(serde_json::json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "request_id": request_id,
+                    "capability_revision": (known_revision + 1).to_string(),
+                }))
+            }
+
+            async fn submit_task(
+                &self,
+                lease: &LeaseContext,
+                session_ref: &str,
+                payload: &Value,
+            ) -> Result<Value, String> {
+                // 与 B 的 RemoteTaskService::status_payload 一致：冻结 wire 形状。
+                Ok(serde_json::json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "status-1",
+                    "task_id": payload["task_id"],
+                    "session_id": session_ref,
+                    "task_status": "succeeded",
+                    "result_digest": "0".repeat(64),
+                }))
+            }
+
+            async fn cancel_task(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _task_id: &str,
+            ) -> Result<Option<Value>, String> {
+                Ok(None)
+            }
+        }
+
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let lease = lease_context(&reservation);
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+
+        // A 端：活租约 + 加密通道 + 已拿到能力快照的会话意图。
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: capabilities.clone(),
+                },
+            )
+            .unwrap();
+        let business = ControllingLaneState::default();
+        business
+            .install(HandshakeRole::A, &lease, a_session)
+            .unwrap();
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease, &capabilities)
+            .unwrap();
+        sessions
+            .apply_capability_snapshot(
+                &session.session_ref,
+                &serde_json::json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-snapshot-1",
+                    "capability_revision": "4",
+                    "expires_at_ms": "30000",
+                    "modes": ["chat"],
+                    "tools": [],
+                    "skills": [],
+                    "workspaces": [],
+                }),
+                &lease,
+            )
+            .unwrap();
+
+        // A：构造并加密任务提交。
+        let intent = sessions
+            .task_intent(&session.session_ref, "hello from A", &lease)
+            .unwrap();
+        let frame = business
+            .seal("task_submit", &intent.payload, &capabilities)
+            .unwrap();
+
+        // B：解密 → 派发 → 加密回传。
+        let mut b_lane = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
+        let (kind, payload) = b_lane.open(&frame, &capabilities).unwrap();
+        assert_eq!(kind, "task_submit");
+        let (response_kind, response) =
+            dispatch_decrypted_payload(&TerminalPort, &lease, &kind, &payload)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(response_kind, "task_status");
+        let response_frame = b_lane
+            .seal(response_kind, &response, &capabilities)
+            .unwrap();
+
+        // A：保活任务解密并投影到任务状态域。
+        let mut lane = TestLane {
+            events: VecDeque::from(vec![ControllerLaneEvent::Frame(
+                response_frame.to_string(),
+            )]),
+        };
+        let mut task_events = Vec::new();
+        let mut session_projections = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |projection: &ControllingSessionProjection| {
+            session_projections.push(projection.session_id.clone());
+        };
+        let mut on_task = |event: Value| task_events.push(event);
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+        };
+        serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
+
+        assert!(session_projections.is_empty());
+        assert_eq!(task_events.len(), 1);
+        assert_eq!(task_events[0]["taskId"], intent.task_id.clone().unwrap());
+        assert_eq!(task_events[0]["status"], "succeeded");
+        assert_eq!(task_events[0]["sessionId"], session.session_id);
+        assert_eq!(task_events[0]["resultDigest"], "0".repeat(64));
+    }
 }
