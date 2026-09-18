@@ -193,13 +193,26 @@ func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, deliv
 		return errors.New("proof-era authorization requires result-only recovery")
 	}
 	jobRunID := binding.EventID.String()
+	// Proof-era Billing wire consumes the single domain attempt before the
+	// Account begin: the Account contract only admits the first Billing begin
+	// from DOMAIN_INFLIGHT, and a crash after the grant must still consume the
+	// attempt. The legacy wire keeps its historical begin-then-grant order.
+	var granted ApprovalAuthorizationDeliveryState
+	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
+		granted, err = consumer.account.GrantAuthorizationAttempt(ctx, binding, state.Version)
+		if err != nil || granted.State != "DOMAIN_INFLIGHT" || granted.DomainAttemptCount != state.DomainAttemptCount+1 || granted.Version <= state.Version {
+			return errors.New("authorization attempt was not granted")
+		}
+	}
 	command, err := consumer.account.BeginAuthorized(ctx, binding, jobRunID, event.CriticalResourceVersions, event.FinancialSnapshot)
 	if err != nil || !validApprovedAuthorizationCommand(command, binding, event) {
 		return errors.New("authorization begin unavailable")
 	}
-	granted, err := consumer.account.GrantAuthorizationAttempt(ctx, binding, state.Version)
-	if err != nil || granted.State != "DOMAIN_INFLIGHT" || granted.DomainAttemptCount != state.DomainAttemptCount+1 || granted.Version <= state.Version {
-		return errors.New("authorization attempt was not granted")
+	if binding.SerializationVersion != approvalencoding.ApprovalSerializationVersion {
+		granted, err = consumer.account.GrantAuthorizationAttempt(ctx, binding, state.Version)
+		if err != nil || granted.State != "DOMAIN_INFLIGHT" || granted.DomainAttemptCount != state.DomainAttemptCount+1 || granted.Version <= state.Version {
+			return errors.New("authorization attempt was not granted")
+		}
 	}
 	attempt := consumer.domain.ExecuteAuthorizationAttempt(ctx, binding, event, command)
 	if len(attempt.Result.DomainResult) != 0 {

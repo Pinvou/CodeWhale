@@ -270,6 +270,8 @@ GSA-22 激活能力接线切片（3/4，仍PARTIAL / REVIEW_PENDING / NOT_DEPLOY
 
 GSA-22 激活能力切片（4/4 前半，仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：跨域集成用例接入真实**签名工作负载身份**：以 RSA/JWKS + `WORKLOAD_IDENTITY_*` 配置给 Billing proof authority 与 activation reader 同一 Account 身份（规则仅授予 `internal.billing.approval-proof.read` 与 `internal.billing.approval-activation.read`，并保持 `APP_ENV=production`）。由此在真实 Account+Billing 库上验证：`INACTIVE` 时 Account 四入口失败关闭、真实 proof 拒绝出证、两侧零副作用；schema owner 激活 v2 行后 Account reader 观测 `ACTIVE`、`requireApprovalAdvancement` 放行、真实 proof 返回 `PROOF_VALID`/`ALLOW` 且不写 proof claim；翻回 `INACTIVE` 后重新全部关闭。定向真实 PG 用例 PASS 25.63s。仍未完成 4/4 后半：Account 批准→outbox sidecar→专属 durable raw consumer→Billing 成对账本与 result-first/幂等恢复的全链路，以及业务页 presenter。
 
+GSA-22 proof-era Billing 授权顺序修复切片：真实跨域 E2E 首次把 proof-era Billing 消费者推进到 Account begin 端点时，命中产品级契约冲突并修复——Account `000054` 的 `validate_approval_authorization_begin` 对 `billing-command-executor` 要求 begin 时投递状态已是 `DOMAIN_INFLIGHT`（与设计"每次可能触发领域副作用前先 CAS 使 `domain_attempt_count+1` 并进入 `DOMAIN_INFLIGHT`"一致），而 Billing `AuthorizationCommandConsumer.advance` 原先是 begin→grant，导致 proof-era Billing 首次 begin 必然 409 `APPROVAL_AUTHORIZATION_BINDING_INVALID`（无尝试、无 proof claim、永不 ACK）。现按 wire 区分顺序：proof-era 先 `GrantAuthorizationAttempt` 再 `BeginAuthorized`，legacy 保持既有 begin→grant 顺序；grant 校验（`DOMAIN_INFLIGHT`、次数 +1、版本前进）保持原样。验证：`go vet ./internal/billing` 与 `go test ./internal/billing -run 'Authorization|Approval'` PASS；未改变任何既有 grant 上限、DLQ 或 result-first 语义。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
