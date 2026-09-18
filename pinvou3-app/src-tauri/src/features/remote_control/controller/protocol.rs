@@ -1596,6 +1596,56 @@ impl LeaseInstallValidationContext {
             capability_hash: verified.capability_hash().to_owned(),
         }
     }
+
+    // E2E-02 所需的冻结契约增量：A 端完成 transcript 验签后必须能读取被认证的
+    // 上下文来构造握手绑定。这里只暴露握手与协商所需的最小集合，不泄露签名材料。
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn pairing_id(&self) -> &str {
+        &self.expected_pairing_id
+    }
+
+    pub(crate) fn reservation_id(&self) -> &str {
+        &self.reservation_id
+    }
+
+    pub(crate) fn relay_epoch(&self) -> &str {
+        &self.relay_epoch
+    }
+
+    pub(crate) fn remote_control_generation(&self) -> &str {
+        &self.remote_control_generation
+    }
+
+    pub(crate) fn controller_connection_identity(&self) -> &str {
+        &self.expected_controller_connection_identity
+    }
+
+    pub(crate) fn negotiated_capabilities(&self) -> &[String] {
+        &self.negotiated_capabilities
+    }
+
+    /// Transcript hash as raw bytes for the handshake KDF. Hex is validated on
+    /// the wire, so a malformed value can only come from a programming error.
+    pub(crate) fn transcript_hash_bytes(&self) -> Result<[u8; 32]> {
+        let mut output = [0_u8; 32];
+        let bytes = self.transcript_hash.as_bytes();
+        if bytes.len() != 64 {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "transcript_hash",
+            ));
+        }
+        for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+            let text = std::str::from_utf8(chunk)
+                .map_err(|_| ControllerProtocolError::new("invalid_field", "transcript_hash"))?;
+            output[index] = u8::from_str_radix(text, 16)
+                .map_err(|_| ControllerProtocolError::new("invalid_field", "transcript_hash"))?;
+        }
+        Ok(output)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

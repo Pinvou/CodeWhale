@@ -1877,6 +1877,13 @@ mod tests {
             authenticate_relay_transcript(&trust, parse_controller_pairing_transcript(&message).unwrap())
                 .unwrap();
         assert!(format!("{context:?}").contains("pairing-0001"));
+        // E2E-02 需要读取被认证的上下文来构造握手绑定。
+        assert_eq!(context.pairing_id(), "pairing-0001");
+        assert_eq!(context.reservation_id(), "reservation-0001");
+        assert_eq!(context.relay_epoch(), "epoch-test-1");
+        assert_eq!(context.remote_control_generation(), "generation-0001");
+        assert_eq!(context.transcript_hash_bytes().unwrap().len(), 32);
+        assert!(!context.negotiated_capabilities().is_empty());
 
         let attacker_key = fixture["untrusted_authentication_inputs"][2]["value"]["public_key_b64"]
             .as_str()
