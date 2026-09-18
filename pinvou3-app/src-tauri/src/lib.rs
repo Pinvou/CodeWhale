@@ -1048,7 +1048,15 @@ pub fn run() {
                     pool.start_idle_reaper();
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
                     // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
-                    handle.manage(ControlledDeviceManager::default());
+                    // E2E-06：B 端清理端口必须在任何终态（stop/refresh/远端断开/
+                    // 恢复失败）都能中断本代远端任务并回收其凭证。
+                    let controlled_device_manager = ControlledDeviceManager::default();
+                    controlled_device_manager.register_cleanup_sink(std::sync::Arc::new(
+                        commands::desktop_remote_controller_business::DesktopControlledCleanup::new(
+                            handle.clone(),
+                        ),
+                    ));
+                    handle.manage(controlled_device_manager);
                     commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
                     handle.manage(ControllingDeviceManager::default());
                     handle.manage(ControllingSessionManager::default());
