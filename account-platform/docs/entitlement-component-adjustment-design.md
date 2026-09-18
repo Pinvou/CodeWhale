@@ -1,6 +1,6 @@
 # GSA-21 权益组成纠错领域设计
 
-状态：`DESIGN_COMPLETE / REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。用户选择首版仅纠正有原始来源证据且完全未动用的额度；审核统一延后。本文冻结 GSA-22 合同，不意味着命令已可执行或获准激活。
+状态：`DESIGN_COMPLETE / REVIEW_PENDING / IMPLEMENTED_UNDER_GSA22_UNACTIVATED / NOT_DEPLOYED (GSA-21 status clarification 2026-09-19: Account 000069 v2 policy, Billing 000057 v2 activation row, dedicated durable billing-entitlement-component-adjustment-executor-p2-v1, executor/consumer mapping, Account 000070 route and Billing 000059 proof claim allowlist are delivered; GSA-21 remains design-frozen, activation stays INACTIVE and nothing is deployed)`。用户选择首版仅纠正有原始来源证据且完全未动用的额度；审核统一延后。本文冻结 GSA-22 合同，不意味着命令已可执行或获准激活。
 
 ## 1. 权威事实与首版边界
 
