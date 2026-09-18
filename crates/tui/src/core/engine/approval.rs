@@ -196,6 +196,22 @@ impl Engine {
         tool_id: &str,
         request: UserInputRequest,
     ) -> Result<UserInputResponse, ToolError> {
+        // Same contract as the approval wait above (R1): the per-turn
+        // wall-clock budget bounds what the agent spends on its own, not
+        // how long a person takes to answer. Without this pause an answer
+        // submitted past the budget would be collected and then discarded
+        // with the failed turn at the next provider boundary.
+        self.turn_wall_clock.begin_human_wait();
+        let result = self.await_user_input_decision(tool_id, request).await;
+        self.turn_wall_clock.end_human_wait();
+        result
+    }
+
+    async fn await_user_input_decision(
+        &mut self,
+        tool_id: &str,
+        request: UserInputRequest,
+    ) -> Result<UserInputResponse, ToolError> {
         let _ = self
             .tx_event
             .send(Event::UserInputRequired {
@@ -212,10 +228,11 @@ impl Engine {
                         format!("Request cancelled while awaiting user input{suffix}"),
                     ));
                 }
-                // No wall-clock cap: the response is human-paced and may take
-                // arbitrarily long (mirrors the unbounded tool-approval wait,
-                // which also excludes this time from the turn wall clock).
-                // Cancellation and channel teardown end the wait instead.
+                // No wall-clock cap: the response is human-paced and may
+                // take arbitrarily long (mirrors the unbounded tool-approval
+                // wait). The human wait is excluded from the turn wall clock
+                // by the wrapper above; cancellation and channel teardown
+                // end the wait instead.
                 result = self.rx_user_input.recv() => {
                     match result {
                         Some(decision) => {
