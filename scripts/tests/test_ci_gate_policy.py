@@ -648,16 +648,36 @@ class CiGatePolicyTests(unittest.TestCase):
         # (workflow command 是单行协议,换行处会被截断)。
         self.assertIn('echo "::warning::[memory-setup] ${*//$', source)
         self.assertIn("${*//$'\\n'/ }", source)
-        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活)只进日志,
-        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。
-        self.assertIn("warn_recoverable() {", source)
+        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活、镜像 swap
+        # as-is 失败后的重试)只进日志,不得注解化,否则每个 job 都会常驻
+        # 黄标稀释真告警。函数体全文钉死:改回 ::warning:: 注解即红。
+        self.assertIn(
+            'warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }',
+            source,
+        )
         self.assertIn(
             'warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
             source,
         )
-        # 磁盘 swap 重建失败必须携带诊断与 removed_note,且不得再出现
-        # 「声称保留既有 swap 配置」的旧误导文案。
-        self.assertIn("removed_note", source)
+        self.assertIn(
+            'warn_recoverable "no swap active; activating the image swapfile'
+            ' before the slow module install"',
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "swapon ${cand} failed as is; trying chmod 600'
+            " + mkswap + swapon once\"",
+            source,
+        )
+        # 磁盘 swap 重建失败必须携带诊断,且 removed_note 只允许出现在 rm
+        # 实际成功的分支内(裸 `|| removed_note=""` 会被后续无条件赋值覆盖
+        # 成死代码);不得再出现「声称保留既有 swap 配置」的旧误导文案。
+        self.assertIn(
+            "if rm -f /mnt/swapfile; then\n"
+            '        removed_note=" (the previous /mnt/swapfile was removed)"\n'
+            "      fi",
+            source,
+        )
         self.assertNotIn("keeping the existing swap configuration", source)
 
     def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):

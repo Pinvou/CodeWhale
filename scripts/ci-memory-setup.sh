@@ -280,8 +280,9 @@ setup_disk_swap() {
     # bounded and on timeout the swap simply stays active (kept below).
     if run_to 120 swapoff /mnt/swapfile 2>/dev/null; then
       # Only claim removal in removed_note if it actually happened.
-      rm -f /mnt/swapfile || removed_note=""
-      removed_note=" (the previous /mnt/swapfile was removed)"
+      if rm -f /mnt/swapfile; then
+        removed_note=" (the previous /mnt/swapfile was removed)"
+      fi
     else
       warn "could not swapoff the active /mnt/swapfile; keeping it as is instead of rebuilding"
       return 0
@@ -319,7 +320,7 @@ activate_image_swap_fallback() {
       log "last-resort swap active: ${cand} (image-provided)"
       return 0
     fi
-    warn "swapon ${cand} failed as is; trying chmod 600 + mkswap + swapon once"
+    warn_recoverable "swapon ${cand} failed as is; trying chmod 600 + mkswap + swapon once"
     chmod 600 "${cand}" 2>/dev/null || true
     if run_to 60 mkswap "${cand}" >/dev/null 2>&1 \
       && run_to 60 swapon "${cand}" 2>/dev/null; then
