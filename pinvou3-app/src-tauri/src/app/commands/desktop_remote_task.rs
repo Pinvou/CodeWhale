@@ -13,7 +13,9 @@ use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
-use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
+use crate::features::assistant::remote_turn::{
+    EnginePoolChatEngine, EnginePoolChatTurnPort, StoreChatTranscript,
+};
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::codex_acp::AcpPool;
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
@@ -93,6 +95,24 @@ impl ControllerTaskEventSink for TaskEventBridge {
     fn emit(&self, event: Value) {
         let _ = self.app.emit(TASK_STATUS_EVENT, event);
     }
+
+    /// E2E-05：执行器产出的正文事件先写权威 journal，再经加密通道回传 A。
+    fn emit_journal(
+        &self,
+        kind: crate::features::remote_control::controller::journal::JournalKind,
+        session_id: &str,
+        task_id: Option<&str>,
+        payload: Value,
+    ) {
+        use tauri::Manager as _;
+        let history = self
+            .app
+            .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
+        if let Ok(event) = history.journal().append(&event_id, kind, session_id, task_id, payload) {
+            super::desktop_remote_history::publish_authoritative_event(&self.app, &event);
+        }
+    }
 }
 
 impl RemoteTaskEventSink for TaskEventBridge {
@@ -118,13 +138,14 @@ impl DesktopRemoteTaskRuntime {
         let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
-            store,
+            store.clone(),
             pool.clone(),
         )));
         service.register_executor(
             TASK_MODE_CHAT,
             Arc::new(ChatTurnExecutor::new(Arc::new(EnginePoolChatTurnPort::new(
                 Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
+                Arc::new(StoreChatTranscript::new(store)),
             )))),
         );
         service.register_executor(

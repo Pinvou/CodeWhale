@@ -36,6 +36,52 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
     async fn cancel_turn(&self, session_id: &str);
 }
 
+/// E2E-05：读取 B 会话最后一条 assistant 文本（用于把回复正文写进权威 journal
+/// 并回传 A）。只在同进程内读取本地 transcript，不跨进程、不带任何凭证。
+pub(crate) trait RemoteChatTranscriptPort: Send + Sync {
+    fn last_assistant_text(&self, session_id: &str) -> Option<String>;
+}
+
+/// 基于 SessionStore 的实现：取最后一条 assistant 消息里的文本块，按 journal
+/// 上限截断；任何读取失败都返回 None（不产生半事件）。
+pub(crate) struct StoreChatTranscript {
+    store: crate::features::sessions::SessionStore,
+}
+
+impl StoreChatTranscript {
+    pub(crate) fn new(store: crate::features::sessions::SessionStore) -> Self {
+        Self { store }
+    }
+}
+
+impl RemoteChatTranscriptPort for StoreChatTranscript {
+    fn last_assistant_text(&self, session_id: &str) -> Option<String> {
+        use deepseek_tui::models::{ContentBlock, Role};
+
+        let session = self.store.load(session_id).ok()?;
+        let message = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)?;
+        let mut text = String::new();
+        for block in &message.content {
+            if let ContentBlock::Text { text: block_text, .. } = block {
+                text.push_str(block_text);
+            }
+        }
+        let bounded: String = text
+            .chars()
+            .take(crate::features::remote_control::controller::journal::MAX_EVENT_TEXT_CHARS)
+            .collect();
+        if bounded.trim().is_empty() {
+            None
+        } else {
+            Some(bounded)
+        }
+    }
+}
+
 pub(crate) struct EnginePoolChatEngine {
     pool: Arc<EnginePool>,
 }
@@ -70,11 +116,15 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
 
 pub(crate) struct EnginePoolChatTurnPort {
     engine: Arc<dyn RemoteChatEnginePort>,
+    transcript: Arc<dyn RemoteChatTranscriptPort>,
 }
 
 impl EnginePoolChatTurnPort {
-    pub(crate) fn new(engine: Arc<dyn RemoteChatEnginePort>) -> Self {
-        Self { engine }
+    pub(crate) fn new(
+        engine: Arc<dyn RemoteChatEnginePort>,
+        transcript: Arc<dyn RemoteChatTranscriptPort>,
+    ) -> Self {
+        Self { engine, transcript }
     }
 
     async fn wait_for_terminal(
@@ -114,9 +164,11 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
         session_id: &str,
         content: String,
         cancel: CancellationToken,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<Option<String>, String> {
         self.engine.send_user_message(session_id, content).await?;
-        self.wait_for_terminal(session_id, &cancel).await
+        self.wait_for_terminal(session_id, &cancel).await?;
+        // 轮次结束后读回最后一条 assistant 文本作为正文（读取失败不阻塞终态）。
+        Ok(self.transcript.last_assistant_text(session_id))
     }
 }
 
@@ -189,11 +241,23 @@ mod tests {
             .unwrap()
     }
 
+    /// 测试用 transcript 端口：固定返回一句回复（或 None）。
+    struct FakeTranscript(Option<&'static str>);
+
+    impl RemoteChatTranscriptPort for FakeTranscript {
+        fn last_assistant_text(&self, _session_id: &str) -> Option<String> {
+            self.0.map(str::to_owned)
+        }
+    }
+
     #[test]
     fn turn_is_submitted_and_completion_waits_for_the_busy_transition() {
         let fake = FakeEngine::immediate();
-        let port = EnginePoolChatTurnPort::new(fake.clone());
-        runtime()
+        let port = EnginePoolChatTurnPort::new(
+            fake.clone(),
+            Arc::new(FakeTranscript(Some("remote reply"))),
+        );
+        let reply = runtime()
             .block_on(port.run_chat_turn(
                 "session-0001",
                 "hello remote".into(),
@@ -201,12 +265,13 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(fake.sent.lock().unwrap().as_slice(), ["hello remote"]);
+        assert_eq!(reply.as_deref(), Some("remote reply"));
     }
 
     #[test]
     fn cancellation_stops_the_turn_and_reports_the_cancel_code() {
         let fake = FakeEngine::always_busy();
-        let port = EnginePoolChatTurnPort::new(fake.clone());
+        let port = EnginePoolChatTurnPort::new(fake.clone(), Arc::new(FakeTranscript(None)));
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         let result = runtime().block_on(async move {
