@@ -305,12 +305,13 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 |---|---|
 | `a416ad41e` | 双端 UI 最小闭环与能力降级：B 面板状态映射补齐后端枚举（连接码按状态显示、disabled 不再算 active、主控设备行改用 `controllerDeviceName` + 三语回落）；状态域新增 `controllerDeviceName` 与 `transcript`（去重/只收正文/快照替换/上限 200）；A 会话窗口连接后自动开远程会话并加密请求能力快照，发送/取消改走 `controllerTaskSend`/`controllerTaskCancelSend`，渲染 transcript，A 临时模型与模型导出列表按首版开关隐藏；新增 `desktop_remote_controller_capability_send` 命令与 bridge 入口；新增 `remote_control_ui_closure` 契约（4 条）并更新 `remote_conversation_contract`（禁止旧的自建 payload 路径） |
 | `582cba938` | A 端命令错误码回传：bridge `asBoundedError` 把 Tauri `Err(String)` 恢复成带 `.code` 的错误，连接/断开/会话/能力/任务/取消/快照路径统一套用；契约新增逐条断言 |
+| `8510525b` | 文案细化（10.2 的第 2、3 项）：`connectionErrorKey` 补 `endpoint_offline` → `errorOffline`、`invalid_message` → `errorProtocol`（三语齐全，不再回落通用文案）；B 面板 `Refreshing` 改用面板既有的 `refreshing` 词条，不再借用 `statusStopping`；契约补「新码三语齐全」与「刷新文案回归」断言 |
 
 ### 10.2 剩余步骤
 
 1. **浏览器冒烟**（DEV-21 登记的缺口）：三个 UI 面（B 面板、A 连接壳、远程会话窗口）需要一次真实渲染/交互冒烟（键盘、焦点、aria-live、倒计时节流），当前证据仍为源码契约 + `vite build`。
-2. **文案细化**：`connectionErrorKey` 目前只映射 `pairing_code_invalid`/`controller_busy` 等少数码，A 端新的有界码（`endpoint_offline`、`invalid_message`）会回落到 `errorGeneric`；需要补齐到三语文案（`remote_control_ui_closure` 已锁定错误码必须先恢复）。
-3. **`ControllerStatusKind::Refreshing` 的 UI 文案**：B 面板把它映射为 `statusStopping`，需要独立词条或明确复用策略。
+2. ~~**文案细化**~~ 已完成（`8510525b`）：`endpoint_offline` → `errorOffline`、`invalid_message` → `errorProtocol`，均补齐 zh/en/ja，并由契约锁定。
+3. ~~**`ControllerStatusKind::Refreshing` 的 UI 文案**~~ 已完成（`8510525b`）：显式复用面板既有的 `refreshing` 词条（不再映射 `statusStopping`），契约新增回归断言。
 
 ## 11. E2E-08 待做清单（集成回归与发布审核）
 
