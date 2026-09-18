@@ -4425,9 +4425,26 @@ async fn saved_sessions_carry_thread_workspace_roots_through_save_and_resave() -
         "save-thread-as-session must stamp the thread's workspace_roots"
     );
 
-    // Re-saving through the snapshot path (the round-1 remediation) must
-    // keep the same set: the engine builds from the thread's roots and the
-    // save copies the snapshot roots over the metadata.
+    // Change the thread's set before the re-save. The POST above already
+    // wrote `expected_roots` to the file, so asserting the same value after
+    // the PUT would pass with the PUT stamp deleted; the newer set is what
+    // makes the snapshot save path load-bearing.
+    let patched: serde_json::Value = client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "workspace_roots": ["/later"] }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        patched["workspace_roots"],
+        json!([root.join("workspace"), "/later"])
+    );
+
+    // Re-saving through the snapshot path must write the thread's *current*
+    // roots: the engine builds from the thread and the save copies the
+    // snapshot roots over the metadata.
     client
         .put(format!("http://{addr}/v1/sessions"))
         .json(&json!({
@@ -4440,8 +4457,8 @@ async fn saved_sessions_carry_thread_workspace_roots_through_save_and_resave() -
     let resaved = session_manager.load_session_by_prefix(&session_handle)?;
     assert_eq!(
         serde_json::to_value(&resaved.metadata.workspace_roots)?,
-        expected_roots,
-        "the snapshot save path must not erase the persisted roots"
+        json!([root.join("workspace"), "/later"]),
+        "the snapshot save path must write the thread's current roots"
     );
 
     handle.abort();
