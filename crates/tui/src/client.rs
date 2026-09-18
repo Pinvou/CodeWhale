@@ -2449,9 +2449,7 @@ impl DeepSeekClient {
         // The pinned 30s total survives: the retry loop's shared envelope is
         // not allowed to overwrite a caller's own per-attempt budget.
         let response = self
-            .send_with_retry_total(NON_STREAMING_HTTP_TIMEOUT, || {
-                self.http_client.get(&url)
-            })
+            .send_with_retry_total(NON_STREAMING_HTTP_TIMEOUT, || self.http_client.get(&url))
             .await?;
 
         let status = response.status();
@@ -2923,10 +2921,7 @@ impl DeepSeekClient {
     /// stream mid-generation. Stream opens stay bounded by the caller's
     /// `stream_open_timeout` around the open and per-chunk idle checks on
     /// the returned body instead.
-    pub(super) async fn send_stream_open_with_retry<F>(
-        &self,
-        build: F,
-    ) -> Result<reqwest::Response>
+    pub(super) async fn send_stream_open_with_retry<F>(&self, build: F) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
@@ -2969,50 +2964,50 @@ impl DeepSeekClient {
                     None => build(),
                 };
                 async move {
-                        // Sleep in bounded slices rather than the full remaining
-                        // window: the pause is process-global, so a concurrent
-                        // `clear_rate_limit()` (or a shortened deadline) must
-                        // release requests that are already waiting instead of
-                        // stranding them for the whole original window.
-                        while let Some(delay) = crate::retry_status::rate_limit_remaining() {
-                            tokio::time::sleep(delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL)).await;
-                        }
-                        self.wait_for_rate_limit().await;
-                        let response = request
-                            .send()
-                            .await
-                            .map_err(|err| LlmError::from_reqwest(&err))?;
-                        let status = response.status();
-                        if status.is_success() {
-                            return Ok(response);
-                        }
-                        let retry_after = extract_retry_after(response.headers());
-                        let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                        let body = sanitize_http_error_body(
-                            Some(self.api_provider.display_name()),
-                            status.as_u16(),
-                            &body,
-                        );
-                        Err(LlmError::from_http_response_with_retry_after(
-                            status.as_u16(),
-                            &body,
-                            retry_after,
-                        ))
+                    // Sleep in bounded slices rather than the full remaining
+                    // window: the pause is process-global, so a concurrent
+                    // `clear_rate_limit()` (or a shortened deadline) must
+                    // release requests that are already waiting instead of
+                    // stranding them for the whole original window.
+                    while let Some(delay) = crate::retry_status::rate_limit_remaining() {
+                        tokio::time::sleep(delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL)).await;
                     }
-                },
-                Some(Box::new(|err: &LlmError, attempt, delay| {
-                    let (reason_label, human_reason) = retry_reason_label_and_human(err);
-                    logging::warn(format!(
-                        "HTTP retry reason={} attempt={} delay={:.2}s",
-                        reason_label,
-                        attempt + 1,
-                        delay.as_secs_f64(),
-                    ));
-                    if matches!(err, LlmError::RateLimited { .. }) {
-                        crate::retry_status::note_rate_limit(delay);
+                    self.wait_for_rate_limit().await;
+                    let response = request
+                        .send()
+                        .await
+                        .map_err(|err| LlmError::from_reqwest(&err))?;
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
                     }
-                    crate::retry_status::start(attempt + 1, delay, human_reason);
-                })),
+                    let retry_after = extract_retry_after(response.headers());
+                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                    let body = sanitize_http_error_body(
+                        Some(self.api_provider.display_name()),
+                        status.as_u16(),
+                        &body,
+                    );
+                    Err(LlmError::from_http_response_with_retry_after(
+                        status.as_u16(),
+                        &body,
+                        retry_after,
+                    ))
+                }
+            },
+            Some(Box::new(|err: &LlmError, attempt, delay| {
+                let (reason_label, human_reason) = retry_reason_label_and_human(err);
+                logging::warn(format!(
+                    "HTTP retry reason={} attempt={} delay={:.2}s",
+                    reason_label,
+                    attempt + 1,
+                    delay.as_secs_f64(),
+                ));
+                if matches!(err, LlmError::RateLimited { .. }) {
+                    crate::retry_status::note_rate_limit(delay);
+                }
+                crate::retry_status::start(attempt + 1, delay, human_reason);
+            })),
         );
         let request_result = if let Some(total) = attempt_total {
             // The loop envelope must dominate the per-attempt total it

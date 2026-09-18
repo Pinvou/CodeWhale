@@ -106,7 +106,7 @@ pub async fn run_rlm_turn(
         child_model,
         tx_event,
         max_depth,
-        Duration::from_secs(super::bridge::CHILD_TIMEOUT_SECS),
+        Duration::from_secs(CHILD_TIMEOUT_SECS),
     )
     .await
 }
@@ -130,7 +130,7 @@ pub async fn run_rlm_turn_with_root(
         child_model,
         tx_event,
         max_depth,
-        Duration::from_secs(super::bridge::CHILD_TIMEOUT_SECS),
+        Duration::from_secs(CHILD_TIMEOUT_SECS),
     )
     .await
 }
@@ -138,6 +138,7 @@ pub async fn run_rlm_turn_with_root(
 /// Inner entry point — also used by the bridge when it recurses. Returns
 /// a boxed future to break the recursive opaque-future-type cycle:
 /// `run_rlm_turn_inner` → `RlmBridge::dispatch` → `run_rlm_turn_inner`.
+#[allow(clippy::too_many_arguments)] // one knob per concern; struct-ifying the boxed-future entry adds churn
 pub(crate) fn run_rlm_turn_inner(
     client: Arc<dyn RlmLlmClient>,
     model: String,
@@ -171,6 +172,7 @@ fn turn_timeout() -> Option<Duration> {
 // Implementation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_rlm_turn_impl(
     client: Arc<dyn RlmLlmClient>,
     model: String,
@@ -953,7 +955,7 @@ mod tests {
             "child-model".to_string(),
             tx,
             0,
-            Duration::from_secs(CHILD_TIMEOUT_SECS),
+            Duration::from_secs(crate::rlm::bridge::CHILD_TIMEOUT_SECS),
         )
         .await;
 
