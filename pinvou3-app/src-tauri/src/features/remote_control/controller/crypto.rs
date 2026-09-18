@@ -1310,6 +1310,8 @@ impl TranscriptAuthenticator {
             expected_controller_connection_identity: parts.expected_controller_connection_identity,
             negotiated_capabilities: parts.negotiated_capabilities,
             capability_hash: parts.capability_hash,
+            handshake_public_key_a_b64: parts.handshake_public_key_a_b64,
+            handshake_public_key_b_b64: parts.handshake_public_key_b_b64,
         }))
     }
 }
@@ -1346,6 +1348,8 @@ pub(crate) struct VerifiedTranscript {
     expected_controller_connection_identity: String,
     negotiated_capabilities: Vec<String>,
     capability_hash: String,
+    handshake_public_key_a_b64: String,
+    handshake_public_key_b_b64: String,
 }
 
 impl VerifiedTranscript {
@@ -1375,6 +1379,12 @@ impl VerifiedTranscript {
     }
     pub(crate) fn capability_hash(&self) -> &str {
         &self.capability_hash
+    }
+    pub(crate) fn local_handshake_public_key(&self) -> &str {
+        &self.handshake_public_key_a_b64
+    }
+    pub(crate) fn peer_handshake_public_key(&self) -> &str {
+        &self.handshake_public_key_b_b64
     }
 }
 
@@ -1911,6 +1921,13 @@ mod tests {
         assert_eq!(context.remote_control_generation(), "generation-0001");
         assert_eq!(context.transcript_hash_bytes().unwrap().len(), 32);
         assert!(!context.negotiated_capabilities().is_empty());
+        // E2E-02：A 端必须能从验签后的上下文拿到双方握手公钥（对端用于 ECDH）。
+        for key in [
+            context.local_handshake_public_key(),
+            context.peer_handshake_public_key_b64(),
+        ] {
+            assert_eq!(base64::engine::general_purpose::STANDARD.decode(key).unwrap().len(), 32);
+        }
 
         let attacker_key = fixture["untrusted_authentication_inputs"][2]["value"]["public_key_b64"]
             .as_str()
