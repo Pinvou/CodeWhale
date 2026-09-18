@@ -303,6 +303,12 @@ impl ControllerResumeGate {
         self.resumed_liveness_epoch.as_deref()
     }
 
+    /// E2E-06：恢复准备帧必须按冻结协议把本端令牌交给 Relay（`resume_token_b64`）。
+    /// 只以固定大小数组拷出，调用方用完即弃，绝不进入 Debug/序列化路径。
+    pub(crate) fn current_token(&self) -> [u8; RESUME_TOKEN_BYTES] {
+        *self.current.token
+    }
+
     pub(crate) fn terminate(&mut self, code: &'static str) -> Result<()> {
         self.current.token.zeroize();
         self.current.key_fingerprint.zeroize();
