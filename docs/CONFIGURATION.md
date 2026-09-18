@@ -2073,8 +2073,9 @@ reasoning contract, and all four membership ids omit generic sampling fields.
   attempt is retried with exponential backoff (up to 5 retries) before the
   step interrupts with a preserved checkpoint.
   `[subagents] heartbeat_timeout_secs` controls stale running agent cleanup,
-  defaults to `300`, and is clamped to `30..=3600` while staying above the
-  resolved API timeout. `[subagents.providers.<provider>]` accepts the same
+  defaults to `300`, and is clamped to `30..=3600` while staying above both
+  the resolved API timeout and the resolved tool timeout (30 seconds above
+  each; 1830 with both defaults). `[subagents.providers.<provider>]` accepts the same
   fanout, depth, budget, and timeout knobs (`enabled`, `max_concurrent`,
   `max_admitted`, `launch_concurrency`, `max_depth`, `token_budget`,
   `api_timeout_secs`, `heartbeat_timeout_secs`) and inherits the global

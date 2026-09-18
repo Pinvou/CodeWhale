@@ -1128,8 +1128,10 @@ execution-policy rule caused the prompt. This field is explanatory metadata for
 clients and does not grant or persist permissions.
 
 Approval decisions wait for a human and have no wall-clock cap: a pending
-approval is resolved by a client decision, by interrupting the turn, by runtime
-shutdown, or when the engine goes away. Every resolution is published as
+approval is resolved by a client decision, by interrupting the turn, or when
+the engine goes away. (Runtime shutdown can also resolve it via
+`RuntimeThreadManager::shutdown`, but no host invokes that API yet — it is
+exercised by tests until a host wires it into its exit path.) Every resolution is published as
 `approval.decided` so clients can clear pending UI. A resolution forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
