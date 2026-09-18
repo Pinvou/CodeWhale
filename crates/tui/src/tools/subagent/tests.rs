@@ -3827,6 +3827,11 @@ async fn agent_roster_action_and_spawn_resolve_the_same_roles() {
     assert_eq!(payload["count"], json!(8));
     assert_eq!(payload["total_count"], json!(8));
     assert_eq!(payload["truncated"], json!(false));
+    // No host-presented profiles in the stub runtime: the additive keys stay
+    // stable with an empty list instead of disappearing.
+    assert_eq!(payload["host_profiles"], json!([]));
+    assert_eq!(payload["host_profile_count"], json!(0));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
     let ids: Vec<&str> = payload["members"]
         .as_array()
         .expect("members array")
@@ -3855,6 +3860,348 @@ async fn agent_roster_action_and_spawn_resolve_the_same_roles() {
     resolve_spawn_role(&mut request).expect("same roles resolve");
     assert_eq!(request.agent_type, FleetRole::Scout);
     assert_eq!(request.profile.as_deref(), Some("explore"));
+}
+
+#[tokio::test]
+async fn agent_roster_lists_host_presented_profiles_spawn_resolves() {
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for (id, description) in [
+        ("exp-host-zeta", "Zeta domain expert"),
+        ("exp-host-alpha", "Alpha domain expert"),
+    ] {
+        fleet.profiles.insert(
+            id.to_string(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.to_string()),
+                role: codewhale_config::FleetRole {
+                    name: id.to_string(),
+                    description: Some(description.to_string()),
+                    instructions: None,
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+    let mut runtime = stub_runtime();
+    let host_roster = std::sync::Arc::new(FleetRoster::from_host_config(&fleet));
+    runtime.host_agent_profiles = host_roster.clone();
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    let result = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect("roster action");
+    let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+    // The builtin keys are untouched by the additive host listing.
+    assert_eq!(payload["count"], json!(8));
+    assert_eq!(payload["truncated"], json!(false));
+    let host_profiles = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array");
+    assert_eq!(payload["host_profile_count"], json!(2));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+    let ids: Vec<&str> = host_profiles
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["exp-host-alpha", "exp-host-zeta"],
+        "host profiles sort by member_id: {ids:?}"
+    );
+    assert_eq!(
+        host_profiles[0]["description"],
+        json!("Alpha domain expert")
+    );
+
+    // End-to-end: every listed member_id is exactly the profile= token spawn
+    // resolution accepts against the same host roster.
+    for profile_id in ids {
+        let mut request = parse_spawn_request(&json!({
+            "prompt": "review the change",
+            "profile": profile_id,
+            "write_authority": "read_only"
+        }))
+        .expect("host profile request parses");
+        let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_roster)
+            .expect("roster-listed profile must resolve at spawn")
+            .expect("host member is returned");
+        assert_eq!(resolved.id, profile_id);
+        assert_eq!(request.profile.as_deref(), Some(profile_id));
+    }
+}
+
+#[tokio::test]
+async fn agent_roster_truncates_host_profiles_at_the_listing_cap() {
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for index in 0..50 {
+        let id = format!("exp-host-{index:03}");
+        fleet.profiles.insert(
+            id.clone(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.clone()),
+                role: codewhale_config::FleetRole {
+                    name: id,
+                    description: None,
+                    instructions: None,
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+    let mut runtime = stub_runtime();
+    runtime.host_agent_profiles = std::sync::Arc::new(FleetRoster::from_host_config(&fleet));
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    let result = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect("roster action");
+    let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+    assert_eq!(payload["host_profile_count"], json!(50));
+    assert_eq!(payload["host_profiles_truncated"], json!(true));
+    let host_profiles = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array");
+    assert_eq!(host_profiles.len(), ROSTER_HOST_PROFILE_LIMIT);
+    // The sorted listing keeps the lowest ids and drops the tail.
+    let last = host_profiles[ROSTER_HOST_PROFILE_LIMIT - 1]["member_id"]
+        .as_str()
+        .expect("member id");
+    assert_eq!(last, "exp-host-047");
+    // Descriptions fall back to the role name when the profile carries none.
+    assert_eq!(host_profiles[0]["description"], json!("exp-host-000"));
+}
+
+#[tokio::test]
+async fn agent_roster_profile_query_discovers_members_beyond_the_listing_cap() {
+    // The T7 discovery-contract regression: a spawnable profile past
+    // `ROSTER_HOST_PROFILE_LIMIT` never appears in the default listing, yet
+    // `profile_query` must surface it, and the discovered id must resolve at
+    // spawn — the model-facing answer to an exhausted 48-row listing page.
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for index in 0..50 {
+        let id = format!("exp-host-{index:03}");
+        let description = (index == 49).then(|| "Swahili localization reviewer".to_string());
+        fleet.profiles.insert(
+            id.clone(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.clone()),
+                role: codewhale_config::FleetRole {
+                    name: id,
+                    description,
+                    instructions: None,
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+    let mut runtime = stub_runtime();
+    let host_roster = std::sync::Arc::new(FleetRoster::from_host_config(&fleet));
+    runtime.host_agent_profiles = host_roster.clone();
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    async fn roster_payload(tool: &AgentTool, workspace: &std::path::Path, query: Value) -> Value {
+        let input = if query.is_null() {
+            json!({"action": "roster"})
+        } else {
+            json!({"action": "roster", "profile_query": query})
+        };
+        let result = tool
+            .execute(input, &ToolContext::new(workspace))
+            .await
+            .expect("roster action");
+        let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+        payload
+    }
+
+    // Default listing: the tail member is cut, exactly as the cap test pins.
+    let payload = roster_payload(&tool, tmp.path(), Value::Null).await;
+    assert_eq!(payload["host_profile_count"], json!(50));
+    assert_eq!(payload["host_profiles_truncated"], json!(true));
+    let listed: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert!(
+        !listed.contains(&"exp-host-049"),
+        "the unfiltered listing must cut the tail member: {listed:?}"
+    );
+
+    // A description keyword (case-insensitive) finds the tail member alone.
+    let payload = roster_payload(&tool, tmp.path(), json!("swahili")).await;
+    assert_eq!(payload["host_profile_count"], json!(1));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+    let listed: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert_eq!(listed, vec!["exp-host-049"]);
+
+    // Id substrings match case-insensitively too — including partial ids, so
+    // an exact-equality regression on the id leg cannot survive.
+    let payload = roster_payload(&tool, tmp.path(), json!("EXP-HOST-049")).await;
+    assert_eq!(payload["host_profile_count"], json!(1));
+    let payload = roster_payload(&tool, tmp.path(), json!("host-049")).await;
+    assert_eq!(payload["host_profile_count"], json!(1));
+    assert_eq!(
+        payload["host_profiles"][0]["member_id"],
+        json!("exp-host-049")
+    );
+
+    // Zero matches stay honest: empty list, zero count, no truncation flag.
+    let payload = roster_payload(&tool, tmp.path(), json!("nonexistent-topic")).await;
+    assert_eq!(payload["host_profiles"], json!([]));
+    assert_eq!(payload["host_profile_count"], json!(0));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+
+    // A blank keyword filters nothing (the full listing returns).
+    let payload = roster_payload(&tool, tmp.path(), json!("   ")).await;
+    assert_eq!(payload["host_profile_count"], json!(50));
+    assert_eq!(payload["host_profiles_truncated"], json!(true));
+
+    // End-to-end: the query-discovered id is exactly what spawn resolution
+    // accepts against the same host roster.
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": "exp-host-049",
+        "write_authority": "read_only"
+    }))
+    .expect("host profile request parses");
+    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_roster)
+        .expect("query-discovered profile must resolve at spawn")
+        .expect("host member is returned");
+    assert_eq!(resolved.id, "exp-host-049");
+    assert_eq!(request.profile.as_deref(), Some("exp-host-049"));
+}
+
+#[tokio::test]
+async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for (id, description) in [
+        ("exp-host-listed", "Listed domain expert"),
+        ("exp-host-pinned", "Pinned model route"),
+        ("exp-host-shadowed", "Shadows a built-in role token"),
+    ] {
+        fleet.profiles.insert(
+            id.to_string(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.to_string()),
+                role: codewhale_config::FleetRole {
+                    name: id.to_string(),
+                    description: Some(description.to_string()),
+                    instructions: None,
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+    fleet
+        .profiles
+        .get_mut("exp-host-pinned")
+        .expect("pinned profile exists")
+        .model = Some("forbidden-route-pin".to_string());
+    // `from_host_config` stamps Config-origin `AgentProfile`s; clone those to
+    // derive the members that must stay unlisted.
+    let config_roster = FleetRoster::from_host_config(&fleet);
+    let member = |id: &str| {
+        config_roster
+            .members()
+            .iter()
+            .find(|member| member.id == id)
+            .cloned()
+            .expect("config member exists")
+    };
+    let good = member("exp-host-listed");
+    let pinned = member("exp-host-pinned");
+    let mut shadowed = member("exp-host-shadowed");
+    shadowed.id = "reviewer".to_string();
+    let shadowed_for_mirror = shadowed.clone();
+    let mut personal = good.clone();
+    personal.origin = crate::fleet::roster::ProfileOrigin::Personal;
+    let mut oversize = good.clone();
+    oversize.id = "x".repeat(129);
+
+    let mut runtime = stub_runtime();
+    runtime.host_agent_profiles = std::sync::Arc::new(FleetRoster::from_members(vec![
+        good, pinned, shadowed, personal, oversize,
+    ]));
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    let result = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect("roster action");
+    let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+    let ids: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["exp-host-listed"],
+        "only spawnable members may be listed: {ids:?}"
+    );
+    assert_eq!(payload["host_profile_count"], json!(1));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+
+    // Mirror direction: the unlisted members are unlisted for real reasons —
+    // the pinned route fails resolution, and a config id shadowing a built-in
+    // role token takes the role path instead of the roster.
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": "exp-host-pinned",
+        "write_authority": "read_only"
+    }))
+    .expect("pinned request parses");
+    let error = resolve_spawn_role_with_host_profiles(&mut request, &config_roster)
+        .expect_err("route-pinned profile must stay unlisted and unspawnable")
+        .to_string();
+    assert!(error.contains("not prompt-only"), "{error}");
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": "reviewer",
+        "write_authority": "read_only"
+    }))
+    .expect("role-token request parses");
+    // Resolve against a roster that actually contains the shadowing member:
+    // against a roster without the id the role path wins under any ordering,
+    // so the precedence claim would be vacuous.
+    let shadow_mirror = FleetRoster::from_members(vec![shadowed_for_mirror]);
+    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &shadow_mirror)
+        .expect("a shadowing role token still parses and resolves as the role");
+    assert!(
+        resolved.is_none(),
+        "profile=<built-in token> must take the role path, never the roster"
+    );
+    let error = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": "x".repeat(129),
+        "write_authority": "read_only"
+    }))
+    .expect_err("oversize selectors are refused at parse time, before the roster");
+    assert!(
+        error.to_string().contains("at most 128 characters"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -4849,7 +5196,8 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         );
     }
     assert!(agent_schema["properties"].get("role").is_none());
-    // #5324/#5123: the advertised surface is exactly 12 fields. Budgets,
+    // #5324/#5123: the advertised surface stays minimal — the 12 post-#5324
+    // fields plus the T7 roster discovery filter `profile_query`. Budgets,
     // model/thinking overrides, worktree-path knobs and spawn-contract
     // ceremony moved off the schema; the parser still accepts them for
     // replay compat (pinned by
@@ -4868,6 +5216,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
         "message",
         "name",
         "profile",
+        "profile_query",
         "prompt",
         "resume_from",
         "type",
@@ -4878,7 +5227,7 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     expected.sort_unstable();
     assert_eq!(
         advertised, expected,
-        "the agent tool must advertise exactly the 12-field surface: {}",
+        "the agent tool must advertise exactly the 13-field surface: {}",
         agent_schema["properties"]
     );
     for unadvertised in [
@@ -5199,6 +5548,15 @@ fn agent_tool_schema_bounds_fields_by_explicit_action() {
             .unwrap_or_else(|| panic!("missing dependent schema for action {action}"))
     };
     assert_eq!(branch("start")["required"], json!(["prompt"]));
+    // T7: `profile_query` is roster-scoped discovery — the branch advertises
+    // it so models can see the filter is legal on the unscoped listing.
+    assert!(
+        branch("roster")["properties"]
+            .get("profile_query")
+            .is_some(),
+        "the roster branch must advertise profile_query: {}",
+        branch("roster")
+    );
     for action in ["message", "followup"] {
         assert_eq!(branch(action)["required"], json!(["message"]));
     }
