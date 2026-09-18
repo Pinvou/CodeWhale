@@ -371,13 +371,13 @@ pub(crate) async fn serve_controlling_lane_with_interval(
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
-    let mut sequence: u64 = 0;
+    let mut liveness = LivenessExpectations::default();
     let mut journal = JournalExpectations::default();
     loop {
         tokio::select! {
             biased;
             _ = heartbeat.tick() => {
-                if let Some(frame) = next_liveness_frame(manager, &mut sequence) {
+                if let Some(frame) = next_liveness_frame(manager, &mut liveness) {
                     (sinks.on_liveness)(frame);
                 }
             }
@@ -396,6 +396,7 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                             sessions,
                             business,
                             &mut journal,
+                            &mut liveness,
                             &json,
                             sinks,
                         );
@@ -408,15 +409,17 @@ pub(crate) async fn serve_controlling_lane_with_interval(
 
 /// 生成下一条心跳帧：只在存在活租约（connected）时产出，序号单调递增；租约
 /// 变更后序号从 1 重新开始（epoch 同步换新，接收侧按新 epoch 接受）。
-fn next_liveness_frame(manager: &ControllingDeviceManager, sequence: &mut u64) -> Option<Value> {
+fn next_liveness_frame(
+    manager: &ControllingDeviceManager,
+    liveness: &mut LivenessExpectations,
+) -> Option<Value> {
     let (lease, _) = manager.live_runtime_context().ok()?;
     let epoch = manager.live_liveness_epoch()?;
-    let next = sequence.checked_add(1)?;
+    let next = liveness.next_sequence()?;
     let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
         &lease, &epoch, next,
     )
     .ok()?;
-    *sequence = next;
     Some(frame)
 }
 
@@ -427,6 +430,7 @@ fn dispatch_inbound_frame(
     sessions: &ControllingSessionManager,
     business: &ControllingLaneState,
     journal: &mut JournalExpectations,
+    liveness: &mut LivenessExpectations,
     json: &str,
     sinks: &mut ControllingLaneSinks<'_>,
 ) {
@@ -489,6 +493,42 @@ fn dispatch_inbound_frame(
             // 快照原子替换本地副本：期望值推进到快照基准，后续事件从基准+1 连续。
             journal.mark_snapshot(&snapshot);
             (sinks.on_snapshot)(&snapshot);
+        }
+        "controller_liveness_challenge_a" => {
+            // E2E-06：B 的存活挑战由 A 直接应答（AEAD 存活证明，域与业务帧分离）。
+            let Some(challenge_id) = payload.get("challenge_id").and_then(Value::as_str) else {
+                return;
+            };
+            let Some(challenge_b64) = payload.get("challenge_b64").and_then(Value::as_str) else {
+                return;
+            };
+            if !liveness.mark_answered(challenge_id) {
+                return;
+            }
+            let Some(sequence) = liveness.next_sequence() else {
+                return;
+            };
+            let Some(epoch) = manager.live_liveness_epoch() else {
+                return;
+            };
+            let inner = serde_json::json!({
+                "v": 1,
+                "type": "controller_liveness_a",
+                "connection_id": lease.connection_id,
+                "controller_lease_id": lease.controller_lease_id,
+                "lease_epoch": lease.lease_epoch,
+                "relay_epoch": lease.relay_epoch,
+                "remote_control_generation": lease.remote_control_generation,
+                "role": "A",
+                "liveness_epoch_a": epoch,
+                "heartbeat_sequence_a": sequence.to_string(),
+                "challenge_id": challenge_id,
+                "challenge_b64": challenge_b64,
+            });
+            let Ok(frame) = business.seal_liveness(&inner, &capabilities) else {
+                return;
+            };
+            let _ = manager.send_authenticated_control(&frame);
         }
         _ => {}
     }
@@ -570,6 +610,26 @@ pub(crate) fn journal_admission(
             epoch: event.epoch.clone(),
             after: last,
         },
+    }
+}
+
+/// A 端存活状态：与心跳共享的单调序号 + 已应答过的挑战（同一挑战只答一次，
+/// 避免重复投递导致重复加密大帧）。
+#[derive(Default)]
+pub(crate) struct LivenessExpectations {
+    sequence: u64,
+    answered: std::collections::BTreeSet<String>,
+}
+
+impl LivenessExpectations {
+    pub(crate) fn next_sequence(&mut self) -> Option<u64> {
+        self.sequence = self.sequence.checked_add(1)?;
+        Some(self.sequence)
+    }
+
+    /// 返回 true 表示这是该挑战的首次应答。
+    pub(crate) fn mark_answered(&mut self, challenge_id: &str) -> bool {
+        self.answered.insert(challenge_id.to_owned())
     }
 }
 

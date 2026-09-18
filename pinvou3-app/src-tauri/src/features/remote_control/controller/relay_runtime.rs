@@ -366,6 +366,10 @@ impl ControlledRelayWorker {
                             Some("controller_liveness_attestation_a") => {
                                 self.accept_liveness_attestation(&message, &mut evidence);
                             }
+                            // E2E-06：A 的直接存活证明 → 优先于兜底，续期后不再升级。
+                            Some("encrypted_controller_liveness_a") => {
+                                self.accept_direct_liveness(&message, &mut evidence);
+                            }
                             // E2E-06：A 端显式断开 → 终结租约并结束本代通道。
                             Some("controller_disconnect") => {
                                 if self.accept_remote_disconnect(&message) {
@@ -503,6 +507,39 @@ impl ControlledRelayWorker {
                 true
             }
             Err(_) => false,
+        }
+    }
+
+    /// E2E-06：接受 Relay 签名 attestation 续期本端 watchdog（挑战与请求时间
+    /// 由本端记录，跨机时间一律不用）。
+    /// E2E-06：A 的直接存活证明（`encrypted_controller_liveness_a`）：解密后用
+    /// 明文走 `accept_direct_liveness`（挑战、RTT 与序号单调性由 watchdog 校验），
+    /// 成功后清除未完成挑战，避免再走 Relay 兜底。
+    fn accept_direct_liveness(
+        &self,
+        frame: &Value,
+        evidence: &mut LivenessEvidenceState,
+    ) {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let business = self.app.state::<ControlledLaneState>();
+        let Ok(inner) = business.open_liveness(frame) else {
+            return;
+        };
+        let Some(challenge_id) = inner.get("challenge_id").and_then(Value::as_str) else {
+            return;
+        };
+        match &evidence.outstanding {
+            Some((outstanding, _, _)) if outstanding == challenge_id => {}
+            // 不是当前挑战的证明（重放或过期）一律忽略。
+            _ => return,
+        }
+        let now_b = controlled_monotonic_millis();
+        if manager
+            .accept_direct_liveness(&inner.to_string(), now_b)
+            .is_ok()
+        {
+            evidence.outstanding = None;
+            evidence.escalated = false;
         }
     }
 
