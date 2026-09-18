@@ -101,6 +101,8 @@ test('the bridge forwards UI fields only and never builds protocol payloads', ()
     'controllerApplyCapabilitySnapshot',
     'controllerTaskIntent',
     'controllerTaskCancelIntent',
+    'controllerTaskSend',
+    'controllerTaskCancelSend',
   ]) {
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
@@ -152,4 +154,17 @@ test('reopening a session reuses the connection session reference', () => {
   );
   assert.ok(open.includes('controllerConnection.sessionRef'));
   assert.ok(open.includes('remoteRef: existing || null'));
+});
+
+test('the encrypted send entry points only carry UI fields', () => {
+  const send = bridge.slice(
+    bridge.indexOf('function controllerTaskSend'),
+    bridge.indexOf('function applyControllerSession'),
+  );
+  assert.ok(send.includes('text: String(text || "")'));
+  assert.ok(send.includes('taskId: taskId'));
+  assert.ok(
+    !/input_digest|client_request_id|session_id|controller_lease_id/.test(send),
+    'the send path must not assemble protocol fields',
+  );
 });

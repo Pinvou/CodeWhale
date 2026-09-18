@@ -294,6 +294,27 @@
       });
     }
 
+    /**
+     * E2E-04: compose and send one encrypted task / cancel frame. The protocol
+     * payload is built and sealed in Rust; the UI only supplies the session
+     * reference plus the text or task id.
+     */
+    function controllerTaskSend(remoteRef, text) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_send", {
+        remoteRef: remoteRef,
+        text: String(text || ""),
+      });
+    }
+
+    function controllerTaskCancelSend(remoteRef, taskId) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_cancel_send", {
+        remoteRef: remoteRef,
+        taskId: taskId,
+      });
+    }
+
     function applyControllerSession(result) {
       var payload = result && typeof result === "object" ? result : {};
       publish(logic.applyControllerSession(current(), {
@@ -588,6 +609,8 @@
       controllerApplyCapabilitySnapshot: controllerApplyCapabilitySnapshot,
       controllerTaskIntent: controllerTaskIntent,
       controllerTaskCancelIntent: controllerTaskCancelIntent,
+      controllerTaskSend: controllerTaskSend,
+      controllerTaskCancelSend: controllerTaskCancelSend,
       controllerListHistory: controllerListHistory,
       controllerCreateHistory: controllerCreateHistory,
       capabilitiesSnapshot: capabilitiesSnapshot,
