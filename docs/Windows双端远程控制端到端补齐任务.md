@@ -82,3 +82,36 @@
 |---|---|---|
 | `desktop_remote_controlled_start` 阻塞等待注册结果 | 保守默认，登记 | 注册最长等待 30 秒（`REGISTRATION_TIMEOUT_MS`）；期间状态事件照常推送，UI 显示 starting。E2E-07 收敛 UI 状态时再评估是否改为「立即返回 starting + 事件收口」。 |
 | `serve()` 暂只保活通道 | 预期 | 握手与加密业务帧派发分别在 E2E-02 / E2E-04 安装到该服务循环；当前对未知消息只做丢弃，绝不转发到 legacy WebUI 事件流。 |
+
+## 5. E2E-02 实施状态与剩余步骤
+
+### 5.1 已落地提交（协议与状态机层已可运行且测试齐全）
+
+| 提交 | 内容 |
+|---|---|
+| `08143219` | `SessionKeys::finished_pair`：收据阶段不再需要 `LeaseBinding` |
+| `7ad57a5f` | 受控信任根入口：`from_pinned_keys` / `load_relay_trust_config` / `authenticate_relay_transcript` |
+| `a79e2d36` | `LeaseInstallValidationContext` 访问器 + transcript hash 解码 |
+| `d2d1a31d` | `ReceiptSecret::to_base64`（receipt ack 信封） |
+| `311b539e` | 双方握手公钥透出（A 端 ECDH 的对端公钥） |
+| `75565b17` | A 端 claim 与握手序列模块 `controller/controlling_handshake.rs` |
+| `0444a083` | A 端全序列测试；修正 ack 角色语义与 finished 收发器提前丢弃两处缺陷 |
+| `c5a2ee3b` | B 端对称模块 `controller/controlled_handshake.rs` + A↔B 双端配对测试 |
+| `0d6a405f` | A 端 worker 编排 `controller/controlling_runtime.rs`（端口化，2 条用例） |
+
+验证基线：`cargo test controller::` 178 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
+
+### 5.2 剩余三步（按序执行，每步独立提交并审核）
+
+1. **transport 共享 generation 与一次性绑定**（`controller/relay_transport.rs`）
+   - 现状：`install_authenticated_lease` 要求租约 generation 等于 transport 创建时的 generation，而 A 端在 claim 前不可能知道 B 的 generation（只能从验签 transcript / `controller_joined` 得到），因此 A 端无法安装租约。
+   - 做法：把 generation 改为 sender 与 transport 任务共享的 `Arc<RwLock<String>>`（sender 字段 `:237-247`、任务内 4 处 `config.remote_control_generation.clone()` `:551/:564/:616/:669`、`install_authenticated_lease` `:250-260` 统一读同一来源），并新增受控 `bind_generation`：仅未安装租约时可调用、只允许绑定一次、空值/非法 id 失败关闭。
+   - 用例：一次绑定成功、二次绑定拒绝、已装租约后拒绝、绑定后用新 generation 安装租约成功且旧 generation 仍被拒。
+2. **A 端接线**（`app/commands/desktop_remote_controller.rs` + 端口实现）
+   - `connect`：`HandshakeKeyPair::generate()` → `load_relay_trust_config`（未配置失败关闭）→ `spawn_controller_transport(ControllerTransportConfig::new(relay_url, ControllerRole::ControllerA, placeholder), sink)` → 收到验签 transcript 后 `bind_generation(transcript.remote_control_generation)` → `drive_controlling_handshake`；
+   - 阶段投影：`ControllingStageEvent{ClaimSent, Reserved, FinishedSent, Joined}` → `ControllingDeviceManager::{connect, complete_reserved, complete_connected}` + 广播 `desktop-remote-controller-status`；失败/超时/断线统一映射为有限公共错误，不产生半租约；
+   - `disconnect`：停止 worker 并清理 live 上下文；`ControllerLease` 需要 `device_display_name`（`controller_joined` 无该字段，先取有界占位并在 E2E-03 补真实来源）与 `transport_key_fingerprint`（需确定派生来源，建议由 transcript_hash + 角色派生）。
+3. **B 端接线**（`controller/relay_runtime.rs`）
+   - `ControlledRelayWorker::serve()` 收到 `controller_pairing_reserved` 时用 `ControlledHandshake::new(...)` 接管，按序处理 `finished_receipt_commit` / `encrypted_handshake_finished` / `finished_receipt_ack`，并把 `controller_joined` 应用到 `ControlledDeviceManager`。
+
+完成后运行定向测试与架构守卫，做 E2E-02 正式审核（失败路径、敏感信息、跨 generation/lease 边界），通过后进入 E2E-03。
