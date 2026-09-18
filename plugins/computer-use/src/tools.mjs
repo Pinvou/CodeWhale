@@ -82,7 +82,7 @@ export const TOOLS = [
   },
   {
     name: "switch_display",
-    description: "Set which display subsequent screenshots/recordings capture on this computer.",
+    description: "Set which display subsequent screenshots/recordings capture on this computer. Local and hdc computers only: over ssh the one-shot agent process cannot keep a display choice alive, so this fails closed (persistent_session_required) — pass display to screenshot/recording_start instead (honored on macOS; Linux/Windows captures cover every display).",
     inputSchema: { type: "object", required: ["index"], properties: { index: { type: "integer", minimum: 1 }, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -124,7 +124,7 @@ export const TOOLS = [
   },
   {
     name: "screenshot",
-    description: "Capture the screen (all or one display, optional region) as PNG/JPEG. The receipt carries raster geometry; later coordinate targets refer to this raster.",
+    description: "Capture the screen (all or one display, optional region) as PNG/JPEG. The receipt carries raster geometry; later coordinate targets refer to the latest returned raster (screenshot or zoom).",
     inputSchema: {
       type: "object",
       properties: {
@@ -138,12 +138,12 @@ export const TOOLS = [
   },
   {
     name: "zoom",
-    description: "Close-up crop of the latest screenshot. Choose points from the returned child raster only.",
+    description: "Close-up crop of the latest raster (screenshot or zoom). Choose points from the returned child raster only. A region reaching past the raster is clipped to it; the receipt's region is the crop actually taken, so aim from that. Over ssh aiming stays correct but the crop file stays on the remote computer — view it only with out-of-band access such as scp; unavailable on HarmonyOS (hdc) computers.",
     inputSchema: {
       type: "object",
       required: ["region"],
       properties: {
-        region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in last-raster pixels" },
+        region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in last-raster pixels; clipped to the raster when it reaches past it" },
         path: { type: "string" },
         computer: computerParam,
       },
@@ -198,7 +198,7 @@ export const TOOLS = [
     inputSchema: { type: "object", required: ["from_target", "to"], properties: { from_target: targetSchema, to: targetSchema, computer: computerParam }, additionalProperties: false },
   },
   {
-    name: "left_mouse_down", description: "Press and hold the left button at a target. Release with left_mouse_up.",
+    name: "left_mouse_down", description: "Press and hold the left button at a target. Release with left_mouse_up. Local computers only: over ssh the agent process ends after every call, so a press could outlive its release, and the HarmonyOS (hdc) backend does not expose press-and-hold — use left_click_drag there.",
     inputSchema: { type: "object", properties: { target: targetSchema, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -246,7 +246,7 @@ export const TOOLS = [
   // ---- recording ----
   {
     name: "recording_start",
-    description: "Start screen recording on a computer (mp4/mov). Darwin: screencapture -v (timed or until recording_stop). Linux: x11grab/wf-recorder. Windows: ffmpeg gdigrab. HarmonyOS: snapshot-series muxed with ffmpeg.",
+    description: "Start screen recording on a computer (mp4/mov). Darwin: screencapture -v (timed or until recording_stop). Linux: x11grab/wf-recorder. Windows: ffmpeg gdigrab. HarmonyOS: snapshot-series muxed with ffmpeg. Local and hdc computers only: over ssh the one-shot agent process cannot keep a recorder running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -262,17 +262,17 @@ export const TOOLS = [
   },
   {
     name: "recording_stop",
-    description: "Stop a running recording and finalize the file.",
+    description: "Stop a running recording and finalize the file. Local and hdc computers only: over ssh the one-shot agent process cannot reach a recorder from an earlier call.",
     inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {
     name: "recording_status",
-    description: "Status of one recording (running, bytes so far).",
+    description: "Status of one recording (running, bytes so far). Local and hdc computers only: over ssh the one-shot agent process cannot reach a recorder from an earlier call, so this fails closed instead of reporting status.",
     inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {
     name: "recording_list",
-    description: "List recordings and screenshots saved on a computer.",
+    description: "List recordings and screenshots saved on a computer. Over ssh: lists the files saved on the remote computer; running recordings never appear there.",
     inputSchema: { type: "object", properties: { computer: computerParam }, additionalProperties: false },
   },
   // ---- kill switch ----
