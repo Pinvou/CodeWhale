@@ -9,7 +9,7 @@
 #   scripts/asr/setup-sensevoice.sh [q4_k|q8_0]      # 量化档,默认 q4_k(174MB)
 #   GGML_CUDA=ON scripts/asr/setup-sensevoice.sh     # GB10 等带 GPU 的机器开 CUDA 加速
 #
-# 依赖: git / gcc / g++ / make（apt install build-essential git）; ffmpeg(转码,建议)。
+# 依赖: git / gcc / g++ / make / sha256sum（apt install build-essential git; sha256sum 属 coreutils）; ffmpeg(转码,建议)。
 #       cmake 缺失会自动下预编译(免 root)。
 set -euo pipefail
 
@@ -45,7 +45,8 @@ else
   esac
   curl --retry 4 --retry-all-errors -fsSL -o "$WORK/cmake.tgz" \
     "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz"
-  printf '%s  %s\n' "$CMAKE_SHA256" "$WORK/cmake.tgz" | sha256sum --check --status
+  printf '%s  %s\n' "$CMAKE_SHA256" "$WORK/cmake.tgz" | sha256sum --check --status \
+    || { echo "❌ CMake 预编译包 sha256 校验失败（下载损坏或上游产物已变更）"; exit 1; }
   tar xzf "$WORK/cmake.tgz" -C "$WORK"
   CMAKE="$WORK/$(ls "$WORK" | grep '^cmake-')/bin/cmake"
 fi
@@ -55,8 +56,9 @@ git init --quiet "$WORK/sv"
 git -C "$WORK/sv" remote add origin "$SENSEVOICE_SOURCE_URL"
 git -C "$WORK/sv" fetch --quiet --depth 1 origin "$SENSEVOICE_SOURCE_COMMIT"
 git -C "$WORK/sv" checkout --quiet --detach FETCH_HEAD
-test "$(git -C "$WORK/sv" rev-parse HEAD)" = "$SENSEVOICE_SOURCE_COMMIT"
-git -C "$WORK/sv" submodule update --init --recursive
+test "$(git -C "$WORK/sv" rev-parse HEAD)" = "$SENSEVOICE_SOURCE_COMMIT" \
+  || { echo "❌ pinned commit 复核失败：检出的 HEAD 与 $SENSEVOICE_SOURCE_COMMIT 不符"; exit 1; }
+git -C "$WORK/sv" submodule update --init --recursive --depth 1
 mkdir -p "$WORK/sv/build"
 ( cd "$WORK/sv/build" \
   && "$CMAKE" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
@@ -67,13 +69,20 @@ mkdir -p "$WORK/sv/build"
 
 echo "[3/5] 安装引擎 → $ASR_DIR …"
 mkdir -p "$ASR_DIR"
-cp "$WORK/sv/build/bin/sense-voice-main" "$ASR_DIR/"
+# 同目录临时文件 + rename 落位：拷贝中途被打断不能在最终路径留下截断文件
+# （shim 只检查文件存在，截断的引擎/模型要到运行期才会暴露）。
+engine_tmp="$ASR_DIR/.sense-voice-main.tmp.$$"
+cp "$WORK/sv/build/bin/sense-voice-main" "$engine_tmp" || { rm -f "$engine_tmp"; exit 1; }
+mv -f "$engine_tmp" "$ASR_DIR/sense-voice-main"
 
 echo "[4/5] 下载模型 $MODEL_FILE（modelscope，国内可达）…"
 curl --retry 4 --retry-all-errors -fsSL -o "$WORK/$MODEL_FILE" \
   "https://www.modelscope.cn/models/lovemefan/SenseVoiceGGUF/resolve/master/$MODEL_FILE"
-printf '%s  %s\n' "$MODEL_SHA256" "$WORK/$MODEL_FILE" | sha256sum --check --status
-install -m 0644 "$WORK/$MODEL_FILE" "$ASR_DIR/$MODEL_FILE"
+printf '%s  %s\n' "$MODEL_SHA256" "$WORK/$MODEL_FILE" | sha256sum --check --status \
+  || { echo "❌ 模型 sha256 校验失败（下载损坏或上游产物已变更）: $MODEL_FILE"; exit 1; }
+model_tmp="$ASR_DIR/.$MODEL_FILE.tmp.$$"
+install -m 0644 "$WORK/$MODEL_FILE" "$model_tmp" || { rm -f "$model_tmp"; exit 1; }
+mv -f "$model_tmp" "$ASR_DIR/$MODEL_FILE"
 
 echo "[5/5] 安装 shim …"
 cp "$HERE/pinvou3-asr-shim.py" "$ASR_DIR/"
