@@ -16297,6 +16297,18 @@ api_key = "test-only-key"
             Some("custom-b")
         );
         assert_eq!(persisted.metadata.model, "model-b");
+        // The stamp must carry the root set, not only the primary: a resumed
+        // multi-root exec that dropped it would persist single-root and the
+        // next `exec --resume` would run degraded.
+        assert_eq!(
+            persisted.metadata.workspace_roots,
+            vec![PathBuf::from("/tmp/exec-resume-shared")],
+            "the exec stamp must write the root set it was given"
+        );
+        assert_eq!(
+            persisted.metadata.workspace,
+            PathBuf::from("/tmp/exec-resume")
+        );
         assert_eq!(next_config.provider.as_deref(), Some("custom-b"));
         assert_eq!(resumed_model, "model-b");
     }
