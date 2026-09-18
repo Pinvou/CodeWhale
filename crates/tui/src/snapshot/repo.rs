@@ -1008,12 +1008,11 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    // Drain both pipes concurrently while waiting: several snapshot
-    // commands emit output that grows with workspace size (`ls-tree -r`
-    // on restore, `diff --name-only` after large refactors), and a child
+    // Drain both pipes concurrently while waiting: the restore path's
+    // `ls-tree -r` emits output that grows with workspace size, and a child
     // blocked on a full pipe buffer would never exit, turning every such
-    // call into a guaranteed timeout. Mirrors the sandbox exec plumbing
-    // in crate::run_sandboxed_exec.
+    // call into a guaranteed timeout. Mirrors the sandbox exec plumbing in
+    // crate::run_sandbox_command.
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
     let stdout_thread = std::thread::spawn(move || {
@@ -1034,10 +1033,13 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
     let Some(status) = child.wait_timeout(GIT_COMMAND_TIMEOUT)? else {
         let _ = child.kill();
         let _ = child.wait();
-        // Killing the child closes the pipe writers, so both readers see
-        // EOF and these joins cannot hang.
-        let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
+        // Detach (don't join) the reader threads: killing the child closes
+        // only the child's write ends. A grandchild that inherited the
+        // pipes (a post-checkout hook, an `git gc` pack worker, a clean
+        // filter) keeps them open, so read_to_end would never see EOF and
+        // joining here would block the turn pipeline past the timeout —
+        // exactly what this bound exists to prevent. The detached threads
+        // end on their own once the last write end closes.
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!(

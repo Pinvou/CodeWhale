@@ -342,8 +342,13 @@ async fn run_plugin_child_raw(
         Err(_elapsed) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
+            // Abort (don't join) the drain tasks: a grandchild that
+            // inherited the pipe keeps the write end open after the child
+            // dies, so read_to_end would never see EOF and joining here
+            // would hang the caller past the timeout. Aborting drops the
+            // read end, which hands grandchildren an EPIPE instead.
+            stdout_task.abort();
+            stderr_task.abort();
             return Err(ToolError::Timeout {
                 seconds: PLUGIN_EXECUTION_TIMEOUT.as_secs(),
             });
