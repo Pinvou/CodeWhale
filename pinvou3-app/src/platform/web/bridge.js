@@ -10218,20 +10218,6 @@
     return left + (/[。！？.!?，,;；:]$/.test(left) ? " " : "\n") + right;
   }
 
-  function runVoiceInputDebugAssertions() {
-    var denied = normalizeVoiceError({ name: "NotAllowedError" });
-    var noDevice = normalizeVoiceError({ name: "NotFoundError" });
-    var unsupportedConstraint = normalizeVoiceError({ name: "OverconstrainedError", message: "Invalid constraint", constraint: "channelCount" });
-    var mismatch = normalizeVoiceError({ category: "context_mismatch" });
-    console.assert(denied.category === "permission_denied", "permission error classified");
-    console.assert(noDevice.category === "device_unavailable", "device error classified");
-    console.assert(unsupportedConstraint.category === "constraint_unsupported", "unsupported constraint classified");
-    console.assert(unsupportedConstraint.diagnostic === "unsupported media constraint: channelCount", "unsupported constraint diagnostic");
-    console.assert(mismatch.stage === "writeback", "context mismatch classified");
-    console.assert(appendVoiceText("草稿", "识别文本") === "草稿\n识别文本", "voice text appended");
-    return true;
-  }
-
   async function pickFiles() {
     if (!dialogOpen) { addSystemItem(bt("filePickUnavailable")); return []; }
     var selected = await dialogOpen({ multiple: true });
@@ -10383,7 +10369,6 @@
     completeVoiceSubmission: completeVoiceSubmission,
     dismissVoiceInput: dismissVoiceInput,
     appendVoiceText: appendVoiceText,
-    runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     loadScheduledTasks: loadScheduledTasks,
     readScheduledTask: readScheduledTask,
     loadScheduledTaskRuns: loadScheduledTaskRuns,

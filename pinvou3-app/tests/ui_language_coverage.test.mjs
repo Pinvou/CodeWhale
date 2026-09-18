@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dict } from '../src/shared/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
+import { dict } from './helpers/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
 import { errorCode, localizedErrorMessage } from '../src/shared/user-facing-error.js';
 import {
   applyConnectorFailure,

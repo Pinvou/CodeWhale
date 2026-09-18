@@ -1711,7 +1711,12 @@ jobs:
             'connector_introspection_guard_matches_complete_names_only' \
             'features::projects::tests::' \
             'run_with_timeout_reaps_and_stays_bounded' \
-            'reap_killed_child_'; do
+            'reap_killed_child_' \
+            'features::browser::platform::windows::tests::' \
+            'features::monitor::platform::windows_cpu::tests::' \
+            'features::monitor::platform::windows_memory::tests::' \
+            'features::monitor::platform::windows_gpu::tests::' \
+            'features::remote_control::platform::windows::tests::'; do
             index=$((index+1))
             started=$SECONDS
             "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
@@ -1721,7 +1726,7 @@ jobs:
             }
             echo "WINDOWS_RUST_TIMING phase=regression step=test-filter-$index elapsed_seconds=$((SECONDS-started)) status=0"
           done
-          echo "WINDOWS_RUST_TIMING phase=regression step=six-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
+          echo "WINDOWS_RUST_TIMING phase=regression step=regression-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
 
   windows-rustup-repair-test:
     name: windows-rustup-repair-test

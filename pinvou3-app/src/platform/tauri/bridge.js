@@ -2606,7 +2606,6 @@
   var syncVoiceShortcutRecording = voiceFeature.syncVoiceShortcutRecording;
   var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
-  var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
@@ -2811,7 +2810,6 @@
       completeVoiceSubmission: voiceFeature.completeVoiceSubmission,
       dismissVoiceInput: voiceFeature.dismissVoiceInput,
       appendVoiceText: appendVoiceText,
-      runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
     knowledge: {
       loadKnowledgeEmbedderAfterFirstFrame: loadKnowledgeEmbedderAfterFirstFrame,
