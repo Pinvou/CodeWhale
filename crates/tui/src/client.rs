@@ -4505,7 +4505,7 @@ mod tests {
         // tests (which may issue non-streaming requests with their own
         // timing assumptions) through the shared test-env lock.
         let _env_lock = crate::test_support::lock_test_env();
-        let _envelope = NonStreamingEnvelopeGuard::millis(250);
+        let _envelope = NonStreamingEnvelopeGuard::millis(2000);
         let server = MockServer::start().await;
         // The provider accepts the connection but stalls far past the
         // budgeted envelope before answering: the whole request (headers
@@ -4563,7 +4563,7 @@ mod tests {
         // tests (which may issue non-streaming requests with their own
         // timing assumptions) through the shared test-env lock.
         let _env_lock = crate::test_support::lock_test_env();
-        let _envelope = NonStreamingEnvelopeGuard::millis(250);
+        let _envelope = NonStreamingEnvelopeGuard::millis(2000);
         let server = MockServer::start().await;
         // The open answers past the injected non-streaming envelope. The
         // streaming-open path must not inherit any total: reqwest's
@@ -4574,7 +4574,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("data: [DONE]\n\n")
-                    .set_delay(Duration::from_millis(600)),
+                    .set_delay(Duration::from_millis(2500)),
             )
             .mount(&server)
             .await;
@@ -4601,17 +4601,17 @@ mod tests {
         // tests (which may issue non-streaming requests with their own
         // timing assumptions) through the shared test-env lock.
         let _env_lock = crate::test_support::lock_test_env();
-        let _envelope = NonStreamingEnvelopeGuard::millis(250);
+        let _envelope = NonStreamingEnvelopeGuard::millis(2000);
         let server = MockServer::start().await;
         // A caller that pins its own, larger total (`list_models` pins 30s)
         // must keep it: `.timeout()` on the builder is a pure overwrite, so
         // an unconditional envelope would silently replace the pinned
-        // budget with the injected 250ms and fail this 600ms-late response.
+        // budget with the injected 2s and fail this 2.5s-late response.
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("{}")
-                    .set_delay(Duration::from_millis(600)),
+                    .set_delay(Duration::from_millis(2500)),
             )
             .mount(&server)
             .await;
