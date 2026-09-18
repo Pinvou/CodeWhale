@@ -7,6 +7,7 @@
 
 use base64::Engine as _;
 use serde_json::{json, Value};
+use zeroize::Zeroize;
 
 use super::crypto::{
     authenticate_relay_transcript, AuthenticatedRelayTrustConfig, ControllerRole, FinishedReceiver,
@@ -210,7 +211,10 @@ impl ControllingHandshake {
     }
 
     /// `controller_pairing_claim`：声明本端握手公钥与所需能力。
-    pub(crate) fn claim(&self) -> Result<Value> {
+    ///
+    /// 连接码只在 claim 中一次性使用：报文提交成功后立刻从内存里清除，之后
+    /// 任何重试都只能失败关闭（`pairing_code` 不再是合法码）。
+    pub(crate) fn claim(&mut self) -> Result<Value> {
         let handshake = self
             .handshake
             .as_ref()
@@ -227,7 +231,9 @@ impl ControllingHandshake {
             "capabilities": CLAIM_CAPABILITIES,
         });
         validate_controller_message_json(&value.to_string(), SenderRole::ControllerA)
-            .map_err(|_| HandshakeError::new("controller_claim_invalid"))
+            .map_err(|_| HandshakeError::new("controller_claim_invalid"))?;
+        self.pairing_code.zeroize();
+        Ok(value)
     }
 
     /// 处理 `controller_pairing_reserved`：验签 transcript、派生会话密钥、
@@ -594,7 +600,7 @@ mod tests {
     #[test]
     fn claim_is_protocol_valid_and_carries_the_local_handshake_key() {
         let (trust, _) = trust_fixture();
-        let handshake = new_handshake(trust);
+        let mut handshake = new_handshake(trust);
         let claim = handshake.claim().unwrap();
         validate_controller_message_json(&claim.to_string(), SenderRole::ControllerA).unwrap();
         assert_eq!(claim["claim_request_id"], json!("claim-0001"));
@@ -606,6 +612,13 @@ mod tests {
                 .unwrap()
                 .len(),
             32
+        );
+        // E2E-02：连接码只在 claim 中一次性使用，提交成功后立刻清除；重复 claim
+        // 只能失败关闭，绝不重放已被消费的码。
+        assert!(handshake.pairing_code.is_empty());
+        assert_eq!(
+            handshake.claim().unwrap_err().code,
+            "controller_claim_invalid"
         );
     }
 
