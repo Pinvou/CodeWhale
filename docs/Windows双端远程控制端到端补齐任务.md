@@ -293,6 +293,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ## 11. E2E-08 待做清单（集成回归与发布审核）
 
+- 已执行证据（本轮）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` 58 通过 / 0 失败，`test/relay.test.js` 25 通过 / 0 失败；Rust `cargo test remote_control::` 312 通过 / 0 失败；前端 6 个契约文件 36 通过 / 0 失败、`npm run build:ui` 通过、`npm run lint:ui|lint:node` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer`）在新增的 controller 与前端文件中零命中。
 - 双端集成测试：在现有同进程双端用例（task_submit/task_status、journal_event、快照、心跳证据）基础上补一条完整旅程（连接 → 能力快照 → 普通文本任务 → 正文回传 → 显式断开），并断言旧 lease/generation 帧在各阶段都被丢弃。
 - 架构守卫与 UI 契约：`python scripts/architecture-guard.py`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run lint:ui`、前端契约测试全套。
 - 安全扫描：仓库已有的 `controller-telemetry`/日志脱敏用例 + `remote-control-relay` 契约测试；再跑一次敏感信息扫描（密钥/路径/内部地址不得进入 wire 与投影）。
