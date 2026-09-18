@@ -2000,6 +2000,7 @@ dictZh["controllerConnection"] = {
   errorOffline: "对方设备当前离线或已关闭远程控制。",
   errorVersion: "双方版本不兼容，请升级到最新版本。",
   errorGeneric: "连接失败，请稍后重试。",
+  errorProtocol: "对方返回的数据无法识别，请重试；若持续出现请检查双方版本。",
   errorLocalFormat: "请输入 7 位连接码（字母和数字）。",
   historyTitle: "远程连接记录",
   historyEmpty: "还没有远程连接记录。",
