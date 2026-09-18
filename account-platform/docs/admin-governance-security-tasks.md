@@ -290,6 +290,8 @@ GSA-37 业务入口契约切片（仍PENDING / PARTIAL）：跨域 E2E 的请求
 
 GSA-38 只读资源清单与 readiness 切片（IN_PROGRESS / READONLY_READY / NOT_ACTIVATED / NOT_DEPLOYED）：新增[权益纠错资源清单与只读 readiness](entitlement-correction-release-readiness.md)：冻结该命令激活/切换所需的资源清单（Billing `000056`–`000059`、Account `000069`/`000070`、executable 与 durable 注册表、Billing 消费者开关与受信收据引导、事件入口与权限、OpenAPI/合同、proof/执行/consumer 代码、presenter、受控激活手册、迁移清单 330 项）；给出七项**只读** readiness 检查（迁移账本、activation 行组合与投影、Account 四入口失败关闭且零副作用、proof 不可用且无 claim、消费者未启动且 Q+1 收据未包含、零效果基线、presenter 可用性），任何一步出现写入或状态推进即 NO-GO；并明确切换顺序（先放宽 claim 白名单、再受信收据与本命令消费者、再 Account、最后 Portal，激活仍由授权人按手册执行）与回滚边界（只允许停止消费者并把 v2 行翻回 `INACTIVE`，禁止破坏性数据库回滚，000059 down 为 forward-only）。本切片不含任何写入、激活或部署动作。
 
+GSA-37 业务页闭合草稿切片（仍PENDING / PARTIAL）：新增 Portal 侧闭合草稿构造器 `pinvou3-app/src/features/account-platform/admin-entitlement-correction.js`：`entitlementCorrectionPrecheck` 只接受服务端只读预检投影（命令类型、policy v2/schema v2、`ENTITLEMENT_PACKAGE` 目标与合法 UUID、normalized/critical/financial 三对象齐备），`entitlementCorrectionApprovalDraft` 仅以运营人选择的原因码重建闭合 `normalized_command`（`package_id`/`payment_order_id`/`reason_code`），critical/financial 投影**逐字复制**、调用方额外字段（含任何金额）一律丢弃，预检不合法或原因越界时以稳定错误码 `ENTITLEMENT_CORRECTION_PRECHECK_INVALID` 失败关闭。新增 Node 合同 `test/contract/entitlement-correction-draft.test.mjs` 三项（闭合键集与逐字复制、篡改金额被丢弃、八类不可用预检与原因越界失败关闭）PASS。仍未完成：服务端只读预检 API、业务页表单与草稿编辑 UI、三语文案与真实浏览器联调。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
