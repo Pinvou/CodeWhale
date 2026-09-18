@@ -109,15 +109,27 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         self.assertIn("-DGGML_NATIVE=OFF", source)
         self.assertIn("check-linux-elf-policy.sh", source)
         # 浅克隆检出后必须复核正是 pinned commit(与 setup-sensevoice.sh
-        # 同一道 tripwire),防 refspec/环境值被改坏时发布产物悄悄换源。
+        # 同一道 tripwire),防 refspec/环境值被改坏时发布产物悄悄换源;
+        # 失配诊断必须带上实际检出的 commit。
         self.assertIn('rev-parse HEAD)" = "$SENSEVOICE_SOURCE_COMMIT"', source)
+        self.assertIn(
+            "expected $SENSEVOICE_SOURCE_COMMIT, got $(git -C",
+            source,
+        )
+        self.assertNotIn(
+            "pinvou3-app/src-tauri/resources/platforms/linux/asr/sense-voice-main",
+            subprocess.run(
+                ["git", "ls-files"], cwd=ROOT, check=True, text=True, capture_output=True
+            ).stdout.splitlines(),
+        )
 
     def test_sensevoice_setup_script_pins_downloads_and_checksums(self):
         # #1149 复审跟进:setup 脚本此前在 scripts/tests 零覆盖(兄弟构建
         # 脚本有钉定先例)。钉住供应链加固锚点,防止后续改动悄悄拆掉:
         # 两处下载的重试与 sha256 校验、量化档/架构分档校验和、pinned
-        # commit tripwire、校验失败显式报错(不得 --status 静默退出)、
-        # 同目录 tmp+rename 原子落位。
+        # commit tripwire、校验失败显式报错(不得 --status 静默退出,且
+        # 必须带期望/实际值并走 stderr)、同目录 tmp+rename 原子落位
+        # (引擎/模型/shim 三处)与失败时的临时文件清理。
         source = ASR_SETUP_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("q4_k) MODEL_SHA256=", source)
         self.assertIn("q8_0) MODEL_SHA256=", source)
@@ -125,17 +137,19 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         self.assertIn("x86_64) CMAKE_SHA256=", source)
         self.assertEqual(source.count("--retry-all-errors"), 2)
         self.assertEqual(source.count("sha256sum --check --status"), 2)
-        # 校验/tripwire 失败必须有用户可见报错(--status 会吞掉诊断)。
+        # 校验/tripwire 失败必须有用户可见报错(--status 会吞掉诊断),
+        # 且携带期望/实际值供用户自助比对。
         self.assertEqual(source.count("校验失败"), 2)
+        self.assertEqual(source.count("，实际 $("), 2)
         self.assertIn("pinned commit 复核失败", source)
-        # 引擎与模型都必须经同目录临时文件 + rename 落位。
-        self.assertEqual(source.count(".tmp.$$"), 2)
-        self.assertEqual(source.count("mv -f"), 2)
-        self.assertNotIn(
-            "pinvou3-app/src-tauri/resources/platforms/linux/asr/sense-voice-main",
-            subprocess.run(
-                ["git", "ls-files"], cwd=ROOT, check=True, text=True, capture_output=True
-            ).stdout.splitlines(),
+        # 所有 ❌ 报错走 stderr,管道/CI 捕获场景不丢诊断。
+        self.assertEqual(source.count(">&2"), 6)
+        # 引擎/模型/shim 都必须经同目录临时文件 + rename 落位。
+        self.assertEqual(source.count(".tmp.$$"), 3)
+        self.assertEqual(source.count("mv -f"), 3)
+        # 失败/中断时 EXIT trap 清理已创建的落位临时文件。
+        self.assertIn(
+            '[ -z "${engine_tmp:-}" ] || rm -f "$engine_tmp"', source
         )
 
     def test_elf_policy_accepts_host_arch_and_rejects_mismatch(self):

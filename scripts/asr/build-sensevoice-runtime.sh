@@ -88,7 +88,7 @@ git -C "$source_tmp" fetch --quiet --depth 1 origin "$SENSEVOICE_SOURCE_COMMIT"
 git -C "$source_tmp" checkout --quiet --detach FETCH_HEAD
 # 复核浅克隆检出的正是 pinned commit（与 setup-sensevoice.sh 同一道 tripwire）。
 test "$(git -C "$source_tmp" rev-parse HEAD)" = "$SENSEVOICE_SOURCE_COMMIT" \
-  || { echo "pinned commit checkout mismatch: expected $SENSEVOICE_SOURCE_COMMIT" >&2; exit 1; }
+  || { echo "pinned commit checkout mismatch: expected $SENSEVOICE_SOURCE_COMMIT, got $(git -C "$source_tmp" rev-parse HEAD)" >&2; exit 1; }
 git -C "$source_tmp" submodule update --init --recursive --depth 1
 rm -rf -- "$source_dir" "$build_dir"
 mv "$source_tmp" "$source_dir"
