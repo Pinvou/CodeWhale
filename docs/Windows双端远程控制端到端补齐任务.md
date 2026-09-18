@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`  
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 进行中（A 端 journal 落库与投影已落地，B 端正文/终态产出待接）。当前位于 E2E-05。
+> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 的正文链路（A 落库/投影 + B 用户消息/回复/终态回传）已落地待审核，剩余缺口恢复与 UI 渲染。当前位于 E2E-05 → E2E-06。
 
 ## 1. 执行规则
 
@@ -104,6 +104,8 @@
 | 能力快照按 `known_revision` 复用 | E2E-04 决策 | B 收到 `capability_snapshot_request` 时，若本地已有同一 revision 且未过期的快照则直接复用（A 端同 revision 幂等接受），否则重建并把 revision 加一；避免每次请求都抬 revision。 |
 | B 端 journal 回传的 session 身份 | E2E-05 决策 | journal 事件在 B 侧按权威 session id 记录；回传 wire 帧时与 `task_status` 一致改写回 A 的 ref（需要在 `RemoteSessionMap` 补反向查询），保证 A 端一份 wire 身份贯穿任务与正文。 |
 | A 端未绑定历史时只投影不落库 | E2E-05 决策 | 收到 journal 事件时若没有匹配 `session_ref` 的本地历史，只广播 `desktop-remote-controller-journal`（含 `historyId: null`），由 E2E-07 决定先创建/绑定历史；避免在数据层臆造标题或文案。 |
+| wire `event_kind` 只用冻结闭集 | E2E-05 决策 | 内部 `JournalKind`（task_status/attachment/snapshot 等）与冻结 `EVENT_KINDS` 不完全一致：回传时终态 `task_status` 映射为 `terminal`，进行中状态、附件与快照不回传（进行中状态由 `task_status` 帧负责，附件/快照属后续任务）；事件本体（base64）保留内部更细类型，A 端只核对 epoch/序号/会话。 |
+| B 回复正文来源 | E2E-05 决策 | 首版在轮次结束后从 B 的 `SessionStore` 读最后一条 assistant 消息的文本块（按 journal 上限截断），不做流式增量；因此 A 端看到的是一轮结束后的完整回复。读取失败不阻塞终态，只少一条正文事件。 |
 
 ## 5. E2E-02 实施状态与剩余步骤
 
@@ -215,10 +217,16 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ### 8.2 剩余步骤（按序执行）
 
-1. **B 端正文与终态产出并回传**
-   - `RemoteTaskEventSink` 增补一个默认空实现的事件入口（如 `publish_journal_event(kind, session_id, task_id, payload)`），命令层 `DesktopTaskEventSink` 实现为「写 `RemoteJournal` + 加密 `journal_event` 回传 A」；
-   - `RemoteChatTurnPort::run_chat_turn` 返回 B 的最终 assistant 文本（从 `SessionStore` 读回最后一条 assistant 消息，长度按 journal 上限截断），任务服务在派发前后分别写 `user_message` 与 `assistant_delta`；
-   - `RemoteSessionMap` 增反向查询（权威 session id → A 的 ref），使 journal 事件的 `session_id` 与 `task_status` 一样改写回 A 的 ref；
-   - 回传经 `ControllerRelayChannel::try_send`：需要在 `manager` 层给 worker 一个可克隆的发送句柄（`ControllerRelayChannel::sender()`），否则 journal 旁路无法在 worker 任务外发送。
-2. **缺口恢复**：A 端发现 `event_sequence` 缺口时用 `journal_replay_request`/`session_snapshot_request`（DEV-19 已有 B 侧 API）补齐；当前只做增量事件。
-3. **E2E-07 渲染**：前端订阅 `desktop-remote-controller-journal`，按 `historyId` 落库并渲染 transcript。
+1. ~~**B 端正文与终态产出并回传**~~ 已完成（`352997f15`、`9dc5f9e51`）
+   - `RemoteJournal::record_task_event`（落库并返回权威事件）+ `ControllerRelaySender`/`ControlledOutboundState` 出站旁路 + `build_journal_event_payload`（内部类型 → 冻结 `EVENT_KINDS` 映射，终态 `task_status` → `terminal`）+ `RemoteSessionMap::remote_ref_for` 反向改写；
+   - `ControllerTaskEventSink::emit_journal` 默认端口 + `ChatTurnExecutor` 产出 `user_message`/`assistant_delta` + `EnginePoolChatTurnPort::run_chat_turn` 返回回复文本（`StoreChatTranscript` 从 SessionStore 读最后一条 assistant 文本）；
+   - 命令层 `TaskEventBridge::emit_journal` 与 `DesktopTaskEventSink::publish_task_event` 都先写权威 journal，再经加密通道回传 A。
+2. **缺口恢复**（剩余）：A 端发现 `event_sequence` 缺口时用 `journal_replay_request`/`session_snapshot_request`（DEV-19 已有 B 侧 API）补齐；当前只做增量事件，缺口时 A 端历史等待下一次 epoch 或 E2E-07 的显式重放。
+3. **E2E-07 渲染**（剩余）：前端订阅 `desktop-remote-controller-journal`，按 `historyId` 落库并渲染 transcript；未绑定历史时先创建/绑定。
+
+### 8.3 E2E-05 审核要点（轮次 1 待补）
+
+- 目标差异：A 端可得到用户输入与 B 的回复——`journal_event` 解密 → 历史落库 → `desktop-remote-controller-journal`；B 端由 `user_message`/`assistant_delta`/`terminal` 三类事件产出，同进程双端用例已覆盖 assistant_delta 往返。
+- 失败路径：`event_b64` 体积/声明不一致、epoch/序号/会话不符、未映射内部类型、非远程会话、通道未就位、未协商 `snapshot_journal_v1` 都静默丢弃（不产生半状态）。
+- 敏感信息：正文只进权威 journal 与 A 独立历史（本地），wire 明文只有 epoch/序号/类型；无凭证、无路径、无主机信息。
+- 待补证据：缺口恢复用例与前端渲染用例（分别在剩余步骤 2、3 完成）。
