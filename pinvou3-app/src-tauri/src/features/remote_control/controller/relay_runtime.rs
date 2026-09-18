@@ -377,6 +377,8 @@ impl ControlledRelayWorker {
                 }
             }
         }
+        // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
+        self.app.state::<ControlledOutboundState>().clear();
     }
 
     /// 接管握手：本地进入安全握手阶段并产出本端 commit。信任根缺失或非法时
@@ -424,6 +426,9 @@ impl ControlledRelayWorker {
         {
             return Err(self.fail_completed_handshake(&manager));
         }
+        // 出站旁路（journal 事件回传）与通道一起就位。
+        let outbound = self.app.state::<ControlledOutboundState>();
+        outbound.install(self.channel.sender());
         let status = manager
             .complete_connected(self.operation.clone(), lease)
             .map_err(|error| error.code.to_owned())?;
@@ -580,6 +585,81 @@ fn rewrite_session_id(mut payload: Value, session_ref: &str) -> Result<Value, St
         Value::String(session_ref.to_owned()),
     );
     Ok(payload)
+}
+
+/// B → A 的 wire `journal_event`（E2E-05）。会话身份按第 4 节决策统一使用 A 的
+/// 会话引用；事件本体 base64 编码，明文字段与本体保持一致以便 A 端做缺口检测。
+///
+/// 明文 `event_kind` 使用冻结的 `EVENT_KINDS` 闭集，而事件本体保留内部更细的
+/// `JournalKind`（例如 `task_status`）。无法映射到冻结闭集的事件（附件、快照、
+/// 非终态任务状态）不回传：A 端的任务状态由 `task_status` 帧负责，正文按
+/// user_message / assistant_delta / reasoning / tool / permission / error /
+/// terminal / artifact 回传。
+pub(crate) fn build_journal_event_payload(
+    lease: &LeaseContext,
+    session_ref: &str,
+    event: &super::journal::JournalEvent,
+) -> Option<Value> {
+    let wire_kind = wire_event_kind(event)?;
+    let raw = serde_json::to_vec(event).ok()?;
+    if raw.len() > super::journal::MAX_EVENT_PAYLOAD_BYTES {
+        return None;
+    }
+    Some(json!({
+        "v": 1,
+        "type": "journal_event",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "session_id": session_ref,
+        "journal_epoch": event.epoch,
+        "event_sequence": event.sequence.to_string(),
+        "event_kind": wire_kind,
+        "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
+        "event_bytes": raw.len().to_string(),
+    }))
+}
+
+/// 内部 journal 类型 → 冻结 wire 闭集；无对应项时返回 None（不回传）。
+fn wire_event_kind(event: &super::journal::JournalEvent) -> Option<&'static str> {
+    match event.kind.as_str() {
+        "user_message" => Some("user_message"),
+        "assistant_delta" => Some("assistant_delta"),
+        "reasoning" => Some("reasoning"),
+        "tool" => Some("tool"),
+        "permission" => Some("permission"),
+        "error" => Some("error"),
+        "artifact" => Some("artifact"),
+        // 只有终态任务状态走 journal 回传；进行中状态由 task_status 帧投影。
+        "task_status" if event.terminal_status.is_some() => Some("terminal"),
+        _ => None,
+    }
+}
+
+/// B 端出站旁路：权威 journal 事件需要经同一代 endpoint lane 回传 A，而 lane 的
+/// 接收端由 worker 独占，因此这里只保存可克隆发送句柄（断开/结束时清空）。
+#[derive(Default)]
+pub(crate) struct ControlledOutboundState {
+    sender: parking_lot::Mutex<Option<crate::features::remote_control::manager::ControllerRelaySender>>,
+}
+
+impl ControlledOutboundState {
+    pub(crate) fn install(
+        &self,
+        sender: crate::features::remote_control::manager::ControllerRelaySender,
+    ) {
+        *self.sender.lock() = Some(sender);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.sender.lock() = None;
+    }
+
+    pub(crate) fn sender(&self) -> Option<crate::features::remote_control::manager::ControllerRelaySender> {
+        self.sender.lock().clone()
+    }
 }
 
 /// 由 `controller_joined` 材料构造 B 端租约（纯函数）。传输指纹与 A 端使用
@@ -1290,5 +1370,80 @@ mod tests {
                 .unwrap_err(),
             "task_request_invalid"
         );
+    }
+
+    /// E2E-05：B → A 的 journal_event 信封必须通过冻结运行时校验（角色 B +
+    /// snapshot_journal_v1），且明文字段与事件本体一致。
+    #[test]
+    fn journal_event_payload_matches_the_frozen_contract() {
+        use crate::features::remote_control::controller::journal::JournalEvent;
+        use crate::features::remote_control::controller::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
+        };
+
+        let PairingFixture { reservation, .. } =
+            crate::features::remote_control::controller::test_support::pairing_fixture(
+                "relay-key-journal",
+            );
+        let lease =
+            crate::features::remote_control::controller::test_support::lease_context(&reservation);
+        let event = JournalEvent {
+            event_id: "task-task-0001:1".to_owned(),
+            epoch: "epoch-1".to_owned(),
+            sequence: 1,
+            kind: "task_status".to_owned(),
+            session_id: "session-authoritative".to_owned(),
+            task_id: Some("task-0001".to_owned()),
+            terminal_status: Some("succeeded".to_owned()),
+            payload: json!({"status": "succeeded", "sequence": "1"}),
+        };
+        let payload = build_journal_event_payload(&lease, "session-a-ref", &event).unwrap();
+        assert_eq!(payload["session_id"], "session-a-ref");
+        assert_eq!(payload["journal_epoch"], "epoch-1");
+        assert_eq!(payload["event_sequence"], "1");
+        assert_eq!(
+            payload["event_kind"], "terminal",
+            "内部 task_status（终态）在 wire 上映射为冻结闭集的 terminal"
+        );
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "snapshot_journal_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+        validate_controller_runtime_payload_json(
+            &payload.to_string(),
+            SenderRole::ControlledB,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease.clone()),
+                negotiated_capabilities: capabilities,
+            }),
+        )
+        .expect("journal_event 信封必须满足冻结契约");
+        // 解码回来的事件与本体一致。
+        let decoded: JournalEvent = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(payload["event_b64"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded, event);
+        // 进行中的任务状态与附件/快照不回传（由 task_status 帧或后续任务负责）。
+        let mut running = event.clone();
+        running.kind = "task_status".to_owned();
+        running.terminal_status = None;
+        assert!(build_journal_event_payload(&lease, "session-a-ref", &running).is_none());
+        let mut attachment = event.clone();
+        attachment.kind = "attachment".to_owned();
+        assert!(build_journal_event_payload(&lease, "session-a-ref", &attachment).is_none());
+    }
+
+    /// 出站旁路（journal 回传句柄）：安装后可取用同一代 sender，清空后不再可发。
+    #[test]
+    fn controlled_outbound_state_installs_and_clears() {
+        let state = ControlledOutboundState::default();
+        assert!(state.sender().is_none());
+        state.clear();
+        assert!(state.sender().is_none());
     }
 }

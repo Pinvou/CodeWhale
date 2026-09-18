@@ -397,7 +397,8 @@ fn dispatch_inbound_frame(
 
 /// wire `journal_event` → 权威事件。`event_b64` 是事件本体（冻结的 camelCase
 /// 形状），明文侧还有 journal_epoch/event_sequence/event_kind 供缺口检测；三者
-/// 必须互相一致，否则丢弃。事件体积有硬上限。
+/// 必须互相一致，否则丢弃。事件体积有硬上限。明文 `event_kind` 是冻结闭集
+/// （如 `terminal`），事件本体保留更细的内部类型，因此只核对 epoch/序号/会话。
 fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
     let encoded = payload.get("event_b64").and_then(Value::as_str)?;
     let declared = payload
@@ -411,7 +412,6 @@ fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
     let event: JournalEvent = serde_json::from_slice(&raw).ok()?;
     if payload.get("journal_epoch").and_then(Value::as_str) != Some(event.epoch.as_str())
         || payload.get("event_sequence").and_then(Value::as_str) != Some(event.sequence.to_string().as_str())
-        || payload.get("event_kind").and_then(Value::as_str) != Some(event.kind.as_str())
         || payload.get("session_id").and_then(Value::as_str) != Some(event.session_id.as_str())
     {
         return None;

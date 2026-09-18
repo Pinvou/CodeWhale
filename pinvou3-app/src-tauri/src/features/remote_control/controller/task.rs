@@ -913,6 +913,11 @@ impl RemoteSessionMap {
         self.reverse.lock().contains_key(session_id)
     }
 
+    /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
+    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
+        self.reverse.lock().get(session_id).cloned()
+    }
+
     pub(crate) fn unbind(&self, remote_ref: &str) -> Option<String> {
         let mut forward = self.forward.lock();
         let session_id = forward.remove(remote_ref)?;
@@ -1199,6 +1204,11 @@ impl RemoteTaskService {
 
     pub(crate) fn is_remote_session(&self, session_id: &str) -> bool {
         self.sessions.is_remote_session(session_id)
+    }
+
+    /// E2E-05：B 权威会话 id → A 的会话引用（未绑定或本地会话返回 None）。
+    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
+        self.sessions.remote_ref_for(session_id)
     }
 
     pub(crate) fn clear_sessions(&self) {

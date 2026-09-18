@@ -351,6 +351,14 @@ impl RemoteJournal {
 
 impl RemoteTaskEventSink for RemoteJournal {
     fn publish_task_event(&self, event: &RemoteTaskEvent) {
+        let _ = self.record_task_event(event);
+    }
+}
+
+impl RemoteJournal {
+    /// E2E-05：把一条任务状态事件写进权威 journal 并返回落库后的事件，供 B 端
+    /// 通过 wire `journal_event` 回传 A。重复投递按同一 event_id 幂等。
+    pub(crate) fn record_task_event(&self, event: &RemoteTaskEvent) -> Option<JournalEvent> {
         let payload = json!({
             "status": event.status,
             "outcome_unknown": event.outcome_unknown,
@@ -382,8 +390,19 @@ impl RemoteTaskEventSink for RemoteJournal {
             )
             .map(|_| ())
         };
-        if let Err(error) = result {
-            eprintln!("[remote-control] journal append rejected: {}", error.code);
+        match result {
+            Ok(()) => self
+                .inner
+                .lock()
+                .events
+                .iter()
+                .rev()
+                .find(|stored| stored.event_id == event_id)
+                .cloned(),
+            Err(error) => {
+                eprintln!("[remote-control] journal append rejected: {}", error.code);
+                None
+            }
         }
     }
 }
@@ -758,5 +777,39 @@ mod tests {
         );
         let encoded = serde_json::to_string(&snapshot).unwrap();
         assert!(!encoded.contains(r"C:\"));
+    }
+
+    /// E2E-05：任务状态事件落库后必须能被回传层拿到（含终态），重复投递幂等。
+    #[test]
+    fn recorded_task_events_are_returned_for_wire_delivery() {
+        let journal = RemoteJournal::new("epoch-1");
+        let event = RemoteTaskEvent {
+            task_id: "task-0001".into(),
+            session_id: "session-0001".into(),
+            status: "running".into(),
+            sequence: "1".into(),
+            outcome_unknown: false,
+            terminal_reason: None,
+            result_digest: None,
+        };
+        let stored = journal.record_task_event(&event).unwrap();
+        assert_eq!(stored.kind, "task_status");
+        assert_eq!(stored.sequence, 1);
+        assert_eq!(stored.session_id, "session-0001");
+        assert_eq!(stored.payload["status"], "running");
+        // 重复投递（同 task + sequence）幂等：不新增事件，仍返回同一投影。
+        let again = journal.record_task_event(&event).unwrap();
+        assert_eq!(again, stored);
+        assert_eq!(journal.len(), 1);
+        // 终态只落一次，冲突的终态不会改写已落库结果。
+        let terminal = RemoteTaskEvent {
+            status: "succeeded".into(),
+            sequence: "2".into(),
+            terminal_reason: Some("completed".into()),
+            ..event.clone()
+        };
+        let stored = journal.record_task_event(&terminal).unwrap();
+        assert_eq!(stored.terminal_status.as_deref(), Some("succeeded"));
+        assert_eq!(stored.sequence, 2);
     }
 }

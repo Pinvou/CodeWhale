@@ -1054,6 +1054,9 @@ pub fn run() {
                     handle.manage(ControllingSessionManager::default());
                     handle.manage(ControllingLaneState::default());
                     handle.manage(ControlledLaneState::default());
+                    handle.manage(
+                        features::remote_control::controller::relay_runtime::ControlledOutboundState::default(),
+                    );
                     handle.manage(CapabilitySnapshotManager::default());
                     let temporary_models = commands::desktop_remote_model::shared_model_store();
                     handle.manage(temporary_models.clone());
