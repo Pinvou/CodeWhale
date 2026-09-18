@@ -167,6 +167,7 @@ pub const COMPACTION_SUMMARY_MARKER: &str = "Another language model started to s
 /// Marker written by pre-v0.9.6 compaction; sessions saved under the old
 /// format must still be recognized so their summary is replaced, not stacked.
 pub const LEGACY_COMPACTION_SUMMARY_MARKER: &str = "Conversation Summary (Auto-Generated)";
+const COMPACTION_CHECKPOINT_PROVENANCE: &str = "<!-- codewhale.compaction-checkpoint.v1 -->";
 const COMPACTION_SUMMARY_BEGIN: &str = "<!-- compaction-summary:begin -->";
 const COMPACTION_SUMMARY_END: &str = "<!-- compaction-summary:end -->";
 
@@ -282,16 +283,106 @@ pub fn summary_prompt_text(prompt: &SystemPrompt) -> String {
 pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
     Message {
         role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: summary_prompt_text(prompt),
-            cache_control: None,
-        }],
+        content: vec![
+            ContentBlock::Text {
+                text: summary_prompt_text(prompt),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: COMPACTION_CHECKPOINT_PROVENANCE.to_string(),
+                cache_control: None,
+            },
+        ],
     }
 }
 
+/// Whether the first text block carries the summary header, current or legacy.
+fn has_compaction_summary_header(text: &str) -> bool {
+    // `COMPACTION_SUMMARY_MARKER` is the current header's first sentence, and
+    // releases before this one also committed carriers with their own body
+    // after that sentence, so the prefix — not the whole header — is the
+    // stable shape.
+    text.starts_with(COMPACTION_SUMMARY_MARKER)
+        || text.starts_with(LEGACY_COMPACTION_SUMMARY_MARKER)
+}
+
+/// Structural recognition of the one generated checkpoint in saved history.
+///
+/// The marker substring scan above stays scoped to system-prompt carriers:
+/// on history it matches an ordinary user turn that merely *quotes* the
+/// header, and every consumer here either deletes or replaces what it matches.
+/// Structure instead — a `role="user"` message whose first text block begins
+/// with the header and whose remaining block, if any, is exactly the
+/// engine-written provenance marker.
+///
+/// Boundary: the single-block form has no provenance to check, because
+/// releases before this one saved the bare summary, and a reload that failed
+/// to recognize it would stack a second summary beside it. A user turn that
+/// *begins* with the header is therefore still read as a carrier here. Request
+/// rewriting does not share that reading — see
+/// [`is_generated_compaction_checkpoint`] — so such a turn is never moved or
+/// merged on the wire.
 #[must_use]
 pub(crate) fn is_compaction_checkpoint_message(message: &Message) -> bool {
-    user_text_of(message).is_some_and(|text| is_compaction_summary_text(&text))
+    let [
+        ContentBlock::Text {
+            text,
+            cache_control: None,
+        },
+        rest @ ..,
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    message.role == Role::User
+        && has_compaction_summary_header(text)
+        && (rest.is_empty()
+            || matches!(
+                rest,
+                [ContentBlock::Text {
+                    text: provenance,
+                    cache_control: None,
+                }] if provenance == COMPACTION_CHECKPOINT_PROVENANCE
+            ))
+}
+
+/// The provenance-stamped form, and the only form request rewriting may
+/// relocate or merge. A user cannot type this shape, so an ordinary turn that
+/// pastes the whole summary header after a tool result keeps its position.
+#[must_use]
+pub(crate) fn is_generated_compaction_checkpoint(message: &Message) -> bool {
+    let [
+        ContentBlock::Text {
+            cache_control: None,
+            ..
+        },
+        ContentBlock::Text {
+            text: provenance,
+            cache_control: None,
+        },
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    provenance == COMPACTION_CHECKPOINT_PROVENANCE && is_compaction_checkpoint_message(message)
+}
+
+/// Replace the saved history checkpoint with the authoritative carrier, keep
+/// its position relative to later turns, and repair a pre-placement-fix
+/// Agent-topology sidecar. Both steps exist so the first request after a
+/// restore is wire-legal for strict paired chat templates.
+pub(crate) fn restore_compaction_checkpoint(
+    mut messages: Vec<Message>,
+    checkpoint: Option<&SystemPrompt>,
+) -> Vec<Message> {
+    let checkpoint_index = messages.iter().position(is_compaction_checkpoint_message);
+    messages.retain(|message| !is_compaction_checkpoint_message(message));
+    if let Some(checkpoint) = checkpoint {
+        let index = checkpoint_index.unwrap_or(messages.len());
+        messages.insert(index, compaction_checkpoint_message(checkpoint));
+    }
+    crate::runtime_handoff::relocate_restored_compaction_topology(&mut messages);
+    messages
 }
 
 pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usize {
@@ -1151,7 +1242,7 @@ pub async fn compact_messages_safe(
         .unwrap_or_else(|| anyhow::anyhow!("Compaction failed after {MAX_RETRIES} retries")))
 }
 
-fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
+pub(crate) fn build_compaction_summary_block_text(summary: &str, anchors: &str) -> String {
     let summary = summary.trim();
     let summary = if summary.is_empty() {
         "(no summary available)"
@@ -1174,12 +1265,18 @@ pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) ->
         if remaining == 0 {
             break;
         }
+        if !crate::runtime_handoff::is_user_turn_prompt(msg) {
+            continue;
+        }
+        // A header-prefixed summary saved before the provenance block existed
+        // is not a user turn to carry forward, but an ordinary turn that
+        // merely quotes the header is.
+        if is_compaction_checkpoint_message(msg) {
+            continue;
+        }
         let Some(text) = user_text_of(msg) else {
             continue;
         };
-        if is_compaction_summary_text(&text) {
-            continue;
-        }
         let tokens = estimate_text_tokens_conservative(&text);
         let text = if tokens <= remaining {
             remaining -= tokens;
@@ -1946,6 +2043,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn restore_keeps_a_user_turn_that_quotes_the_summary_header() {
+        let quoting = "why does my log say 'Another language model started to solve this problem'?";
+        let text = build_compaction_summary_block_text("first handoff", "");
+        let messages = vec![
+            msg("user", "hi"),
+            msg("assistant", "hello"),
+            msg("user", quoting),
+            msg("assistant", "It is the compaction header."),
+            compaction_checkpoint_message(&SystemPrompt::Text(text.clone())),
+        ];
+
+        let restored = restore_compaction_checkpoint(messages, Some(&SystemPrompt::Text(text)));
+
+        assert!(
+            restored
+                .iter()
+                .any(|message| user_text_of(message).as_deref() == Some(quoting)),
+            "the persisted carrier is the last message, not the question quoting it: {restored:?}"
+        );
+        assert_eq!(
+            restored
+                .iter()
+                .filter(|message| is_compaction_checkpoint_message(message))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn restore_replaces_a_pre_provenance_carrier() {
+        let text = build_compaction_summary_block_text("legacy handoff", "");
+        let persisted = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            }],
+        };
+        assert!(
+            !is_generated_compaction_checkpoint(&persisted),
+            "a bare header-prefixed summary carries no provenance"
+        );
+        let messages = vec![
+            msg("user", "Run the suite."),
+            msg("assistant", "Rerunning."),
+            persisted,
+        ];
+
+        let restored = restore_compaction_checkpoint(messages, Some(&SystemPrompt::Text(text)));
+
+        assert_eq!(restored.len(), 3);
+        assert_eq!(
+            restored
+                .iter()
+                .filter(|message| is_compaction_checkpoint_message(message))
+                .count(),
+            1,
+            "the saved single-block summary must be replaced, not stacked"
+        );
+        assert!(is_generated_compaction_checkpoint(restored.last().unwrap()));
+    }
+
     #[tokio::test]
     async fn compaction_commits_summary_and_retains_recent_user_messages() {
         let messages = vec![
@@ -2033,10 +2193,11 @@ mod tests {
             })
         }));
         assert!(is_compaction_checkpoint_message(retained.last().unwrap()));
-        assert_eq!(
-            user_text_of(retained.last().unwrap()).as_deref(),
-            Some(text.as_str())
-        );
+        assert!(is_generated_compaction_checkpoint(retained.last().unwrap()));
+        let ContentBlock::Text { text: body, .. } = &retained.last().unwrap().content[0] else {
+            panic!("compaction checkpoint must begin with its summary");
+        };
+        assert_eq!(body, text);
         last_round::validate_last_round_coverage(&messages, &retained[..retained.len() - 1])
             .unwrap();
     }

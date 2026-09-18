@@ -3438,18 +3438,15 @@ impl Engine {
                         }
                         let compaction_checkpoint =
                             extract_compaction_summary_prompt(system_prompt.clone());
-                        let mut restored_messages =
+                        let restored_messages =
                             crate::runtime_handoff::project_messages_for_restore(&messages);
                         // The persisted carrier is authoritative for the one
-                        // history checkpoint. Drop stale projected copies so
-                        // repeated reloads cannot stack or retain an older one.
-                        restored_messages.retain(|message| {
-                            !crate::compaction::is_compaction_checkpoint_message(message)
-                        });
-                        if let Some(checkpoint) = compaction_checkpoint.as_ref() {
-                            restored_messages
-                                .push(crate::compaction::compaction_checkpoint_message(checkpoint));
-                        }
+                        // history checkpoint, at its saved location. Later
+                        // turns must remain after it for Chat wire ordering.
+                        let restored_messages = crate::compaction::restore_compaction_checkpoint(
+                            restored_messages,
+                            compaction_checkpoint.as_ref(),
+                        );
                         self.session.messages = restored_messages.into();
                         // Direct field assignment bypasses `add_message` /
                         // `replace_messages`, which own the messages-revision
