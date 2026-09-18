@@ -82,6 +82,8 @@
 | E2E-04 | 1 | PASS | 加密业务帧双向派发完成（5 个提交）：共享加密通道、A 端收发接线、B 端解密派发与加密回传、bridge 发送入口；同进程双端用例覆盖 A 发 task_submit → B 解密派发 → B 回传 task_status → A 投影。审核修复 1 处：任务校验改用活租约的真实协商能力（删除本地常量表）。验证：`cargo test remote_control::` 298 通过 / 0 失败；architecture-guard 通过。细节见第 7 节。 |
 | E2E-05 | 1 | PASS | 普通会话正文 journal 与 A 端 transcript 渲染完成（A 落库/投影、B 终态与正文产出、缺口回放与快照恢复、A 视图渲染）。细节见第 8.3 节。 |
 | E2E-06 | 1 | PASS | liveness / 恢复 / 清理闭环完成：A 心跳与 B watchdog（直接应答优先 + Relay 签名兜底）、双端显式断开、双端 resume 序列接线（A `22929522`，B `5b42e1d8`/`4bfa63e3`/`a345b6a0`）、B 停止/刷新/远端断开的任务与凭证清理端口（`1987dd2e`）。审核发现 2 处 minor 已修复（恢复帧租约绑定、清理 scope 语义，`6e84a097`）。验证：`cargo test remote_control::` 322 通过 / 0 失败；`cargo test remote_control::controller::` 229 通过 / 0 失败；architecture-guard 通过。细节见第 9.5 节。 |
+| E2E-07 | 1 | PASS | 双端 UI 闭环与能力降级完成：B 面板状态映射/连接码/主控设备名三语回落、A 会话窗口自动开会话与加密请求能力快照、发送取消走加密派发、transcript 渲染、A 端命令错误码回传、错误码与刷新状态三语文案（`8510525b`）。验证：6 个前端契约 36 通过 / 0 失败；`build:ui` 通过；`lint:ui` 0 error。发布 blocker：三面 UI 浏览器冒烟未执行（环境受限，已登记）。细节见第 10.3 节。 |
+| E2E-08 | 1 | PASS | 集成回归与发布审核完成：完整旅程集成测试（`5a246985`）、门禁全套复跑与敏感信息扫描、发布缺口按「本轮 blocker / 已隐藏 / 后续排期」分类落进 `Windows双端远程控制发布与回滚.md` 第 7 节（`be913049`）。验证：Relay 58+25、前端 36、Rust `remote_control::` 323 / `controller::` 229、`build:ui`、`lint:ui`、architecture-guard、release-gates 6 条全部通过。发布 blocker：真实双机 21 条旅程与真机断线恢复演练未执行（环境受限，已登记）。细节见第 11.1 节。 |
 
 ## 4. 已登记决策与本轮已知限制
 
@@ -330,10 +332,26 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 2. ~~**文案细化**~~ 已完成（`8510525b`）：`endpoint_offline` → `errorOffline`、`invalid_message` → `errorProtocol`，均补齐 zh/en/ja，并由契约锁定。
 3. ~~**`ControllerStatusKind::Refreshing` 的 UI 文案**~~ 已完成（`8510525b`）：显式复用面板既有的 `refreshing` 词条（不再映射 `statusStopping`），契约新增回归断言。
 
+### 10.3 E2E-07 审核记录（轮次 1，结论 PASS，含 1 项发布 blocker）
+
+- 出口核对：「三个 UI 面有可执行行为测试」由 6 个前端契约文件 36 条用例覆盖（`desktop_remote_state`、`connect_remote_device_contract`、`controlled_device_panel_contract`、`remote_control_ui_closure`、`controller_session_intent_contract`、`remote_conversation_contract`），`npm run build:ui` 与 `npm run lint:ui`（0 error）通过；「不可用能力不暴露半通路」由 A 临时模型/代码模式/附件与成果导出按首版开关隐藏、工具审批未闭环前禁用体现，且契约禁止 UI 出现协议字段名。
+- 本轮修复：`8510525b`（A 端有界错误码与刷新状态的三语文案）。
+- 发布 blocker（环境受限，未执行）：三个 UI 面的**浏览器冒烟**（真实渲染/交互、键盘与焦点、aria-live、倒计时节流）。当前证据是源码契约 + vite 构建；已登记到 `Windows双端远程控制发布与回滚.md` 第 7.1 节，未取得冒烟证据前不得进入灰度。
+- 结论：**REVIEW: PASS**（代码与契约侧）；浏览器冒烟作为发布 blocker 单独登记。
+
 ## 11. E2E-08 待做清单（集成回归与发布审核）
 
 - 已执行证据（E2E-06 收口后复跑）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` **58 通过 / 0 失败**，`test/relay.test.js` **25 通过 / 0 失败**；Rust `cargo test remote_control::` **322 通过 / 0 失败**、`cargo test remote_control::controller::` **229 通过 / 0 失败**；前端 6 个契约文件 **36 通过 / 0 失败**、`npm run build:ui` 通过、`npm run lint:ui` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer` / `-----BEGIN`）在 controller 与前端文件中仅命中**刻意的脱敏测试夹具/哨兵**（`journal.rs` 断言投影剥离 `vault://secret`、`telemetry.rs` 哨兵表、`temporary_model.rs` 反向用例），无真实凭证。
 - 发布缺口登记（已完成）：`docs/Windows双端远程控制发布与回滚.md` 新增第 7 节，把第 4 节全部登记项与本节缺口按「本轮 blocker（真实双机旅程、三面 UI 冒烟、真机断线恢复演练）/ 已隐藏（临时模型·代码模式·附件·成果、工具审批、Relay 子协议与 `controller_capabilities`）/ 后续排期（设备显示名、非流式回复、快照引导、附件事件、跨 lease 清理、清理适配器测试、无关既有失败）」分类。
+
+### 11.1 E2E-08 审核记录（轮次 1，结论 PASS，发布 blocker 已登记）
+
+- 已落地提交：`be913049`（门禁证据复跑 + 发布缺口分类）、`5a246985`（完整旅程集成测试）。
+- 目标差异核对：出口「普通文本会话端到端测试通过」由 `full_journey_connect_snapshot_task_text_and_disconnect_drops_stale_frames` 覆盖——连接 → 能力快照（revision 4 落进会话状态）→ A 构造并封帧的普通文本任务（B 解封校验 payload 与正文 `hello from A`）→ B 的 `task_status` 与 `journal_event` 回流并投影为任务/正文事件（`succeeded` + `hello from B`）→ 显式断开（`disconnected` + 业务通道清空）→ 断开后旧 generation 的残留帧不再产生任何投影。分段用例另覆盖 A↔B 真实端口派发（`dual_end_task_round_trip_lands_in_a_side_state`）、缺口回放与快照替换、恢复序列与显式断开。
+- 门禁与安全：Relay 契约 58 + `relay.test.js` 25、前端契约 36、Rust `remote_control::` 323 / `controller::` 229、`build:ui`、`lint:ui`（0 error）、`architecture-guard`、`controller-release-gates` 6 条全部通过；敏感信息扫描仅命中刻意脱敏的测试夹具/哨兵，无真实凭证。
+- 出口「所有剩余缺口明确非本轮 blocker 或已隐藏」：已按 `Windows双端远程控制发布与回滚.md` 第 7 节分类——3 项发布 blocker（真实双机 21 条旅程、三面 UI 浏览器冒烟、真机断线恢复演练，均环境受限未执行）、3 类已隐藏能力、7 项后续排期。
+- 审核发现：无 blocker；本轮新增测试未发现缺陷。唯一非阻塞观察：旅程测试中 B 侧的接纳/执行用冻结形状的直接产出替代（真实路径由 DEV-13 用例覆盖），已在测试文档注释中写明。
+- 结论：**REVIEW: PASS**（自动化门禁与集成回归侧）；发布 blocker 以 `Windows双端远程控制发布与回滚.md` 第 7.1 节为准，未取得证据前不得进入灰度。
 - 双端集成测试：在现有同进程双端用例（task_submit/task_status、journal_event、快照、心跳证据）基础上补一条完整旅程（连接 → 能力快照 → 普通文本任务 → 正文回传 → 显式断开），并断言旧 lease/generation 帧在各阶段都被丢弃。
 - 架构守卫与 UI 契约：`python scripts/architecture-guard.py`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run lint:ui`、前端契约测试全套。
 - 安全扫描：仓库已有的 `controller-telemetry`/日志脱敏用例 + `remote-control-relay` 契约测试；再跑一次敏感信息扫描（密钥/路径/内部地址不得进入 wire 与投影）。
