@@ -232,15 +232,21 @@ func (consumer *TokenAuthorizationCommandConsumer) advance(ctx context.Context, 
 		if readErr != nil || current.State != "ACTIVE" || current.Epoch != active.Epoch {
 			return fmt.Errorf("%w: APPROVAL_ACTIVATION_CHANGED", ErrApprovalResultUnconfirmed)
 		}
-		status, requestErr = executor.request(ctx, executor.tokenURL, http.MethodPost, path+"/execute", approvedTokenCommandBody{
+		command := approvedTokenCommandBody{
 			ActivationEpoch: active.Epoch, ApprovalRequestID: lease.ApprovalRequestID, RequesterUserID: lease.RequesterUserID,
 			AuthorizationVersion: lease.RequesterAuthorizationVersion, CommandFingerprint: lease.CommandFingerprint,
 			ExecutionIdempotencyKey: lease.ExecutionIdempotencyKey, CriticalResourceVersions: lease.CriticalResourceVersions,
 			FinancialSnapshot: lease.FinancialSnapshot, Envelope: envelope,
-			ProofSchemaVersion: selected.ProofSchemaVersion, CommandDigest: selected.CommandDigest,
-			SnapshotDigest: selected.SnapshotDigest, DomainRevision: selected.DomainRevision,
-			ProofDigest: selected.ProofDigest, ApprovalControlEpoch: selected.ApprovalControlEpoch,
-		}, &domain)
+		}
+		if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
+			command.ProofSchemaVersion = selected.ProofSchemaVersion
+			command.CommandDigest = selected.CommandDigest
+			command.SnapshotDigest = selected.SnapshotDigest
+			command.DomainRevision = selected.DomainRevision
+			command.ProofDigest = selected.ProofDigest
+			command.ApprovalControlEpoch = selected.ApprovalControlEpoch
+		}
+		status, requestErr = executor.request(ctx, executor.tokenURL, http.MethodPost, path+"/execute", command, &domain)
 		found = requestErr == nil && (status == http.StatusOK || status == http.StatusAccepted)
 	}
 	if !found {

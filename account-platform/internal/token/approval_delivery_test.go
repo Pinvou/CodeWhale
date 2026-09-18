@@ -198,12 +198,13 @@ func (fixture *tokenAuthorizationHTTPFixture) handleHTTP(w http.ResponseWriter, 
 			fixture.testing.Fatal(err)
 		}
 		if fixture.binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
-			if body.DomainRevision != fixture.event.DomainRevision || body.ProofDigest != fixture.event.ProofDigest ||
+			if body.ProofSchemaVersion != fixture.event.ProofSchemaVersion || body.DomainRevision != fixture.event.DomainRevision || body.ProofDigest != fixture.event.ProofDigest ||
 				body.CommandDigest != fixture.event.CommandDigest || body.SnapshotDigest != fixture.event.SnapshotDigest ||
 				body.ApprovalControlEpoch != fixture.event.ApprovalControlEpoch {
 				fixture.testing.Fatalf("proof binding lost before Token execution: %+v", body)
 			}
-		} else if body.DomainRevision != "" || body.ProofDigest != "" || body.ApprovalControlEpoch != 0 {
+		} else if body.ProofSchemaVersion != "" || body.CommandDigest != "" || body.SnapshotDigest != "" ||
+			body.DomainRevision != "" || body.ProofDigest != "" || body.ApprovalControlEpoch != 0 {
 			fixture.testing.Fatalf("legacy authorization acquired proof fields: %+v", body)
 		}
 		fixture.domainCalls++
