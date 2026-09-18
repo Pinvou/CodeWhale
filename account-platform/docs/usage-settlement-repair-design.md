@@ -10,9 +10,9 @@
 
 ## 2. 用量结算现状与不变量（事实）
 
-- **预留与结算**：`usage_holds`（`status ∈ {ACTIVE,COMMITTED,RELEASED,EXPIRED,REVIEW}`、`max_microcredits>0`、可选 `actual_microcredits>=0`）与 `usage_hold_allocations`（`PRIMARY KEY(hold_id,package_id)`、`reserved_microcredits>0`、`settled/released>=0`、`CHECK settled+released<=reserved`）共同承载一次用量在多个 package 上的预留与最终结算。
+- **预留与结算**：`usage_holds`（`status ∈ {ACTIVE,COMMITTED,RELEASED,EXPIRED,REVIEW}`、`max_microcredits>0`、可选 `actual_microcredits>=0`）与 `usage_hold_allocations`（`PRIMARY KEY(hold_id,package_id)`、`reserved_microcredits>0`、`settled/released>=0`、`CHECK settled+released<=reserved`）共同承载一次用量在多个 package 上的预留与最终结算。；出处：`migrations/billing/000002_ledger.up.sql`、`000012_package_hold_allocations.up.sql`；`usage_request_id` 唯一，影响幂等键设计
 - **结算落账**：结算写入 `USAGE` journal（业务引用 `usage:<usage_request_id>`）并按信用 lot 扣减钱包/组件（`internal/billing/postgres.go`），全程要求 journal 平衡且不可改写。
-- **既有相关路径**：Token 侧 `USAGE_RECONCILE` 任务与用量对账（`cmd/token-gateway` 的 `usage-reconciliation`）、`usage_hold_allocations` 的释放/提交、以及支付异常/对账案件；它们只做观察、重放安全收敛与既有结算，不提供可申请、可审批、可证明的结算修复命令。
+- **既有相关路径**：Token 侧 `USAGE_RECONCILE` 任务与用量对账（`cmd/token-gateway` 的 `usage-reconciliation`）、`usage_hold_allocations` 的释放/提交、以及支付异常/对账案件；它们只做观察、重放安全收敛与既有结算，不提供可申请、可审批、可证明的结算修复命令。；另有 Billing 侧管理员安全释放 `BILLING_USAGE_HOLD_SAFE_RELEASE`（AUDIT_ONLY，`internal/billing/service.go`）与用量损失复核 `usage_loss_reviews`（`internal/billing/postgres.go` 的 `ENTITLEMENT_EXPIRED_UNCERTAIN`，并入 `organization_lifecycle.go` 的组织阻塞）
 - **账本与余额不变量**：journal/posting 不可变且必须平衡、`business_reference` 全局唯一；钱包 `posted_microcredits>=0`、credit lot 有上下界；`usage_hold_allocations` 的守恒关系不得被破坏。
 - **缺口**：没有定义"哪些结算差异允许修复"（少结算/多结算、重复结算、hold 已 RELEASED 却存在已结算量、package 归属错误）、证据来源（用量记录与 hold 事实）、写入边界（只写 journal/posting 还是允许回补钱包/package）与未知结果规则；也明确禁止以"重发模型请求"作为修复手段。
 

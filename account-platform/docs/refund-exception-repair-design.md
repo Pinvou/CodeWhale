@@ -12,7 +12,7 @@
 
 - **普通退款**：`refunds` 表以 `merchant_refund_no`、`channel_refund_id`、`idempotency_key` 三重唯一约束冻结一次退款；`amount_fen>0`、`credit_microcredits>0`，状态仅 `REQUESTED/SUCCEEDED/FAILED/MANUAL_REVIEW`；`request_hash` 与 `reason` 记录原始请求。退款金额与组成来自 package 当前有效组件（BASE 可退、BONUS 不可退），并受未结应收阻塞（`refunds.go`）。
 - **强制退款**：`forced_refund_cases` 由外部证据驱动，携带 `payment_evidence_id`（唯一）、订单/交易/package/钱包、`provider_refund_id`、`amount_fen>0`、`entitlement_snapshot`，状态仅 `REVIEW_REQUIRED/RESOLVED`，并以 `UNIQUE(payment_transaction_id,provider_refund_id)` 与组合外键冻结"同一交易同一 provider 退款"。
-- **相邻流程**：拒付（`chargebacks.go` + `chargeback_cases`）、Refund 消费者（`billing-refund-executor-v1`，`refunds.go`）、包过期与强制退款回收（`packages.go`）、对账与支付异常（`reconciliation.go`、`payment_anomaly_cases`）。
+- **相邻流程**：拒付（`chargebacks.go` + `chargeback_cases`）、Refund 消费者（`billing-refund-executor-v1` (durable 注册于 `cmd/billing-service/main.go`，消费者实现于 `internal/billing/refund_consumer.go`)、包过期与强制退款回收（`packages.go`）、对账与支付异常（`reconciliation.go`、`payment_anomaly_cases`）。
 - **账本不变量**（同[账本修复设计](ledger-repair-design.md) §2）：journal/posting 不可变、必须平衡、`business_reference` 全局唯一、钱包与 credit lot 有上下界；退款相关历史调整只能是新增平衡 journal 与配对 posting。
 - **缺口**：没有"退款异常"的可申请/可审批/可证明命令；"异常"指哪一类（provider 已退款但系统未冲销、重复退款、金额/归属错误、强制退款案件收口）以及外部证据、写入边界、未知结果规则都未定义。
 
