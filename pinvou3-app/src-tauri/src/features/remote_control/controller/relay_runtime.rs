@@ -18,7 +18,7 @@ use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
-    ControlledStatus,
+    ControlledResumeStep, ControlledStatus,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -31,6 +31,10 @@ use super::protocol::LeaseContext;
 use super::protocol::{
     validate_controller_message_json, validate_controller_registration_message_json,
     RegistrationValidationContext, SenderRole,
+};
+use super::resume::{
+    build_controller_post_activation_liveness, build_controller_resume_activation_ack,
+    build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
@@ -350,6 +354,7 @@ impl ControlledRelayWorker {
         let mut driver = ControlledHandshakeDriver::new(keys);
         let mut joined = false;
         let mut evidence = LivenessEvidenceState::default();
+        let mut resume = ControlledResumeAttempt::default();
         let mut poll = tokio::time::interval(std::time::Duration::from_millis(
             LIVENESS_EVIDENCE_POLL_MS,
         ));
@@ -359,7 +364,7 @@ impl ControlledRelayWorker {
             tokio::select! {
                 biased;
                 _ = poll.tick() => {
-                    if joined {
+                    if joined && !resume.is_active() {
                         self.pump_liveness_evidence(&mut evidence);
                     }
                     continue 'serve;
@@ -367,6 +372,25 @@ impl ControlledRelayWorker {
                 message = self.channel.recv() => {
                     let Some(message) = message else { break 'serve };
                     if joined {
+                        // E2E-06：恢复进行中时所有帧都由恢复状态机处理，业务帧与
+                        // 存活证据一律不派发（Relay 侧同样禁止业务帧）。
+                        if resume.is_active() {
+                            let manager = self.app.state::<ControlledDeviceManager>();
+                            let lane = self.app.state::<ControlledLaneState>();
+                            match handle_controlled_resume_frame(
+                                &self.channel,
+                                manager.inner(),
+                                lane.inner(),
+                                &mut resume,
+                                &message,
+                            ) {
+                                ControlledResumeOutcome::Failed => break 'serve,
+                                ControlledResumeOutcome::Completed => {}
+                                ControlledResumeOutcome::Ignored
+                                | ControlledResumeOutcome::Progressed => {}
+                            }
+                            continue 'serve;
+                        }
                         match message.get("type").and_then(Value::as_str) {
                             Some("encrypted_frame") => {
                                 self.dispatch_business_frame(&message).await;
@@ -383,6 +407,25 @@ impl ControlledRelayWorker {
                             Some("controller_disconnect") => {
                                 if self.accept_remote_disconnect(&message) {
                                     break 'serve;
+                                }
+                            }
+                            // E2E-06：desktop socket 掉线 → 挂起业务通道并启动恢复。
+                            Some("desktop_relay_connection") => {
+                                let connected = message
+                                    .get("connected")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(true);
+                                if !connected {
+                                    let manager = self.app.state::<ControlledDeviceManager>();
+                                    let lane = self.app.state::<ControlledLaneState>();
+                                    lane.suspend();
+                                    if !begin_controlled_resume(
+                                        &self.channel,
+                                        manager.inner(),
+                                        &mut resume,
+                                    ) {
+                                        break 'serve;
+                                    }
                                 }
                             }
                             _ => {}
@@ -973,6 +1016,291 @@ impl ControlledOutboundState {
 
 /// 由 `controller_joined` 材料构造 B 端租约（纯函数）。传输指纹与 A 端使用
 /// 同一份验签 transcript、按 B 角色域分离派生；租约在真正落地前不投影状态。
+/// E2E-06：B 端恢复尝试状态（`challenge_b64` 非空即代表一次进行中的恢复）。
+#[derive(Default)]
+pub(crate) struct ControlledResumeAttempt {
+    lease: Option<LeaseContext>,
+    activation_id: Option<String>,
+    challenge_b64: String,
+    original_deadline_b: u64,
+    liveness_epoch_b: String,
+    peer_confirmed: bool,
+    confirmed: bool,
+    ack_sent: bool,
+    liveness_sent: bool,
+    ready_sent: bool,
+}
+
+impl ControlledResumeAttempt {
+    pub(crate) fn is_active(&self) -> bool {
+        !self.challenge_b64.is_empty()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// E2E-06：B 端恢复帧处理结果。
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ControlledResumeOutcome {
+    Ignored,
+    Progressed,
+    Completed,
+    Failed,
+}
+
+/// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
+/// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
+/// 必须结束本代通道（此时管理器的恢复失败路径已经清理租约与本代凭证）。
+pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    resume: &mut ControlledResumeAttempt,
+) -> bool {
+    let Some(operation) = manager.current_operation() else {
+        return false;
+    };
+    let now_b = controlled_monotonic_millis();
+    let _ = manager.mark_transport_disconnected(now_b);
+    let Ok(material) = manager.begin_resume(operation, now_b) else {
+        return false;
+    };
+    let Ok(challenge) = new_resume_challenge() else {
+        return false;
+    };
+    let request_id = format!("request-resume-{}", uuid::Uuid::new_v4().simple());
+    let Ok(frame) = build_controller_resume_prepare(
+        &material.lease,
+        super::relay_transport::ControllerRole::ControlledB,
+        &request_id,
+        &material.resume_token,
+        &challenge,
+        material.original_deadline_b,
+    ) else {
+        return false;
+    };
+    if port.try_send(frame).is_err() {
+        return false;
+    }
+    resume.lease = Some(material.lease);
+    resume.challenge_b64 = challenge;
+    resume.original_deadline_b = material.original_deadline_b;
+    // 激活后的 liveness epoch 必须与旧值不同（Relay 会据此拒绝复用）。
+    resume.liveness_epoch_b = format!("live-b-{}", uuid::Uuid::new_v4().simple());
+    resume.activation_id = None;
+    resume.peer_confirmed = false;
+    resume.confirmed = false;
+    resume.ack_sent = false;
+    resume.liveness_sent = false;
+    resume.ready_sent = false;
+    true
+}
+
+/// E2E-06：按 Relay/A 的恢复帧推进 B 端相位。任何相位不符、对端确认验签失败或
+/// `controller_resumed` 材料不完整都失败关闭（管理器侧已清理本代）。
+pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    lane: &ControlledLaneState,
+    resume: &mut ControlledResumeAttempt,
+    message: &Value,
+) -> ControlledResumeOutcome {
+    let Some(kind) = message.get("type").and_then(Value::as_str) else {
+        return ControlledResumeOutcome::Ignored;
+    };
+    let Some(operation) = manager.current_operation() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    let Some(lease) = resume.lease.clone() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    let role = super::relay_transport::ControllerRole::ControlledB;
+    let now_b = controlled_monotonic_millis();
+    let request_id = || format!("request-resume-{}", uuid::Uuid::new_v4().simple());
+    match kind {
+        "controller_resume_provisional" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if resume.activation_id.is_some() {
+                return ControlledResumeOutcome::Ignored;
+            }
+            if manager
+                .advance_resume(
+                    operation.clone(),
+                    ControlledResumeStep::Provisional { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            let Ok(confirm) = lane.seal_resume_confirm(&request_id(), activation_id) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(confirm).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.activation_id = Some(activation_id.to_owned());
+            ControlledResumeOutcome::Progressed
+        }
+        "encrypted_resume_confirm" => match lane.open_resume_confirm(message) {
+            Ok(()) => {
+                resume.peer_confirmed = true;
+                ControlledResumeOutcome::Progressed
+            }
+            Err(_) => ControlledResumeOutcome::Ignored,
+        },
+        "controller_resume_activation_pending" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if resume.ack_sent || !resume.peer_confirmed {
+                return ControlledResumeOutcome::Ignored;
+            }
+            if !resume.confirmed {
+                if manager
+                    .advance_resume(
+                        operation.clone(),
+                        ControlledResumeStep::Confirmed { activation_id },
+                        now_b,
+                    )
+                    .is_err()
+                {
+                    return ControlledResumeOutcome::Failed;
+                }
+                resume.confirmed = true;
+            }
+            let Ok(ack) = build_controller_resume_activation_ack(
+                &lease,
+                &request_id(),
+                activation_id,
+                resume.original_deadline_b,
+            ) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(ack).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            if manager
+                .advance_resume(
+                    operation.clone(),
+                    ControlledResumeStep::ActivationAcknowledged { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.ack_sent = true;
+            if manager
+                .advance_resume(
+                    operation,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id,
+                        liveness_epoch_b: &resume.liveness_epoch_b,
+                    },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            let Ok(liveness) = build_controller_post_activation_liveness(
+                &lease,
+                &request_id(),
+                activation_id,
+                &resume.liveness_epoch_b,
+            ) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(liveness).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.liveness_sent = true;
+            ControlledResumeOutcome::Progressed
+        }
+        "controller_post_activation_liveness_confirmed" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(liveness_epoch_b) = message.get("liveness_epoch_b").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(heartbeat_sequence_b) =
+                message.get("heartbeat_sequence_b").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if !resume.liveness_sent || resume.ready_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
+            let Ok(ready) = build_controller_resume_ready_ack(
+                &lease,
+                role,
+                &request_id(),
+                activation_id,
+                liveness_epoch_b,
+                heartbeat_sequence_b,
+            ) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(ready).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            if manager
+                .advance_resume(
+                    operation,
+                    ControlledResumeStep::ReadyAcknowledged { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.ready_sent = true;
+            ControlledResumeOutcome::Progressed
+        }
+        "controller_resumed" => {
+            if !resume.ready_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(liveness_epoch_a) = message.get("liveness_epoch_a").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(new_token) = message.get("new_resume_token_b64").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(new_token) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Ok(token) = <[u8; 32]>::try_from(decoded.as_slice()) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Ok(fingerprint) = lane.resume_fingerprint(activation_id) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if manager
+                .complete_resumed(operation, activation_id, now_b, liveness_epoch_a, token, fingerprint)
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            lane.activate();
+            resume.reset();
+            ControlledResumeOutcome::Completed
+        }
+        "error" => ControlledResumeOutcome::Failed,
+        _ => ControlledResumeOutcome::Ignored,
+    }
+}
+
 fn controlled_lease_from_outcome(
     outcome: ControlledHandshakeOutcome,
     now_b: u64,
@@ -1794,6 +2122,156 @@ mod tests {
         let mut attachment = event.clone();
         attachment.kind = "attachment".to_owned();
         assert!(build_journal_event_payload(&lease, "session-a-ref", &attachment).is_none());
+    }
+
+    /// E2E-06：B 端恢复序列——掉线后发 prepare，provisional 回 confirm，校验对端
+    /// confirm 后依次发 activation_ack / post_activation_liveness / ready_ack，
+    /// `controller_resumed` 后重开业务闸门。
+    #[test]
+    fn controlled_resume_sequence_sends_every_frame_and_reopens_business() {
+        use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
+        use crate::features::remote_control::controller::test_support::{
+            lease_context, paired_session_keys, pairing_fixture,
+        };
+
+        let fixture = pairing_fixture("relay-key-b-resume");
+        let (a_session, b_session) =
+            paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        // 租约的 generation 必须与本代一致（complete_connected 会据此校验）。
+        let lease_context = LeaseContext {
+            remote_control_generation: operation.generation().to_owned(),
+            ..lease_context(&fixture.reservation)
+        };
+        manager
+            .complete_registration(
+                operation.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: 30_000,
+                },
+                1_000,
+            )
+            .unwrap();
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation.clone(),
+                ControlledLease {
+                    context: lease_context.clone(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [1; 32],
+                    transport_key_fingerprint: [2; 32],
+                    controller_device_name: "Controller PC".into(),
+                    connected_at_b: 3_000,
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "resume_v1".into(),
+                    ],
+                },
+            )
+            .unwrap();
+        let lane = ControlledLaneState::default();
+        lane.install(HandshakeRole::B, &lease_context, b_session)
+            .unwrap();
+        let peer = ControllingLaneState::default();
+        peer.install(HandshakeRole::A, &lease_context, a_session)
+            .unwrap();
+
+        let port = FakePort::new(vec![], false);
+        let mut resume = ControlledResumeAttempt::default();
+        assert!(begin_controlled_resume(&port, &manager, &mut resume));
+        assert!(resume.is_active(), "恢复尝试必须处于进行中");
+        let activation = "activation-0001";
+
+        // provisional → B 回 confirm。
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({"type": "controller_resume_provisional", "activation_id": activation}),
+            ),
+            ControlledResumeOutcome::Progressed
+        );
+        // A 的 confirm（同一 resume 秘密）必须验签通过。
+        let peer_confirm = peer
+            .seal_resume_confirm("request-resume-peer", activation)
+            .unwrap();
+        assert_eq!(
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
+            ControlledResumeOutcome::Progressed
+        );
+        // activation_pending → activation_ack + post_activation_liveness。
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resume_activation_pending",
+                    "activation_id": activation,
+                }),
+            ),
+            ControlledResumeOutcome::Progressed
+        );
+        let epoch_b = resume.liveness_epoch_b.clone();
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_post_activation_liveness_confirmed",
+                    "activation_id": activation,
+                    "liveness_epoch_b": epoch_b,
+                    "heartbeat_sequence_b": "1",
+                }),
+            ),
+            ControlledResumeOutcome::Progressed
+        );
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resumed",
+                    "activation_id": activation,
+                    "liveness_epoch_a": "live-a-2",
+                    "liveness_epoch_b": epoch_b,
+                    "new_resume_token_b64": base64::engine::general_purpose::STANDARD
+                        .encode([3_u8; 32]),
+                }),
+            ),
+            ControlledResumeOutcome::Completed
+        );
+        assert!(!resume.is_active());
+        assert!(manager.live_lease().is_ok(), "恢复完成后必须回到 connected");
+        assert_eq!(manager.live_liveness_epoch().as_deref(), Some("live-a-2"));
+        assert!(!lane.is_suspended(), "恢复完成后业务通道必须重新打开");
+        let sent = port.sent.lock().unwrap();
+        let kinds: Vec<&str> = sent
+            .iter()
+            .filter_map(|frame| frame.get("type").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "controller_resume_prepare",
+                "encrypted_resume_confirm",
+                "controller_resume_activation_ack",
+                "controller_post_activation_liveness",
+                "controller_resume_ready_ack",
+            ]
+        );
     }
 
     /// 出站旁路（journal 回传句柄）：安装后可取用同一代 sender，清空后不再可发。
