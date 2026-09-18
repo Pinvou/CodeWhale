@@ -43,7 +43,11 @@ fn build_gate_command(command: &str, cwd: &Path) -> Command {
     cmd.args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // The gate runs under `timeout(cmd.output())`: on timeout the future
+        // is dropped, and without this the child would be left running
+        // orphaned — the same bug the interpreter tools fixed.
+        .kill_on_drop(true);
     cmd
 }
 

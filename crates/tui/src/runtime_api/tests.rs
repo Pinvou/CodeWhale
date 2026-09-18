@@ -3942,9 +3942,68 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
     assert!(text.contains("\"decision\":\"allow\""));
     assert!(!text.contains("approval-decision-secret"));
 
-    let unknown = RuntimeEventRecord {
+    // An interrupted resolution (turn interrupt / engine death / runtime
+    // shutdown) must surface the `interrupted` flag so clients clear the
+    // pending approval UI; current producers never set `timeout`.
+    let approval_interrupted = RuntimeEventRecord {
         schema_version: 1,
         seq: 9,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "approval.decided".to_string(),
+        payload: json!({
+            "approval_id": "approval_test",
+            "decision": "deny",
+            "interrupted": true,
+        }),
+    };
+    let mapped = map_compat_stream_event(&approval_interrupted)
+        .context("missing interrupted approval.decided event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: approval.decided"));
+    assert!(text.contains("\"interrupted\":true"));
+    assert!(
+        !text.contains("\"timeout\":true"),
+        "current resolutions must not carry a timeout; got {text}"
+    );
+
+    // Legacy journals carry `approval.timeout`; replays must still surface
+    // the legacy SSE event even though no current producer emits it.
+    let legacy_timeout = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 10,
+        timestamp: chrono::Utc::now(),
+        thread_id: "thr_test".to_string(),
+        turn_id: Some("turn_test".to_string()),
+        item_id: None,
+        event: "approval.timeout".to_string(),
+        payload: json!({
+            "approval_id": "approval_legacy",
+            "timeout_secs": 300,
+        }),
+    };
+    let mapped =
+        map_compat_stream_event(&legacy_timeout).context("missing approval.timeout event")?;
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(mapped);
+    };
+    let body =
+        axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("event: approval.timeout"));
+    assert!(text.contains("\"approval_id\":\"approval_legacy\""));
+    assert!(text.contains("\"timeout_secs\":300"));
+
+    let unknown = RuntimeEventRecord {
+        schema_version: 1,
+        seq: 11,
         timestamp: chrono::Utc::now(),
         thread_id: "thr_test".to_string(),
         turn_id: Some("turn_test".to_string()),
