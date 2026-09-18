@@ -292,6 +292,8 @@ GSA-38 只读资源清单与 readiness 切片（IN_PROGRESS / READONLY_READY / N
 
 GSA-37 业务页闭合草稿切片（仍PENDING / PARTIAL）：新增 Portal 侧闭合草稿构造器 `pinvou3-app/src/features/account-platform/admin-entitlement-correction.js`：`entitlementCorrectionPrecheck` 只接受服务端只读预检投影（命令类型、policy v2/schema v2、`ENTITLEMENT_PACKAGE` 目标与合法 UUID、normalized/critical/financial 三对象齐备），`entitlementCorrectionApprovalDraft` 仅以运营人选择的原因码重建闭合 `normalized_command`（`package_id`/`payment_order_id`/`reason_code`），critical/financial 投影**逐字复制**、调用方额外字段（含任何金额）一律丢弃，预检不合法或原因越界时以稳定错误码 `ENTITLEMENT_CORRECTION_PRECHECK_INVALID` 失败关闭。新增 Node 合同 `test/contract/entitlement-correction-draft.test.mjs` 三项（闭合键集与逐字复制、篡改金额被丢弃、八类不可用预检与原因越界失败关闭）PASS。仍未完成：服务端只读预检 API、业务页表单与草稿编辑 UI、三语文案与真实浏览器联调。
 
+设计类审核轮次发现（2026-09-19，独立审核进行中）：①GSA-27 文档原先把 `payment_order_repairs` 的唯一键写成订单级，实际迁移 `000024` 已改为 `UNIQUE(payment_transaction_id)` + `(payment_transaction_id,payment_order_id)` 组合外键，语义是"同一支付交易只修复一次"，已更正。②`journal_entries.entry_type` 白名单的当前取值以 `000025` 为准（`…EXPIRY/RECEIVABLE/CHARGEBACK`），`000013` 的 `EXPIRE/REPAIR_CREDIT` 已被替换，GSA-23 文档已按当前约束更正。③由此暴露真实产品缺陷：`internal/billing/payments.go` 的 `repair=true` 既有支付补记路径仍写 `REPAIR_CREDIT`，在 `000025` 之后必然违反 CHECK，且该分支无测试覆盖；需在本命令族范围内以独立切片决定"前向放宽白名单"还是"改用既有取值"，修正前不得声称既有补记路径可用。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
