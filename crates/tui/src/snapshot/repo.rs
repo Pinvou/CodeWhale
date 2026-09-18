@@ -58,6 +58,16 @@ pub struct SnapshotRepo {
 
 const STALE_TMP_PACK_AGE: Duration = Duration::from_secs(60 * 60);
 
+/// Age after which a leftover side-repo `index.lock` is treated as abandoned
+/// and removed on open. Every git invocation here is bounded by
+/// [`GIT_COMMAND_TIMEOUT`], and a SIGKILL on timeout cannot run git's lock
+/// cleanup — without this, one wedged `git add -A` poisons every later
+/// snapshot with a fast-failing lock. The side repo is private to this
+/// module, so a lock older than the command bound cannot belong to a live
+/// writer of ours; one hour (matching [`STALE_TMP_PACK_AGE`]) leaves wide
+/// margin.
+const STALE_INDEX_LOCK_AGE: Duration = Duration::from_secs(60 * 60);
+
 /// Maximum total snapshot storage in megabytes before pruning kicks in at
 /// snapshot time. Keeps the side repo from blowing up the user's disk during
 /// long-running or high-churn sessions (#1112).
@@ -315,6 +325,19 @@ impl SnapshotRepo {
                 target: "snapshot",
                 "failed to clean stale snapshot tmp_pack files: {err}"
             );
+        }
+        match clear_stale_index_lock(&git_dir, STALE_INDEX_LOCK_AGE) {
+            Ok(true) => tracing::warn!(
+                target: "snapshot",
+                "removed a stale index.lock from the snapshot side repo; a previous \
+                 snapshot likely timed out or wedged, and snapshots were silently \
+                 failing since then"
+            ),
+            Ok(false) => {}
+            Err(err) => tracing::debug!(
+                target: "snapshot",
+                "failed to clean a stale snapshot index.lock: {err}"
+            ),
         }
         Ok(Self { git_dir, work_tree })
     }
@@ -944,6 +967,40 @@ fn cleanup_stale_pack_temps(git_dir: &Path, stale_age: Duration) -> io::Result<u
         return Ok(0);
     }
     cleanup_stale_pack_temps_in(&pack_dir, stale_age, SystemTime::now())
+}
+
+/// Remove `<git-dir>/index.lock` when it is older than `stale_age`. Returns
+/// whether a stale lock was removed. A fresh lock (any age below the bound)
+/// is left alone: it may belong to a git that is still running.
+fn clear_stale_index_lock(git_dir: &Path, stale_age: Duration) -> io::Result<bool> {
+    clear_stale_index_lock_in(&git_dir.join("index.lock"), stale_age, SystemTime::now())
+}
+
+fn clear_stale_index_lock_in(
+    lock_path: &Path,
+    stale_age: Duration,
+    now: SystemTime,
+) -> io::Result<bool> {
+    let Ok(metadata) = std::fs::metadata(lock_path) else {
+        return Ok(false);
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    let Ok(modified) = metadata.modified() else {
+        return Ok(false);
+    };
+    let Ok(age) = now.duration_since(modified) else {
+        return Ok(false);
+    };
+    if age < stale_age {
+        return Ok(false);
+    }
+    match std::fs::remove_file(lock_path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 fn cleanup_stale_pack_temps_in(
@@ -1599,6 +1656,36 @@ mod tests {
         assert!(!stale.exists(), "stale tmp_pack file should be removed");
         assert!(fresh.exists(), "fresh tmp_pack file should be kept");
         assert!(ordinary_pack.exists(), "non-temp pack file should be kept");
+    }
+
+    #[test]
+    fn open_or_init_removes_a_stale_index_lock_only() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let workspace = repo.work_tree().to_path_buf();
+
+        // A SIGKILLed `git add -A` cannot clean its index.lock; a leftover
+        // one fast-fails every later snapshot. Only a lock older than the
+        // stale bound may be from a live git, so exactly the old one goes.
+        let stale = repo.git_dir().join("index.lock");
+        std::fs::write(&stale, b"stale").unwrap();
+        let old_time = SystemTime::now() - STALE_INDEX_LOCK_AGE - Duration::from_secs(60);
+        {
+            let file = File::options().write(true).open(&stale).unwrap();
+            file.set_times(FileTimes::new().set_modified(old_time))
+                .unwrap();
+        }
+
+        SnapshotRepo::open_or_init(&workspace).unwrap();
+
+        assert!(!stale.exists(), "stale index.lock should be removed");
+
+        // A fresh lock must survive the cleanup untouched.
+        let fresh = repo.git_dir().join("index.lock");
+        std::fs::write(&fresh, b"fresh").unwrap();
+        SnapshotRepo::open_or_init(&workspace).unwrap();
+        assert!(fresh.exists(), "fresh index.lock must be kept");
+        let _ = std::fs::remove_file(&fresh);
     }
 
     #[test]
