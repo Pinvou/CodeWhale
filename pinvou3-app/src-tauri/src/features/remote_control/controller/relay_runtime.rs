@@ -291,6 +291,10 @@ impl ControlledRelayWorker {
 
     fn fail_registration(&self, error: &str) {
         let manager = self.app.state::<ControlledDeviceManager>();
+        if !manager.is_pending_handshake(self.operation.clone()) {
+            // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
+            return;
+        }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
             let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
@@ -393,6 +397,10 @@ impl ControlledRelayWorker {
     /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
         let manager = self.app.state::<ControlledDeviceManager>();
+        if !manager.is_pending_handshake(self.operation.clone()) {
+            // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
+            return;
+        }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
             let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);

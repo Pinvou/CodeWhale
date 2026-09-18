@@ -733,6 +733,19 @@ impl ControlledDeviceManager {
             .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
     }
 
+    /// 本次代际是否仍处于注册/握手的待决阶段。在途 worker 的失败收尾据此判断
+    /// 能否投影 error：用户已显式停止/断开、或本代已被刷新取代时不得覆盖。
+    pub(crate) fn is_pending_handshake(&self, operation: ControlledOperation) -> bool {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, &operation).is_ok()
+            && matches!(
+                inner.phase,
+                ControlledStatusKind::Reserving
+                    | ControlledStatusKind::WaitingConnection
+                    | ControlledStatusKind::SafetyHandshake
+            )
+    }
+
     pub(crate) fn register_cleanup_sink(&self, sink: Arc<dyn ControlledCleanupSink>) {
         self.cleanup_sinks.lock().push(sink);
     }
@@ -1205,5 +1218,39 @@ mod tests {
             assert!(validate_pairing_code(code).is_err(), "{code}");
         }
         assert!(validate_pairing_code("2345678").is_ok());
+    }
+
+    /// E2E-02：只有注册/握手待决的代际才允许在途 worker 把状态收尾为 error；
+    /// 用户停止/断开（或已连接）之后不得覆盖既有投影。
+    #[test]
+    fn pending_handshake_is_the_only_owner_of_failure_projection() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(Some("Studio PC"), Vec::new()).unwrap();
+        assert!(manager.is_pending_handshake(operation.clone()));
+        register(&manager, &operation);
+        assert!(manager.is_pending_handshake(operation.clone()));
+        manager.mark_claimed(operation.clone()).unwrap();
+        assert!(manager.is_pending_handshake(operation.clone()));
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        assert!(
+            !manager.is_pending_handshake(operation.clone()),
+            "已连接后不得再投影握手失败"
+        );
+
+        manager.stop();
+        assert!(
+            !manager.is_pending_handshake(operation.clone()),
+            "用户已停止时在途失败不得覆盖状态"
+        );
+        assert_eq!(
+            manager
+                .fail_operation(operation, "invalid_message".to_owned())
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result",
+            "停止会清空 generation，在途结果被状态机判定为陈旧"
+        );
     }
 }
