@@ -23889,6 +23889,101 @@ async fn turn_wall_clock_budget_is_overridable() {
     assert_eq!(mock.call_count(), 1);
 }
 
+/// R1: the request_user_input wait is human-paced, so like the approval wait
+/// it must be excluded from the turn wall-clock budget. An answer submitted
+/// past the budget must still drive the turn to completion — not be
+/// collected and then discarded with a budget-exhausted failure at the next
+/// provider boundary.
+#[tokio::test]
+async fn user_input_human_wait_is_excluded_from_the_turn_wall_clock() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let questions = json!({
+        "questions": [{
+            "header": "Confirm",
+            "id": "q1",
+            "question": "Proceed?",
+            "options": [
+                {"label": "Yes", "description": "continue the work"},
+                {"label": "No", "description": "stop here"}
+            ]
+        }]
+    });
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call_1", "request_user_input", &questions.to_string()),
+        canned::simple_text_turn("The user confirmed; the work is complete."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let engine_config = EngineConfig {
+        // A 1s budget: the 1.2s answer delay below exceeds it, so without
+        // the human-wait exclusion the turn would fail right after the
+        // answer finally lands.
+        turn_wall_clock: std::time::Duration::from_secs(1),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let registry = crate::tools::ToolRegistry::new(context);
+    // The question tool must be present AND active, or the model's call is
+    // rejected as an unknown/inactive tool and the turn never waits on a
+    // human. request_user_input is deferred by default, so activate it the
+    // way tool_search would.
+    let registry = {
+        let mut registry = registry;
+        registry.register(std::sync::Arc::new(
+            crate::tools::user_input::RequestUserInputTool,
+        ));
+        registry
+    };
+    let surface = ToolSurfacePolicy::new(
+        registry,
+        Some(vec![api_tool(REQUEST_USER_INPUT_NAME)]),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[REQUEST_USER_INPUT_NAME],
+        engine.config.strict_tool_mode,
+        engine.config.allowed_tools.clone(),
+        engine.config.disallowed_tools.clone(),
+        engine.config.max_tool_calls,
+        engine.session.approval_mode,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(engine.config.max_steps);
+
+    // Answer after 1.2s — past the 1s budget, well inside the test timeout.
+    let submit_task = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        handle
+            .submit_user_input(
+                "call_1",
+                crate::tools::user_input::UserInputResponse {
+                    answers: vec![crate::tools::user_input::UserInputAnswer {
+                        id: "q1".to_string(),
+                        label: "Yes".to_string(),
+                        value: "Yes".to_string(),
+                    }],
+                },
+            )
+            .await
+            .expect("submit user input");
+    });
+
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    submit_task.await.expect("submit task joins");
+
+    assert_eq!(
+        status,
+        TurnOutcomeStatus::Completed,
+        "a human-paced answer must complete the turn, not be dropped: {error:?}"
+    );
+    assert_eq!(
+        mock.call_count(),
+        2,
+        "the submitted answer must reach the next model request"
+    );
+}
+
 /// R1: a turn that keeps calling tools past its model-step ceiling ends as a
 /// reported failure naming the limit — never as a silent completion.
 #[tokio::test]
