@@ -61,13 +61,19 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
   for (const index of [4, 5, 10]) allCompatibleInactive.activations[index].state = 'INACTIVE';
   assert.equal(validate(allCompatibleInactive), true, JSON.stringify(validate.errors));
 
-  // The entitlement correction command may append exactly one still-INACTIVE
-  // policy v2 / snapshot v2 row while retaining the immutable v1 history; the
-  // projection then reports the higher version and stays INACTIVE.
+  // The entitlement correction command may append exactly one policy v2 /
+  // snapshot v2 row while retaining the immutable v1 history; the projection
+  // then reports the higher version, which is the only projection of this
+  // command that may be activated.
   const versionedCorrection = snapshot();
   versionedCorrection.activations[1].policy_version = 2;
   versionedCorrection.activations[1].snapshot_schema_version = 2;
   assert.equal(validate(versionedCorrection), true, JSON.stringify(validate.errors));
+  const activatedCorrection = snapshot();
+  activatedCorrection.activations[1].policy_version = 2;
+  activatedCorrection.activations[1].snapshot_schema_version = 2;
+  activatedCorrection.activations[1].state = 'ACTIVE';
+  assert.equal(validate(activatedCorrection), true, JSON.stringify(validate.errors));
 
   for (const [name, mutate] of [
     ['partial', value => value.activations.pop()],
@@ -79,7 +85,7 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
     ['policy-only-active', value => { value.activations[0].state = 'ACTIVE'; }],
     ['mixed-correction-version', value => { value.activations[1].policy_version = 2; }],
     ['unknown-correction-version', value => { value.activations[1].policy_version = 3; value.activations[1].snapshot_schema_version = 3; }],
-    ['premature-correction-activation', value => { value.activations[1].policy_version = 2; value.activations[1].snapshot_schema_version = 2; value.activations[1].state = 'ACTIVE'; }],
+    ['active-correction-v1-history', value => { value.activations[1].state = 'ACTIVE'; }],
     ['unknown-command', value => { value.activations[0].command_type = 'UNKNOWN_COMMAND'; }],
     ['extra-field', value => { value.activations[0].private_fact = 'must-not-escape'; }],
   ]) {

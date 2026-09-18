@@ -165,11 +165,24 @@ func TestEntitlementCorrectionProofStaysUnavailableWhileInactive(t *testing.T) {
 	if _, err := service.billingApprovalProof(context.Background(), request); !errors.Is(err, errBillingApprovalProofUnavailable) {
 		t.Fatalf("inactive correction proof must stay unavailable: %v", err)
 	}
-	premature := snapshot
-	premature.Activations[1].State = "ACTIVE"
-	reader.activation = premature
-	if _, err := service.billingApprovalProof(context.Background(), request); !errors.Is(err, errBillingApprovalProofUnavailable) {
-		t.Fatalf("premature activation must stay rejected: %v", err)
+	// The capability itself only clears the activation gate: an activated v2
+	// projection is selectable, while proof still requires real owner facts.
+	if _, err := activeBillingProofCommand(snapshot, entitlementComponentAdjustmentCommand, time.Now().UTC()); !errors.Is(err, errBillingApprovalProofUnavailable) {
+		t.Fatalf("inactive activation stayed selectable: %v", err)
+	}
+	activated := snapshot
+	activated.Activations[1].State = "ACTIVE"
+	selected, err := activeBillingProofCommand(activated, entitlementComponentAdjustmentCommand, time.Now().UTC())
+	if err != nil || selected.State != "ACTIVE" || selected.PolicyVersion != 2 || selected.SnapshotSchemaVersion != 2 {
+		t.Fatalf("activated v2 projection is not selectable: %+v err=%v", selected, err)
+	}
+	reader.activation = activated
+	response, err := service.billingApprovalProof(context.Background(), request)
+	if err != nil && !errors.Is(err, errBillingApprovalProofUnavailable) {
+		t.Fatalf("activation without owner facts returned an unexpected error: %v", err)
+	}
+	if err == nil && response.Verdict != "DENY" {
+		t.Fatalf("activation without matching owner facts issued proof: %+v", response)
 	}
 }
 

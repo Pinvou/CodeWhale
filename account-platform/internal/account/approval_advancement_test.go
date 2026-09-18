@@ -51,16 +51,40 @@ func billingAdvancementSnapshot(state string) billinggovernance.Snapshot {
 	return billinggovernance.Snapshot{SchemaVersion: 1, Activations: rows}
 }
 
+// billingAdvancementSnapshotWithCorrectionV2 models the only activatable
+// projection of the entitlement correction command: the appended policy v2 /
+// snapshot schema v2 row replaces the v1 row in the projection.
+func billingAdvancementSnapshotWithCorrectionV2(state string) billinggovernance.Snapshot {
+	snapshot := billingAdvancementSnapshot(state)
+	snapshot.Activations[1] = billinggovernance.Activation{
+		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		State: state, Version: 1, UpdatedAt: time.Now().UTC(),
+	}
+	return snapshot
+}
+
 func (r *advancementActivationReader) Snapshot(context.Context) (tokengovernance.Snapshot, error) {
 	r.calls++
 	return tokengovernance.Snapshot{State: r.state, Epoch: 1}, r.err
 }
 
 func TestApprovalAdvancementProjection(t *testing.T) {
+	for _, variant := range []struct {
+		name     string
+		snapshot billinggovernance.Snapshot
+	}{
+		{"correction-inactive", billingAdvancementSnapshot("ACTIVE")},
+		{"correction-v2-active", billingAdvancementSnapshotWithCorrectionV2("ACTIVE")},
+	} {
+		t.Run(variant.name, func(t *testing.T) { assertApprovalAdvancementProjection(t, variant.snapshot) })
+	}
+}
+
+func assertApprovalAdvancementProjection(t *testing.T, billingSnapshot billinggovernance.Snapshot) {
 	requester, approver := uuid.New(), uuid.New()
 	for _, state := range []string{"PRE_ACTIVATION", "ACTIVE", "SAFE_ROLLBACK", "UNAVAILABLE"} {
 		reader := &advancementActivationReader{state: state}
-		billingReader := &billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")}
+		billingReader := &billingAdvancementReader{snapshot: billingSnapshot}
 		if state == "UNAVAILABLE" {
 			reader.err = errors.New("unavailable")
 		}
@@ -70,7 +94,13 @@ func TestApprovalAdvancementProjection(t *testing.T) {
 				continue
 			}
 			advance := projection(policy)
-			want := approvalpolicy.Executable(policy.CommandType) && (!approvalpolicy.TokenExecutableApproval(policy.CommandType) || state == "ACTIVE")
+			billingActive := false
+			if activation, ok := billingSnapshot.Find(policy.CommandType, policy.PolicyVersion, policy.SnapshotSchemaVersion); ok {
+				billingActive = activation.State == "ACTIVE"
+			}
+			want := approvalpolicy.Executable(policy.CommandType) &&
+				(approvalpolicy.TokenExecutableApproval(policy.CommandType) && state == "ACTIVE" ||
+					!approvalpolicy.TokenExecutableApproval(policy.CommandType) && billingActive)
 			if advance != want {
 				t.Fatalf("%s/%s projection=%v", state, policy.CommandType, advance)
 			}
@@ -102,31 +132,55 @@ func TestApprovalAdvancementProjection(t *testing.T) {
 }
 
 func TestApprovalAdvancementRegistryAndActivation(t *testing.T) {
+	billingVariants := []struct {
+		name     string
+		snapshot billinggovernance.Snapshot
+	}{
+		{"correction-inactive", billingAdvancementSnapshot("ACTIVE")},
+		{"correction-v2-active", billingAdvancementSnapshotWithCorrectionV2("ACTIVE")},
+	}
 	for _, state := range []string{"PRE_ACTIVATION", "ACTIVE", "SAFE_ROLLBACK"} {
-		for _, policy := range approvalpolicy.All() {
-			if policy.Mode != approvalpolicy.ApprovalRequired {
-				continue
-			}
-			t.Run(state+"/"+policy.CommandType, func(t *testing.T) {
-				reader := &advancementActivationReader{state: state}
-				billingReader := &billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")}
-				repository := (&PostgresRepository{}).WithTokenGovernanceActivation(reader).WithBillingGovernanceActivation(billingReader)
-				err := repository.requireApprovalAdvancement(context.Background(), policy)
-				switch {
-				case !approvalpolicy.Executable(policy.CommandType):
-					if !errors.Is(err, ErrApprovalCommandNotExecutable) || reader.calls != 0 {
-						t.Fatalf("policy-only must fail before domain access: %v, calls=%d", err, reader.calls)
-					}
-				case approvalpolicy.TokenExecutableApproval(policy.CommandType):
-					if reader.calls != 1 || (state == "ACTIVE" && err != nil) || (state != "ACTIVE" && !errors.Is(err, ErrTokenGovernanceInactive)) {
-						t.Fatalf("Token activation mismatch: %v, calls=%d", err, reader.calls)
-					}
-				default:
-					if err != nil || reader.calls != 0 || billingReader.calls != 1 {
-						t.Fatalf("existing Billing activation mismatch: %v token=%d billing=%d", err, reader.calls, billingReader.calls)
-					}
+		for _, variant := range billingVariants {
+			for _, policy := range approvalpolicy.All() {
+				if policy.Mode != approvalpolicy.ApprovalRequired {
+					continue
 				}
-			})
+				t.Run(state+"/"+variant.name+"/"+policy.CommandType, func(t *testing.T) {
+					reader := &advancementActivationReader{state: state}
+					billingReader := &billingAdvancementReader{snapshot: variant.snapshot}
+					repository := (&PostgresRepository{}).WithTokenGovernanceActivation(reader).WithBillingGovernanceActivation(billingReader)
+					err := repository.requireApprovalAdvancement(context.Background(), policy)
+					switch {
+					case !approvalpolicy.Executable(policy.CommandType):
+						if !errors.Is(err, ErrApprovalCommandNotExecutable) || reader.calls != 0 {
+							t.Fatalf("policy-only must fail before domain access: %v, calls=%d", err, reader.calls)
+						}
+					case approvalpolicy.TokenExecutableApproval(policy.CommandType):
+						if reader.calls != 1 || (state == "ACTIVE" && err != nil) || (state != "ACTIVE" && !errors.Is(err, ErrTokenGovernanceInactive)) {
+							t.Fatalf("Token activation mismatch: %v, calls=%d", err, reader.calls)
+						}
+					default:
+						if reader.calls != 0 || billingReader.calls != 1 {
+							t.Fatalf("Billing activation observation mismatch: %v token=%d billing=%d", err, reader.calls, billingReader.calls)
+						}
+						activation, ok := variant.snapshot.Find(policy.CommandType, policy.PolicyVersion, policy.SnapshotSchemaVersion)
+						switch {
+						case !ok:
+							if !errors.Is(err, ErrBillingGovernanceUnavailable) {
+								t.Fatalf("missing Billing activation row: %v", err)
+							}
+						case activation.State == "ACTIVE":
+							if err != nil {
+								t.Fatalf("active Billing activation rejected: %v", err)
+							}
+						default:
+							if !errors.Is(err, ErrBillingGovernanceInactive) {
+								t.Fatalf("inactive Billing activation accepted: %v", err)
+							}
+						}
+					}
+				})
+			}
 		}
 	}
 	if err := (&PostgresRepository{}).requireApprovalAdvancement(context.Background(), approvalpolicy.Policy{CommandType: "UNKNOWN_COMMAND"}); !errors.Is(err, ErrApprovalCommandNotExecutable) {

@@ -198,7 +198,7 @@ func validBillingApprovalActivationSnapshot(now time.Time) ApprovalCommandActiva
 	return result
 }
 
-func TestEntitlementCorrectionActivationV2RemainsInactive(t *testing.T) {
+func TestEntitlementCorrectionActivationV2MayBeActive(t *testing.T) {
 	now := time.Now().UTC()
 	snapshot := validBillingApprovalActivationSnapshot(now)
 	item := &snapshot.Activations[1]
@@ -210,10 +210,16 @@ func TestEntitlementCorrectionActivationV2RemainsInactive(t *testing.T) {
 		t.Fatalf("inactive v2 should be readable: %v", err)
 	}
 	item.State = "ACTIVE"
-	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
-		t.Fatalf("premature activation accepted: %v", err)
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("activated v2 projection rejected: %v", err)
 	}
-	item.State, item.PolicyVersion = "INACTIVE", 3
+	// Only the appended v2 projection may be activated: an ACTIVE v1 history
+	// row and an unknown future version still fail the whole projection closed.
+	item.PolicyVersion, item.SnapshotSchemaVersion, item.State = 1, 1, "ACTIVE"
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("active v1 history accepted: %v", err)
+	}
+	item.State, item.PolicyVersion, item.SnapshotSchemaVersion = "INACTIVE", 3, 2
 	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
 		t.Fatalf("unknown version accepted: %v", err)
 	}

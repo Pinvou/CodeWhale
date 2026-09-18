@@ -102,6 +102,12 @@ func ValidateSnapshot(s Snapshot) error {
 		}
 		switch activation.CommandType {
 		case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
+			// Only the appended policy v2 / snapshot schema v2 projection may be
+			// activated; the v1 projection stays INACTIVE history.
+			if activation.State == "ACTIVE" && (activation.PolicyVersion != 2 || activation.SnapshotSchemaVersion != 2) {
+				return ErrUnavailable
+			}
 		default:
 			if activation.State != "INACTIVE" {
 				return ErrUnavailable

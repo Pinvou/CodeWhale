@@ -69,8 +69,11 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 		{"unknown entitlement version", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 3, 3
 		})), "no-store", 200, false},
-		{"premature entitlement activation", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
+		{"activated entitlement v2", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].PolicyVersion, value.Activations[1].SnapshotSchemaVersion = 2, 2
+			value.Activations[1].State = "ACTIVE"
+		})), "no-store", 200, true},
+		{"activated entitlement v1 history", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			value.Activations[1].State = "ACTIVE"
 		})), "no-store", 200, false},
 		{"duplicate envelope key", strings.Replace(valid, `"schema_version":1`, `"schema_version":2,"schema_version":1`, 1), "no-store", 200, false},

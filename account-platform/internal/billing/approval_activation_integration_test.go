@@ -381,8 +381,23 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE billing_approval_command_activations SET state='ACTIVE',version=version+1 WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=2`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.ApprovalCommandActivations(ctx); !errors.Is(err, ErrApprovalActivationUnavailable) {
-		t.Fatalf("policy-only v2 activation escaped: %v", err)
+	activated, err := repository.ApprovalCommandActivations(ctx)
+	if err != nil || len(activated.Activations) != 11 || activated.Activations[1].CommandType != entitlementComponentAdjustmentCommand ||
+		activated.Activations[1].PolicyVersion != 2 || activated.Activations[1].SnapshotSchemaVersion != 2 || activated.Activations[1].State != "ACTIVE" {
+		t.Fatalf("activated entitlement projection=%+v err=%v", activated, err)
+	}
+	var retainedActiveV1 int
+	if err := connection.QueryRow(ctx, `SELECT count(*) FROM billing_approval_command_activations WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' AND policy_version=1 AND snapshot_schema_version=1 AND state='INACTIVE'`).Scan(&retainedActiveV1); err != nil || retainedActiveV1 != 1 {
+		t.Fatalf("activation replaced or modified the immutable v1 history row: count=%d err=%v", retainedActiveV1, err)
+	}
+	// Activating the entitlement v2 projection must not activate anything else.
+	for index, item := range activated.Activations {
+		if index == 1 {
+			continue
+		}
+		if item.CommandType != beforeDown.Activations[index].CommandType || item.State != beforeDown.Activations[index].State {
+			t.Fatalf("activation changed another command: index=%d item=%+v before=%+v", index, item, beforeDown.Activations[index])
+		}
 	}
 }
 

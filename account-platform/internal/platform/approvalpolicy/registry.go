@@ -42,6 +42,7 @@ var policies = buildPolicies()
 var executableApprovalCommands = map[string]struct{}{
 	"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}, "PAYMENT_PRODUCT_RESUME": {},
 	"TOKEN_MODEL_LIFECYCLE_CHANGE": {}, "TOKEN_MODEL_CATALOG_ROLLBACK": {}, "TOKEN_CREDENTIAL_REVOKE": {},
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {},
 }
 
 func buildPolicies() map[string]Policy {
@@ -68,9 +69,10 @@ func buildPolicies() map[string]Policy {
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
 	// The entitlement correction command keeps its v1 row as immutable history
-	// and moves to its own closed domain snapshot schema. Registering the v2
-	// metadata opens nothing: the command stays outside the executable set until
-	// every GSA-22 domain gate exists and activation is separately authorized.
+	// and moves to its own closed domain snapshot schema. Being in the
+	// executable set only lets the four Account entry points consult the live
+	// Billing per-command activation; the command still opens nothing while
+	// Billing reports it INACTIVE.
 	result["ENTITLEMENT_COMPONENT_ADJUSTMENT"] = Policy{
 		CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, Mode: ApprovalRequired,
 		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",

@@ -66,11 +66,18 @@ const entitlementComponentAdjustmentCommand = "ENTITLEMENT_COMPONENT_ADJUSTMENT"
 
 func validActivationItem(item ApprovalCommandActivation, commandType string, spec activationSpec, now time.Time) bool {
 	if item.CommandType != commandType || item.Version < 1 || item.UpdatedAt.IsZero() || item.UpdatedAt.After(now.Add(time.Second)) ||
-		(item.State != "ACTIVE" && item.State != "INACTIVE") || (!spec.mayBeActive && item.State != "INACTIVE") {
+		(item.State != "ACTIVE" && item.State != "INACTIVE") {
 		return false
 	}
+	// The entitlement correction command is the only command whose appended
+	// policy v2 / snapshot schema v2 projection may be activated; its v1 row
+	// stays immutable INACTIVE history. Every other version of every command
+	// keeps the frozen mayBeActive contract.
 	if commandType == entitlementComponentAdjustmentCommand && item.PolicyVersion == 2 && item.SnapshotSchemaVersion == 2 {
 		return true
+	}
+	if !spec.mayBeActive && item.State != "INACTIVE" {
+		return false
 	}
 	return item.PolicyVersion == spec.policyVersion && item.SnapshotSchemaVersion == spec.snapshotSchemaVersion
 }

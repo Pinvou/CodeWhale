@@ -16,7 +16,9 @@ import (
 // TestEntitlementCorrectionPolicyV2PostgresIntegration proves the Account
 // command-policy metadata that accompanies the entitlement correction domain
 // gate: the immutable v1 row stays in place, the latest version is the v2
-// closed domain snapshot schema, and the command stays non-executable.
+// closed domain snapshot schema, and the command is registered as executable
+// only so the four Account entry points consult the live Billing per-command
+// activation instead of a static allowlist.
 func TestEntitlementCorrectionPolicyV2PostgresIntegration(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL"))
 	if databaseURL == "" {
@@ -48,8 +50,8 @@ func TestEntitlementCorrectionPolicyV2PostgresIntegration(t *testing.T) {
 	if expected.PolicyVersion != 2 || expected.SnapshotSchemaVersion != 2 {
 		t.Fatalf("registry correction policy=%d/%d, want 2/2", expected.PolicyVersion, expected.SnapshotSchemaVersion)
 	}
-	if Executable("ENTITLEMENT_COMPONENT_ADJUSTMENT") {
-		t.Fatal("the correction command must stay outside the executable set")
+	if !Executable("ENTITLEMENT_COMPONENT_ADJUSTMENT") {
+		t.Fatal("the correction command must consult the live Billing activation")
 	}
 	var actual Policy
 	var mode string
