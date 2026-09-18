@@ -410,7 +410,10 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // Component-side quartet handlers: deps are injected from the component closure at call time (same semantics
       // as the original in-component quartet); busyId is cleared in event callbacks/error branches. The configuration
       // telemetry hooks (begin/finishToolConfiguration + findLocalizedTool) ride along as optional deps.
-      const connect = async ({ setBusyId, detailCopy, beginToolConfiguration: beginCfg, finishToolConfiguration: finishCfg, findLocalizedTool: findTool }) => {
+      const connect = async ({ setBusyId, busyRef, detailCopy, beginToolConfiguration: beginCfg, finishToolConfiguration: finishCfg, findLocalizedTool: findTool }) => {
+        // 共享忙碌槽位:另一操作在跑时启动会经 setBusyId(cfg.key) 抢走其槽位、
+        // 令对方按钮中途放闸,故拒绝重叠启动(retry 复用本路径,同获保护)。
+        if (busyRef.current) return;
         if (beginCfg) beginCfg(findTool(cfg.key), 'marketplace');
         setBusyId(cfg.key);
         ensureListeners();
@@ -449,7 +452,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       };
       // Retry: ensure_cli is idempotent, so simply rerun the whole connection flow.
       const retry = (deps) => { connect(deps); };
-      const disconnect = async ({ setBusyId, storeCopy, detailCopy, loadBackendState, setAlert }) => {
+      const disconnect = async ({ setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert }) => {
+        if (busyRef.current) return;
         setBusyId(cfg.key);
         try {
           await invokeTauri(cfg.commands.logout);
@@ -1853,7 +1857,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 执行安装（已拿到 config 或无需 config）
       const doInstall = async (backendId, userConfig) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         const t = findLocalizedTool(backendId);
         if (!externalAuthAvailable && isRestrictedExternalAuthTool(t)) return;
         const name = t ? t.title : backendId;
@@ -1984,7 +1988,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 技能安装/卸载(无 configFields,直接装/卸)
       const handleSkillAction = async (backendId, isInstalled) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         const t = skillCards.find(x => x.backendId === backendId);
         const name = t ? t.title : backendId;
         setBusyId(backendId);
@@ -2017,7 +2021,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setUpdateConfirm({ backendId, skillId, name: card ? card.title : skillId });
       };
       const doSkillUpdate = async () => {
-        if (!updateConfirm) return;
+        if (!updateConfirm || busyRef.current) return;
         const { backendId, skillId, name } = updateConfirm;
         setUpdateConfirm(null);
         setBusyId(backendId);
@@ -2105,7 +2109,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // （extra 覆盖 > 上传文件名/manifest 回退），用户可直接保存或改名，
       // 取消则不设覆盖、保留默认展示。
       const doImportSkillZip = async (invokeFn) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         setBusyId('__upload__');
         setAlert({ loading: true, visible: false, title: storeCopy.importingSkill, subtitle: storeCopy.validatingSkillPackage, isInstall: true, isError: false });
         try {
@@ -2154,7 +2158,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       };
 
       const connectIma = async (values = {}) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         const clientId = (values.IMA_CLIENT_ID || '').trim();
         const apiKey = (values.IMA_API_KEY || '').trim();
         setBusyId('ima');
@@ -2181,7 +2185,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       };
 
       const disconnectIma = async () => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         setBusyId('ima');
         try {
           await invokeTauri('ima_logout');
@@ -2287,7 +2291,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // Connector flow handlers: factory products + component closure injection (mirroring the original
       // connect*/disconnect*/*ResetFlow*/*Retry quartets; event-driven, busyId cleared in event/error branches).
-      const flowDeps = { setBusyId, storeCopy, detailCopy, loadBackendState, setAlert, beginToolConfiguration, finishToolConfiguration, findLocalizedTool };
+      const flowDeps = { setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert, beginToolConfiguration, finishToolConfiguration, findLocalizedTool };
       const connectConnector = (key) => CONNECTOR_FLOW_APIS[key].connect(flowDeps);
       const disconnectConnector = (key) => CONNECTOR_FLOW_APIS[key].disconnect(flowDeps);
       const resetConnectorFlow = (key) => CONNECTOR_FLOW_APIS[key].resetFlow(flowDeps);
@@ -2321,6 +2325,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         // OAuth orchestration differ per connector listener). Routing-table order mirrors the original if-chain order.
         const cliFlowTool = CLI_FLOW_TOOLS[backendId];
         if (cliFlowTool) {
+          if (busyRef.current) return;
           if (isInstalled) return disconnectConnector(backendId);
           const ct = tools.find(x => x[cliFlowTool.cliKey]) || localizeTool(tsToolsData.find(x => x.backendId === backendId), t);
           if (ct) setSelectedTool(ct);
@@ -2383,6 +2388,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
 
         // 卸载
+        if (busyRef.current) return;
         setBusyId(backendId);
         try {
           await invokeTauri('uninstall_marketplace_tool', { toolId: backendId });
