@@ -1,8 +1,13 @@
 //! Production glue between the Windows controlled-device owner and Relay.
 //!
-//! E2E-01 only owns pairing registration: B reuses the authenticated desktop
-//! endpoint socket, sends one generation-bound registration, validates Relay's
-//! sealed result, and keeps the channel alive for later handshake phases.
+//! E2E-01 owns pairing registration: B reuses the authenticated desktop
+//! endpoint socket, sends one generation-bound registration and validates
+//! Relay's sealed result. E2E-02 adds the对称握手接线: the same channel takes
+//! over from `controller_pairing_reserved`, runs the commitment/Finished
+//! exchange and applies `controller_joined` to the device owner.
+
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -12,9 +17,16 @@ use tokio::sync::oneshot;
 use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
-    ControlledDeviceManager, ControlledOperation, ControlledRegistration, ControlledStatus,
+    ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
+    ControlledStatus,
 };
-use super::crypto::{CodeWrapKeyPair, CodeWrapBinding, HandshakeKeyPair};
+use super::controlled_handshake::ControlledHandshake;
+use super::controlling_handshake::JoinedLease;
+use super::crypto::{
+    AuthenticatedRelayTrustConfig, CodeWrapBinding, CodeWrapKeyPair, ControllerRole as HandshakeRole,
+    HandshakeKeyPair, load_relay_trust_config, transport_key_fingerprint,
+};
+use super::protocol::LeaseContext;
 use super::protocol::{
     validate_controller_message_json, validate_controller_registration_message_json,
     RegistrationValidationContext, SenderRole,
@@ -27,13 +39,26 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     "finished_receipt_v1",
 ];
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
+/// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。
+const HANDSHAKE_FAILED: &str = "invalid_message";
+/// 部署期没有可用的 Relay 信任根：没有它就无法验签 transcript，必须失败关闭。
+const RELAY_TRUST_UNCONFIGURED: &str = "relay_trust_unconfigured";
+
+/// B 端单调时钟。注册、握手、watchdog 与状态投影必须共用同一个原点，否则
+/// deadline 会由不同基准推导。
+pub(crate) fn controlled_monotonic_millis() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let origin = ORIGIN.get_or_init(Instant::now);
+    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 pub(crate) struct ControlledRelayWorker {
     app: AppHandle,
     relay: RemoteControlManager,
     operation: ControlledOperation,
     code_wrap: CodeWrapKeyPair,
-    handshake: HandshakeKeyPair,
+    /// 注册阶段声明、握手接管时一次性移交给 `ControlledHandshakeDriver`。
+    handshake: Option<HandshakeKeyPair>,
     channel: crate::features::remote_control::manager::ControllerRelayChannel,
 }
 
@@ -63,6 +88,103 @@ pub(crate) enum RegistrationStep {
     /// `desktop_endpoint_registered` acknowledgement) is ignored here.
     Ignore,
     Registered(Box<ControlledRegistration>),
+}
+
+/// `controller_joined` 之后的租约材料：租约身份来自 Relay，传输指纹由双方
+/// 认证过的 transcript 派生。
+#[derive(Debug)]
+pub(crate) struct ControlledHandshakeOutcome {
+    pub(crate) lease: JoinedLease,
+    pub(crate) transcript_hash: [u8; 32],
+}
+
+/// B 端握手推进器（E2E-02 第 3 步）：不含网络、不含 Tauri，只按冻结顺序把
+/// 入站报文喂给 `ControlledHandshake`，并把要发送的下一帧交给调用方。
+pub(crate) struct ControlledHandshakeDriver {
+    keys: Option<HandshakeKeyPair>,
+    handshake: Option<ControlledHandshake>,
+}
+
+impl ControlledHandshakeDriver {
+    /// 注册阶段生成的握手密钥在握手接管时移交给 driver（一次性）。
+    pub(crate) fn new(keys: HandshakeKeyPair) -> Self {
+        Self {
+            keys: Some(keys),
+            handshake: None,
+        }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.handshake.is_some()
+    }
+
+    /// `controller_pairing_reserved`：验签 transcript、派生会话密钥与 receipt，
+    /// 产出本端 `finished_receipt_commit`。未验签或重复接管都失败关闭。
+    pub(crate) fn accept_reserved(
+        &mut self,
+        message: &Value,
+        trust: &AuthenticatedRelayTrustConfig,
+    ) -> Result<Value, &'static str> {
+        if self.handshake.is_some() {
+            return Err("controller_handshake_stage_invalid");
+        }
+        let keys = self
+            .keys
+            .take()
+            .ok_or("controller_handshake_key_invalid")?;
+        let handshake =
+            ControlledHandshake::new(message, keys, trust).map_err(|error| error.code)?;
+        let commit = handshake.commit().map_err(|error| error.code)?;
+        self.handshake = Some(handshake);
+        Ok(commit)
+    }
+
+    /// `finished_receipt_commit`：记录对端 commitment 后产出本端 Finished。
+    pub(crate) fn accept_peer_commitment(
+        &mut self,
+        message: &Value,
+    ) -> Result<Value, &'static str> {
+        let handshake = self
+            .handshake
+            .as_mut()
+            .ok_or("controller_handshake_stage_invalid")?;
+        handshake
+            .accept_peer_commitment(message)
+            .map_err(|error| error.code)?;
+        handshake.finished().map_err(|error| error.code)
+    }
+
+    /// `encrypted_handshake_finished`：打开对端 Finished 并核对 commitment 后
+    /// 产出本端 `finished_receipt_ack`。
+    pub(crate) fn accept_peer_finished(
+        &mut self,
+        message: &Value,
+    ) -> Result<Value, &'static str> {
+        let handshake = self
+            .handshake
+            .as_mut()
+            .ok_or("controller_handshake_stage_invalid")?;
+        handshake
+            .accept_peer_finished(message)
+            .map_err(|error| error.code)
+    }
+
+    /// `controller_joined`：只有双收据完成且绑定与验签 transcript 完全一致时
+    /// 才产出可安装的租约材料。
+    pub(crate) fn accept_joined(
+        &mut self,
+        message: &Value,
+    ) -> Result<ControlledHandshakeOutcome, &'static str> {
+        let handshake = self
+            .handshake
+            .as_mut()
+            .ok_or("controller_handshake_stage_invalid")?;
+        let lease = handshake.accept_joined(message).map_err(|error| error.code)?;
+        Ok(ControlledHandshakeOutcome {
+            lease,
+            transcript_hash: handshake.transcript_hash(),
+        })
+    }
 }
 
 /// Waits for the registration response for `request`. Extracted from the worker
@@ -114,7 +236,7 @@ impl ControlledRelayWorker {
             relay,
             operation,
             code_wrap,
-            handshake,
+            handshake: Some(handshake),
             channel,
         };
         tauri::async_runtime::spawn(async move {
@@ -141,7 +263,9 @@ impl ControlledRelayWorker {
             &endpoint_id,
             self.operation.generation(),
             &self.code_wrap,
-            &self.handshake,
+            self.handshake
+                .as_ref()
+                .ok_or_else(|| "handshake_key_invalid".to_owned())?,
         )?;
         self.channel.try_send(request.clone())?;
         loop {
@@ -173,12 +297,135 @@ impl ControlledRelayWorker {
         }
     }
 
+    /// E2E-02 第 3 步：`controller_pairing_reserved` 到达后用
+    /// `ControlledHandshake` 接管，按冻结顺序完成双收据交换，并把
+    /// `controller_joined` 应用到设备所有者。
+    ///
+    /// 任何顺序错误、绑定不符或验签失败都失败关闭（投影为有界错误的 error
+    /// 状态并结束本代通道）；握手完成后的帧只做排空，业务帧派发属 E2E-04，
+    /// 未知帧绝不转发到 legacy WebUI 事件流。
     async fn serve(mut self) {
-        // A dropped channel is intentional on stop/refresh and clears the old
-        // generation binding. Unknown messages are ignored until E2E-02; they
-        // must never be forwarded to the legacy WebUI event stream.
-        while let Some(_message) = self.channel.recv().await {}
+        let Some(keys) = self.handshake.take() else {
+            self.fail_handshake(HANDSHAKE_FAILED);
+            return;
+        };
+        let mut driver = ControlledHandshakeDriver::new(keys);
+        let mut joined = false;
+        while let Some(message) = self.channel.recv().await {
+            if joined {
+                continue;
+            }
+            let result = match message.get("type").and_then(Value::as_str) {
+                Some("controller_pairing_reserved") => self.begin_handshake(&message, &mut driver),
+                Some("finished_receipt_commit") => driver
+                    .accept_peer_commitment(&message)
+                    .map(Some)
+                    .map_err(str::to_owned),
+                Some("encrypted_handshake_finished") => driver
+                    .accept_peer_finished(&message)
+                    .map(Some)
+                    .map_err(str::to_owned),
+                Some("controller_joined") => match self.complete_handshake(&message, &mut driver) {
+                    Ok(()) => {
+                        joined = true;
+                        Ok(None)
+                    }
+                    Err(code) => Err(code),
+                },
+                _ => Ok(None),
+            };
+            match result {
+                Ok(Some(frame)) => {
+                    if let Err(error) = self.channel.try_send(frame) {
+                        self.fail_handshake(&error);
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                Err(code) => {
+                    self.fail_handshake(&code);
+                    return;
+                }
+            }
+        }
     }
+
+    /// 接管握手：本地进入安全握手阶段并产出本端 commit。信任根缺失或非法时
+    /// 失败关闭，绝不降级为无认证握手。
+    fn begin_handshake(
+        &self,
+        message: &Value,
+        driver: &mut ControlledHandshakeDriver,
+    ) -> Result<Option<Value>, String> {
+        let trust = load_relay_trust_config(|name| std::env::var(name).ok())
+            .map_err(|_| RELAY_TRUST_UNCONFIGURED.to_owned())?;
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let status = manager
+            .mark_claimed(self.operation.clone())
+            .map_err(|error| error.code.to_owned())?;
+        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+        driver
+            .accept_reserved(message, &trust)
+            .map(Some)
+            .map_err(|code| code.to_owned())
+    }
+
+    /// 应用 `controller_joined`：构造 B 端租约（含双方一致的传输指纹）并进入
+    /// connected。租约未真正落地前不投影 connected。
+    fn complete_handshake(
+        &self,
+        message: &Value,
+        driver: &mut ControlledHandshakeDriver,
+    ) -> Result<(), String> {
+        let outcome = driver
+            .accept_joined(message)
+            .map_err(|code| code.to_owned())?;
+        let lease = controlled_lease_from_outcome(outcome, controlled_monotonic_millis())?;
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let status = manager
+            .complete_connected(self.operation.clone(), lease)
+            .map_err(|error| error.code.to_owned())?;
+        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+        Ok(())
+    }
+
+    /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
+    /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
+    fn fail_handshake(&self, error: &str) {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let bounded = sanitize_error(error);
+        if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
+            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+        }
+    }
+}
+
+/// 由 `controller_joined` 材料构造 B 端租约（纯函数）。传输指纹与 A 端使用
+/// 同一份验签 transcript、按 B 角色域分离派生；租约在真正落地前不投影状态。
+fn controlled_lease_from_outcome(
+    outcome: ControlledHandshakeOutcome,
+    now_b: u64,
+) -> Result<ControlledLease, String> {
+    let context = LeaseContext {
+        connection_id: outcome.lease.connection_id.clone(),
+        controller_lease_id: outcome.lease.controller_lease_id.clone(),
+        lease_epoch: outcome.lease.lease_epoch.to_string(),
+        relay_epoch: outcome.lease.relay_epoch.clone(),
+        remote_control_generation: outcome.lease.remote_control_generation.clone(),
+    };
+    let fingerprint = transport_key_fingerprint(outcome.transcript_hash, HandshakeRole::B)
+        .map_err(|_| HANDSHAKE_FAILED.to_owned())?;
+    Ok(ControlledLease {
+        context,
+        liveness_epoch_a: outcome.lease.liveness_epoch_a.clone(),
+        resume_deadline_b: outcome.lease.resume_deadline_ms,
+        resume_token: outcome.lease.resume_token,
+        transport_key_fingerprint: fingerprint,
+        // 冻结协议 v1 不携带主控设备显示名（controller_joined 无该字段）：首版
+        // 留空，由 UI 的 i18n 兜底文案显示未知设备，真实来源待协议扩展。
+        controller_device_name: String::new(),
+        connected_at_b: now_b,
+    })
 }
 
 fn registration_request(
@@ -277,6 +524,8 @@ fn sanitize_error(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
+    use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
+    use crate::features::remote_control::controller::test_support::PairingFixture;
     use std::collections::VecDeque;
     use std::time::Duration;
 
@@ -558,6 +807,178 @@ mod tests {
         assert_eq!(
             registration_from_response(&receiver, &request, &response).unwrap_err(),
             "pairing_registration_rejected"
+        );
+    }
+
+    /// 用真实 A 端握手跑完双收据交换，返回已推进到 Acked 的 driver 与 A 端状态。
+    fn drive_through_receipts(
+        reservation: &Value,
+        b_keys: HandshakeKeyPair,
+        a_keys: HandshakeKeyPair,
+        trust: &AuthenticatedRelayTrustConfig,
+    ) -> (ControlledHandshakeDriver, ControllingHandshake) {
+        let mut driver = ControlledHandshakeDriver::new(b_keys);
+        let b_commit = driver.accept_reserved(reservation, trust).unwrap();
+        let mut a = ControllingHandshake::new(
+            reservation["request_id"].as_str().unwrap(),
+            "claim-0001",
+            "2345678",
+            a_keys,
+            trust.clone(),
+        );
+        let a_commit = a.accept_reserved(reservation).unwrap();
+        let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
+        let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
+        driver.accept_peer_finished(&a_finished).unwrap();
+        a.accept_peer_finished(&b_finished).unwrap();
+        (driver, a)
+    }
+
+    /// E2E-02 第 3 步：B 端 driver 与真实 A 端握手完成双收据交换，并且只有在
+    /// 收到 `controller_joined` 后才产出与 A 端同一份 transcript 绑定的材料。
+    #[test]
+    fn driver_completes_both_receipts_and_yields_the_joined_lease() {
+        let PairingFixture {
+            relay,
+            reservation,
+            joined,
+            a_keys,
+            b_keys,
+            resume_token,
+        } = crate::features::remote_control::controller::test_support::pairing_fixture(
+            "relay-key-runtime",
+        );
+        let mut driver = ControlledHandshakeDriver::new(b_keys);
+        let mut a = ControllingHandshake::new(
+            reservation["request_id"].as_str().unwrap(),
+            "claim-0001",
+            "2345678",
+            a_keys,
+            relay.trust.clone(),
+        );
+
+        // 未接管前的顺序违规必须失败关闭，且不产生任何材料。
+        assert_eq!(
+            driver.accept_peer_finished(&reservation).unwrap_err(),
+            "controller_handshake_stage_invalid"
+        );
+        assert_eq!(
+            driver.accept_joined(&joined).unwrap_err(),
+            "controller_handshake_stage_invalid"
+        );
+        assert!(!driver.is_active());
+
+        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        assert!(driver.is_active());
+        assert_eq!(b_commit["type"], "finished_receipt_commit");
+        assert_eq!(b_commit["sender_role"], "B");
+        // 重复接管同一预留必须拒绝。
+        assert_eq!(
+            driver.accept_reserved(&reservation, &relay.trust).unwrap_err(),
+            "controller_handshake_stage_invalid"
+        );
+        // 收到 A 的 commitment 之前不能回送 Finished。
+        assert_eq!(
+            driver.accept_joined(&joined).unwrap_err(),
+            "controller_handshake_stage_invalid"
+        );
+
+        let a_commit = a.accept_reserved(&reservation).unwrap();
+        let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
+        assert_eq!(b_finished["type"], "encrypted_handshake_finished");
+        assert_eq!(b_finished["sender_role"], "B");
+        let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
+        let b_ack = driver.accept_peer_finished(&a_finished).unwrap();
+        assert_eq!(b_ack["type"], "finished_receipt_ack");
+        assert_eq!(b_ack["sender_role"], "A");
+        assert_eq!(b_ack["receiver_role"], "B");
+        // A 校验 B 的 Finished 与其 commitment 一致后产出 ack。
+        let a_ack = a.accept_peer_finished(&b_finished).unwrap();
+        assert_eq!(a_ack["sender_role"], "B");
+        assert_eq!(a_ack["receiver_role"], "A");
+
+        let outcome = driver.accept_joined(&joined).unwrap();
+        assert_eq!(outcome.lease.connection_id, "connection-0001");
+        assert_eq!(outcome.lease.controller_lease_id, "controller-lease-0001");
+        assert_eq!(outcome.lease.lease_epoch, 1);
+        assert_eq!(outcome.lease.remote_control_generation, "generation-0001");
+        assert_eq!(outcome.lease.liveness_epoch_a, "liveness-epoch-a-0001");
+        assert_eq!(outcome.lease.resume_deadline_ms, 30_000);
+        assert_eq!(outcome.lease.resume_token, resume_token);
+        // 两端绑定同一份验签 transcript（传输指纹的派生输入）。
+        assert_eq!(outcome.transcript_hash, a.transcript_hash().unwrap());
+        // 双收据完成后 joined 只允许一次。
+        assert_eq!(
+            driver.accept_joined(&joined).unwrap_err(),
+            "controller_handshake_stage_invalid"
+        );
+    }
+
+    /// 绑定不符的 `controller_joined` 必须失败关闭。
+    #[test]
+    fn driver_rejects_joined_with_a_foreign_reservation_binding() {
+        let PairingFixture {
+            relay,
+            reservation,
+            joined,
+            a_keys,
+            b_keys,
+            ..
+        } = crate::features::remote_control::controller::test_support::pairing_fixture(
+            "relay-key-runtime",
+        );
+        let (mut driver, _a) =
+            drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
+        let mut foreign = joined;
+        foreign["reservation_id"] = json!("reservation-other");
+        assert_eq!(
+            driver.accept_joined(&foreign).unwrap_err(),
+            "controller_joined_binding_mismatch"
+        );
+    }
+
+    /// B 端租约必须带上与验签 transcript 绑定的传输指纹、恢复材料与单调时钟
+    /// 连接时刻，并把恢复凭证从 Debug 输出里剔除。
+    #[test]
+    fn controlled_lease_binds_fingerprint_and_recovery_material() {
+        let PairingFixture {
+            relay,
+            reservation,
+            joined,
+            a_keys,
+            b_keys,
+            resume_token,
+            ..
+        } = crate::features::remote_control::controller::test_support::pairing_fixture(
+            "relay-key-runtime",
+        );
+        let (mut driver, _a) =
+            drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
+        let outcome = driver.accept_joined(&joined).unwrap();
+        let expected =
+            transport_key_fingerprint(outcome.transcript_hash, HandshakeRole::B).unwrap();
+        let lease = controlled_lease_from_outcome(outcome, 12_345).unwrap();
+
+        assert_eq!(lease.context.controller_lease_id, "controller-lease-0001");
+        assert_eq!(lease.context.lease_epoch, "1");
+        assert_eq!(
+            lease.context.remote_control_generation,
+            "generation-0001"
+        );
+        assert_eq!(lease.liveness_epoch_a, "liveness-epoch-a-0001");
+        assert_eq!(lease.resume_deadline_b, 30_000);
+        assert_eq!(lease.resume_token, resume_token);
+        assert_eq!(lease.transport_key_fingerprint, expected);
+        assert_eq!(
+            lease.controller_device_name, "",
+            "冻结协议不携带主控设备名，首版留空由 UI 兜底"
+        );
+        assert_eq!(lease.connected_at_b, 12_345);
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(
+            !debug.contains(&base64::engine::general_purpose::STANDARD.encode(resume_token)),
+            "恢复凭证不得出现在 Debug 输出里"
         );
     }
 }

@@ -361,93 +361,15 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
-    use base64::Engine as _;
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
-    use sha2::{Digest, Sha256};
-
     use super::*;
     use crate::features::remote_control::controller::controlled_handshake::ControlledHandshake;
     use crate::features::remote_control::controller::crypto::AuthenticatedRelayTrustConfig;
-    use crate::features::remote_control::controller::protocol::build_pairing_transcript_preimage;
     use crate::features::remote_control::controller::relay_transport::transport_channels;
+    use crate::features::remote_control::controller::test_support::{
+        PairingFixture, encode, pairing_fixture, signed_relay, signed_reservation,
+    };
 
-    struct SignedRelay {
-        trust: AuthenticatedRelayTrustConfig,
-        key_id: String,
-        key_pair: Ed25519KeyPair,
-    }
-
-    fn signed_relay() -> SignedRelay {
-        let rng = SystemRandom::new();
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
-        let public_key =
-            base64::engine::general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
-        let key_id = "relay-key-service".to_owned();
-        let trust =
-            AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.clone(), public_key)])
-                .unwrap();
-        SignedRelay {
-            trust,
-            key_id,
-            key_pair,
-        }
-    }
-
-    fn encoded(bytes: [u8; 32]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
-    fn hex_lower(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-
-    /// 以冻结 fixture 的 transcript 为模板替换双方握手公钥并重新签名，得到
-    /// 一份真实可验签的 `controller_pairing_reserved`。
-    fn signed_reservation(
-        relay: &SignedRelay,
-        a_public_b64: &str,
-        b_public_b64: &str,
-    ) -> Value {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
-        ))
-        .unwrap();
-        let mut message =
-            fixture["lease_install_vector"]["verification_input"]["reserved_message"].clone();
-        let mut transcript = message["transcript"].clone();
-        transcript["handshake_public_key_a_b64"] = serde_json::json!(a_public_b64);
-        transcript["handshake_public_key_b_b64"] = serde_json::json!(b_public_b64);
-        let preimage = build_pairing_transcript_preimage(&transcript).unwrap();
-        message["transcript"] = transcript;
-        message["transcript_hash"] = serde_json::json!(hex_lower(&Sha256::digest(&preimage)));
-        message["relay_signing_key_id"] = serde_json::json!(relay.key_id);
-        message["relay_signature_b64"] = serde_json::json!(base64::engine::general_purpose::STANDARD
-            .encode(relay.key_pair.sign(&preimage).as_ref()));
-        message
-    }
-
-    fn joined_message(reserved: &Value, token: [u8; 32]) -> Value {
-        serde_json::json!({
-            "v": 1,
-            "type": "controller_joined",
-            "request_id": reserved["request_id"],
-            "pairing_id": reserved["pairing_id"],
-            "reservation_id": reserved["reservation_id"],
-            "transcript_hash": reserved["transcript_hash"],
-            "controller_connection_identity": reserved["transcript"]["controller_connection_identity"],
-            "connection_id": "connection-0001",
-            "controller_lease_id": "controller-lease-0001",
-            "lease_epoch": "1",
-            "relay_epoch": reserved["relay_epoch"],
-            "remote_control_generation": reserved["remote_control_generation"],
-            "liveness_epoch_a": "liveness-epoch-a-0001",
-            "liveness_epoch_b": "liveness-epoch-b-0001",
-            "resume_token_b64": base64::engine::general_purpose::STANDARD.encode(token),
-            "resume_deadline_ms": "30000",
-        })
-    }
+    const RELAY_KEY_ID: &str = "relay-key-service";
 
     /// 由真实 `ControlledHandshake` 扮演 B：按冻结顺序投喂 commit / Finished /
     /// joined，并用收到的 A 端报文推进自己的状态机。
@@ -582,15 +504,14 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_installs_the_lease_and_reaches_connected() {
-        let relay = signed_relay();
-        let a_keys = HandshakeKeyPair::generate().unwrap();
-        let b_keys = HandshakeKeyPair::generate().unwrap();
-        let reservation = signed_reservation(
-            &relay,
-            &encoded(a_keys.public_key().to_bytes()),
-            &encoded(b_keys.public_key().to_bytes()),
-        );
-        let joined = joined_message(&reservation, [7_u8; 32]);
+        let PairingFixture {
+            relay,
+            reservation,
+            joined,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
         let mut port = peer_port(reservation.clone(), joined, b_keys, &relay.trust);
         let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
 
@@ -644,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn relay_rejection_is_surfaced_as_a_bounded_public_error() {
-        let relay = signed_relay();
+        let relay = signed_relay(RELAY_KEY_ID);
         let a_keys = HandshakeKeyPair::generate().unwrap();
         let mut handshake = ControllingHandshake::new(
             "request-0001",
@@ -699,7 +620,7 @@ mod tests {
             (true, Duration::from_secs(5), "endpoint_offline"),
             (false, Duration::from_millis(20), "endpoint_offline"),
         ] {
-            let relay = signed_relay();
+            let relay = signed_relay(RELAY_KEY_ID);
             let a_keys = HandshakeKeyPair::generate().unwrap();
             let mut handshake = ControllingHandshake::new(
                 "request-0001",
@@ -740,14 +661,14 @@ mod tests {
     #[tokio::test]
     async fn untrusted_transcript_and_generation_bind_failure_fail_closed() {
         // 1) 用另一把 Relay 签名密钥签发的 transcript 必须失败关闭。
-        let trusted = signed_relay();
-        let attacker = signed_relay();
+        let trusted = signed_relay(RELAY_KEY_ID);
+        let attacker = signed_relay("relay-key-attacker");
         let a_keys = HandshakeKeyPair::generate().unwrap();
         let b_keys = HandshakeKeyPair::generate().unwrap();
         let forged = signed_reservation(
             &attacker,
-            &encoded(a_keys.public_key().to_bytes()),
-            &encoded(b_keys.public_key().to_bytes()),
+            &encode(a_keys.public_key().to_bytes()),
+            &encode(b_keys.public_key().to_bytes()),
         );
         let mut handshake = a_handshake(&forged, a_keys, trusted.trust.clone());
         let mut port = ScriptedPort {
@@ -776,15 +697,14 @@ mod tests {
         assert_eq!(sender.generation(), "", "untrusted transcript must not bind");
 
         // 2) transport 已经绑定过 generation 时，Reserved 阶段必须中止。
-        let relay = signed_relay();
-        let a_keys = HandshakeKeyPair::generate().unwrap();
-        let b_keys = HandshakeKeyPair::generate().unwrap();
-        let reservation = signed_reservation(
-            &relay,
-            &encoded(a_keys.public_key().to_bytes()),
-            &encoded(b_keys.public_key().to_bytes()),
-        );
-        let joined = joined_message(&reservation, [7_u8; 32]);
+        let PairingFixture {
+            relay,
+            reservation,
+            joined,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
         let mut port = peer_port(reservation.clone(), joined, b_keys, &relay.trust);
         let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
         let manager = ControllingDeviceManager::default();
@@ -855,7 +775,7 @@ mod tests {
     /// 用户已显式断开（或尝试已被取代）时，在途失败不得把状态覆盖成 error。
     #[tokio::test]
     async fn in_flight_failure_does_not_override_an_explicit_disconnect() {
-        let relay = signed_relay();
+        let relay = signed_relay(RELAY_KEY_ID);
         let a_keys = HandshakeKeyPair::generate().unwrap();
         let mut handshake = ControllingHandshake::new(
             "request-0001",

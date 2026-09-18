@@ -4,9 +4,6 @@
 //! the feature state machine and emit only its allowlisted, generation-bearing
 //! projection; no pairing, lease, token, key, or host-path value is persisted.
 
-use std::sync::OnceLock;
-use std::time::Instant;
-
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -15,7 +12,9 @@ use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
 };
-use crate::features::remote_control::controller::relay_runtime::ControlledRelayWorker;
+use crate::features::remote_control::controller::relay_runtime::{
+    ControlledRelayWorker, controlled_monotonic_millis,
+};
 use crate::features::remote_control::RemoteControlManager;
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
@@ -34,7 +33,7 @@ pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
             let status = {
                 use tauri::Manager as _;
                 app.state::<ControlledDeviceManager>()
-                    .poll_watchdog(monotonic_millis())
+                    .poll_watchdog(controlled_monotonic_millis())
             };
             // 仅在状态投影变化时广播，避免空闲时每秒刷事件。
             let projection = serde_json::to_string(&status).unwrap_or_default();
@@ -64,12 +63,6 @@ fn ensure_supported(manager: &ControlledDeviceManager) -> Result<(), String> {
     } else {
         Err(UNSUPPORTED.to_owned())
     }
-}
-
-fn monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn workspace_request(
@@ -201,7 +194,7 @@ pub fn desktop_remote_controlled_poll_watchdog(
     manager: State<'_, ControlledDeviceManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
-    let status = manager.poll_watchdog(monotonic_millis());
+    let status = manager.poll_watchdog(controlled_monotonic_millis());
     emit_status(&app, &status);
     Ok(status)
 }
@@ -264,6 +257,6 @@ mod tests {
     fn command_surface_has_stable_events_and_monotonic_clock() {
         assert_eq!(STATUS_EVENT, "desktop-remote-controlled-status");
         assert_eq!(UNSUPPORTED, "desktop_remote_control_unsupported");
-        assert!(monotonic_millis() <= monotonic_millis());
+        assert!(controlled_monotonic_millis() <= controlled_monotonic_millis());
     }
 }
