@@ -255,6 +255,7 @@ fn complete_connected(
         resume_deadline_b: outcome.lease.resume_deadline_ms,
         resume_token: outcome.lease.resume_token,
         transport_key_fingerprint: fingerprint,
+        negotiated_capabilities: outcome.negotiated_capabilities.clone(),
     };
     sender
         .install_authenticated_lease(AuthenticatedLease {
@@ -750,6 +751,11 @@ mod tests {
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "pairing_v1".into(),
+                        "task_v1".into(),
+                    ],
                 },
             )
             .unwrap();

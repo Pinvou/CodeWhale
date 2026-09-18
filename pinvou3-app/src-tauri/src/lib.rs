@@ -37,6 +37,7 @@ use crate::features::{
         capabilities::CapabilitySnapshotManager,
         controlled::ControlledDeviceManager,
         controlling::ControllingDeviceManager,
+        controlling_session::ControllingSessionManager,
         permission::PermissionAuthority,
     },
     remote_control::RemoteControlManager,
@@ -1048,6 +1049,7 @@ pub fn run() {
                     handle.manage(ControlledDeviceManager::default());
                     commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
                     handle.manage(ControllingDeviceManager::default());
+                    handle.manage(ControllingSessionManager::default());
                     handle.manage(CapabilitySnapshotManager::default());
                     let temporary_models = commands::desktop_remote_model::shared_model_store();
                     handle.manage(temporary_models.clone());
@@ -1481,6 +1483,13 @@ pub fn run() {
             commands::desktop_remote_controller::desktop_remote_controller_live_context,
             commands::desktop_remote_controller::desktop_remote_controller_create_history,
             commands::desktop_remote_controller::desktop_remote_controller_list_history,
+            commands::desktop_remote_controller_session::desktop_remote_controller_session_open,
+            commands::desktop_remote_controller_session::desktop_remote_controller_session_state,
+            commands::desktop_remote_controller_session::desktop_remote_controller_session_close,
+            commands::desktop_remote_controller_session::desktop_remote_controller_capability_request,
+            commands::desktop_remote_controller_session::desktop_remote_controller_apply_capability_snapshot,
+            commands::desktop_remote_controller_session::desktop_remote_controller_task_intent,
+            commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_intent,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
             commands::desktop_remote_task::desktop_remote_task_open_session,
             commands::desktop_remote_task::desktop_remote_task_switch_session,

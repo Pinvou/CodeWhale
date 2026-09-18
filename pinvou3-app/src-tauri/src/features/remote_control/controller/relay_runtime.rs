@@ -37,6 +37,9 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
     "encrypted_frames_v1",
     "finished_receipt_v1",
+    // E2E-03：B 端的权威 session / 任务台账（DEV-12/DEV-13）已实现，注册时
+    // 一并声明 task_v1，使 A 的能力快照请求与任务请求能通过协商。
+    "task_v1",
 ];
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
 /// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。

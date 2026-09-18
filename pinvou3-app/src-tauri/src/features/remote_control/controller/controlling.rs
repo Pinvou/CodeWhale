@@ -138,6 +138,8 @@ pub(crate) struct ControllerLease {
     pub(crate) resume_deadline_b: u64,
     pub(crate) resume_token: [u8; 32],
     pub(crate) transport_key_fingerprint: [u8; 32],
+    /// 验签 transcript 协商出的能力集合（E2E-03 构造 payload 的准入上下文）。
+    pub(crate) negotiated_capabilities: Vec<String>,
 }
 
 impl std::fmt::Debug for ControllerLease {
@@ -392,6 +394,22 @@ impl ControllingDeviceManager {
             )
     }
 
+    /// 活租约上下文 + 协商能力：A 端构造任何 payload 都以此为唯一准入依据。
+    pub(crate) fn live_runtime_context(&self) -> Result<(LeaseContext, Vec<String>)> {
+        let inner = self.inner.lock();
+        if inner.phase != ControllingStatusKind::Connected {
+            return Err(ControllingStateError::new("controller_not_connected"));
+        }
+        let lease = inner
+            .lease
+            .as_ref()
+            .ok_or_else(|| ControllingStateError::new("controller_not_connected"))?;
+        Ok((
+            lease.context.clone(),
+            lease.negotiated_capabilities.clone(),
+        ))
+    }
+
     pub(crate) fn create_history(
         &self,
         title: &str,
@@ -558,6 +576,11 @@ mod tests {
             resume_deadline_b: 30_000,
             resume_token: [1; 32],
             transport_key_fingerprint: [2; 32],
+            negotiated_capabilities: vec![
+                "encrypted_frames_v1".into(),
+                "pairing_v1".into(),
+                "task_v1".into(),
+            ],
         }
     }
 

@@ -29,6 +29,7 @@ pub(crate) mod desktop_remote_attachment;
 pub(crate) mod desktop_remote_capabilities;
 pub(crate) mod desktop_remote_controlled;
 pub(crate) mod desktop_remote_controller;
+pub(crate) mod desktop_remote_controller_session;
 pub(crate) mod desktop_remote_history;
 pub(crate) mod desktop_remote_model;
 pub(crate) mod desktop_remote_permission;

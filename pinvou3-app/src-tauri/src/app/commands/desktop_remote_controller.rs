@@ -11,6 +11,7 @@ use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,
     RemoteHistoryEntry,
 };
+use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
@@ -47,9 +48,12 @@ pub async fn desktop_remote_controller_connect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    sessions: State<'_, ControllingSessionManager>,
     code: String,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
+    // 新连接不得复用上一代租赁的会话意图（它们的 lease 绑定必然失效）。
+    sessions.clear();
     let operation = manager.connect(&code).map_err(controlling_error)?;
     let status = manager.status();
     emit_status(&app, &status);
@@ -60,8 +64,10 @@ pub async fn desktop_remote_controller_connect(
 pub fn desktop_remote_controller_disconnect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
+    sessions.clear();
     let status = manager.disconnect();
     emit_status(&app, &status);
     Ok(status)

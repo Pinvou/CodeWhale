@@ -67,6 +67,12 @@
           unlisten.push(off);
         }).catch(function () {});
       });
+      listen("desktop-remote-controller-session", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControllerSession(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
     }
 
     function stop() {
@@ -190,6 +196,79 @@
     function controllerStatus() {
       ensureAvailable();
       return invoke("desktop_remote_controller_status", {});
+    }
+
+    /**
+     * E2E-03: the A-side remote session and task intent. The view passes only UI
+     * fields (title, mode, text); every protocol field, identifier and the input
+     * digest are built in Rust. The composed payload is returned for the
+     * encrypted dispatch task (E2E-04) and is never assembled here.
+     */
+    function controllerSessionOpen(title, mode) {
+      ensureAvailable();
+      subscribe();
+      return invoke("desktop_remote_controller_session_open", {
+        remoteRef: null,
+        title: title || "",
+        mode: mode || "chat",
+      }).then(function (result) {
+        return applyControllerSession(result);
+      });
+    }
+
+    function controllerSessionState(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_session_state", { remoteRef: remoteRef });
+    }
+
+    function controllerSessionClose(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_session_close", { remoteRef: remoteRef });
+    }
+
+    function controllerCapabilityRequest(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_capability_request", { remoteRef: remoteRef });
+    }
+
+    function controllerApplyCapabilitySnapshot(remoteRef, payload) {
+      ensureAvailable();
+      var body = payload && typeof payload === "object" ? payload : {};
+      return invoke("desktop_remote_controller_apply_capability_snapshot", {
+        remoteRef: remoteRef,
+        payload: body,
+      }).then(function (result) {
+        return applyControllerSession(result);
+      });
+    }
+
+    function controllerTaskIntent(remoteRef, text) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_intent", {
+        remoteRef: remoteRef,
+        text: String(text || ""),
+      });
+    }
+
+    function controllerTaskCancelIntent(remoteRef, taskId) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_cancel_intent", {
+        remoteRef: remoteRef,
+        taskId: taskId,
+      });
+    }
+
+    function applyControllerSession(result) {
+      var payload = result && typeof result === "object" ? result : {};
+      publish(logic.applyControllerSession(current(), {
+        sessionRef: payload.sessionRef || null,
+        sessionId: payload.sessionId || null,
+        mode: payload.mode || null,
+        connectionId: payload.connectionId || null,
+        leaseEpoch: payload.leaseEpoch || null,
+        capabilityRevision: payload.capabilityRevision == null ? null : payload.capabilityRevision,
+      }));
+      return result;
     }
 
     function controllerListHistory() {
@@ -466,6 +545,13 @@
       controllerConnect: controllerConnect,
       controllerDisconnect: controllerDisconnect,
       controllerStatus: controllerStatus,
+      controllerSessionOpen: controllerSessionOpen,
+      controllerSessionState: controllerSessionState,
+      controllerSessionClose: controllerSessionClose,
+      controllerCapabilityRequest: controllerCapabilityRequest,
+      controllerApplyCapabilitySnapshot: controllerApplyCapabilitySnapshot,
+      controllerTaskIntent: controllerTaskIntent,
+      controllerTaskCancelIntent: controllerTaskCancelIntent,
       controllerListHistory: controllerListHistory,
       controllerCreateHistory: controllerCreateHistory,
       capabilitiesSnapshot: capabilitiesSnapshot,
