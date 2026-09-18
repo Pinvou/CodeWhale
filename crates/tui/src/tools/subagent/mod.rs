@@ -8232,6 +8232,11 @@ pub fn new_shared_subagent_manager_with_state_root_and_timeout(
 
 // === Tool Implementations ===
 
+/// Cap on how many host-presented prompt-only profiles the `agent`
+/// `action=roster` payload lists. The full count still travels in
+/// `host_profile_count` so the model can tell when the listing was cut.
+const ROSTER_HOST_PROFILE_LIMIT: usize = 48;
+
 /// Start a child agent task through a single simplified model-facing surface.
 pub struct AgentTool {
     manager: SharedSubAgentManager,
@@ -8414,7 +8419,7 @@ impl ToolSpec for AgentTool {
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
             "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
-            "Use action=roster to inspect the Fleet roles and their descriptions before choosing a type or profile. ",
+            "Use action=roster to inspect the Fleet roles and the host-presented prompt-only profiles (if any), with their descriptions, before choosing a type or profile. ",
             "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
@@ -8453,7 +8458,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "roster", "status", "peek", "message", "followup", "interrupt", "wait", "claim", "cancel"],
-                    "description": "start launches a turn-owned worker and returns immediately. roster lists the Fleet roles and their descriptions. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). cancel permanently cancels a running child."
+                    "description": "start launches a turn-owned worker and returns immediately. roster lists the Fleet roles plus any host-presented prompt-only profiles, with descriptions. status/peek inspect running or retained workers. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes; see until. claim widens your own enforced write scope (see write_roots). cancel permanently cancels a running child."
                 },
                 "until": {
                     "type": "string",
@@ -8641,10 +8646,19 @@ impl ToolSpec for AgentTool {
         match action {
             AgentToolAction::Start => {}
             AgentToolAction::Roster => {
-                // This action remains the bounded built-in role catalog. An
-                // embedding host may separately present exact prompt-only
-                // profile ids for the active turn; ambient saved members still
-                // live only in the durable Fleet UI (`/fleet`).
+                // The builtin `members` slice remains the bounded role catalog.
+                // The additive `host_profiles` list exposes the prompt-only
+                // profile ids the embedding host installed for this session
+                // (`with_host_agent_profiles`): spawn accepts
+                // `profile=<member_id>` for them, so the model must be able to
+                // discover those ids, and the listing shares the
+                // spawn-acceptance predicate so every listed id resolves.
+                // `self.runtime` carries the engine-installed snapshot;
+                // `refresh_spawn_route_sources` refreshes a clone of the
+                // runtime per spawn from session config, so this listing may
+                // lag a mid-session config edit — acceptable, because host
+                // profiles are installed at engine spawn. Ambient saved
+                // members still live only in the durable Fleet UI (`/fleet`).
                 let members: Vec<Value> = FleetRole::all()
                     .iter()
                     .map(|role| {
@@ -8655,13 +8669,50 @@ impl ToolSpec for AgentTool {
                         })
                     })
                     .collect();
+                // `is_spawnable_host_profile` is the spawn-acceptance contract
+                // shared with `resolve_spawn_role_with_host_profiles` (config
+                // origin, prompt-only, no built-in role-token shadow, bounded
+                // selector), so the listing never advertises an id spawn would
+                // refuse. Sort by member_id and cap the listing to keep the
+                // payload bounded.
+                let mut host_members: Vec<&crate::fleet::profile::AgentProfile> = self
+                    .runtime
+                    .host_agent_profiles
+                    .members()
+                    .iter()
+                    .filter(|member| is_spawnable_host_profile(member))
+                    .collect();
+                // Same case-insensitive collation as `FleetRoster::from_host_config`.
+                host_members.sort_by_key(|member| member.id.to_ascii_lowercase());
+                let host_profile_count = host_members.len();
+                let host_profiles: Vec<Value> = host_members
+                    .iter()
+                    .take(ROSTER_HOST_PROFILE_LIMIT)
+                    .map(|member| {
+                        let description = member
+                            .description
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or_else(|| member.profile.role.name.trim());
+                        json!({
+                            "member_id": member.id.as_str(),
+                            "description":
+                                crate::fleet::identity::bounded_identity_field(description),
+                        })
+                    })
+                    .collect();
+                let host_profiles_truncated = host_profile_count > host_profiles.len();
                 let payload = json!({
                     "action": "roster",
                     "count": members.len(),
                     "total_count": members.len(),
                     "truncated": false,
                     "members": members,
-                    "selector_help": "Use type:<role> with one of the listed roles. A host may separately present exact prompt-only profile ids; ambient saved members are not available to this tool.",
+                    "host_profiles": host_profiles,
+                    "host_profile_count": host_profile_count,
+                    "host_profiles_truncated": host_profiles_truncated,
+                    "selector_help": "Use type:<role> with one of the listed roles. host_profiles are prompt-only profiles presented by the embedding host for this session; select one with profile=<member_id>. Ambient saved members are not available to this tool.",
                 });
                 let mut result = ToolResult::json(&payload)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
@@ -13071,6 +13122,40 @@ fn refresh_spawn_route_sources(runtime: &mut SubAgentRuntime) {
     );
 }
 
+/// Prompt-only gate for host-presented roster members: a profile that pins a
+/// model, provider, reasoning tier, loadout, permission set, or delegation
+/// policy cannot cross the Agent spawn boundary, which resolves every
+/// executable posture from the v0.9.12 [`FleetRole`] set instead.
+fn host_profile_is_prompt_only(member: &crate::fleet::profile::AgentProfile) -> bool {
+    member.profile.model.is_none()
+        && member.profile.provider.is_none()
+        && member.profile.reasoning_effort.is_none()
+        && matches!(
+            member.profile.loadout,
+            codewhale_config::FleetLoadout::Inherit
+        )
+        && member.profile.permissions == codewhale_config::FleetProfilePermissions::default()
+        && member.profile.delegation == codewhale_config::FleetDelegationHints::default()
+        && member.requires.is_empty()
+}
+
+/// Full spawn-acceptance contract for a host roster member: exactly the
+/// members `profile=<member_id>` can resolve into a host-profile spawn. The
+/// `action=roster` listing filters through this predicate so it can never
+/// advertise an id spawn would refuse (non-config origin, route pins, a
+/// built-in role token shadowing the id, or an out-of-bound selector).
+///
+/// `resolve_spawn_role_with_host_profiles` applies the origin and
+/// prompt-only legs separately to keep its distinct error messages; the
+/// role-token and selector legs never surface there because the built-in
+/// role path and parse-time selector validation run first.
+fn is_spawnable_host_profile(member: &crate::fleet::profile::AgentProfile) -> bool {
+    member.origin == crate::fleet::roster::ProfileOrigin::Config
+        && host_profile_is_prompt_only(member)
+        && FleetRole::from_str(&member.id).is_none()
+        && validate_roster_selector(&member.id, "profile").is_ok()
+}
+
 /// Resolve the `profile` spawn parameter against the closed role set or an
 /// exact profile explicitly injected by the embedding host.
 ///
@@ -13109,17 +13194,7 @@ fn resolve_spawn_role_with_host_profiles(
         )));
     };
 
-    let prompt_only = member.profile.model.is_none()
-        && member.profile.provider.is_none()
-        && member.profile.reasoning_effort.is_none()
-        && matches!(
-            member.profile.loadout,
-            codewhale_config::FleetLoadout::Inherit
-        )
-        && member.profile.permissions == codewhale_config::FleetProfilePermissions::default()
-        && member.profile.delegation == codewhale_config::FleetDelegationHints::default()
-        && member.requires.is_empty();
-    if !prompt_only {
+    if !host_profile_is_prompt_only(&member) {
         return Err(ToolError::invalid_input(format!(
             "Host profile '{}' is not prompt-only; model/provider/reasoning/loadout/permission/delegation fields are not accepted by the Agent spawn boundary",
             member.id
