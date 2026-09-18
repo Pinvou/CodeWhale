@@ -207,8 +207,12 @@
     function controllerSessionOpen(title, mode) {
       ensureAvailable();
       subscribe();
+      // 复用当前连接上的会话引用：重复打开是幂等的，不会为同一连接不断创建
+      // 新会话（Rust 侧按引用复用并重新校验 lease 绑定）。
+      var current = current();
+      var existing = current.controllerConnection && current.controllerConnection.sessionRef;
       return invoke("desktop_remote_controller_session_open", {
-        remoteRef: null,
+        remoteRef: existing || null,
         title: title || "",
         mode: mode || "chat",
       }).then(function (result) {
@@ -238,8 +242,40 @@
         remoteRef: remoteRef,
         payload: body,
       }).then(function (result) {
+        // 同一个快照同时进入能力域（revision/modes/描述符），字段名按 UI 侧
+        // 约定映射；wire 字段名不会泄漏到状态。
+        publish(logic.applyCapabilities(current(), capabilitySnapshotForUi(body)));
         return applyControllerSession(result);
       });
+    }
+
+    function descriptorList(value, idKey) {
+      if (!Array.isArray(value)) return [];
+      return value.slice(0, 256).map(function (item) {
+        var entry = item && typeof item === "object" ? item : {};
+        return {
+          id: entry[idKey] || entry.id || "",
+          displayName: entry.display_name || entry.displayName || "",
+          codeAllowed: !!entry.code_allowed,
+        };
+      });
+    }
+
+    function capabilitySnapshotForUi(payload) {
+      var wire = payload && typeof payload === "object" ? payload : {};
+      var revision = Number(wire.capability_revision);
+      return {
+        connectionId: wire.connection_id || null,
+        leaseEpoch: wire.lease_epoch || null,
+        relayEpoch: wire.relay_epoch || null,
+        remoteControlGeneration: wire.remote_control_generation || null,
+        capabilityRevision: isFinite(revision) ? revision : 0,
+        modes: Array.isArray(wire.modes) ? wire.modes.slice(0, 2) : [],
+        tools: descriptorList(wire.tools, "tool_id"),
+        skills: descriptorList(wire.skills, "skill_id"),
+        workspaces: descriptorList(wire.workspaces, "workspace_id"),
+        expiresAtMs: wire.expires_at_ms || null,
+      };
     }
 
     function controllerTaskIntent(remoteRef, text) {

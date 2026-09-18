@@ -111,8 +111,45 @@ test('the bridge forwards UI fields only and never builds protocol payloads', ()
   );
   assert.ok(intent.includes('text: String(text || "")'));
   assert.ok(!/input_digest|inputDigest|connection_id|controller_lease_id|relay_epoch/.test(intent));
-  assert.ok(!/input_digest|client_request_id|capability_revision/.test(bridge));
+  const uiPaths = [
+    bridge.slice(
+      bridge.indexOf('function controllerSessionOpen'),
+      bridge.indexOf('function controllerSessionState'),
+    ),
+    intent,
+    bridge.slice(
+      bridge.indexOf('function controllerTaskCancelIntent'),
+      bridge.indexOf('function applyControllerSession'),
+    ),
+  ].join('\n');
+  assert.ok(
+    !/input_digest|client_request_id|capability_revision|controller_lease_id|relay_epoch/.test(uiPaths),
+    'UI paths must not carry protocol field names',
+  );
   // 会话事件驱动 UI 状态（sessionId 由 Rust 投影）。
   assert.ok(bridge.includes('"desktop-remote-controller-session"'));
   assert.ok(bridge.includes('applyControllerSession'));
+});
+
+test('capability snapshots cross the bridge without leaking wire field names', () => {
+  // 快照从 wire 进来后先映射成 UI 字段，再进入能力域状态。
+  assert.ok(bridge.includes('function capabilitySnapshotForUi'));
+  assert.ok(bridge.includes('applyCapabilities(current(), capabilitySnapshotForUi(body))'));
+  const mapping = bridge.slice(
+    bridge.indexOf('function capabilitySnapshotForUi'),
+    bridge.indexOf('function controllerTaskIntent'),
+  );
+  assert.ok(mapping.includes('wire.capability_revision'));
+  assert.ok(mapping.includes('wire.workspaces'));
+  assert.ok(mapping.includes('capabilityRevision'));
+  assert.ok(!/workspaces: Array.isArray\(wire/.test(bridge.slice(0, bridge.indexOf('function capabilitySnapshotForUi'))));
+});
+
+test('reopening a session reuses the connection session reference', () => {
+  const open = bridge.slice(
+    bridge.indexOf('function controllerSessionOpen'),
+    bridge.indexOf('function controllerSessionState'),
+  );
+  assert.ok(open.includes('controllerConnection.sessionRef'));
+  assert.ok(open.includes('remoteRef: existing || null'));
 });
