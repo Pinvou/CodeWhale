@@ -2168,16 +2168,35 @@ impl McpConnection {
         }
 
         let call_id = self.next_id();
-        if let Err(error) = self
-            .send(serde_json::json!({
+        // The send leg shares the request budget: a server that wedges
+        // without draining stdin would otherwise block `write_all` forever,
+        // outside every budget — the same liveness hole the read leg's
+        // per-request budget closed. A timed-out partial write desyncs the
+        // line protocol, so this goes through finish_guarded_error like the
+        // read-side timeout (the caller reconnects).
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            self.send(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": &call_id,
                 "method": method,
                 "params": params
-            }))
-            .await
+            })),
+        )
+        .await
         {
-            return self.finish_guarded_error(error).await;
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return self.finish_guarded_error(error).await,
+            Err(error) => {
+                return self
+                    .finish_guarded_error(anyhow::anyhow!(
+                        "MCP method '{}' on server '{}' timed out sending after {}s: {error}",
+                        method,
+                        self.name,
+                        timeout_secs
+                    ))
+                    .await;
+            }
         }
 
         // The inner read wait must never undercut this request's own outer
@@ -3385,7 +3404,7 @@ impl McpPool {
     /// whether a browser login is needed and, if so, start it. Only touches
     /// config, the connection map, and the token store — it returns as soon
     /// as the authorization URL exists, so a caller holding the pool lock can
-    /// release it before the (up to five minute) browser wait in
+    /// release it before the (up to fifteen minute) browser wait in
     /// [`oauth::McpOAuthToolLogin::finish`]. Holding the lock across that wait
     /// would freeze every other MCP call, the `/mcp` manager, and the
     /// Extensions view for the whole sign-in.
