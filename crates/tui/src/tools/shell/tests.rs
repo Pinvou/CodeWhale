@@ -4382,3 +4382,143 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
         "the frozen value must be the real duration, not the timeout: {second}ms"
     );
 }
+
+// The Windows execution-policy fallback: the temp `-File` script is refused
+// before any statement runs, so the tool re-runs the identical payload as an
+// inline `-EncodedCommand`. The predicate is what decides "refused by the
+// host" versus "the command itself failed", and it must not depend on the
+// language of the machine.
+#[test]
+fn powershell_execution_policy_rejection_is_locale_independent() {
+    // Captured verbatim from the real invocation the tool makes
+    // (`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Restricted
+    // -File <temp>.ps1`, stderr piped). Two details decide the predicate: the
+    // formatter wraps the About_Execution_Policies URL mid-token, so
+    // "linkid=135170" is not in the captured text at all, and this host path
+    // reports ParentContainsErrorRecordException rather than
+    // PSSecurityException.
+    let raw_en = concat!(
+        "File C:\\Users\\u\\AppData\\Local\\Temp\\codewhale-shell-1-2.ps1 cannot be loaded because running scripts is disa\n",
+        "bled on this system. For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=13517\n",
+        "0.\n",
+        "    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n",
+        "    + FullyQualifiedErrorId : UnauthorizedAccess\n",
+    );
+    assert!(powershell_execution_policy_rejection(raw_en, ""));
+    assert!(
+        !raw_en.to_ascii_lowercase().contains("linkid=135170"),
+        "the wrapped URL must not be the signal the predicate depends on"
+    );
+    assert!(
+        !raw_en.to_ascii_lowercase().contains("pssecurityexception"),
+        "the host path reports a different exception type"
+    );
+    // zh-CN refusal, including the unsigned-script shape.
+    assert!(powershell_execution_policy_rejection(
+        "无法加载文件 C:\\Temp\\codewhale-shell-1-2.ps1，因为在此系统上禁止运行脚本。有关详细信息，请参阅 https:/go.microsoft.com/fwlink/?LinkID=135170 中的 about_Execution_Policies。\n    + CategoryInfo          : SecurityError: (:) []，PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    assert!(powershell_execution_policy_rejection(
+        "未对文件 C:\\Temp\\codewhale-shell-1-2.ps1 进行数字签名。无法在当前系统上运行该脚本。有关运行脚本和设置执行策略的详细信息，请参阅 https:/go.microsoft.com/fwlink/?LinkID=135170 中的 about_Execution_Policies。\n    + CategoryInfo          : SecurityError: (:) []，PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    // ja-JP refusal, where even the category name is translated
+    // ("セキュリティ エラー"), and the same refusal with every localized part
+    // stripped away: the error-record metadata alone still identifies it.
+    assert!(powershell_execution_policy_rejection(
+        "このシステムではスクリプトの実行が無効になっているため、ファイル C:\\Temp\\codewhale-shell-1-2.ps1 を読み込むことができません。詳細については、「about_Execution_Policies」(https://go.microsoft.com/fwlink/?LinkID=135170) を参照してください。\n    + CategoryInfo          : セキュリティ エラー: (: ) []、PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    assert!(powershell_execution_policy_rejection(
+        "    + CategoryInfo          : セキュリティ エラー: (: ) []、PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    // A statement location rules it out even when every other signal matches:
+    // here the outer script ran, then the policy refused an inner script, so
+    // re-running the command would duplicate the outer script's side effects.
+    assert!(!powershell_execution_policy_rejection(
+        "未对文件 C:\\Temp\\inner.ps1 进行数字签名。无法在当前系统上运行该脚本。有关运行脚本和设置执行策略的详细信息，请参阅 https:/go.microsoft.com/fwlink/?LinkID=135170 中的 about_Execution_Policies。\n    所在位置 C:\\Temp\\codewhale-shell-1-2.ps1:2 字符: 3\n    + CategoryInfo          : SecurityError: (:) []，PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    assert!(!powershell_execution_policy_rejection(
+        "File C:\\Temp\\inner.ps1 is not digitally signed. You cannot run this script on the current system. For more information see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\n    At C:\\Temp\\codewhale-shell-1-2.ps1:2 char:1\n    + CategoryInfo          : SecurityError: (:) [], PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    // A command failing on its own keeps its result: UnauthorizedAccess is
+    // present, but with the command's own exception type and its location
+    // inside the script. An unknown command and empty output do too.
+    assert!(!powershell_execution_policy_rejection(
+        "Get-Content: C:\\private\\secret.txt: Access to the path is denied.\n    At C:\\Temp\\codewhale-shell-1-2.ps1:3 char:1\n    + CategoryInfo          : PermissionDenied: (:) [Get-Content], UnauthorizedAccessException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        "",
+    ));
+    assert!(!powershell_execution_policy_rejection(
+        "The term 'foo' is not recognized as a name of a cmdlet, function, script file, \
+         or executable program.",
+        "",
+    ));
+    assert!(!powershell_execution_policy_rejection("", ""));
+}
+
+// End-to-end: the encoded form really runs the payload the temp `-File` form
+// was written for (multiline + non-ASCII), with no file on disk.
+#[cfg(windows)]
+#[test]
+fn powershell_encoded_spec_runs_a_non_ascii_payload() {
+    use std::process::{Command, Stdio};
+
+    let spec = CommandSpec::powershell_encoded_shell(
+        "Write-Output '编码-ok'\nWrite-Output 'line2'",
+        std::env::temp_dir(),
+        std::time::Duration::from_secs(60),
+    )
+    .expect("PowerShell encoded spec");
+    assert!(
+        !spec.args.iter().any(|arg| arg == "-File"),
+        "{:?}",
+        spec.args
+    );
+
+    let output = Command::new(&spec.program)
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn PowerShell");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("编码-ok"), "stdout={stdout}");
+    assert!(stdout.contains("line2"), "stdout={stdout}");
+}
+
+// End-to-end: the normal temp `-File` form still carries the process-scoped
+// policy bypass, so a restricted machine runs the script this tool wrote.
+#[cfg(windows)]
+#[test]
+fn powershell_temp_script_form_runs_a_non_ascii_payload() {
+    use std::process::{Command, Stdio};
+
+    let dispatcher = crate::shell_dispatcher::global_dispatcher();
+    let (program, args) = dispatcher.build_command_parts(
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+         Write-Output '编码-ok'\nWrite-Output 'line2'",
+    );
+    assert!(args.iter().any(|arg| arg == "-File"), "{args:?}");
+    assert!(
+        args.iter().any(|arg| arg == "Bypass"),
+        "the temp script needs the bypass: {args:?}"
+    );
+
+    let output = Command::new(&program)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn PowerShell");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("编码-ok"), "stdout={stdout}");
+    assert!(stdout.contains("line2"), "stdout={stdout}");
+}

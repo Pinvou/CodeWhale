@@ -507,6 +507,50 @@ fn install_parent_death_signal(cmd: &mut Command) {
     }
 }
 
+/// Whether PowerShell refused to load the tool's temporary `-File` script
+/// because of the machine's execution policy.
+///
+/// Only what the console formatter never translates is matched. The refusal
+/// prose is localized; what survives is the error-record metadata:
+///
+/// * `unauthorizedaccess` - the `FullyQualifiedErrorId` of a script the
+///   security manager refused (its label stays English under en-US, zh-CN, and
+///   ja-JP);
+/// * `parentcontainserrorrecordexception` or `pssecurityexception` - the
+///   exception type of that refusal, for the host `-File` path and the
+///   in-session `&` path respectively. .NET type names are never localized,
+///   and a command that fails on its own reports its own exception type, so an
+///   ordinary access-denied error inside the script cannot trigger a retry.
+///
+/// `about_execution_policies` (the help topic both refusals cite) stays English
+/// too and covers a truncated metadata block. The `LinkID=135170` fwlink is
+/// deliberately *not* matched: the formatter wraps it mid-token at its line
+/// width, so it is absent from the captured text of a real refusal.
+///
+/// A `<path>.ps1:<line>` location line rules every branch out: it means a
+/// statement already ran, so the failure happened *inside* a script rather than
+/// at the host's load boundary, and retrying would duplicate whatever executed
+/// before it. A top-level load refusal prints no location line.
+fn powershell_execution_policy_rejection(stderr: &str, stdout: &str) -> bool {
+    let mut haystack = String::with_capacity(stderr.len() + stdout.len() + 1);
+    haystack.push_str(stderr);
+    haystack.push('\n');
+    haystack.push_str(stdout);
+    let haystack = haystack.to_ascii_lowercase();
+    if haystack.match_indices(".ps1:").any(|(index, _)| {
+        haystack[index + 5..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+    }) {
+        return false;
+    }
+    (haystack.contains("unauthorizedaccess")
+        && (haystack.contains("parentcontainserrorrecordexception")
+            || haystack.contains("pssecurityexception")))
+        || haystack.contains("about_execution_policies")
+}
+
 /// Attach `args` to a `std::process::Command`, honoring shell-quoting on
 /// Windows.
 ///
@@ -2106,8 +2150,64 @@ impl ShellManager {
                     "TTY mode requires background execution (set background: true)."
                 ));
             }
-            Self::execute_sync_sandboxed(command, &work_dir, timeout_ms, stdin_data, &exec_env)
+            let first = Self::execute_sync_sandboxed(
+                command, &work_dir, timeout_ms, stdin_data, &exec_env,
+            )?;
+            // Only a temp `-File` script the host refused to load is retried:
+            // a completed run, any other failure, and the command's own output
+            // keep the first result. The refusal runs no statement, so the
+            // inline rerun cannot duplicate side effects.
+            if first.status == ShellStatus::Completed
+                || !spec.args.iter().any(|arg| arg == "-File")
+                || !powershell_execution_policy_rejection(&first.stderr, &first.stdout)
+            {
+                return Ok(first);
+            }
+            self.retry_powershell_without_script_file(
+                command, &work_dir, timeout_ms, stdin_data, &spec, first,
+            )
         }
+    }
+
+    /// PowerShell's temporary `-File` script is subject to the machine's
+    /// execution policy, so a locked-down machine refuses a script this tool
+    /// wrote itself. PowerShell rejects the file before running a single
+    /// statement, which makes one inline retry side-effect free: the identical
+    /// payload is re-sent as `-EncodedCommand` (no file to refuse, no quoting
+    /// surface, no BOM), which is also what survives a Group Policy
+    /// `-ExecutionPolicy` override or an AppLocker script rule. Any other
+    /// failure keeps the first result untouched.
+    fn retry_powershell_without_script_file(
+        &self,
+        command: &str,
+        work_dir: &std::path::Path,
+        timeout_ms: u64,
+        stdin_data: Option<&str>,
+        spec: &CommandSpec,
+        first: ShellResult,
+    ) -> Result<ShellResult> {
+        let Some(encoded) = CommandSpec::powershell_encoded_shell(
+            command,
+            work_dir.to_path_buf(),
+            Duration::from_millis(timeout_ms),
+        ) else {
+            return Ok(first);
+        };
+        let encoded = encoded
+            .with_policy(spec.sandbox_policy.clone())
+            .with_env(spec.env.clone());
+        let exec_env = self.sandbox_manager.prepare(&encoded);
+        let mut retried =
+            Self::execute_sync_sandboxed(command, work_dir, timeout_ms, stdin_data, &exec_env)?;
+        if !retried.stderr.is_empty() && !retried.stderr.ends_with('\n') {
+            retried.stderr.push('\n');
+        }
+        retried.stderr.push_str(
+            "[codewhale] the local execution policy refused the temporary script; \
+             the same command was re-run inline with -EncodedCommand\n",
+        );
+        retried.duration_ms = retried.duration_ms.saturating_add(first.duration_ms);
+        Ok(retried)
     }
 
     /// Interactive variant that accepts extra env vars (#456 shell_env hook).

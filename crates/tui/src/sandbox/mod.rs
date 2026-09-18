@@ -154,6 +154,48 @@ impl CommandSpec {
         }
     }
 
+    /// Like [`CommandSpec::shell`], but forces the PowerShell
+    /// `-EncodedCommand` form: the script travels as a UTF-16LE base64
+    /// argument instead of a temp `.ps1`, so the Windows execution policy
+    /// (which governs script files) cannot refuse it and no quoting or BOM
+    /// handling is involved. Returns `None` when the detected shell is not
+    /// PowerShell, and the caller then keeps the original invocation.
+    pub fn powershell_encoded_shell(
+        command: &str,
+        cwd: PathBuf,
+        timeout: Duration,
+    ) -> Option<Self> {
+        let dispatcher = crate::shell_dispatcher::global_dispatcher();
+
+        #[cfg(windows)]
+        let cmd = format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}");
+        #[cfg(not(windows))]
+        let cmd = command.to_string();
+
+        let (program, args) = dispatcher.build_powershell_encoded_parts(&cmd)?;
+        let env = {
+            #[cfg(windows)]
+            {
+                windows_shell_default_env()
+            }
+            #[cfg(not(windows))]
+            {
+                HashMap::new()
+            }
+        };
+
+        Some(Self {
+            program,
+            args,
+            cwd,
+            env,
+            timeout,
+            sandbox_policy: SandboxPolicy::default(),
+            justification: None,
+            requested_command: Some(command.to_string()),
+        })
+    }
+
     /// Create a `CommandSpec` for running a program directly.
     pub fn program(program: &str, args: Vec<String>, cwd: PathBuf, timeout: Duration) -> Self {
         Self {
