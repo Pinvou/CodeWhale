@@ -112,25 +112,61 @@ impl CommandSpec {
 
         #[cfg(windows)]
         let (program, args) = {
-            // Force UTF-8 output. cmd.exe uses chcp; PowerShell sets the
-            // console output encoding directly. See issue #982.
-            let kind = dispatcher.kind();
-            let cmd = if matches!(
-                kind,
-                crate::shell_dispatcher::ShellKind::Pwsh
-                    | crate::shell_dispatcher::ShellKind::WindowsPowerShell
-            ) {
-                format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}")
-            } else if matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
-                format!("chcp 65001 >NUL & {command}")
-            } else {
-                command.to_string()
-            };
+            let cmd = Self::windows_shell_text(dispatcher.kind(), command);
             dispatcher.build_command_parts(&cmd)
         };
         #[cfg(not(windows))]
         let (program, args) = dispatcher.build_command_parts(command);
 
+        Self::from_shell_parts(program, args, cwd, timeout, command)
+    }
+
+    /// Like [`CommandSpec::shell`], but forces the PowerShell
+    /// `-EncodedCommand` form: the script travels as a UTF-16LE base64
+    /// argument instead of a temp `.ps1`, so the Windows execution policy
+    /// (which governs script files) cannot refuse it and no quoting or BOM
+    /// handling is involved. Returns `None` when the detected shell is not
+    /// PowerShell, and the caller then keeps the original invocation.
+    pub fn powershell_encoded_shell(
+        command: &str,
+        cwd: PathBuf,
+        timeout: Duration,
+    ) -> Option<Self> {
+        let dispatcher = crate::shell_dispatcher::global_dispatcher();
+
+        #[cfg(windows)]
+        let cmd = Self::windows_shell_text(dispatcher.kind(), command);
+        #[cfg(not(windows))]
+        let cmd = command.to_string();
+
+        let (program, args) = dispatcher.build_powershell_encoded_parts(&cmd)?;
+        Some(Self::from_shell_parts(program, args, cwd, timeout, command))
+    }
+
+    /// The exact command text the platform shell receives. Both shell
+    /// constructors must agree on it: cmd.exe needs `chcp` while PowerShell
+    /// sets the console output encoding directly (issue #982).
+    #[cfg(windows)]
+    fn windows_shell_text(kind: &crate::shell_dispatcher::ShellKind, command: &str) -> String {
+        use crate::shell_dispatcher::ShellKind;
+        match kind {
+            ShellKind::Pwsh | ShellKind::WindowsPowerShell => {
+                format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}")
+            }
+            ShellKind::Cmd => format!("chcp 65001 >NUL & {command}"),
+            _ => command.to_string(),
+        }
+    }
+
+    /// Shared construction for both shell forms, so the two cannot drift on the
+    /// default env, the policy slot, or the displayed command.
+    fn from_shell_parts(
+        program: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        timeout: Duration,
+        requested_command: &str,
+    ) -> Self {
         let env = {
             #[cfg(windows)]
             {
@@ -150,50 +186,8 @@ impl CommandSpec {
             timeout,
             sandbox_policy: SandboxPolicy::default(),
             justification: None,
-            requested_command: Some(command.to_string()),
+            requested_command: Some(requested_command.to_string()),
         }
-    }
-
-    /// Like [`CommandSpec::shell`], but forces the PowerShell
-    /// `-EncodedCommand` form: the script travels as a UTF-16LE base64
-    /// argument instead of a temp `.ps1`, so the Windows execution policy
-    /// (which governs script files) cannot refuse it and no quoting or BOM
-    /// handling is involved. Returns `None` when the detected shell is not
-    /// PowerShell, and the caller then keeps the original invocation.
-    pub fn powershell_encoded_shell(
-        command: &str,
-        cwd: PathBuf,
-        timeout: Duration,
-    ) -> Option<Self> {
-        let dispatcher = crate::shell_dispatcher::global_dispatcher();
-
-        #[cfg(windows)]
-        let cmd = format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}");
-        #[cfg(not(windows))]
-        let cmd = command.to_string();
-
-        let (program, args) = dispatcher.build_powershell_encoded_parts(&cmd)?;
-        let env = {
-            #[cfg(windows)]
-            {
-                windows_shell_default_env()
-            }
-            #[cfg(not(windows))]
-            {
-                HashMap::new()
-            }
-        };
-
-        Some(Self {
-            program,
-            args,
-            cwd,
-            env,
-            timeout,
-            sandbox_policy: SandboxPolicy::default(),
-            justification: None,
-            requested_command: Some(command.to_string()),
-        })
     }
 
     /// Create a `CommandSpec` for running a program directly.

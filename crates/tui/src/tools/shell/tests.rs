@@ -4492,6 +4492,134 @@ fn powershell_encoded_spec_runs_a_non_ascii_payload() {
     assert!(stdout.contains("line2"), "stdout={stdout}");
 }
 
+fn failed_result_with(status: ShellStatus, stderr: &str) -> ShellResult {
+    ShellResult {
+        task_id: None,
+        status,
+        exit_code: Some(1),
+        stdout: String::new(),
+        stderr: stderr.to_string(),
+        duration_ms: 1,
+        stdout_len: 0,
+        stderr_len: stderr.len(),
+        stdout_omitted: 0,
+        stderr_omitted: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        sandboxed: false,
+        sandbox_type: None,
+        sandbox_denied: false,
+    }
+}
+
+fn temp_file_spec(script: &std::path::Path, cwd: &std::path::Path) -> CommandSpec {
+    CommandSpec::program(
+        "pwsh",
+        vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script.to_string_lossy().into_owned(),
+        ],
+        cwd.to_path_buf(),
+        Duration::from_secs(5),
+    )
+}
+
+// The retry gate: only a failed temp `-File` refusal may be retried, so a
+// cancellation or a timeout can never re-run a command the user stopped.
+#[test]
+fn powershell_inline_retry_only_for_a_failed_file_refusal() {
+    let dir = tempdir().expect("tempdir");
+    let script = dir.path().join("codewhale-shell-1-9.ps1");
+    let refusal = concat!(
+        "File C:\\Temp\\codewhale-shell-1-9.ps1 cannot be loaded because running scripts is disabled on this system. ",
+        "For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\n",
+        "    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n",
+        "    + FullyQualifiedErrorId : UnauthorizedAccess",
+    );
+    let spec = temp_file_spec(&script, dir.path());
+
+    assert!(powershell_refusal_needs_inline_retry(
+        &spec,
+        &failed_result_with(ShellStatus::Failed, refusal)
+    ));
+    for status in [
+        ShellStatus::Completed,
+        ShellStatus::Killed,
+        ShellStatus::TimedOut,
+        ShellStatus::Running,
+    ] {
+        assert!(
+            !powershell_refusal_needs_inline_retry(
+                &spec,
+                &failed_result_with(status.clone(), refusal)
+            ),
+            "{status:?} must never be retried"
+        );
+    }
+    // A direct invocation has no temp script to refuse, and an ordinary
+    // failure keeps its own result.
+    let direct = CommandSpec::program(
+        "pwsh",
+        vec!["-Command".to_string(), "echo hi".to_string()],
+        dir.path().to_path_buf(),
+        Duration::from_secs(5),
+    );
+    assert!(!powershell_refusal_needs_inline_retry(
+        &direct,
+        &failed_result_with(ShellStatus::Failed, refusal)
+    ));
+    assert!(!powershell_refusal_needs_inline_retry(
+        &spec,
+        &failed_result_with(
+            ShellStatus::Failed,
+            "Get-Content: access to the path is denied."
+        )
+    ));
+}
+
+// The glue: the retry helper re-runs the identical payload inline, annotates
+// the fallback, and accounts for both attempts.
+#[cfg(windows)]
+#[test]
+fn powershell_inline_retry_runs_the_command_and_notes_the_fallback() {
+    let dir = tempdir().expect("tempdir");
+    let manager = ShellManager::new(dir.path().to_path_buf());
+    let command = "Write-Output '中文-ok'";
+    let spec = CommandSpec::shell(command, dir.path().to_path_buf(), Duration::from_secs(60));
+    let mut first = failed_result_with(ShellStatus::Failed, "");
+    first.duration_ms = 7;
+
+    let retried = manager
+        .retry_powershell_without_script_file(command, dir.path(), 60_000, None, &spec, first)
+        .expect("the inline retry runs");
+
+    assert!(
+        retried.status == ShellStatus::Completed,
+        "stderr={}",
+        retried.stderr
+    );
+    assert!(
+        retried.stdout.contains("中文-ok"),
+        "stdout={}",
+        retried.stdout
+    );
+    assert!(
+        retried.stderr.contains("-EncodedCommand"),
+        "the fallback must be annotated: {}",
+        retried.stderr
+    );
+    assert!(
+        retried.duration_ms >= 7,
+        "elapsed must account for the first attempt: {}",
+        retried.duration_ms
+    );
+}
+
 // End-to-end: the normal temp `-File` form still carries the process-scoped
 // policy bypass, so a restricted machine runs the script this tool wrote.
 #[cfg(windows)]

@@ -551,6 +551,16 @@ fn powershell_execution_policy_rejection(stderr: &str, stdout: &str) -> bool {
         || haystack.contains("about_execution_policies")
 }
 
+/// Whether a finished PowerShell attempt is a refusal the inline retry may
+/// repair: only a *failed* temp `-File` run qualifies. A completed run keeps
+/// its result, and a `Killed` (the user cancelled) or `TimedOut` attempt must
+/// never be re-run - that would defeat the stop or double the wall clock.
+fn powershell_refusal_needs_inline_retry(spec: &CommandSpec, result: &ShellResult) -> bool {
+    result.status == ShellStatus::Failed
+        && spec.args.iter().any(|arg| arg == "-File")
+        && powershell_execution_policy_rejection(&result.stderr, &result.stdout)
+}
+
 /// Attach `args` to a `std::process::Command`, honoring shell-quoting on
 /// Windows.
 ///
@@ -2153,14 +2163,11 @@ impl ShellManager {
             let first = Self::execute_sync_sandboxed(
                 command, &work_dir, timeout_ms, stdin_data, &exec_env,
             )?;
-            // Only a temp `-File` script the host refused to load is retried:
-            // a completed run, any other failure, and the command's own output
-            // keep the first result. The refusal runs no statement, so the
-            // inline rerun cannot duplicate side effects.
-            if first.status == ShellStatus::Completed
-                || !spec.args.iter().any(|arg| arg == "-File")
-                || !powershell_execution_policy_rejection(&first.stderr, &first.stdout)
-            {
+            // Only a failed temp `-File` run the host refused to load is
+            // retried: a completed run, a cancellation, a timeout, and the
+            // command's own output all keep the first result. The refusal runs
+            // no statement, so the inline rerun cannot duplicate side effects.
+            if !powershell_refusal_needs_inline_retry(&spec, &first) {
                 return Ok(first);
             }
             self.retry_powershell_without_script_file(
