@@ -1,0 +1,55 @@
+# 账本修复（`LEDGER_REPAIR`）领域设计
+
+状态：`IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED`。本文只登记 GSA-23 的仓库事实、既有不变量与待用户决策的门禁，不冻结写入协议、不开始 GSA-24、不开启 activation；用户范围决策前不把本文算作设计完成。命令基线见 [十四命令事实与兼容基线](admin-governance-security-command-baseline.md)，治理与激活约束见 [治理与安全重设计](admin-governance-security-redesign.md) §11 与 §14。
+
+## 1. 命令现状（事实）
+
+- **只有策略元数据**：Account `approval_command_policies` 与 `approvalpolicy` 注册表为该命令登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`、`internal/platform/approvalpolicy/registry.go`）。
+- **静态不可执行**：该命令不在 `executableApprovalCommands` 内，因此 create/update/submit/APPROVE/Begin 均在领域调用前失败关闭，Portal 目录以 Billing activation 真相为准（`internal/account/approvals.go`、`internal/account/token_governance_activation.go`）。
+- **Billing 侧只有未激活行**：`billing_approval_command_activations` 中为 `('LEDGER_REPAIR',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`）。不存在该命令的 HTTP handler、proof 投影、executor、consumer durable、恢复分类或结果载荷；`internal/platform/approvalconsumer` 的 durable 注册表只有既有六命令与 GSA-22 的权益纠错专属 durable。
+- **合同层已登记为已知命令**：OpenAPI 与 Node 合同把该命令列入 11 项 activation 投影并要求 `state=INACTIVE`（`contracts/openapi/billing.yaml`、`test/contract/billing-approval-activation.test.mjs`）。
+
+结论：当前不存在任何可执行路径，也不存在通过审批获得执行授权的可能；本命令要么整体设计后按 GSA-24 实现，要么保持关闭。
+
+## 2. 账本现状与不可改写边界（事实）
+
+- **账户类型与系统账户**：`ledger_accounts.account_type ∈ {WALLET_LIABILITY,PAYMENT_CLEARING,USAGE_REVENUE,REFUND_CLEARING,ADJUSTMENT}`；四个系统账户使用固定 UUID，Billing 仓库启动时校验其存在（`migrations/billing/000002_ledger.up.sql`、`internal/billing/system_ledger_accounts.go`、`internal/billing/postgres.go`）。
+- **journal 与 posting 必须新增、不可改写**：`journal_entries.business_reference` 全局唯一、`entry_type` 白名单为 `RECHARGE/USAGE/REFUND/REVERSAL/ADJUSTMENT/EXPIRE/REPAIR_CREDIT`（迁移 `000013_package_expiry`），并有 `journal_entries_immutable`、`ledger_postings_immutable` 触发器拒绝 UPDATE/DELETE；`ledger_postings` 要求 `delta_microcredits<>0`，`ledger_postings_balanced` 是 `DEFERRABLE INITIALLY DEFERRED` 约束触发器，要求同一 journal 内 posting 求和为 0（`migrations/billing/000002_ledger.up.sql`）。
+- **余额与额度护栏**：`wallets.posted_microcredits>=0` 且带 `version`；`credit_lots.remaining_microcredits` 限定在 `[0,original_microcredits]`；`entitlement_packages`/`entitlement_components` 有各自的守恒约束与只读投影，GSA-22 已把 `original-reclassified_out` 纳入包有效量。
+- **已有账本写入者**（修复设计必须复用而不是绕开）：普通充值 `RECHARGE`、用量结算 `USAGE`（`internal/billing/postgres.go`）、人工调账 `ADJUSTMENT`（`internal/billing/adjustments.go`，含 `platform:adjustment` 对向 posting）、包过期 `EXPIRE`（`internal/billing/packages.go`）、已验证支付但未入账的修复信用 `REPAIR_CREDIT`（`internal/billing/payments.go`，业务引用 `repair-payment-transaction:<txn>`）、GSA-22 权益组成纠错的成对 `ADJUSTMENT` posting（`internal/billing/entitlement_correction_execute.go`）。
+- **可发现的结论**：唯一 `business_reference` 天然是幂等边界；任何修复只能是“新增一个平衡 journal 及其配对 posting（必要时附带新 credit lot 或 component）”，不能修改、删除、重放既有 journal/posting，也不能让历史台账失去可核对性。
+
+## 3. 与相邻流程的职责边界（避免重复建设）
+
+- “支付已确认但未入账”已有对账驱动的 `REPAIR_CREDIT` 路径，本命令不应重复实现同一场景。
+- 钱包余额的人工增减已有 `WALLET_ADJUSTMENT`（审批 + 执行 + `ADJUSTMENT` 账户对向 posting），本命令不应成为第二个任意金额入口。
+- 权益组成与原支付拆分错配已有 GSA-22 `ENTITLEMENT_COMPONENT_ADJUSTMENT`（含 zero-history 门禁与成对账本）。
+- `payment_order_repairs`、`reconciliation_cases` 目前记录支付/对账事实与观察，不直接改账本。
+- **仍无归属的账本级缺口**（需要用户先定范围）：①journal 平衡但账户或 credit lot 归属错误；②钱包/包派生余额与账本事实不一致（未入账或重复入账）；③业务已发生但缺少 journal；④分录金额与业务事实不符。每类的证据来源、允许写入的字段集合与失败关闭点都不同，不能用一个通用 schema 一次性覆盖。
+
+## 4. 决策门禁（待用户确认，本文不做选择）
+
+| 决策 | 选项 | 影响 |
+|---|---|---|
+| 首版范围 | (a) 仅“归属错误”的等额冲正；(b) 含“缺失/重复记账”的补记；(c) 仅只读核对并交由人工 `WALLET_ADJUSTMENT` | 直接决定 closed command/snapshot/proof 字段、需要的外部证据与恢复分类 |
+| 事实证据 | (a) 仅领域内既有持久事实；(b) 需要外部对账/支付证据；(c) 需要运维人工确认记录 | 决定 proof 是否可离线重算、是否需要新的证据表与归档 |
+| 写入边界 | (a) 只允许 journal/posting 层纠正；(b) 允许同时调整 wallet/credit lot/package 有效量 | 决定是否触碰余额守恒、退款/拒付/应收归属与消费顺序 |
+| 幂等与恢复 | 沿用 `business_reference` 单次语义 + GSA-16 分类，是否允许“结果未知时只读查证” | 决定 executor/consumer 的 result-first 读取与 DLQ 收口 |
+| 金额与次数 | 单笔上限、同一目标可修复次数、是否需要冷却窗口 | 决定是否新增限额表与并发门禁 |
+
+无论选择哪一项：默认保持 `INACTIVE`，只有本类设计、实现、recovery 与发布门禁全部通过并取得独立激活授权后才可激活，且不得改写历史账本。
+
+## 5. 本切片不做的事
+
+- 不新增或修改任何迁移、Go/Node 代码、OpenAPI 合同、activation 行或执行路径。
+- 不冻结 command/snapshot/proof schema，不定义 error 分类，不把本文当作 GSA-24 的开工依据。
+- 不改动既有六命令、GSA-22 权益纠错、`REPAIR_CREDIT`、`WALLET_ADJUSTMENT` 或对账流程的任何行为。
+
+## 6. 自检与验证
+
+- 本文每条事实都能回溯到上列迁移或源码路径；结论只写“当前不存在可执行路径”，不推测未来实现。
+- 变更范围仅本文件与任务登记；运行 `node scripts/check-account-platform-tasks.mjs`、`node scripts/account-platform-migration-manifest.mjs check`、`git diff --check` 与统一 `account-platform verify`，不使用 SKIP 作为通过证据。
+
+## 7. 记录
+
+- 2026-09-18 代理：登记事实与决策门禁首切片；范围未定，等用户决策后再进入 GSA-23 设计冻结与 GSA-24 实现。

@@ -45,7 +45,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-21 | APT-141 | 权益组成调整领域设计 | GSA-16, GSA-20 | DESIGN | DESIGN_COMPLETE / REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-22 | APT-141 | 权益组成调整实现与领域 E2E | GSA-21 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
-| GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | PENDING |
+| GSA-23 | APT-141 | 账本修复领域设计 | GSA-22 | DESIGN | IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-24 | APT-141 | 账本修复实现与领域 E2E | GSA-23 | CODE | PENDING |
 | GSA-25 | APT-141 | 应收核销领域设计 | GSA-24 | DESIGN | PENDING |
 | GSA-26 | APT-141 | 应收核销实现与领域 E2E | GSA-25 | CODE | PENDING |
@@ -257,6 +257,8 @@ GSA-22 Account proof client路由切片（仍PARTIAL / REVIEW_PENDING）：Accou
 GSA-22 权益纠错consumer专属路由切片（仍PARTIAL / REVIEW_PENDING）：closed consumer registry新增`billing-entitlement-component-adjustment-executor-p2-v1`（Billing workload / policy v2 / Q+1启动），Account前向`000070`以authorization owner重写只读mapping/route函数，仅允许该命令的proof-era wire进入此durable并拒绝legacy wire；down保持55000前向禁止。同步OpenAPI canonical durable枚举、consumer wiring合同和query-only失败分类。真实Account迁移1→70与路由函数集成PASS，registry/recovery/合同定向测试PASS，manifest328项PASS；durable仍不在Billing服务启动集合，跨域E2E与activation未完成。
 
 GSA-22 跨域未激活门禁验证切片（仍PARTIAL / REVIEW_PENDING）：Account集成夹具改为生产同构的独立Billing数据库（库与`public`归`billing_schema_owner`、迁移以`billing_migrator`加`MIGRATION_ROLE=billing_service`应用1→58、运行期使用非超级用户`billing_service`会话），并以真实HTTP proof authority验证跨域门禁仍按部署状态闭合：Billing投影该命令为追加的v2/INACTIVE且保留不可变v1历史行，真实proof endpoint对闭合owner投影拒绝出证（`ErrApprovalProofUnavailable`），Account create/update以公开冲突结果拒绝、submit/approve以`ErrApprovalCommandNotExecutable`拒绝且完全不读取Billing activation、begin在缺少冻结consumer binding时失败关闭；两侧零副作用（无decision/outbox/execution/correction/proof claim/组件变化）。以schema owner提前激活该v2行时，Billing reader仍整表失败关闭（`ErrApprovalActivationUnavailable`），owner只读计划不受影响。本切片同时把Billing闭合owner投影抽为proof路径与夹具共用的单一实现，并新增受控连接池构造入口。真实Account+Billing组合PASS 19.50s。仍未完成：正向Account→Billing批准/消费/查证E2E必须先做“激活能力”决定（Billing `mayBeActive`、Account `billinggovernance`校验与静态executable集合三处门禁需同时放开，且默认仍INACTIVE、生产激活仍需GSA-38～40与独立授权）、业务页presenter与生产激活。
+
+GSA-23 账本修复事实与决策门禁切片（IN_PROGRESS / FACTS_RECORDED / DECISION_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED）：新增[账本修复领域设计](ledger-repair-design.md)首版，只登记仓库事实与待决策门禁：该命令当前仅有Account v1策略元数据（`platform.billing.repairs.request`/`.approve`、FINANCIAL_FACT_CHANGE、1名非申请人审批、24小时有效期、5分钟窗口、`billing-command-executor`）与Billing `('LEDGER_REPAIR',1,1,'INACTIVE',1)`，静态不可执行且没有handler/proof/executor/consumer/recovery；账本侧`journal_entries.business_reference`全局唯一、`entry_type`白名单含`REVERSAL`/`EXPIRE`/`REPAIR_CREDIT`、journal/posting均有不可变触发器且journal必须平衡（延迟约束触发器），`wallets.posted_microcredits>=0`与`credit_lots`上下界构成既有护栏，因此任何修复只能是新增平衡journal与配对posting、不能改写历史。文档同时列出与既有路径的职责边界（`REPAIR_CREDIT`、`WALLET_ADJUSTMENT`、GSA-22权益纠错、对账/支付修复事实）与四项待用户决策（首版范围、事实证据来源、是否允许触碰wallet/lot/package有效量、幂等与恢复/限额），明确默认`INACTIVE`且不得改写历史账本。本切片不改任何代码、迁移、合同或activation，等用户范围决策后再进入GSA-23设计冻结与GSA-24实现。
 
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
