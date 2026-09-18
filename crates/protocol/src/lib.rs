@@ -211,8 +211,13 @@ pub struct ThreadForkParams {
     pub base_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_roots: Vec<PathBuf>,
+    /// `None` (or absent) inherits the parent thread's set, with the fork's
+    /// cwd taking the primary slot; `Some(roots)` replaces it wholesale —
+    /// `Some([])` is an explicit clear back to the bare cwd. The field is
+    /// new, so a bare `thread/fork` (the historical shape) must inherit
+    /// rather than silently degrade a multi-root parent to the fallback cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_roots: Option<Vec<PathBuf>>,
     #[serde(default)]
     pub persist_extended_history: bool,
 }
