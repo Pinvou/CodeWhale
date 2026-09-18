@@ -327,8 +327,13 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ### 12.1 恢复点（NEXT）
 
-- **当前恢复点**：E2E-06 第 2 项「B 端恢复循环」——状态机侧（`5b42e1d8`）与出站帧构造（`4bfa63e3`）已完成。
-- **下一步动作（唯一剩余代码项）**：在 `ControlledRelayWorker::serve`（`relay_runtime.rs:345`）的 joined 分支接恢复：
+- **当前恢复点**：E2E-06 第 4 项「B 停止/刷新清理闭环」——第 2 项（B 端恢复循环）已由 `5b42e1d8`、`4bfa63e3`、`a345b6a0` 完成：`serve` 的 joined 分支接
+  `desktop_relay_connection{connected:false}` → 挂起通道 + `mark_transport_disconnected` + prepare，恢复期间所有帧只走
+  `handle_controlled_resume_frame`，成功后 `activate` 并恢复存活性轮询。
+- **下一步动作**：把 `ControlledCleanupSink` 接到生产注册表（任务/权限/传输/临时模型），确保
+  `stop`/`refresh`/远端断开三条路径都清理远端任务与凭证；核对 `terminate_local`、`disconnect_now`、`accept_remote_disconnect`
+  与 `fail_operation` 各自触发的清理范围，并补一条三种路径都触发清理的用例。之后进入 E2E-06 正式审核。
+- **（历史记录）B 端恢复循环当时的接线要点**：在 `ControlledRelayWorker::serve`（`relay_runtime.rs:345`）的 joined 分支接恢复：
   用 `desktop_relay_connection{connected:false}` 触发 `mark_transport_disconnected(now_b)` + `begin_resume` + 发
   `controller_resume_prepare`；按 §12.1 的相位映射处理 provisional / encrypted_resume_confirm /
   activation_pending / post_activation_liveness_confirmed / controller_resumed，完成后 `activate` 业务通道；
