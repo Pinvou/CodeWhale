@@ -1285,6 +1285,14 @@ pub(crate) async fn apply_command_result(
                     apply_workspace_runtime_state(app, config, workspace.clone());
                     sync_runtime_workspace_state(task_manager, workspace.clone()).await;
                 }
+                // The action is the roots authority for this transition (a
+                // fork carries the parent's set, a new session carries an
+                // empty one). Record it in the same step as the workspace
+                // above: the provider restore below can fail and return
+                // early, and leaving the previous session's set paired with
+                // the new workspace would make every later re-sync send a
+                // workspace whose primary root is the old directory.
+                app.workspace_roots = workspace_roots.clone();
                 let provider_changed = config.api_provider() != app.api_provider
                     || config.provider_identity_for(config.api_provider())
                         != app.provider_identity_for_persistence();
@@ -1308,12 +1316,6 @@ pub(crate) async fn apply_command_result(
                 // provider overrides.
                 resolve_loaded_session_route(app, config);
                 app.update_model_compaction_budget();
-                // The action is the roots authority for this transition (a
-                // fork carries the parent's set, a new session carries an
-                // empty one): record it only after the fallible restore
-                // steps above succeeded, so a failed load cannot leave the
-                // app carrying a set that belongs to no live session.
-                app.workspace_roots = workspace_roots.clone();
                 if provider_changed || workspace_changed {
                     let _ = engine_handle.send(Op::Shutdown).await;
                     *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);

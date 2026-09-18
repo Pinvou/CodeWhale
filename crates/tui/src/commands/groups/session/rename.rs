@@ -115,6 +115,14 @@ pub(crate) fn rename_with_manager(
         .metadata
         .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     session.metadata.workspace.clone_from(&app.workspace);
+    // The paired set travels with the workspace it belongs to. Syncing only
+    // the primary would let a `/rename` after a `/cd` whose direct save
+    // failed rewrite `workspace: new` next to the stale pre-switch set —
+    // resurrecting the abandoned directory on the next resume.
+    session
+        .metadata
+        .workspace_roots
+        .clone_from(&app.workspace_roots);
     session.metadata.mode = Some(app.mode.as_setting().to_string());
     app.sync_cost_to_metadata(&mut session.metadata);
     session.metadata.title = new_title.to_string();
@@ -154,17 +162,23 @@ pub(crate) fn live_session_before_first_snapshot(
     if let Ok(Some(checkpoint)) = manager.load_session_checkpoint(session_id) {
         return Some(checkpoint);
     }
-    Some(
-        crate::session_manager::create_saved_session_with_id_and_mode(
-            session_id.to_string(),
-            &app.api_messages,
-            &app.model_selection_for_persistence(),
-            &app.workspace,
-            u64::from(app.session.total_tokens),
-            app.system_prompt.as_ref(),
-            Some(app.mode.as_setting()),
-        ),
-    )
+    let mut rebuilt = crate::session_manager::create_saved_session_with_id_and_mode(
+        session_id.to_string(),
+        &app.api_messages,
+        &app.model_selection_for_persistence(),
+        &app.workspace,
+        u64::from(app.session.total_tokens),
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    );
+    // The rebuilt document pairs `workspace` with the live root set, exactly
+    // like `build_session_snapshot`; a roots-blind rebuild would persist a
+    // workspace whose primary root is still the previous directory.
+    rebuilt
+        .metadata
+        .workspace_roots
+        .clone_from(&app.workspace_roots);
+    Some(rebuilt)
 }
 
 #[cfg(test)]
