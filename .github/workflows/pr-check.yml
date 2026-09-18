@@ -91,7 +91,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 校验 commit 信息规范
         run: |
@@ -116,7 +116,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -172,7 +172,7 @@ jobs:
           fetch-depth: 0
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
 
 
@@ -488,7 +488,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 架构边界门禁
         run: |
@@ -557,7 +557,7 @@ jobs:
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
         with:
@@ -662,7 +662,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
         with:
@@ -704,7 +704,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
 
       - uses: actions/setup-node@v7
@@ -735,7 +735,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
         with:
@@ -771,7 +771,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -1050,7 +1050,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1309,7 +1309,7 @@ jobs:
       # first (enforced by the gate policy).
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: Init CodeWhale submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1851,7 +1851,7 @@ jobs:
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - name: 汇总所有适用检查
         env:

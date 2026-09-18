@@ -566,7 +566,9 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         self.assertIn(
-            'sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+            'sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,'
+            'PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}'
+            '/scripts/ci-memory-setup.sh"',
             rust_test,
         )
         self.assertNotIn("ci-memguard", self.pr_workflow)
@@ -620,13 +622,16 @@ class CiGatePolicyTests(unittest.TestCase):
             # 一道防线)。漏写包装的 job 挂死时会烧满整个 job 时限,守卫
             # 在此强制每个调用点结构一致。
             self.assertIn(
-                'run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+                'run: timeout --kill-after=15 240 sudo --preserve-env='
+                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP'
+                ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
                 job,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
                 " 'timeout --kill-after=15 240' (userspace hang backstop) and"
-                " pass GITHUB_ACTIONS through sudo (sudo env_reset strips it,"
-                " which would silently disable the script's ::warning"
-                " annotations)",
+                " pass GITHUB_ACTIONS and the PINVOU3_CI_* emergency switches"
+                " through sudo (sudo env_reset strips them, silently disabling"
+                " the script's ::warning annotations and the standing zram"
+                " opt-out)",
             )
             self.assertIn(
                 '|| echo "::warning::ci-memory-setup',

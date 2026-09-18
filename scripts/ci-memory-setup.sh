@@ -43,7 +43,9 @@
 #      (stock Ubuntu kernels ship zswap enabled by default), so the
 #      "compress in RAM first" layer exists exactly once.
 #
-# Environment switches:
+# Environment switches (both survive the workflow wrappers'
+# `sudo --preserve-env` alongside GITHUB_ACTIONS; sudo env_reset would
+# otherwise strip them from the job env, silently no-op'ing the opt-out):
 #   PINVOU3_CI_DISABLE_ZRAM=1      skip zram entirely (explicit opt-out for
 #                                  future incidents). Replaces the old
 #                                  PINVOU3_CI_ENABLE_ZRAM opt-in; zram is
