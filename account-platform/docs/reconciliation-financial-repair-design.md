@@ -30,6 +30,7 @@
 | 写入边界 | (a) 只写 journal/posting 与案件解决；(b) 允许补钱包/credit lot/package 有效量 | 决定是否触碰余额守恒与消费顺序 |
 | 未知结果 | 沿用 GSA-16 分类，未知只读查证；是否需要"零效果"证据才允许重试 | 决定 executor/consumer 的 result-first 与 DLQ 收口 |
 | 幂等与限额 | 单笔上限、同一案件可修复次数、冷却窗口 | 决定是否新增限额表与并发门禁 |
+| 权限与版本 | (a) 复用现有 permission/policy 版本；(b) 新增专用 permission 或 policy 版本 | 决定是否需要 Account/Billing 迁移、合同与灰度顺序 |
 
 无论选择哪一项：默认 `INACTIVE`，需本类设计、实现、recovery 与发布门禁全部通过并取得独立激活授权；不得改写历史账本、对账案件或支付事实。
 
