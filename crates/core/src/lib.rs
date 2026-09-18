@@ -68,6 +68,12 @@ pub enum InitialHistory {
 /// Normalizes a workspace root set: `cwd` is always a member and the primary
 /// root at position 0, followed by `roots` in their original order with
 /// duplicates removed. An empty `roots` degenerates to `[cwd]`.
+///
+/// Deduplication is lexical, not filesystem-aware: two spellings of the same
+/// directory (a symlinked `/var/x` beside its `/private/var/x` target) both
+/// survive here. Callers that enumerate writable roots canonicalize per root
+/// for exactly that reason; a future canonicalizing intake would remove the
+/// residue, at the cost of filesystem access on every normalization.
 pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut normalized = vec![cwd.to_path_buf()];
     for root in roots {
@@ -677,10 +683,12 @@ impl ThreadManager {
             );
             thread.cwd = cwd;
             thread.workspace_roots = workspace_roots;
-            // Write the override back to the cache: a later parameterless
-            // resume reads this entry, so returning the override only
-            // through the return value would let the stale set win.
-            // (Persistence aligns with the autosave path, as for cwd.)
+            // Write the override back to both the cache and the persisted row.
+            // The cache alone is not enough in-process: a later resume that
+            // carries history bypasses this branch entirely, re-reads the
+            // stored row, and would silently reinstate the pre-override set.
+            thread.updated_at = chrono::Utc::now().timestamp();
+            self.persist_thread(&thread, None)?;
             self.running_threads
                 .insert(params.thread_id.clone(), thread.clone());
             return Ok(Some(NewThread {
@@ -3378,6 +3386,58 @@ mod tests {
             second.thread.workspace_roots,
             vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
             "the roots override must stick in the running-thread cache"
+        );
+    }
+
+    #[test]
+    fn resume_override_survives_a_later_history_carrying_resume() {
+        let store = temp_core_state("resume-roots-history-bypass");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // Prime the running cache, then take the cached history-free branch
+        // with an explicit roots override: that branch used to update the
+        // cache only.
+        let primed = manager
+            .resume_thread_with_history(&resume_params(&thread_id), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            primed.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main")]
+        );
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        let overridden = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            overridden.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+
+        // A history-carrying resume bypasses the running cache and reads the
+        // stored row, so a cache-only override is silently undone here.
+        let mut params = resume_params(&thread_id);
+        params.history = Some(vec![json!({"type": "message", "role": "user"})]);
+        let second = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            second.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            "a history-carrying resume must not reinstate the pre-override set"
         );
     }
 
