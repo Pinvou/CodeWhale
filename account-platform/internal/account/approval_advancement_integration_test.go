@@ -182,7 +182,7 @@ func TestApprovalAdvancementPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, dsn, 0)
+	repository, _, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, dsn, 0)
 	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "advance-requester")
 	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "advance-approver")
 	outsider := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PERSONAL_USER", "advance-outsider")

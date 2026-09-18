@@ -53,7 +53,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, accountMigrations := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
+	repository, _, _, accountMigrations := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
 	repository.WithBillingGovernanceActivation(&billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")})
 	repository.tokenApprovalCreateGate = func(commandType string) bool {
 		return commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_CREDENTIAL_REVOKE"

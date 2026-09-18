@@ -62,7 +62,7 @@ func (r *PostgresRepository) ClaimBillingApprovalProof(ctx context.Context, bind
 		return ErrApprovalSnapshotMismatch
 	}
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
-		CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: 1,
+		CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: approvalSnapshotSchemaVersion(event.CommandType),
 		TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,
 		NormalizedCommand: event.NormalizedCommand, CriticalResourceVersions: event.CriticalResourceVersions,
 		FinancialSnapshot: event.FinancialSnapshot,
@@ -84,13 +84,17 @@ func (r *PostgresRepository) ClaimBillingApprovalProof(ctx context.Context, bind
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
+	// The claim takes no row lock: FOR SHARE needs UPDATE privilege, which the
+	// Billing runtime deliberately does not hold. The activation row is read
+	// again outside this transaction by the proof path, and the claim INSERT
+	// below is the single-shot boundary.
 	var active ApprovalCommandActivation
-	err = tx.QueryRow(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations WHERE command_type=$1 AND policy_version=$2 FOR SHARE`, event.CommandType, event.PolicyVersion).
+	err = tx.QueryRow(ctx, `SELECT command_type,policy_version,snapshot_schema_version,state,version,updated_at FROM billing_approval_command_activations WHERE command_type=$1 AND policy_version=$2`, event.CommandType, event.PolicyVersion).
 		Scan(&active.CommandType, &active.PolicyVersion, &active.SnapshotSchemaVersion, &active.State, &active.Version, &active.UpdatedAt)
 	if err != nil {
 		return err
 	}
-	if active.State != "ACTIVE" || active.Version < 1 || active.SnapshotSchemaVersion != 1 || active.UpdatedAt.IsZero() || active.UpdatedAt.After(r.now().Add(time.Second)) {
+	if active.State != "ACTIVE" || active.Version < 1 || active.SnapshotSchemaVersion != approvalSnapshotSchemaVersion(event.CommandType) || active.UpdatedAt.IsZero() || active.UpdatedAt.After(r.now().Add(time.Second)) {
 		return ErrApprovalSnapshotMismatch
 	}
 	frozen, err := approvalencoding.LegacyProofInputFromArtifacts(artifacts)

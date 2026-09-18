@@ -57,7 +57,7 @@ func TestBillingApprovalActivationAccountPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, dsn, 0)
+	repository, _, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, dsn, 0)
 	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "billing-activation-requester")
 	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "billing-activation-approver")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)

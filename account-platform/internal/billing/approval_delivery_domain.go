@@ -161,16 +161,24 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 // A proof-era event cannot reach a local effect (or a trusted provider probe)
 // until its frozen command and current Billing owner revision agree. The
 // command transactions still perform their own row/version CAS afterwards.
+
+// approvalSnapshotSchemaVersion is the closed snapshot schema bound to a
+// command's frozen proof input: the entitlement correction command owns the
+// appended v2 schema, every other command keeps the original v1 schema.
+func approvalSnapshotSchemaVersion(commandType string) int {
+	if commandType == entitlementComponentAdjustmentCommand {
+		return 2
+	}
+	return 1
+}
+
 func (domain *billingAuthorizationDomain) executionProof(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, command ApprovedCommand) (authorizationDomainAttempt, bool) {
 	if domain.proof == nil || event.ProofSchemaVersion != approvalencoding.ProofSchemaVersion ||
 		event.ApprovalControlEpoch != binding.ApprovalEpoch || !sameRawJSON(command.NormalizedCommand, event.NormalizedCommand) ||
 		!sameRawJSON(command.CriticalResourceVersions, event.CriticalResourceVersions) || !sameRawJSON(command.FinancialSnapshot, event.FinancialSnapshot) {
 		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH"), false
 	}
-	snapshotSchemaVersion := 1
-	if event.CommandType == entitlementComponentAdjustmentCommand {
-		snapshotSchemaVersion = 2
-	}
+	snapshotSchemaVersion := approvalSnapshotSchemaVersion(event.CommandType)
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
 		CommandType: event.CommandType, PolicyVersion: event.PolicyVersion, SnapshotSchemaVersion: snapshotSchemaVersion,
 		TargetResourceType: event.TargetResourceType, TargetResourceID: event.TargetResourceID,

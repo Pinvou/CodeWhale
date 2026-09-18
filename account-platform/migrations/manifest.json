@@ -1274,6 +1274,16 @@
         "file": "000058_entitlement_component_correction_effect.up.sql",
         "version": 58,
         "sha256": "a6ff23901e5c01f83dfcb09ad6e0a4f4ec47b93658d094c4c3767ce92b2a45a7"
+      },
+      {
+        "file": "000059_entitlement_component_adjustment_proof_claims.down.sql",
+        "version": 59,
+        "sha256": "5b2673c2391962c3dcc099ab6ce619bddb241e5d315950535d018e7261429622"
+      },
+      {
+        "file": "000059_entitlement_component_adjustment_proof_claims.up.sql",
+        "version": 59,
+        "sha256": "61320c59c85b809eefad61842bce8bfdd2600b1c944fe199fd6172a44c6eb989"
       }
     ],
     "payment-simulator": [

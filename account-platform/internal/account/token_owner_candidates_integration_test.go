@@ -39,7 +39,7 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	repository, connection, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 43)
+	repository, connection, _, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 43)
 	migration := loaded[len(loaded)-1]
 	if migration.Version != 43 {
 		t.Fatalf("latest account migration=%d, want 43 for this isolated test", migration.Version)
@@ -427,7 +427,7 @@ func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testin
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	repository, connection, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
+	repository, connection, _, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
 	if latest := loaded[len(loaded)-1]; latest.Version != 70 {
 		t.Fatalf("latest account migration=%d, want 70", latest.Version)
 	}
@@ -475,7 +475,7 @@ func (actor integrationActor) TokenActor(service, subject string) TokenOwnerCand
 	return TokenOwnerCandidateActor{Issuer: actor.Issuer, Subject: actor.Subject, CallerService: service, CallerSubject: subject}
 }
 
-func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Context, databaseURL string, maximumVersion int64) (*PostgresRepository, *pgx.Conn, []migrations.Migration) {
+func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Context, databaseURL string, maximumVersion int64) (*PostgresRepository, *pgx.Conn, *ApprovalRelayStore, []migrations.Migration) {
 	t.Helper()
 	admin, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
@@ -488,7 +488,7 @@ func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Conte
 		t.Fatal(err)
 	}
 	var connection *pgx.Conn
-	var pool, writerPool *pgxpool.Pool
+	var pool, writerPool, relayPool *pgxpool.Pool
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -500,6 +500,9 @@ func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Conte
 		}
 		if writerPool != nil {
 			writerPool.Close()
+		}
+		if relayPool != nil {
+			relayPool.Close()
 		}
 		_, _ = admin.Exec(cleanupCtx, `DROP DATABASE IF EXISTS `+databaseIdentifier)
 		_ = admin.Close(context.Background())
@@ -581,8 +584,22 @@ func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Conte
 	if err != nil {
 		t.Fatal(err)
 	}
+	relayConfiguration, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayConfiguration.MaxConns = 10
+	relayConfiguration.ConnConfig.Database = fixtureDatabase
+	relayConfiguration.AfterConnect = func(connectContext context.Context, connect *pgx.Conn) error {
+		_, connectErr := connect.Exec(connectContext, `SET SESSION AUTHORIZATION account_approval_relay; SET ROLE account_approval_relay; SET search_path TO public,pg_temp`)
+		return connectErr
+	}
+	relayPool, err = pgxpool.NewWithConfig(ctx, relayConfiguration)
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository := &PostgresRepository{pool: pool, approvalWriterPool: writerPool, now: func() time.Time { return time.Now().UTC() }}
-	return repository, connection, loaded
+	return repository, connection, &ApprovalRelayStore{pool: relayPool}, loaded
 }
 
 // loadAccountIntegrationMigrations keeps the production public/control schema

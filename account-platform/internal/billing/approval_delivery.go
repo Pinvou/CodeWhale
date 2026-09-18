@@ -193,6 +193,24 @@ func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, deliv
 		return errors.New("proof-era authorization requires result-only recovery")
 	}
 	jobRunID := binding.EventID.String()
+	// The proof wire encodes every int64 as a canonical decimal string while
+	// Account and the domain handlers still own the JSON-number contract, so the
+	// observed values handed to Account and compared against the approved command
+	// must be normalised back to the domain form (approvalencoding's closed
+	// conversion, never a heuristic re-shape).
+	executionEvent := event
+	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
+		legacy, normaliseErr := approvalencoding.LegacyExecutionInput(approvalencoding.DecodedAuthorizationEvent{
+			EventID: event.EventID, AggregateID: event.ApprovalRequestID, AggregateVersion: binding.ApprovedRequestVersion,
+			SerializationVersion: binding.SerializationVersion, Payload: event,
+		})
+		if normaliseErr != nil {
+			return errors.New("authorization wire cannot be normalised")
+		}
+		executionEvent.NormalizedCommand = legacy.NormalizedCommand
+		executionEvent.CriticalResourceVersions = legacy.CriticalResourceVersions
+		executionEvent.FinancialSnapshot = legacy.FinancialSnapshot
+	}
 	// Proof-era Billing wire consumes the single domain attempt before the
 	// Account begin: the Account contract only admits the first Billing begin
 	// from DOMAIN_INFLIGHT, and a crash after the grant must still consume the
@@ -204,8 +222,8 @@ func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, deliv
 			return errors.New("authorization attempt was not granted")
 		}
 	}
-	command, err := consumer.account.BeginAuthorized(ctx, binding, jobRunID, event.CriticalResourceVersions, event.FinancialSnapshot)
-	if err != nil || !validApprovedAuthorizationCommand(command, binding, event) {
+	command, err := consumer.account.BeginAuthorized(ctx, binding, jobRunID, executionEvent.CriticalResourceVersions, executionEvent.FinancialSnapshot)
+	if err != nil || !validApprovedAuthorizationCommand(command, binding, executionEvent) {
 		return errors.New("authorization begin unavailable")
 	}
 	if binding.SerializationVersion != approvalencoding.ApprovalSerializationVersion {
@@ -214,7 +232,7 @@ func (consumer *AuthorizationCommandConsumer) advance(ctx context.Context, deliv
 			return errors.New("authorization attempt was not granted")
 		}
 	}
-	attempt := consumer.domain.ExecuteAuthorizationAttempt(ctx, binding, event, command)
+	attempt := consumer.domain.ExecuteAuthorizationAttempt(ctx, binding, executionEvent, command)
 	if len(attempt.Result.DomainResult) != 0 {
 		if err := consumer.account.Complete(ctx, binding.ApprovalRequestID, jobRunID, "EXECUTED", attempt.Result.DomainResult, jsonOrEmpty(attempt.Result.LedgerReferences), ""); err != nil {
 			return err
