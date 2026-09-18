@@ -332,7 +332,8 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ## 11. E2E-08 待做清单（集成回归与发布审核）
 
-- 已执行证据（本轮）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` 58 通过 / 0 失败，`test/relay.test.js` 25 通过 / 0 失败；Rust `cargo test remote_control::` 312 通过 / 0 失败；前端 6 个契约文件 36 通过 / 0 失败、`npm run build:ui` 通过、`npm run lint:ui|lint:node` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer`）在新增的 controller 与前端文件中零命中。
+- 已执行证据（E2E-06 收口后复跑）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` **58 通过 / 0 失败**，`test/relay.test.js` **25 通过 / 0 失败**；Rust `cargo test remote_control::` **322 通过 / 0 失败**、`cargo test remote_control::controller::` **229 通过 / 0 失败**；前端 6 个契约文件 **36 通过 / 0 失败**、`npm run build:ui` 通过、`npm run lint:ui` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer` / `-----BEGIN`）在 controller 与前端文件中仅命中**刻意的脱敏测试夹具/哨兵**（`journal.rs` 断言投影剥离 `vault://secret`、`telemetry.rs` 哨兵表、`temporary_model.rs` 反向用例），无真实凭证。
+- 发布缺口登记（已完成）：`docs/Windows双端远程控制发布与回滚.md` 新增第 7 节，把第 4 节全部登记项与本节缺口按「本轮 blocker（真实双机旅程、三面 UI 冒烟、真机断线恢复演练）/ 已隐藏（临时模型·代码模式·附件·成果、工具审批、Relay 子协议与 `controller_capabilities`）/ 后续排期（设备显示名、非流式回复、快照引导、附件事件、跨 lease 清理、清理适配器测试、无关既有失败）」分类。
 - 双端集成测试：在现有同进程双端用例（task_submit/task_status、journal_event、快照、心跳证据）基础上补一条完整旅程（连接 → 能力快照 → 普通文本任务 → 正文回传 → 显式断开），并断言旧 lease/generation 帧在各阶段都被丢弃。
 - 架构守卫与 UI 契约：`python scripts/architecture-guard.py`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run lint:ui`、前端契约测试全套。
 - 安全扫描：仓库已有的 `controller-telemetry`/日志脱敏用例 + `remote-control-relay` 契约测试；再跑一次敏感信息扫描（密钥/路径/内部地址不得进入 wire 与投影）。
