@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -199,30 +197,6 @@ func retryWhileWriterUnavailable(t *testing.T, ctx context.Context, repository *
 		time.Sleep(250 * time.Millisecond)
 	}
 	return err
-}
-
-// logEntitlementCrossDomainRouteChecks replicates the consumer's early route and
-// wire validation with exported helpers so a rejection names its exact field.
-func logEntitlementCrossDomainRouteChecks(t *testing.T, route billingdomain.ApprovalAuthorizationRoute, raw []byte) {
-	t.Helper()
-	descriptor, ok := approvalconsumer.LookupDurable(route.CanonicalDurable)
-	t.Logf("route check lookupDurable=%v descriptor=%+v", ok, descriptor)
-	if ok {
-		t.Logf("route check matchRoute=%v", approvalconsumer.MatchRoute(descriptor, route.CommandType, route.PolicyVersion, route.ExecutorIdentity))
-	}
-	decoded, err := approvalencoding.DecodeAuthorizationEvent(raw, approvalencoding.ExpectedAuthorizationBinding{
-		ApprovedRequestVersion: route.ApprovedRequestVersion, ApprovalEpoch: route.ApprovalEpoch,
-	})
-	if err != nil {
-		t.Logf("route check decode err=%v", err)
-		return
-	}
-	digest := sha256.Sum256(raw)
-	t.Logf("route check eventID=%v aggregateID=%v aggregateVersion=%v serialization=%v command=%v policy=%v executor=%v target=%s/%s digest=%v",
-		decoded.EventID == route.EventID, decoded.AggregateID == route.ApprovalRequestID, decoded.AggregateVersion == route.ApprovedRequestVersion,
-		decoded.SerializationVersion == route.SerializationVersion, decoded.Payload.CommandType == route.CommandType,
-		decoded.Payload.PolicyVersion == route.PolicyVersion, decoded.Payload.ExecutorIdentity == route.ExecutorIdentity,
-		decoded.Payload.TargetResourceType, decoded.Payload.TargetResourceID, hex.EncodeToString(digest[:]) == route.EventDigest)
 }
 
 func TestEntitlementCorrectionCrossDomainActivationPostgresIntegration(t *testing.T) {
@@ -451,53 +425,10 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 	if err != nil || binding.ExecutorIdentity != "billing-command-executor" {
 		t.Fatalf("authorization binding=%+v err=%v", binding, err)
 	}
-	logEntitlementCrossDomainRouteChecks(t, route, raw)
-	decoded, err := approvalencoding.DecodeAuthorizationEvent(raw, approvalencoding.ExpectedAuthorizationBinding{
+	if _, err := approvalencoding.DecodeAuthorizationEvent(raw, approvalencoding.ExpectedAuthorizationBinding{
 		ApprovedRequestVersion: route.ApprovedRequestVersion, ApprovalEpoch: route.ApprovalEpoch,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("authorization wire decode route=%+v err=%v", route, err)
-	}
-	t.Logf("event critical=%s", string(decoded.Payload.CriticalResourceVersions))
-	t.Logf("event financial=%s", string(decoded.Payload.FinancialSnapshot))
-	{
-		var criticalSame, financialSame bool
-		if probeErr := repository.pool.QueryRow(ctx, `SELECT critical_resource_versions = $2::jsonb, financial_snapshot = $3::jsonb
-		FROM approval_request_snapshots WHERE approval_request_id=$1`,
-			requestID, string(decoded.Payload.CriticalResourceVersions), string(decoded.Payload.FinancialSnapshot)).Scan(&criticalSame, &financialSame); probeErr != nil {
-			t.Logf("snapshot equality probe failed: %v", probeErr)
-		}
-		t.Logf("snapshot equality critical=%v financial=%v", criticalSame, financialSame)
-	}
-	observed, err := gate.ObserveAuthorizationDelivery(ctx, binding, "ACCOUNT_PLATFORM", 1)
-	if err != nil {
-		t.Fatalf("authorization delivery observation=%+v err=%v", observed, err)
-	}
-	t.Logf("authorization delivery state=%+v binding=%+v route=%+v", observed, binding, route)
-	// Converge the approval writer before the begin contract is exercised: the
-	// isolated fixture is known to need a short readiness window.
-	for attempt := 0; attempt < 30; attempt++ {
-		if err := repository.ApprovalWriterReady(ctx); err == nil {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if err := repository.ApprovalWriterReady(ctx); err != nil {
-		t.Fatalf("approval writer never became ready: %v", err)
-	}
-	{
-		var status, deadline, durable, serialization, provenance, digestKind, eventDigest string
-		var policyVersion, approvedVersion, epoch, snapshotSchema int64
-		if probeErr := repository.pool.QueryRow(ctx, `SELECT r.status,COALESCE(r.execution_deadline::text,'NULL'),COALESCE(r.authorization_durable,''),
-			COALESCE(r.authorization_serialization_version,''),COALESCE(r.authorization_provenance,''),COALESCE(r.authorization_digest_kind,''),
-			COALESCE(r.authorization_event_digest,''),r.policy_version,COALESCE(r.authorization_approved_request_version,0),
-			COALESCE(r.authorization_approval_epoch,0),s.snapshot_schema_version
-		FROM approval_requests r JOIN approval_request_snapshots s ON s.approval_request_id=r.id WHERE r.id=$1`, requestID).
-			Scan(&status, &deadline, &durable, &serialization, &provenance, &digestKind, &eventDigest, &policyVersion, &approvedVersion, &epoch, &snapshotSchema); probeErr != nil {
-			t.Logf("request probe failed: %v", probeErr)
-		}
-		t.Logf("request probe status=%s deadline=%s durable=%s serialization=%s provenance=%s digestKind=%s digest=%s policyVersion=%d approvedVersion=%d epoch=%d snapshotSchema=%d registryExecutor=%s",
-			status, deadline, durable, serialization, provenance, digestKind, eventDigest, policyVersion, approvedVersion, epoch, snapshotSchema, policy.ExecutorIdentity)
 	}
 	consumer, err := billingdomain.NewAuthorizationCommandConsumer(billingdomain.NewService(billingRepository), &entitlementCrossDomainGateProbe{HTTPApprovalExecutionGate: gate, t: t}, descriptor.Durable)
 	if err != nil {
@@ -508,22 +439,12 @@ WHERE o.aggregate_id=$1 AND o.event_type='account.approval-command.authorized.v1
 		{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 2}},
 	}
 	acked := 0
-	for index, delivery := range deliveries {
+	for _, delivery := range deliveries {
 		if acked > 0 {
 			break
 		}
 		consumer.Handle(ctx, delivery)
 		acked = delivery.ack
-		var probeState string
-		var probeAttempts, probeVersion int64
-		if _, roleErr := accountConnection.Exec(ctx, `SET ROLE account_approval_authorization_owner`); roleErr == nil {
-			_ = accountConnection.QueryRow(ctx, `SELECT state,domain_attempt_count,version FROM account_approval_authorization.approval_delivery_states
-WHERE original_event_id=$1 AND durable=$2`, eventID, descriptor.Durable).Scan(&probeState, &probeAttempts, &probeVersion)
-			_, _ = accountConnection.Exec(ctx, `RESET ROLE; SET ROLE account_service`)
-		}
-		var probeClaims int64
-		_ = billingPool.QueryRow(ctx, `SELECT count(*) FROM billing_approval_proof_claims`).Scan(&probeClaims)
-		t.Logf("after handle %d: ack=%d state=%s attempts=%d version=%d claims=%d", index, delivery.ack, probeState, probeAttempts, probeVersion, probeClaims)
 	}
 	if acked != 1 {
 		var state, lastError string
@@ -535,10 +456,6 @@ WHERE original_event_id=$1 AND durable=$2`, eventID, descriptor.Durable).Scan(&p
 FROM account_approval_authorization.approval_delivery_states WHERE approval_request_id=$1`, requestID).
 			Scan(&state, &lastError, &attempts)
 		_, _ = accountConnection.Exec(ctx, `RESET ROLE; SET ROLE account_service`)
-		var invalidationStatus, invalidationCode string
-		_ = repository.pool.QueryRow(ctx, `SELECT status,COALESCE(invalidation_code,''),COALESCE(invalidation_details::text,'') FROM approval_requests WHERE id=$1`, requestID).
-			Scan(&invalidationStatus, &invalidationCode, new(string))
-		t.Logf("request after failure: status=%s invalidation=%s", invalidationStatus, invalidationCode)
 		var correctionCount, claimCount, proofAttempts int64
 		_ = billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM entitlement_component_corrections),
 			(SELECT count(*) FROM billing_approval_proof_claims),
