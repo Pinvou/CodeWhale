@@ -380,6 +380,18 @@ impl ControllingDeviceManager {
             .ok_or_else(|| ControllingStateError::new("controller_not_connected"))
     }
 
+    /// 本次连接尝试是否仍然拥有待决状态（connecting / safety_handshake）。
+    /// 在途 worker 的失败收尾据此判断「该不该把状态投影为 error」：用户已经
+    /// 显式断开、或尝试已被新 intent 取代时不得覆盖既有状态。
+    pub(crate) fn is_connecting(&self, operation: ControllerOperation) -> bool {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, &operation).is_ok()
+            && matches!(
+                inner.phase,
+                ControllingStatusKind::Connecting | ControllingStatusKind::SafetyHandshake
+            )
+    }
+
     pub(crate) fn create_history(
         &self,
         title: &str,
@@ -690,6 +702,36 @@ mod tests {
                 .unwrap_err()
                 .code,
             "controller_stale_result"
+        );
+    }
+
+    /// E2E-02：在途 worker 只能在自己的尝试仍然待决时收尾为 error。
+    #[test]
+    fn pending_attempt_is_the_only_owner_of_failure_projection() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        assert!(manager.is_connecting(operation.clone()));
+        manager.complete_reserved(operation.clone()).unwrap();
+        assert!(manager.is_connecting(operation.clone()));
+        manager.complete_connected(operation.clone(), lease()).unwrap();
+        assert!(!manager.is_connecting(operation.clone()));
+        assert_eq!(
+            manager
+                .complete_reserved(operation.clone())
+                .unwrap_err()
+                .code,
+            "controller_phase_invalid",
+            "connected 之后不得再回到待决阶段"
+        );
+
+        // 已连接时必须先显式断开才能发起新的连接（connect 拒绝 connected 阶段）。
+        manager.disconnect();
+        let operation = manager.connect("345-6789").unwrap();
+        assert!(manager.is_connecting(operation.clone()));
+        manager.disconnect();
+        assert!(
+            !manager.is_connecting(operation),
+            "用户已断开时在途失败不得覆盖状态"
         );
     }
 }

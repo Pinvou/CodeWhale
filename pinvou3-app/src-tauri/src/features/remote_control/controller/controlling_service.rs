@@ -216,13 +216,16 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
         }
     };
 
-    match complete_connected(manager, operation, sender, outcome) {
+    match complete_connected(manager, operation.clone(), sender, outcome) {
         Ok(status) => {
             on_status(&status);
             Ok(status)
         }
         Err(code) => {
             sender.stop();
+            // 本地收尾失败（指纹派生、租约安装）时不能停在非终态阶段：只有在
+            // 本次尝试仍然待决时才投影为有界错误，已断开/已被取代时不覆盖。
+            let _ = fail_connection(manager, operation, GENERIC_CONNECT_ERROR, on_status);
             Err(code)
         }
     }
@@ -270,12 +273,17 @@ fn fail_connection(
     public_code: &'static str,
     on_status: &mut impl FnMut(&ControllingStatus),
 ) -> String {
+    if !manager.is_connecting(operation.clone()) {
+        // 已被显式断开或新的连接取代：状态归对方所有，本次尝试只回报有界
+        // 错误码，绝不覆盖别人的投影。
+        return public_code.to_owned();
+    }
     match manager.fail_connection(operation, public_code) {
         Ok(status) => {
             on_status(&status);
             public_code.to_owned()
         }
-        // 已被新的连接取代：新 intent 拥有状态，这里只回报有界错误码。
+        // 竞态下仍可能失败（例如刚被取代）：同样只回报有界错误码。
         Err(error) => error.code.to_owned(),
     }
 }
@@ -842,5 +850,49 @@ mod tests {
             "reconnecting",
             "断线后不能继续声称 connected"
         );
+    }
+
+    /// 用户已显式断开（或尝试已被取代）时，在途失败不得把状态覆盖成 error。
+    #[tokio::test]
+    async fn in_flight_failure_does_not_override_an_explicit_disconnect() {
+        let relay = signed_relay();
+        let a_keys = HandshakeKeyPair::generate().unwrap();
+        let mut handshake = ControllingHandshake::new(
+            "request-0001",
+            "claim-0001",
+            "2345678",
+            a_keys,
+            relay.trust.clone(),
+        );
+        let mut port = ScriptedPort {
+            inbound: VecDeque::new(),
+            relay_error: None,
+            disconnected: true,
+        };
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        let status = manager.disconnect();
+        assert_eq!(projection(&status)["status"], "disconnected");
+        let (sender, _receiver) =
+            transport_channels(ControllerRole::ControllerA, "", 2, 2, 8192, 1024);
+        let error = run_controlling_connection(
+            &manager,
+            operation,
+            &mut port,
+            &mut handshake,
+            &sender,
+            Duration::from_secs(5),
+            &mut |_: &ControllingStatus| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "endpoint_offline");
+        assert_eq!(
+            projection(&manager.status())["status"],
+            "disconnected",
+            "在途失败的收尾不得覆盖用户的显式断开"
+        );
+        assert!(sender.authenticated_lease().is_none());
+        assert!(sender.is_stopped());
     }
 }
