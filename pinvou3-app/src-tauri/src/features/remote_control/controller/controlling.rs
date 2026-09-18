@@ -451,6 +451,25 @@ impl ControllingDeviceManager {
             .map(|lease| lease.liveness_epoch_a.clone())
     }
 
+    /// E2E-06：尽力发送显式断开帧（失败不影响本地断开，本地状态始终权威）。
+    pub(crate) fn send_disconnect(&self, reason: &str) -> bool {
+        let inner = self.inner.lock();
+        if inner.phase != ControllingStatusKind::Connected {
+            return false;
+        }
+        let Some(lease) = inner.lease.as_ref() else {
+            return false;
+        };
+        let request_id = format!("request-disconnect-{}", Uuid::new_v4().simple());
+        let Ok(frame) = build_controller_disconnect(&lease.context, &request_id, reason) else {
+            return false;
+        };
+        let Some(transport) = inner.transport.as_ref() else {
+            return false;
+        };
+        transport.try_send_authenticated_control(&frame).is_ok()
+    }
+
     pub(crate) fn create_history(
         &self,
         title: &str,
@@ -517,6 +536,35 @@ impl Drop for ControllingDeviceManager {
         let mut inner = self.inner.lock();
         clear_live_context(&mut inner);
     }
+}
+
+/// E2E-06：A 端显式断开帧（`controller_disconnect`）。reason 只允许有界标识符，
+/// 不携带任何用户文本；Relay 收到后会终结当前租约并通知 B。
+pub(crate) fn build_controller_disconnect(
+    lease: &LeaseContext,
+    request_id: &str,
+    reason: &str,
+) -> Result<serde_json::Value> {
+    let bounded: String = reason
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        .take(64)
+        .collect();
+    if bounded.is_empty() || request_id.is_empty() || request_id.len() > 128 {
+        return Err(ControllingStateError::new("controller_disconnect_invalid"));
+    }
+    Ok(serde_json::json!({
+        "v": 1,
+        "type": "controller_disconnect",
+        "request_id": request_id,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "sender_role": "A",
+        "reason": bounded,
+    }))
 }
 
 pub(crate) fn normalize_pairing_code(raw: &str) -> Result<String> {
@@ -767,6 +815,83 @@ mod tests {
                 .code,
             "controller_stale_result"
         );
+    }
+
+    /// E2E-06：显式断开帧必须通过冻结校验（角色 A + encrypted_frames_v1），
+    /// 且只在 connected 且有 transport 时尽力发送。
+    #[test]
+    fn explicit_disconnect_frame_is_frozen_and_lease_bound() {
+        use super::super::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_message_json,
+            validate_controller_runtime_message_json,
+        };
+
+        let fixture = lease();
+        let frame = build_controller_disconnect(
+            &fixture.context,
+            "request-disconnect-0001",
+            "user_disconnect",
+        )
+        .unwrap();
+        validate_controller_message_json(&frame.to_string(), SenderRole::ControllerA).unwrap();
+        validate_controller_runtime_message_json(
+            &frame.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(fixture.context.clone()),
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".to_owned(),
+                    "pairing_v1".to_owned(),
+                    "task_v1".to_owned(),
+                ],
+            }),
+        )
+        .expect("断开帧必须通过运行时校验");
+        assert_eq!(frame["sender_role"], "A");
+        assert_eq!(frame["reason"], "user_disconnect");
+        // reason 只保留有界标识符字符：全部被过滤时失败关闭，否则截断到有界长度。
+        assert!(
+            build_controller_disconnect(&fixture.context, "request-1", " 用户 断开 ").is_err()
+        );
+        let sanitized = build_controller_disconnect(&fixture.context, "request-1", "user disconnect!")
+            .unwrap();
+        assert_eq!(sanitized["reason"], "userdisconnect");
+
+        // 未连接时没有可发送的断开帧。
+        let manager = ControllingDeviceManager::default();
+        assert!(!manager.send_disconnect("user_disconnect"));
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, fixture).unwrap();
+        // 测试用 transport_channels 不启动网络任务，入队即视为送出成功。
+        let (sender, _receiver) =
+            super::super::relay_transport::transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                2,
+                8192,
+                1024,
+            );
+        // 断开帧是租约控制帧：transport 必须先装上同一租约。
+        sender
+            .install_authenticated_lease(super::super::relay_transport::AuthenticatedLease {
+                context: lease().context,
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".into(),
+                    "pairing_v1".into(),
+                    "task_v1".into(),
+                ],
+            })
+            .unwrap();
+        manager.replace_transport(sender);
+        assert!(manager.send_disconnect("user_disconnect"));
+        // 断开后本地状态立即权威：不再声称 connected。
+        assert_eq!(
+            manager.disconnect().status,
+            ControllingStatusKind::Disconnected
+        );
+        assert!(!manager.send_disconnect("user_disconnect"));
     }
 
     /// E2E-02：在途 worker 只能在自己的尝试仍然待决时收尾为 error。

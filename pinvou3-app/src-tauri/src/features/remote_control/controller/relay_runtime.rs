@@ -366,6 +366,12 @@ impl ControlledRelayWorker {
                             Some("controller_liveness_attestation_a") => {
                                 self.accept_liveness_attestation(&message, &mut evidence);
                             }
+                            // E2E-06：A 端显式断开 → 终结租约并结束本代通道。
+                            Some("controller_disconnect") => {
+                                if self.accept_remote_disconnect(&message) {
+                                    break 'serve;
+                                }
+                            }
                             _ => {}
                         }
                         continue 'serve;
@@ -466,6 +472,37 @@ impl ControlledRelayWorker {
                 evidence.outstanding = None;
                 evidence.escalated = false;
             }
+        }
+    }
+
+    /// E2E-06：A 端显式断开（`controller_disconnect`）。返回 true 表示已被接受，
+    /// 本代通道应当结束（租约、会话密钥与远端任务都已清理）。
+    fn accept_remote_disconnect(&self, message: &Value) -> bool {
+        // 先做冻结校验（角色 A + 租约 + 能力），再交给状态所有者终结租约。
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+            return false;
+        };
+        let context = crate::features::remote_control::controller::protocol::RuntimeValidationContext {
+            lease: Some(lease),
+            negotiated_capabilities: capabilities,
+        };
+        let validated = crate::features::remote_control::controller::protocol::validate_controller_runtime_message_json(
+            &message.to_string(),
+            crate::features::remote_control::controller::protocol::SenderRole::ControllerA,
+            Some(&context),
+        );
+        if validated.is_err() {
+            return false;
+        }
+        match manager.accept_remote_disconnect() {
+            Ok(status) => {
+                self.app.state::<ControlledLaneState>().clear();
+                self.app.state::<ControlledOutboundState>().clear();
+                let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                true
+            }
+            Err(_) => false,
         }
     }
 
