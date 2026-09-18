@@ -46,7 +46,7 @@ impl ModelClientRlmAdapter {
 }
 
 /// Per-child completion timeout — same as the previous sidecar default.
-const CHILD_TIMEOUT_SECS: u64 = 120;
+pub(super) const CHILD_TIMEOUT_SECS: u64 = 120;
 /// Hard cap on prompts per batch RPC.
 pub const MAX_BATCH: usize = 16;
 
@@ -300,6 +300,7 @@ impl RlmBridge {
             child_model,
             tx,
             self.depth_remaining.saturating_sub(1),
+            self.sub_query_timeout,
         )
         .await;
 

@@ -3040,9 +3040,16 @@ pub struct RuntimeThreadManager {
 impl RuntimeThreadManager {
     /// Request runtime shutdown: cancels the shared cancellation token that
     /// turn monitoring and the unbounded external-approval wait observe, so
-    /// a manager being torn down resolves suspended waits instead of leaving
-    /// turns pending forever. Hosts call this while winding down; it is
-    /// idempotent and safe to call more than once.
+    /// a manager being torn down resolves suspended *approval* waits
+    /// (as `approval.decided{interrupted:true}`) instead of leaving them
+    /// pending forever. Idempotent and safe to call more than once.
+    ///
+    /// Scope limits a host must know before relying on it: this only arms
+    /// the token — it does not abort in-flight turns (the engine keeps
+    /// running until its host stops it), and it does not resolve suspended
+    /// `request_user_input` waits, which observe the engine's token rather
+    /// than this one. There is no production caller yet; the exit is
+    /// exercised by tests until a host wires it up.
     pub fn shutdown(&self) {
         self.cancel_token.cancel();
     }

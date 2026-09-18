@@ -48,7 +48,16 @@ async fn drain_plugin_pipe<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 /// model-invoked interpreters in the same class as js_execution /
 /// code_execution (600s there): 120s killed healthy long-running
 /// plugins, and a timeout used to leave the script running orphaned.
-const PLUGIN_EXECUTION_TIMEOUT: Duration = Duration::from_secs(600);
+fn plugin_execution_timeout() -> Duration {
+    if cfg!(test) {
+        // Same test budget as the js/code interpreters: short enough that
+        // the kill test finishes fast, long enough that happy-path tests
+        // never approach it.
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(600)
+    }
+}
 
 /// Metadata extracted from a plugin script's frontmatter header.
 #[derive(Debug, Clone)]
@@ -323,7 +332,7 @@ async fn run_plugin_child_raw(
     let stdout_task = tokio::spawn(drain_plugin_pipe(stdout_pipe));
     let stderr_task = tokio::spawn(drain_plugin_pipe(stderr_pipe));
 
-    let output = match tokio::time::timeout(PLUGIN_EXECUTION_TIMEOUT, child.wait()).await {
+    let output = match tokio::time::timeout(plugin_execution_timeout(), child.wait()).await {
         Ok(status) => {
             let status =
                 status.map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
@@ -350,7 +359,7 @@ async fn run_plugin_child_raw(
             stdout_task.abort();
             stderr_task.abort();
             return Err(ToolError::Timeout {
-                seconds: PLUGIN_EXECUTION_TIMEOUT.as_secs(),
+                seconds: plugin_execution_timeout().as_secs(),
             });
         }
     };
@@ -755,6 +764,48 @@ echo hello
 
         assert!(result.success);
         assert!(result.content.len() > 64 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_plugin_child_instead_of_orphaning_it() {
+        let dir = TempDir::new().unwrap();
+        let pid_file = dir.path().join("child_pid");
+        let script = dir.path().join("hang.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n# name: hang\necho $$ > '{}'\nsleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        let (interpreter, args) = script_command_parts(&script, &[]);
+        let err = run_plugin_child(&interpreter, &args, "hang", serde_json::json!({}))
+            .await
+            .expect_err("a 60s sleep must hit the plugin execution timeout");
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "expected a timeout error; got {err:?}"
+        );
+
+        // The script reported its pid before sleeping; the timeout must
+        // have killed it instead of leaving it running orphaned.
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("child must have written its pid")
+            .trim()
+            .parse()
+            .expect("pid file must contain an integer");
+        let mut attempts = 0;
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                attempts < 50,
+                "plugin child {pid} is still alive after the timeout kill"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            attempts += 1;
+        }
     }
 
     #[test]
