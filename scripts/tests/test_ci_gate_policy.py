@@ -566,7 +566,9 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         self.assertIn(
-            'sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+            'sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,'
+            'PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}'
+            '/scripts/ci-memory-setup.sh"',
             rust_test,
         )
         self.assertNotIn("ci-memguard", self.pr_workflow)
@@ -620,10 +622,16 @@ class CiGatePolicyTests(unittest.TestCase):
             # 一道防线)。漏写包装的 job 挂死时会烧满整个 job 时限,守卫
             # 在此强制每个调用点结构一致。
             self.assertIn(
-                'run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+                'run: timeout --kill-after=15 240 sudo --preserve-env='
+                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP'
+                ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
                 job,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
-                " 'timeout --kill-after=15 240' (userspace hang backstop)",
+                " 'timeout --kill-after=15 240' (userspace hang backstop) and"
+                " pass GITHUB_ACTIONS and the PINVOU3_CI_* emergency switches"
+                " through sudo (sudo env_reset strips them, silently disabling"
+                " the script's ::warning annotations and the standing zram"
+                " opt-out)",
             )
             self.assertIn(
                 '|| echo "::warning::ci-memory-setup',
@@ -631,6 +639,128 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
                 " (degrade to stock runner memory with a ::warning)",
             )
+        # 透传与非致命包装契约必须覆盖所有 workflow 的调用点,不只
+        # pr-check:其余文件任何一处缩水,都会让注解/应急开关在该 workflow
+        # 静默失效(2026-09-18 复审:缩水 release-packages 调用点时,仅扫
+        # pr-check 的守卫 27 项全绿)。
+        workflows_dir = ROOT / ".github/workflows"
+        workflow_paths = sorted(workflows_dir.glob("*.yml")) + sorted(
+            workflows_dir.glob("*.yaml")
+        )
+        call_line = (
+            "run: timeout --kill-after=15 240 sudo --preserve-env="
+            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP"
+            ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
+        )
+        total_call_sites = 0
+        for workflow_path in workflow_paths:
+            text = workflow_path.read_text(encoding="utf-8")
+            call_sites = text.count(
+                'bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
+            )
+            if call_sites == 0:
+                continue
+            total_call_sites += call_sites
+            self.assertEqual(
+                text.count(call_line),
+                call_sites,
+                f"{workflow_path.name}: every ci-memory-setup call site must"
+                " hard-cap with 'timeout --kill-after=15 240' and pass"
+                " GITHUB_ACTIONS and the PINVOU3_CI_* emergency switches"
+                " through sudo (sudo env_reset strips them, silently"
+                " disabling ::warning annotations and the standing opt-out)",
+            )
+            self.assertEqual(
+                text.count('|| echo "::warning::ci-memory-setup'),
+                call_sites,
+                f"{workflow_path.name}: every ci-memory-setup call site must"
+                " stay non-fatal (degrade to stock runner memory with a"
+                " ::warning)",
+            )
+        self.assertGreaterEqual(
+            total_call_sites,
+            19,
+            "ci-memory-setup call sites across workflows must not shrink"
+            " without updating this contract",
+        )
+
+    def test_memory_setup_script_pins_annotations_and_honest_degradation(self):
+        # #1149 复审跟进:此前该脚本只有 workflow 调用结构被钉住,脚本内容
+        # 零覆盖——「声称保留实已删除」这类误导文案的回归现有测试抓不住。
+        # 这里钉住三类锚点:zswap 关闭(压缩在内存中的层只允许存在一份)、
+        # ::warning:: 注解及其单行约束、诚实失败文案。
+        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        # zram 激活时必须显式关闭 zswap,否则存量 Ubuntu 内核默认开启的
+        # zswap 会在 zram 前对每个换出页双重压缩。
+        self.assertIn("echo 0 >/sys/module/zswap/params/enabled", source)
+        # Actions 下降级告警必须是步骤注解,且注解载荷必须折叠换行与 CR
+        # (workflow command 是单行协议,换行处会被截断;runner 的 .NET 行
+        # 读取器同样把孤立 CR 当行终止,可伪造第二条 workflow command)。
+        self.assertIn('echo "::warning::[memory-setup] ${*//[', source)
+        self.assertIn("${*//[$'\\r\\n']/ }", source)
+        # 预期可恢复的慢路径(modprobe 首失败、镜像 swap 预激活、镜像 swap
+        # as-is 失败后的重试、全层失败后的镜像 swapfile 兜底重试)只进日志,
+        # 不得注解化,否则每个 job 都会常驻黄标稀释真告警。函数体全文钉死:
+        # 改回 ::warning:: 注解即红。
+        self.assertIn(
+            'warn_recoverable() { echo "[memory-setup] WARNING: $*" >&2; }',
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "modprobe zram failed${modprobe_err:+: ${modprobe_err}};',
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "no swap active; activating the image swapfile'
+            ' before the slow module install"',
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "swapon ${cand} failed as is; trying chmod 600'
+            " + mkswap + swapon once\"",
+            source,
+        )
+        self.assertIn(
+            'warn_recoverable "no active swap after all layers; trying the'
+            ' image-provided swapfile"',
+            source,
+        )
+        # 磁盘 swap 重建失败必须携带诊断,且 removed_note 只允许出现在 rm
+        # 实际成功的分支内(裸 `|| removed_note=""` 会被后续无条件赋值覆盖
+        # 成死代码);不得再出现「声称保留既有 swap 配置」的旧误导文案。
+        self.assertIn(
+            "if rm -f /mnt/swapfile; then\n"
+            '        removed_note=" (the previous /mnt/swapfile was removed)"\n'
+            "      fi",
+            source,
+        )
+        self.assertNotIn("keeping the existing swap configuration", source)
+
+    def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
+        # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
+        # 三处调用点裸调(check_only 门禁、下载复核、二进制落位前),失配若
+        # 零输出退出,门禁只剩 "exit code 1"。诊断内建在 verify_file,任何
+        # 调用点都无法静默化;下载前的探测调用自行 >/dev/null 2>&1 抑制。
+        source = (ROOT / "scripts" / "fetch-connectors.sh").read_text(
+            encoding="utf-8"
+        )
+        # 失配必须携带期望/实际值(文件缺失单列),并显式 return 1。
+        self.assertIn(
+            'echo "sha256 校验失败: $1（期望 $2，实际 $(compute_sha256 "$1")）"',
+            source,
+        )
+        self.assertIn('echo "sha256 校验失败: $1（文件缺失，期望 $2）"', source)
+        self.assertIn('[[ "$(compute_sha256 "$1")" == "$2" ]]', source)
+        self.assertIn("return 1", source)
+        # 三处裸调 + 下载前探测调用,校验点不得悄悄减少。
+        self.assertEqual(
+            source.count("verify_file "),
+            4,
+            "fetch-connectors.sh must keep verifying: check_only gate,"
+            " pre-download probe, post-download recheck, and pre-install"
+            " binary check",
+        )
+
 
     def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):
         # 发布构建 job(单盘 hosted runner,x64 开机仅 ~13-14G 可用)必须在

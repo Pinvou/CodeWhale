@@ -56,7 +56,18 @@ compute_sha256() {
 }
 
 verify_file() {
-  [[ -f "$1" ]] && [[ "$(compute_sha256 "$1")" == "$2" ]]
+  if [[ -f "$1" ]] && [[ "$(compute_sha256 "$1")" == "$2" ]]; then
+    return 0
+  fi
+  # 三个调用点(check_only 门禁、下载复核、落位前)都在 set -e 下裸调,
+  # 失配诊断必须内建在此,否则整个脚本零输出退出;下载前的探测调用
+  # 自行 >/dev/null 2>&1 抑制,不受影响。
+  if [[ -f "$1" ]]; then
+    echo "sha256 校验失败: $1（期望 $2，实际 $(compute_sha256 "$1")）" >&2
+  else
+    echo "sha256 校验失败: $1（文件缺失，期望 $2）" >&2
+  fi
+  return 1
 }
 
 names=()
