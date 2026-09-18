@@ -33,15 +33,6 @@ use crate::features::sessions::SessionStore;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
-const NEGOTIATED_CAPABILITIES: &[&str] = &[
-    "pairing_v1",
-    "encrypted_frames_v1",
-    "finished_receipt_v1",
-    "role_liveness_v1",
-    "resume_v1",
-    "task_v1",
-];
-
 fn monotonic_millis() -> u64 {
     use std::sync::OnceLock;
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -527,7 +518,9 @@ mod tests {
         assert_eq!(UNSUPPORTED, "desktop_remote_control_unsupported");
         assert_eq!(TASK_EVENT, "desktop-remote-task-status");
         assert_eq!(TASK_STATUS_EVENT, "desktop-remote-task-event");
-        assert!(NEGOTIATED_CAPABILITIES.contains(&"task_v1"));
+        // 任务校验的能力集来自活租约的协商结果（live_runtime_context），
+        // 不再使用本文件内的常量表。
+        assert!(!TASK_MODE_CHAT.is_empty());
     }
 
     #[test]
