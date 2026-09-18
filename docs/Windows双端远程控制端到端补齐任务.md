@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`  
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00、E2E-01、E2E-02、E2E-03 完成（见第 3 节、第 5、6 节），当前位于 E2E-04。
+> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 进行中（A 端 journal 落库与投影已落地，B 端正文/终态产出待接）。当前位于 E2E-05。
 
 ## 1. 执行规则
 
@@ -79,6 +79,7 @@
 | E2E-01 | 1 | PASS | B 端 Relay 通道与短期码注册接线完成；审核中修复两处：`controller_endpoint_id` 由散文错误改为有界码 `desktop_relay_inactive`，注册等待循环抽出可测端口并补齐超时/断线/忽略 ack/拒绝四条用例。验证：`cargo test remote_control::` 252 通过；`desktop_remote_state.test.mjs` 9 通过；architecture-guard 通过。 |
 | E2E-02 | 1 | PASS | A 端 claim、安全握手、租约安装与 B 端对称接管全部接线完成（三步 6 个提交）；审核中每步各修复 1 处，正式审核再修复 1 处：测试构造入口收口、在途失败不覆盖已有状态（A/B 两侧）、claim 后立即清除连接码。验证：`cargo test remote_control::controller::` 193 通过 / 0 失败，`cargo test remote_control::` 282 通过 / 0 失败，architecture-guard 通过。细节见第 5.3 节。 |
 | E2E-03 | 1 | PASS | A 端会话/能力/任务意图命令落地（2 个提交）：冻结 payload 与输入摘要由 Rust 构造并自检，前端只传 UI 字段；UI 状态持有 sessionId 与 capability revision。审核修复 2 处：会话重开复用引用、wire 快照映射进 UI 能力域。验证：`cargo test remote_control::` 289 通过 / 0 失败；4 个 node 契约文件 25 通过 / 0 失败；`npm run build:ui` 与 architecture-guard 通过。细节见第 6 节。 |
+| E2E-04 | 1 | PASS | 加密业务帧双向派发完成（5 个提交）：共享加密通道、A 端收发接线、B 端解密派发与加密回传、bridge 发送入口；同进程双端用例覆盖 A 发 task_submit → B 解密派发 → B 回传 task_status → A 投影。审核修复 1 处：任务校验改用活租约的真实协商能力（删除本地常量表）。验证：`cargo test remote_control::` 298 通过 / 0 失败；architecture-guard 通过。细节见第 7 节。 |
 
 ## 4. 已登记决策与本轮已知限制
 
@@ -99,6 +100,10 @@
 | 任务意图重试必须复用 client_request_id | 依赖 E2E-04 | `desktop_remote_controller_task_intent` 每次调用生成新的 `task_id`/`client_request_id`（一次用户提交 = 一个新意图）；断线重试/恢复时必须复用已返回的 id（B 侧 `task_id + client_request_id` 幂等），E2E-04 接线时不要把重试当成新意图。 |
 | A 会话视图发送路径仍走旧 JS 拼装 | 已知缺口（E2E-07） | `RemoteConversationView.jsx:55-62` 仍在 JS 拼一个 camelCase 伪 payload 并调用 B 侧 `desktop_remote_task_submit`（DEV-22 遗留，必然被冻结校验拒绝）。E2E-03 只提供了 A 专用构造路径与状态位；E2E-07 收敛 UI 时把发送/取消改为 `controllerTaskIntent`/`controllerTaskCancelIntent` 并接 E2E-04 的加密派发。 |
 | A 端历史与远程会话尚未关联 | 依赖 E2E-05 | `desktop_remote_controller_create_history` 的 `b_session_reference` 目前由前端传入；E2E-03 的 `session_ref`/`session_id` 是它的自然来源，E2E-05 写 A 独立历史时统一关联。 |
+| B 端取消不校验跨 lease 任务 | 依赖 E2E-06 | `cancel_decrypted_task` 只校验帧的租约与任务存在性；旧 lease 遗留任务的清理由 E2E-06（B stop/刷新的任务与凭证清理）负责，`ControllerTaskEventSink` 级别的权限不再扩张。 |
+| 能力快照按 `known_revision` 复用 | E2E-04 决策 | B 收到 `capability_snapshot_request` 时，若本地已有同一 revision 且未过期的快照则直接复用（A 端同 revision 幂等接受），否则重建并把 revision 加一；避免每次请求都抬 revision。 |
+| B 端 journal 回传的 session 身份 | E2E-05 决策 | journal 事件在 B 侧按权威 session id 记录；回传 wire 帧时与 `task_status` 一致改写回 A 的 ref（需要在 `RemoteSessionMap` 补反向查询），保证 A 端一份 wire 身份贯穿任务与正文。 |
+| A 端未绑定历史时只投影不落库 | E2E-05 决策 | 收到 journal 事件时若没有匹配 `session_ref` 的本地历史，只广播 `desktop-remote-controller-journal`（含 `historyId: null`），由 E2E-07 决定先创建/绑定历史；避免在数据层臆造标题或文案。 |
 
 ## 5. E2E-02 实施状态与剩余步骤
 
@@ -171,7 +176,7 @@
 
 E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节的登记项，特别是：`client_request_id` 复用规则、B 端会话映射（`RemoteSessionMap`）、`task_v1` 已协商、A 端 `controllerTaskIntent` 返回的 payload 直接交给加密派发。
 
-## 7. E2E-04 实施进度（进行中，未审核）
+## 7. E2E-04 实施与审核记录（轮次 1，结论 PASS）
 
 ### 7.1 已落地提交
 
@@ -179,27 +184,41 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 |---|---|
 | `c0629c5c4` | 共享加密业务帧通道 `encrypted_lane.rs`：seal/open 两侧冻结校验（明文 → 加密 → 信封 / 信封 → 解密 → 明文）、有界失败分类、`ControllingLaneState` 单连接通道、`FrameDirection::wire` 提升可见性、test_support 增加 `handshake_binding`/`role_session_keys`/`lease_context`；5 条用例（双向往返无明文泄漏、重放窗口与篡改/方向/类型失败关闭、能力与跨 lease 失败关闭、通道未安装/清理失败关闭、异密钥对失败关闭） |
 | `800a83f75` | A 端收发接线：握手 outcome 带 `SessionKeys`（driver 在 Joined 后 `take_session`）；`complete_connected` 在安装认证租约的同一处安装加密通道；`send_authenticated_business`；保活任务改为解密+派发（capability_snapshot → 会话状态、task_status → 任务事件；异 generation/重放/伪造帧静默丢弃），事件出口收敛为 `ControllingLaneSinks`；新增 `desktop_remote_controller_task_send` / `_task_cancel_send`；`apply_capability_snapshot_for_lease` / `session_ref_for_lease`；1 条端到端派发用例 |
+| `10ead6648` | bridge 暴露 `controllerTaskSend` / `controllerTaskCancelSend`（只传会话引用与正文/任务 id），并补契约断言锁定发送路径不出现协议字段名 |
+| `c15029029` | B 端解密/派发/回传：`ControlledBusinessPort` 端口 + 纯函数 `dispatch_decrypted_payload`（capability_snapshot_request / task_submit / task_cancel，回包 session_id 改写回 A 的 ref）、B 侧加密通道安装（先装通道再投影 connected）、`ControlledLease`/`ControlledDeviceManager::live_runtime_context` 暴露协商能力、命令层端口实现复用 `build_capability_snapshot` 与抽出的 `admit_and_dispatch`/`cancel_and_project`、wire 会话映射（首次见到 A 的 ref 即创建 B 权威会话）、能力快照 wire 投影 `wire_capability_snapshot` |
+| `a899f4096` | 审核修复：任务校验改用活租约的真实协商能力（删除本地常量表 `NEGOTIATED_CAPABILITIES`） |
+| `88832f0f3` | E2E-05 第 1 步：A 端解密 `journal_event`（明文字段与事件本体逐项一致才接受）经 `ControllingJournalSink` 落库到 A 独立历史并广播 `desktop-remote-controller-journal`；能力声明补 `snapshot_journal_v1` |
 
 验证基线：`cargo test remote_control::` 295 通过 / 0 失败；architecture-guard 通过。
 
-### 7.2 剩余步骤（按序执行，每步独立提交并审核）
+### 7.2 审核要点（E2E-04 轮次 1）
 
-1. **B 端解密、派发与回传**（`controller/relay_runtime.rs` + `app/commands/desktop_remote_task.rs`）
-   - `ControlledHandshake::take_session` 的会话密钥安装到同一份 `ControllingLaneState`（角色 B）；
-   - `serve()` 握手完成后对 `encrypted_frame` 解密，按 payload_kind 派发：
-     `capability_snapshot_request` → 复用 B 的 `desktop_remote_capabilities_snapshot` 逻辑加密回传 `capability_snapshot`；
-     `task_submit` → 复用 `desktop_remote_task_submit` 的校验/派发逻辑（需把命令体抽成可复用函数），状态经 `task_status` 加密回传；
-     `task_cancel` → 复用 `desktop_remote_task_cancel`；
-   - **会话映射**：A 的 `session_id` 作为 ref，B 首次见到时调用 `RemoteTaskService::open_remote_session(ref, title, code_mode)` 建权威会话并交换 `session_id`；按第 4 节的决策，回传帧里的 `session_id` 统一改回 A 的 ref，保证两侧同一 wire 身份；
-   - 出站经 `ControllerRelayChannel::try_send`（B 的 v1 通道是桌面端 socket），并在发送前自行校验租约/生成代/帧上限。
-2. **同一进程双端集成用例**（E2E-04 出口）
-   - A 端 intent → 加密 → B 端解密 → B 任务接纳/执行（用测试用 executor）→ 状态加密回传 → A 端投影为任务事件；旧 lease/generation 帧丢弃；用例可直接复用 `encrypted_lane` 的双向通道与 `test_support::paired_session_keys`。
-3. **前端**：bridge 暴露 `controllerTaskSend` / `controllerTaskCancelSend`（只传 `remoteRef` 与正文/任务 id），E2E-07 再把会话视图的发送/取消切到这两个入口。
+- 目标差异：出口用例「同进程双端完成任务 admission/execution/terminal status」由 `dual_end_task_round_trip_lands_in_a_side_state` 覆盖（A 构造并加密 → B 解密派发 → B 加密回传 → A 解密投影为任务事件）；B 的真实接纳/执行由 DEV-13 的服务用例覆盖，本用例用端口桩产出冻结形状的 `task_status`。
+- 失败路径：解密/校验失败、无活租约、异 generation/异租约帧、重放帧与未知 payload_kind 一律丢弃且无副作用（`encrypted_inbound_frames_dispatch_to_session_and_task_state`、`decrypted_payloads_dispatch_and_rewrite_the_session_reference`、`replay_wrong_direction_and_tampering_fail_closed`、`foreign_lease_and_missing_capabilities_fail_closed`）。
+- 敏感信息：信封不含明文或摘要（用例断言）；通道/密钥类型 Debug 脱敏；无新增日志。
+- 跨 generation/lease：通道与租约同时安装、断线即清空；解密与信封校验都绑定 lease 五元组与方向；`send_authenticated_business` 未装租约即拒绝。
+- 审核发现（minor，已修复）：命令层任务校验使用本地能力常量表（与真实协商可能漂移）→ 改用 `live_runtime_context`（`a899f4096`）。
+- 登记缺口：`task_cancel` 只校验帧的租约与任务存在性，跨 lease 遗留任务的清理属 E2E-06（B stop/刷新的任务清理）。
 
 ### 7.3 下一步注意
 
-- B 侧派发函数不要复制 `desktop_remote_task_submit` 的命令体：抽成
-  `pub(crate) fn submit_decrypted_task(app: &AppHandle, payload: Value) -> Result<Value, String>`，
-  命令与 worker 共用，避免两条实现漂移。
-- A 端任务事件沿用 `desktop-remote-task-status`（与 B 侧本地任务事件同名，但两端是不同进程/状态域）。
-- `role_liveness_v1` / `resume_v1` 仍未在 B 注册能力中声明，E2E-06 处理心跳时一并补齐并补协商用例。
+- 已按第 4 节决策实现「回传 frame 的 session_id 统一改写回 A 的 ref」；B 内部权威会话 id 只存在于 `RemoteSessionMap` 与台账中。
+- `role_liveness_v1` / `resume_v1` 仍未在 B 注册能力中声明，E2E-06 处理心跳时一并补齐并补协商用例（`task_v1`、`snapshot_journal_v1` 已在 E2E-03/05 补齐）。
+
+## 8. E2E-05 实施进度（进行中，未审核）
+
+### 8.1 已落地
+
+| 提交 | 内容 |
+|---|---|
+| `88832f0f3` | A 端：解密 `journal_event`（`event_b64` 与 `event_bytes` 一致、明文 `journal_epoch`/`event_sequence`/`event_kind`/`session_id` 与事件本体逐项一致），经 `ControllingJournalSink` 端口落库到 A 独立历史（`RemoteHistoryStore::find_by_session_reference`）并广播 `desktop-remote-controller-journal`；能力声明补 `snapshot_journal_v1`（A claim + B 注册）；双端用例扩展出正文事件（assistant_delta）往返 |
+
+### 8.2 剩余步骤（按序执行）
+
+1. **B 端正文与终态产出并回传**
+   - `RemoteTaskEventSink` 增补一个默认空实现的事件入口（如 `publish_journal_event(kind, session_id, task_id, payload)`），命令层 `DesktopTaskEventSink` 实现为「写 `RemoteJournal` + 加密 `journal_event` 回传 A」；
+   - `RemoteChatTurnPort::run_chat_turn` 返回 B 的最终 assistant 文本（从 `SessionStore` 读回最后一条 assistant 消息，长度按 journal 上限截断），任务服务在派发前后分别写 `user_message` 与 `assistant_delta`；
+   - `RemoteSessionMap` 增反向查询（权威 session id → A 的 ref），使 journal 事件的 `session_id` 与 `task_status` 一样改写回 A 的 ref；
+   - 回传经 `ControllerRelayChannel::try_send`：需要在 `manager` 层给 worker 一个可克隆的发送句柄（`ControllerRelayChannel::sender()`），否则 journal 旁路无法在 worker 任务外发送。
+2. **缺口恢复**：A 端发现 `event_sequence` 缺口时用 `journal_replay_request`/`session_snapshot_request`（DEV-19 已有 B 侧 API）补齐；当前只做增量事件。
+3. **E2E-07 渲染**：前端订阅 `desktop-remote-controller-journal`，按 `historyId` 落库并渲染 transcript。
