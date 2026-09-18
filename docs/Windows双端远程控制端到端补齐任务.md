@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`  
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00、E2E-01、E2E-02 完成（见第 3 节与第 5 节），当前位于 E2E-03。
+> 进度：E2E-00、E2E-01、E2E-02、E2E-03 完成（见第 3 节、第 5、6 节），当前位于 E2E-04。
 
 ## 1. 执行规则
 
@@ -78,6 +78,7 @@
 | E2E-00 | 1 | PASS | 任务覆盖当前已确认的连接、session、任务路由、事件回流、生命周期与 UI 断点；保守能力决策已登记。 |
 | E2E-01 | 1 | PASS | B 端 Relay 通道与短期码注册接线完成；审核中修复两处：`controller_endpoint_id` 由散文错误改为有界码 `desktop_relay_inactive`，注册等待循环抽出可测端口并补齐超时/断线/忽略 ack/拒绝四条用例。验证：`cargo test remote_control::` 252 通过；`desktop_remote_state.test.mjs` 9 通过；architecture-guard 通过。 |
 | E2E-02 | 1 | PASS | A 端 claim、安全握手、租约安装与 B 端对称接管全部接线完成（三步 6 个提交）；审核中每步各修复 1 处，正式审核再修复 1 处：测试构造入口收口、在途失败不覆盖已有状态（A/B 两侧）、claim 后立即清除连接码。验证：`cargo test remote_control::controller::` 193 通过 / 0 失败，`cargo test remote_control::` 282 通过 / 0 失败，architecture-guard 通过。细节见第 5.3 节。 |
+| E2E-03 | 1 | PASS | A 端会话/能力/任务意图命令落地（2 个提交）：冻结 payload 与输入摘要由 Rust 构造并自检，前端只传 UI 字段；UI 状态持有 sessionId 与 capability revision。审核修复 2 处：会话重开复用引用、wire 快照映射进 UI 能力域。验证：`cargo test remote_control::` 289 通过 / 0 失败；4 个 node 契约文件 25 通过 / 0 失败；`npm run build:ui` 与 architecture-guard 通过。细节见第 6 节。 |
 
 ## 4. 已登记决策与本轮已知限制
 
@@ -94,6 +95,10 @@
 | B 端信任根缺失在接管点失败关闭 | 保守默认，登记 | 为保持 E2E-01 的注册行为不变，B 在收到 `controller_pairing_reserved` 时才要求信任根（错误码 `relay_trust_unconfigured`）；A 端在 connect 前即失败关闭。 |
 | 命令层错误码未映射到 A 对话框文案 | 已知缺口（E2E-07） | `desktop_remote_controller_*` 现在返回有界错误码，但 `desktop-remote-control.js` 的 `controllerConnect` 未把 `Err(String)` 转成带 `code` 的错误，`connectionErrorKey` 只能拿到 undefined；B 面板与 A 壳层的状态名映射同样与后端枚举不一致（`ControlledDevicePanel.jsx:27-40` 期望 `registering`/`waiting_for_pairing`/`pairing_reserved`/`handshake_pending`，后端实际是 `reserving`/`waiting_connection`/`safety_handshake`），导致 B 面板回落到 statusIdle 且不显示连接码。E2E-07 统一修复并补行为测试。 |
 | 能力协商按交集收敛 | 依赖 E2E-04/E2E-06 处理 | `negotiateControllerCapabilities` 取「A 请求 ∩ B 注册」；B 目前只注册 `[pairing_v1, encrypted_frames_v1, finished_receipt_v1]`，A 声明 `pairing_v1/encrypted_frames_v1/finished_receipt_v1/role_liveness_v1/resume_v1`，因此 `role_liveness_v1`、`resume_v1`、`task_v1` 都未协商成功。E2E-02 只用到 `pairing_v1`（`controller_joined` 能力绑定）所以可跑通；E2E-04 发送业务帧前必须先在两侧声明 `task_v1`（本地运行时校验会以 `unsupported_capability` 拒绝 `task_submit` 等载荷），E2E-06 同理需要 `role_liveness_v1`/`resume_v1`。 |
+| A 端会话 id 由本端生成 | E2E-03 决策 | 冻结协议没有「创建会话」帧：`task_submit.session_id` 必须由发起方提供。E2E-03 由 A 生成 `session-<uuid>` 作为该远程会话在 wire 上的 id（UI 持有的「远程 sessionId」即此值），`session_ref` 只用于本地索引；B 的派发层（E2E-04）需据此绑定/创建权威会话（B 侧 `RemoteSessionMap` 支持 ref→权威 id 映射），并能把权威 id 回传（`task_status`/`session_snapshot` 都带 `session_id`）。 |
+| 任务意图重试必须复用 client_request_id | 依赖 E2E-04 | `desktop_remote_controller_task_intent` 每次调用生成新的 `task_id`/`client_request_id`（一次用户提交 = 一个新意图）；断线重试/恢复时必须复用已返回的 id（B 侧 `task_id + client_request_id` 幂等），E2E-04 接线时不要把重试当成新意图。 |
+| A 会话视图发送路径仍走旧 JS 拼装 | 已知缺口（E2E-07） | `RemoteConversationView.jsx:55-62` 仍在 JS 拼一个 camelCase 伪 payload 并调用 B 侧 `desktop_remote_task_submit`（DEV-22 遗留，必然被冻结校验拒绝）。E2E-03 只提供了 A 专用构造路径与状态位；E2E-07 收敛 UI 时把发送/取消改为 `controllerTaskIntent`/`controllerTaskCancelIntent` 并接 E2E-04 的加密派发。 |
+| A 端历史与远程会话尚未关联 | 依赖 E2E-05 | `desktop_remote_controller_create_history` 的 `b_session_reference` 目前由前端传入；E2E-03 的 `session_ref`/`session_id` 是它的自然来源，E2E-05 写 A 独立历史时统一关联。 |
 
 ## 5. E2E-02 实施状态与剩余步骤
 
@@ -142,3 +147,26 @@
 - 定向测试与守卫：`cargo test remote_control::controller::relay_transport` 16 通过；`remote_control::controller::controlling_runtime` 3 通过；`controlling_service` 6 通过；`relay_runtime` 9 通过；`cargo test remote_control::controller::` 193 通过 / 0 失败；`cargo test remote_control::` 282 通过 / 0 失败；`python scripts/architecture-guard.py` 通过。
 - 全量回归观察（非本任务范围）：`cargo test --lib` 2487 通过 / 6 失败 / 12 忽略。6 条失败全部在 remote_control 之外的既有模块，且与本次改动无调用关系：`platform::process::tests::timeout_kills_self_contained_process_tree`（隔离运行仍失败，进程树终止超时）与 `features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_is_rejected`（工具 `up-pip-reinstall` 不存在）为环境限制；`platform::process::{completed_parent_does_not_wait_for_descendant_capture_handles, output_capture_limit_terminates_process_tree}`、`features::assistant::multiagent_regression_tests::code_session_real_spawn_refresh_resolves_config_expert_without_project_writes`、`features::assistant::platform::bridge::tests::api_key_requirement_allows_only_vllm_or_loopback_without_key` 在隔离运行时通过，属并行负载下的抖动。
 - 结论：**REVIEW: PASS**。下一步进入 E2E-03（A 端远程 Session 与合法任务请求构造）。
+
+## 6. E2E-03 实施与审核记录（轮次 1，结论 PASS）
+
+### 6.1 已落地提交
+
+| 提交 | 内容 |
+|---|---|
+| `debf3aa1c` | A 端远程会话与任务请求构造：`controlling_session.rs`（会话意图 + 三个冻结 payload builder + 输入摘要 + 失败门）、7 个 `desktop_remote_controller_session_*` 命令、`ControllerLease` 记录协商能力与 `live_runtime_context`、A/B 两侧补 `task_v1` 能力声明、前端状态与 bridge 接线、node 契约测试 |
+| `8858dfe48` | 审核修复：会话重开复用 `sessionRef`（幂等）、wire 快照映射进 UI 能力域（`capabilitySnapshotForUi`），并锁定「UI 路径不出现协议字段名」 |
+
+### 6.2 审核要点
+
+- 目标差异：A 专用 session/capability/task intent 命令齐备；payload 与输入摘要全部由 Rust 构造，且每个 builder 的输出都经 `validate_controller_runtime_payload_json`（角色 A + 活租约 + 协商能力）自检，前端只提交标题/模式/正文。
+- 失败关闭：未连接（`controller_not_connected`）、lease 五元组变更（`session_context_stale`）、未取到能力快照（`capability_snapshot_required`）、能力未协商（`capability_not_negotiated`）、revision 回退（`capability_snapshot_stale`）、跨连接/跨 lease 快照、取消未构造过的任务（`task_not_found`）、非 chat 模式（`session_mode_unavailable`）、容量上限（`session_capacity`/`task_capacity`）均有用例。
+- 导出标准：`validate_controller_runtime_payload_json` 输出即为 wire payload（租约五元组 + revision + 摘要 + input 结构），因此 E2E-04 只需加密与派发，不再重新拼装字段。
+- 敏感信息：会话状态只在内存（无持久化调用）、投影只含 opaque 标识与计数、意图投影不含凭证；无新增日志/遥测。
+- 跨 generation/lease：会话绑定活租约五元组，快照必须与同一 lease 匹配；断线/新连接清空全部会话意图。
+- 审核发现（均 minor，已修复）：见 6.1 第二个提交。
+- 验证：`cargo test remote_control::` 289 通过 / 0 失败；`node --test controller_session_intent_contract/desktop_remote_state/remote_conversation_contract/connect_remote_device_contract` 25 通过 / 0 失败；`npm run build:ui` 通过；`python scripts/architecture-guard.py` 通过；`npm run lint:ui` 0 error。
+
+### 6.3 下一步
+
+E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节的登记项，特别是：`client_request_id` 复用规则、B 端会话映射（`RemoteSessionMap`）、`task_v1` 已协商、A 端 `controllerTaskIntent` 返回的 payload 直接交给加密派发。
