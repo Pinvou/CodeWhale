@@ -505,6 +505,13 @@ impl ReceiptSecret {
         Ok(commitment)
     }
 
+    /// E2E-02 所需的冻结契约增量：`finished_receipt_ack` 必须把本端 receipt
+    /// secret 只经已认证角色 socket 回传给 Relay（用于校验它与此前 commitment
+    /// 一致）。明文只在此显式路径出 Rust，Debug/Display/普通序列化仍全部脱敏。
+    pub(crate) fn to_base64(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(&self.0[..])
+    }
+
     #[cfg(test)]
     fn from_test_bytes(value: [u8; RECEIPT_SECRET_BYTES]) -> Self {
         Self(Zeroizing::new(value))
@@ -1793,6 +1800,26 @@ mod tests {
         require_zeroizing_array(&a.resume_secret);
         let ciphers = a.into_role_ciphers(ControllerRole::A, lease(1)).unwrap();
         require_zeroizing_array(&ciphers.resume_secret.0);
+    }
+
+    /// E2E-02 契约：ack 信封携带的 receipt secret 必须能还原成同一份密钥，
+    /// 且其 commitment 与握手期提交的 commitment 一致；调试输出仍脱敏。
+    #[test]
+    fn receipt_secret_round_trips_through_the_ack_envelope_only() {
+        let secret = ReceiptSecret::from_test_bytes([11_u8; 32]);
+        let encoded = secret.to_base64();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .unwrap();
+        assert_eq!(decoded, vec![11_u8; 32]);
+        assert!(!format!("{secret:?}").contains(&encoded));
+
+        let restored = ReceiptSecret::from_test_bytes(decoded.try_into().unwrap());
+        assert_eq!(
+            secret.commitment(&binding(), ControllerRole::A).unwrap(),
+            restored.commitment(&binding(), ControllerRole::A).unwrap(),
+            "the transmitted secret must reproduce the committed receipt"
+        );
     }
 
     #[test]
