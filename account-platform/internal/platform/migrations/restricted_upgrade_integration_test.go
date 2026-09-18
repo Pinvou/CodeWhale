@@ -28,18 +28,19 @@ func TestRestrictedMigrationLedgerPostgresIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = control.Close(context.Background()) })
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
-	role, deniedRole := "ledger_writer_"+suffix, "ledger_denied_"+suffix
+	role, deniedRole, switchedRole := "ledger_writer_"+suffix, "ledger_denied_"+suffix, "ledger_switched_"+suffix
 	schema, emptySchema := "ledger_upgrade_"+suffix, "ledger_empty_"+suffix
 	password := strings.ReplaceAll(uuid.NewString(), "-", "") + strings.ReplaceAll(uuid.NewString(), "-", "")
 	quotedRole, quotedDenied := pgx.Identifier{role}.Sanitize(), pgx.Identifier{deniedRole}.Sanitize()
+	quotedSwitched := pgx.Identifier{switchedRole}.Sanitize()
 	quotedSchema, quotedEmpty := pgx.Identifier{schema}.Sanitize(), pgx.Identifier{emptySchema}.Sanitize()
-	if _, err = control.Exec(ctx, "CREATE ROLE "+quotedRole+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '"+password+"'; CREATE ROLE "+quotedDenied+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '"+password+"'; CREATE SCHEMA "+quotedSchema+"; CREATE SCHEMA "+quotedEmpty+"; GRANT USAGE,CREATE ON SCHEMA "+quotedSchema+" TO "+quotedRole+"; GRANT USAGE ON SCHEMA "+quotedSchema+" TO "+quotedDenied+"; GRANT USAGE ON SCHEMA "+quotedEmpty+" TO "+quotedRole); err != nil {
+	if _, err = control.Exec(ctx, "CREATE ROLE "+quotedRole+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '"+password+"'; CREATE ROLE "+quotedDenied+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '"+password+"'; CREATE ROLE "+quotedSwitched+" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT; GRANT "+quotedSwitched+" TO "+quotedRole+"; CREATE SCHEMA "+quotedSchema+"; CREATE SCHEMA "+quotedEmpty+"; GRANT USAGE,CREATE ON SCHEMA "+quotedSchema+" TO "+quotedRole+"; GRANT USAGE,CREATE ON SCHEMA "+quotedSchema+" TO "+quotedSwitched+"; GRANT USAGE ON SCHEMA "+quotedSchema+" TO "+quotedDenied+"; GRANT USAGE ON SCHEMA "+quotedEmpty+" TO "+quotedRole); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
-		if _, err := control.Exec(cleanup, "DROP SCHEMA "+quotedSchema+" CASCADE; DROP SCHEMA "+quotedEmpty+" CASCADE; DROP ROLE "+quotedRole+"; DROP ROLE "+quotedDenied); err != nil {
+		if _, err := control.Exec(cleanup, "DROP SCHEMA "+quotedSchema+" CASCADE; DROP SCHEMA "+quotedEmpty+" CASCADE; DROP ROLE "+quotedRole+"; DROP ROLE "+quotedDenied+"; DROP ROLE "+quotedSwitched); err != nil {
 			t.Errorf("cleanup isolated migration fixture: %v", err)
 		}
 	})
@@ -71,6 +72,12 @@ func TestRestrictedMigrationLedgerPostgresIntegration(t *testing.T) {
 	first.Checksum = normalizedChecksum(first.UpSQL)
 	second := Migration{Version: 2, Name: "restricted_dml", UpSQL: `INSERT INTO migration_probe(id) VALUES(7)`, DownSQL: `DELETE FROM migration_probe WHERE id=7`}
 	second.Checksum = normalizedChecksum(second.UpSQL)
+	// A migration that legitimately enters a trusted owner must not decide the
+	// identity of the ledger write or of the next ledger read.
+	switched := Migration{Version: 3, Name: "trusted_owner_switch",
+		UpSQL:   `SET ROLE ` + quotedSwitched + `; CREATE TABLE switched_role_probe(id INTEGER PRIMARY KEY)`,
+		DownSQL: `SET ROLE ` + quotedSwitched + `; DROP TABLE switched_role_probe`}
+	switched.Checksum = normalizedChecksum(switched.UpSQL)
 	if err = Up(ctx, writer, []Migration{first}); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -130,6 +137,36 @@ func TestRestrictedMigrationLedgerPostgresIntegration(t *testing.T) {
 		denied := connect(deniedRole, schema)
 		assertMigrationPermissionDenied(t, Up(ctx, denied, loaded))
 		Unlock(ctx, denied)
+	})
+	t.Run("trusted_owner_switch_keeps_ledger_identity", func(t *testing.T) {
+		withSwitch := []Migration{first, second, switched}
+		if err := Up(ctx, writer, withSwitch); err != nil {
+			t.Fatalf("upgrade with trusted owner switch: %v", err)
+		}
+		Unlock(ctx, writer)
+		if _, err := VerifyApplied(ctx, writer, withSwitch); err != nil {
+			t.Fatal(err)
+		}
+		var session, current string
+		var ledgerRows int
+		if err := writer.QueryRow(ctx, `SELECT session_user,current_user,(SELECT count(*) FROM schema_migrations WHERE version=3)`).Scan(&session, &current, &ledgerRows); err != nil || session != role || current != role || ledgerRows != 1 {
+			t.Fatalf("role-switching migration session=%s current=%s ledger=%d err=%v", session, current, ledgerRows, err)
+		}
+		var owner string
+		if err := writer.QueryRow(ctx, `SELECT pg_catalog.pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid=to_regclass('switched_role_probe')))`).Scan(&owner); err != nil || owner != switchedRole {
+			t.Fatalf("role-switched DDL owner=%s err=%v", owner, err)
+		}
+		if err := DownOne(ctx, writer, withSwitch); err != nil {
+			t.Fatalf("down with trusted owner switch: %v", err)
+		}
+		Unlock(ctx, writer)
+		if _, err := VerifyApplied(ctx, writer, loaded); err != nil {
+			t.Fatal(err)
+		}
+		var exists bool
+		if err := writer.QueryRow(ctx, `SELECT pg_catalog.to_regclass('switched_role_probe') IS NOT NULL`).Scan(&exists); err != nil || exists {
+			t.Fatalf("role-switched down left table=%v err=%v", exists, err)
+		}
 	})
 	t.Run("empty_schema_without_create", func(t *testing.T) {
 		empty := connect(role, emptySchema)

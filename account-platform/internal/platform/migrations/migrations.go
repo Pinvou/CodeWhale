@@ -85,9 +85,13 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
+	role, err := migrationRole(ctx, connection)
+	if err != nil {
+		return err
+	}
 	for _, migration := range migrations {
 		var existingChecksum string
-		err := connection.QueryRow(ctx,
+		err = connection.QueryRow(ctx,
 			`SELECT checksum FROM schema_migrations WHERE version = $1`, migration.Version,
 		).Scan(&existingChecksum)
 		switch {
@@ -104,11 +108,15 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 		if err != nil {
 			return fmt.Errorf("begin migration %d: %w", migration.Version, err)
 		}
-		if _, err = tx.Exec(ctx, migration.UpSQL); err == nil {
-			_, err = tx.Exec(ctx,
-				`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
-				migration.Version, migration.Name, migration.Checksum,
-			)
+		if err = setMigrationRole(ctx, tx, role); err == nil {
+			if _, err = tx.Exec(ctx, migration.UpSQL); err == nil {
+				if err = setMigrationRole(ctx, tx, role); err == nil {
+					_, err = tx.Exec(ctx,
+						`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
+						migration.Version, migration.Name, migration.Checksum,
+					)
+				}
+			}
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)
@@ -117,6 +125,30 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit migration %d: %w", migration.Version, err)
 		}
+	}
+	return nil
+}
+
+// migrationRole is the identity the ledger belongs to. A deployment runs the
+// migrator with MIGRATION_ROLE already selected, and that role owns
+// schema_migrations in every domain.
+func migrationRole(ctx context.Context, connection *pgx.Conn) (string, error) {
+	var role string
+	if err := connection.QueryRow(ctx, `SELECT current_user`).Scan(&role); err != nil {
+		return "", fmt.Errorf("select migration role: %w", err)
+	}
+	return role, nil
+}
+
+// setMigrationRole pins the transaction back to the migration role. A
+// migration may legitimately enter a trusted owner through SET ROLE, but
+// neither that owner nor the role it leaves behind may decide whether the
+// ledger row is recorded or readable later: the ledger is owned by the
+// migration role, so an unpinned connection would fail the next ledger read
+// with SQLSTATE 42501 instead of applying or skipping history.
+func setMigrationRole(ctx context.Context, tx pgx.Tx, role string) error {
+	if _, err := tx.Exec(ctx, `SET ROLE `+pgx.Identifier{role}.Sanitize()); err != nil {
+		return fmt.Errorf("restore migration role: %w", err)
 	}
 	return nil
 }
@@ -156,8 +188,12 @@ func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) 
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
+	role, err := migrationRole(ctx, connection)
+	if err != nil {
+		return err
+	}
 	var version int64
-	err := connection.QueryRow(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
+	err = connection.QueryRow(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -175,8 +211,12 @@ func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) 
 		if err != nil {
 			return fmt.Errorf("begin rollback %d: %w", version, err)
 		}
-		if _, err = tx.Exec(ctx, migration.DownSQL); err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
+		if err = setMigrationRole(ctx, tx, role); err == nil {
+			if _, err = tx.Exec(ctx, migration.DownSQL); err == nil {
+				if err = setMigrationRole(ctx, tx, role); err == nil {
+					_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
+				}
+			}
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)

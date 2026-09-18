@@ -27,3 +27,27 @@ APT-138 真实非超级用户 PostgreSQL 激活迁移验收发现：Token 29 已
 - 2026-09-06 B：文档及代码静态审核 PASS。A 已写好三文件最小实现及具名 PostgreSQL 回归测试，等待隔离候选实际执行结果；尚未宣称真实测试通过，不标记完成。
 - 2026-09-06 根代理：从已提交 HEAD 加本批三文件导出隔离候选 `fd445c2e68e3373fdd144065e582bc0c865dbe22`。`TestRestrictedMigrationLedgerPostgresIntegration` 真实 PostgreSQL 五个子用例全 PASS，用例 0.97 秒；原四项迁移单元测试亦 PASS，包总计 2.909 秒，退出码 0，无 SKIP。真实证据覆盖受限升级/down、历史校验和、无账本权限、无 CREATE 初始化和 advisory 锁竞争；不依赖未提交激活代码。
 - 2026-09-06 B：最终独立审核 PASS，三文件范围、真实角色权限和完整测试证据均通过。A 仅更新本记录，交根代理独立签署；后续按既定顺序恢复其余前置修复及 APT-138。
+
+# GSA-22-P1：迁移切换可信 owner 后的账本写入身份
+
+## 需求与根因
+
+GSA-22 跨域领域 E2E 首次按生产同构拓扑创建独立 Billing 数据库（`CREATE DATABASE ... OWNER billing_schema_owner`、`public` 归 `billing_schema_owner`、`schema_migrations` 归迁移角色 `billing_service`、迁移以 `billing_migrator` 加 `SET ROLE billing_service` 执行）应用迁移 1→58 时在 `000056_entitlement_component_correction_prepare` 失败：`permission denied for table schema_migrations (SQLSTATE 42501)`。
+
+根因有两层：`000056` 内部 `SET ROLE billing_schema_owner` 建表后没有切回迁移角色，通用执行器 `Up` 随后在同一事务内以该 owner 记录账本；提交后连接角色仍是 schema owner，下一次迭代的账本 `SELECT` 同样会失败。`000053/000054/000055/000057/000058` 均在结尾回到 `SET ROLE billing_service`，因此这是 `000056` 的遗漏；而仓库 `migrations/manifest.json` 明确禁止编辑已登记历史脚本，修复只能落在通用执行器。
+
+## 设计
+
+`internal/platform/migrations` 在执行每个迁移前读取一次 `current_user`（迁移角色，即部署 `MIGRATION_ROLE`，也是账本在部署库中的所有者），并在事务内于迁移 SQL 执行前后各 `SET ROLE` 回该角色：迁移仍可合法切到可信 owner（例如 `billing_schema_owner` 建表），但账本 `INSERT` 以及下一次账本读取始终由迁移角色执行。角色恢复失败保持既有失败关闭；不新增账本 ACL、不改写已登记迁移、不引入超级用户替代身份。`DownOne` 采用同一约定，删除账本行同样回到迁移角色。
+
+## 单任务与验收
+
+- 文件范围：本说明、`internal/platform/migrations/migrations.go`、专属真实 PostgreSQL 回归 `internal/platform/migrations/restricted_upgrade_integration_test.go`。
+- 回归用例 `trusted_owner_switch_keeps_ledger_identity`：迁移 3 在事务内 `SET ROLE` 到受信 owner 后建表；断言升级成功、账本记录版本 3、连接当前角色仍是迁移角色、DDL 对象归属该受信 owner、`down` 后对象消失且账本回到 2。
+- 修复前同一用例必须以 `permission denied for table schema_migrations (SQLSTATE 42501)` 失败；修复后真实 PostgreSQL 六个子用例全部 PASS，无 SKIP。
+- 运行 `go test ./internal/platform/migrations`、`go vet ./internal/platform/migrations`、架构守卫与统一 `account-platform verify`；不使用 SKIP 作为通过证据。
+- 本切片只修正账本写入身份，不激活任何财务命令、不部署、不改动 `migrations/manifest.json`。
+
+## 独立审核记录
+
+- 2026-09-18 代理：定位根因、完成最小修复，并以真实 PostgreSQL 证明修复前失败、修复后 `TestRestrictedMigrationLedgerPostgresIntegration` 六个子用例全 PASS；待独立审核与本任务后续提交。
