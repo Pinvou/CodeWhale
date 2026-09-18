@@ -254,6 +254,8 @@ GSA-22 Account 集成夹具与授权链修复切片（仍PARTIAL / REVIEW_PENDIN
 
 GSA-22 Account proof client路由切片（仍PARTIAL / REVIEW_PENDING）：Account HTTP proof reader将`ENTITLEMENT_COMPONENT_ADJUSTMENT`加入Billing authority路由与`PROOF_VALID`/closed DENY reason白名单，双服务端单测证明该命令只访问Billing proof endpoint且Token endpoint零调用；不改变其它六命令路由、proof wire、2秒 deadline或64KiB预算。该切片只打通Account→Billing proof入口，跨库领域E2E与业务presenter仍待完成。
 
+GSA-22 权益纠错consumer专属路由切片（仍PARTIAL / REVIEW_PENDING）：closed consumer registry新增`billing-entitlement-component-adjustment-executor-p2-v1`（Billing workload / policy v2 / Q+1启动），Account前向`000070`以authorization owner重写只读mapping/route函数，仅允许该命令的proof-era wire进入此durable并拒绝legacy wire；down保持55000前向禁止。同步OpenAPI canonical durable枚举、consumer wiring合同和query-only失败分类。真实Account迁移1→70与路由函数集成PASS，registry/recovery/合同定向测试PASS，manifest328项PASS；durable仍不在Billing服务启动集合，跨域E2E与activation未完成。
+
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

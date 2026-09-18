@@ -48,10 +48,21 @@ func TestRecoveryResultClientBindsOriginalReferencesAndRejectsCacheableResponses
 					if r.URL.Query().Get("original_event_id") != candidate.OriginalEventID.String() || r.URL.Query().Get("approval_epoch") != "2" {
 						t.Error("original Billing binding missing")
 					}
-					body = billingRecoveryResultView{SchemaVersion: 1, ApprovalRequestID: id, OriginalEventID: candidate.OriginalEventID,
+					correctionID, journalID := uuid.New(), uuid.New()
+					billing := billingRecoveryResultView{SchemaVersion: 1, ApprovalRequestID: id, OriginalEventID: candidate.OriginalEventID,
 						ApprovalEpoch: 2, CommandType: candidate.CommandType, State: "SUCCEEDED",
-						DomainResult:     json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`),
-						LedgerReferences: json.RawMessage(`{"journal_entry_id":"` + uuid.NewString() + `"}`), ObservedAt: time.Now().UTC()}
+						ObservedAt: time.Now().UTC()}
+					if descriptor.CommandType == "ENTITLEMENT_COMPONENT_ADJUSTMENT" {
+						billing.DomainResult = json.RawMessage(`{"correction_id":"` + correctionID.String() + `","package_id":"` + uuid.NewString() +
+							`","wallet_id":"` + uuid.NewString() + `","source_component_id":"` + uuid.NewString() + `","source_lot_id":"` + uuid.NewString() +
+							`","target_component_id":"` + uuid.NewString() + `","target_lot_id":"` + uuid.NewString() +
+							`","source_type":"BASE","target_type":"BONUS","amount_microcredits":20,"journal_entry_id":"` + journalID.String() + `","status":"SUCCEEDED"}`)
+						billing.LedgerReferences = json.RawMessage(`{"journal_entry_id":"` + journalID.String() + `"}`)
+					} else {
+						billing.DomainResult = json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`)
+						billing.LedgerReferences = json.RawMessage(`{"journal_entry_id":"` + uuid.NewString() + `"}`)
+					}
+					body = billing
 				}
 				_ = json.NewEncoder(w).Encode(body)
 			}))

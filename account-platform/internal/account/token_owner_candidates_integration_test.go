@@ -428,14 +428,14 @@ func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	repository, connection, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
-	if latest := loaded[len(loaded)-1]; latest.Version != 69 {
-		t.Fatalf("latest account migration=%d, want 69", latest.Version)
+	if latest := loaded[len(loaded)-1]; latest.Version != 70 {
+		t.Fatalf("latest account migration=%d, want 70", latest.Version)
 	}
 	var sessionUser, currentUser string
 	var latestVersion int64
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT max(version) FROM schema_migrations)`).
 		Scan(&sessionUser, &currentUser, &latestVersion); err != nil || sessionUser != "account_migrator" ||
-		currentUser != "account_service" || latestVersion != 69 {
+		currentUser != "account_service" || latestVersion != 70 {
 		t.Fatalf("migration identity session=%q current=%q version=%d err=%v", sessionUser, currentUser, latestVersion, err)
 	}
 	var policyVersion int64
@@ -448,6 +448,20 @@ WHERE command_type='ENTITLEMENT_COMPONENT_ADJUSTMENT' ORDER BY policy_version DE
 count(*) FILTER (WHERE nspname='account_approval_authorization') FROM pg_namespace`).Scan(&controlSchemas, &authorizationSchemas); err != nil ||
 		controlSchemas != 1 || authorizationSchemas != 1 {
 		t.Fatalf("production authorization schemas control=%d authorization=%d err=%v", controlSchemas, authorizationSchemas, err)
+	}
+	if _, err := connection.Exec(ctx, `SET ROLE account_approval_authorization_owner`); err != nil {
+		t.Fatal(err)
+	}
+	var durable string
+	var proofWire, legacyWire bool
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('ENTITLEMENT_COMPONENT_ADJUSTMENT',2,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-entitlement-component-adjustment-executor-p2-v1','billing-command-executor','ENTITLEMENT_COMPONENT_ADJUSTMENT',2,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-entitlement-component-adjustment-executor-p2-v1','billing-command-executor','ENTITLEMENT_COMPONENT_ADJUSTMENT',2,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&durable, &proofWire, &legacyWire); err != nil || durable != "billing-entitlement-component-adjustment-executor-p2-v1" || !proofWire || legacyWire {
+		t.Fatalf("entitlement consumer route durable=%q proof=%v legacy=%v err=%v", durable, proofWire, legacyWire, err)
+	}
+	if _, err := connection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
+		t.Fatal(err)
 	}
 }
 

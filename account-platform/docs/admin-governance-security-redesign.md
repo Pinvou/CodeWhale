@@ -368,6 +368,7 @@ SAFE→PROOF_REQUIRED 的唯一恢复顺序为：先保持所有 approval 写/Be
 | `WALLET_ADJUSTMENT` / p1 | `billing-command-executor` | `billing-wallet-adjustment-executor-p1-v1` | `MaxDeliver=-1` |
 | `PAYMENT_PROVIDER_RESUME` / p2 | `billing-command-executor` | `billing-payment-provider-resume-executor-p2-v1` | `MaxDeliver=-1` |
 | `PAYMENT_PRODUCT_RESUME` / p1 | `billing-command-executor` | `billing-payment-product-resume-executor-p1-v1` | `MaxDeliver=-1` |
+| `ENTITLEMENT_COMPONENT_ADJUSTMENT` / p2 | `billing-command-executor` | `billing-entitlement-component-adjustment-executor-p2-v1` | `MaxDeliver=-1` |
 | `TOKEN_MODEL_LIFECYCLE_CHANGE` / p2 | `token-command-executor` | 既有 `token-model-lifecycle-executor-v1` | 保持 `MaxDeliver=-1` |
 | `TOKEN_MODEL_CATALOG_ROLLBACK` / p2 | `token-command-executor` | 既有 `token-catalog-rollback-executor-v1` | 保持 `MaxDeliver=-1` |
 | `TOKEN_CREDENTIAL_REVOKE` / p1 | `token-command-executor` | 既有 `token-credential-revoke-executor-v1` | 保持 `MaxDeliver=-1` |

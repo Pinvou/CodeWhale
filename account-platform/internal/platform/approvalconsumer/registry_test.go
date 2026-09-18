@@ -4,7 +4,7 @@ import "testing"
 
 func TestApprovalConsumerRegistryContract(t *testing.T) {
 	all := All()
-	if len(all) != 6 || len(BillingCommands()) != 3 || len(TokenCommands()) != 3 {
+	if len(all) != 7 || len(BillingCommands()) != 4 || len(TokenCommands()) != 3 {
 		t.Fatalf("unexpected registry sizes: all=%d billing=%d token=%d", len(all), len(BillingCommands()), len(TokenCommands()))
 	}
 	seenCommands, seenDurables := map[string]bool{}, map[string]bool{}
@@ -30,7 +30,7 @@ func TestApprovalConsumerRegistryContract(t *testing.T) {
 		t.Fatalf("legacy billing must remain a compatibility descriptor: %+v", legacy)
 	}
 	if Match(legacy, "WALLET_ADJUSTMENT", 1, BillingWorkload) {
-		t.Fatal("legacy shared durable must not become a seventh command mapping")
+		t.Fatal("legacy shared durable must not become an eighth command mapping")
 	}
 	if _, ok := LookupDurable("unknown"); ok {
 		t.Fatal("unknown durable accepted")

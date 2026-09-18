@@ -36,6 +36,8 @@ func ClassifyProofFailure(command string, policyVersion int64, code string) Reco
 		result.Class = classifyBillingFailure(code)
 	case command == "PAYMENT_PRODUCT_RESUME" && policyVersion == 1:
 		result.Class = classifyBillingFailure(code)
+	case command == "ENTITLEMENT_COMPONENT_ADJUSTMENT" && policyVersion == 2:
+		result.Class = classifyBillingFailure(code)
 	case command == "TOKEN_MODEL_LIFECYCLE_CHANGE" && policyVersion == 2:
 		result.Class = classifyTokenFailure(code)
 	case command == "TOKEN_MODEL_CATALOG_ROLLBACK" && policyVersion == 2:

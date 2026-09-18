@@ -692,6 +692,16 @@
         "file": "000069_entitlement_component_adjustment_policy_v2.up.sql",
         "version": 69,
         "sha256": "5dfcd5e1f9e3f41206e594653cc6b55c0e1c3c015033e8d59a294f966710dd6e"
+      },
+      {
+        "file": "000070_entitlement_correction_consumer_route.down.sql",
+        "version": 70,
+        "sha256": "c809db57a8bb9ca01c99e8766f8678bc17499ac4f34500e0098e6a29c4dbe621"
+      },
+      {
+        "file": "000070_entitlement_correction_consumer_route.up.sql",
+        "version": 70,
+        "sha256": "ffde14c97998cef51233599d6c18e4839049fe0ea30153c163a87e3849006380"
       }
     ],
     "billing": [

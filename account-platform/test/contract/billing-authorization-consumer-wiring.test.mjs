@@ -16,6 +16,7 @@ test('Billing wires the legacy authorization durable only through the raw consum
     'billing-wallet-adjustment-executor-p1-v1',
     'billing-payment-provider-resume-executor-p2-v1',
     'billing-payment-product-resume-executor-p1-v1',
+    'billing-entitlement-component-adjustment-executor-p2-v1',
   ]) {
     assert.equal(source.includes(`ConsumeAuthorization(workerContext, "${durable}"`), false,
       `${durable} must remain inactive until a trusted Q+1 receipt is supplied`);
