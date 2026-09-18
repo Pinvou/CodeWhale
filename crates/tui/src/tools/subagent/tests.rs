@@ -4088,9 +4088,16 @@ async fn agent_roster_profile_query_discovers_members_beyond_the_listing_cap() {
         .collect();
     assert_eq!(listed, vec!["exp-host-049"]);
 
-    // Id substrings match case-insensitively too.
+    // Id substrings match case-insensitively too — including partial ids, so
+    // an exact-equality regression on the id leg cannot survive.
     let payload = roster_payload(&tool, tmp.path(), json!("EXP-HOST-049")).await;
     assert_eq!(payload["host_profile_count"], json!(1));
+    let payload = roster_payload(&tool, tmp.path(), json!("host-049")).await;
+    assert_eq!(payload["host_profile_count"], json!(1));
+    assert_eq!(
+        payload["host_profiles"][0]["member_id"],
+        json!("exp-host-049")
+    );
 
     // Zero matches stay honest: empty list, zero count, no truncation flag.
     let payload = roster_payload(&tool, tmp.path(), json!("nonexistent-topic")).await;
@@ -4160,6 +4167,7 @@ async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
     let pinned = member("exp-host-pinned");
     let mut shadowed = member("exp-host-shadowed");
     shadowed.id = "reviewer".to_string();
+    let shadowed_for_mirror = shadowed.clone();
     let mut personal = good.clone();
     personal.origin = crate::fleet::roster::ProfileOrigin::Personal;
     let mut oversize = good.clone();
@@ -4211,7 +4219,11 @@ async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
         "write_authority": "read_only"
     }))
     .expect("role-token request parses");
-    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &config_roster)
+    // Resolve against a roster that actually contains the shadowing member:
+    // against a roster without the id the role path wins under any ordering,
+    // so the precedence claim would be vacuous.
+    let shadow_mirror = FleetRoster::from_members(vec![shadowed_for_mirror]);
+    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &shadow_mirror)
         .expect("a shadowing role token still parses and resolves as the role");
     assert!(
         resolved.is_none(),

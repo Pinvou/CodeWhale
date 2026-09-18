@@ -8237,9 +8237,10 @@ pub fn new_shared_subagent_manager_with_state_root_and_timeout(
 /// `host_profile_count` so the model can tell when the listing was cut.
 const ROSTER_HOST_PROFILE_LIMIT: usize = 48;
 
-/// Upper bound for the roster `profile_query` keyword. Anything longer can
-/// never be a useful substring of an id or description; bound it like every
-/// other model-supplied identity string.
+/// Upper bound for the roster `profile_query` keyword. An over-long query is
+/// truncated to this prefix instead of refused: the filter is read-only and
+/// lenient by convention, unlike `profile=<id>` selectors, which error over
+/// 128 characters so a refused selector stays correctable.
 const ROSTER_PROFILE_QUERY_MAX_CHARS: usize = 256;
 
 /// Start a child agent task through a single simplified model-facing surface.
