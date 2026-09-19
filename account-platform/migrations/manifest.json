@@ -1324,6 +1324,26 @@
         "file": "000062_ledger_repair_proof_claim_allowlist.up.sql",
         "version": 62,
         "sha256": "2056779f11083fa02dd1cdd697e98235df681d082695a0012e9b5b898bddca0a"
+      },
+      {
+        "file": "000063_receivable_write_off_cases.down.sql",
+        "version": 63,
+        "sha256": "a0a1e37a181a8385a56c9bd2ca5b5debdab23ca9aad83721ad6d0db84dafdeb5"
+      },
+      {
+        "file": "000063_receivable_write_off_cases.up.sql",
+        "version": 63,
+        "sha256": "76dd9aba8d948ddaa2c6533c32dd3a018c88e9358b99b60f731d061382e4ebce"
+      },
+      {
+        "file": "000064_receivable_write_off_proof_claim_allowlist.down.sql",
+        "version": 64,
+        "sha256": "09734d6fb2009b4c08b5776e9d9054a0ddb833c612aeb78636398967e8d835ea"
+      },
+      {
+        "file": "000064_receivable_write_off_proof_claim_allowlist.up.sql",
+        "version": 64,
+        "sha256": "7aae85473ce8a005e967431422068a2fcd28a6aff795d7b70f99ede2580b37f8"
       }
     ],
     "payment-simulator": [

@@ -19,7 +19,14 @@ type billingProofFactsStub struct {
 	correction      entitlementCorrectionReadPlan
 	ledgerRepair    LedgerRepairPlan
 	ledgerRepairErr error
+	writeOff        ReceivableWriteOffPlan
+	writeOffErr     error
 	reads           int
+}
+
+func (s *billingProofFactsStub) receivableWriteOffPlan(context.Context, ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error) {
+	s.reads++
+	return s.writeOff, s.writeOffErr
 }
 
 func (s *billingProofFactsStub) ledgerRepairPlan(context.Context, LedgerRepairCommandInput) (LedgerRepairPlan, error) {

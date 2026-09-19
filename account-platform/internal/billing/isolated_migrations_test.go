@@ -16,7 +16,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 && loaded[index].Version != 58 && loaded[index].Version != 59 && loaded[index].Version != 60 && loaded[index].Version != 61 && loaded[index].Version != 62 {
+		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 && loaded[index].Version != 58 && loaded[index].Version != 59 && loaded[index].Version != 60 && loaded[index].Version != 61 && loaded[index].Version != 62 && loaded[index].Version != 63 && loaded[index].Version != 64 {
 			continue
 		}
 		loaded[index].UpSQL = rewriteBillingPublicSchema(loaded[index].UpSQL, qualified)
@@ -26,7 +26,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 		if loaded[index].Version == 54 {
 			loaded[index].UpSQL = "GRANT USAGE ON SCHEMA " + qualified + " TO billing_service;\n" + loaded[index].UpSQL
 		}
-		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 || loaded[index].Version == 58 || loaded[index].Version == 59 || loaded[index].Version == 60 || loaded[index].Version == 61 || loaded[index].Version == 62 {
+		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 || loaded[index].Version == 58 || loaded[index].Version == 59 || loaded[index].Version == 60 || loaded[index].Version == 61 || loaded[index].Version == 62 || loaded[index].Version == 63 || loaded[index].Version == 64 {
 			loaded[index].UpSQL += "\nRESET ROLE;"
 		}
 		if loaded[index].Version == 56 {
@@ -41,6 +41,14 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 		}
 		if loaded[index].Version == 61 {
 			for _, table := range []string{"ledger_accounts", "ledger_postings", "journal_entries"} {
+				loaded[index].UpSQL = "ALTER TABLE " + qualified + "." + table + " OWNER TO billing_service;\n" + loaded[index].UpSQL
+			}
+		}
+		// 000063 grants REFERENCES on the receivable and ledger tables to the
+		// schema owner, so the isolated runtime must own them first (same reason
+		// as the 000060/000061 preludes above).
+		if loaded[index].Version == 63 {
+			for _, table := range []string{"receivables", "receivable_allocations", "journal_entries", "wallets"} {
 				loaded[index].UpSQL = "ALTER TABLE " + qualified + "." + table + " OWNER TO billing_service;\n" + loaded[index].UpSQL
 			}
 		}

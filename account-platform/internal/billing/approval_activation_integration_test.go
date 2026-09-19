@@ -268,9 +268,10 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 		{"retained incompatible policy", `INSERT INTO billing_approval_command_activations VALUES('PAYMENT_PROVIDER_RESUME',1,1,'ACTIVE',1,now())`, `DELETE FROM billing_approval_command_activations WHERE command_type='PAYMENT_PROVIDER_RESUME' AND policy_version=1`},
 		{"mixed policy", `UPDATE billing_approval_command_activations SET policy_version=3 WHERE command_type='PAYMENT_PROVIDER_RESUME'`, `UPDATE billing_approval_command_activations SET policy_version=2 WHERE command_type='PAYMENT_PROVIDER_RESUME'`},
 		{"mixed schema", `UPDATE billing_approval_command_activations SET snapshot_schema_version=2 WHERE command_type='LEDGER_REPAIR'`, `UPDATE billing_approval_command_activations SET snapshot_schema_version=1 WHERE command_type='LEDGER_REPAIR'`},
-		// LEDGER_REPAIR joined the ACTIVATABLE set with its single v1/s1 row, so the
-		// negative example moves to a command that still may not be active.
-		{"policy-only active", `UPDATE billing_approval_command_activations SET state='ACTIVE' WHERE command_type='RECEIVABLE_WRITE_OFF'`, `UPDATE billing_approval_command_activations SET state='INACTIVE' WHERE command_type='RECEIVABLE_WRITE_OFF'`},
+		// LEDGER_REPAIR and RECEIVABLE_WRITE_OFF joined the ACTIVATABLE set with
+		// their single v1/s1 rows, so the negative example moves to a command that
+		// still may not be active.
+		{"policy-only active", `UPDATE billing_approval_command_activations SET state='ACTIVE' WHERE command_type='PAYMENT_FINANCIAL_REPAIR'`, `UPDATE billing_approval_command_activations SET state='INACTIVE' WHERE command_type='PAYMENT_FINANCIAL_REPAIR'`},
 		{"future timestamp", `UPDATE billing_approval_command_activations SET updated_at=now()+interval '1 day' WHERE command_type='LEDGER_REPAIR'`, `UPDATE billing_approval_command_activations SET updated_at=now() WHERE command_type='LEDGER_REPAIR'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
