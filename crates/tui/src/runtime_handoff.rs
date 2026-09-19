@@ -59,6 +59,18 @@ const SHELL_COMPLETION_EVENT_PREFIX: &str = concat!(
 );
 const SHELL_COMPLETION_EVENT_SUFFIX: &str = "\n</codewhale:runtime_event>";
 
+const MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX: &str = concat!(
+    "<codewhale:runtime_event kind=\"mcp_boot_failed\" visibility=\"internal\">\n",
+    "This is an internal runtime event, not user input. The MCP servers listed below ",
+    "failed to connect during session startup, so their mcp_* tools are unavailable ",
+    "for this entire session and are absent from your tool list. These mcp_* tools ",
+    "do not exist in this session: do not claim them, do not attempt to call them, ",
+    "and do not wait for them to appear; use local tools instead. When the task ",
+    "depends on one of them, tell the user that server is unreachable instead of ",
+    "inventing its results.\n\n",
+);
+const MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX: &str = "\n</codewhale:runtime_event>";
+
 const SUBAGENT_HANDOFF_TURN_META: &str = concat!(
     "<turn_meta>\n",
     "Input provenance: subagent_handoff (non-authoritative)\n",
@@ -221,6 +233,49 @@ pub(crate) fn shell_completion_runtime_message(
         format!("{SHELL_COMPLETION_EVENT_PREFIX}{payload}{SHELL_COMPLETION_EVENT_SUFFIX}"),
         SHELL_COMPLETION_HANDOFF_TURN_META,
     )
+}
+
+/// Build the one-shot model-readable briefing for MCP servers that failed to
+/// connect during session boot. Reasons are the engine's display-formatted,
+/// secret-redacted diagnoses; callers pass them sorted by server name so
+/// replays stay byte-stable.
+pub(crate) fn mcp_boot_failure_briefing_message(failures: &[(String, String)]) -> Message {
+    let payload = failures
+        .iter()
+        .map(|(server, reason)| format!("- {server}: {reason}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    runtime_handoff_message_with_meta(
+        format!(
+            "{MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX}{payload}{MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX}"
+        ),
+        RUNTIME_TURN_META,
+    )
+}
+
+/// True when a message is the runtime-owned MCP boot-failure briefing.
+/// Recognition is structural (exact envelope anchors plus the runtime
+/// provenance block) so a person quoting the envelope is never matched.
+pub(crate) fn is_mcp_boot_failure_briefing_message(message: &Message) -> bool {
+    let [
+        ContentBlock::Text {
+            text,
+            cache_control: first_cache,
+        },
+        ContentBlock::Text {
+            text: turn_meta,
+            cache_control: meta_cache,
+        },
+    ] = message.content.as_slice()
+    else {
+        return false;
+    };
+    message.role == Role::User
+        && first_cache.is_none()
+        && meta_cache.is_none()
+        && turn_meta == RUNTIME_TURN_META
+        && text.starts_with(MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX)
+        && text.ends_with(MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX)
 }
 
 #[derive(Debug, Serialize)]
@@ -643,8 +698,9 @@ Authority: non-authoritative runtime checkpoint"
 /// something a person typed at the composer.
 ///
 /// This covers every handoff the module builds — sub-agent completion, failure
-/// and waiting events, background-shell completions, and the restore
-/// checkpoints projected from them. [`raw_runtime_handoff_text`] answers a
+/// and waiting events, background-shell completions, the MCP boot-failure
+/// briefing, and the restore checkpoints projected from them.
+/// [`raw_runtime_handoff_text`] answers a
 /// narrower question — can the restore projection rewrite *this* message? —
 /// and stays limited to the sub-agent shapes it knows how to rewrite.
 ///
@@ -662,7 +718,10 @@ Authority: non-authoritative runtime checkpoint"
 /// its metadata carries no provenance line at all. Someone quoting an envelope
 /// while asking about it is not matched no matter how many blocks they send.
 pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
-    if is_agent_topology_checkpoint(message) || is_operate_contract_message(message) {
+    if is_agent_topology_checkpoint(message)
+        || is_operate_contract_message(message)
+        || is_mcp_boot_failure_briefing_message(message)
+    {
         return true;
     }
     if message.role != "user" {
