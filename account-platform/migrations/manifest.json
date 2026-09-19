@@ -702,6 +702,16 @@
         "file": "000070_entitlement_correction_consumer_route.up.sql",
         "version": 70,
         "sha256": "ffde14c97998cef51233599d6c18e4839049fe0ea30153c163a87e3849006380"
+      },
+      {
+        "file": "000071_ledger_repair_consumer_route.down.sql",
+        "version": 71,
+        "sha256": "84d503676468bf3def1141dbf23d1595ae30bbfdeec5b705d4618f827c387c17"
+      },
+      {
+        "file": "000071_ledger_repair_consumer_route.up.sql",
+        "version": 71,
+        "sha256": "9fea6a910059d525adf410a414fcb868d3452e9d37d17be21110f4a71da18ecf"
       }
     ],
     "billing": [

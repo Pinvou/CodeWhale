@@ -83,7 +83,10 @@ type LedgerRepairPlan struct {
 	FactsDigest              string    `json:"facts_digest"`
 }
 
-// LedgerRepairFrozenFacts is the owner revision an approval froze.
+// LedgerRepairFrozenFacts is the owner revision an approval froze. FactsDigest
+// is an owner-only recomputation input; a consumed authorization leaves it
+// empty and the execution transaction recomputes and stores it. Any caller that
+// does present a digest must match the recomputed one exactly.
 type LedgerRepairFrozenFacts struct {
 	TargetJournalEntryID   uuid.UUID
 	TargetPostingID        uuid.UUID
@@ -585,6 +588,11 @@ func ledgerRepairFrozenMismatch(plan LedgerRepairPlan, frozen LedgerRepairFrozen
 		return "amount_microcredits"
 	case plan.PostingSetDigest != frozen.PostingSetDigest:
 		return "posting_set_digest"
+	// The consumed authorization freezes only the wire-visible owner
+	// projection; the owner-only facts digest is recomputed inside the
+	// execution transaction, so an empty value is not a caller claim.
+	case frozen.FactsDigest == "":
+		return ""
 	case plan.FactsDigest != frozen.FactsDigest:
 		return "facts_digest"
 	}

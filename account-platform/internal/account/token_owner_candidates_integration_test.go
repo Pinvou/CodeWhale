@@ -428,14 +428,14 @@ func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	repository, connection, _, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
-	if latest := loaded[len(loaded)-1]; latest.Version != 70 {
-		t.Fatalf("latest account migration=%d, want 70", latest.Version)
+	if latest := loaded[len(loaded)-1]; latest.Version != 71 {
+		t.Fatalf("latest account migration=%d, want 71", latest.Version)
 	}
 	var sessionUser, currentUser string
 	var latestVersion int64
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT max(version) FROM schema_migrations)`).
 		Scan(&sessionUser, &currentUser, &latestVersion); err != nil || sessionUser != "account_migrator" ||
-		currentUser != "account_service" || latestVersion != 70 {
+		currentUser != "account_service" || latestVersion != 71 {
 		t.Fatalf("migration identity session=%q current=%q version=%d err=%v", sessionUser, currentUser, latestVersion, err)
 	}
 	var policyVersion int64
@@ -459,6 +459,23 @@ account_approval_authorization.authorization_consumer_mapping_allows('billing-en
 account_approval_authorization.authorization_consumer_mapping_allows('billing-entitlement-component-adjustment-executor-p2-v1','billing-command-executor','ENTITLEMENT_COMPONENT_ADJUSTMENT',2,'billing-command-executor','LEGACY_TYPED_V1')`).
 		Scan(&durable, &proofWire, &legacyWire); err != nil || durable != "billing-entitlement-component-adjustment-executor-p2-v1" || !proofWire || legacyWire {
 		t.Fatalf("entitlement consumer route durable=%q proof=%v legacy=%v err=%v", durable, proofWire, legacyWire, err)
+	}
+	// LEDGER_REPAIR joins the dedicated routing with its original v1 policy: the
+	// shared legacy durable must not route it and the dedicated durable accepts
+	// only the frozen RFC8785 wire.
+	var ledgerRepairLegacy *string
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('LEDGER_REPAIR',1,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&ledgerRepairLegacy); err != nil || ledgerRepairLegacy != nil {
+		t.Fatalf("legacy ledger repair route=%v err=%v", ledgerRepairLegacy, err)
+	}
+	var ledgerRepairDurable string
+	var ledgerRepairProofWire, ledgerRepairLegacyWire bool
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('LEDGER_REPAIR',1,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-ledger-repair-executor-p1-v1','billing-command-executor','LEDGER_REPAIR',1,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-ledger-repair-executor-p1-v1','billing-command-executor','LEDGER_REPAIR',1,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&ledgerRepairDurable, &ledgerRepairProofWire, &ledgerRepairLegacyWire); err != nil ||
+		ledgerRepairDurable != "billing-ledger-repair-executor-p1-v1" || !ledgerRepairProofWire || ledgerRepairLegacyWire {
+		t.Fatalf("ledger repair consumer route durable=%q proof=%v legacy=%v err=%v", ledgerRepairDurable, ledgerRepairProofWire, ledgerRepairLegacyWire, err)
 	}
 	if _, err := connection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
 		t.Fatal(err)

@@ -164,9 +164,16 @@ type authorizationExecutionRepositoryStub struct {
 	entitlementFrozen               entitlementCorrectionFrozenFacts
 	entitlementKey                  string
 	entitlementReasonCode           string
+	ledgerRepair                    LedgerRepairResult
+	ledgerRepairErr                 error
+	ledgerRunErr                    error
+	ledgerInput                     LedgerRepairExecutionInput
+	activations                     ApprovalCommandActivationSnapshot
+	activationsErr                  error
 	adjustmentRuns                  int
 	providerRuns, productRuns       int
 	entitlementRuns                 int
+	ledgerRuns                      int
 }
 
 func (s *authorizationExecutionRepositoryStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
@@ -206,6 +213,23 @@ func (s *authorizationExecutionRepositoryStub) ExecuteEntitlementComponentCorrec
 		return EntitlementCorrectionResult{}, s.entitlementRunErr
 	}
 	return s.entitlementCorrection, nil
+}
+
+func (s *authorizationExecutionRepositoryStub) ApprovalCommandActivations(context.Context) (ApprovalCommandActivationSnapshot, error) {
+	return s.activations, s.activationsErr
+}
+
+func (s *authorizationExecutionRepositoryStub) LedgerRepairForRequest(context.Context, uuid.UUID) (LedgerRepairResult, error) {
+	return s.ledgerRepair, s.ledgerRepairErr
+}
+
+func (s *authorizationExecutionRepositoryStub) ApplyLedgerRepair(_ context.Context, input LedgerRepairExecutionInput) (LedgerRepairResult, error) {
+	s.ledgerRuns++
+	s.ledgerInput = input
+	if s.ledgerRunErr != nil {
+		return LedgerRepairResult{}, s.ledgerRunErr
+	}
+	return s.ledgerRepair, nil
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {

@@ -39,10 +39,15 @@ type Policy struct {
 var ErrPolicyNotRegistered = errors.New("management command policy is not registered")
 
 var policies = buildPolicies()
+
+// executableApprovalCommands is the closed set of commands whose four Account
+// entry points may consult the live Billing per-command activation. Membership
+// opens nothing by itself: LEDGER_REPAIR still fails closed while its Billing
+// activation row reports INACTIVE.
 var executableApprovalCommands = map[string]struct{}{
 	"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}, "PAYMENT_PRODUCT_RESUME": {},
 	"TOKEN_MODEL_LIFECYCLE_CHANGE": {}, "TOKEN_MODEL_CATALOG_ROLLBACK": {}, "TOKEN_CREDENTIAL_REVOKE": {},
-	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {},
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {}, "LEDGER_REPAIR": {},
 }
 
 func buildPolicies() map[string]Policy {

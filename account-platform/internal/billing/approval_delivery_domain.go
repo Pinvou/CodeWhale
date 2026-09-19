@@ -24,12 +24,15 @@ type billingAuthorizationDomain struct {
 
 type billingAuthorizationExecutionRepository interface {
 	approvalAdjustmentRepository
+	ApprovalCommandActivations(context.Context) (ApprovalCommandActivationSnapshot, error)
 	providerResumeVersions(context.Context, ProviderResumeVersions) (ProviderResumeVersions, error)
 	productResumeVersions(context.Context, ProductResumeVersions) (ProductResumeVersions, error)
 	executeProviderResume(context.Context, ProviderResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProviderResumeResult, error)
 	executeProductResume(context.Context, ProductResumeVersions, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, PaymentOrder, ProviderOrder) (ProductResumeResult, error)
 	EntitlementCorrectionForRequest(context.Context, uuid.UUID) (EntitlementCorrectionResult, error)
 	ExecuteEntitlementComponentCorrection(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string, entitlementCorrectionFrozenFacts) (EntitlementCorrectionResult, error)
+	LedgerRepairForRequest(context.Context, uuid.UUID) (LedgerRepairResult, error)
+	ApplyLedgerRepair(context.Context, LedgerRepairExecutionInput) (LedgerRepairResult, error)
 }
 
 func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain {
@@ -114,6 +117,23 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		}
 		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
+	case ledgerRepairCommand:
+		if domain.repository == nil {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		result, err := domain.repository.LedgerRepairForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
 	default:
 		return authorizationDomainResult{}, false, ErrConflict
 	}
@@ -153,6 +173,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return domain.executeProductResume(ctx, binding, event, command)
 	case entitlementComponentAdjustmentCommand:
 		return domain.executeEntitlementCorrection(ctx, binding, event, command)
+	case ledgerRepairCommand:
+		return domain.executeLedgerRepair(ctx, binding, event, command)
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
@@ -293,6 +315,119 @@ func (domain *billingAuthorizationDomain) executeEntitlementCorrection(ctx conte
 	}
 	ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
 	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
+}
+
+// executeLedgerRepair applies one consumed attribution repair. The approval
+// snapshot carries only the wire-visible owner projection (target identifiers,
+// entry type, amount and posting-set digest); the owner recomputes every fact
+// and the facts digest again inside the execution transaction, so nothing the
+// consumer presents can become a domain fact.
+func (domain *billingAuthorizationDomain) executeLedgerRepair(ctx context.Context, binding ApprovalAuthorizationBinding,
+	event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
+	if domain.repository == nil {
+		return authorizationDomainAttempt{}
+	}
+	var normalized struct {
+		TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+		TargetPostingID        uuid.UUID `json:"target_posting_id"`
+		WrongLedgerAccountID   uuid.UUID `json:"wrong_ledger_account_id"`
+		CorrectLedgerAccountID uuid.UUID `json:"correct_ledger_account_id"`
+		AmountMicrocredits     int64     `json:"amount_microcredits"`
+		ReasonCode             string    `json:"reason_code"`
+	}
+	var critical struct {
+		TargetJournalEntryID uuid.UUID `json:"target_journal_entry_id"`
+		TargetPostingID      uuid.UUID `json:"target_posting_id"`
+		PostingSetDigest     string    `json:"posting_set_digest"`
+		EntryType            string    `json:"entry_type"`
+		PolicyVersion        int64     `json:"policy_version"`
+	}
+	var financial struct {
+		AmountMicrocredits     int64      `json:"amount_microcredits"`
+		WrongLedgerAccountID   uuid.UUID  `json:"wrong_ledger_account_id"`
+		CorrectLedgerAccountID uuid.UUID  `json:"correct_ledger_account_id"`
+		WrongAccountType       string     `json:"wrong_account_type"`
+		CorrectAccountType     string     `json:"correct_account_type"`
+		WalletID               *uuid.UUID `json:"wallet_id"`
+	}
+	if json.Unmarshal(event.NormalizedCommand, &normalized) != nil || json.Unmarshal(event.CriticalResourceVersions, &critical) != nil ||
+		json.Unmarshal(event.FinancialSnapshot, &financial) != nil {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if normalized.TargetJournalEntryID == uuid.Nil || normalized.TargetPostingID == uuid.Nil ||
+		normalized.WrongLedgerAccountID == uuid.Nil || normalized.CorrectLedgerAccountID == uuid.Nil ||
+		normalized.WrongLedgerAccountID == normalized.CorrectLedgerAccountID || normalized.AmountMicrocredits < 1 ||
+		strings.TrimSpace(normalized.ReasonCode) != normalized.ReasonCode || len(normalized.ReasonCode) == 0 || len(normalized.ReasonCode) > 80 {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if critical.TargetJournalEntryID != normalized.TargetJournalEntryID || critical.TargetPostingID != normalized.TargetPostingID ||
+		critical.EntryType == "" || critical.PolicyVersion != 1 || !validHexDigest(critical.PostingSetDigest) ||
+		financial.AmountMicrocredits != normalized.AmountMicrocredits ||
+		financial.WrongLedgerAccountID != normalized.WrongLedgerAccountID ||
+		financial.CorrectLedgerAccountID != normalized.CorrectLedgerAccountID ||
+		financial.WrongAccountType == "" || financial.CorrectAccountType == "" ||
+		financial.WrongAccountType == financial.CorrectAccountType || financial.WalletID != nil {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if event.CommandType != ledgerRepairCommand || event.TargetResourceType != "LEDGER_POSTING" ||
+		event.TargetResourceID != normalized.TargetPostingID.String() ||
+		command.TargetResourceType != event.TargetResourceType || command.TargetResourceID != event.TargetResourceID ||
+		!sameRawJSON(event.NormalizedCommand, command.NormalizedCommand) ||
+		!sameRawJSON(event.CriticalResourceVersions, command.CriticalResourceVersions) ||
+		!sameRawJSON(event.FinancialSnapshot, command.FinancialSnapshot) ||
+		event.ApprovalRequestID != binding.ApprovalRequestID || command.ApprovalRequestID != binding.ApprovalRequestID ||
+		event.EventID != binding.EventID || event.ApprovalControlEpoch != binding.ApprovalEpoch ||
+		event.ExecutorIdentity != billingApprovalExecutorIdentity || command.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		binding.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		event.PolicyVersion != 1 || command.PolicyVersion != 1 || binding.PolicyVersion != 1 ||
+		!validIndependentApproval(command.RequesterUserID, command.ApproverUserID, command.DecisionReason) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	snapshot, err := domain.repository.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	active, ok := activeLedgerRepairActivation(snapshot)
+	if !ok || active.PolicyVersion != 1 || active.SnapshotSchemaVersion != 1 {
+		// A command that is not ACTIVE at policy v1 / schema v1 can never
+		// produce a domain effect; the consumer reports the frozen failure
+		// classification instead of retrying until the attempt budget runs out.
+		return definiteAuthorizationFailure("POLICY_OR_SCHEMA_MISMATCH")
+	}
+	result, err := domain.repository.ApplyLedgerRepair(ctx, LedgerRepairExecutionInput{
+		ApprovalRequestID: binding.ApprovalRequestID, AuthorizationEventID: binding.EventID, ApprovalEpoch: binding.ApprovalEpoch,
+		ExecutionKey: command.ExecutionIdempotencyKey,
+		PolicyVersion: active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
+		Command: LedgerRepairCommandInput{
+			TargetJournalEntryID: normalized.TargetJournalEntryID, TargetPostingID: normalized.TargetPostingID,
+			WrongLedgerAccountID: normalized.WrongLedgerAccountID, CorrectLedgerAccountID: normalized.CorrectLedgerAccountID,
+			AmountMicrocredits: normalized.AmountMicrocredits,
+		},
+		Frozen: LedgerRepairFrozenFacts{
+			TargetJournalEntryID: normalized.TargetJournalEntryID, TargetPostingID: normalized.TargetPostingID,
+			WrongLedgerAccountID: normalized.WrongLedgerAccountID, CorrectLedgerAccountID: normalized.CorrectLedgerAccountID,
+			EntryType: critical.EntryType, AmountMicrocredits: financial.AmountMicrocredits,
+			PostingSetDigest: critical.PostingSetDigest,
+		},
+	})
+	if err != nil {
+		return classifyAuthorizationDomainFailure(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
+}
+
+func activeLedgerRepairActivation(snapshot ApprovalCommandActivationSnapshot) (ApprovalCommandActivation, bool) {
+	for _, item := range snapshot.Activations {
+		if item.CommandType == ledgerRepairCommand && item.State == "ACTIVE" {
+			return item, true
+		}
+	}
+	return ApprovalCommandActivation{}, false
 }
 
 func (domain *billingAuthorizationDomain) executeProviderResume(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {

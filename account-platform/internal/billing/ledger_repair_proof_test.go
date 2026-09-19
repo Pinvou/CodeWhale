@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,4 +93,35 @@ func TestLedgerRepairProofProjectionIsClosedAndActivationGated(t *testing.T) {
 func marshalRaw(value any) json.RawMessage {
 	encoded, _ := json.Marshal(value)
 	return encoded
+}
+// The consumed authorization freezes only the wire-visible owner projection, so
+// an empty facts digest means "the execution transaction recomputes it" while a
+// presented digest must still match the owner revision exactly.
+func TestLedgerRepairFrozenFactsDigestIsOptionalOnlyWhenAbsent(t *testing.T) {
+	plan := LedgerRepairPlan{
+		TargetJournalEntryID: uuid.New(), TargetPostingID: uuid.New(),
+		WrongLedgerAccountID: uuid.New(), CorrectLedgerAccountID: uuid.New(),
+		EntryType: "USAGE", AmountMicrocredits: 30, PostingSetDigest: strings.Repeat("a", 64),
+		FactsDigest: strings.Repeat("b", 64),
+	}
+	frozen := LedgerRepairFrozenFacts{
+		TargetJournalEntryID: plan.TargetJournalEntryID, TargetPostingID: plan.TargetPostingID,
+		WrongLedgerAccountID: plan.WrongLedgerAccountID, CorrectLedgerAccountID: plan.CorrectLedgerAccountID,
+		EntryType: plan.EntryType, AmountMicrocredits: plan.AmountMicrocredits, PostingSetDigest: plan.PostingSetDigest,
+	}
+	if mismatch := ledgerRepairFrozenMismatch(plan, frozen); mismatch != "" {
+		t.Fatalf("owner-recomputed digest rejected: %s", mismatch)
+	}
+	frozen.FactsDigest = strings.Repeat("c", 64)
+	if mismatch := ledgerRepairFrozenMismatch(plan, frozen); mismatch != "facts_digest" {
+		t.Fatalf("presented digest mismatch=%q", mismatch)
+	}
+	frozen.FactsDigest = plan.FactsDigest
+	if mismatch := ledgerRepairFrozenMismatch(plan, frozen); mismatch != "" {
+		t.Fatalf("matching digest rejected: %s", mismatch)
+	}
+	frozen.PostingSetDigest = strings.Repeat("d", 64)
+	if mismatch := ledgerRepairFrozenMismatch(plan, frozen); mismatch != "posting_set_digest" {
+		t.Fatalf("posting set digest mismatch=%q", mismatch)
+	}
 }

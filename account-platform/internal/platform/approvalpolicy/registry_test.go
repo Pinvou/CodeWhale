@@ -31,7 +31,13 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if !Executable("WALLET_ADJUSTMENT") {
 		t.Fatal("wallet adjustment executor must be available")
 	}
-	if Executable("LEDGER_REPAIR") {
+	// LEDGER_REPAIR joins the executable set only so the four Account entry
+	// points consult the live Billing activation; its row stays INACTIVE until a
+	// separately authorized activation, so no request can advance.
+	if !Executable("LEDGER_REPAIR") {
+		t.Fatal("ledger repair must consult its live Billing activation")
+	}
+	if Executable("RECEIVABLE_WRITE_OFF") {
 		t.Fatal("unimplemented domain repair must remain non-executable")
 	}
 	if !Executable("PAYMENT_PROVIDER_RESUME") {

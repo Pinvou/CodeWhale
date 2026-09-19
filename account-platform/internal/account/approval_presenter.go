@@ -96,6 +96,19 @@ type approvalEntitlementCorrectionSummary struct {
 	ReasonCode string    `json:"reason_code"`
 }
 
+// approvalLedgerRepairSummary is the closed read-only projection of the ledger
+// repair command: only the immutable target posting, the frozen owner revision
+// digest and the operator-chosen reason code are presented, never a
+// caller-supplied account, amount or free text.
+type approvalLedgerRepairSummary struct {
+	TargetJournalEntryID uuid.UUID `json:"target_journal_entry_id"`
+	TargetPostingID      uuid.UUID `json:"target_posting_id"`
+	EntryType            string    `json:"entry_type"`
+	AmountMicrocredits   string    `json:"amount_microcredits"`
+	PostingSetDigest     string    `json:"posting_set_digest"`
+	ReasonCode           string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -104,6 +117,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 		return policyVersion == 2 && snapshotVersion == 1
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		return policyVersion == 2 && snapshotVersion == 2
+	case "LEDGER_REPAIR":
+		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
 	default:
@@ -186,6 +201,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalEntitlementCorrectionSummary{PackageID: id}
+	case "LEDGER_REPAIR":
+		if item.TargetResourceType != "LEDGER_POSTING" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalLedgerRepairSummary{TargetPostingID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -244,8 +268,14 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			EffectiveAt            *string   `json:"effective_at"`
 			TokenAccountID         uuid.UUID `json:"token_account_id"`
 			PackageID              uuid.UUID `json:"package_id"`
+			TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+			TargetPostingID        uuid.UUID `json:"target_posting_id"`
 			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
+		Critical struct {
+			EntryType        string `json:"entry_type"`
+			PostingSetDigest string `json:"posting_set_digest"`
+		} `json:"critical_resource_versions"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
@@ -273,6 +303,17 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.TokenAccountID = proof.Normalized.TokenAccountID
 		command = target
 	case approvalEntitlementCorrectionSummary:
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalLedgerRepairSummary:
+		if proof.Normalized.TargetJournalEntryID == uuid.Nil || proof.Normalized.TargetPostingID != target.TargetPostingID ||
+			proof.Critical.EntryType == "" || !approvalPaginationHexDigest(proof.Critical.PostingSetDigest) {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.TargetJournalEntryID = proof.Normalized.TargetJournalEntryID
+		target.EntryType = proof.Critical.EntryType
+		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
+		target.PostingSetDigest = proof.Critical.PostingSetDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target
 	default:

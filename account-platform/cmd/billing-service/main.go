@@ -106,21 +106,32 @@ func main() {
 	}
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
-	// The dedicated entitlement durable is the only Q+1 authorization consumer
-	// Billing owns. It starts only when the deployment explicitly enables it and
-	// supplies independently trusted manifest/receipt artifacts; the missing or
-	// partial case is a hard startup failure instead of a silent half-open
-	// consumer. The deployed activation row stays INACTIVE until a separately
-	// authorized activation step, so this wiring opens no command by itself.
+	// The two dedicated entitlement/ledger-repair durables are the only Q+1
+	// authorization consumers Billing owns. Each starts only when the deployment
+	// explicitly enables it and supplies independently trusted manifest/receipt
+	// artifacts; the missing or partial case is a hard startup failure instead of
+	// a silent half-open consumer. The deployed activation rows stay INACTIVE
+	// until a separately authorized activation step, so this wiring opens no
+	// command by itself.
 	entitlementConsumerEnabled, err := optionalBooleanEnvironment("BILLING_ENTITLEMENT_CONSUMER_ENABLED", false)
 	if err != nil {
 		log.Fatal(err)
 	}
+	ledgerRepairConsumerEnabled, err := optionalBooleanEnvironment("BILLING_LEDGER_REPAIR_CONSUMER_ENABLED", false)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var approvalConsumerResources *events.ApprovalConsumerResourceBinding
-	if entitlementConsumerEnabled {
+	// One verified receipt set covers every dedicated Billing durable, so the
+	// enabled switches only select which startup contract names a missing or
+	// untrusted binding. The entitlement code keeps precedence when both are on.
+	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled {
 		approvalConsumerResources, err = billingApprovalConsumerResources(time.Now().UTC())
-		if err != nil {
+		if err != nil && entitlementConsumerEnabled {
 			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		if err != nil {
+			log.Fatal("BILLING_LEDGER_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 	}
 	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor", events.NATSConfig{Environment: cfg.Environment, CAFile: os.Getenv("NATS_CA_FILE"), ApprovalConsumerResources: approvalConsumerResources})
@@ -147,6 +158,17 @@ func main() {
 			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 		defer stopEntitlementConsumer()
+	}
+	if ledgerRepairConsumerEnabled {
+		ledgerRepairConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-ledger-repair-executor-p1-v1")
+		if err != nil {
+			log.Fatal(err)
+		}
+		stopLedgerRepairConsumer, err := broker.ConsumeAuthorization(workerContext, "billing-ledger-repair-executor-p1-v1", ledgerRepairConsumer.Handle)
+		if err != nil {
+			log.Fatal("BILLING_LEDGER_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		defer stopLedgerRepairConsumer()
 	}
 	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
 		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)

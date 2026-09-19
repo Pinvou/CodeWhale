@@ -58,7 +58,7 @@ func TestApprovalFingerprintCanonicalizesCriticalFinancialSnapshots(t *testing.T
 
 func TestUnimplementedFinancialCommandCannotEnterApprovalLifecycle(t *testing.T) {
 	draft := approvalTestDraft()
-	draft.CommandType = "LEDGER_REPAIR"
+	draft.CommandType = "RECEIVABLE_WRITE_OFF"
 	if _, _, _, err := normalizeApprovalDraft(draft); err == nil {
 		t.Fatal("unimplemented domain executor must fail before draft creation")
 	}

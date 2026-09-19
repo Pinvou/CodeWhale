@@ -55,6 +55,25 @@ test('Billing starts the dedicated entitlement durable only from an explicit tru
   assert.match(helper, /files\.Load\(now\)/);
 });
 
+test('Billing starts the dedicated ledger-repair durable only from an explicit trusted receipt', async () => {
+  const source = await readFile(path.join(root, 'cmd/billing-service/main.go'), 'utf8');
+  const durable = 'billing-ledger-repair-executor-p1-v1';
+  assert.match(source, /optionalBooleanEnvironment\("BILLING_LEDGER_REPAIR_CONSUMER_ENABLED", false\)/,
+    'the dedicated durable must stay opt-in with a disabled default');
+  assert.match(source, new RegExp(`NewAuthorizationCommandConsumer\\(service, approvalGate, "${durable}"\\)`));
+  assert.match(source, new RegExp(`ConsumeAuthorization\\(workerContext, "${durable}", ledgerRepairConsumer\\.Handle\\)`));
+  assert.match(source, /log\.Fatal\("BILLING_LEDGER_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE"\)/,
+    'a missing or untrusted binding must fail startup, not silently skip the durable');
+  // The switch must not gate any other durable and must not appear in the
+  // entitlement branch, so the two opt-ins stay independently reviewable.
+  const enabledBranch = source.slice(source.lastIndexOf('if ledgerRepairConsumerEnabled {'));
+  assert.ok(enabledBranch.includes(`ConsumeAuthorization(workerContext, "${durable}"`));
+  assert.equal(enabledBranch.includes('"billing-command-executor-v1"'), false,
+    'the legacy shared durable must keep starting unconditionally');
+  assert.equal(enabledBranch.includes('billing-entitlement-component-adjustment-executor-p2-v1'), false,
+    'the ledger-repair opt-in must not start the entitlement durable');
+});
+
 test('the legacy generic authorization handler is permanently fail closed', async () => {
   const source = await readFile(path.join(root, 'internal/billing/approval_consumer.go'), 'utf8');
   assert.match(source, /generic approval authorization consumption is forbidden/);
