@@ -17106,6 +17106,105 @@ fn forkguard_subagent_context_hint_names_active_tools() {
     );
 }
 
+// Regression (agent-domain audit): `agent(action=roster)` returns the Fleet
+// role catalog and `agent(action=wait)` returns the join outcome — neither is
+// a per-child result snapshot, so the snapshot summarizer must not destroy
+// them into "- unknown (agent) status=unknown" noise.
+#[test]
+fn forkguard_agent_roster_receipt_passes_through_to_context() {
+    let roster = json!({
+        "action": "roster",
+        "count": 2,
+        "total_count": 2,
+        "truncated": false,
+        "members": [
+            {"member_id": "general", "role": "general",
+             "description": "General-purpose worker with full tool access for multi-step tasks."},
+            {"member_id": "explore", "role": "explore",
+             "description": "Fast read-only exploration for codebase search and analysis."}
+        ],
+        "selector_help": "Use type:<role> with one of the listed roles."
+    })
+    .to_string();
+    let output = ToolResult::success(roster.clone());
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "roster receipt must pass through as a receipt:\n{context}"
+    );
+    assert!(
+        context.contains("\"selector_help\"") && context.contains("General-purpose worker"),
+        "roster members and selector help must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "roster is not a result snapshot; the summarizer header is a lie:\n{context}"
+    );
+    assert!(
+        !context.contains("status=unknown") && !context.contains("result: not available yet"),
+        "roster must not be collapsed into snapshot noise:\n{context}"
+    );
+}
+
+#[test]
+fn forkguard_agent_wait_receipt_passes_through_to_context() {
+    let wait = json!({
+        "action": "wait",
+        "settled": [
+            {"agent_id": "agent_1a2b3c4d", "name": "slash_agent", "status": "Completed"}
+        ],
+        "running": 1,
+        "waited_ms": 3_214,
+        "timed_out": true,
+        "note": "Wait timed out with children still running."
+    })
+    .to_string();
+    let output = ToolResult::success(wait);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "wait receipt must pass through as a receipt:\n{context}"
+    );
+    assert!(
+        context.contains("\"timed_out\":true")
+            && context.contains("\"waited_ms\":3214")
+            && context.contains("agent_1a2b3c4d")
+            && context.contains("Wait timed out with children still running."),
+        "settled/timed_out/waited_ms/note must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "wait is not a result snapshot; the summarizer header is a lie:\n{context}"
+    );
+}
+
+#[test]
+fn forkguard_agent_receipt_passthrough_is_bounded() {
+    let huge_member = "x".repeat(4_000);
+    let roster = json!({
+        "action": "roster",
+        "members": [{"member_id": "general", "description": huge_member}],
+    })
+    .to_string();
+    let output = ToolResult::success(roster);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]") && context.contains("characters]"),
+        "oversized receipts pass through bounded with a truncation note:\n{context}"
+    );
+    let prefix_len = "[sub-agent receipt]\n".len();
+    assert!(
+        context.len() <= prefix_len + 4_000,
+        "passthrough must stay bounded:\n{context}"
+    );
+}
+
 // Regression (Pinvou #490 phantom-tool class): GOAL_CONTINUATION_PROMPT
 // commands `update_goal`, which is deferred on stock hosts — it must name the
 // `tool_search` activation path instead of telling the model to call a tool
