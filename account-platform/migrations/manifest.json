@@ -1404,6 +1404,16 @@
         "file": "000068_refund_exception_repair_proof_claim_allowlist.up.sql",
         "version": 68,
         "sha256": "9473cc3e1d90d2e89d66fc144f9fd28aa5d8dd94f4105df15d16f21840fcac1d"
+      },
+      {
+        "file": "000069_entitlement_package_stale_composition_check.down.sql",
+        "version": 69,
+        "sha256": "227867e7585509bc2a4e00a7800bac5c0e6fb605d9e39e9d5a03dc4c1c611ebe"
+      },
+      {
+        "file": "000069_entitlement_package_stale_composition_check.up.sql",
+        "version": 69,
+        "sha256": "3e58dd5cfe84082b2ec1580a063804807852d844f3e463cd0fb53355230eb4f6"
       }
     ],
     "payment-simulator": [
