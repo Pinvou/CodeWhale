@@ -60,7 +60,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-35 | APT-141 | 用量结算修复领域设计 | GSA-34 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-36 | APT-141 | 用量结算修复实现与领域 E2E | GSA-35 | CODE | IN_PROGRESS |
 | GSA-37 | APT-142 | 八命令业务入口及审批 presenter 联调 | GSA-36, GSA-20 | CODE | PENDING |
-| GSA-38 | APT-143 | 切换/回滚工具、资源清单与只读 readiness | GSA-37 | CODE | IN_PROGRESS / READONLY_READY / NOT_ACTIVATED / NOT_DEPLOYED |
+| GSA-38 | APT-143 | 切换/回滚工具、资源清单与只读 readiness | GSA-37 | CODE | IN_PROGRESS / READONLY_READY / FAMILY_INVENTORY_RECORDED / NOT_ACTIVATED / NOT_DEPLOYED |
 | GSA-39 | APT-143 | 生产等价集成、性能、N/N-1 与故障演练 | GSA-38 | CODE+ENV | PENDING |
 | GSA-40 | APT-143 | 授权后的逐命令灰度与生产证据归档 | GSA-39 | CODE+ENV | PENDING |
 
