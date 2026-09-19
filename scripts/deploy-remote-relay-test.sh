@@ -36,6 +36,12 @@
 #   PUBLIC_URL     https://pinvou.com/pinvou3/remote-test
 #   SKIP_LOCAL_TESTS=1                   跳过本地 npm test(默认会跑)
 #   SKIP_WEB_BUILD=1                     使用已经构建并验证的 web/dist
+#   ENABLE_DESKTOP_CONTROLLER=1          同时启用 Windows 双端远控的 controller-v1 lane:
+#                                        部署时在 $TEST_DIR/controller.env(0600) 生成并复用
+#                                        一套 enrollment/pairing HMAC 与 Relay 签名密钥，
+#                                        服务单元改用 EnvironmentFile 加载；脚本结束时打印
+#                                        客户端需要 pin 的签名公钥。默认 0 = 只服务 WebUI v2。
+#                                        注意:该模式是 development + TOFU，仅限测试端点。
 # 注:必须带 -E,否则函数+heredoc 调用失败时 ERR trap 不触发(错误路径无阶段报告)。
 set -eEuo pipefail
 
@@ -48,6 +54,7 @@ TEST_DIR="${TEST_DIR:-/opt/pinvou-remote-relay-test}"
 TEST_PORT="${TEST_PORT:-8788}"
 BASE_PATH="${BASE_PATH:-/pinvou3/remote-test}"
 PUBLIC_URL="${PUBLIC_URL:-https://pinvou.com/pinvou3/remote-test}"
+ENABLE_DESKTOP_CONTROLLER="${ENABLE_DESKTOP_CONTROLLER:-0}"
 SERVICE="pinvou-remote-relay-test.service"
 TUNNEL_SERVICE="pinvou-remote-relay-test-tunnel.service"
 NGINX_SNIPPET="/etc/nginx/snippets/pinvou3-remote-relay-test.conf"
@@ -243,16 +250,20 @@ STAGE="打包并上传 relay 代码(tarball 暂存)"
 echo "── 上传 relay 代码到 $RELAY_SERVER:$TEST_DIR(暂存 + 整体替换)──"
 # 打成单个 tarball 流式上传,.tmp 落盘后原子 mv——scp 逐文件覆盖若中断会留下半新半旧的目录,
 # 服务一旦因故重启就会加载混合版本(与评审「暂存+原子替换」同类的隐患)。
+# 注意:清单必须覆盖 relay 根目录的全部运行期模块——controller-*.js / enrollment-*.js /
+# pairing-*.js / relay-state-store.js 等是 server.js 按需动态 import 的运行时依赖,
+# 漏传会让启用 controller lane 的实例启动即 ERR_MODULE_NOT_FOUND(2026-09-19 实测踩坑)。
+relay_js_files="$(cd "$RELAY_DIR" && ls *.js)"
 tar -czf - -C "$RELAY_DIR" \
-  server.js telemetry-service.js behavior-telemetry-schema.js package.json package-lock.json web/dist web/stats.html \
+  $relay_js_files package.json package-lock.json web/dist web/stats.html \
   -C "$ROOT" docs/schemas/behavior-telemetry-v1.schema.json docs/schemas/behavior-telemetry-registries.json \
   | relay_ssh "cat > '$TEST_DIR.staging.tar.gz.tmp' && mv '$TEST_DIR.staging.tar.gz.tmp' '$TEST_DIR.staging.tar.gz'"
 
 STAGE="配置并重启测试 relay 实例(端口 $TEST_PORT,含失败回滚)"
 echo "── 配置并重启测试 relay 实例(端口 $TEST_PORT) ──"
-relay_ssh "bash -s -- $(shq_all "$TEST_DIR" "$TEST_PORT" "$BASE_PATH" "$SERVICE" "$PROXY_SERVER")" <<'REMOTE'
+relay_ssh "bash -s -- $(shq_all "$TEST_DIR" "$TEST_PORT" "$BASE_PATH" "$SERVICE" "$PROXY_SERVER" "$ENABLE_DESKTOP_CONTROLLER")" <<'REMOTE'
 set -euo pipefail
-test_dir="$1"; port="$2"; base_path="$3"; service="$4"; proxy_server="$5"
+test_dir="$1"; port="$2"; base_path="$3"; service="$4"; proxy_server="$5"; controller="$6"
 proxy_ip="${proxy_server#*@}"
 # 先解包到暂存目录并装依赖:此步失败则现役目录未被触碰,在跑服务不受影响。
 rm -rf "$test_dir.extract"
@@ -266,6 +277,52 @@ rm -rf "$test_dir.bak"
 [ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
 mv "$test_dir.extract" "$test_dir"
 mkdir -p /var/lib/pinvou-telemetry-test
+# ENABLE_DESKTOP_CONTROLLER=1:幂等生成/复用 controller 运行时环境(0600)。
+# 私钥只写入该环境文件,不进 unit、不进日志;公钥另存一份供调用方取回。
+if [ "$controller" = "1" ]; then
+  # relay-state-store 要求专用目录 mode 0700 且属主为运行用户(relay_state_permissions_unsafe),
+  # 且状态必须放在会被整体替换的代码目录之外,重新部署不会丢掉 tombstone/keyring 状态。
+  mkdir -p /var/lib/pinvou-remote-relay-test/state
+  chmod 700 /var/lib/pinvou-remote-relay-test /var/lib/pinvou-remote-relay-test/state
+  if [ ! -f "$test_dir/controller.env" ]; then
+    node -e "
+      const crypto = require('node:crypto');
+      const fs = require('node:fs');
+      const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+      const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64');
+      const spki = publicKey.export({ type: 'spki', format: 'der' });
+      const raw = spki.subarray(spki.length - 32).toString('base64');
+      const hex = (n) => crypto.randomBytes(n).toString('hex');
+      const dir = process.argv[1];
+      const lines = [
+        'NODE_ENV=development',
+        'PINVOU_DESKTOP_CONTROLLER_ENABLED=1',
+        'PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development',
+        'PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true',
+        'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID=relay-test-enrollment-hmac-1',
+        'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY=' + hex(32),
+        'PINVOU_REMOTE_PAIRING_HMAC_KEY_ID=relay-test-pairing-hmac-1',
+        'PINVOU_REMOTE_PAIRING_HMAC_KEY=' + hex(32),
+        'PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay-test/state/controller-state.json',
+        // legacy 状态文件不能位于 controller 状态目录内(loadEnrollmentRegistryConfig 会
+        // 以 legacy_state_path_inside_controller_directory 失败关闭),因此放在同级。
+        'PINVOU_REMOTE_STATE_PATH=/var/lib/pinvou-remote-relay-test/legacy-web-state.json',
+        'PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1',
+        'PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64=' + pkcs8,
+      ];
+      fs.writeFileSync(process.argv[2], lines.join('\n') + '\n', { mode: 0o600 });
+      fs.writeFileSync(process.argv[3], raw + '\n', { mode: 0o600 });
+    " "$test_dir" "$test_dir/controller.env" "$test_dir/controller-public-key.b64"
+    chmod 600 "$test_dir/controller.env" "$test_dir/controller-public-key.b64"
+  fi
+fi
+controller_unit_line=""
+if [ "$controller" = "1" ]; then
+  # 用 "-" 前缀声明为可选:回滚到不含 controller.env 的旧版本时,服务仍能启动(退化为 v2-only),
+  # 不会因 systemd 加载环境文件失败而崩溃重启(2026-09-19 实测踩坑)。
+  controller_unit_line="EnvironmentFile=-$test_dir/controller.env"
+fi
+cp -a "/etc/systemd/system/$service" "/etc/systemd/system/$service.bak" 2>/dev/null || true
 cat > "/etc/systemd/system/$service" <<EOF
 [Unit]
 Description=PINVOU Remote Relay (TEST endpoint)
@@ -283,6 +340,7 @@ Environment=PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry-test
 Environment=MAX_ROOMS=100
 Environment=ROOM_CREATE_LIMIT=10
 Environment=MAX_WS_CONNECTIONS=300
+$controller_unit_line
 ExecStart=/usr/bin/npm start
 Restart=always
 RestartSec=3
@@ -295,17 +353,40 @@ systemctl daemon-reload
 systemctl enable "$service"
 # 关键:即使服务已 active 也必须显式 restart,否则旧进程仍跑旧代码,"更新幂等"不成立。
 systemctl restart "$service"
-sleep 2
-if ! { systemctl is-active --quiet "$service" && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; }; then
+# 有界重试:controller 运行时初始化(enrollment registry + 状态文件)比 v2-only 慢,
+# 固定 sleep 2 会把「启动稍慢」误判成失败并触发回滚(2026-09-19 实测踩坑)。
+healthy=0
+for _ in $(seq 1 30); do
+  if systemctl is-active --quiet "$service" \
+    && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "$healthy" != "1" ]; then
   echo "✗ 新版本健康检查失败" >&2
   if [ -d "$test_dir.bak" ]; then
     echo "── 自动回滚到上一版($test_dir.bak)──" >&2
     rm -rf "$test_dir.failed"
     mv "$test_dir" "$test_dir.failed"
     mv "$test_dir.bak" "$test_dir"
+    # 同时恢复上一版单元:新单元可能引用只在新版本里存在的环境文件。
+    if [ -f "/etc/systemd/system/$service.bak" ]; then
+      cp -a "/etc/systemd/system/$service.bak" "/etc/systemd/system/$service"
+      systemctl daemon-reload
+    fi
     systemctl restart "$service" || true
-    sleep 2
-    if systemctl is-active --quiet "$service" && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+    rollback_healthy=0
+    for _ in $(seq 1 15); do
+      if systemctl is-active --quiet "$service" \
+        && curl -fsS "http://127.0.0.1:$port$base_path/healthz" > /dev/null; then
+        rollback_healthy=1
+        break
+      fi
+      sleep 1
+    done
+    if [ "$rollback_healthy" = "1" ]; then
       echo "回滚完成,已恢复上一版(失败版本保留在 $test_dir.failed)" >&2
     else
       echo "⚠ 回滚后健康检查仍未通过,请人工登录检查: journalctl -u $service" >&2
@@ -567,3 +648,15 @@ STAGE="完成"
 echo "部署完成: $PUBLIC_URL"
 echo "桌面端指向测试端点:"
 echo "  PINVOU_REMOTE_PUBLIC_URL=\"$PUBLIC_URL\" PINVOU_REMOTE_RELAY_WS_URL=\"wss://pinvou.com$BASE_PATH/ws\" pinvou3-tauri"
+if [ "$ENABLE_DESKTOP_CONTROLLER" = "1" ]; then
+  STAGE="读取 controller 公钥"
+  controller_public_key="$(relay_ssh "cat '$TEST_DIR/controller-public-key.b64'" | tr -d '\r\n')"
+  if [ -z "$controller_public_key" ]; then
+    echo "✗ 未取到 controller 签名公钥($TEST_DIR/controller-public-key.b64),无法为客户端提供信任根" >&2
+    exit 1
+  fi
+  echo "Windows 双端远控(controller-v1)已启用:"
+  echo "  PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=\"relay-test-key-1\""
+  echo "  PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=\"$controller_public_key\""
+  echo "  (development + TOFU 模式,仅供测试端点;生产需按 ENROLLMENT.md 走正式注册)"
+fi
