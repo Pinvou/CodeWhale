@@ -141,6 +141,22 @@ type approvalPaymentFinancialRepairSummary struct {
 	ReasonCode             string    `json:"reason_code"`
 }
 
+// approvalRefundExceptionRepairSummary is the closed read-only projection of
+// the refund exception repair command: the target refund, the owner-derived
+// revoked/shortfall split and the owner revision digest. Provider refund
+// identifiers, evidence internals and free text are never presented.
+type approvalRefundExceptionRepairSummary struct {
+	RefundID              uuid.UUID `json:"refund_id"`
+	WalletID              uuid.UUID `json:"wallet_id"`
+	PackageID             uuid.UUID `json:"package_id"`
+	AmountFen             string    `json:"amount_fen"`
+	CreditMicrocredits    string    `json:"credit_microcredits"`
+	RevokedMicrocredits   string    `json:"revoked_microcredits"`
+	ShortfallMicrocredits string    `json:"shortfall_microcredits"`
+	FactsDigest           string    `json:"facts_digest"`
+	ReasonCode            string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -154,6 +170,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	case "RECEIVABLE_WRITE_OFF":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "PAYMENT_FINANCIAL_REPAIR":
+		return policyVersion == 1 && snapshotVersion == 1
+	case "REFUND_EXCEPTION_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
@@ -264,6 +282,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalPaymentFinancialRepairSummary{PaymentOrderID: id}
+	case "REFUND_EXCEPTION_REPAIR":
+		if item.TargetResourceType != "REFUND" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalRefundExceptionRepairSummary{RefundID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -326,6 +353,7 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			TargetPostingID        uuid.UUID `json:"target_posting_id"`
 			ReceivableID           uuid.UUID `json:"receivable_id"`
 			PaymentOrderID         uuid.UUID `json:"payment_order_id"`
+			RefundID               uuid.UUID `json:"refund_id"`
 			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
 		Critical struct {
@@ -346,6 +374,10 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			CreditMicrocredits           string `json:"credit_microcredits"`
 			AppliedToReceivables         string `json:"applied_to_receivables"`
 			WalletVersion                string `json:"wallet_version"`
+			WalletID                     string `json:"wallet_id"`
+			PackageID                    string `json:"package_id"`
+			RevokedMicrocredits          string `json:"revoked_microcredits"`
+			ShortfallMicrocredits        string `json:"shortfall_microcredits"`
 		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -412,6 +444,23 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.CreditMicrocredits = proof.Financial.CreditMicrocredits
 		target.AppliedToReceivables = proof.Financial.AppliedToReceivables
 		target.WalletVersion = proof.Financial.WalletVersion
+		target.FactsDigest = proof.Critical.FactsDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalRefundExceptionRepairSummary:
+		walletID, walletErr := uuid.Parse(proof.Financial.WalletID)
+		packageID, packageErr := uuid.Parse(proof.Financial.PackageID)
+		if proof.Normalized.RefundID != target.RefundID || !approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			walletErr != nil || walletID == uuid.Nil || packageErr != nil || packageID == uuid.Nil ||
+			proof.Normalized.ReasonCode != "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.WalletID = walletID
+		target.PackageID = packageID
+		target.AmountFen = proof.Financial.AmountFen
+		target.CreditMicrocredits = proof.Financial.CreditMicrocredits
+		target.RevokedMicrocredits = proof.Financial.RevokedMicrocredits
+		target.ShortfallMicrocredits = proof.Financial.ShortfallMicrocredits
 		target.FactsDigest = proof.Critical.FactsDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target

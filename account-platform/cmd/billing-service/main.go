@@ -129,11 +129,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	refundExceptionRepairConsumerEnabled, err := optionalBooleanEnvironment("BILLING_REFUND_EXCEPTION_REPAIR_CONSUMER_ENABLED", false)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var approvalConsumerResources *events.ApprovalConsumerResourceBinding
 	// One verified receipt set covers every dedicated Billing durable, so the
 	// enabled switches only select which startup contract names a missing or
 	// untrusted binding. The entitlement code keeps precedence when both are on.
-	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled || receivableWriteOffConsumerEnabled || paymentFinancialRepairConsumerEnabled {
+	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled || receivableWriteOffConsumerEnabled || paymentFinancialRepairConsumerEnabled || refundExceptionRepairConsumerEnabled {
 		approvalConsumerResources, err = billingApprovalConsumerResources(time.Now().UTC())
 		if err != nil && entitlementConsumerEnabled {
 			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
@@ -144,8 +148,11 @@ func main() {
 		if err != nil && receivableWriteOffConsumerEnabled {
 			log.Fatal("BILLING_RECEIVABLE_WRITE_OFF_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
-		if err != nil {
+		if err != nil && paymentFinancialRepairConsumerEnabled {
 			log.Fatal("BILLING_PAYMENT_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		if err != nil {
+			log.Fatal("BILLING_REFUND_EXCEPTION_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 	}
 	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor", events.NATSConfig{Environment: cfg.Environment, CAFile: os.Getenv("NATS_CA_FILE"), ApprovalConsumerResources: approvalConsumerResources})
@@ -205,6 +212,17 @@ func main() {
 			log.Fatal("BILLING_PAYMENT_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 		defer stopPaymentFinancialRepairConsumer()
+	}
+	if refundExceptionRepairConsumerEnabled {
+		refundExceptionRepairConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-refund-exception-repair-executor-p1-v1")
+		if err != nil {
+			log.Fatal(err)
+		}
+		stopRefundExceptionRepairConsumer, err := broker.ConsumeAuthorization(workerContext, "billing-refund-exception-repair-executor-p1-v1", refundExceptionRepairConsumer.Handle)
+		if err != nil {
+			log.Fatal("BILLING_REFUND_EXCEPTION_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		defer stopRefundExceptionRepairConsumer()
 	}
 	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
 		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)

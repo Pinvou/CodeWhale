@@ -1419,7 +1419,7 @@ components:
         policy_version: { type: integer, format: int64, minimum: 1 }
         executor_identity: { type: string, enum: [billing-command-executor, token-command-executor] }
         canonical_workload: { type: string, enum: [billing-command-executor, token-command-executor] }
-        canonical_durable: { type: string, enum: [billing-command-executor-v1, billing-wallet-adjustment-executor-p1-v1, billing-payment-provider-resume-executor-p2-v1, billing-payment-product-resume-executor-p1-v1, billing-entitlement-component-adjustment-executor-p2-v1, billing-ledger-repair-executor-p1-v1, billing-receivable-write-off-executor-p1-v1, billing-payment-financial-repair-executor-p1-v1, token-model-lifecycle-executor-v1, token-catalog-rollback-executor-v1, token-credential-revoke-executor-v1] }
+        canonical_durable: { type: string, enum: [billing-command-executor-v1, billing-wallet-adjustment-executor-p1-v1, billing-payment-provider-resume-executor-p2-v1, billing-payment-product-resume-executor-p1-v1, billing-entitlement-component-adjustment-executor-p2-v1, billing-ledger-repair-executor-p1-v1, billing-receivable-write-off-executor-p1-v1, billing-payment-financial-repair-executor-p1-v1, billing-refund-exception-repair-executor-p1-v1, token-model-lifecycle-executor-v1, token-catalog-rollback-executor-v1, token-credential-revoke-executor-v1] }
     ApprovalAuthorizationDeliveryObservation:
       type: object
       additionalProperties: false

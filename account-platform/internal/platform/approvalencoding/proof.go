@@ -116,6 +116,19 @@ var commandSpecs = map[string]commandSpec{
 		criticalInts:  []string{"policy_version"},
 		financialInts: []string{"amount_fen", "credit_microcredits", "wallet_version", "applied_to_receivables"},
 	},
+	// REFUND_EXCEPTION_REPAIR reuses the command's original v1 policy/schema. The
+	// target is the refund, and every amount, the revoked/shortfall split and the
+	// wallet/package projection are recomputed by the owner proof.
+	"REFUND_EXCEPTION_REPAIR": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "REFUND", executor: "billing-command-executor",
+		normalizedKeys: []string{"refund_id", "payment_evidence_id", "anomaly_case_id", "reason_code"},
+		criticalKeys:   []string{"refund_updated_at", "anomaly_version", "facts_digest", "policy_version"},
+		financialKeys: []string{"amount_fen", "credit_microcredits", "provider_refund_id", "revoked_microcredits",
+			"shortfall_microcredits", "wallet_id", "wallet_version", "package_id"},
+		criticalInts: []string{"anomaly_version", "policy_version"},
+		financialInts: []string{"amount_fen", "credit_microcredits", "revoked_microcredits",
+			"shortfall_microcredits", "wallet_version"},
+	},
 }
 
 func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
@@ -623,6 +636,23 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			!validUUIDField(financialObject["wallet_id"]) || integers["f.wallet_version"] < 1 ||
 			integers["f.applied_to_receivables"] < 0 || integers["f.applied_to_receivables"] > integers["f.credit_microcredits"] ||
 			reasonErr != nil || reasonCode != "CONFIRMED_PAYMENT_NOT_CREDITED" {
+			return ErrInvalidDocument
+		}
+	case "REFUND_EXCEPTION_REPAIR":
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		providerRefundID, providerErr := stringValue(financialObject["provider_refund_id"])
+		revoked, shortfall := integers["f.revoked_microcredits"], integers["f.shortfall_microcredits"]
+		if !validUUID(targetID) || !equalString(normalizedObject["refund_id"], targetID) ||
+			!validUUIDField(normalizedObject["payment_evidence_id"]) ||
+			!validUUIDField(normalizedObject["anomaly_case_id"]) ||
+			integers["c.policy_version"] != spec.policyVersion || integers["c.anomaly_version"] < 1 ||
+			!canonicalTimeField(criticalObject["refund_updated_at"]) || !hexField(criticalObject["facts_digest"]) ||
+			integers["f.amount_fen"] < 1 || integers["f.credit_microcredits"] < 1 ||
+			providerErr != nil || len(providerRefundID) == 0 || len(providerRefundID) > 200 ||
+			revoked < 0 || shortfall < 0 || revoked+shortfall < 1 || revoked+shortfall > integers["f.credit_microcredits"] ||
+			!validUUIDField(financialObject["wallet_id"]) || integers["f.wallet_version"] < 1 ||
+			!validUUIDField(financialObject["package_id"]) ||
+			reasonErr != nil || reasonCode != "PROVIDER_REFUNDED_LOCAL_REVERSAL_MISSING" {
 			return ErrInvalidDocument
 		}
 	}

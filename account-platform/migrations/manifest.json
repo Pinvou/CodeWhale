@@ -732,6 +732,16 @@
         "file": "000073_payment_financial_repair_consumer_route.up.sql",
         "version": 73,
         "sha256": "11610566134efed99e91dd4eb3b75af2c2c2e06c70097c8eade29a79b759c21a"
+      },
+      {
+        "file": "000074_refund_exception_repair_consumer_route.down.sql",
+        "version": 74,
+        "sha256": "0642ca8e20264ed88e60fc9d2d798854adb01e4c02b765c63a25e0fc5527f26e"
+      },
+      {
+        "file": "000074_refund_exception_repair_consumer_route.up.sql",
+        "version": 74,
+        "sha256": "7cdeb575ee80a95a75fe5818c39ea25e3ed38d1b68df4412499001b5b2a46f5f"
       }
     ],
     "billing": [

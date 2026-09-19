@@ -37,6 +37,11 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if !Executable("LEDGER_REPAIR") {
 		t.Fatal("ledger repair must consult its live Billing activation")
 	}
+	// REFUND_EXCEPTION_REPAIR follows the same rule as the other repair
+	// commands: membership only opens the live activation consultation.
+	if !Executable("REFUND_EXCEPTION_REPAIR") {
+		t.Fatal("refund exception repair must consult its live Billing activation")
+	}
 	if Executable("USAGE_SETTLEMENT_REPAIR") {
 		t.Fatal("unimplemented domain repair must remain non-executable")
 	}

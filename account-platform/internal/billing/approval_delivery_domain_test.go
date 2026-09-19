@@ -174,6 +174,10 @@ type authorizationExecutionRepositoryStub struct {
 	writeOffInput                   ReceivableWriteOffExecutionInput
 	paymentRepair                   PaymentFinancialRepairResult
 	paymentRepairErr                error
+	refundRepair                    RefundExceptionRepairResult
+	refundRepairErr                 error
+	refundRunErr                    error
+	refundInput                     RefundExceptionRepairExecutionInput
 	activations                     ApprovalCommandActivationSnapshot
 	activationsErr                  error
 	adjustmentRuns                  int
@@ -181,6 +185,7 @@ type authorizationExecutionRepositoryStub struct {
 	entitlementRuns                 int
 	ledgerRuns                      int
 	writeOffRuns                    int
+	refundRuns                      int
 }
 
 func (s *authorizationExecutionRepositoryStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
@@ -254,6 +259,19 @@ func (s *authorizationExecutionRepositoryStub) ApplyReceivableWriteOff(_ context
 
 func (s *authorizationExecutionRepositoryStub) PaymentFinancialRepairForRequest(context.Context, uuid.UUID) (PaymentFinancialRepairResult, error) {
 	return s.paymentRepair, s.paymentRepairErr
+}
+
+func (s *authorizationExecutionRepositoryStub) RefundExceptionRepairForRequest(context.Context, uuid.UUID) (RefundExceptionRepairResult, error) {
+	return s.refundRepair, s.refundRepairErr
+}
+
+func (s *authorizationExecutionRepositoryStub) ApplyRefundExceptionRepair(_ context.Context, input RefundExceptionRepairExecutionInput) (RefundExceptionRepairResult, error) {
+	s.refundRuns++
+	s.refundInput = input
+	if s.refundRunErr != nil {
+		return RefundExceptionRepairResult{}, s.refundRunErr
+	}
+	return s.refundRepair, nil
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {
