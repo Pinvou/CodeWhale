@@ -46,7 +46,14 @@ type ReceivableAllocation struct {
 }
 
 func createReceivableWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID, sourceType, sourceReference string, amount int64, paymentOrderID, paymentTransactionID, packageID, usageRequestID *uuid.UUID, now time.Time) (Receivable, error) {
-	if amount <= 0 || strings.TrimSpace(sourceReference) == "" || (sourceType != "USAGE_OVERAGE" && sourceType != "CHARGEBACK") {
+	// The closed source-type set is the same one migration 000025/000060 keeps in
+	// receivables.source_type: usage overage, provider chargeback, and the forced
+	// refund BASE shortfall created by the reviewed forced-refund path.
+	// The closed source-type set is the same one migration 000025/000060 keeps in
+	// receivables.source_type: usage overage, provider chargeback, and the forced
+	// refund BASE shortfall created by the reviewed forced-refund path.
+	if amount <= 0 || strings.TrimSpace(sourceReference) == "" ||
+		(sourceType != "USAGE_OVERAGE" && sourceType != "CHARGEBACK" && sourceType != "FORCED_REFUND") {
 		return Receivable{}, ErrConflict
 	}
 	var existing Receivable
