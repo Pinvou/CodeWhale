@@ -21,7 +21,14 @@ type billingProofFactsStub struct {
 	ledgerRepairErr error
 	writeOff        ReceivableWriteOffPlan
 	writeOffErr     error
+	paymentRepair   PaymentFinancialRepairPlan
+	paymentRepairErr error
 	reads           int
+}
+
+func (s *billingProofFactsStub) paymentFinancialRepairPlan(context.Context, PaymentFinancialRepairCommandInput) (PaymentFinancialRepairPlan, error) {
+	s.reads++
+	return s.paymentRepair, s.paymentRepairErr
 }
 
 func (s *billingProofFactsStub) receivableWriteOffPlan(context.Context, ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error) {

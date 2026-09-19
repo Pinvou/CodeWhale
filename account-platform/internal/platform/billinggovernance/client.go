@@ -103,11 +103,11 @@ func ValidateSnapshot(s Snapshot) error {
 		}
 		switch activation.CommandType {
 		case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
-		case "LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF":
+		case "LEDGER_REPAIR", "RECEIVABLE_WRITE_OFF", "PAYMENT_FINANCIAL_REPAIR":
 			// Each of these commands owns exactly one v1/s1 projection and that is
-			// the only version of it that may report ACTIVE. Both stay INACTIVE
-			// until a separately authorized activation, so accepting ACTIVE here
-			// opens no command by itself.
+			// the only version of it that may report ACTIVE. All of them stay
+			// INACTIVE until a separately authorized activation, so accepting
+			// ACTIVE here opens no command by itself.
 			if activation.State == "ACTIVE" && (activation.PolicyVersion != 1 || activation.SnapshotSchemaVersion != 1) {
 				return ErrUnavailable
 			}

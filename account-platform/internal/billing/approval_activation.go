@@ -85,6 +85,9 @@ func validActivationItem(item ApprovalCommandActivation, commandType string, spe
 	if commandType == receivableWriteOffCommand && item.PolicyVersion == 1 && item.SnapshotSchemaVersion == 1 {
 		return true
 	}
+	if commandType == paymentFinancialRepairCommand && item.PolicyVersion == 1 && item.SnapshotSchemaVersion == 1 {
+		return true
+	}
 	if !spec.mayBeActive && item.State != "INACTIVE" {
 		return false
 	}

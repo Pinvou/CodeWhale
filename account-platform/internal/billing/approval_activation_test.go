@@ -259,3 +259,27 @@ func TestLedgerRepairActivationMayBeActive(t *testing.T) {
 		t.Fatalf("unknown ledger repair policy accepted: %v", err)
 	}
 }
+
+// TestPaymentFinancialRepairActivationMayBeActive covers the GSA-28 activation
+// capability: the command's single v1/s1 projection may report ACTIVE once a
+// separately authorized activation runs, while unknown versions still fail the
+// whole projection closed.
+func TestPaymentFinancialRepairActivationMayBeActive(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := validBillingApprovalActivationSnapshot(now)
+	item := &snapshot.Activations[3]
+	if item.CommandType != paymentFinancialRepairCommand {
+		t.Fatal("unexpected activation order")
+	}
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("deployed INACTIVE projection rejected: %v", err)
+	}
+	item.State = "ACTIVE"
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("activated payment financial repair projection rejected: %v", err)
+	}
+	item.PolicyVersion = 2
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("unknown payment financial repair policy accepted: %v", err)
+	}
+}

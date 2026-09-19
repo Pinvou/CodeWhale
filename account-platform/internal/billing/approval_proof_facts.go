@@ -23,6 +23,34 @@ type billingProofFacts interface {
 	entitlementCorrectionPlan(context.Context, uuid.UUID, uuid.UUID) (entitlementCorrectionReadPlan, error)
 	ledgerRepairPlan(context.Context, LedgerRepairCommandInput) (LedgerRepairPlan, error)
 	receivableWriteOffPlan(context.Context, ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error)
+	paymentFinancialRepairPlan(context.Context, PaymentFinancialRepairCommandInput) (PaymentFinancialRepairPlan, error)
+}
+
+// paymentFinancialRepairPlan re-reads the owner activation row and recomputes
+// the closed payment-repair projection. The activation row must be ACTIVE with
+// the current version, and this path never calls the provider.
+func (r *PostgresRepository) paymentFinancialRepairPlan(ctx context.Context, input PaymentFinancialRepairCommandInput) (PaymentFinancialRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, paymentFinancialRepairCommand, r.now())
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := paymentFinancialRepairPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return PaymentFinancialRepairPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return PaymentFinancialRepairPlan{}, err
+	}
+	return plan, nil
 }
 
 // receivableWriteOffPlan re-reads the owner activation row and recomputes the
@@ -252,6 +280,31 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
 		if plan.ReceivableID != command.ReceivableID || plan.WriteOffMicrocredits != command.WriteOffMicrocredits ||
 			plan.ReceivableVersion != command.ExpectedReceivableVersion {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case paymentFinancialRepairCommand:
+		var command struct {
+			PaymentOrderID    uuid.UUID `json:"payment_order_id"`
+			PaymentEvidenceID uuid.UUID `json:"payment_evidence_id"`
+			ReasonCode        string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.PaymentOrderID == uuid.Nil ||
+			command.PaymentEvidenceID == uuid.Nil || strings.TrimSpace(command.ReasonCode) != paymentFinancialRepairReason {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		plan, err := repository.paymentFinancialRepairPlan(ctx, PaymentFinancialRepairCommandInput{
+			PaymentOrderID: command.PaymentOrderID, PaymentEvidenceID: command.PaymentEvidenceID,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.ProviderTransactionID
+		critical, financial := paymentFinancialRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.OrderID != command.PaymentOrderID || plan.EvidenceID != command.PaymentEvidenceID {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:
