@@ -17092,6 +17092,38 @@ fn forkguard_subagent_context_hint_names_active_tools() {
             && !context.contains("read_file")
             && !context.contains("list_dir")
     );
+    assert!(
+        !context.contains("handle_read"),
+        "this receipt carries no transcript_handle, so the hint would name a \
+         value the model never received:\n{context}"
+    );
+    assert!(
+        !context.contains("call `handle_read` directly anyway"),
+        "calling a deferred tool by name is not a hydration contract; the \
+         hint must not promise what allowlist-filtered hosts refuse:\n{context}"
+    );
+
+    // A receipt that does carry a transcript_handle (verbose projection,
+    // terminal status row) keeps the guidance — with the honest fallback
+    // that names the degradation instead of a direct-call promise.
+    let with_handle = ToolResult::success(
+        json!({
+            "agent_id": "agent_1234abcd",
+            "agent_type": "explore",
+            "assignment": {
+                "objective": "Inspect the RLM rendering path and report the smallest fix."
+            },
+            "model": "deepseek-v4-flash",
+            "status": "Completed",
+            "result": long_result,
+            "steps_taken": 12,
+            "duration_ms": 3456,
+            "transcript_handle": "agent:agent_1234abcd/full_transcript"
+        })
+        .to_string(),
+    );
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_handle);
+
     assert!(context.contains("handle_read"));
     assert!(
         context.contains("activate it via `tool_search` first"),
@@ -17100,9 +17132,115 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          {context}"
     );
     assert!(
-        context.contains("call `handle_read` directly anyway"),
-        "allowed_tools-filtered sessions can strip tool_search too; the hint \
-         must keep the direct-call fallback instead of dead-ending:\n{context}"
+        context.contains("transcript reads are unavailable in this session"),
+        "when tool_search cannot surface handle_read the hint must degrade \
+         honestly instead of promising a direct call works:\n{context}"
+    );
+    assert!(
+        !context.contains("call `handle_read` directly anyway")
+            && !context.contains("hydrate when called by name"),
+        "registered deferred tools do not hydrate-and-execute when called by \
+         name on allowlist-filtered hosts; the false promise must stay gone:\n\
+         {context}"
+    );
+}
+
+// Regression (agent-domain audit): `agent(action=roster)` returns the Fleet
+// role catalog and `agent(action=wait)` returns the join outcome — neither is
+// a per-child result snapshot, so the snapshot summarizer must not destroy
+// them into "- unknown (agent) status=unknown" noise.
+#[test]
+fn forkguard_agent_roster_receipt_passes_through_to_context() {
+    let roster = json!({
+        "action": "roster",
+        "count": 2,
+        "total_count": 2,
+        "truncated": false,
+        "members": [
+            {"member_id": "general", "role": "general",
+             "description": "General-purpose worker with full tool access for multi-step tasks."},
+            {"member_id": "explore", "role": "explore",
+             "description": "Fast read-only exploration for codebase search and analysis."}
+        ],
+        "selector_help": "Use type:<role> with one of the listed roles."
+    })
+    .to_string();
+    let output = ToolResult::success(roster.clone());
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "roster receipt must pass through as a receipt:\n{context}"
+    );
+    assert!(
+        context.contains("\"selector_help\"") && context.contains("General-purpose worker"),
+        "roster members and selector help must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "roster is not a result snapshot; the summarizer header is a lie:\n{context}"
+    );
+    assert!(
+        !context.contains("status=unknown") && !context.contains("result: not available yet"),
+        "roster must not be collapsed into snapshot noise:\n{context}"
+    );
+}
+
+#[test]
+fn forkguard_agent_wait_receipt_passes_through_to_context() {
+    let wait = json!({
+        "action": "wait",
+        "settled": [
+            {"agent_id": "agent_1a2b3c4d", "name": "slash_agent", "status": "Completed"}
+        ],
+        "running": 1,
+        "waited_ms": 3_214,
+        "timed_out": true,
+        "note": "Wait timed out with children still running."
+    })
+    .to_string();
+    let output = ToolResult::success(wait);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "wait receipt must pass through as a receipt:\n{context}"
+    );
+    assert!(
+        context.contains("\"timed_out\":true")
+            && context.contains("\"waited_ms\":3214")
+            && context.contains("agent_1a2b3c4d")
+            && context.contains("Wait timed out with children still running."),
+        "settled/timed_out/waited_ms/note must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "wait is not a result snapshot; the summarizer header is a lie:\n{context}"
+    );
+}
+
+#[test]
+fn forkguard_agent_receipt_passthrough_is_bounded() {
+    let huge_member = "x".repeat(4_000);
+    let roster = json!({
+        "action": "roster",
+        "members": [{"member_id": "general", "description": huge_member}],
+    })
+    .to_string();
+    let output = ToolResult::success(roster);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]") && context.contains("characters]"),
+        "oversized receipts pass through bounded with a truncation note:\n{context}"
+    );
+    let prefix_len = "[sub-agent receipt]\n".len();
+    assert!(
+        context.len() <= prefix_len + 4_000,
+        "passthrough must stay bounded:\n{context}"
     );
 }
 
@@ -21913,6 +22051,227 @@ async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
     assert_eq!(engine.mcp_boot_generation, Some(2));
     assert!(engine.mcp_boot_in_flight);
     assert!(engine.mcp_boot_rx.is_some());
+}
+
+#[tokio::test]
+async fn mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        r#"{"servers":{"bad":{"command":"codewhale-mcp-missing-payload-9f8e7d6c"}}}"#,
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace,
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    let reason = "connect failed: spawn failure";
+    engine.mcp_connection_errors = HashMap::from([("bad".to_string(), reason.to_string())]);
+
+    engine.emit_mcp_session_boot(7, true).await;
+
+    let mut rx = handle.rx_event.write().await;
+    let mut other_events = 0;
+    let event = loop {
+        let event = rx.recv().await.expect("engine event channel stays open");
+        if matches!(event, Event::McpSessionBoot { .. }) {
+            break event;
+        }
+        other_events += 1;
+        assert!(other_events < 8, "no McpSessionBoot event arrived");
+    };
+    drop(rx);
+    let Event::McpSessionBoot {
+        snapshot,
+        connecting,
+        finished,
+        ..
+    } = event
+    else {
+        unreachable!("loop broke on McpSessionBoot");
+    };
+    assert!(finished, "the terminal receipt carries the final diagnoses");
+    assert!(connecting.is_empty());
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "bad")
+        .expect("failed server row");
+    assert!(!server.connected);
+    assert_eq!(server.error.as_deref(), Some(reason));
+}
+
+#[tokio::test]
+async fn mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "slow-fs".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "one failed boot pass briefs exactly once"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("briefing present");
+    assert!(
+        crate::runtime_handoff::is_internal_runtime_handoff(briefing),
+        "the briefing is runtime control traffic, not a user turn"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(text.contains("slow-fs: connect timed out after 5s"));
+    assert!(text.contains("use local tools instead"));
+    assert_eq!(engine.mcp_boot_briefing_generation, Some(3));
+
+    engine.maybe_inject_mcp_boot_briefing(3).await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "the same boot generation never briefs twice"
+    );
+}
+
+#[tokio::test]
+async fn successful_mcp_boot_injects_no_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 2;
+    engine.mcp_boot_generation = Some(2);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 2,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::new(),
+        })
+        .await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)),
+        "a fully successful boot must not brief the model"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+}
+
+#[tokio::test]
+async fn isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let api_config = Config {
+        runtime_chat_isolated: true,
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+    engine.mcp_connection_errors = HashMap::from([(
+        "bad".to_string(),
+        "connect failed: spawn failure".to_string(),
+    )]);
+
+    engine.maybe_inject_mcp_boot_briefing(1).await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)),
+        "isolated Runtime Chat must stay free of host runtime briefings"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+}
+
+#[tokio::test]
+async fn drained_mcp_boot_finish_also_briefs_the_model() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 5;
+    engine.mcp_boot_generation = Some(5);
+    engine.mcp_boot_in_flight = true;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(McpBootUpdate::Finished {
+        generation: 5,
+        authority_errors: Arc::new(HashMap::new()),
+        connection_errors: HashMap::from([(
+            "auth-broken".to_string(),
+            "401 unauthorized".to_string(),
+        )]),
+    })
+    .expect("queue the boot finish");
+    engine.mcp_boot_rx = Some(rx);
+
+    engine.drain_mcp_boot_updates().await;
+
+    assert!(!engine.mcp_boot_in_flight);
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("mcp-session-boot"),
+        "the drained finish still declares the next-turn catalog refresh"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("the drained finish still briefs the model");
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(text.contains("auth-broken: 401 unauthorized"));
+    assert_eq!(engine.mcp_boot_briefing_generation, Some(5));
 }
 
 #[tokio::test]

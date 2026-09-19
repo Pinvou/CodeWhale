@@ -901,10 +901,12 @@ fn default_agent_inspect_tool() -> String {
 /// `handle_read` is deferred on stock hosts, so model-facing text that pairs
 /// it with a transcript handle must teach the activation path instead of
 /// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
-/// `pub(crate)` so the engine's parent-context hint reuses the exact wording
-/// instead of re-typing a drifting copy.
-pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str =
-    "if `handle_read` is not in your tool list, activate it via `tool_search` first";
+/// The fallback is an honest degradation, not a promise that calling the
+/// hidden tool by name works: `tool_search` hydration only reaches tools the
+/// host allowlist kept in the catalog, and it surfaces a schema, never an
+/// execution. `pub(crate)` so the engine's parent-context hint reuses the
+/// exact wording instead of re-typing a drifting copy.
+pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` first; if `tool_search` cannot surface it, transcript reads are unavailable in this session — rely on the returned summaries";
 
 /// Shared inspect brief for worker records and takeover targets; both name
 /// `handle_read`, so both must carry the activation hint.
@@ -8406,13 +8408,13 @@ impl ToolSpec for AgentTool {
         concat!(
             "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
-            "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
+            "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
             "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
             "Use action=roster to inspect the Fleet roles and their descriptions before choosing a type or profile. ",
             "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
-            "Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
+            "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
             "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
@@ -8452,7 +8454,7 @@ impl ToolSpec for AgentTool {
                 "until": {
                     "type": "string",
                     "enum": ["completion", "all", "activity"],
-                    "description": "For action=wait. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
+                    "description": "For action=wait. A wait blocks until one child settles or the timeout (default 30s, max 120s) elapses; on timeout the receipt reports timed_out=true with any already-settled children, and full results still arrive as completion sentinels. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
                 },
                 "agent_id": {
                     "type": "string",

@@ -2838,6 +2838,43 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     assert!(description.contains("action=wait"));
     assert!(description.contains("action=claim"));
     assert!(description.contains("Fleet role"));
+    // The tool description must use the canonical role vocabulary the schema
+    // advertises (FLEET_ROLE_SCHEMA_VALUES / SUBAGENT_TYPE_DESCRIPTION); the
+    // legacy spellings stay parse-accepted but are never advertised.
+    for canonical in [
+        "general (full tool access)",
+        "explore (fast read-only exploration)",
+        "planner (grounded strategy",
+        "reviewer (reads and grades code)",
+        "implement (lands focused code changes)",
+        "test (runs tests and reports evidence)",
+        "advisor (read-only design counsel)",
+        "custom (allowed_tools",
+        "legacy aliases are still accepted",
+        "type=implement",
+        "type=test",
+    ] {
+        assert!(
+            description.contains(canonical),
+            "agent description must use canonical role vocabulary, missing \
+             {canonical:?}:\n{description}"
+        );
+    }
+    for legacy in [
+        "worker (",
+        "scout (",
+        "builder (",
+        "verifier (",
+        "consultant (",
+        "type=builder",
+        "type=verifier",
+    ] {
+        assert!(
+            !description.contains(legacy),
+            "agent description must not advertise legacy role {legacy:?}:\n\
+             {description}"
+        );
+    }
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"
@@ -4917,6 +4954,31 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     assert!(
         worktree.contains("git worktree") && worktree.contains("parallel edit"),
         "worktree description should teach isolated parallel edits: {worktree}"
+    );
+}
+
+// The wait surfaces block the turn, so the model-facing text must disclose
+// the bounded block (default 30s, max 120s) and the timed_out receipt shape;
+// an undisclosed finite block reads as a hang when nothing settles.
+#[test]
+fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let agent_schema = AgentTool::new(manager.clone(), stub_runtime()).input_schema();
+    let until = schema_property_description(&agent_schema, "until");
+    assert!(
+        until.contains("default 30s") && until.contains("max 120s") && until.contains("timed_out"),
+        "agent(action=wait) until description must disclose the timeout bound \
+         and the timed_out receipt:\n{until}"
+    );
+
+    let wait_tool = AgentsWaitTool::new(manager);
+    let wait_description = wait_tool.description();
+    assert!(
+        wait_description.contains("timeout_secs (default 30, max 120)")
+            && wait_description.contains("timed_out=true"),
+        "agents/wait description must disclose the timeout bound and the \
+         timed_out receipt:\n{wait_description}"
     );
 }
 

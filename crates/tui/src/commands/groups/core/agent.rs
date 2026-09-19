@@ -59,7 +59,7 @@ pub fn agent(_app: &mut App, arg: Option<&str>) -> CommandResult {
         }
     };
     let message = format!(
-        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on the returned transcript_handle if you need more detail; {handle_read_hint}; if `tool_search` cannot surface it, call `handle_read` directly anyway, since registered deferred tools hydrate when called by name. Verify any claimed side effects before reporting success.",
+        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on the returned transcript_handle if you need more detail; {handle_read_hint}. Verify any claimed side effects before reporting success.",
         handle_read_hint = crate::tools::subagent::HANDLE_READ_ACTIVATION_HINT
     );
     CommandResult::with_message_and_action(
@@ -143,10 +143,16 @@ mod tests {
             "the dispatch brief must teach the handle_read activation path:\n{message}"
         );
         assert!(
-            message.contains("call `handle_read` directly anyway"),
-            "allowed_tools-filtered sessions can strip tool_search too; the \
-             dispatch brief must keep the direct-call fallback instead of \
-             dead-ending:\n{message}"
+            message.contains("transcript reads are unavailable in this session"),
+            "when tool_search cannot surface handle_read the brief must \
+             degrade honestly instead of dead-ending or over-promising:\n{message}"
+        );
+        assert!(
+            !message.contains("directly anyway")
+                && !message.contains("hydrate when called by name"),
+            "registered deferred tools do not hydrate-and-execute when called \
+             by name on allowlist-filtered hosts; the false promise must stay \
+             gone:\n{message}"
         );
     }
 }
