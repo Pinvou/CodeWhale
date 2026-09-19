@@ -92,6 +92,26 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
         "504": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-command-prechecks:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: readBillingApprovalPrecheckInternal
+      summary: Read the closed owner projection the business page renders before submitting an approval draft
+      description: Account-service workload with internal.billing.approval-proof.read only. Read-only with no Provider probe and no fact write; unknown fields, unknown commands, missing evidence references and unusable owner facts fail closed, and the request plus response stay inside the same 64 KiB bound as the proof transport with a two second deadline.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BillingApprovalCommandPrecheckRequest" }
+      responses:
+        "200": { description: Closed normalized critical and financial projection copied verbatim from the owner domain, content: { application/json: { schema: { $ref: "#/components/schemas/BillingApprovalCommandPrecheckResponse" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /internal/v1/pricing/impact-coverage:
     post:
       operationId: readImpactPriceCoverage
@@ -833,6 +853,37 @@ components:
         source: { type: string, const: BILLING }
         financial_fact_revision: { type: integer, format: int64, minimum: 1 }
         price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+    BillingApprovalCommandPrecheckRequest:
+      type: object
+      additionalProperties: false
+      required: [command_type, target_resource_id]
+      properties:
+        command_type: { type: string, enum: [LEDGER_REPAIR, RECEIVABLE_WRITE_OFF, PAYMENT_FINANCIAL_REPAIR, REFUND_EXCEPTION_REPAIR, CHARGEBACK_FINANCIAL_REPAIR, RECONCILIATION_FINANCIAL_REPAIR, USAGE_SETTLEMENT_REPAIR] }
+        target_resource_id: { type: string, format: uuid }
+        target_journal_entry_id: { type: string, format: uuid }
+        payment_evidence_id: { type: string, format: uuid }
+        anomaly_case_id: { type: string, format: uuid }
+        loss_review_id: { type: string, format: uuid }
+        business_date: { type: string, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' }
+        reason_code: { type: string, maxLength: 80 }
+        expected_version: { type: integer, format: int64, minimum: 0 }
+        write_off_microcredits: { type: integer, format: int64, minimum: 0 }
+        wrong_ledger_account_id: { type: string, format: uuid }
+        correct_ledger_account_id: { type: string, format: uuid }
+        amount_microcredits: { type: integer, format: int64, minimum: 0 }
+    BillingApprovalCommandPrecheckResponse:
+      type: object
+      additionalProperties: false
+      required: [command_type, policy_version, snapshot_schema_version, target_resource_type, target_resource_id, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        command_type: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        target_resource_type: { type: string }
+        target_resource_id: { type: string }
+        normalized_command: { type: object }
+        critical_resource_versions: { type: object }
+        financial_snapshot: { type: object }
     CoveredImpactPrice:
       type: object
       additionalProperties: false
