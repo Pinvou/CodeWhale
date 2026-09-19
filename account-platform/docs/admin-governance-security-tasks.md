@@ -59,7 +59,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-34 | APT-141 | 对账财务修复实现与领域 E2E | GSA-33 | CODE | IN_PROGRESS |
 | GSA-35 | APT-141 | 用量结算修复领域设计 | GSA-34 | DESIGN | IN_REVIEW / DESIGN_FROZEN / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PENDING / NOT_IMPLEMENTED / NOT_DEPLOYED |
 | GSA-36 | APT-141 | 用量结算修复实现与领域 E2E | GSA-35 | CODE | IN_PROGRESS |
-| GSA-37 | APT-142 | 八命令业务入口及审批 presenter 联调 | GSA-36, GSA-20 | CODE | PENDING |
+| GSA-37 | APT-142 | 八命令业务入口及审批 presenter 联调 | GSA-36, GSA-20 | CODE | IN_PROGRESS / PARTIAL / SERVER_PRECHECK_READY / PORTAL_UI_PENDING / NOT_DEPLOYED |
 | GSA-38 | APT-143 | 切换/回滚工具、资源清单与只读 readiness | GSA-37 | CODE | IN_PROGRESS / READONLY_READY / FAMILY_INVENTORY_RECORDED / NOT_ACTIVATED / NOT_DEPLOYED |
 | GSA-39 | APT-143 | 生产等价集成、性能、N/N-1 与故障演练 | GSA-38 | CODE+ENV | PENDING |
 | GSA-40 | APT-143 | 授权后的逐命令灰度与生产证据归档 | GSA-39 | CODE+ENV | PENDING |
@@ -299,6 +299,10 @@ GSA-37 业务页闭合草稿切片（仍PENDING / PARTIAL）：新增 Portal 侧
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 
 > 说明：本小节内穿插的“GSA-22 / GSA-37 / GSA-38 … 切片”与“设计类审核轮次发现”等段落是逐轮追加的审核与验证记录（正式记录见 §5）；为避免改写历史记录，此处保留原文，其中已被后续提交取代的事实以 §5 的“设计冻结轮”与“记录失效更正”为准。
+
+GSA-37 只读预检真实 PG 证据补充：真实 PostgreSQL 双库跨域用例 `TestUsageSettlementRepairCrossDomainActivationPostgresIntegration` PASS 8.27s，其中新增断言「Account 预检客户端 → 真实 Billing 预检 HTTP → 真实 PG owner 读」返回的闭合投影与同一目标随后冻结的 proof 输入**逐字段相同**（命令、policy/schema 版本、目标类型与 id、normalized/critical/financial 三段字节），不可证明的目标（不存在的 loss review）返回 422 拒绝，两次预检后 `billing_approval_proof_claims` 与 `usage_settlement_repair_cases` 计数均为 0；`/admin/v2/approval-command-prechecks` 已注册在管理端 v2 group 之后（鉴权中间件真实生效）。
+
+GSA-37 只读预检接口面切片（IN_PROGRESS / PARTIAL / SERVER_PRECHECK_READY / PORTAL_UI_PENDING / NOT_DEPLOYED）：按[只读预检接口面提案](financial-repair-precheck-surface-proposal.md)的方案 A2 交付业务页唯一可用的服务端预检面。Billing 侧新增 `POST /internal/v1/approval-command-prechecks`（`internal/billing/approval_precheck.go`）：仅接受 Account 服务身份（复用既有只读权限 `internal.billing.approval-proof.read`，不扩大部署清单的工作负载权限集合），2 秒绝对期限、64 KiB 文档上限、`DisallowUnknownFields` 闭合解码；七个财务修复命令一律复用与 proof **完全相同**的 `*ProofInput` 装配入口，因此预检不可能比其后的证明更宽松；不可用或目标不一致返回 422 且零写入、零 claim，未知命令与缺证据引用一律失败关闭。Account 侧新增代理端点 `POST /admin/v2/approval-command-prechecks`（`internal/account/approval_precheck.go`、`service.go` 注册、`authorization.go` 新增常量 `PermissionPlatformBillingRepairsRequest`）：复用 `platform.billing.repairs.request` 做真实内联鉴权（因此不需要也不允许再登记 `http_policies` 条目），只转发闭合输入、以 Account 服务身份调用 Billing，并重新校验 owner 应答的命令/目标类型/目标 id 绑定、policy 与 schema 版本以及三段闭合文档；全程不跟随重定向、不缓存、不落库、不新增任何审批事实。**同轮修复一处真实缺陷**：原 Billing 预检的用量结算分支把 `loss_review_id` 同时当作 hold 与 loss review，而真实计划要求 `usage_loss_reviews.hold_id == plan.HoldID`，因此该分支对任何真实目标只会返回不可用（此前仅被 stub 单测覆盖）；修复后 `target_resource_id` 即 hold（与其余六命令及 Portal 描述符 `targetKey: hold_id` 一致），并新增独立 `usage_request_id`/`loss_review_id` 引用，负例覆盖缺任一引用。合同与门禁：`contracts/openapi/{billing,account}.yaml` 新增预检请求/应答闭合 schema（`additionalProperties: false`、逐命令 enum、`usage_request_id`），授权覆盖门禁 HTTP 路由 375→376 并同步 `test/contract/authorization-coverage-release-gate.test.mjs`；新增 Node 合同 `test/contract/account-approval-precheck.test.mjs`（鉴权/只读/有界/不跟随重定向、Go 侧命令→目标类型表与 Portal 描述符逐命令一致、两侧 OpenAPI 闭合、预检不得携带审批身份或 epoch）与 Billing 预检合同新增断言。验证：`go test ./internal/billing -run TestBillingApprovalPrecheck` PASS、`go test ./internal/account -run TestApprovalPrecheck` PASS（客户端边界与绑定矩阵、代理失败关闭/不缓存/不落库矩阵）、`go vet` PASS、`redocly lint` 两个合同 valid、`npm test` 649 项 647 PASS / 0 FAIL / 2 既有环境 SKIP、授权覆盖门禁 376 HTTP / 28 task / 15 event / 23 CLI。仍未完成：Portal 表单与草稿编辑 UI、三语文案，以及需要至少一个命令在联调环境激活后的真实浏览器联调；activation 行全部保持 `INACTIVE`，未部署、未推送。
 
 ### GSA-21～37：八类财务命令
 

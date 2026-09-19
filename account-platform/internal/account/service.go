@@ -38,6 +38,7 @@ type Service struct {
 	humanDelegations            *humandelegation.Signer
 	ownerCandidateCursorKey     []byte
 	recoveryResults             ApprovalRecoveryResultReader
+	approvalPrechecks           ApprovalPrecheckSource
 }
 
 func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
@@ -86,6 +87,13 @@ func (s *Service) WithServiceToken(serviceToken string) *Service {
 
 func (s *Service) WithApprovalRecoveryResults(reader ApprovalRecoveryResultReader) *Service {
 	s.recoveryResults = reader
+	return s
+}
+
+// WithApprovalPrecheckSource wires the read-only owner precheck the business
+// page needs before any approval draft exists.
+func (s *Service) WithApprovalPrecheckSource(source ApprovalPrecheckSource) *Service {
+	s.approvalPrechecks = source
 	return s
 }
 
@@ -220,6 +228,9 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	adminV2.GET("/approval-directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	adminV2.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequestsV2))
 	adminV2.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraftV2))
+	// The business page cannot derive frozen facts itself: it asks the read-only
+	// precheck proxy for the closed owner projection, then submits the draft.
+	adminV2.POST("/approval-command-prechecks", s.requirePermission(PermissionPlatformBillingRepairsRequest), httpserver.AdaptFunc(s.adminApprovalCommandPrecheck))
 	adminV2.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequestV2))
 	adminV2.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraftV2))
 	adminV2.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequestV2))

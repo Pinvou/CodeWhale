@@ -1,6 +1,6 @@
 # 财务修复只读预检接口面提案（GSA-37 剩余工作的决策材料）
 
-状态：`PROPOSAL / AWAITING_SCOPE_DECISION / NOT_IMPLEMENTED`。本文件不是已冻结设计，也未被实现；它把 GSA-37 目前唯一缺失的跨域接口面写成可评审的方案，供授权人决定是否开这条路线。
+状态：`IMPLEMENTED_AS_A2 / PORTAL_UI_PENDING / NOT_ACTIVATED / NOT_DEPLOYED`。§2 的接口面已按方案 A2 落地（Billing 只读预检端点 + Account 代理端点 + 两侧合同与门禁），Portal 表单/三语文案与真实浏览器联调仍未交付；本文件继续作为该接口面的登记与勘测记录。
 
 ## 1. 为什么缺它
 
@@ -48,6 +48,9 @@ Portal 表单只做渲染与提交，草稿投影由运维/联调人员用 Billi
 ## 7. 记录
 
 - 2026-09-20 代理：登记本提案，等待范围决策；未实现、未新增权限、未新增路由。
+- 2026-09-20 方案 A2 落地（Billing 侧）：`POST /internal/v1/approval-command-prechecks` 交付，Account 服务身份专属，复用 `internal.billing.approval-proof.read`，2 秒绝对期限与 64 KiB 文档上限，未知字段/未知命令/缺证据一律失败关闭且零写入、零 claim。
+- 2026-09-20 用量结算预检修复：原实现的预检请求把 `loss_review_id` 同时当作 hold 与 loss review，而真实计划要求 `usage_loss_reviews.hold_id == plan.HoldID`，因此该分支对任何真实目标都只会返回不可用（只有 stub 单测覆盖到）。修复后 `target_resource_id` 就是 hold（与其余六命令一致，也与 Portal 描述符的 `targetKey: hold_id` 一致），并新增独立 `usage_request_id` 与 `loss_review_id` 证据引用；负例覆盖缺 `usage_request_id`、缺 `loss_review_id`。
+- 2026-09-20 方案 A2 落地（Account 侧）：`POST /admin/v2/approval-command-prechecks` 代理端点交付，复用 `platform.billing.repairs.request`，只转发闭合输入并重新校验 owner 应答的命令/目标绑定、策略版本与三段闭合文档，不缓存、不落库、不跟随重定向。
 
 ## 8. 方案 A 的落地勘测（2026-09-20 补充，已核实路径）
 
@@ -61,11 +64,13 @@ Portal 表单只做渲染与提交，草稿投影由运维/联调人员用 Billi
   "path": "/approval-command-prechecks", "scope": "platform", "strategy": "domain.approval-policy-v1" }
 ```
 
-要点：`source` 必须是路由实际注册所在的 Go 文件；`receiver` 为 `admin`（管理端 group）；`path` 只写 group
-之后的相对路径；`scope: platform` 时覆盖门禁要求 `permissions` 中每个权限以 `platform.` 开头（本命令复用
-`platform.billing.repairs.request`）；`strategy` 必须匹配 `^(protocol|authenticated|domain|workload)\.[a-z0-9][a-z0-9.-]*$`。
-新增该条目后，`node scripts/check-account-platform-authorization-coverage.mjs` 的 HTTP 路由数从 **375 增至 376**，
-`test/contract/authorization-coverage-release-gate.test.mjs` 里的精确断言必须同步为 376，否则合同必红。
+**修正（落地时实测）**：`lookup` 门禁只在路由**没有**内联人类权限时才要求 `http_policies` 条目。本代理端点用
+`s.requirePermission(PermissionPlatformBillingRepairsRequest)`（`internal/account/authorization.go` 新增常量
+`platform.billing.repairs.request`）直接做真实鉴权，因此它被分类为 inline、既不需要也不允许再登记 `http_policies`
+条目（登记会被判为 `stale_http_policy`）。要点仍是：`source` 必须指向路由实际注册的 Go 文件、`path` 为 group
+之后的相对路径、`strategy` 必须匹配 `^(protocol|authenticated|domain|workload)\.[a-z0-9][a-z0-9.-]*$`。
+新增该路由后，`node scripts/check-account-platform-authorization-coverage.mjs` 的 HTTP 路由数从 **375 增至 376**，
+`test/contract/authorization-coverage-release-gate.test.mjs` 里的精确断言已同步为 376。
 
 - **可复用的装配入口已就绪**：七个命令的 proof 输入方法签名都很窄且无需新参数，
   `LedgerRepairProofInput(target, reasonCode)`、`ReceivableWriteOffProofInput(target)`、

@@ -83,6 +83,45 @@ func TestUsageSettlementRepairCrossDomainActivationPostgresIntegration(t *testin
 	if frozen.TargetResourceType != "USAGE_HOLD" || frozen.TargetResourceID != loss.HoldID.String() {
 		t.Fatalf("usage settlement repair frozen target=%s/%s", frozen.TargetResourceType, frozen.TargetResourceID)
 	}
+	// The business page reaches owner facts only through the Account precheck
+	// proxy. The closed projection it receives must equal the proof input the
+	// approval later freezes, an unprovable target must be a definite refusal,
+	// and the precheck itself must write no fact and issue no claim.
+	precheckSource, err := NewHTTPApprovalPrecheckSource(billingServer.URL, proofToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	precheck, err := precheckSource.Precheck(ctx, ApprovalPrecheckRequest{
+		CommandType: policy.CommandType, TargetResourceID: loss.HoldID.String(),
+		UsageRequestID: loss.UsageRequestID.String(), LossReviewID: loss.LossReviewID.String(),
+	})
+	if err != nil {
+		t.Fatalf("usage settlement repair precheck: %v", err)
+	}
+	if precheck.CommandType != frozen.CommandType || precheck.PolicyVersion != frozen.PolicyVersion ||
+		precheck.SnapshotSchemaVersion != frozen.SnapshotSchemaVersion ||
+		precheck.TargetResourceType != frozen.TargetResourceType || precheck.TargetResourceID != frozen.TargetResourceID ||
+		string(precheck.NormalizedCommand) != string(frozen.NormalizedCommand) ||
+		string(precheck.CriticalResourceVersions) != string(frozen.CriticalResourceVersions) ||
+		string(precheck.FinancialSnapshot) != string(frozen.FinancialSnapshot) {
+		t.Fatalf("precheck projection differs from the proof input: %#v vs %#v", precheck, frozen)
+	}
+	if _, err := precheckSource.Precheck(ctx, ApprovalPrecheckRequest{
+		CommandType: policy.CommandType, TargetResourceID: loss.HoldID.String(),
+		UsageRequestID: loss.UsageRequestID.String(), LossReviewID: uuid.NewString(),
+	}); !errors.Is(err, ErrApprovalPrecheckRejected) {
+		t.Fatalf("unprovable usage target must be refused, got %v", err)
+	}
+	var proofClaims, repairCases int64
+	if err := billingPool.QueryRow(ctx, `SELECT count(*) FROM billing_approval_proof_claims`).Scan(&proofClaims); err != nil {
+		t.Fatal(err)
+	}
+	if err := billingPool.QueryRow(ctx, `SELECT count(*) FROM usage_settlement_repair_cases`).Scan(&repairCases); err != nil {
+		t.Fatal(err)
+	}
+	if proofClaims != 0 || repairCases != 0 {
+		t.Fatalf("precheck wrote facts: claims=%d cases=%d", proofClaims, repairCases)
+	}
 	artifacts, err := approvalencoding.ConvertLegacyProofInput(frozen)
 	if err != nil {
 		t.Fatal(err)

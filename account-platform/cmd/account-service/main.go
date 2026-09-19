@@ -112,6 +112,10 @@ func main() {
 	if err != nil {
 		log.Fatal("Approval recovery result reader configuration is invalid: ", err)
 	}
+	approvalPrechecks, err := account.NewHTTPApprovalPrecheckSource(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal("Approval precheck reader configuration is invalid: ", err)
+	}
 	wallets, err := account.NewHTTPWalletProvisioner(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
@@ -139,6 +143,7 @@ func main() {
 	service := account.NewService(repository, wallets).
 		WithServiceToken(serviceCredential).
 		WithApprovalRecoveryResults(recoveryResults).
+		WithApprovalPrecheckSource(approvalPrechecks).
 		WithClientCompatibility(valueOrDefault("ACCOUNT_SERVICE_VERSION", "development"), valueOrDefault("ACCOUNT_CLIENT_CONTRACT_VERSION", "account-client-v1")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
