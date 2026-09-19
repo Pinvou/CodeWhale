@@ -76,6 +76,62 @@ use workspace_grants::{
 // remote-test 端点。用户保存的自定义 Relay 设置仍具有最高优先级。
 const DEFAULT_PUBLIC_BASE_URL: &str = "https://pinvou.com/pinvou3/remote";
 const DEFAULT_RELAY_WS_URL: &str = "wss://pinvou.com/pinvou3/remote/ws";
+
+/// 内置服务端点 profile：正式安装包与开发启动都不再要求用户配置环境变量。
+///
+/// 每个 profile 同时内置「公网地址 + Relay WebSocket 地址 + 信任根(key id/公钥)」。
+/// 信任根是公开信息（Ed25519 公钥），可以随包分发；私钥永远只存在于 Relay 部署环境。
+/// 选择顺序：环境变量 `PINVOU_REMOTE_ENDPOINT_PROFILE` > `~/.pinvou3/web-relay.json`
+/// 的 `profile` 字段 > 默认 `production`。
+pub(crate) struct RelayEndpointProfile {
+    pub(crate) id: &'static str,
+    pub(crate) public_base_url: &'static str,
+    pub(crate) relay_ws_url: &'static str,
+    pub(crate) signing_key_id: &'static str,
+    pub(crate) signing_public_key_b64: &'static str,
+}
+
+pub(crate) const PRODUCTION_PROFILE: RelayEndpointProfile = RelayEndpointProfile {
+    id: "production",
+    public_base_url: DEFAULT_PUBLIC_BASE_URL,
+    relay_ws_url: DEFAULT_RELAY_WS_URL,
+    // 生产签名公钥由部署侧提供后填入（留空表示"尚未随包内置"，此时仅能靠环境变量配置）。
+    signing_key_id: "",
+    signing_public_key_b64: "",
+};
+
+pub(crate) const TEST_PROFILE: RelayEndpointProfile = RelayEndpointProfile {
+    id: "test",
+    public_base_url: "https://pinvou.com/pinvou3/remote-test",
+    relay_ws_url: "wss://pinvou.com/pinvou3/remote-test/ws",
+    signing_key_id: "relay-test-key-1",
+    signing_public_key_b64: "otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=",
+};
+
+pub(crate) const ENDPOINT_PROFILES: [&RelayEndpointProfile; 2] =
+    [&PRODUCTION_PROFILE, &TEST_PROFILE];
+
+pub(crate) fn endpoint_profile_by_id(id: &str) -> Option<&'static RelayEndpointProfile> {
+    ENDPOINT_PROFILES
+        .iter()
+        .copied()
+        .find(|profile| profile.id == id)
+}
+
+/// 当前生效的内置 profile（环境变量 > 持久设置 > production）。
+pub(crate) fn active_endpoint_profile() -> &'static RelayEndpointProfile {
+    if let Ok(requested) = std::env::var("PINVOU_REMOTE_ENDPOINT_PROFILE") {
+        if let Some(profile) = endpoint_profile_by_id(requested.trim()) {
+            return profile;
+        }
+    }
+    if let Some(selected) = persistence::selected_endpoint_profile() {
+        if let Some(profile) = endpoint_profile_by_id(selected.as_str()) {
+            return profile;
+        }
+    }
+    &PRODUCTION_PROFILE
+}
 const MAX_WEB_ACCESS_CONFIG_BYTES: usize = 16 * 1024;
 const JOURNAL_CAPACITY: usize = 1_024;
 const JOURNAL_BYTES_CAPACITY: usize = 16 * 1024 * 1024;
@@ -1085,12 +1141,14 @@ impl RemoteControlManager {
     }
 
     pub fn relay_settings(&self) -> RelaySettingsInfo {
+        let profile = active_endpoint_profile();
         RelaySettingsInfo {
             relay_url: remote_relay_ws_url(),
             public_base_url: remote_public_base_url(),
             custom: load_relay_settings().is_some(),
-            default_relay_url: DEFAULT_RELAY_WS_URL.to_string(),
-            default_public_base_url: DEFAULT_PUBLIC_BASE_URL.to_string(),
+            default_relay_url: profile.relay_ws_url.to_string(),
+            default_public_base_url: profile.public_base_url.to_string(),
+            profile: profile.id.to_string(),
         }
     }
 
@@ -3214,6 +3272,42 @@ mod tests {
     fn packaged_defaults_target_the_production_remote_endpoint() {
         assert_eq!(DEFAULT_PUBLIC_BASE_URL, "https://pinvou.com/pinvou3/remote");
         assert_eq!(DEFAULT_RELAY_WS_URL, "wss://pinvou.com/pinvou3/remote/ws");
+    }
+
+    /// 内置端点 profile：地址与信任根随包分发，用户不需要再配置环境变量。
+    #[test]
+    fn builtin_endpoint_profiles_ship_urls_and_trust_root() {
+        use base64::Engine as _;
+
+        assert_eq!(active_endpoint_profile().id, "production");
+        assert_eq!(PRODUCTION_PROFILE.public_base_url, DEFAULT_PUBLIC_BASE_URL);
+        assert_eq!(PRODUCTION_PROFILE.relay_ws_url, DEFAULT_RELAY_WS_URL);
+
+        let test_profile = endpoint_profile_by_id("test").expect("test profile must exist");
+        assert_eq!(
+            test_profile.public_base_url,
+            "https://pinvou.com/pinvou3/remote-test"
+        );
+        assert_eq!(
+            test_profile.relay_ws_url,
+            "wss://pinvou.com/pinvou3/remote-test/ws"
+        );
+        assert_eq!(test_profile.signing_key_id, "relay-test-key-1");
+        // 内置公钥必须是合法的 32 字节 ed25519 公钥，否则配对会以
+        // relay_trust_unconfigured 失败关闭。
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(test_profile.signing_public_key_b64)
+            .expect("built-in public key must be base64");
+        assert_eq!(decoded.len(), 32);
+        crate::features::remote_control::controller::crypto::AuthenticatedRelayTrustConfig::from_pinned_keys(
+            [(
+                test_profile.signing_key_id.to_string(),
+                test_profile.signing_public_key_b64.to_string(),
+            )],
+        )
+        .expect("built-in trust root must be accepted by the pinning validator");
+
+        assert!(endpoint_profile_by_id("unknown").is_none());
     }
 
     #[test]
