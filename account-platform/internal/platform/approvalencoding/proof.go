@@ -153,6 +153,19 @@ var commandSpecs = map[string]commandSpec{
 		criticalInts:   []string{"policy_version"},
 		financialInts:  []string{"amount_fen"},
 	},
+	// USAGE_SETTLEMENT_REPAIR reuses the command's original v1 policy/schema. The
+	// target is the usage hold, and the expected/settled/overage split plus the
+	// allocation digest are recomputed by the owner proof.
+	"USAGE_SETTLEMENT_REPAIR": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "USAGE_HOLD", executor: "billing-command-executor",
+		normalizedKeys: []string{"usage_request_id", "hold_id", "evidence_kind", "loss_review_id", "reason_code"},
+		criticalKeys:   []string{"hold_updated_at", "loss_review_updated_at", "facts_digest", "policy_version"},
+		financialKeys: []string{"expected_microcredits", "settled_microcredits", "settlement_microcredits",
+			"overage_microcredits", "wallet_id", "wallet_version", "allocations_digest"},
+		criticalInts: []string{"policy_version"},
+		financialInts: []string{"expected_microcredits", "settled_microcredits", "settlement_microcredits",
+			"overage_microcredits", "wallet_version"},
+	},
 }
 
 func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
@@ -712,6 +725,26 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			ledgerErr != nil || ledgerEffect != "NONE" ||
 			businessErr != nil || dateErr != nil || businessDateValue.UTC().Format("2006-01-02") != businessDate ||
 			resolutionErr != nil || resolutionCode != "PROVIDER_REFUND_CONFIRMED" {
+			return ErrInvalidDocument
+		}
+	case "USAGE_SETTLEMENT_REPAIR":
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		evidenceKind, evidenceErr := stringValue(normalizedObject["evidence_kind"])
+		if !validUUID(targetID) || !equalString(normalizedObject["hold_id"], targetID) ||
+			!validUUIDField(normalizedObject["usage_request_id"]) ||
+			!validUUIDField(normalizedObject["loss_review_id"]) ||
+			!validUUIDField(financialObject["wallet_id"]) ||
+			integers["c.policy_version"] != spec.policyVersion || !hexField(criticalObject["facts_digest"]) ||
+			!hexField(financialObject["allocations_digest"]) ||
+			!canonicalTimeField(criticalObject["hold_updated_at"]) ||
+			!canonicalTimeField(criticalObject["loss_review_updated_at"]) ||
+			integers["f.expected_microcredits"] < 1 || integers["f.settled_microcredits"] < 0 ||
+			integers["f.overage_microcredits"] < 0 ||
+			integers["f.settled_microcredits"]+integers["f.overage_microcredits"] != integers["f.expected_microcredits"] ||
+			integers["f.settlement_microcredits"] != integers["f.settled_microcredits"] ||
+			integers["f.wallet_version"] < 1 ||
+			evidenceErr != nil || evidenceKind != "LOSS_REVIEW" ||
+			reasonErr != nil || reasonCode != "MISSING_USAGE_SETTLEMENT" {
 			return ErrInvalidDocument
 		}
 	}

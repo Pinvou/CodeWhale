@@ -48,8 +48,12 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if !Executable("RECONCILIATION_FINANCIAL_REPAIR") {
 		t.Fatal("reconciliation financial repair must consult its live Billing activation")
 	}
-	if Executable("USAGE_SETTLEMENT_REPAIR") {
-		t.Fatal("unimplemented domain repair must remain non-executable")
+	if !Executable("USAGE_SETTLEMENT_REPAIR") {
+		t.Fatal("usage settlement repair must consult its live Billing activation")
+	}
+	// The remaining unimplemented command keeps failing closed.
+	if Executable("FUTURE_FINANCIAL_REPAIR") {
+		t.Fatal("unknown command must remain non-executable")
 	}
 	if !Executable("PAYMENT_PROVIDER_RESUME") {
 		t.Fatal("payment provider resume executor must be available")

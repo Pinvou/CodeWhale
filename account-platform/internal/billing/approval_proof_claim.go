@@ -130,6 +130,19 @@ func (f billingTxProofFacts) reconciliationFinancialRepairPlan(ctx context.Conte
 	return reconciliationFinancialRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
 }
 
+// The usage settlement repair follows the same proof-era rule: the owner
+// recomputes the closed projection inside the claim transaction, so no external
+// call and no activation drift is possible between proof and claim.
+func (f billingTxProofFacts) usageSettlementRepairPlan(ctx context.Context, input UsageSettlementRepairCommandInput) (UsageSettlementRepairPlan, error) {
+	var policyVersion, schemaVersion, version int64
+	var state string
+	if err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, usageSettlementRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version); err != nil || state != "ACTIVE" || version < 1 {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return usageSettlementRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
+}
+
 // ClaimBillingApprovalProof is the last zero-effect authorization boundary.
 // Once committed, a crash or provider failure is an unknown outcome, never
 // permission to run a second probe under a newly issued proof.

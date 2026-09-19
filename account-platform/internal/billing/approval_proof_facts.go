@@ -27,6 +27,34 @@ type billingProofFacts interface {
 	refundExceptionRepairPlan(context.Context, RefundExceptionRepairCommandInput) (RefundExceptionRepairPlan, error)
 	chargebackFinancialRepairPlan(context.Context, ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error)
 	reconciliationFinancialRepairPlan(context.Context, ReconciliationFinancialRepairCommandInput) (ReconciliationFinancialRepairPlan, error)
+	usageSettlementRepairPlan(context.Context, UsageSettlementRepairCommandInput) (UsageSettlementRepairPlan, error)
+}
+
+// usageSettlementRepairPlan re-reads the owner activation row and recomputes the
+// closed settlement repair projection. The activation row must be ACTIVE with
+// the current version, and neither this path nor execution calls any provider.
+func (r *PostgresRepository) usageSettlementRepairPlan(ctx context.Context, input UsageSettlementRepairCommandInput) (UsageSettlementRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, usageSettlementRepairCommand, r.now())
+	if err != nil {
+		return UsageSettlementRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := usageSettlementRepairPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return UsageSettlementRepairPlan{}, err
+	}
+	return plan, nil
 }
 
 // reconciliationFinancialRepairPlan re-reads the owner activation row and
@@ -475,6 +503,35 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
 		if plan.CaseID != command.ReconciliationCaseID || plan.PaymentEvidenceID != command.PaymentEvidenceID ||
 			plan.BusinessDate != strings.TrimSpace(command.BusinessDate) {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case usageSettlementRepairCommand:
+		var command struct {
+			UsageRequestID uuid.UUID `json:"usage_request_id"`
+			HoldID         uuid.UUID `json:"hold_id"`
+			EvidenceKind   string    `json:"evidence_kind"`
+			LossReviewID   uuid.UUID `json:"loss_review_id"`
+			ReasonCode     string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.UsageRequestID == uuid.Nil ||
+			command.HoldID == uuid.Nil || strings.TrimSpace(command.EvidenceKind) != usageSettlementRepairEvidenceKind ||
+			command.LossReviewID == uuid.Nil || strings.TrimSpace(command.ReasonCode) != usageSettlementRepairReason {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		plan, err := repository.usageSettlementRepairPlan(ctx, UsageSettlementRepairCommandInput{
+			UsageRequestID: command.UsageRequestID, HoldID: command.HoldID,
+			EvidenceKind: command.EvidenceKind, LossReviewID: command.LossReviewID,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.UsageRequestID.String()
+		critical, financial := usageSettlementRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.UsageRequestID != command.UsageRequestID || plan.HoldID != command.HoldID {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:

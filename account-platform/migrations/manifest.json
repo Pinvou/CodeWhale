@@ -762,6 +762,16 @@
         "file": "000076_reconciliation_financial_repair_consumer_route.up.sql",
         "version": 76,
         "sha256": "d916cf34c616ba8ee3ebfd8bf9b6ecdfc9b176081751e737788046bbf43119d1"
+      },
+      {
+        "file": "000077_usage_settlement_repair_consumer_route.down.sql",
+        "version": 77,
+        "sha256": "83d36397a742c68e124880f59563de2c1af80d759acd564d73ab96281564f4a8"
+      },
+      {
+        "file": "000077_usage_settlement_repair_consumer_route.up.sql",
+        "version": 77,
+        "sha256": "04abf54982185b6189ca4994f26d2ace66871634d8533f7a4ffbea0fd7b1fe00"
       }
     ],
     "billing": [
@@ -1484,6 +1494,36 @@
         "file": "000073_reconciliation_financial_repair_proof_claim_allowlist.up.sql",
         "version": 73,
         "sha256": "a5bc933477582174241d29e5ab90cc2ab553bba68050107f13a39bc027e64102"
+      },
+      {
+        "file": "000074_usage_settlement_repair_cases.down.sql",
+        "version": 74,
+        "sha256": "1e3d8cac81316f8d54ff332e1c9d2ead5334cd94059663b134e7778f7597bbab"
+      },
+      {
+        "file": "000074_usage_settlement_repair_cases.up.sql",
+        "version": 74,
+        "sha256": "0621fe5d4cf2a945c02c6c4cbbe678202aa79885d434853b97ac7567769d27e0"
+      },
+      {
+        "file": "000075_usage_loss_review_settled_state.down.sql",
+        "version": 75,
+        "sha256": "5a4618033d6c7228cf3042559fc19f854dd5108b574216201af8414e84ec8743"
+      },
+      {
+        "file": "000075_usage_loss_review_settled_state.up.sql",
+        "version": 75,
+        "sha256": "da7cfa80b32f33a3b5226ab660b6c25869f8fa1a8164893fa7f8b599c07bb09b"
+      },
+      {
+        "file": "000076_usage_settlement_repair_proof_claim_allowlist.down.sql",
+        "version": 76,
+        "sha256": "106857ba1cf79e3d98ea2cb9166edc8538345bb3179c5b3cecfac0e78ad94e32"
+      },
+      {
+        "file": "000076_usage_settlement_repair_proof_claim_allowlist.up.sql",
+        "version": 76,
+        "sha256": "b97d517e6f19597f642b7eaaeef02bbe51eec978b3932f3677d15aa10d02e008"
       }
     ],
     "payment-simulator": [

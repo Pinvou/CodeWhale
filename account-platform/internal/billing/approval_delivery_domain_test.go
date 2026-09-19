@@ -186,6 +186,10 @@ type authorizationExecutionRepositoryStub struct {
 	reconciliationRepairErr         error
 	reconciliationRunErr            error
 	reconciliationInput             ReconciliationFinancialRepairExecutionInput
+	usageRepair                     UsageSettlementRepairResult
+	usageRepairErr                  error
+	usageRunErr                     error
+	usageInput                      UsageSettlementRepairExecutionInput
 	activations                     ApprovalCommandActivationSnapshot
 	activationsErr                  error
 	adjustmentRuns                  int
@@ -196,6 +200,7 @@ type authorizationExecutionRepositoryStub struct {
 	refundRuns                      int
 	chargebackRuns                  int
 	reconciliationRuns              int
+	usageRuns                       int
 }
 
 func (s *authorizationExecutionRepositoryStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
@@ -308,6 +313,19 @@ func (s *authorizationExecutionRepositoryStub) ApplyReconciliationFinancialRepai
 		return ReconciliationFinancialRepairResult{}, s.reconciliationRunErr
 	}
 	return s.reconciliationRepair, nil
+}
+
+func (s *authorizationExecutionRepositoryStub) UsageSettlementRepairForRequest(context.Context, uuid.UUID) (UsageSettlementRepairResult, error) {
+	return s.usageRepair, s.usageRepairErr
+}
+
+func (s *authorizationExecutionRepositoryStub) ApplyUsageSettlementRepair(_ context.Context, input UsageSettlementRepairExecutionInput) (UsageSettlementRepairResult, error) {
+	s.usageRuns++
+	s.usageInput = input
+	if s.usageRunErr != nil {
+		return UsageSettlementRepairResult{}, s.usageRunErr
+	}
+	return s.usageRepair, nil
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {

@@ -186,6 +186,23 @@ type approvalReconciliationFinancialRepairSummary struct {
 	ResolutionCode       string    `json:"resolution_code"`
 }
 
+// approvalUsageSettlementRepairSummary is the closed read-only projection of the
+// usage settlement repair: the target hold, the owner-derived expected/settled/
+// overage split and both owner digests. Raw request bodies, prompts, provider
+// texts and personal data are never presented.
+type approvalUsageSettlementRepairSummary struct {
+	HoldID               uuid.UUID `json:"hold_id"`
+	UsageRequestID       uuid.UUID `json:"usage_request_id"`
+	WalletID             uuid.UUID `json:"wallet_id"`
+	EvidenceKind         string    `json:"evidence_kind"`
+	ExpectedMicrocredits string    `json:"expected_microcredits"`
+	SettledMicrocredits  string    `json:"settled_microcredits"`
+	OverageMicrocredits  string    `json:"overage_microcredits"`
+	AllocationsDigest    string    `json:"allocations_digest"`
+	FactsDigest          string    `json:"facts_digest"`
+	ReasonCode           string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -205,6 +222,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	case "CHARGEBACK_FINANCIAL_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "RECONCILIATION_FINANCIAL_REPAIR":
+		return policyVersion == 1 && snapshotVersion == 1
+	case "USAGE_SETTLEMENT_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
@@ -342,6 +361,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalReconciliationFinancialRepairSummary{ReconciliationCaseID: id}
+	case "USAGE_SETTLEMENT_REPAIR":
+		if item.TargetResourceType != "USAGE_HOLD" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalUsageSettlementRepairSummary{HoldID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -407,6 +435,8 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			RefundID               uuid.UUID `json:"refund_id"`
 			ChargebackCaseID       uuid.UUID `json:"chargeback_case_id"`
 			ReconciliationCaseID   uuid.UUID `json:"reconciliation_case_id"`
+			UsageRequestID         uuid.UUID `json:"usage_request_id"`
+			EvidenceKind           string    `json:"evidence_kind"`
 			BusinessDate           string    `json:"business_date"`
 			ResolutionCode         string    `json:"resolution_code"`
 			ReasonCode             string    `json:"reason_code"`
@@ -419,6 +449,8 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			RunID                  string `json:"run_id"`
 			CaseID                 string `json:"case_id"`
 			ProviderSnapshotDigest string `json:"provider_snapshot_digest"`
+			HoldUpdatedAt          string `json:"hold_updated_at"`
+			LossReviewUpdatedAt    string `json:"loss_review_updated_at"`
 		} `json:"critical_resource_versions"`
 		Financial struct {
 			SourceType                   string `json:"source_type"`
@@ -440,6 +472,10 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			ComponentDigest              string `json:"component_digest"`
 			LedgerEffect                 string `json:"ledger_effect"`
 			Currency                     string `json:"currency"`
+			ExpectedMicrocredits         string `json:"expected_microcredits"`
+			SettlementMicrocredits       string `json:"settlement_microcredits"`
+			OverageMicrocredits          string `json:"overage_microcredits"`
+			AllocationsDigest            string `json:"allocations_digest"`
 		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -562,6 +598,28 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.LedgerEffect = proof.Financial.LedgerEffect
 		target.FactsDigest = proof.Critical.FactsDigest
 		target.ResolutionCode = proof.Normalized.ResolutionCode
+		command = target
+	case approvalUsageSettlementRepairSummary:
+		if proof.Normalized.UsageRequestID == uuid.Nil || proof.Normalized.EvidenceKind != "LOSS_REVIEW" ||
+			!approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			!approvalPaginationHexDigest(proof.Financial.AllocationsDigest) ||
+			proof.Critical.HoldUpdatedAt == "" || proof.Critical.LossReviewUpdatedAt == "" ||
+			proof.Normalized.ReasonCode != "MISSING_USAGE_SETTLEMENT" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		walletID, walletErr := uuid.Parse(strings.TrimSpace(proof.Financial.WalletID))
+		if walletErr != nil || walletID == uuid.Nil {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.UsageRequestID = proof.Normalized.UsageRequestID
+		target.WalletID = walletID
+		target.EvidenceKind = proof.Normalized.EvidenceKind
+		target.ExpectedMicrocredits = proof.Financial.ExpectedMicrocredits
+		target.SettledMicrocredits = proof.Financial.SettledMicrocredits
+		target.OverageMicrocredits = proof.Financial.OverageMicrocredits
+		target.AllocationsDigest = proof.Financial.AllocationsDigest
+		target.FactsDigest = proof.Critical.FactsDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target
 	default:
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable

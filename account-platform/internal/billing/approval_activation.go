@@ -97,6 +97,9 @@ func validActivationItem(item ApprovalCommandActivation, commandType string, spe
 	if commandType == reconciliationFinancialRepairCommand && item.PolicyVersion == 1 && item.SnapshotSchemaVersion == 1 {
 		return true
 	}
+	if commandType == usageSettlementRepairCommand && item.PolicyVersion == 1 && item.SnapshotSchemaVersion == 1 {
+		return true
+	}
 	if !spec.mayBeActive && item.State != "INACTIVE" {
 		return false
 	}

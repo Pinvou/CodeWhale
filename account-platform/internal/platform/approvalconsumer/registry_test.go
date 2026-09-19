@@ -4,7 +4,7 @@ import "testing"
 
 func TestApprovalConsumerRegistryContract(t *testing.T) {
 	all := All()
-	if len(all) != 13 || len(BillingCommands()) != 10 || len(TokenCommands()) != 3 {
+	if len(all) != 14 || len(BillingCommands()) != 11 || len(TokenCommands()) != 3 {
 		t.Fatalf("unexpected registry sizes: all=%d billing=%d token=%d", len(all), len(BillingCommands()), len(TokenCommands()))
 	}
 	seenCommands, seenDurables := map[string]bool{}, map[string]bool{}

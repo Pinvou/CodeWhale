@@ -141,11 +141,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	usageSettlementRepairConsumerEnabled, err := optionalBooleanEnvironment("BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_ENABLED", false)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var approvalConsumerResources *events.ApprovalConsumerResourceBinding
 	// One verified receipt set covers every dedicated Billing durable, so the
 	// enabled switches only select which startup contract names a missing or
 	// untrusted binding. The entitlement code keeps precedence when both are on.
-	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled || receivableWriteOffConsumerEnabled || paymentFinancialRepairConsumerEnabled || refundExceptionRepairConsumerEnabled || chargebackFinancialRepairConsumerEnabled || reconciliationRepairConsumerEnabled {
+	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled || receivableWriteOffConsumerEnabled || paymentFinancialRepairConsumerEnabled || refundExceptionRepairConsumerEnabled || chargebackFinancialRepairConsumerEnabled || reconciliationRepairConsumerEnabled || usageSettlementRepairConsumerEnabled {
 		approvalConsumerResources, err = billingApprovalConsumerResources(time.Now().UTC())
 		if err != nil && entitlementConsumerEnabled {
 			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
@@ -165,8 +169,11 @@ func main() {
 		if err != nil && chargebackFinancialRepairConsumerEnabled {
 			log.Fatal("BILLING_CHARGEBACK_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
-		if err != nil {
+		if err != nil && reconciliationRepairConsumerEnabled {
 			log.Fatal("BILLING_RECONCILIATION_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		if err != nil {
+			log.Fatal("BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 	}
 	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor", events.NATSConfig{Environment: cfg.Environment, CAFile: os.Getenv("NATS_CA_FILE"), ApprovalConsumerResources: approvalConsumerResources})
@@ -259,6 +266,17 @@ func main() {
 			log.Fatal("BILLING_RECONCILIATION_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 		defer stopReconciliationRepairConsumer()
+	}
+	if usageSettlementRepairConsumerEnabled {
+		usageSettlementRepairConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-usage-settlement-repair-executor-p1-v1")
+		if err != nil {
+			log.Fatal(err)
+		}
+		stopUsageSettlementRepairConsumer, err := broker.ConsumeAuthorization(workerContext, "billing-usage-settlement-repair-executor-p1-v1", usageSettlementRepairConsumer.Handle)
+		if err != nil {
+			log.Fatal("BILLING_USAGE_SETTLEMENT_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		defer stopUsageSettlementRepairConsumer()
 	}
 	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
 		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)

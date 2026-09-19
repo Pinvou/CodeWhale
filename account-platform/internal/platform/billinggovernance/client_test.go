@@ -92,12 +92,13 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 		{"fractional version", strings.Replace(valid, `"version":1`, `"version":1.5`, 1), "no-store", 200, false},
 		{"string version", strings.Replace(valid, `"version":1`, `"version":"1"`, 1), "no-store", 200, false},
 		{"unknown state", strings.Replace(valid, `"state":"INACTIVE"`, `"state":"FUTURE"`, 1), "no-store", 200, false},
-		// USAGE_SETTLEMENT_REPAIR still owns only an INACTIVE v1/s1 projection, so
-		// an authority that reports it ACTIVE must stay rejected.
-		{"active policy-only", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
+		// USAGE_SETTLEMENT_REPAIR is activatable only at v1/s1, so a future version
+		// reported ACTIVE must stay rejected.
+		{"future version active", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
 			for index := range value.Activations {
 				if value.Activations[index].CommandType == "USAGE_SETTLEMENT_REPAIR" {
 					value.Activations[index].State = "ACTIVE"
+					value.Activations[index].PolicyVersion, value.Activations[index].SnapshotSchemaVersion = 2, 2
 				}
 			}
 		})), "no-store", 200, false},

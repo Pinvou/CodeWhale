@@ -428,14 +428,14 @@ func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	repository, connection, _, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
-	if latest := loaded[len(loaded)-1]; latest.Version != 76 {
-		t.Fatalf("latest account migration=%d, want 76", latest.Version)
+	if latest := loaded[len(loaded)-1]; latest.Version != 77 {
+		t.Fatalf("latest account migration=%d, want 77", latest.Version)
 	}
 	var sessionUser, currentUser string
 	var latestVersion int64
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT max(version) FROM schema_migrations)`).
 		Scan(&sessionUser, &currentUser, &latestVersion); err != nil || sessionUser != "account_migrator" ||
-		currentUser != "account_service" || latestVersion != 76 {
+		currentUser != "account_service" || latestVersion != 77 {
 		t.Fatalf("migration identity session=%q current=%q version=%d err=%v", sessionUser, currentUser, latestVersion, err)
 	}
 	var policyVersion int64
@@ -553,6 +553,22 @@ account_approval_authorization.authorization_consumer_mapping_allows('billing-re
 		Scan(&reconciliationRepairDurable, &reconciliationRepairProofWire, &reconciliationRepairLegacyWire); err != nil ||
 		reconciliationRepairDurable != "billing-reconciliation-financial-repair-executor-p1-v1" || !reconciliationRepairProofWire || reconciliationRepairLegacyWire {
 		t.Fatalf("reconciliation financial repair consumer route durable=%q proof=%v legacy=%v err=%v", reconciliationRepairDurable, reconciliationRepairProofWire, reconciliationRepairLegacyWire, err)
+	}
+	// USAGE_SETTLEMENT_REPAIR joins the dedicated routing under the same
+	// proof-era-only wire rule.
+	var usageRepairLegacy *string
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('USAGE_SETTLEMENT_REPAIR',1,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&usageRepairLegacy); err != nil || usageRepairLegacy != nil {
+		t.Fatalf("legacy usage settlement repair route=%v err=%v", usageRepairLegacy, err)
+	}
+	var usageRepairDurable string
+	var usageRepairProofWire, usageRepairLegacyWire bool
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('USAGE_SETTLEMENT_REPAIR',1,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-usage-settlement-repair-executor-p1-v1','billing-command-executor','USAGE_SETTLEMENT_REPAIR',1,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-usage-settlement-repair-executor-p1-v1','billing-command-executor','USAGE_SETTLEMENT_REPAIR',1,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&usageRepairDurable, &usageRepairProofWire, &usageRepairLegacyWire); err != nil ||
+		usageRepairDurable != "billing-usage-settlement-repair-executor-p1-v1" || !usageRepairProofWire || usageRepairLegacyWire {
+		t.Fatalf("usage settlement repair consumer route durable=%q proof=%v legacy=%v err=%v", usageRepairDurable, usageRepairProofWire, usageRepairLegacyWire, err)
 	}
 	if _, err := connection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
 		t.Fatal(err)
