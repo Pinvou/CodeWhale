@@ -18,6 +18,7 @@
 
 - 正常预留在 `ACTIVE` 时由既有 `Commit` 结算；本命令只处理 `Commit` 已无法覆盖的两类**既有事实**：①hold 已 `RELEASED`（`ENTITLEMENT_EXPIRED_UNCERTAIN`）但存在已发生用量 → `usage_loss_reviews` `REVIEW_REQUIRED`（未结算）；②hold 已 `COMMITTED` 但存在冻结的修正用量证据表明少结算。
 - **绝不重发模型请求**：不调用任何 Provider/adapter、不重放推理请求、不新增 usage request；只读既有持久用量与定价事实。
+- **相邻既有路径不改道**：管理端 `BILLING_USAGE_HOLD_SAFE_RELEASE`（`AUDIT_ONLY`，`internal/billing/service.go`）保持既有“安全释放”语义，本命令不得借用它、不得把它升级为结算修复入口；组织生命周期所消费的 `usage_loss_reviews` 阻塞投影在本命令推进为 `RESOLVED_SETTLED` 后按既有读取规则自然解除，不改其读取合同。
 - 组成/归属错配属 GSA-21；支付、退款、拒付、应收核销分别属 GSA-27/29/31/25；本命令只处理消费侧结算差异。
 
 ## 4. 首版范围与精确允许/禁止的变化（冻结）
