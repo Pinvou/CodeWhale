@@ -1,6 +1,6 @@
 # 财务修复只读预检接口面提案（GSA-37 剩余工作的决策材料）
 
-状态：`IMPLEMENTED_AS_A2 / PORTAL_UI_PENDING / NOT_ACTIVATED / NOT_DEPLOYED`。§2 的接口面已按方案 A2 落地（Billing 只读预检端点 + Account 代理端点 + 两侧合同与门禁），Portal 表单/三语文案与真实浏览器联调仍未交付；本文件继续作为该接口面的登记与勘测记录。
+状态：`IMPLEMENTED_AS_A2 / PORTAL_ENTRY_READY / BROWSER_E2E_PENDING / NOT_ACTIVATED / NOT_DEPLOYED`。§2 的接口面已按方案 A2 落地（Billing 只读预检端点 + Account 代理端点 + Portal BFF 与业务页表单 + 两侧合同与门禁），仅真实浏览器联调仍待至少一个命令被激活；本文件继续作为该接口面的登记与勘测记录。
 
 ## 1. 为什么缺它
 
@@ -51,6 +51,7 @@ Portal 表单只做渲染与提交，草稿投影由运维/联调人员用 Billi
 - 2026-09-20 方案 A2 落地（Billing 侧）：`POST /internal/v1/approval-command-prechecks` 交付，Account 服务身份专属，复用 `internal.billing.approval-proof.read`，2 秒绝对期限与 64 KiB 文档上限，未知字段/未知命令/缺证据一律失败关闭且零写入、零 claim。
 - 2026-09-20 用量结算预检修复：原实现的预检请求把 `loss_review_id` 同时当作 hold 与 loss review，而真实计划要求 `usage_loss_reviews.hold_id == plan.HoldID`，因此该分支对任何真实目标都只会返回不可用（只有 stub 单测覆盖到）。修复后 `target_resource_id` 就是 hold（与其余六命令一致，也与 Portal 描述符的 `targetKey: hold_id` 一致），并新增独立 `usage_request_id` 与 `loss_review_id` 证据引用；负例覆盖缺 `usage_request_id`、缺 `loss_review_id`。
 - 2026-09-20 方案 A2 落地（Account 侧）：`POST /admin/v2/approval-command-prechecks` 代理端点交付，复用 `platform.billing.repairs.request`，只转发闭合输入并重新校验 owner 应答的命令/目标绑定、策略版本与三段闭合文档，不缓存、不落库、不跟随重定向。
+- 2026-09-20 方案 A2 落地（Portal 侧）：BFF `POST /api/admin/approvals/prechecks`（会话 + CSRF + 用户 access token 转发）+ 审批中心的「发起财务修复」页签与闭合表单交付；页面只渲染服务端投影、只用运营人理由与请求键组装既有闭合草稿。授权覆盖门禁 HTTP 路由 376→377。同轮修复第二处同类缺陷：Portal 闭合草稿构造器原先只接受整数的字符串编码，而 owner 把 int64 编码为 JSON 数字，导致账本修复/应收核销/拒付修复的真实投影被判不可用；现同时接受正安全整数与正整数串，数字逐字复制不转换。
 
 ## 8. 方案 A 的落地勘测（2026-09-20 补充，已核实路径）
 

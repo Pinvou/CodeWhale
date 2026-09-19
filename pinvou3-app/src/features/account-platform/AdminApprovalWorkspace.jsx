@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { approvalActionsForDetail, approvalBusinessRoute, approvalDecisionForAction, approvalDetailForRoute } from './admin-approval-actions.js';
+import { AdminFinancialRepairDraftForm } from './AdminFinancialRepairDraftForm.jsx';
 import './admin-approval-workspace.css';
 
-const views = ['mine', 'pending', 'execution', 'directory'];
+const views = ['mine', 'pending', 'execution', 'directory', 'repair'];
 const executionStatuses = ['EXECUTION_FAILED', 'EXECUTING', 'APPROVED', 'EXECUTED'];
 
 function readRoute() {
@@ -88,6 +89,9 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     setLoading(true);
     const load = async () => {
       try {
+        // The repair page reads its own closed projection per target; it never
+        // loads the approval lists.
+        if (route.view === 'repair') return;
         if (route.view === 'directory') {
           const result = await client.governedApprovalDirectory(controller.signal);
           if (!controller.signal.aborted) setDirectory(result);
@@ -118,7 +122,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     const controller = new AbortController();
     setDetail(null);
     setDetailError(false);
-    if (route.view === 'directory' || !route.requestID) return () => controller.abort();
+    if (route.view === 'directory' || route.view === 'repair' || !route.requestID) return () => controller.abort();
     void client.governedApprovalRequest(route.requestID, controller.signal).then((result) => {
       if (!controller.signal.aborted) { setDetail(result); setOutcomeUnknown(false); }
     }).catch(() => { if (!controller.signal.aborted) setDetailError(true); });
@@ -175,6 +179,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
   const businessRoute = approvalBusinessRoute(currentDetail, { modelDetailsEnabled, tokenDetailsEnabled });
 
   const rows = (page?.items || []).filter((item) => route.view !== 'pending' || requesterOf(item) !== currentUserID);
+  const drafting = route.view === 'repair';
   const nextCursor = page?.next_cursor || '';
   const selectView = (view) => { setPrevious([]); changeRoute({ view, cursor: '', requestID: '', status: '' }); };
   const selectFilter = (patch) => { setPrevious([]); changeRoute({ ...patch, cursor: '', requestID: '' }); };
@@ -191,7 +196,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
         onClick={() => selectView(view)}>{c[view]}</button>)}
     </nav>
     <form className="adm-approval-toolbar" onSubmit={(event) => { event.preventDefault(); selectFilter({ commandType: commandInput.trim(), target: targetInput.trim() }); }}>
-      {route.view !== 'directory' && <>
+      {route.view !== 'directory' && !drafting && <>
         <label>{c.commandType}<input value={commandInput} onChange={(event) => setCommandInput(event.target.value)} /></label>
         <label>{c.target}<input value={targetInput} onChange={(event) => setTargetInput(event.target.value)} /></label>
         {(route.view === 'mine' || route.view === 'execution') && <label>{c.status}<select value={route.status || (route.view === 'execution' ? 'EXECUTION_FAILED' : '')}
@@ -201,22 +206,24 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
         </select></label>}
         <button type="submit">{copy.searchAction}</button>
       </>}
-      <button type="button" onClick={() => setRefresh((value) => value + 1)}>{c.refresh}</button>
+      {!drafting && <button type="button" onClick={() => setRefresh((value) => value + 1)}>{c.refresh}</button>}
     </form>
     {loading && <p role="status">{c.loading}</p>}
+    {drafting && <AdminFinancialRepairDraftForm client={client} copy={c.financialRepair}
+      onCreated={(id) => { setPrevious([]); changeRoute({ view: 'mine', requestID: id, cursor: '', status: '' }); }} />}
     {listError && <div role="alert"><p>{c.listUnavailable}</p>
       {route.cursor && <button type="button" onClick={() => { setPrevious([]); changeRoute({ cursor: '', requestID: '' }); }}>{c.firstPage}</button>}
     </div>}
     {route.view === 'directory' && directory && <div className="adm-approval-table"><table><thead><tr><th>{c.commandType}</th><th>{c.risk}</th><th>{c.requestable}</th></tr></thead><tbody>
       {directory.items.map((item) => <tr key={`${item.command_type}-${item.policy_version}`}><td>{item.command_type} · v{item.policy_version}</td><td>{item.risk_class}</td><td>{item.requestable ? c.yes : c.no}</td></tr>)}
     </tbody></table>{directory.items.length === 0 && <p>{c.empty}</p>}</div>}
-    {route.view !== 'directory' && page && <>
+    {route.view !== 'directory' && !drafting && page && <>
       <div className="adm-approval-table"><table><thead><tr><th>{c.commandType}</th><th>{c.status}</th><th>{c.target}</th><th>{c.requester}</th><th>{c.updated}</th><th>{c.detail}</th></tr></thead><tbody>
         {rows.map((item) => <tr key={item.approval_request_id}><td>{item.command_type}</td><td>{item.status}</td><td>{targetOf(item).resource_type} · {targetOf(item).resource_id}</td><td>{requesterOf(item)}</td><td>{date(item.updated_at, language)}</td><td><button type="button" onClick={() => changeRoute({ requestID: item.approval_request_id })}>{c.open}</button></td></tr>)}
       </tbody></table>{rows.length === 0 && <p>{c.empty}</p>}</div>
       <div className="adm-approval-pagination"><button type="button" disabled={!previous.length} onClick={previousPage}>{c.previous}</button><button type="button" disabled={!nextCursor} onClick={nextPage}>{c.next}</button></div>
     </>}
-    {route.requestID && route.view !== 'directory' && <aside className="adm-approval-detail" aria-label={c.detail}>
+    {route.requestID && route.view !== 'directory' && !drafting && <aside className="adm-approval-detail" aria-label={c.detail}>
       <div><h3>{c.detail}</h3><button type="button" onClick={() => changeRoute({ requestID: '' })}>{c.close}</button></div>
       {detailError && <p role="alert">{c.detailUnavailable}</p>}
       {!currentDetail && !detailError && <p role="status">{c.loading}</p>}

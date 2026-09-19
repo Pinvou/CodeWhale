@@ -594,6 +594,21 @@ export class AdminPlatformClient {
   governedApprovalRequest(requestID, signal) {
     return this.governedApprovalRead(`/${encodeURIComponent(requestID)}`, { detail: true, signal });
   }
+  // The business page reads the closed owner projection of one repair target
+  // through this single read-only endpoint; the browser never derives facts.
+  async approvalCommandPrecheck(payload, signal) {
+    const response = await fetch(`${this.baseURL}/api/admin/approvals/prechecks`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrfToken },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, body);
+    return body;
+  }
   async governedApprovalDirectory(signal) {
     const capability = await this.governedApprovalCapability(signal);
     const key = approvalControlKey(capability);

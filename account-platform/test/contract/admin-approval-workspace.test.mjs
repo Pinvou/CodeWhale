@@ -9,7 +9,7 @@ import { approvalDetailForRoute } from '../../../pinvou3-app/src/features/accoun
 const root = path.resolve(import.meta.dirname, '../..');
 const read = (relative) => readFileSync(path.join(root, relative), 'utf8');
 
-test('approval center mounts one governed four-view reader without the legacy direct-v1 script', () => {
+test('approval center mounts one governed reader without the legacy direct-v1 script', () => {
   const html = read('internal/portal/static/admin.html');
   const view = read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx');
   const workspace = read('../pinvou3-app/src/features/account-platform/AdminApprovalWorkspace.jsx');
@@ -20,7 +20,11 @@ test('approval center mounts one governed four-view reader without the legacy di
   assert.match(view, /approval_request_id: null/);
   assert.match(view, /approval_request_id: approval\?\.approval_request_id \|\| null/);
   assert.match(view, /approval_request_id: adjustmentApprovalByTarget\.get\(item\.adjustment_id\)\?\.approval_request_id \|\| item\.approval_request_id \|\| null/);
-  assert.match(workspace, /\['mine', 'pending', 'execution', 'directory'\]/);
+  // Four list/detail views plus the closed repair-draft entry: every view still
+  // goes through the same governed client, and the repair view reads facts only
+  // through the read-only precheck.
+  assert.match(workspace, /\['mine', 'pending', 'execution', 'directory', 'repair'\]/);
+  assert.match(workspace, /<AdminFinancialRepairDraftForm client=\{client\} copy=\{c\.financialRepair\}/);
   assert.match(workspace, /client\.governedApprovalDirectory/);
   assert.match(workspace, /client\.governedApprovalRequests/);
   assert.match(workspace, /client\.governedApprovalRequest/);
