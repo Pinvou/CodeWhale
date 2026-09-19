@@ -546,9 +546,10 @@ class CiGatePolicyTests(unittest.TestCase):
         # hosted runner 失联防护(私有仓规格实测为 2-core/7.8GiB RAM,2026-09
         # 探针):编译与执行拆成独立 step(失联后日志全丢,按 step 状态定位阶段),
         # CI 关 DWARF 缩小测试二进制降低链接内存峰值。有效内存由 job 开头的
-        # zram 扩容 step(scripts/ci-memory-setup.sh,zram→zswap→镜像自带 swap
-        # 逐层降级)提供;盘上 swapfile 不再默认创建(hosted runner 单盘布局,
-        # 会挤占构建磁盘,见 ci-memory-setup.sh 头注释);看门狗已删除。
+        # zram 扩容 step(scripts/ci-memory-setup.sh,zram→盘上 swap→zswap→
+        # 镜像自带 swap 逐层降级)提供;盘上 swapfile 8G 必建(zram 池 70%
+        # 封顶后唯一无界溢出层,/mnt 为 tmpfs 或空间不足时护栏跳过,见
+        # ci-memory-setup.sh 头注释);看门狗已删除。
         self.assertIn(
             "- name: cargo test --lib --no-run（编译链接测试二进制）\n"
             "        if: ${{ github.event_name != 'push' }}",
@@ -566,8 +567,8 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         self.assertIn(
-            'sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,'
-            'PINVOU3_CI_ENABLE_DISK_SWAP bash "${{ github.workspace }}'
+            'sudo --preserve-env=GITHUB_ACTIONS,'
+            'PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}'
             '/scripts/ci-memory-setup.sh"',
             rust_test,
         )
@@ -623,15 +624,15 @@ class CiGatePolicyTests(unittest.TestCase):
             # 在此强制每个调用点结构一致。
             self.assertIn(
                 'run: timeout --kill-after=15 240 sudo --preserve-env='
-                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP'
+                'GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM'
                 ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
                 job,
                 f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
                 " 'timeout --kill-after=15 240' (userspace hang backstop) and"
-                " pass GITHUB_ACTIONS and the PINVOU3_CI_* emergency switches"
-                " through sudo (sudo env_reset strips them, silently disabling"
-                " the script's ::warning annotations and the standing zram"
-                " opt-out)",
+                " pass GITHUB_ACTIONS and the PINVOU3_CI_DISABLE_ZRAM emergency"
+                " switch through sudo (sudo env_reset strips them, silently"
+                " disabling the script's ::warning annotations and the standing"
+                " zram opt-out)",
             )
             self.assertIn(
                 '|| echo "::warning::ci-memory-setup',
@@ -649,7 +650,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         call_line = (
             "run: timeout --kill-after=15 240 sudo --preserve-env="
-            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,PINVOU3_CI_ENABLE_DISK_SWAP"
+            "GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM"
             ' bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"'
         )
         total_call_sites = 0
@@ -735,6 +736,18 @@ class CiGatePolicyTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("keeping the existing swap configuration", source)
+
+    def test_memory_setup_disk_swap_is_mandatory(self):
+        # 2026-09-19 拍板:磁盘 swap 必建,不再是 PINVOU3_CI_ENABLE_DISK_SWAP
+        # opt-in(zram 池 70% 封顶后,8G /mnt swapfile 是唯一无界溢出层)。
+        # 开关残留即红;主流程必须无条件调用(顶层零缩进),8G 定值一并钉死。
+        source = (ROOT / "scripts" / "ci-memory-setup.sh").read_text(encoding="utf-8")
+        self.assertNotIn("PINVOU3_CI_ENABLE_DISK_SWAP", source)
+        self.assertIn("DISK_SWAP_SIZE_KIB=$((8 * 1024 * 1024))", source)
+        self.assertIn(
+            'log "provisioning the mandatory /mnt disk swap"\nsetup_disk_swap',
+            source,
+        )
 
     def test_fetch_connectors_verifies_checksums_with_loud_diagnostics(self):
         # #1155 复审跟进:fetch-connectors.sh 的 verify_file 在 set -e 下被
