@@ -2838,6 +2838,43 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     assert!(description.contains("action=wait"));
     assert!(description.contains("action=claim"));
     assert!(description.contains("Fleet role"));
+    // The tool description must use the canonical role vocabulary the schema
+    // advertises (FLEET_ROLE_SCHEMA_VALUES / SUBAGENT_TYPE_DESCRIPTION); the
+    // legacy spellings stay parse-accepted but are never advertised.
+    for canonical in [
+        "general (full tool access)",
+        "explore (fast read-only exploration)",
+        "planner (grounded strategy",
+        "reviewer (reads and grades code)",
+        "implement (lands focused code changes)",
+        "test (runs tests and reports evidence)",
+        "advisor (read-only design counsel)",
+        "custom (allowed_tools",
+        "legacy aliases are still accepted",
+        "type=implement",
+        "type=test",
+    ] {
+        assert!(
+            description.contains(canonical),
+            "agent description must use canonical role vocabulary, missing \
+             {canonical:?}:\n{description}"
+        );
+    }
+    for legacy in [
+        "worker (",
+        "scout (",
+        "builder (",
+        "verifier (",
+        "consultant (",
+        "type=builder",
+        "type=verifier",
+    ] {
+        assert!(
+            !description.contains(legacy),
+            "agent description must not advertise legacy role {legacy:?}:\n\
+             {description}"
+        );
+    }
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"
