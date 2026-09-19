@@ -20,6 +20,22 @@ type billingProofFacts interface {
 	productResumeVersions(context.Context, ProductResumeVersions) (ProductResumeVersions, error)
 	confirmedResumeProbe(context.Context, string, string, string, uuid.UUID) (bool, error)
 	entitlementCorrectionPlan(context.Context, uuid.UUID, uuid.UUID) (entitlementCorrectionReadPlan, error)
+	ledgerRepairPlan(context.Context, LedgerRepairCommandInput) (LedgerRepairPlan, error)
+}
+
+// ledgerRepairPlan re-reads the owner activation row and recomputes the closed
+// ledger repair projection. The activation row must be ACTIVE with the current
+// version, so a proof can never be issued while the command is INACTIVE.
+func (r *PostgresRepository) ledgerRepairPlan(ctx context.Context, input LedgerRepairCommandInput) (LedgerRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return LedgerRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, ledgerRepairCommand, r.now())
+	if err != nil {
+		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return r.LedgerRepairPlanForCommand(ctx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
 }
 
 func (r *PostgresRepository) entitlementCorrectionPlan(ctx context.Context, packageID, orderID uuid.UUID) (entitlementCorrectionReadPlan, error) {
@@ -141,6 +157,38 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		ownerState = plan.Amounts.SourceType + "->" + plan.Amounts.TargetType
 		current.CriticalResourceVersions, current.FinancialSnapshot = entitlementCorrectionProofProjection(plan)
 		if plan.PackageID != command.PackageID || plan.PaymentOrderID != command.PaymentOrderID {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case ledgerRepairCommand:
+		var command struct {
+			TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
+			TargetPostingID        uuid.UUID `json:"target_posting_id"`
+			WrongLedgerAccountID   uuid.UUID `json:"wrong_ledger_account_id"`
+			CorrectLedgerAccountID uuid.UUID `json:"correct_ledger_account_id"`
+			AmountMicrocredits     int64     `json:"amount_microcredits"`
+			ReasonCode             string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.TargetJournalEntryID == uuid.Nil ||
+			command.TargetPostingID == uuid.Nil || strings.TrimSpace(command.ReasonCode) == "" {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		plan, err := repository.ledgerRepairPlan(ctx, LedgerRepairCommandInput{
+			TargetJournalEntryID: command.TargetJournalEntryID, TargetPostingID: command.TargetPostingID,
+			WrongLedgerAccountID: command.WrongLedgerAccountID, CorrectLedgerAccountID: command.CorrectLedgerAccountID,
+			AmountMicrocredits: command.AmountMicrocredits,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.EntryType + ":" + plan.WrongLedgerAccountType + "->" + plan.CorrectLedgerAccountType
+		critical, financial := ledgerRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.TargetJournalEntryID != command.TargetJournalEntryID || plan.TargetPostingID != command.TargetPostingID ||
+			plan.WrongLedgerAccountID != command.WrongLedgerAccountID || plan.CorrectLedgerAccountID != command.CorrectLedgerAccountID ||
+			plan.AmountMicrocredits != command.AmountMicrocredits {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:

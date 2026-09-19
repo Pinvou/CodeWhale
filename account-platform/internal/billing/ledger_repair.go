@@ -30,6 +30,33 @@ type LedgerRepairResult struct {
 	Status                 string    `json:"status"`
 }
 
+// ledgerRepairCommand is the closed command name shared by the proof
+// authority, the activation projection and the consumer mapping.
+const ledgerRepairCommand = "LEDGER_REPAIR"
+
+// ledgerRepairProofProjection is the closed proof projection of one repair:
+// the frozen critical revision and the financial facts Account stores on the
+// approval. Both objects are recomputed by the owner domain, never supplied by
+// the caller.
+func ledgerRepairProofProjection(plan LedgerRepairPlan) ([]byte, []byte) {
+	critical, _ := json.Marshal(map[string]any{
+		"target_journal_entry_id": plan.TargetJournalEntryID.String(),
+		"target_posting_id":       plan.TargetPostingID.String(),
+		"posting_set_digest":      plan.PostingSetDigest,
+		"entry_type":              plan.EntryType,
+		"policy_version":          1,
+	})
+	financial, _ := json.Marshal(map[string]any{
+		"amount_microcredits":       plan.AmountMicrocredits,
+		"wrong_ledger_account_id":   plan.WrongLedgerAccountID.String(),
+		"correct_ledger_account_id": plan.CorrectLedgerAccountID.String(),
+		"wrong_account_type":        plan.WrongLedgerAccountType,
+		"correct_account_type":      plan.CorrectLedgerAccountType,
+		"wallet_id":                 nil,
+	})
+	return critical, financial
+}
+
 // LedgerRepairCommandInput is the closed command the approval froze. Account
 // only routes these identifiers; every amount and account type is recomputed
 // from the ledger by the proof.

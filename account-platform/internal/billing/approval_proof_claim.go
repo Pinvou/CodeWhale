@@ -52,6 +52,19 @@ func (f billingTxProofFacts) entitlementCorrectionPlan(ctx context.Context, pack
 	return entitlementCorrectionPlanFrom(ctx, f.tx, f.repository.now(), packageID, orderID)
 }
 
+// The proof-era claim path recomputes the ledger repair projection inside the
+// same transaction, so the activation row it reads is the one the delivery was
+// bound to.
+func (f billingTxProofFacts) ledgerRepairPlan(ctx context.Context, input LedgerRepairCommandInput) (LedgerRepairPlan, error) {
+	var policyVersion, schemaVersion, version int64
+	var state string
+	if err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, ledgerRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version); err != nil || state != "ACTIVE" || version < 1 {
+		return LedgerRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return ledgerRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
+}
+
 // ClaimBillingApprovalProof is the last zero-effect authorization boundary.
 // Once committed, a crash or provider failure is an unknown outcome, never
 // permission to run a second probe under a newly issued proof.

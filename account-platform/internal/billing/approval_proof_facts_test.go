@@ -11,13 +11,20 @@ import (
 )
 
 type billingProofFactsStub struct {
-	adjustment ManualAdjustment
-	wallet     Wallet
-	provider   ProviderResumeVersions
-	product    ProductResumeVersions
-	confirmed  bool
-	correction entitlementCorrectionReadPlan
-	reads      int
+	adjustment      ManualAdjustment
+	wallet          Wallet
+	provider        ProviderResumeVersions
+	product         ProductResumeVersions
+	confirmed       bool
+	correction      entitlementCorrectionReadPlan
+	ledgerRepair    LedgerRepairPlan
+	ledgerRepairErr error
+	reads           int
+}
+
+func (s *billingProofFactsStub) ledgerRepairPlan(context.Context, LedgerRepairCommandInput) (LedgerRepairPlan, error) {
+	s.reads++
+	return s.ledgerRepair, s.ledgerRepairErr
 }
 
 func (s *billingProofFactsStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
