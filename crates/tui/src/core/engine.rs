@@ -1135,6 +1135,10 @@ pub struct Engine {
     /// task updates retain their spawn generation so later passes can reject
     /// only genuinely stale work.
     mcp_event_generation: u64,
+    /// Boot generation whose boot-failure briefing already reached the session
+    /// history. One boot pass briefs the model at most once; a genuinely new
+    /// boot pass (new generation) that fails again may brief again.
+    mcp_boot_briefing_generation: Option<u64>,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
     api_provider: ApiProvider,
@@ -2009,6 +2013,7 @@ impl Engine {
             mcp_boot_done: None,
             mcp_boot_generation: None,
             mcp_event_generation: 0,
+            mcp_boot_briefing_generation: None,
             plugin_registry,
             api_provider,
             api_provider_identity,
@@ -6965,6 +6970,37 @@ impl Engine {
         true
     }
 
+    /// Append the one-shot model-readable briefing for the servers that failed
+    /// to connect during session boot, so the next turn's model learns the
+    /// `mcp_*` surface is unavailable instead of trusting capability claims
+    /// that no longer hold. A fully successful boot injects nothing, isolated
+    /// Runtime Chat sessions never inject, and the boot-generation stamp keeps
+    /// a single boot pass to exactly one briefing.
+    ///
+    /// The runtime-handoff channel (see `runtime_handoff`) is deliberate: the
+    /// inline registry instruction is composed once in `Engine::new`, before
+    /// any connection is attempted, and the pinned system prompt must not move
+    /// after the fact. An appended user-role runtime event is plain
+    /// append-only history growth, so the KV-cache prefix only extends. Every
+    /// boot-finish seam that calls this runs while the engine is idle, so the
+    /// briefing is never appended mid-tool-loop.
+    async fn maybe_inject_mcp_boot_briefing(&mut self, generation: u64) {
+        if self.api_config.runtime_chat_isolated || self.mcp_connection_errors.is_empty() {
+            return;
+        }
+        if self.mcp_boot_briefing_generation == Some(generation) {
+            return;
+        }
+        self.mcp_boot_briefing_generation = Some(generation);
+        let mut failures: Vec<(String, String)> =
+            self.mcp_connection_errors.clone().into_iter().collect();
+        failures.sort_by(|left, right| left.0.cmp(&right.0));
+        self.add_session_message(crate::runtime_handoff::mcp_boot_failure_briefing_message(
+            &failures,
+        ))
+        .await;
+    }
+
     async fn emit_mcp_session_boot(&self, generation: u64, finished: bool) {
         let Ok(snapshot) = self.mcp_session_snapshot().await else {
             return;
@@ -7031,6 +7067,7 @@ impl Engine {
                 self.finish_mcp_boot_generation(generation);
                 self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
                 self.emit_mcp_session_boot(generation, true).await;
+                self.maybe_inject_mcp_boot_briefing(generation).await;
             }
         }
     }
@@ -7076,6 +7113,7 @@ impl Engine {
                     self.finish_mcp_boot_generation(generation);
                     self.session.pending_prefix_change_reason =
                         Some("mcp-session-boot".to_string());
+                    self.maybe_inject_mcp_boot_briefing(generation).await;
                     break;
                 }
             }
@@ -7141,6 +7179,7 @@ impl Engine {
             self.mcp_boot_in_flight = false;
             self.mcp_boot_generation = None;
             self.emit_mcp_session_boot(generation, true).await;
+            self.maybe_inject_mcp_boot_briefing(generation).await;
             return;
         }
 

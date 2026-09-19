@@ -22111,6 +22111,170 @@ async fn mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
 }
 
 #[tokio::test]
+async fn mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "slow-fs".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "one failed boot pass briefs exactly once"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("briefing present");
+    assert!(
+        crate::runtime_handoff::is_internal_runtime_handoff(briefing),
+        "the briefing is runtime control traffic, not a user turn"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(text.contains("slow-fs: connect timed out after 5s"));
+    assert!(text.contains("use local tools instead"));
+    assert_eq!(engine.mcp_boot_briefing_generation, Some(3));
+
+    engine.maybe_inject_mcp_boot_briefing(3).await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "the same boot generation never briefs twice"
+    );
+}
+
+#[tokio::test]
+async fn successful_mcp_boot_injects_no_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 2;
+    engine.mcp_boot_generation = Some(2);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 2,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::new(),
+        })
+        .await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)),
+        "a fully successful boot must not brief the model"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+}
+
+#[tokio::test]
+async fn isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let api_config = Config {
+        runtime_chat_isolated: true,
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+    engine.mcp_connection_errors = HashMap::from([(
+        "bad".to_string(),
+        "connect failed: spawn failure".to_string(),
+    )]);
+
+    engine.maybe_inject_mcp_boot_briefing(1).await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)),
+        "isolated Runtime Chat must stay free of host runtime briefings"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+}
+
+#[tokio::test]
+async fn drained_mcp_boot_finish_also_briefs_the_model() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 5;
+    engine.mcp_boot_generation = Some(5);
+    engine.mcp_boot_in_flight = true;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(McpBootUpdate::Finished {
+        generation: 5,
+        authority_errors: Arc::new(HashMap::new()),
+        connection_errors: HashMap::from([(
+            "auth-broken".to_string(),
+            "401 unauthorized".to_string(),
+        )]),
+    })
+    .expect("queue the boot finish");
+    engine.mcp_boot_rx = Some(rx);
+
+    engine.drain_mcp_boot_updates().await;
+
+    assert!(!engine.mcp_boot_in_flight);
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("mcp-session-boot"),
+        "the drained finish still declares the next-turn catalog refresh"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("the drained finish still briefs the model");
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(text.contains("auth-broken: 401 unauthorized"));
+    assert_eq!(engine.mcp_boot_briefing_generation, Some(5));
+}
+
+#[tokio::test]
 async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().join("workspace");
