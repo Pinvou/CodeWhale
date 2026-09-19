@@ -80,3 +80,48 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 5. 是否启用遥测及其凭据。
 
 拿到上述输入后，我会按 2.1 的顺序执行并逐项产出 2.3 的验收证据。
+
+## 4. 云端测试端点部署记录（2026-09-19，进行中）
+
+按 `docs/remote-e2e-test-endpoint.md` 的幂等脚本 `scripts/deploy-remote-relay-test.sh`（带 `ENABLE_DESKTOP_CONTROLLER=1`）把
+Windows 双端远控的 controller-v1 lane 部署到云端测试端点。生产 relay（8787 / `/pinvou3/remote`）全程未改动。
+
+### 4.1 已完成（relay 侧）
+
+| 项 | 值 |
+|---|---|
+| 实例 | `pinvou-remote-relay-test.service`，`/opt/pinvou-remote-relay-test`，端口 8788 |
+| 状态 | `active`；`curl http://127.0.0.1:8788/pinvou3/remote-test/healthz` → **200** |
+| 协议 | 启动日志：`pinvou remote relay listening on http://0.0.0.0:8788 (protocol=v2+controller-v1, …)` |
+| controller 环境 | `/opt/pinvou-remote-relay-test/controller.env`（0600，`EnvironmentFile=-` 加载）：`development` + `TOFU`、enrollment/pairing HMAC、`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1` |
+| 状态目录 | `/var/lib/pinvou-remote-relay-test/state`（0700，位于代码目录之外，重新部署不丢 tombstone/keyring） |
+| 客户端信任根 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1`、`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=` |
+| 客户端入口 | `PINVOU_REMOTE_PUBLIC_URL=https://pinvou.com/pinvou3/remote-test`、`PINVOU_REMOTE_RELAY_WS_URL=wss://pinvou.com/pinvou3/remote-test/ws`（**公网路由尚未生效**，见 4.2） |
+
+### 4.2 阻塞：共享代理侧未完成
+
+`scripts/deploy-remote-relay-test.sh` 在代理侧阶段（`fail2ban 解封 relay 主机 IP` / `代理侧隧道账号与 authorized_keys`）被
+`8.218.49.20` 重置连接（`Connection reset by 8.218.49.20 port 22`，静默 10 分钟后再试仍复现），因此以下三件尚未建立：
+
+1. 代理侧 `relay-tunnel` 账号与 `authorized_keys`、`/etc/ssh/sshd_config` 的 `Match User` 限权块；
+2. 代理侧 nginx snippet `pinvou3-remote-relay-test.conf` 与 `sites-enabled/pinvou` 的 include（`/pinvou3/remote-test` 路由）；
+3. relay → 代理的 `pinvou-remote-relay-test-tunnel.service`（当前 `inactive`）。
+
+**续做方式（二选一）**：
+
+- 由运维在共享代理上为本机出口 IP 解除封禁/加白（或临时提高该来源的连接配额），随后在仓库根目录重跑
+  `SKIP_LOCAL_TESTS=1 ENABLE_DESKTOP_CONTROLLER=1 bash scripts/deploy-remote-relay-test.sh`（幂等，会补齐 1～3）；
+- 或在一台与代理连通性稳定的机器（持有 `~/.ssh/id_ed25519_pinvou8`）上执行同一条命令。
+
+不需要回滚 relay 侧：脚本幂等，重跑只做增量补齐；如需整体撤销用 `bash scripts/deploy-remote-relay-test.sh --teardown`
+（会移除测试实例、隧道与代理侧 location，生产 relay 不受影响）。
+
+### 4.3 本次踩到并已修复的脚本缺陷（`dd307239`）
+
+1. 上传清单是旧白名单，缺 `controller-*.js` / `enrollment-*.js` / `pairing-*.js` / `relay-state-store.js` 等运行时模块 →
+   启用 controller 后启动即 `ERR_MODULE_NOT_FOUND`；已改为打包 relay 根目录全部 `*.js`。
+2. `legacy` 状态文件被放在 controller 状态目录内 → `legacy_state_path_inside_controller_directory`；已移到同级。
+3. 状态目录默认 755 且位于会被整体替换的代码目录 → `relay_state_permissions_unsafe` 且重部署丢状态；
+   已改到 `/var/lib/pinvou-remote-relay-test` 并 `chmod 700`。
+4. 单元 `EnvironmentFile` 不可选、回滚不恢复 unit、健康检查固定 `sleep 2` → 回滚后进入重启循环 / 启动稍慢被误判；
+   已改为可选 `EnvironmentFile=-`、回滚同时恢复 unit、健康检查有界重试 30s。
