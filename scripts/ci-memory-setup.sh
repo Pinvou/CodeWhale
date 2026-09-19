@@ -11,14 +11,18 @@
 #     the "16 GiB RAM" claimed by older comments was the public-repo spec.
 #
 # Swap layers, preferred first:
-#   1. zram (default ON): 24 GiB lz4, priority 100; compressed pages never
-#      touch disk, and the compressed pool is capped at 50% of RAM
-#      (mem_limit) so an incompressible workload cannot eat the runner's
-#      whole memory through zram itself. Re-qualified on all three images
-#      via modprobe zram ->
+#   1. zram (default ON): zstd, priority 100; the virtual device is sized
+#      to 2x RAM at runtime (from MemTotal), compressed pages never touch
+#      disk, and the compressed pool is capped at 70% of RAM (mem_limit) so
+#      an incompressible workload cannot eat the runner's whole memory
+#      through zram itself. The 2026-09-19 tuning only changes the
+#      compressor (lz4 -> zstd), the device size (fixed 24 GiB -> 2x RAM)
+#      and the pool cap (50% -> 70% of RAM). Re-qualified on all three
+#      images via modprobe zram ->
 #      (on failure: activate the image swapfile first if nothing is active,
 #      then apt-get install linux-modules-extra-$(uname -r), then modprobe
-#      again) -> lz4 -> 24G disksize -> mem_limit -> mkswap -> swapon -p 100.
+#      again) -> zstd -> 2x-RAM disksize -> mem_limit -> mkswap ->
+#      swapon -p 100.
 #      The 2026-09-12 hosted job hangs once blamed on zram (run
 #      34708283784) are re-classified as a transient environment incident:
 #      the same script ran green with zram loaded on the community repo the
@@ -130,9 +134,13 @@ sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1 \
   || warn "vm.overcommit_memory=1 rejected"
 log "sysctl tuned (best effort): swappiness=130 watermark_scale_factor=300 min_free_kbytes=65536 overcommit_memory=1"
 
-ZRAM_SIZE_BYTES=$((24 * 1024 * 1024 * 1024))
+# zram knobs: the virtual device is ZRAM_RAM_MULT x RAM (derived at runtime
+# from MemTotal) and the compressed pool is capped at ZRAM_POOL_RAM_PCT
+# percent of RAM. The opt-in disk swap keeps a fixed size.
+ZRAM_RAM_MULT=2
+ZRAM_POOL_RAM_PCT=70
 ZRAM_PRIORITY=100
-DISK_SWAP_SIZE_KIB=$((16 * 1024 * 1024))
+DISK_SWAP_SIZE_KIB=$((8 * 1024 * 1024))
 DISK_SWAP_PRIORITY=10
 
 setup_zram() {
@@ -187,48 +195,51 @@ setup_zram() {
     fi
   fi
 
+  # MemTotal drives both zram knobs (disksize = ZRAM_RAM_MULT x RAM, pool
+  # cap = ZRAM_POOL_RAM_PCT% of RAM), so read it before touching the device
+  # and fail closed when it cannot be read: the fallback swap layers engage
+  # instead of an undersized or uncapped zram.
+  local mem_total_kib zram_size_bytes zram_size_gib mem_limit_bytes
+  mem_total_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  if ! [[ ${mem_total_kib} =~ ^[0-9]+$ ]] || ((mem_total_kib <= 0)); then
+    warn "cannot read MemTotal; giving up on zram so the fallback swap layers engage"
+    return 1
+  fi
+  zram_size_bytes=$((mem_total_kib * 1024 * ZRAM_RAM_MULT))
+  mem_limit_bytes=$((mem_total_kib * 1024 * ZRAM_POOL_RAM_PCT / 100))
+  zram_size_gib=$((zram_size_bytes / 1024 / 1024 / 1024))
+
   # Configure zram0: compressor -> size -> pool cap -> mkswap -> swapon.
   # Each step warns instead of aborting, except the pool cap below, which
   # fails closed: an uncapped zram on a 7.8 GiB runner is worse than no
   # zram. Only an inactive zram swap device counts as overall failure so
   # the next layer takes over.
-  if echo lz4 >/sys/block/zram0/comp_algorithm 2>/dev/null; then
-    log "zram0 compressor set to lz4"
+  if echo zstd >/sys/block/zram0/comp_algorithm 2>/dev/null; then
+    log "zram0 compressor set to zstd"
   else
-    warn "could not set zram0 compressor to lz4; keeping the kernel default"
+    warn "could not set zram0 compressor to zstd; keeping the kernel default"
   fi
-  if ! echo "${ZRAM_SIZE_BYTES}" >"${size_file}" 2>/dev/null; then
+  if ! echo "${zram_size_bytes}" >"${size_file}" 2>/dev/null; then
     warn "could not set zram0 disksize; giving up on zram"
     return 1
   fi
-  log "zram0 disksize set to 24 GiB"
+  log "zram0 disksize set to ${zram_size_gib} GiB (${ZRAM_RAM_MULT}x RAM)"
 
-  # Cap the compressed pool at 50% of RAM. disksize is only the virtual
-  # capacity; the pool grows with stored pages and lz4 keeps incompressible
-  # pages near 1:1, so an unbounded pool on a 7.8 GiB runner could eat all
-  # RAM through zram itself and reproduce the "runner lost communication"
-  # failure this script exists to prevent. Writes beyond mem_limit fail the
-  # swap write and surface as ordinary memory pressure instead. Fail closed:
-  # if MemTotal cannot be read or the mem_limit write fails, reset the device
-  # and return failure so the fallback layers engage; never activate an
-  # uncapped zram.
-  local mem_total_kib mem_limit_bytes
-  mem_total_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-  if [[ ${mem_total_kib} =~ ^[0-9]+$ ]] && ((mem_total_kib > 0)); then
-    mem_limit_bytes=$((mem_total_kib * 1024 / 2))
-    if ! echo "${mem_limit_bytes}" >/sys/block/zram0/mem_limit 2>/dev/null; then
-      warn "could not set zram0 mem_limit; resetting zram0 so the fallback swap layers engage"
-      echo 0 >"${size_file}" 2>/dev/null \
-        || warn "could not reset the zram0 disksize; giving up on zram"
-      return 1
-    fi
-    log "zram0 pool capped at $((mem_limit_bytes / 1024 / 1024)) MiB (50% of RAM)"
-  else
-    warn "cannot read MemTotal; resetting zram0 so the fallback swap layers engage"
+  # Cap the compressed pool at 70% of RAM. disksize is only the virtual
+  # capacity; the pool grows with stored pages and zstd keeps incompressible
+  # pages near 1:1, so an unbounded pool could eat all RAM through zram
+  # itself and reproduce the "runner lost communication" failure this script
+  # exists to prevent. Writes beyond mem_limit fail the swap write and
+  # surface as ordinary memory pressure instead. Fail closed: if the
+  # mem_limit write fails, reset the device and return failure so the
+  # fallback layers engage; never activate an uncapped zram.
+  if ! echo "${mem_limit_bytes}" >/sys/block/zram0/mem_limit 2>/dev/null; then
+    warn "could not set zram0 mem_limit; resetting zram0 so the fallback swap layers engage"
     echo 0 >"${size_file}" 2>/dev/null \
       || warn "could not reset the zram0 disksize; giving up on zram"
     return 1
   fi
+  log "zram0 pool capped at $((mem_limit_bytes / 1024 / 1024)) MiB (${ZRAM_POOL_RAM_PCT}% of RAM)"
 
   # udev/devtmpfs usually creates the node synchronously, but wait briefly
   # so a fresh boot does not degrade on a node-creation race.
@@ -248,7 +259,7 @@ setup_zram() {
     warn "swapon /dev/zram0 failed${swapon_err:+: ${swapon_err}}"
     return 1
   fi
-  log "zram swap active: /dev/zram0 24 GiB lz4, priority ${ZRAM_PRIORITY}"
+  log "zram swap active: /dev/zram0 ${zram_size_gib} GiB zstd, priority ${ZRAM_PRIORITY}"
   return 0
 }
 
@@ -377,8 +388,8 @@ fi
 if swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'; then
   # Keep the "compress in RAM first" layer to exactly one: stock Ubuntu
   # kernels ship zswap enabled by default, and left on it would sit in
-  # front of zram and compress every swapped page twice (zswap's default
-  # compressor, then lz4 again).
+  # front of zram and compress every swapped page twice (once in zswap,
+  # once again in zram).
   if [[ -d /sys/module/zswap/params ]]; then
     if echo 0 >/sys/module/zswap/params/enabled 2>/dev/null; then
       log "zswap disabled (zram is the single compress-in-RAM layer)"
