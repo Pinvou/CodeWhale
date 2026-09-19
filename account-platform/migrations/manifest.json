@@ -1384,6 +1384,26 @@
         "file": "000066_payment_financial_repair_proof_claim_allowlist.up.sql",
         "version": 66,
         "sha256": "2967bab33940a1a902dd7f0e29f14265c3a9d4aa09b1e7120ad9eb0355645cb6"
+      },
+      {
+        "file": "000067_refund_exception_repair_cases.down.sql",
+        "version": 67,
+        "sha256": "d5c82044b8baa0ceb10d1c0f70b4ed76bdb4907511343830172b34fda60761ab"
+      },
+      {
+        "file": "000067_refund_exception_repair_cases.up.sql",
+        "version": 67,
+        "sha256": "aed061d6e32e714113a913deb40bf4256ba9e2ac8fe8996ce451b2d160c86994"
+      },
+      {
+        "file": "000068_refund_exception_repair_proof_claim_allowlist.down.sql",
+        "version": 68,
+        "sha256": "f3d2097a288e1186e2a7daceac6fc4735b0fa68840d8ab3691facd5cb66d47a3"
+      },
+      {
+        "file": "000068_refund_exception_repair_proof_claim_allowlist.up.sql",
+        "version": 68,
+        "sha256": "9473cc3e1d90d2e89d66fc144f9fd28aa5d8dd94f4105df15d16f21840fcac1d"
       }
     ],
     "payment-simulator": [
