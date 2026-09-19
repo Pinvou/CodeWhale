@@ -16,6 +16,7 @@ type billingApprovalPrecheckStub struct {
 	command        string
 	usageRequestID uuid.UUID
 	holdID         uuid.UUID
+	lossReviewID   uuid.UUID
 	paymentOrderID uuid.UUID
 	evidenceID     uuid.UUID
 	receivableID   uuid.UUID
@@ -71,7 +72,7 @@ func (s *billingApprovalPrecheckStub) ReconciliationFinancialRepairProofInput(_ 
 }
 
 func (s *billingApprovalPrecheckStub) UsageSettlementRepairProofInput(_ context.Context, input UsageSettlementRepairCommandInput) (approvalencoding.LegacyProofInput, error) {
-	s.usageRequestID, s.holdID = input.UsageRequestID, input.HoldID
+	s.usageRequestID, s.holdID, s.lossReviewID = input.UsageRequestID, input.HoldID, input.LossReviewID
 	return s.projection(usageSettlementRepairCommand, "USAGE_HOLD", input.HoldID.String())
 }
 
@@ -105,10 +106,10 @@ func TestBillingApprovalPrecheckUsesTheClosedProofInputs(t *testing.T) {
 			},
 		},
 		"usage settlement repair": {
-			request: billingApprovalPrecheckRequest{CommandType: usageSettlementRepairCommand, TargetResourceID: requestID.String(),
-				LossReviewID: evidenceID.String()},
+			request: billingApprovalPrecheckRequest{CommandType: usageSettlementRepairCommand, TargetResourceID: caseID.String(),
+				UsageRequestID: requestID.String(), LossReviewID: evidenceID.String()},
 			check: func(t *testing.T, stub *billingApprovalPrecheckStub, projection approvalencoding.LegacyProofInput) {
-				if stub.usageRequestID != requestID || stub.holdID != evidenceID ||
+				if stub.usageRequestID != requestID || stub.holdID != caseID || stub.lossReviewID != evidenceID ||
 					projection.TargetResourceType != "USAGE_HOLD" {
 					t.Fatalf("usage repair mapping=%+v %+v", stub, projection)
 				}
@@ -133,7 +134,11 @@ func TestBillingApprovalPrecheckUsesTheClosedProofInputs(t *testing.T) {
 		"missing evidence": {CommandType: paymentFinancialRepairCommand, TargetResourceID: caseID.String()},
 		"zero amount":      {CommandType: receivableWriteOffCommand, TargetResourceID: caseID.String(), ExpectedVersion: 1},
 		"missing date":     {CommandType: reconciliationFinancialRepairCommand, TargetResourceID: caseID.String(), PaymentEvidenceID: evidenceID.String()},
-		"padded id":        {CommandType: paymentFinancialRepairCommand, TargetResourceID: " " + caseID.String(), PaymentEvidenceID: evidenceID.String()},
+		"usage without request": {CommandType: usageSettlementRepairCommand, TargetResourceID: caseID.String(),
+			LossReviewID: evidenceID.String()},
+		"usage without loss review": {CommandType: usageSettlementRepairCommand, TargetResourceID: caseID.String(),
+			UsageRequestID: requestID.String()},
+		"padded id": {CommandType: paymentFinancialRepairCommand, TargetResourceID: " " + caseID.String(), PaymentEvidenceID: evidenceID.String()},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := precheckBillingApprovalCommand(context.Background(), &billingApprovalPrecheckStub{}, request); !errors.Is(err, errBillingApprovalPrecheckUnavailable) {

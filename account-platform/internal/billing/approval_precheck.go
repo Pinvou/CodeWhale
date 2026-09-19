@@ -39,6 +39,7 @@ type billingApprovalPrecheckRequest struct {
 	TargetJournalEntryID   string `json:"target_journal_entry_id"`
 	PaymentEvidenceID      string `json:"payment_evidence_id"`
 	AnomalyCaseID          string `json:"anomaly_case_id"`
+	UsageRequestID         string `json:"usage_request_id"`
 	LossReviewID           string `json:"loss_review_id"`
 	BusinessDate           string `json:"business_date"`
 	ReasonCode             string `json:"reason_code"`
@@ -145,14 +146,18 @@ func precheckBillingApprovalCommand(ctx context.Context, repository billingAppro
 			ReconciliationCaseID: caseID, PaymentEvidenceID: evidenceID, BusinessDate: request.BusinessDate,
 		})
 	case usageSettlementRepairCommand:
-		requestID, requestOK := validPrecheckUUID(request.TargetResourceID)
-		holdID, holdOK := validPrecheckUUID(request.LossReviewID)
-		if !requestOK || !holdOK {
+		// target_resource_id is the hold the projection is frozen on, exactly as
+		// the other six commands name their target; the usage request and the
+		// unsettled loss review are the evidence references the owner re-reads.
+		holdID, holdOK := validPrecheckUUID(request.TargetResourceID)
+		requestID, requestOK := validPrecheckUUID(request.UsageRequestID)
+		lossReviewID, reviewOK := validPrecheckUUID(request.LossReviewID)
+		if !holdOK || !requestOK || !reviewOK {
 			return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable
 		}
 		return repository.UsageSettlementRepairProofInput(ctx, UsageSettlementRepairCommandInput{
 			UsageRequestID: requestID, HoldID: holdID,
-			EvidenceKind: usageSettlementRepairEvidenceKind, LossReviewID: holdID,
+			EvidenceKind: usageSettlementRepairEvidenceKind, LossReviewID: lossReviewID,
 		})
 	default:
 		return approvalencoding.LegacyProofInput{}, errBillingApprovalPrecheckUnavailable

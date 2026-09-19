@@ -32,6 +32,14 @@ test('the Billing approval precheck stays Account-only, bounded and read-only', 
   assert.match(source, /EvidenceKind: usageSettlementRepairEvidenceKind/,
     'the usage settlement precheck is pinned to the implemented evidence kind');
   assert.doesNotMatch(source, /COMMITTED_SHORTFALL/, 'the unimplemented evidence kind must not appear in the precheck');
+  // target_resource_id names the hold projection exactly like every other
+  // command; the usage request and the unsettled loss review are separate
+  // evidence references, so the owner can re-read both real rows.
+  assert.match(source, /holdID, holdOK := validPrecheckUUID\(request\.TargetResourceID\)/,
+    'the usage settlement hold must come from the target resource');
+  assert.match(source, /requestID, requestOK := validPrecheckUUID\(request\.UsageRequestID\)/,
+    'the usage settlement request id must be its own closed reference');
+  assert.match(source, /LossReviewID: lossReviewID/, 'the loss review must stay its own reference');
 });
 
 test('the precheck route reuses the proof-read workload permission and is contracted', async () => {
@@ -52,6 +60,7 @@ test('the precheck route reuses the proof-read workload permission and is contra
   assert.equal(request.additionalProperties, false);
   assert.equal(response.additionalProperties, false);
   assert.deepEqual(request.required, ['command_type', 'target_resource_id']);
+  assert.equal(request.properties.usage_request_id.format, 'uuid');
   assert.deepEqual(request.properties.command_type.enum, [
     'LEDGER_REPAIR', 'RECEIVABLE_WRITE_OFF', 'PAYMENT_FINANCIAL_REPAIR', 'REFUND_EXCEPTION_REPAIR',
     'CHARGEBACK_FINANCIAL_REPAIR', 'RECONCILIATION_FINANCIAL_REPAIR', 'USAGE_SETTLEMENT_REPAIR',
