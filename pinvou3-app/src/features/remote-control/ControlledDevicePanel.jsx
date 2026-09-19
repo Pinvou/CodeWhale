@@ -98,9 +98,19 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   // 随包内置的「服务端点」列表：生产/测试 profile 都自带地址与信任根，
   // 用户不需要配置环境变量即可切换。
   useEffect(() => {
-    if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return undefined;
+    const remote = bridge && bridge.available && bridge.desktopRemoteControl;
+    // 必须按能力探测：bridge 是宿主注入对象，实现可能早于本面板（例如旧宿主、
+    // jsdom 冒烟的桩）。直接调用不存在的方法会**同步抛错**并让整个设置页被
+    // 错误边界接住（2026-09-20 实测：settings_ui_smoke 的 ① 断言失败）。
+    if (!remote || typeof remote.endpointProfiles !== 'function') return undefined;
     let cancelled = false;
-    Promise.resolve(bridge.desktopRemoteControl.endpointProfiles())
+    let pending;
+    try {
+      pending = remote.endpointProfiles();
+    } catch (failure) {
+      return undefined;
+    }
+    Promise.resolve(pending)
       .then((profiles) => {
         if (cancelled || !Array.isArray(profiles)) return;
         setEndpointProfiles(profiles);
@@ -112,6 +122,12 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   }, []);
 
   const endpointLabelKey = (id) => `endpoint${String(id || '').charAt(0).toUpperCase()}${String(id || '').slice(1)}`;
+  const canSwitchEndpoint = !!(
+    bridge
+    && bridge.available
+    && bridge.desktopRemoteControl
+    && typeof bridge.desktopRemoteControl.setEndpointProfile === 'function'
+  );
 
   const run = async (name, action) => {
     if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return;
@@ -212,7 +228,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         <span>{copy.modelSourceDevice}</span>
       </div>
 
-      {endpointProfiles.length > 0 && (
+      {canSwitchEndpoint && endpointProfiles.length > 0 && (
         <div className="settings-row">
           <label htmlFor="controlled-device-endpoint">{copy.endpointLabel}</label>
           <select
@@ -221,8 +237,17 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
             disabled={busy === 'endpoint'}
             onChange={(event) => {
               const next = event.target.value;
+              const previous = endpointId;
               setEndpointId(next);
-              run('endpoint', (remote) => remote.setEndpointProfile(next));
+              run('endpoint', async (remote) => {
+                try {
+                  await remote.setEndpointProfile(next);
+                } catch (failure) {
+                  // 写入失败时把选择回滚到原值，避免 UI 与持久设置不一致。
+                  setEndpointId(previous);
+                  throw failure;
+                }
+              });
             }}
           >
             {endpointProfiles.map((profile) => (
@@ -233,7 +258,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
           </select>
         </div>
       )}
-      {endpointProfiles.length > 0 && (
+      {canSwitchEndpoint && endpointProfiles.length > 0 && (
         <p className="settings-hint">{copy.endpointHint}</p>
       )}
 

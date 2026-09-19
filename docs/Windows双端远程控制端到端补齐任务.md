@@ -419,4 +419,11 @@ npm --prefix pinvou3-app run lint:ui
 node --test pinvou3-app/tests/<相关契约>.test.mjs
 ```
 
+**UI 改动的强制项（2026-09-20 补充）**：任何改动设置页/面板的提交，除源码契约测试外必须跑
+`npm --prefix pinvou3-app run build:ui && npm --prefix pinvou3-app run test:settings-ui`
+（jsdom 真实渲染 + 错误边界断言）。原因：`ControlledDevicePanel` 里新增的
+`bridge.desktopRemoteControl.endpointProfiles()` 在缺少该方法的宿主实现上是**同步抛错**，会让整页被
+错误边界接住（用户侧表现为「设置页面加载失败」），而源码契约测试与 `build:ui` 都发现不了——只有
+jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
