@@ -4920,6 +4920,31 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     );
 }
 
+// The wait surfaces block the turn, so the model-facing text must disclose
+// the bounded block (default 30s, max 120s) and the timed_out receipt shape;
+// an undisclosed finite block reads as a hang when nothing settles.
+#[test]
+fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let agent_schema = AgentTool::new(manager.clone(), stub_runtime()).input_schema();
+    let until = schema_property_description(&agent_schema, "until");
+    assert!(
+        until.contains("default 30s") && until.contains("max 120s") && until.contains("timed_out"),
+        "agent(action=wait) until description must disclose the timeout bound \
+         and the timed_out receipt:\n{until}"
+    );
+
+    let wait_tool = AgentsWaitTool::new(manager);
+    let wait_description = wait_tool.description();
+    assert!(
+        wait_description.contains("timeout_secs (default 30, max 120)")
+            && wait_description.contains("timed_out=true"),
+        "agents/wait description must disclose the timeout bound and the \
+         timed_out receipt:\n{wait_description}"
+    );
+}
+
 #[test]
 fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     // #5324 compat: the fields removed from the advertised schema must stay

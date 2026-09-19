@@ -618,7 +618,7 @@ impl ToolSpec for AgentsWaitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Block briefly until watched children settle or the timeout elapses. Keep waits short: on timeout, end your turn — settled children wake you automatically as completion sentinels; polling agents/list in a loop is not the right shape either. until=all is the fan-out join: it returns only when every child running at call time has left running, with each child's outcome. until=completion (default) returns as soon as any one child settles. until=activity also returns on progress."
+        "Block briefly until one child settles or timeout_secs (default 30, max 120) elapses; on timeout the receipt reports timed_out=true and any settled children. Keep waits short: on timeout, end your turn — settled children wake you automatically as completion sentinels; polling agents/list in a loop is not the right shape either. until=all is the fan-out join: it returns only when every child running at call time has left running, with each child's outcome. until=completion (default) returns as soon as any one child settles. until=activity also returns on progress."
     }
 
     fn input_schema(&self) -> Value {
