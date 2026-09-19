@@ -120,9 +120,15 @@ func TestAdminSnapshotQueriesFreezeEveryResourceByDeterministicKey(t *testing.T)
 
 func TestAdminPaginationFilterEnumsCoverCurrentFinancialStates(t *testing.T) {
 	entryTypes := adminPaginationFilters[adminPageWalletLedger]["entry_type"].values
-	for _, value := range []string{"RECHARGE", "USAGE", "REFUND", "REVERSAL", "ADJUSTMENT", "EXPIRY", "RECEIVABLE", "CHARGEBACK"} {
+	for _, value := range []string{"RECHARGE", "USAGE", "REFUND", "REVERSAL", "ADJUSTMENT", "EXPIRY", "RECEIVABLE", "CHARGEBACK", "REPAIR_CREDIT", "FORCED_REFUND"} {
 		if !entryTypes[value] {
 			t.Fatalf("ledger entry type %s is missing", value)
+		}
+	}
+	sourceTypes := adminPaginationFilters[adminPageReceivables]["source_type"].values
+	for _, value := range []string{"USAGE_OVERAGE", "CHARGEBACK", "FORCED_REFUND"} {
+		if !sourceTypes[value] {
+			t.Fatalf("receivable source type %s is missing", value)
 		}
 	}
 	caseTypes := adminPaginationFilters[adminPageReconciliationCases]["case_type"].values

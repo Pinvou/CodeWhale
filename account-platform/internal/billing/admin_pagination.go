@@ -186,7 +186,7 @@ var adminPaginationFilters = map[string]map[string]adminFilterDefinition{
 		"q":          {maxLength: 160},
 	},
 	adminPageWalletLedger: {
-		"entry_type":         enumFilter("RECHARGE", "USAGE", "REFUND", "REVERSAL", "ADJUSTMENT", "EXPIRY", "RECEIVABLE", "CHARGEBACK"),
+		"entry_type":         enumFilter("RECHARGE", "USAGE", "REFUND", "REVERSAL", "ADJUSTMENT", "EXPIRY", "RECEIVABLE", "CHARGEBACK", "REPAIR_CREDIT", "FORCED_REFUND"),
 		"business_reference": {maxLength: 160},
 		"created_from":       {rfc3339: true, maxLength: 64},
 		"created_to":         {rfc3339: true, maxLength: 64},
@@ -194,7 +194,7 @@ var adminPaginationFilters = map[string]map[string]adminFilterDefinition{
 	adminPageReceivables: {
 		"wallet_id":    {uuid: true, maxLength: 64},
 		"status":       enumFilter("OPEN", "PARTIALLY_SETTLED", "SETTLED", "WRITTEN_OFF"),
-		"source_type":  enumFilter("USAGE_OVERAGE", "CHARGEBACK"),
+		"source_type":  enumFilter("USAGE_OVERAGE", "CHARGEBACK", "FORCED_REFUND"),
 		"created_from": {rfc3339: true, maxLength: 64},
 		"created_to":   {rfc3339: true, maxLength: 64},
 	},
