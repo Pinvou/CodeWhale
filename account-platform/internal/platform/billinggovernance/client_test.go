@@ -92,7 +92,15 @@ func TestActivationClientClosedAuthoritativeRead(t *testing.T) {
 		{"fractional version", strings.Replace(valid, `"version":1`, `"version":1.5`, 1), "no-store", 200, false},
 		{"string version", strings.Replace(valid, `"version":1`, `"version":"1"`, 1), "no-store", 200, false},
 		{"unknown state", strings.Replace(valid, `"state":"INACTIVE"`, `"state":"FUTURE"`, 1), "no-store", 200, false},
-		{"active policy-only", strings.Replace(valid, `"state":"INACTIVE"`, `"state":"ACTIVE"`, 1), "no-store", 200, false},
+		// USAGE_SETTLEMENT_REPAIR still owns only an INACTIVE v1/s1 projection, so
+		// an authority that reports it ACTIVE must stay rejected.
+		{"active policy-only", encodeSnapshot(t, mutateSnapshot(compatibleSnapshot(), func(value *Snapshot) {
+			for index := range value.Activations {
+				if value.Activations[index].CommandType == "USAGE_SETTLEMENT_REPAIR" {
+					value.Activations[index].State = "ACTIVE"
+				}
+			}
+		})), "no-store", 200, false},
 		{"unknown command", strings.Replace(valid, `CHARGEBACK_FINANCIAL_REPAIR`, `FUTURE_COMMAND`, 1), "no-store", 200, false},
 		{"invalid utf8", strings.Replace(valid, `CHARGEBACK_FINANCIAL_REPAIR`, string([]byte{0xff}), 1), "no-store", 200, false},
 		{"trailing object", valid + `{}`, "no-store", 200, false},

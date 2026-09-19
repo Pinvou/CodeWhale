@@ -87,7 +87,9 @@ func TestApprovalCommandActivationHTTP(t *testing.T) {
 			value.Activations[0], value.Activations[1] = value.Activations[1], value.Activations[0]
 		}},
 		{"unknown-state", func(value *ApprovalCommandActivationSnapshot) { value.Activations[0].State = "UNKNOWN" }},
-		{"policy-only-active", func(value *ApprovalCommandActivationSnapshot) { value.Activations[0].State = "ACTIVE" }},
+		// USAGE_SETTLEMENT_REPAIR still owns only an INACTIVE v1/s1 projection, so
+		// reporting it ACTIVE must stay rejected end to end.
+		{"policy-only-active", func(value *ApprovalCommandActivationSnapshot) { value.Activations[9].State = "ACTIVE" }},
 	} {
 		t.Run("invalid-repository-"+test.name, func(t *testing.T) {
 			invalid := validBillingApprovalActivationSnapshot(now)
