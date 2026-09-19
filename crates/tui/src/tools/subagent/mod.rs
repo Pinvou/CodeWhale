@@ -901,10 +901,12 @@ fn default_agent_inspect_tool() -> String {
 /// `handle_read` is deferred on stock hosts, so model-facing text that pairs
 /// it with a transcript handle must teach the activation path instead of
 /// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
-/// `pub(crate)` so the engine's parent-context hint reuses the exact wording
-/// instead of re-typing a drifting copy.
-pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str =
-    "if `handle_read` is not in your tool list, activate it via `tool_search` first";
+/// The fallback is an honest degradation, not a promise that calling the
+/// hidden tool by name works: `tool_search` hydration only reaches tools the
+/// host allowlist kept in the catalog, and it surfaces a schema, never an
+/// execution. `pub(crate)` so the engine's parent-context hint reuses the
+/// exact wording instead of re-typing a drifting copy.
+pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` first; if `tool_search` cannot surface it, transcript reads are unavailable in this session — rely on the returned summaries";
 
 /// Shared inspect brief for worker records and takeover targets; both name
 /// `handle_read`, so both must carry the activation hint.
