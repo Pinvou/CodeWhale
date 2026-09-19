@@ -200,16 +200,60 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
     lines.join("\n")
 }
 
+/// Agent-tool receipts that are not per-child result snapshots — `roster`
+/// role catalogs, `wait` join state, and similar action payloads — carry
+/// facts the snapshot summarizer cannot represent (the members catalog,
+/// settled/`timed_out` state). Pass them through bounded instead of
+/// collapsing them into "- unknown (agent) status=unknown" noise.
+const SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS: usize = 2_000;
+
+/// A per-child result snapshot: an object carrying `agent_id` or `status`.
+fn subagent_snapshot_shaped(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("agent_id") || object.contains_key("status"))
+}
+
+/// Bounded verbatim passthrough for non-snapshot agent action receipts.
+fn bounded_subagent_receipt(raw: &str) -> String {
+    let mut out = String::from("[sub-agent receipt]\n");
+    let total_chars = raw.chars().count();
+    if total_chars <= SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS {
+        out.push_str(raw);
+        return out;
+    }
+    out.push_str(
+        &raw.chars()
+            .take(SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS)
+            .collect::<String>(),
+    );
+    out.push_str(&format!(
+        "\n[receipt truncated: showing {SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS} of {total_chars} characters]"
+    ));
+    out
+}
+
 fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Option<String> {
     if tool_name != "agent" {
         return None;
     }
 
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let snapshots: Vec<&serde_json::Value> = match &parsed {
-        serde_json::Value::Array(items) => items.iter().collect(),
-        serde_json::Value::Object(_) => vec![&parsed],
-        _ => return None,
+    let snapshots: Option<Vec<&serde_json::Value>> = match &parsed {
+        serde_json::Value::Array(items) => {
+            if !items.is_empty() && items.iter().all(subagent_snapshot_shaped) {
+                Some(items.iter().collect())
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Object(_) if subagent_snapshot_shaped(&parsed) => Some(vec![&parsed]),
+        _ => None,
+    };
+    let Some(snapshots) = snapshots else {
+        // Not a per-child snapshot (`roster`/`wait`/`claim` receipts): the
+        // raw JSON is the payload the model needs — pass it through bounded.
+        return Some(bounded_subagent_receipt(raw));
     };
 
     let mut out = String::from("[sub-agent result summarized for parent context]\n");
