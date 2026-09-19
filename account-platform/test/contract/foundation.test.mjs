@@ -180,7 +180,13 @@ test('entitlement packages expire locally and remain queryable by the personal u
 	assert.match(packages, /lockTransactionKey\(ctx, tx, "entitlement\.expire"/);
 	assert.match(packages, /ENTITLEMENT_EXPIRED_UNCERTAIN/);
 	assert.match(packages, /expired_microcredits=expired_microcredits\+\$2/);
-  assert.match(packages, /"EXPIRE", "expire:"\+packageID\.String\(\)/);
+  // The expiry journal must use the entry_type the ledger whitelist actually
+  // contains (000025 renamed EXPIRE to EXPIRY); packages.go and the migration
+  // check are asserted together so the writer can never drift again.
+  assert.match(packages, /"EXPIRY", "expire:"\+packageID\.String\(\)/);
+  const entryTypeMigration = await readFile(path.join(root, 'migrations/billing/000060_repair_journal_and_receivable_enums.up.sql'), 'utf8');
+  assert.match(entryTypeMigration, /entry_type IN \('RECHARGE','USAGE','REFUND','REVERSAL','ADJUSTMENT','EXPIRY','RECEIVABLE','CHARGEBACK','REPAIR_CREDIT','FORCED_REFUND'\)/);
+  assert.match(entryTypeMigration, /source_type IN \('USAGE_OVERAGE','CHARGEBACK','FORCED_REFUND'\)/);
 });
 
 test('repeated purchase clicks reuse one pending order for the same personal plan', async () => {
