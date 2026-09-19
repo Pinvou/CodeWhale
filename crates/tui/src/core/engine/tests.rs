@@ -22054,6 +22054,63 @@ async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
 }
 
 #[tokio::test]
+async fn mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        r#"{"servers":{"bad":{"command":"codewhale-mcp-missing-payload-9f8e7d6c"}}}"#,
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace,
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    let reason = "connect failed: spawn failure";
+    engine.mcp_connection_errors = HashMap::from([("bad".to_string(), reason.to_string())]);
+
+    engine.emit_mcp_session_boot(7, true).await;
+
+    let mut rx = handle.rx_event.write().await;
+    let mut other_events = 0;
+    let event = loop {
+        let event = rx.recv().await.expect("engine event channel stays open");
+        if matches!(event, Event::McpSessionBoot { .. }) {
+            break event;
+        }
+        other_events += 1;
+        assert!(other_events < 8, "no McpSessionBoot event arrived");
+    };
+    drop(rx);
+    let Event::McpSessionBoot {
+        snapshot,
+        connecting,
+        finished,
+        ..
+    } = event
+    else {
+        unreachable!("loop broke on McpSessionBoot");
+    };
+    assert!(finished, "the terminal receipt carries the final diagnoses");
+    assert!(connecting.is_empty());
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "bad")
+        .expect("failed server row");
+    assert!(!server.connected);
+    assert_eq!(server.error.as_deref(), Some(reason));
+}
+
+#[tokio::test]
 async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().join("workspace");
