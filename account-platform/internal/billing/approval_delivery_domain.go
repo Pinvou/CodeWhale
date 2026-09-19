@@ -404,6 +404,10 @@ func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) 
 		return event.TargetResourceType == "PAYMENT_PRODUCT_CONTROL" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	case entitlementComponentAdjustmentCommand:
 		return event.TargetResourceType == "ENTITLEMENT_PACKAGE" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
+	case ledgerRepairCommand:
+		// A ledger repair targets one immutable ledger posting; the journal id
+		// travels inside the normalized command, so Account binds the posting.
+		return event.TargetResourceType == "LEDGER_POSTING" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	default:
 		return false
 	}
