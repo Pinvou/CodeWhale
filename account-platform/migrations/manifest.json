@@ -1354,6 +1354,26 @@
         "file": "000064_receivable_write_off_proof_claim_allowlist.up.sql",
         "version": 64,
         "sha256": "7aae85473ce8a005e967431422068a2fcd28a6aff795d7b70f99ede2580b37f8"
+      },
+      {
+        "file": "000065_payment_financial_repair_approval_columns.down.sql",
+        "version": 65,
+        "sha256": "ff02afa97ffa1bf6ba5c713f40af06533aa1bc610e44844f853689024c760fa4"
+      },
+      {
+        "file": "000065_payment_financial_repair_approval_columns.up.sql",
+        "version": 65,
+        "sha256": "9bafa6cbbfb13a2ca0572ec6edcb046f317a0f7f382bc44153f827fdfee2907b"
+      },
+      {
+        "file": "000066_payment_financial_repair_proof_claim_allowlist.down.sql",
+        "version": 66,
+        "sha256": "615f7fab1f86bd8308afd8333fd13b66eb3f2993503b5c798a67d6f9902d42ca"
+      },
+      {
+        "file": "000066_payment_financial_repair_proof_claim_allowlist.up.sql",
+        "version": 66,
+        "sha256": "2967bab33940a1a902dd7f0e29f14265c3a9d4aa09b1e7120ad9eb0355645cb6"
       }
     ],
     "payment-simulator": [
