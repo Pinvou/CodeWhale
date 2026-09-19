@@ -1495,26 +1495,39 @@ impl AuthenticatedRelayTrustConfig {
 pub(crate) fn load_relay_trust_config(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> CryptoResult<AuthenticatedRelayTrustConfig> {
-    // 环境变量优先（运维/CI 覆盖），否则使用随包内置的端点 profile 信任根，
-    // 使用户不再需要手工配置这两个变量；两者都缺失才失败关闭。
+    // 环境变量优先（运维/CI 覆盖），否则回退到随包内置的端点 profile 信任根，
+    // 使用户不再需要手工配置这两个变量。安全语义：环境变量**要么全给、要么
+    // 全不给**——只给一半视为配置错误并失败关闭，避免"配错一半被内置值兜底"。
     let profile = crate::features::remote_control::manager::active_endpoint_profile();
-    let key_id = lookup("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID")
-        .or_else(|| {
-            (!profile.signing_key_id.is_empty()).then(|| profile.signing_key_id.to_owned())
-        })
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            ControllerCryptoError::new("relay_trust_unconfigured", "relay_signing_key_id")
-        })?;
-    let public_key = lookup("PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64")
-        .or_else(|| {
-            (!profile.signing_public_key_b64.is_empty())
-                .then(|| profile.signing_public_key_b64.to_owned())
-        })
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            ControllerCryptoError::new("relay_trust_unconfigured", "relay_signing_public_key")
-        })?;
+    let env_key_id = lookup("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID")
+        .filter(|value| !value.trim().is_empty());
+    let env_public_key = lookup("PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64")
+        .filter(|value| !value.trim().is_empty());
+    let (key_id, public_key) = match (env_key_id, env_public_key) {
+        (Some(key_id), Some(public_key)) => (key_id, public_key),
+        (None, None) => (
+            profile.signing_key_id.to_owned(),
+            profile.signing_public_key_b64.to_owned(),
+        ),
+        (Some(_), None) => {
+            return Err(ControllerCryptoError::new(
+                "relay_trust_unconfigured",
+                "relay_signing_public_key",
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(ControllerCryptoError::new(
+                "relay_trust_unconfigured",
+                "relay_signing_key_id",
+            ))
+        }
+    };
+    if key_id.trim().is_empty() || public_key.trim().is_empty() {
+        return Err(ControllerCryptoError::new(
+            "relay_trust_unconfigured",
+            "relay_signing_key_id",
+        ));
+    }
     AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.trim().to_owned(), public_key.trim().to_owned())])
 }
 
@@ -2144,11 +2157,11 @@ mod tests {
     }
 
     #[test]
-    fn relay_trust_loader_fails_closed_without_a_complete_pin() {
-        assert_eq!(
-            load_relay_trust_config(|_| None).unwrap_err().code,
-            "relay_trust_unconfigured"
-        );
+    fn relay_trust_loader_prefers_env_and_falls_back_to_the_builtin_profile() {
+        // 无环境变量时不再失败关闭：随包内置的端点 profile 提供信任根
+        // （这是"用户不需要配置环境变量"的实现基础）。
+        assert!(load_relay_trust_config(|_| None).is_ok());
+        // 环境变量只给一半（不完整 pin）时仍然失败关闭。
         assert_eq!(
             load_relay_trust_config(|name| match name {
                 "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
