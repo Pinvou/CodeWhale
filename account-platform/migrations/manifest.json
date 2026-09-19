@@ -752,6 +752,16 @@
         "file": "000075_chargeback_financial_repair_consumer_route.up.sql",
         "version": 75,
         "sha256": "9f1b944e0a8a02c995dec46f0e132e34d8379df38749dcc34cbbddb46a6c4f40"
+      },
+      {
+        "file": "000076_reconciliation_financial_repair_consumer_route.down.sql",
+        "version": 76,
+        "sha256": "b8dfb4158b4302b6c61de5f66cdf4d4c6f2829ad71ad63406b48df24a03a518b"
+      },
+      {
+        "file": "000076_reconciliation_financial_repair_consumer_route.up.sql",
+        "version": 76,
+        "sha256": "d916cf34c616ba8ee3ebfd8bf9b6ecdfc9b176081751e737788046bbf43119d1"
       }
     ],
     "billing": [
@@ -1454,6 +1464,26 @@
         "file": "000071_chargeback_financial_repair_proof_claim_allowlist.up.sql",
         "version": 71,
         "sha256": "10b04921095e47c657aa2e8c87c136d4026659e6e0ec461381723288b5cd3dd3"
+      },
+      {
+        "file": "000072_reconciliation_repair_cases.down.sql",
+        "version": 72,
+        "sha256": "f64a1770bb0a0a4ebc5f7602c6e9bb4beae3ba6ee48000b43ae3c039481d167b"
+      },
+      {
+        "file": "000072_reconciliation_repair_cases.up.sql",
+        "version": 72,
+        "sha256": "a72e40b935ecdfa1128a26e3cabf5bc1d19a0500c04b490e3c6ce2fa247fa0f3"
+      },
+      {
+        "file": "000073_reconciliation_financial_repair_proof_claim_allowlist.down.sql",
+        "version": 73,
+        "sha256": "c7b7d3eae4ab260168d29b3e15c0254add64dd0d2703ec0191511c3b1aa9d4e3"
+      },
+      {
+        "file": "000073_reconciliation_financial_repair_proof_claim_allowlist.up.sql",
+        "version": 73,
+        "sha256": "a5bc933477582174241d29e5ab90cc2ab553bba68050107f13a39bc027e64102"
       }
     ],
     "payment-simulator": [

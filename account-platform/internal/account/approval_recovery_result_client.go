@@ -376,6 +376,36 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 			lowerHexDigest(result.FactsDigest) && result.JournalEntryID != uuid.Nil &&
 			result.ReceivableID != uuid.Nil && strings.TrimSpace(result.ProviderChargebackID) != "" &&
 			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
+	case "RECONCILIATION_FINANCIAL_REPAIR":
+		var result struct {
+			CaseID                uuid.UUID `json:"case_id"`
+			RunID                 uuid.UUID `json:"run_id"`
+			Channel               string    `json:"channel"`
+			BusinessDate          string    `json:"business_date"`
+			MerchantOrderNo       string    `json:"merchant_order_no"`
+			AmountFen             int64     `json:"amount_fen"`
+			Currency              string    `json:"currency"`
+			ProviderTransactionID string    `json:"provider_transaction_id"`
+			PaymentEvidenceID     uuid.UUID `json:"payment_evidence_id"`
+			ResolutionCode        string    `json:"resolution_code"`
+			RecheckCaseCount      int64     `json:"recheck_case_count"`
+			FactsDigest           string    `json:"facts_digest"`
+			LedgerEffect          string    `json:"ledger_effect"`
+			Status                string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID *uuid.UUID `json:"journal_entry_id"`
+		}
+		// The zero-accounting-effect closure reports an empty ledger reference
+		// set, so decoding it must succeed and must not carry a journal identity.
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.CaseID != uuid.Nil && result.RunID != uuid.Nil && strings.TrimSpace(result.Channel) != "" &&
+			strings.TrimSpace(result.BusinessDate) != "" && strings.TrimSpace(result.MerchantOrderNo) != "" &&
+			result.AmountFen > 0 && strings.TrimSpace(result.Currency) != "" &&
+			strings.TrimSpace(result.ProviderTransactionID) != "" && result.PaymentEvidenceID != uuid.Nil &&
+			result.ResolutionCode == "PROVIDER_REFUND_CONFIRMED" && result.RecheckCaseCount == 0 &&
+			lowerHexDigest(result.FactsDigest) && result.LedgerEffect == "NONE" &&
+			result.Status == "SUCCEEDED" && ledger.JournalEntryID == nil
 	}
 	return false
 }

@@ -26,6 +26,35 @@ type billingProofFacts interface {
 	paymentFinancialRepairPlan(context.Context, PaymentFinancialRepairCommandInput) (PaymentFinancialRepairPlan, error)
 	refundExceptionRepairPlan(context.Context, RefundExceptionRepairCommandInput) (RefundExceptionRepairPlan, error)
 	chargebackFinancialRepairPlan(context.Context, ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error)
+	reconciliationFinancialRepairPlan(context.Context, ReconciliationFinancialRepairCommandInput) (ReconciliationFinancialRepairPlan, error)
+}
+
+// reconciliationFinancialRepairPlan re-reads the owner activation row and
+// recomputes the closed reconciliation closure projection. The activation row
+// must be ACTIVE with the current version, and neither this path nor execution
+// calls the provider or writes any amount fact.
+func (r *PostgresRepository) reconciliationFinancialRepairPlan(ctx context.Context, input ReconciliationFinancialRepairCommandInput) (ReconciliationFinancialRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, reconciliationFinancialRepairCommand, r.now())
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := reconciliationFinancialRepairPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReconciliationFinancialRepairPlan{}, err
+	}
+	return plan, nil
 }
 
 // chargebackFinancialRepairPlan re-reads the owner activation row and recomputes
@@ -417,6 +446,35 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
 		if plan.ChargebackCaseID != command.ChargebackCaseID || plan.EvidenceID != command.PaymentEvidenceID ||
 			plan.CaseVersion != command.ExpectedCaseVersion {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case reconciliationFinancialRepairCommand:
+		var command struct {
+			ReconciliationCaseID uuid.UUID `json:"reconciliation_case_id"`
+			PaymentEvidenceID    uuid.UUID `json:"payment_evidence_id"`
+			BusinessDate         string    `json:"business_date"`
+			ResolutionCode       string    `json:"resolution_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ReconciliationCaseID == uuid.Nil ||
+			command.PaymentEvidenceID == uuid.Nil || strings.TrimSpace(command.BusinessDate) == "" ||
+			strings.TrimSpace(command.ResolutionCode) != reconciliationRepairResolutionCode {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		plan, err := repository.reconciliationFinancialRepairPlan(ctx, ReconciliationFinancialRepairCommandInput{
+			ReconciliationCaseID: command.ReconciliationCaseID, PaymentEvidenceID: command.PaymentEvidenceID,
+			BusinessDate: command.BusinessDate,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.CaseID.String() + ":" + reconciliationRepairLedgerEffect
+		critical, financial := reconciliationFinancialRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.CaseID != command.ReconciliationCaseID || plan.PaymentEvidenceID != command.PaymentEvidenceID ||
+			plan.BusinessDate != strings.TrimSpace(command.BusinessDate) {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:

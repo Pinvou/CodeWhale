@@ -101,6 +101,11 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
   activatedChargebackRepair.activations[0].state = 'ACTIVE';
   assert.equal(validate(activatedChargebackRepair), true, JSON.stringify(validate.errors));
 
+  // The reconciliation financial repair command owns exactly one v1/s1 projection.
+  const activatedReconciliationRepair = snapshot();
+  activatedReconciliationRepair.activations[7].state = 'ACTIVE';
+  assert.equal(validate(activatedReconciliationRepair), true, JSON.stringify(validate.errors));
+
   for (const [name, mutate] of [
     ['partial', value => value.activations.pop()],
     ['extra', value => value.activations.push({ ...value.activations[10] })],
@@ -115,6 +120,7 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
     ['mixed-payment-repair-schema', value => { value.activations[3].snapshot_schema_version = 2; }],
     ['mixed-refund-repair-policy', value => { value.activations[8].policy_version = 2; }],
     ['mixed-chargeback-repair-schema', value => { value.activations[0].snapshot_schema_version = 2; }],
+    ['mixed-reconciliation-repair-schema', value => { value.activations[7].snapshot_schema_version = 2; }],
     ['mixed-correction-version', value => { value.activations[1].policy_version = 2; }],
     ['unknown-correction-version', value => { value.activations[1].policy_version = 3; value.activations[1].snapshot_schema_version = 3; }],
     ['active-correction-v1-history', value => { value.activations[1].state = 'ACTIVE'; }],

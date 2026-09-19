@@ -171,6 +171,21 @@ type approvalChargebackFinancialRepairSummary struct {
 	ReasonCode                string    `json:"reason_code"`
 }
 
+// approvalReconciliationFinancialRepairSummary is the closed read-only
+// projection of the reconciliation closure: the target case, the frozen provider
+// difference and the explicit zero-accounting-effect declaration. Provider bill
+// payloads, internal attribution attempts and free text are never presented.
+type approvalReconciliationFinancialRepairSummary struct {
+	ReconciliationCaseID uuid.UUID `json:"reconciliation_case_id"`
+	RunID                uuid.UUID `json:"run_id"`
+	BusinessDate         string    `json:"business_date"`
+	AmountFen            string    `json:"amount_fen"`
+	Currency             string    `json:"currency"`
+	LedgerEffect         string    `json:"ledger_effect"`
+	FactsDigest          string    `json:"facts_digest"`
+	ResolutionCode       string    `json:"resolution_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -188,6 +203,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	case "REFUND_EXCEPTION_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "CHARGEBACK_FINANCIAL_REPAIR":
+		return policyVersion == 1 && snapshotVersion == 1
+	case "RECONCILIATION_FINANCIAL_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
@@ -316,6 +333,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalChargebackFinancialRepairSummary{ChargebackCaseID: id}
+	case "RECONCILIATION_FINANCIAL_REPAIR":
+		if item.TargetResourceType != "RECONCILIATION_CASE" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalReconciliationFinancialRepairSummary{ReconciliationCaseID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -380,13 +406,19 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			PaymentOrderID         uuid.UUID `json:"payment_order_id"`
 			RefundID               uuid.UUID `json:"refund_id"`
 			ChargebackCaseID       uuid.UUID `json:"chargeback_case_id"`
+			ReconciliationCaseID   uuid.UUID `json:"reconciliation_case_id"`
+			BusinessDate           string    `json:"business_date"`
+			ResolutionCode         string    `json:"resolution_code"`
 			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
 		Critical struct {
-			EntryType             string `json:"entry_type"`
-			PostingSetDigest      string `json:"posting_set_digest"`
-			FactsDigest           string `json:"facts_digest"`
-			PaymentOrderUpdatedAt string `json:"payment_order_updated_at"`
+			EntryType              string `json:"entry_type"`
+			PostingSetDigest       string `json:"posting_set_digest"`
+			FactsDigest            string `json:"facts_digest"`
+			PaymentOrderUpdatedAt  string `json:"payment_order_updated_at"`
+			RunID                  string `json:"run_id"`
+			CaseID                 string `json:"case_id"`
+			ProviderSnapshotDigest string `json:"provider_snapshot_digest"`
 		} `json:"critical_resource_versions"`
 		Financial struct {
 			SourceType                   string `json:"source_type"`
@@ -406,6 +438,8 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			ShortfallMicrocredits        string `json:"shortfall_microcredits"`
 			BaseShortfallMicrocredits    string `json:"base_shortfall_microcredits"`
 			ComponentDigest              string `json:"component_digest"`
+			LedgerEffect                 string `json:"ledger_effect"`
+			Currency                     string `json:"currency"`
 		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -507,6 +541,27 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.ComponentDigest = proof.Financial.ComponentDigest
 		target.FactsDigest = proof.Critical.FactsDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalReconciliationFinancialRepairSummary:
+		if proof.Normalized.ReconciliationCaseID != target.ReconciliationCaseID ||
+			proof.Critical.CaseID != target.ReconciliationCaseID.String() ||
+			!approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			!approvalPaginationHexDigest(proof.Critical.ProviderSnapshotDigest) ||
+			proof.Financial.LedgerEffect != "NONE" ||
+			proof.Normalized.ResolutionCode != "PROVIDER_REFUND_CONFIRMED" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		runID, runErr := uuid.Parse(strings.TrimSpace(proof.Critical.RunID))
+		if runErr != nil || runID == uuid.Nil {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.RunID = runID
+		target.BusinessDate = proof.Normalized.BusinessDate
+		target.AmountFen = proof.Financial.AmountFen
+		target.Currency = proof.Financial.Currency
+		target.LedgerEffect = proof.Financial.LedgerEffect
+		target.FactsDigest = proof.Critical.FactsDigest
+		target.ResolutionCode = proof.Normalized.ResolutionCode
 		command = target
 	default:
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable

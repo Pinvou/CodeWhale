@@ -42,6 +42,8 @@ type billingAuthorizationExecutionRepository interface {
 	ApplyRefundExceptionRepair(context.Context, RefundExceptionRepairExecutionInput) (RefundExceptionRepairResult, error)
 	ChargebackFinancialRepairForRequest(context.Context, uuid.UUID) (ChargebackFinancialRepairResult, error)
 	ApplyChargebackFinancialRepair(context.Context, ChargebackFinancialRepairExecutionInput) (ChargebackFinancialRepairResult, error)
+	ReconciliationFinancialRepairForRequest(context.Context, uuid.UUID) (ReconciliationFinancialRepairResult, error)
+	ApplyReconciliationFinancialRepair(context.Context, ReconciliationFinancialRepairExecutionInput) (ReconciliationFinancialRepairResult, error)
 }
 
 func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain {
@@ -212,6 +214,24 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		}
 		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
+	case reconciliationFinancialRepairCommand:
+		if domain.repository == nil {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		result, err := domain.repository.ReconciliationFinancialRepairForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		// The closure has no accounting effect, so it reports an empty ledger
+		// reference set instead of a journal identity.
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: json.RawMessage(`{}`)}, true, nil
 	default:
 		return authorizationDomainResult{}, false, ErrConflict
 	}
@@ -261,6 +281,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return domain.executeRefundExceptionRepair(ctx, binding, event, command)
 	case chargebackFinancialRepairCommand:
 		return domain.executeChargebackFinancialRepair(ctx, binding, event, command)
+	case reconciliationFinancialRepairCommand:
+		return domain.executeReconciliationFinancialRepair(ctx, binding, event, command)
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
@@ -886,6 +908,98 @@ func (domain *billingAuthorizationDomain) executeChargebackFinancialRepair(ctx c
 	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
 }
 
+// executeReconciliationFinancialRepair applies one approved zero-effect
+// reconciliation closure. The approval snapshot carries only the wire-visible
+// owner projection; the execution transaction recomputes the frozen facts, the
+// disposal evidence and the repair-then-recheck result again, and no path calls
+// the provider or writes any amount fact.
+func (domain *billingAuthorizationDomain) executeReconciliationFinancialRepair(ctx context.Context, binding ApprovalAuthorizationBinding,
+	event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
+	if domain.repository == nil {
+		return authorizationDomainAttempt{}
+	}
+	var normalized struct {
+		ReconciliationCaseID uuid.UUID `json:"reconciliation_case_id"`
+		PaymentEvidenceID    uuid.UUID `json:"payment_evidence_id"`
+		BusinessDate         string    `json:"business_date"`
+		ResolutionCode       string    `json:"resolution_code"`
+	}
+	var critical struct {
+		RunID                  string `json:"run_id"`
+		CaseID                 string `json:"case_id"`
+		ProviderSnapshotDigest string `json:"provider_snapshot_digest"`
+		FactsDigest            string `json:"facts_digest"`
+		PolicyVersion          int64  `json:"policy_version"`
+	}
+	var financial struct {
+		AmountFen             int64  `json:"amount_fen"`
+		Currency              string `json:"currency"`
+		ProviderTransactionID string `json:"provider_transaction_id"`
+		LedgerEffect          string `json:"ledger_effect"`
+	}
+	if json.Unmarshal(event.NormalizedCommand, &normalized) != nil || json.Unmarshal(event.CriticalResourceVersions, &critical) != nil ||
+		json.Unmarshal(event.FinancialSnapshot, &financial) != nil {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	runID, runErr := uuid.Parse(strings.TrimSpace(critical.RunID))
+	providerTransactionID := strings.TrimSpace(financial.ProviderTransactionID)
+	if normalized.ReconciliationCaseID == uuid.Nil || normalized.PaymentEvidenceID == uuid.Nil ||
+		strings.TrimSpace(normalized.BusinessDate) != normalized.BusinessDate || normalized.BusinessDate == "" ||
+		strings.TrimSpace(normalized.ResolutionCode) != reconciliationRepairResolutionCode ||
+		critical.PolicyVersion != 1 || critical.CaseID != normalized.ReconciliationCaseID.String() ||
+		runErr != nil || runID == uuid.Nil || !validHexDigest(critical.ProviderSnapshotDigest) ||
+		!validHexDigest(critical.FactsDigest) || financial.AmountFen < 1 ||
+		strings.TrimSpace(financial.Currency) != financial.Currency || financial.Currency == "" ||
+		providerTransactionID == "" || providerTransactionID != financial.ProviderTransactionID ||
+		financial.LedgerEffect != reconciliationRepairLedgerEffect {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if event.CommandType != reconciliationFinancialRepairCommand || event.TargetResourceType != "RECONCILIATION_CASE" ||
+		event.TargetResourceID != normalized.ReconciliationCaseID.String() ||
+		command.TargetResourceType != event.TargetResourceType || command.TargetResourceID != event.TargetResourceID ||
+		!sameRawJSON(event.NormalizedCommand, command.NormalizedCommand) ||
+		!sameRawJSON(event.CriticalResourceVersions, command.CriticalResourceVersions) ||
+		!sameRawJSON(event.FinancialSnapshot, command.FinancialSnapshot) ||
+		event.ApprovalRequestID != binding.ApprovalRequestID || command.ApprovalRequestID != binding.ApprovalRequestID ||
+		event.EventID != binding.EventID || event.ApprovalControlEpoch != binding.ApprovalEpoch ||
+		event.ExecutorIdentity != billingApprovalExecutorIdentity || command.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		binding.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		event.PolicyVersion != 1 || command.PolicyVersion != 1 || binding.PolicyVersion != 1 ||
+		!validIndependentApproval(command.RequesterUserID, command.ApproverUserID, command.DecisionReason) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	snapshot, err := domain.repository.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	active, ok := findActiveAuthorizationCommand(snapshot, reconciliationFinancialRepairCommand)
+	if !ok || active.PolicyVersion != 1 || active.SnapshotSchemaVersion != 1 {
+		return definiteAuthorizationFailure("POLICY_OR_SCHEMA_MISMATCH")
+	}
+	result, err := domain.repository.ApplyReconciliationFinancialRepair(ctx, ReconciliationFinancialRepairExecutionInput{
+		ApprovalRequestID: binding.ApprovalRequestID, AuthorizationEventID: binding.EventID, ApprovalEpoch: binding.ApprovalEpoch,
+		ExecutionKey:  command.ExecutionIdempotencyKey,
+		PolicyVersion: active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
+		Command: ReconciliationFinancialRepairCommandInput{
+			ReconciliationCaseID: normalized.ReconciliationCaseID, PaymentEvidenceID: normalized.PaymentEvidenceID,
+			BusinessDate: normalized.BusinessDate,
+		},
+		Frozen: ReconciliationFinancialRepairFrozenFacts{
+			RunID: runID, AmountFen: financial.AmountFen, Currency: financial.Currency,
+			ProviderTransactionID:  financial.ProviderTransactionID,
+			ProviderSnapshotDigest: critical.ProviderSnapshotDigest,
+		},
+	})
+	if err != nil {
+		return classifyAuthorizationDomainFailure(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: json.RawMessage(`{}`)}}
+}
+
 func (domain *billingAuthorizationDomain) executeProviderResume(ctx context.Context, binding ApprovalAuthorizationBinding, event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
 	if domain.probe == nil {
 		return authorizationDomainAttempt{}
@@ -1007,6 +1121,8 @@ func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) 
 		return event.TargetResourceType == "REFUND" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	case chargebackFinancialRepairCommand:
 		return event.TargetResourceType == "CHARGEBACK_CASE" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
+	case reconciliationFinancialRepairCommand:
+		return event.TargetResourceType == "RECONCILIATION_CASE" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	default:
 		return false
 	}

@@ -45,6 +45,9 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if !Executable("CHARGEBACK_FINANCIAL_REPAIR") {
 		t.Fatal("chargeback financial repair must consult its live Billing activation")
 	}
+	if !Executable("RECONCILIATION_FINANCIAL_REPAIR") {
+		t.Fatal("reconciliation financial repair must consult its live Billing activation")
+	}
 	if Executable("USAGE_SETTLEMENT_REPAIR") {
 		t.Fatal("unimplemented domain repair must remain non-executable")
 	}

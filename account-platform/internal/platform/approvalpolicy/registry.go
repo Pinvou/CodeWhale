@@ -50,6 +50,7 @@ var executableApprovalCommands = map[string]struct{}{
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {}, "LEDGER_REPAIR": {}, "RECEIVABLE_WRITE_OFF": {},
 	"PAYMENT_FINANCIAL_REPAIR": {}, "REFUND_EXCEPTION_REPAIR": {},
 	"CHARGEBACK_FINANCIAL_REPAIR": {},
+	"RECONCILIATION_FINANCIAL_REPAIR": {},
 }
 
 func buildPolicies() map[string]Policy {

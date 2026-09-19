@@ -37,6 +37,7 @@ var descriptors = []Descriptor{
 	{CommandType: "PAYMENT_FINANCIAL_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-financial-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "REFUND_EXCEPTION_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-refund-exception-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "CHARGEBACK_FINANCIAL_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-chargeback-financial-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+	{CommandType: "RECONCILIATION_FINANCIAL_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-reconciliation-financial-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-model-lifecycle-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-catalog-rollback-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	{CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, ExecutorIdentity: TokenWorkload, Durable: "token-credential-revoke-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},

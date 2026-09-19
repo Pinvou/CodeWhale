@@ -793,7 +793,7 @@ components:
                 - properties: { command_type: { const: RECEIVABLE_WRITE_OFF }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
-                - properties: { command_type: { const: RECONCILIATION_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+                - properties: { command_type: { const: RECONCILIATION_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
                 - properties: { command_type: { const: REFUND_EXCEPTION_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
