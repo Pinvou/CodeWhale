@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -41,29 +42,41 @@ type billingRecoveryResultReader interface {
 }
 
 func (r *PostgresRepository) ObserveBillingApprovalResult(ctx context.Context, requestID, eventID uuid.UUID, epoch int64, commandType string) (billingRecoveryResultObservation, error) {
-	var claimed, succeeded bool
+	var claimed bool
 	var observedAt time.Time
-	var resultSQL string
-	switch commandType {
-	case "WALLET_ADJUSTMENT":
-		resultSQL = `SELECT 1 FROM manual_adjustments WHERE approval_request_id=$1 AND status='POSTED' AND journal_entry_id IS NOT NULL AND execution_idempotency_key IS NOT NULL`
-	case "PAYMENT_PROVIDER_RESUME":
-		resultSQL = `SELECT 1 FROM payment_provider_resume_executions WHERE approval_request_id=$1`
-	case "PAYMENT_PRODUCT_RESUME":
-		resultSQL = `SELECT 1 FROM payment_product_resume_executions WHERE approval_request_id=$1`
-	default:
+	if _, known := approvaleffect.AuthorityForCommand(commandType); !known {
 		return billingRecoveryResultObservation{}, ErrConflict
 	}
-	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM billing_approval_proof_claims WHERE approval_request_id=$1 AND authorization_event_id=$2 AND approval_epoch=$3 AND command_type=$4), EXISTS(`+resultSQL+`), transaction_timestamp()`,
-		requestID, eventID, epoch, commandType).Scan(&claimed, &succeeded, &observedAt)
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM billing_approval_proof_claims WHERE approval_request_id=$1 AND authorization_event_id=$2 AND approval_epoch=$3 AND command_type=$4), transaction_timestamp()`,
+		requestID, eventID, epoch, commandType).Scan(&claimed, &observedAt)
 	if err != nil {
 		return billingRecoveryResultObservation{}, err
 	}
-	if claimed && succeeded {
-		result, found, err := (&billingAuthorizationDomain{database: r.pool}).LookupAuthorizationResult(ctx,
+	// A claimed dispatch is necessary but never sufficient: the positive result
+	// must come from the same authoritative owner read the delivery path uses, so
+	// recovery and delivery can never disagree about what the domain committed.
+	if claimed {
+		result, found, err := (&billingAuthorizationDomain{repository: r, database: r.pool}).LookupAuthorizationResult(ctx,
 			ApprovalAuthorizationBinding{ApprovalRequestID: requestID, CommandType: commandType}, approvalencoding.AuthorizationEvent{})
-		if err != nil || !found || len(result.DomainResult) == 0 || len(result.LedgerReferences) == 0 {
-			return billingRecoveryResultObservation{}, ErrApprovalExecutionUnavailable
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return billingRecoveryResultObservation{}, err
+		}
+		if !found || len(result.DomainResult) == 0 || len(result.LedgerReferences) == 0 {
+			// Claimed but not yet provable: the caller must stay UNCONFIRMED and
+			// never treat this as a zero-effect proof.
+			return billingRecoveryResultObservation{State: "UNCONFIRMED", ObservedAt: observedAt.UTC()}, nil
+		}
+		// The legacy wallet closure additionally required a real ledger posting,
+		// not merely a POSTED adjustment, so keep that exact strength here.
+		if commandType == "WALLET_ADJUSTMENT" {
+			var postedWithJournal bool
+			if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM manual_adjustments WHERE approval_request_id=$1 AND status='POSTED' AND journal_entry_id IS NOT NULL AND execution_idempotency_key IS NOT NULL)`,
+				requestID).Scan(&postedWithJournal); err != nil {
+				return billingRecoveryResultObservation{}, err
+			}
+			if !postedWithJournal {
+				return billingRecoveryResultObservation{State: "UNCONFIRMED", ObservedAt: observedAt.UTC()}, nil
+			}
 		}
 		return billingRecoveryResultObservation{State: "SUCCEEDED", DomainResult: result.DomainResult,
 			LedgerReferences: result.LedgerReferences, ObservedAt: observedAt.UTC()}, nil

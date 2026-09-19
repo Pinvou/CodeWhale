@@ -407,6 +407,31 @@ JOIN account_approval_authorization.approval_delivery_states d ON d.approval_req
 	if _, err := accountConnection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
 		t.Fatal(err)
 	}
+	// The recovery authority must confirm the same committed result the delivery
+	// path accepted; a claimed but unprovable execution may only ever answer
+	// UNCONFIRMED (never a zero-effect proof).
+	recovery, err := billingRepository.ObserveBillingApprovalResult(ctx, requestID, eventID, route.ApprovalEpoch, "USAGE_SETTLEMENT_REPAIR")
+	if err != nil || recovery.State != "SUCCEEDED" || len(recovery.DomainResult) == 0 || len(recovery.LedgerReferences) == 0 {
+		t.Fatalf("cross-domain recovery result state=%s domain=%s ledger=%s err=%v", recovery.State, recovery.DomainResult, recovery.LedgerReferences, err)
+	}
+	var recoveryPayload struct {
+		CaseID               uuid.UUID `json:"case_id"`
+		JournalEntryID       uuid.UUID `json:"journal_entry_id"`
+		ExpectedMicrocredits int64     `json:"expected_microcredits"`
+		Status               string    `json:"status"`
+	}
+	var recoveryLedger struct {
+		JournalEntryID uuid.UUID `json:"journal_entry_id"`
+	}
+	if json.Unmarshal(recovery.DomainResult, &recoveryPayload) != nil || json.Unmarshal(recovery.LedgerReferences, &recoveryLedger) != nil ||
+		recoveryPayload.CaseID == uuid.Nil || recoveryPayload.ExpectedMicrocredits != 100 || recoveryPayload.Status != "SUCCEEDED" ||
+		recoveryLedger.JournalEntryID != recoveryPayload.JournalEntryID {
+		t.Fatalf("cross-domain recovery payload=%s ledger=%s", recovery.DomainResult, recovery.LedgerReferences)
+	}
+	// An unknown command type stays a definite refusal instead of a fake result.
+	if _, err := billingRepository.ObserveBillingApprovalResult(ctx, requestID, eventID, route.ApprovalEpoch, "FUTURE_REPAIR"); err == nil {
+		t.Fatal("an unregistered command must not produce a recovery result")
+	}
 	replay := &entitlementCrossDomainDelivery{raw: raw, id: eventID.String(), meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 1, NumDelivered: 3}}
 	consumer.Handle(ctx, replay)
 	if replay.ack != 1 {
