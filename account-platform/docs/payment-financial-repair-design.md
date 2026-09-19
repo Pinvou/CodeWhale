@@ -46,7 +46,7 @@
 |---|---|
 | Provider 证据行 | 至少一条 `payment_evidence` 满足：`provider_status` 表示成功、`merchant_order_no`、`provider_transaction_id`、`amount_fen`、`currency`、`provider_id`/`provider_version` 与订单/订单商品快照一致，`merge_result ∈ {RECORDED,DUPLICATE,MERGED}`（`REVIEW_REQUIRED` 拒绝） |
 | 订单状态 | `status='MANUAL_REVIEW'` 且 `fulfillment_status='MANUAL_REVIEW'`；`channel_transaction_id` 为空或等于冻结的 `provider_transaction_id` |
-| 内部未入账 | 订单无 `payment_transactions` 行、无可引用 package、无 `payment_order_repairs` 行 |
+| 内部未入账 | 订单不存在 `status IN ('PAID','LATE_PAID')` 或 `fulfillment_status='CREDITED'` 的交易、无可引用 package、无 `payment_order_repairs` 行；且存在恰好一条 `fulfillment_status='REVIEW_REQUIRED'` 的交易，其 `provider_transaction_id` 等于冻结交易号（该交易即订单进入 `MANUAL_REVIEW` 的来源，补记复用既有 repair 分支并产出 `REPAIR_CREDIT`） |
 | 无冲突事实 | 订单无 `refunds`/`chargebacks` 行，钱包存在且 `status='ACTIVE'`、`posted_microcredits>=0` |
 | 外部幂等引用 | 冻结 `provider_transaction_id` 作为外部幂等引用；同一交易号只能补记一次 |
 
@@ -123,7 +123,7 @@
 
 | 验收点 | 期望证据 |
 |---|---|
-| 正例补记 | 交易/package/lot/component/钱包/journal 与既有 `RepairReviewedOrder` 结果逐字段一致；审计行含审批联动列与 `wallet_balance_before/after` |
+| 正例补记 | 既有 `REVIEW_REQUIRED` 交易推进为已入账、package/lot/component/钱包与既有 `RepairReviewedOrder` 在同一状态下的结果逐字段一致；journal 为 `REPAIR_CREDIT`（引用 `repair-payment-transaction:`）；审计行含审批联动列与 `wallet_balance_before/after` |
 | 应收联动 | 钱包存在未结 `USAGE_OVERAGE` 应收时按既有顺序清偿并写 `CASH_RECHARGE_BASE` 分配；无应收时不产生分配 |
 | 证据门禁 | 无证据、证据与订单不一致、`merge_result='REVIEW_REQUIRED'`、证据缺 `provider_transaction_id` 全部 `PROOF_DENY` 且零写入 |
 | 状态门禁 | 非 `MANUAL_REVIEW`、已履约、已退款、存在拒付、钱包非 ACTIVE 全部失败关闭 |
