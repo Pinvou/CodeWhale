@@ -1380,7 +1380,14 @@ async fn run_scrape_search_with_endpoints(
 
     if provider == SearchProvider::Bing {
         check_policy(decider, BING_HOST)?;
-        let results = run_bing_search(&client, &query.query, max_results, endpoints.bing).await?;
+        let results = run_bing_search(
+            &client,
+            &query.query,
+            query.locale.as_deref(),
+            max_results,
+            endpoints.bing,
+        )
+        .await?;
         return Ok(BackendSearch {
             backend: BackendId::Bing,
             source: "bing".to_string(),
@@ -1391,8 +1398,12 @@ async fn run_scrape_search_with_endpoints(
         });
     }
 
-    let (url, duckduckgo_host) =
-        duckduckgo_search_url(context.search_base_url.as_deref(), &query.query)?;
+    let market = scrape_market(query.locale.as_deref(), &query.query);
+    let (url, duckduckgo_host) = duckduckgo_search_url(
+        context.search_base_url.as_deref(),
+        &query.query,
+        market.as_deref(),
+    )?;
     let allow_bing_fallback = endpoints
         .allow_bing_fallback
         .unwrap_or_else(|| duckduckgo_allows_bing_fallback(context.search_base_url.as_deref()));
@@ -1403,7 +1414,7 @@ async fn run_scrape_search_with_endpoints(
             "Accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
-        .header("Accept-Language", "en-US,en;q=0.5")
+        .header("Accept-Language", scrape_accept_language(market.as_deref()))
         .send()
         .await
         .map_err(|error| {
@@ -1458,7 +1469,15 @@ async fn run_scrape_search_with_endpoints(
     }
 
     check_policy(decider, BING_HOST)?;
-    match run_bing_search(&client, &query.query, max_results, endpoints.bing).await {
+    match run_bing_search(
+        &client,
+        &query.query,
+        query.locale.as_deref(),
+        max_results,
+        endpoints.bing,
+    )
+    .await
+    {
         Ok(results) if !results.is_empty() => {
             degraded.push(DegradedReason::ScrapeFallback {
                 from: BackendId::DuckDuckGo,
@@ -2044,22 +2063,100 @@ fn search_query_items(input: &Value) -> impl Iterator<Item = &Value> {
         .flat_map(|items| items.iter())
 }
 
+/// Whether `query` contains Han ideographs (unified ideographs plus
+/// Extension A). Kana and Hangul are deliberately excluded: this heuristic
+/// exists only to pick a Chinese market for the keyless Bing/DuckDuckGo
+/// scrapes when the model omits `locale`, and forcing Japanese or Korean
+/// queries into the zh-CN market would be worse than sending no market
+/// signal at all.
+fn query_contains_han(query: &str) -> bool {
+    query
+        .chars()
+        .any(|c| matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}'))
+}
+
+/// Market tag the scrape backends should request, or `None` to keep the
+/// historical no-market-signal request. An explicit locale wins; otherwise a
+/// Han-script query falls back to zh-CN because without any market hint (and
+/// with an English `Accept-Language`) Bing serves unrelated Japanese results
+/// for Chinese queries.
+fn scrape_market(locale: Option<&str>, query: &str) -> Option<String> {
+    locale
+        .map(str::to_string)
+        .or_else(|| query_contains_han(query).then(|| "zh-CN".to_string()))
+}
+
+/// `Accept-Language` matching [`scrape_market`]. Keeps the long-standing
+/// English default when no market was resolved so Latin-script requests stay
+/// byte-identical to the previous behavior.
+fn scrape_accept_language(market: Option<&str>) -> String {
+    match market {
+        None => "en-US,en;q=0.9".to_string(),
+        Some(market) => {
+            let primary = market
+                .split(['-', '_'])
+                .next()
+                .filter(|tag| !tag.is_empty())
+                .unwrap_or("en");
+            format!("{market},{primary};q=0.9,en;q=0.8")
+        }
+    }
+}
+
+/// Bing request adjustments for the resolved market: the `mkt`/`setlang`
+/// query parameters and the `Accept-Language` header value.
+fn scrape_locale_params(locale: Option<&str>, query: &str) -> (Vec<(String, String)>, String) {
+    let market = scrape_market(locale, query);
+    let accept_language = scrape_accept_language(market.as_deref());
+    let Some(market) = market else {
+        return (Vec::new(), accept_language);
+    };
+    let primary = market
+        .split(['-', '_'])
+        .next()
+        .filter(|tag| !tag.is_empty())
+        .unwrap_or("en");
+    // Bing expects `setlang` to carry a script tag for Chinese; default
+    // zh to Simplified because the heuristic that reaches this branch is
+    // Han-script driven.
+    let setlang = if primary.eq_ignore_ascii_case("zh") {
+        "zh-Hans"
+    } else {
+        primary
+    };
+    (
+        vec![
+            ("mkt".to_string(), market.clone()),
+            ("setlang".to_string(), setlang.to_string()),
+        ],
+        accept_language,
+    )
+}
+
 async fn run_bing_search(
     client: &reqwest::Client,
     query: &str,
+    locale: Option<&str>,
     max_results: usize,
     endpoint: &str,
 ) -> Result<Vec<WebSearchEntry>, ToolError> {
     let mut url = reqwest::Url::parse(endpoint)
         .map_err(|error| ToolError::invalid_input(format!("Invalid Bing endpoint: {error}")))?;
-    url.query_pairs_mut().append_pair("q", query);
+    let (extra_params, accept_language) = scrape_locale_params(locale, query);
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("q", query);
+        for (key, value) in &extra_params {
+            pairs.append_pair(key, value);
+        }
+    }
     let resp = client
         .get(url)
         .header(
             "Accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
-        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Accept-Language", accept_language)
         .send()
         .await
         .map_err(|e| ToolError::execution_failed(format!("Bing search request failed: {e}")))?;
@@ -2101,9 +2198,30 @@ fn web_search_entry_from_scraped(entry: ScrapedSearchResult) -> WebSearchEntry {
     }
 }
 
+/// Translate a `zh-CN`-style market tag into DuckDuckGo's `kl` region value.
+/// DuckDuckGo's HTML endpoints expect lowercase region-language codes from a
+/// fixed list (for example `cn-zh` or `us-en`), which is the reverse order of
+/// a BCP 47 tag like `zh-CN`. A value outside that list is treated as no
+/// region, so this best-effort reorder can only help, never hurt; custom
+/// DuckDuckGo-compatible services typically ignore `kl` entirely. Tags whose
+/// second subtag is not a two-letter region (scripts such as `zh-Hans`, or
+/// bare languages) pass through lowercased.
+fn ddg_region_param(market: &str) -> String {
+    let lowered = market.to_ascii_lowercase();
+    let segments: Vec<&str> = lowered.split(['-', '_']).collect();
+    let is_region = |tag: &str| tag.len() == 2 && tag.chars().all(|c| c.is_ascii_alphabetic());
+    match segments.as_slice() {
+        [primary, region] if !primary.is_empty() && is_region(region) => {
+            format!("{region}-{primary}")
+        }
+        _ => lowered,
+    }
+}
+
 fn duckduckgo_search_url(
     base_url: Option<&str>,
     query: &str,
+    market: Option<&str>,
 ) -> Result<(String, String), ToolError> {
     let raw = configured_search_base_url(base_url).unwrap_or(DUCKDUCKGO_ENDPOINT);
     let mut url = reqwest::Url::parse(raw).map_err(|err| {
@@ -2111,7 +2229,16 @@ fn duckduckgo_search_url(
             "Invalid DuckDuckGo-compatible search base_url: {err}"
         ))
     })?;
-    url.query_pairs_mut().append_pair("q", query);
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("q", query);
+        // DuckDuckGo HTML endpoints take the market hint as `kl`; see
+        // [`ddg_region_param`] for the region-language format translation.
+        // Custom DDG-compatible services simply ignore the extra parameter.
+        if let Some(market) = market {
+            pairs.append_pair("kl", &ddg_region_param(market));
+        }
+    }
     let host = url.host_str().ok_or_else(|| {
         ToolError::invalid_input("DuckDuckGo-compatible search base_url must include a host")
     })?;
@@ -2914,6 +3041,7 @@ mod tests {
         let (url, host) = duckduckgo_search_url(
             Some("https://search.internal.example/html/?region=us"),
             "rust async",
+            None,
         )
         .expect("custom duckduckgo-compatible url");
 
@@ -2921,6 +3049,103 @@ mod tests {
         assert_eq!(
             url,
             "https://search.internal.example/html/?region=us&q=rust+async"
+        );
+    }
+
+    #[test]
+    fn bing_locale_params_follow_explicit_locale() {
+        let (params, accept_language) = super::scrape_locale_params(Some("zh-CN"), "rust async");
+        assert_eq!(
+            params,
+            vec![
+                ("mkt".to_string(), "zh-CN".to_string()),
+                ("setlang".to_string(), "zh-Hans".to_string()),
+            ]
+        );
+        assert_eq!(accept_language, "zh-CN,zh;q=0.9,en;q=0.8");
+
+        let (params, accept_language) = super::scrape_locale_params(Some("en-US"), "rust async");
+        assert_eq!(
+            params,
+            vec![
+                ("mkt".to_string(), "en-US".to_string()),
+                ("setlang".to_string(), "en".to_string()),
+            ]
+        );
+        assert_eq!(accept_language, "en-US,en;q=0.9,en;q=0.8");
+    }
+
+    #[test]
+    fn bing_locale_params_fall_back_to_china_market_for_han_queries() {
+        // Without this fallback a locale-less Chinese query used to get no
+        // market hint plus an English Accept-Language, and Bing served
+        // unrelated Japanese results.
+        let (params, accept_language) = super::scrape_locale_params(None, "凹语言 编程");
+        assert_eq!(
+            params,
+            vec![
+                ("mkt".to_string(), "zh-CN".to_string()),
+                ("setlang".to_string(), "zh-Hans".to_string()),
+            ]
+        );
+        assert_eq!(accept_language, "zh-CN,zh;q=0.9,en;q=0.8");
+    }
+
+    #[test]
+    fn bing_locale_params_keep_english_default_without_locale_signal() {
+        let (params, accept_language) = super::scrape_locale_params(None, "rust async");
+        assert!(params.is_empty());
+        assert_eq!(accept_language, "en-US,en;q=0.9");
+    }
+
+    #[test]
+    fn han_detection_covers_han_only_and_ignores_other_cjk_scripts() {
+        assert!(super::query_contains_han("学 rust"));
+        assert!(super::query_contains_han("\u{3400}")); // Extension A
+        assert!(!super::query_contains_han("rust async 123"));
+        assert!(!super::query_contains_han("ルスト programming")); // Katakana
+        assert!(!super::query_contains_han("러스트 programming")); // Hangul
+    }
+
+    #[test]
+    fn duckduckgo_url_adds_kl_for_resolved_market() {
+        let (url, _) =
+            duckduckgo_search_url(None, "凹语言 编程", Some("zh-CN")).expect("duckduckgo url");
+        let parsed = reqwest::Url::parse(&url).expect("valid url");
+        assert_eq!(
+            parsed.query_pairs().find(|(key, _)| key == "kl").unwrap().1,
+            "cn-zh"
+        );
+
+        let (url, _) = duckduckgo_search_url(None, "rust async", None).expect("duckduckgo url");
+        let parsed = reqwest::Url::parse(&url).expect("valid url");
+        assert!(parsed.query_pairs().all(|(key, _)| key != "kl"));
+    }
+
+    #[test]
+    fn ddg_region_param_translates_to_region_language_order() {
+        // DuckDuckGo's kl list is lowercase region-language (`cn-zh`,
+        // `us-en`), the reverse of BCP 47 order.
+        assert_eq!(super::ddg_region_param("zh-CN"), "cn-zh");
+        assert_eq!(super::ddg_region_param("en_US"), "us-en");
+        assert_eq!(super::ddg_region_param("ja-JP"), "jp-ja");
+        // Script subtags and bare languages cannot name a region; pass
+        // through lowercased rather than guessing.
+        assert_eq!(super::ddg_region_param("zh-Hans"), "zh-hans");
+        assert_eq!(super::ddg_region_param("zh"), "zh");
+    }
+
+    #[test]
+    fn ddg_accept_language_unifies_with_bing_rule() {
+        assert_eq!(super::scrape_accept_language(None), "en-US,en;q=0.9");
+        assert_eq!(
+            super::scrape_accept_language(Some("zh-CN")),
+            "zh-CN,zh;q=0.9,en;q=0.8"
+        );
+        // Bare-language locale must not panic or emit an empty primary tag.
+        assert_eq!(
+            super::scrape_accept_language(Some("-CN")),
+            "-CN,en;q=0.9,en;q=0.8"
         );
     }
 
