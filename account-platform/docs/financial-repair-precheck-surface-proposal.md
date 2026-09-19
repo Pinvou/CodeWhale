@@ -51,6 +51,22 @@ Portal 表单只做渲染与提交，草稿投影由运维/联调人员用 Billi
 
 ## 8. 方案 A 的落地勘测（2026-09-20 补充，已核实路径）
 
+### 8.1 Account 代理端点的确切登记模板（已核实，下一片可直接照抄）
+
+`deploy/authorization-entrypoints.json` 的 `http_policies` 每条形如
+（示例取自既有 `POST /approval-requests`）：
+
+```json
+{ "source": "account-platform/internal/account/service.go", "receiver": "admin", "method": "POST",
+  "path": "/approval-command-prechecks", "scope": "platform", "strategy": "domain.approval-policy-v1" }
+```
+
+要点：`source` 必须是路由实际注册所在的 Go 文件；`receiver` 为 `admin`（管理端 group）；`path` 只写 group
+之后的相对路径；`scope: platform` 时覆盖门禁要求 `permissions` 中每个权限以 `platform.` 开头（本命令复用
+`platform.billing.repairs.request`）；`strategy` 必须匹配 `^(protocol|authenticated|domain|workload)\.[a-z0-9][a-z0-9.-]*$`。
+新增该条目后，`node scripts/check-account-platform-authorization-coverage.mjs` 的 HTTP 路由数从 **375 增至 376**，
+`test/contract/authorization-coverage-release-gate.test.mjs` 里的精确断言必须同步为 376，否则合同必红。
+
 - **可复用的装配入口已就绪**：七个命令的 proof 输入方法签名都很窄且无需新参数，
   `LedgerRepairProofInput(target, reasonCode)`、`ReceivableWriteOffProofInput(target)`、
   `PaymentFinancialRepairProofInput(target)`、`RefundExceptionRepairProofInput(target)`、
