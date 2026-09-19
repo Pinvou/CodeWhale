@@ -48,3 +48,22 @@ Portal 表单只做渲染与提交，草稿投影由运维/联调人员用 Billi
 ## 7. 记录
 
 - 2026-09-20 代理：登记本提案，等待范围决策；未实现、未新增权限、未新增路由。
+
+## 8. 方案 A 的落地勘测（2026-09-20 补充，已核实路径）
+
+- **可复用的装配入口已就绪**：七个命令的 proof 输入方法签名都很窄且无需新参数，
+  `LedgerRepairProofInput(target, reasonCode)`、`ReceivableWriteOffProofInput(target)`、
+  `PaymentFinancialRepairProofInput(target)`、`RefundExceptionRepairProofInput(target)`、
+  `ChargebackFinancialRepairProofInput(target)`、`ReconciliationFinancialRepairProofInput(target)`、
+  `UsageSettlementRepairProofInput(target)`（`internal/billing/*_repair*.go`）。端点只需把这些输入原样透传。
+- **新增权限的代价比预估更大**：内部权限不是集中在单个常量表，而是同时出现在
+  `deploy/helm/account-platform/templates/app-deployments.yaml`（`WORKLOAD_IDENTITY_RULES_JSON` 的 JSON-in-JSON）、
+  `deploy/compose/compose.model-token.yaml`（同一 JSON 的字符串形式）、
+  `internal/billing/approval_proof_test.go` 与 `internal/account/*_cross_domain_integration_test.go` 的环境夹具，
+  以及 `test/contract/model-token-deployment.test.mjs` 的**精确权限列表断言**。新增 `internal.billing.approval-precheck.read`
+  必须一次性同步这五处，否则对应合同/门禁必然红。
+- **因此的落地建议（二选一，需授权人确认）**：
+  (A1) 严格按 §2 新增独立只读权限，代价为上述五处部署清单与精确列表同步；
+  (A2) 预检端点在 Billing 侧复用既有 `internal.billing.approval-proof.read`（Account 服务身份本就持有、且同为只读投影），
+  仅新增路由与 `deploy/authorization-entrypoints.json` 条目，避免改部署清单与权限列表——治理上稍弱（读预检与出证明共用一个权限），
+  但改动面小得多。两者都需要再补 Account 代理端点与 Portal 表单/三语文案才能形成用户可用的闭环。
