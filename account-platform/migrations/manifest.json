@@ -1513,7 +1513,7 @@
       {
         "file": "000075_usage_loss_review_settled_state.up.sql",
         "version": 75,
-        "sha256": "da7cfa80b32f33a3b5226ab660b6c25869f8fa1a8164893fa7f8b599c07bb09b"
+        "sha256": "4deeb740bc2d94cd9865a7e0c531b434f662f258bcb35ffaff68eae651f4df31"
       },
       {
         "file": "000076_usage_settlement_repair_proof_claim_allowlist.down.sql",

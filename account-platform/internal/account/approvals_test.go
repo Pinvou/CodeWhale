@@ -56,10 +56,14 @@ func TestApprovalFingerprintCanonicalizesCriticalFinancialSnapshots(t *testing.T
 	}
 }
 
-func TestUnimplementedFinancialCommandCannotEnterApprovalLifecycle(t *testing.T) {
+// The eight financial repair commands are all executable now (each one still
+// gates on its live Billing activation), so the old "unimplemented command" case
+// no longer exists. What must keep failing closed is any command that is not a
+// registered approval-required policy at all.
+func TestUnregisteredCommandCannotEnterApprovalLifecycle(t *testing.T) {
 	draft := approvalTestDraft()
-	draft.CommandType = "USAGE_SETTLEMENT_REPAIR"
+	draft.CommandType = "FUTURE_FINANCIAL_REPAIR"
 	if _, _, _, err := normalizeApprovalDraft(draft); err == nil {
-		t.Fatal("unimplemented domain executor must fail before draft creation")
+		t.Fatal("an unregistered command must fail before draft creation")
 	}
 }
