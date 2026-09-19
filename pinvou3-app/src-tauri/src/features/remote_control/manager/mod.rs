@@ -95,9 +95,10 @@ pub(crate) const PRODUCTION_PROFILE: RelayEndpointProfile = RelayEndpointProfile
     id: "production",
     public_base_url: DEFAULT_PUBLIC_BASE_URL,
     relay_ws_url: DEFAULT_RELAY_WS_URL,
-    // 生产签名公钥由部署侧提供后填入（留空表示"尚未随包内置"，此时仅能靠环境变量配置）。
-    signing_key_id: "",
-    signing_public_key_b64: "",
+    // 生产 Relay 的 Ed25519 签名公钥（2026-09-19 随生产部署生成并内置；私钥只存在于
+    // 生产部署环境的 /etc/pinvou-remote-relay-controller.env，0600）。
+    signing_key_id: "prod-relay-key-1",
+    signing_public_key_b64: "nGlRK79H+YdNVhmZOwkI2T83uhiEBqfZeFbMrJ28LQM=",
 };
 
 pub(crate) const TEST_PROFILE: RelayEndpointProfile = RelayEndpointProfile {
@@ -3282,6 +3283,15 @@ mod tests {
         assert_eq!(active_endpoint_profile().id, "production");
         assert_eq!(PRODUCTION_PROFILE.public_base_url, DEFAULT_PUBLIC_BASE_URL);
         assert_eq!(PRODUCTION_PROFILE.relay_ws_url, DEFAULT_RELAY_WS_URL);
+        // 生产信任根也必须随包内置且格式合法（否则线上配对会 relay_trust_unconfigured）。
+        assert!(!PRODUCTION_PROFILE.signing_key_id.is_empty());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(PRODUCTION_PROFILE.signing_public_key_b64)
+                .expect("production public key must be base64")
+                .len(),
+            32
+        );
 
         let test_profile = endpoint_profile_by_id("test").expect("test profile must exist");
         assert_eq!(
