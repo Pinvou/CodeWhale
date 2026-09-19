@@ -8454,7 +8454,7 @@ impl ToolSpec for AgentTool {
                 "until": {
                     "type": "string",
                     "enum": ["completion", "all", "activity"],
-                    "description": "For action=wait. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
+                    "description": "For action=wait. A wait blocks until one child settles or the timeout (default 30s, max 120s) elapses; on timeout the receipt reports timed_out=true with any already-settled children, and full results still arrive as completion sentinels. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
                 },
                 "agent_id": {
                     "type": "string",
