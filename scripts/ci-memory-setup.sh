@@ -34,27 +34,31 @@
 #      stuck sysfs write) is uninterruptible; the workflow-side
 #      `timeout 240` + non-fatal wrapper is the last line there, and
 #      PINVOU3_CI_DISABLE_ZRAM=1 is the standing opt-out.
-#   2. Opt-in /mnt/swapfile (priority 10), only with
-#      PINVOU3_CI_ENABLE_DISK_SWAP=1, for self-hosted runners where /mnt is
-#      a real second disk. The default path never fallocates and never
-#      swapoff/rm's the image-provided swap (/swapfile, ~3G, left as is).
+#   2. /mnt/swapfile (priority 10), 8 GiB, provisioned on EVERY runner:
+#      swap is mandatory, not opt-in (2026-09-19 decision) — with the zram
+#      pool hard-capped at 70% of RAM, this is the only unbounded overflow
+#      layer. The safety guards stay: /mnt is skipped when tmpfs (RAM
+#      backed) or too small, the file is capped at 60% of actual free
+#      space, and an image-provided /mnt/swapfile is rebuilt in place. On
+#      the single-disk hosted images this costs 8G of build disk — a
+#      deliberate trade for the memory ceiling.
 #   3. Image swapfile as last resort: only when the runner came up with
 #      zero active swap (probe data: some ubuntu-22.04 boots ship /swapfile
-#      but leave it inactive), activate it so a zram failure degrades to
-#      "plain swap" instead of "7.8 GiB RAM and nothing else".
+#      but leave it inactive), activate it so a zram or disk-swap failure
+#      degrades to "plain swap" instead of "7.8 GiB RAM and nothing else".
 #   4. zswap in front of whatever swap remains: enabled only when no
 #      /dev/zram swap is active, and disabled again when zram is active
 #      (stock Ubuntu kernels ship zswap enabled by default), so the
 #      "compress in RAM first" layer exists exactly once.
 #
-# Environment switches (both survive the workflow wrappers'
+# Environment switches (it survives the workflow wrappers'
 # `sudo --preserve-env` alongside GITHUB_ACTIONS; sudo env_reset would
-# otherwise strip them from the job env, silently no-op'ing the opt-out):
+# otherwise strip it from the job env, silently no-op'ing the opt-out):
 #   PINVOU3_CI_DISABLE_ZRAM=1      skip zram entirely (explicit opt-out for
 #                                  future incidents). Replaces the old
 #                                  PINVOU3_CI_ENABLE_ZRAM opt-in; zram is
-#                                  now default-on.
-#   PINVOU3_CI_ENABLE_DISK_SWAP=1  additionally create /mnt/swapfile.
+#                                  now default-on. There is no disk-swap
+#                                  switch: the /mnt swapfile is mandatory.
 #
 # Kernel tunables (each knob independent, failure only warns):
 #   vm.swappiness=130 (>=100 shifts reclaim towards anonymous pages, i.e.
@@ -263,9 +267,10 @@ setup_zram() {
   return 0
 }
 
-# Opt-in disk swap (PINVOU3_CI_ENABLE_DISK_SWAP=1) for self-hosted runners
-# where /mnt is a real second disk. Never runs on hosted runners: there /
-# and /mnt share one ext4, so this file would shrink the build disk.
+# Mandatory disk swap: the 8 GiB /mnt/swapfile is the unbounded overflow
+# layer beyond the zram pool cap and is provisioned on every runner (no
+# opt-in switch since 2026-09-19). On hosted images / and /mnt share one
+# ext4, so the guards below keep the file from taking the runner down.
 setup_disk_swap() {
   # /mnt safety checks are load bearing: on images where /mnt is tmpfs
   # (RAM backed) or has less free space than the requested swapfile,
@@ -378,12 +383,12 @@ else
   warn "zram layer unavailable; continuing with the remaining swap layers"
 fi
 
-if [[ ${PINVOU3_CI_ENABLE_DISK_SWAP:-0} == 1 ]]; then
-  log "PINVOU3_CI_ENABLE_DISK_SWAP=1: provisioning the opt-in /mnt disk swap"
-  setup_disk_swap
-else
-  log "disk swap on /mnt skipped by default (hosted / and /mnt share one disk; set PINVOU3_CI_ENABLE_DISK_SWAP=1 on real dual-disk runners)"
-fi
+# Disk swap is mandatory (2026-09-19): the 8G /mnt swapfile is the only
+# unbounded overflow beyond the 70%-capped zram pool, so no opt-in switch
+# remains. setup_disk_swap's guards still skip RAM-backed or nearly-full
+# /mnt instead of taking the runner agent down.
+log "provisioning the mandatory /mnt disk swap"
+setup_disk_swap
 
 if swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'; then
   # Keep the "compress in RAM first" layer to exactly one: stock Ubuntu
