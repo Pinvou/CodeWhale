@@ -174,6 +174,22 @@
       return invoke("desktop_remote_controlled_status", {});
     }
 
+    /**
+     * 随包内置的「服务端点」profile 列表（生产/测试）。用户不需要再配置
+     * PINVOU_REMOTE_* 环境变量即可在应用内切换。
+     */
+    function endpointProfiles() {
+      ensureAvailable();
+      return invoke("desktop_remote_endpoint_profiles");
+    }
+
+    function setEndpointProfile(profileId) {
+      ensureAvailable();
+      return invoke("desktop_remote_set_endpoint_profile", {
+        profile: String(profileId || ""),
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
     function controlledListWorkspaces() {
       ensureAvailable();
       return invoke("desktop_remote_controlled_list_workspaces", {});
@@ -623,6 +639,8 @@
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
       controlledStatus: controlledStatus,
+      endpointProfiles: endpointProfiles,
+      setEndpointProfile: setEndpointProfile,
       controlledListWorkspaces: controlledListWorkspaces,
       controlledAuthorizeWorkspace: controlledAuthorizeWorkspace,
       controllerConnect: controllerConnect,

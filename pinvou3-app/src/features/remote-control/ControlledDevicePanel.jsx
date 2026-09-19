@@ -77,6 +77,8 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
+  const [endpointProfiles, setEndpointProfiles] = useState([]);
+  const [endpointId, setEndpointId] = useState(null);
   const liveRef = useRef(null);
 
   const active = ACTIVE_STATUSES.includes(status);
@@ -92,6 +94,24 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     const timer = setInterval(() => setNow(Date.now()), CODE_TICK_MS);
     return () => clearInterval(timer);
   }, [device.expiresAtMs]);
+
+  // 随包内置的「服务端点」列表：生产/测试 profile 都自带地址与信任根，
+  // 用户不需要配置环境变量即可切换。
+  useEffect(() => {
+    if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return undefined;
+    let cancelled = false;
+    Promise.resolve(bridge.desktopRemoteControl.endpointProfiles())
+      .then((profiles) => {
+        if (cancelled || !Array.isArray(profiles)) return;
+        setEndpointProfiles(profiles);
+        const active = profiles.find((profile) => profile && profile.active);
+        setEndpointId((current) => current || (active && active.id) || (profiles[0] && profiles[0].id) || null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const endpointLabelKey = (id) => `endpoint${String(id || '').charAt(0).toUpperCase()}${String(id || '').slice(1)}`;
 
   const run = async (name, action) => {
     if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return;
@@ -191,6 +211,31 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         <span>{copy.modelSource}</span>
         <span>{copy.modelSourceDevice}</span>
       </div>
+
+      {endpointProfiles.length > 0 && (
+        <div className="settings-row">
+          <label htmlFor="controlled-device-endpoint">{copy.endpointLabel}</label>
+          <select
+            id="controlled-device-endpoint"
+            value={endpointId || ''}
+            disabled={busy === 'endpoint'}
+            onChange={(event) => {
+              const next = event.target.value;
+              setEndpointId(next);
+              run('endpoint', (remote) => remote.setEndpointProfile(next));
+            }}
+          >
+            {endpointProfiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {copy[endpointLabelKey(profile.id)] || profile.id}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {endpointProfiles.length > 0 && (
+        <p className="settings-hint">{copy.endpointHint}</p>
+      )}
 
       <h4>{copy.workspacesTitle}</h4>
       {workspaces.length === 0 ? (
