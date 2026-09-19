@@ -118,7 +118,7 @@
 
 ## 10. 迁移、N/N-1 与回滚
 
-- 迁移只前向追加：新增 `receivable_write_off_cases`（下一个可用 Billing 前向编号，当前为 `000061`），**不改** `receivables`/`receivable_allocations`/`wallets` 的列与 CHECK，不改 `000025/000045/000054/000060`。
+- 迁移只前向追加：新增 `receivable_write_off_cases`（编号取**实现时**的下一个可用 Billing 前向编号，冻结基线为 `000061`，而 `000061` 已被 `ledger_repair_cases` 占用，故实现时应顺延），**不改** `receivables`/`receivable_allocations`/`wallets` 的列与 CHECK，不改 `000025/000045/000054/000060`。
 - N/N-1：先部署可读新表的 Billing，再部署 proof 端与执行器/消费者，最后业务页；旧客户端与旧 writer 行为不变（本命令未激活时不产生任何新行）。
 - 回滚：只允许停止消费者、把 activation 行翻回 `INACTIVE`；已产生的 case/allocation/journal 一律保留可读，禁止破坏性 down。
 - 未通过 GSA-38～40 且未取得独立生产授权前，不部署、不激活。
