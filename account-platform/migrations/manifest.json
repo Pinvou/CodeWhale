@@ -1294,6 +1294,16 @@
         "file": "000060_repair_journal_and_receivable_enums.up.sql",
         "version": 60,
         "sha256": "159061bfd00cd057249247e292a5aaa96242becd506f845731b866c0c10c8bfb"
+      },
+      {
+        "file": "000061_ledger_repair_cases.down.sql",
+        "version": 61,
+        "sha256": "e3129248d40a93b261024595e3cabe674c73b556fc7cdfaac18c6c86aba25374"
+      },
+      {
+        "file": "000061_ledger_repair_cases.up.sql",
+        "version": 61,
+        "sha256": "4608ab7aecb7acee194b201f2ef455d2561c87895cd88c7c88cab98893ea9d3a"
       }
     ],
     "payment-simulator": [
