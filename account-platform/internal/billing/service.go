@@ -95,6 +95,11 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
 	protected.GET("/internal/v1/approval-command-activations", serviceauth.Require("internal.billing.approval-activation.read"), httpserver.AdaptFunc(s.approvalCommandActivations))
 	protected.POST("/internal/v1/approval-command-proofs", serviceauth.Require("internal.billing.approval-proof.read"), httpserver.AdaptFunc(s.internalBillingApprovalProof))
+	// The read-only precheck hands the Portal the same closed owner projection the
+	// proof authority would recompute, so the business page never derives facts.
+	// It reuses the proof-read permission (same caller, same read-only semantics)
+	// instead of widening the deployed workload permission set.
+	protected.POST("/internal/v1/approval-command-prechecks", serviceauth.Require("internal.billing.approval-proof.read"), httpserver.AdaptFunc(s.internalBillingApprovalPrecheck))
 	protected.GET("/internal/v1/approval-effects/:approval_request_id", serviceauth.Require("internal.billing.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	protected.GET("/internal/v1/approval-recovery/results/:approval_request_id", serviceauth.Require("internal.billing.approval-result.read"), httpserver.AdaptFunc(s.billingApprovalRecoveryResult))
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
