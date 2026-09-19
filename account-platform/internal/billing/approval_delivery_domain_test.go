@@ -168,12 +168,17 @@ type authorizationExecutionRepositoryStub struct {
 	ledgerRepairErr                 error
 	ledgerRunErr                    error
 	ledgerInput                     LedgerRepairExecutionInput
+	writeOff                        ReceivableWriteOffResult
+	writeOffErr                     error
+	writeOffRunErr                  error
+	writeOffInput                   ReceivableWriteOffExecutionInput
 	activations                     ApprovalCommandActivationSnapshot
 	activationsErr                  error
 	adjustmentRuns                  int
 	providerRuns, productRuns       int
 	entitlementRuns                 int
 	ledgerRuns                      int
+	writeOffRuns                    int
 }
 
 func (s *authorizationExecutionRepositoryStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
@@ -230,6 +235,19 @@ func (s *authorizationExecutionRepositoryStub) ApplyLedgerRepair(_ context.Conte
 		return LedgerRepairResult{}, s.ledgerRunErr
 	}
 	return s.ledgerRepair, nil
+}
+
+func (s *authorizationExecutionRepositoryStub) ReceivableWriteOffForRequest(context.Context, uuid.UUID) (ReceivableWriteOffResult, error) {
+	return s.writeOff, s.writeOffErr
+}
+
+func (s *authorizationExecutionRepositoryStub) ApplyReceivableWriteOff(_ context.Context, input ReceivableWriteOffExecutionInput) (ReceivableWriteOffResult, error) {
+	s.writeOffRuns++
+	s.writeOffInput = input
+	if s.writeOffRunErr != nil {
+		return ReceivableWriteOffResult{}, s.writeOffRunErr
+	}
+	return s.writeOff, nil
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {

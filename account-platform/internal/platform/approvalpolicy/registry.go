@@ -47,7 +47,7 @@ var policies = buildPolicies()
 var executableApprovalCommands = map[string]struct{}{
 	"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}, "PAYMENT_PRODUCT_RESUME": {},
 	"TOKEN_MODEL_LIFECYCLE_CHANGE": {}, "TOKEN_MODEL_CATALOG_ROLLBACK": {}, "TOKEN_CREDENTIAL_REVOKE": {},
-	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {}, "LEDGER_REPAIR": {},
+	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {}, "LEDGER_REPAIR": {}, "RECEIVABLE_WRITE_OFF": {},
 }
 
 func buildPolicies() map[string]Policy {

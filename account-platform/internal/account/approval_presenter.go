@@ -109,6 +109,24 @@ type approvalLedgerRepairSummary struct {
 	ReasonCode           string    `json:"reason_code"`
 }
 
+// approvalReceivableWriteOffSummary is the closed read-only projection of the
+// receivable write-off command: only the target receivable, the frozen owner
+// amounts and the fixed reason code are presented, never caller-supplied
+// accounts or free text. Settled amounts are shown as the resolved total, never
+// as received cash.
+type approvalReceivableWriteOffSummary struct {
+	ReceivableID                 uuid.UUID `json:"receivable_id"`
+	SourceType                   string    `json:"source_type"`
+	SourceReference              string    `json:"source_reference"`
+	OriginalMicrocredits         string    `json:"original_microcredits"`
+	SettledMicrocredits          string    `json:"settled_microcredits"`
+	OutstandingMicrocredits      string    `json:"outstanding_microcredits"`
+	WriteOffMicrocredits         string    `json:"write_off_microcredits"`
+	WalletReceivableMicrocredits string    `json:"wallet_receivable_microcredits"`
+	FactsDigest                  string    `json:"facts_digest"`
+	ReasonCode                   string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -118,6 +136,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 		return policyVersion == 2 && snapshotVersion == 2
 	case "LEDGER_REPAIR":
+		return policyVersion == 1 && snapshotVersion == 1
+	case "RECEIVABLE_WRITE_OFF":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
@@ -210,6 +230,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalLedgerRepairSummary{TargetPostingID: id}
+	case "RECEIVABLE_WRITE_OFF":
+		if item.TargetResourceType != "RECEIVABLE" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalReceivableWriteOffSummary{ReceivableID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -270,12 +299,23 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			PackageID              uuid.UUID `json:"package_id"`
 			TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
 			TargetPostingID        uuid.UUID `json:"target_posting_id"`
+			ReceivableID           uuid.UUID `json:"receivable_id"`
 			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
 		Critical struct {
 			EntryType        string `json:"entry_type"`
 			PostingSetDigest string `json:"posting_set_digest"`
+			FactsDigest      string `json:"facts_digest"`
 		} `json:"critical_resource_versions"`
+		Financial struct {
+			SourceType                   string `json:"source_type"`
+			SourceReference              string `json:"source_reference"`
+			OriginalMicrocredits         string `json:"original_microcredits"`
+			SettledMicrocredits          string `json:"settled_microcredits"`
+			OutstandingMicrocredits      string `json:"outstanding_microcredits"`
+			WriteOffMicrocredits         string `json:"write_off_microcredits"`
+			WalletReceivableMicrocredits string `json:"wallet_receivable_microcredits"`
+		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
 		return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
@@ -314,6 +354,22 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.EntryType = proof.Critical.EntryType
 		target.AmountMicrocredits = proof.Normalized.AmountMicrocredits
 		target.PostingSetDigest = proof.Critical.PostingSetDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalReceivableWriteOffSummary:
+		if proof.Normalized.ReceivableID != target.ReceivableID || !approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			proof.Financial.SourceType != "USAGE_OVERAGE" || proof.Financial.SourceReference == "" ||
+			proof.Normalized.ReasonCode != "APPROVED_RECEIVABLE_WRITE_OFF" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.SourceType = proof.Financial.SourceType
+		target.SourceReference = proof.Financial.SourceReference
+		target.OriginalMicrocredits = proof.Financial.OriginalMicrocredits
+		target.SettledMicrocredits = proof.Financial.SettledMicrocredits
+		target.OutstandingMicrocredits = proof.Financial.OutstandingMicrocredits
+		target.WriteOffMicrocredits = proof.Financial.WriteOffMicrocredits
+		target.WalletReceivableMicrocredits = proof.Financial.WalletReceivableMicrocredits
+		target.FactsDigest = proof.Critical.FactsDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target
 	default:

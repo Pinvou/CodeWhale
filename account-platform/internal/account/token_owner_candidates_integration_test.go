@@ -428,14 +428,14 @@ func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	repository, connection, _, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
-	if latest := loaded[len(loaded)-1]; latest.Version != 71 {
-		t.Fatalf("latest account migration=%d, want 71", latest.Version)
+	if latest := loaded[len(loaded)-1]; latest.Version != 72 {
+		t.Fatalf("latest account migration=%d, want 72", latest.Version)
 	}
 	var sessionUser, currentUser string
 	var latestVersion int64
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT max(version) FROM schema_migrations)`).
 		Scan(&sessionUser, &currentUser, &latestVersion); err != nil || sessionUser != "account_migrator" ||
-		currentUser != "account_service" || latestVersion != 71 {
+		currentUser != "account_service" || latestVersion != 72 {
 		t.Fatalf("migration identity session=%q current=%q version=%d err=%v", sessionUser, currentUser, latestVersion, err)
 	}
 	var policyVersion int64
@@ -476,6 +476,22 @@ account_approval_authorization.authorization_consumer_mapping_allows('billing-le
 		Scan(&ledgerRepairDurable, &ledgerRepairProofWire, &ledgerRepairLegacyWire); err != nil ||
 		ledgerRepairDurable != "billing-ledger-repair-executor-p1-v1" || !ledgerRepairProofWire || ledgerRepairLegacyWire {
 		t.Fatalf("ledger repair consumer route durable=%q proof=%v legacy=%v err=%v", ledgerRepairDurable, ledgerRepairProofWire, ledgerRepairLegacyWire, err)
+	}
+	// RECEIVABLE_WRITE_OFF joins the dedicated routing with its original v1
+	// policy under the same proof-era-only wire rule.
+	var writeOffLegacy *string
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('RECEIVABLE_WRITE_OFF',1,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&writeOffLegacy); err != nil || writeOffLegacy != nil {
+		t.Fatalf("legacy receivable write-off route=%v err=%v", writeOffLegacy, err)
+	}
+	var writeOffDurable string
+	var writeOffProofWire, writeOffLegacyWire bool
+	if err := connection.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_route_durable('RECEIVABLE_WRITE_OFF',1,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-receivable-write-off-executor-p1-v1','billing-command-executor','RECEIVABLE_WRITE_OFF',1,'billing-command-executor','APPROVAL_RFC8785_DECIMAL_V1'),
+account_approval_authorization.authorization_consumer_mapping_allows('billing-receivable-write-off-executor-p1-v1','billing-command-executor','RECEIVABLE_WRITE_OFF',1,'billing-command-executor','LEGACY_TYPED_V1')`).
+		Scan(&writeOffDurable, &writeOffProofWire, &writeOffLegacyWire); err != nil ||
+		writeOffDurable != "billing-receivable-write-off-executor-p1-v1" || !writeOffProofWire || writeOffLegacyWire {
+		t.Fatalf("receivable write-off consumer route durable=%q proof=%v legacy=%v err=%v", writeOffDurable, writeOffProofWire, writeOffLegacyWire, err)
 	}
 	if _, err := connection.Exec(ctx, `RESET ROLE; SET ROLE account_service`); err != nil {
 		t.Fatal(err)

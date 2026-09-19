@@ -121,17 +121,24 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	receivableWriteOffConsumerEnabled, err := optionalBooleanEnvironment("BILLING_RECEIVABLE_WRITE_OFF_CONSUMER_ENABLED", false)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var approvalConsumerResources *events.ApprovalConsumerResourceBinding
 	// One verified receipt set covers every dedicated Billing durable, so the
 	// enabled switches only select which startup contract names a missing or
 	// untrusted binding. The entitlement code keeps precedence when both are on.
-	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled {
+	if entitlementConsumerEnabled || ledgerRepairConsumerEnabled || receivableWriteOffConsumerEnabled {
 		approvalConsumerResources, err = billingApprovalConsumerResources(time.Now().UTC())
 		if err != nil && entitlementConsumerEnabled {
 			log.Fatal("BILLING_ENTITLEMENT_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
-		if err != nil {
+		if err != nil && ledgerRepairConsumerEnabled {
 			log.Fatal("BILLING_LEDGER_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		if err != nil {
+			log.Fatal("BILLING_RECEIVABLE_WRITE_OFF_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 	}
 	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor", events.NATSConfig{Environment: cfg.Environment, CAFile: os.Getenv("NATS_CA_FILE"), ApprovalConsumerResources: approvalConsumerResources})
@@ -169,6 +176,17 @@ func main() {
 			log.Fatal("BILLING_LEDGER_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE")
 		}
 		defer stopLedgerRepairConsumer()
+	}
+	if receivableWriteOffConsumerEnabled {
+		receivableWriteOffConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-receivable-write-off-executor-p1-v1")
+		if err != nil {
+			log.Fatal(err)
+		}
+		stopReceivableWriteOffConsumer, err := broker.ConsumeAuthorization(workerContext, "billing-receivable-write-off-executor-p1-v1", receivableWriteOffConsumer.Handle)
+		if err != nil {
+			log.Fatal("BILLING_RECEIVABLE_WRITE_OFF_CONSUMER_RESOURCES_UNAVAILABLE")
+		}
+		defer stopReceivableWriteOffConsumer()
 	}
 	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
 		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)

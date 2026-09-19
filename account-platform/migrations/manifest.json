@@ -712,6 +712,16 @@
         "file": "000071_ledger_repair_consumer_route.up.sql",
         "version": 71,
         "sha256": "9fea6a910059d525adf410a414fcb868d3452e9d37d17be21110f4a71da18ecf"
+      },
+      {
+        "file": "000072_receivable_write_off_consumer_route.down.sql",
+        "version": 72,
+        "sha256": "03d74b784a8c26dd653e2f0826eb955b5c5b514b804adfafaaa48402f23d93b8"
+      },
+      {
+        "file": "000072_receivable_write_off_consumer_route.up.sql",
+        "version": 72,
+        "sha256": "3ae1bb2d55aebc40bed95fc0dad748039fe0507a525609e2a4c36eb056debcb2"
       }
     ],
     "billing": [

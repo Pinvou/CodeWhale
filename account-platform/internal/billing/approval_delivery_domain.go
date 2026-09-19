@@ -33,6 +33,8 @@ type billingAuthorizationExecutionRepository interface {
 	ExecuteEntitlementComponentCorrection(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string, entitlementCorrectionFrozenFacts) (EntitlementCorrectionResult, error)
 	LedgerRepairForRequest(context.Context, uuid.UUID) (LedgerRepairResult, error)
 	ApplyLedgerRepair(context.Context, LedgerRepairExecutionInput) (LedgerRepairResult, error)
+	ReceivableWriteOffForRequest(context.Context, uuid.UUID) (ReceivableWriteOffResult, error)
+	ApplyReceivableWriteOff(context.Context, ReceivableWriteOffExecutionInput) (ReceivableWriteOffResult, error)
 }
 
 func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain {
@@ -134,6 +136,23 @@ func (domain *billingAuthorizationDomain) LookupAuthorizationResult(ctx context.
 		}
 		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
 		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
+	case receivableWriteOffCommand:
+		if domain.repository == nil {
+			return authorizationDomainResult{}, false, ErrApprovalExecutionUnavailable
+		}
+		result, err := domain.repository.ReceivableWriteOffForRequest(ctx, binding.ApprovalRequestID)
+		if errors.Is(err, ErrNotFound) {
+			return authorizationDomainResult{}, false, nil
+		}
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return authorizationDomainResult{}, false, err
+		}
+		ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+		return authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}, true, nil
 	default:
 		return authorizationDomainResult{}, false, ErrConflict
 	}
@@ -175,6 +194,8 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return domain.executeEntitlementCorrection(ctx, binding, event, command)
 	case ledgerRepairCommand:
 		return domain.executeLedgerRepair(ctx, binding, event, command)
+	case receivableWriteOffCommand:
+		return domain.executeReceivableWriteOff(ctx, binding, event, command)
 	default:
 		return authorizationDomainAttempt{StableFailureCode: "COMMAND_MAPPING_INVALID", FailureIsDefinite: true}
 	}
@@ -387,7 +408,7 @@ func (domain *billingAuthorizationDomain) executeLedgerRepair(ctx context.Contex
 	if err != nil {
 		return authorizationDomainAttempt{}
 	}
-	active, ok := activeLedgerRepairActivation(snapshot)
+	active, ok := findActiveAuthorizationCommand(snapshot, ledgerRepairCommand)
 	if !ok || active.PolicyVersion != 1 || active.SnapshotSchemaVersion != 1 {
 		// A command that is not ACTIVE at policy v1 / schema v1 can never
 		// produce a domain effect; the consumer reports the frozen failure
@@ -421,9 +442,102 @@ func (domain *billingAuthorizationDomain) executeLedgerRepair(ctx context.Contex
 	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
 }
 
-func activeLedgerRepairActivation(snapshot ApprovalCommandActivationSnapshot) (ApprovalCommandActivation, bool) {
+// executeReceivableWriteOff applies one consumed approved write-off. The
+// approval snapshot carries only the wire-visible owner projection; the owner
+// recomputes every fact and the facts digest again inside the execution
+// transaction, so nothing the consumer presents can become a domain fact.
+func (domain *billingAuthorizationDomain) executeReceivableWriteOff(ctx context.Context, binding ApprovalAuthorizationBinding,
+	event approvalencoding.AuthorizationEvent, command ApprovedCommand) authorizationDomainAttempt {
+	if domain.repository == nil {
+		return authorizationDomainAttempt{}
+	}
+	var normalized struct {
+		ReceivableID              uuid.UUID `json:"receivable_id"`
+		WriteOffMicrocredits      int64     `json:"write_off_microcredits"`
+		ExpectedReceivableVersion int64     `json:"expected_receivable_version"`
+		ReasonCode                string    `json:"reason_code"`
+	}
+	var critical struct {
+		ReceivableVersion int64  `json:"receivable_version"`
+		FactsDigest       string `json:"facts_digest"`
+		PolicyVersion     int64  `json:"policy_version"`
+	}
+	var financial struct {
+		WriteOffMicrocredits         int64  `json:"write_off_microcredits"`
+		OutstandingMicrocredits      int64  `json:"outstanding_microcredits"`
+		SettledMicrocredits          int64  `json:"settled_microcredits"`
+		OriginalMicrocredits         int64  `json:"original_microcredits"`
+		SourceType                   string `json:"source_type"`
+		SourceReference              string `json:"source_reference"`
+		WalletReceivableMicrocredits int64  `json:"wallet_receivable_microcredits"`
+	}
+	if json.Unmarshal(event.NormalizedCommand, &normalized) != nil || json.Unmarshal(event.CriticalResourceVersions, &critical) != nil ||
+		json.Unmarshal(event.FinancialSnapshot, &financial) != nil {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if normalized.ReceivableID == uuid.Nil || normalized.WriteOffMicrocredits < 1 || normalized.ExpectedReceivableVersion < 1 ||
+		strings.TrimSpace(normalized.ReasonCode) != receivableWriteOffReason ||
+		critical.ReceivableVersion != normalized.ExpectedReceivableVersion || critical.PolicyVersion != 1 || !validHexDigest(critical.FactsDigest) ||
+		financial.WriteOffMicrocredits != normalized.WriteOffMicrocredits || financial.OutstandingMicrocredits < normalized.WriteOffMicrocredits ||
+		financial.SettledMicrocredits < 0 || financial.OriginalMicrocredits < financial.OutstandingMicrocredits ||
+		financial.SourceType != "USAGE_OVERAGE" || strings.TrimSpace(financial.SourceReference) == "" ||
+		financial.WalletReceivableMicrocredits < normalized.WriteOffMicrocredits {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	if event.CommandType != receivableWriteOffCommand || event.TargetResourceType != "RECEIVABLE" ||
+		event.TargetResourceID != normalized.ReceivableID.String() ||
+		command.TargetResourceType != event.TargetResourceType || command.TargetResourceID != event.TargetResourceID ||
+		!sameRawJSON(event.NormalizedCommand, command.NormalizedCommand) ||
+		!sameRawJSON(event.CriticalResourceVersions, command.CriticalResourceVersions) ||
+		!sameRawJSON(event.FinancialSnapshot, command.FinancialSnapshot) ||
+		event.ApprovalRequestID != binding.ApprovalRequestID || command.ApprovalRequestID != binding.ApprovalRequestID ||
+		event.EventID != binding.EventID || event.ApprovalControlEpoch != binding.ApprovalEpoch ||
+		event.ExecutorIdentity != billingApprovalExecutorIdentity || command.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		binding.ExecutorIdentity != billingApprovalExecutorIdentity ||
+		event.PolicyVersion != 1 || command.PolicyVersion != 1 || binding.PolicyVersion != 1 ||
+		!validIndependentApproval(command.RequesterUserID, command.ApproverUserID, command.DecisionReason) {
+		return definiteAuthorizationFailure("COMMAND_SNAPSHOT_MISMATCH")
+	}
+	snapshot, err := domain.repository.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	active, ok := findActiveAuthorizationCommand(snapshot, receivableWriteOffCommand)
+	if !ok || active.PolicyVersion != 1 || active.SnapshotSchemaVersion != 1 {
+		// A command that is not ACTIVE at policy v1 / schema v1 can never
+		// produce a domain effect; the consumer reports the frozen failure
+		// classification instead of retrying until the attempt budget runs out.
+		return definiteAuthorizationFailure("POLICY_OR_SCHEMA_MISMATCH")
+	}
+	result, err := domain.repository.ApplyReceivableWriteOff(ctx, ReceivableWriteOffExecutionInput{
+		ApprovalRequestID: binding.ApprovalRequestID, AuthorizationEventID: binding.EventID, ApprovalEpoch: binding.ApprovalEpoch,
+		ExecutionKey: command.ExecutionIdempotencyKey,
+		PolicyVersion: active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
+		Command: ReceivableWriteOffCommandInput{
+			ReceivableID: normalized.ReceivableID, WriteOffMicrocredits: normalized.WriteOffMicrocredits,
+			ExpectedReceivableVersion: normalized.ExpectedReceivableVersion,
+		},
+		Frozen: ReceivableWriteOffFrozenFacts{
+			ReceivableVersion: critical.ReceivableVersion, WriteOffMicrocredits: financial.WriteOffMicrocredits,
+			OutstandingMicrocredits: financial.OutstandingMicrocredits, SettledMicrocredits: financial.SettledMicrocredits,
+			OriginalMicrocredits: financial.OriginalMicrocredits, SourceType: financial.SourceType,
+			SourceReference: financial.SourceReference, WalletReceivableMicrocredits: financial.WalletReceivableMicrocredits,
+		},
+	})
+	if err != nil {
+		return classifyAuthorizationDomainFailure(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return authorizationDomainAttempt{}
+	}
+	ledger, _ := json.Marshal(map[string]any{"journal_entry_id": result.JournalEntryID})
+	return authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: encoded, LedgerReferences: ledger}}
+}
+
+func findActiveAuthorizationCommand(snapshot ApprovalCommandActivationSnapshot, commandType string) (ApprovalCommandActivation, bool) {
 	for _, item := range snapshot.Activations {
-		if item.CommandType == ledgerRepairCommand && item.State == "ACTIVE" {
+		if item.CommandType == commandType && item.State == "ACTIVE" {
 			return item, true
 		}
 	}
@@ -543,6 +657,8 @@ func validAuthorizationCommandTarget(event approvalencoding.AuthorizationEvent) 
 		// A ledger repair targets one immutable ledger posting; the journal id
 		// travels inside the normalized command, so Account binds the posting.
 		return event.TargetResourceType == "LEDGER_POSTING" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
+	case receivableWriteOffCommand:
+		return event.TargetResourceType == "RECEIVABLE" && strings.TrimSpace(event.TargetResourceID) == event.TargetResourceID
 	default:
 		return false
 	}

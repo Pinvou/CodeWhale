@@ -279,6 +279,30 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 			result.AmountMicrocredits > 0 && lowerHexDigest(result.PostingSetDigest) &&
 			result.JournalEntryID != uuid.Nil && result.Status == "SUCCEEDED" &&
 			ledger.JournalEntryID == result.JournalEntryID
+	case "RECEIVABLE_WRITE_OFF":
+		var result struct {
+			CaseID                  uuid.UUID `json:"case_id"`
+			ReceivableID            uuid.UUID `json:"receivable_id"`
+			WalletID                uuid.UUID `json:"wallet_id"`
+			AmountMicrocredits      int64     `json:"amount_microcredits"`
+			ReceivableVersionBefore int64     `json:"receivable_version_before"`
+			ReceivableVersionAfter  int64     `json:"receivable_version_after"`
+			StatusAfter             string    `json:"status_after"`
+			FactsDigest             string    `json:"facts_digest"`
+			JournalEntryID          uuid.UUID `json:"journal_entry_id"`
+			AllocationID            uuid.UUID `json:"allocation_id"`
+			Status                  string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.CaseID != uuid.Nil && result.ReceivableID != uuid.Nil && result.WalletID != uuid.Nil &&
+			result.AmountMicrocredits > 0 && result.ReceivableVersionBefore > 0 &&
+			result.ReceivableVersionAfter == result.ReceivableVersionBefore+1 &&
+			(result.StatusAfter == "PARTIALLY_SETTLED" || result.StatusAfter == "WRITTEN_OFF") &&
+			lowerHexDigest(result.FactsDigest) && result.JournalEntryID != uuid.Nil && result.AllocationID != uuid.Nil &&
+			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
 	}
 	return false
 }
