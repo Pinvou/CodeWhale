@@ -34,6 +34,7 @@ var descriptors = []Descriptor{
 	{CommandType: "ENTITLEMENT_COMPONENT_ADJUSTMENT", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-entitlement-component-adjustment-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "LEDGER_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-ledger-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "RECEIVABLE_WRITE_OFF", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-receivable-write-off-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+	{CommandType: "PAYMENT_FINANCIAL_REPAIR", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-financial-repair-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
 	{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-model-lifecycle-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-catalog-rollback-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	{CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, ExecutorIdentity: TokenWorkload, Durable: "token-credential-revoke-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},

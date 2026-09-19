@@ -722,6 +722,16 @@
         "file": "000072_receivable_write_off_consumer_route.up.sql",
         "version": 72,
         "sha256": "3ae1bb2d55aebc40bed95fc0dad748039fe0507a525609e2a4c36eb056debcb2"
+      },
+      {
+        "file": "000073_payment_financial_repair_consumer_route.down.sql",
+        "version": 73,
+        "sha256": "3fa87dd3501283b4b4d00992882dcd2f66da011ce7a529c024feac932e0c3746"
+      },
+      {
+        "file": "000073_payment_financial_repair_consumer_route.up.sql",
+        "version": 73,
+        "sha256": "11610566134efed99e91dd4eb3b75af2c2c2e06c70097c8eade29a79b759c21a"
       }
     ],
     "billing": [

@@ -37,7 +37,7 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if !Executable("LEDGER_REPAIR") {
 		t.Fatal("ledger repair must consult its live Billing activation")
 	}
-	if Executable("PAYMENT_FINANCIAL_REPAIR") {
+	if Executable("USAGE_SETTLEMENT_REPAIR") {
 		t.Fatal("unimplemented domain repair must remain non-executable")
 	}
 	if !Executable("PAYMENT_PROVIDER_RESUME") {

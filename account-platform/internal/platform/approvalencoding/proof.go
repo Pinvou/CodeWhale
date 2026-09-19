@@ -104,6 +104,18 @@ var commandSpecs = map[string]commandSpec{
 		financialInts: []string{"write_off_microcredits", "outstanding_microcredits", "settled_microcredits",
 			"original_microcredits", "wallet_receivable_microcredits"},
 	},
+	// PAYMENT_FINANCIAL_REPAIR reuses the command's original v1 policy/schema.
+	// The target is the payment order, and every amount, the component split and
+	// the receivable settlement are recomputed by the owner proof.
+	"PAYMENT_FINANCIAL_REPAIR": {
+		policyVersion: 1, snapshotVersion: 1, targetType: "PAYMENT_ORDER", executor: "billing-command-executor",
+		normalizedKeys: []string{"payment_order_id", "payment_evidence_id", "reason_code"},
+		criticalKeys:   []string{"payment_order_updated_at", "facts_digest", "policy_version"},
+		financialKeys: []string{"amount_fen", "credit_microcredits", "provider_transaction_id", "wallet_id",
+			"wallet_version", "applied_to_receivables"},
+		criticalInts:  []string{"policy_version"},
+		financialInts: []string{"amount_fen", "credit_microcredits", "wallet_version", "applied_to_receivables"},
+	},
 }
 
 func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
@@ -597,6 +609,20 @@ func validateProofValues(commandType string, spec commandSpec, targetType, targe
 			sourceTypeErr != nil || sourceType != "USAGE_OVERAGE" ||
 			sourceReferenceErr != nil || len(sourceReference) == 0 || len(sourceReference) > 200 ||
 			reasonErr != nil || reasonCode != "APPROVED_RECEIVABLE_WRITE_OFF" {
+			return ErrInvalidDocument
+		}
+	case "PAYMENT_FINANCIAL_REPAIR":
+		reasonCode, reasonErr := stringValue(normalizedObject["reason_code"])
+		providerTransactionID, providerErr := stringValue(financialObject["provider_transaction_id"])
+		if !validUUID(targetID) || !equalString(normalizedObject["payment_order_id"], targetID) ||
+			!validUUIDField(normalizedObject["payment_evidence_id"]) ||
+			integers["c.policy_version"] != spec.policyVersion || !canonicalTimeField(criticalObject["payment_order_updated_at"]) ||
+			!hexField(criticalObject["facts_digest"]) ||
+			integers["f.amount_fen"] < 1 || integers["f.credit_microcredits"] < 1 ||
+			providerErr != nil || len(providerTransactionID) == 0 || len(providerTransactionID) > 200 ||
+			!validUUIDField(financialObject["wallet_id"]) || integers["f.wallet_version"] < 1 ||
+			integers["f.applied_to_receivables"] < 0 || integers["f.applied_to_receivables"] > integers["f.credit_microcredits"] ||
+			reasonErr != nil || reasonCode != "CONFIRMED_PAYMENT_NOT_CREDITED" {
 			return ErrInvalidDocument
 		}
 	}

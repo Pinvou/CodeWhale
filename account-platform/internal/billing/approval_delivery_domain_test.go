@@ -172,6 +172,8 @@ type authorizationExecutionRepositoryStub struct {
 	writeOffErr                     error
 	writeOffRunErr                  error
 	writeOffInput                   ReceivableWriteOffExecutionInput
+	paymentRepair                   PaymentFinancialRepairResult
+	paymentRepairErr                error
 	activations                     ApprovalCommandActivationSnapshot
 	activationsErr                  error
 	adjustmentRuns                  int
@@ -248,6 +250,10 @@ func (s *authorizationExecutionRepositoryStub) ApplyReceivableWriteOff(_ context
 		return ReceivableWriteOffResult{}, s.writeOffRunErr
 	}
 	return s.writeOff, nil
+}
+
+func (s *authorizationExecutionRepositoryStub) PaymentFinancialRepairForRequest(context.Context, uuid.UUID) (PaymentFinancialRepairResult, error) {
+	return s.paymentRepair, s.paymentRepairErr
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {

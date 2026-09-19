@@ -127,6 +127,20 @@ type approvalReceivableWriteOffSummary struct {
 	ReasonCode                   string    `json:"reason_code"`
 }
 
+// approvalPaymentFinancialRepairSummary is the closed read-only projection of
+// the confirmed-payment repair command: the target order, the frozen amounts and
+// the owner revision digest. Provider payloads, evidence internals and free text
+// are never presented.
+type approvalPaymentFinancialRepairSummary struct {
+	PaymentOrderID         uuid.UUID `json:"payment_order_id"`
+	AmountFen              string    `json:"amount_fen"`
+	CreditMicrocredits     string    `json:"credit_microcredits"`
+	AppliedToReceivables   string    `json:"applied_to_receivables"`
+	WalletVersion          string    `json:"wallet_version"`
+	FactsDigest            string    `json:"facts_digest"`
+	ReasonCode             string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -138,6 +152,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	case "LEDGER_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "RECEIVABLE_WRITE_OFF":
+		return policyVersion == 1 && snapshotVersion == 1
+	case "PAYMENT_FINANCIAL_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
@@ -239,6 +255,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalReceivableWriteOffSummary{ReceivableID: id}
+	case "PAYMENT_FINANCIAL_REPAIR":
+		if item.TargetResourceType != "PAYMENT_ORDER" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalPaymentFinancialRepairSummary{PaymentOrderID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -300,12 +325,14 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			TargetJournalEntryID   uuid.UUID `json:"target_journal_entry_id"`
 			TargetPostingID        uuid.UUID `json:"target_posting_id"`
 			ReceivableID           uuid.UUID `json:"receivable_id"`
+			PaymentOrderID         uuid.UUID `json:"payment_order_id"`
 			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
 		Critical struct {
 			EntryType        string `json:"entry_type"`
 			PostingSetDigest string `json:"posting_set_digest"`
 			FactsDigest      string `json:"facts_digest"`
+			PaymentOrderUpdatedAt string `json:"payment_order_updated_at"`
 		} `json:"critical_resource_versions"`
 		Financial struct {
 			SourceType                   string `json:"source_type"`
@@ -315,6 +342,10 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			OutstandingMicrocredits      string `json:"outstanding_microcredits"`
 			WriteOffMicrocredits         string `json:"write_off_microcredits"`
 			WalletReceivableMicrocredits string `json:"wallet_receivable_microcredits"`
+			AmountFen                    string `json:"amount_fen"`
+			CreditMicrocredits           string `json:"credit_microcredits"`
+			AppliedToReceivables         string `json:"applied_to_receivables"`
+			WalletVersion                string `json:"wallet_version"`
 		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -369,6 +400,18 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.OutstandingMicrocredits = proof.Financial.OutstandingMicrocredits
 		target.WriteOffMicrocredits = proof.Financial.WriteOffMicrocredits
 		target.WalletReceivableMicrocredits = proof.Financial.WalletReceivableMicrocredits
+		target.FactsDigest = proof.Critical.FactsDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalPaymentFinancialRepairSummary:
+		if proof.Normalized.PaymentOrderID != target.PaymentOrderID || !approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			proof.Critical.PaymentOrderUpdatedAt == "" || proof.Normalized.ReasonCode != "CONFIRMED_PAYMENT_NOT_CREDITED" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.AmountFen = proof.Financial.AmountFen
+		target.CreditMicrocredits = proof.Financial.CreditMicrocredits
+		target.AppliedToReceivables = proof.Financial.AppliedToReceivables
+		target.WalletVersion = proof.Financial.WalletVersion
 		target.FactsDigest = proof.Critical.FactsDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target
