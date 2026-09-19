@@ -50,20 +50,22 @@
 
 | `entry_type` | 必须出现的账户类型签名（净 delta 符号） |
 |---|---|
-| `RECHARGE` | `PAYMENT_CLEARING −A`、`WALLET_LIABILITY +A` |
-| `USAGE` | `USAGE_REVENUE +A`、`WALLET_LIABILITY −S`（`RECEIVABLE_ASSET −O` 可缺省） |
-| `ADJUSTMENT` | `ADJUSTMENT ±A`、`WALLET_LIABILITY ∓A` |
-| `REFUND` | `REFUND_CLEARING +T`、`WALLET_LIABILITY −A`（缺口回收时出现 `RECEIVABLE_ASSET −B`） |
-| `EXPIRY` | `ADJUSTMENT +E`、`WALLET_LIABILITY −E` |
-| `CHARGEBACK` | `CHARGEBACK_CLEARING +R+B`、`WALLET_LIABILITY −R`、`RECEIVABLE_ASSET −B`（短缺为 0 时可缺省） |
-| `REPAIR_CREDIT` | `PAYMENT_CLEARING −A`、`WALLET_LIABILITY +A`、`RECEIVABLE_ASSET +R` |
-| `FORCED_REFUND` | `REFUND_CLEARING +R+B`、`WALLET_LIABILITY −R`、`RECEIVABLE_ASSET −B`（短缺为 0 时可缺省） |
+| `RECHARGE` | `PAYMENT_CLEARING −A` 必需；`WALLET_LIABILITY +A` 当 `available>0` 时必需；`RECEIVABLE_ASSET +R` 当 `appliedToReceivables>0` 时可出现（全额清偿未结应收时无钱包腿） |
+| `USAGE` | `USAGE_REVENUE +A` 必需；`WALLET_LIABILITY −S` 当 `settled>0` 时必需；`RECEIVABLE_ASSET −O` 当 `overage>0` 时可出现 |
+| `ADJUSTMENT` | `WALLET_LIABILITY ±A` 与 `ADJUSTMENT ∓A` 成对（`adjustments.go` 两方向）或 `ADJUSTMENT −A` + `RECEIVABLE_ASSET +A`（GSA-25 核销形状，无钱包腿） |
+| `REFUND` | `REFUND_CLEARING +T` 必需；`WALLET_LIABILITY −A` 当 `revoked>0` 时必需；`RECEIVABLE_ASSET −B` 当缺口回收时出现 |
+| `EXPIRY` | `ADJUSTMENT +E` 必需；`WALLET_LIABILITY −E` 当 `expiring>0` 时必需 |
+| `CHARGEBACK` | `CHARGEBACK_CLEARING +R+B` 必需；`WALLET_LIABILITY −R` 当 `revocable>0` 时必需；`RECEIVABLE_ASSET −B` 当 `baseShortfall>0` 时必需（仅剩短缺时只有两条平台腿） |
+| `REPAIR_CREDIT` | `PAYMENT_CLEARING −A` 必需；`WALLET_LIABILITY +A` 当 `available>0` 时必需；`RECEIVABLE_ASSET +R` 当 `appliedToReceivables>0` 时可出现 |
+| `FORCED_REFUND` | `REFUND_CLEARING +R+B` 必需；`WALLET_LIABILITY −R` 当 `revocable>0` 时必需；`RECEIVABLE_ASSET −B` 当 `shortfall>0` 时必需 |
+
+上表的"必需/可出现"是**逐腿条件**：同一 `entry_type` 允许多个合法形状（条件腿缺席即该形状），判据必须按形状集合做成员判定，不能把条件腿当必需腿。写入者除上表列出的路径外，`RECHARGE` 还由支付合并路径写入（`payment_evidence.go` → `payments.go`，`repair=false`），`REPAIR_CREDIT` 由同一段代码以 `repair=true` 写入。
 
 判定与放行规则（全部必须成立，任一不成立即 `PROOF_DENY`）：
 
 1. 目标 journal 的 `entry_type` 在上表内且 `entry_type <> 'REVERSAL'`；目标 posting 属于该 journal，其 `ledger_account_id` 是六个平台系统账户之一（`wallet_id IS NULL`），且 `credit_lot_id IS NULL`。
-2. 目标 posting 的账户类型与契约要求的集合不一致（当前签名已违反契约）；若当前签名已满足契约则拒绝（无错误可修）。
-3. 把该 posting 的账户替换为闭合命令给出的平台账户后，该 journal 的账户类型签名**恰好**满足契约；`D` 等于该 posting 的 `abs(delta)`。
+2. 目标 journal 的当前账户类型签名**不属于**该 `entry_type` 的合法形状集合（即已违反契约）；若属于任一合法形状则拒绝（无错误可修）。
+3. 把该 posting 的账户替换为闭合命令给出的平台账户后，该 journal 的账户类型签名**必须恰好等于**该 `entry_type` 的某个合法形状（按 1 的逐腿条件判定，含 GSA-25 核销与 GSA-31 补偿这两类平台双腿形状）；`D` 等于该 posting 的 `abs(delta)`。
 4. 被修账户与替换账户都是平台系统账户、都存在、且不相同；不允许指向钱包账户。
 5. 目标 posting 尚未被本命令冲正过（`ledger_repair_cases` 无同 posting 记录，且不存在 `business_reference='ledger-repair:'||<posting>` 的 journal）。
 
@@ -182,3 +184,4 @@
 
 - 2026-09-18 代理：登记事实与决策门禁首切片；范围未定。
 - 2026-09-19 代理：按用户确认的首版范围冻结 closed command/snapshot/proof/presenter、账户类型契约、守恒与幂等、失败分类、版本复用守卫、迁移回滚与验收映射；同时登记 `000060` 已修复的前置缺陷。
+- 2026-09-19 独立审核（`/root/review_frozen_designs`，只读，基线 `c481b2644`）：结论 CHANGES_REQUESTED，共 4 项。本文件已处理第 1 项（§5 契约表逐腿条件化 + 规则 2/3 改为形状集合成员判定 + 补 `payments.go` 写入者）与第 3 项的编号表述待办；其余（`000061` 编号在 GSA-25 文档中的重复表述、GSA-35 `max_microcredits>=0`、管理端 `entry_type` 过滤器闭集）在对应文件继续处理。审核同时确认七份文档结构齐备、`000060`/`packages.go`/activation 投影等关键事实成立。
