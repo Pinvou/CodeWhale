@@ -30,6 +30,8 @@
 #
 # 可用环境变量覆盖(默认值即当前线上布局):
 #   SSH_KEY        ~/.ssh/id_ed25519_pinvou8
+#   PROXY_SSH_JUMP  (可选) 本机无法直连前端代理时用的 SSH 跳板,例如 root@47.120.8.237;
+#                   跳板只做 TCP 转发,认证仍使用本机 SSH_KEY。仅允许登记值。
 #   TEST_DIR       /opt/pinvou-remote-relay-test
 #   TEST_PORT      8788
 #   BASE_PATH      /pinvou3/remote-test
@@ -55,6 +57,7 @@ TEST_PORT="${TEST_PORT:-8788}"
 BASE_PATH="${BASE_PATH:-/pinvou3/remote-test}"
 PUBLIC_URL="${PUBLIC_URL:-https://pinvou.com/pinvou3/remote-test}"
 ENABLE_DESKTOP_CONTROLLER="${ENABLE_DESKTOP_CONTROLLER:-0}"
+PROXY_SSH_JUMP="${PROXY_SSH_JUMP:-}"
 SERVICE="pinvou-remote-relay-test.service"
 TUNNEL_SERVICE="pinvou-remote-relay-test-tunnel.service"
 NGINX_SNIPPET="/etc/nginx/snippets/pinvou3-remote-relay-test.conf"
@@ -68,6 +71,8 @@ TUNNEL_USER="relay-tunnel"
 # 登记主机:脚本的一切远端操作只允许落在这两台机器上。
 EXPECTED_RELAY_SERVER="root@47.120.8.237"
 EXPECTED_PROXY_SERVER="admin@8.218.49.20"
+# 允许的前端代理跳板(为空表示直连)。
+EXPECTED_PROXY_SSH_JUMP="root@47.120.8.237"
 PROD_PORT=8787
 RELAY_HOST_IP="${RELAY_SERVER#*@}"
 
@@ -88,6 +93,9 @@ validate_config() {
   fi
   if [ "$PROXY_SERVER" != "$EXPECTED_PROXY_SERVER" ]; then
     echo "拒绝执行: PROXY_SERVER=$PROXY_SERVER 不是登记的前端代理($EXPECTED_PROXY_SERVER)" >&2; err=1
+  fi
+  if [ -n "$PROXY_SSH_JUMP" ] && [ "$PROXY_SSH_JUMP" != "$EXPECTED_PROXY_SSH_JUMP" ]; then
+    echo "拒绝执行: PROXY_SSH_JUMP=$PROXY_SSH_JUMP 不是登记的跳板($EXPECTED_PROXY_SSH_JUMP)" >&2; err=1
   fi
   if ! [[ "$TEST_PORT" =~ ^[0-9]+$ ]] || [ "$TEST_PORT" -lt 1024 ] || [ "$TEST_PORT" -gt 65535 ]; then
     echo "拒绝执行: TEST_PORT=$TEST_PORT 必须是 1024-65535 的数字" >&2; err=1
@@ -118,7 +126,17 @@ validate_config() {
 }
 
 relay_ssh() { ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$RELAY_SERVER" "$@"; }
-proxy_ssh() { ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$PROXY_SERVER" "$@"; }
+# 本机直连代理被网络策略阻断(例如 fail2ban 封禁出口 IP)时,用 PROXY_SSH_JUMP 指定的
+# 主机做 TCP 转发:跳板只跑 `ssh -W`,认证仍在本机用 SSH_KEY 完成。
+proxy_ssh() {
+  if [ -n "$PROXY_SSH_JUMP" ]; then
+    ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 \
+      -o "ProxyCommand=ssh -i $SSH_KEY -W %h:%p $PROXY_SSH_JUMP" \
+      "$PROXY_SERVER" "$@"
+  else
+    ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$PROXY_SERVER" "$@"
+  fi
+}
 
 # ssh 会把所有命令参数用空格拼接成一个字符串,交给远端登录 shell 重新分词——
 # 含空格的参数(如公钥)若不按远端 shell 语法二次引用,会被拆散(2026-07-21 实测踩坑:

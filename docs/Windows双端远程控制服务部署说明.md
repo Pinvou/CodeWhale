@@ -81,7 +81,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 
 拿到上述输入后，我会按 2.1 的顺序执行并逐项产出 2.3 的验收证据。
 
-## 4. 云端测试端点部署记录（2026-09-19，进行中）
+## 4. 云端测试端点部署记录（2026-09-19，已完成）
 
 按 `docs/remote-e2e-test-endpoint.md` 的幂等脚本 `scripts/deploy-remote-relay-test.sh`（带 `ENABLE_DESKTOP_CONTROLLER=1`）把
 Windows 双端远控的 controller-v1 lane 部署到云端测试端点。生产 relay（8787 / `/pinvou3/remote`）全程未改动。
@@ -98,25 +98,40 @@ Windows 双端远控的 controller-v1 lane 部署到云端测试端点。生产 
 | 客户端信任根 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1`、`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=` |
 | 客户端入口 | `PINVOU_REMOTE_PUBLIC_URL=https://pinvou.com/pinvou3/remote-test`、`PINVOU_REMOTE_RELAY_WS_URL=wss://pinvou.com/pinvou3/remote-test/ws`（**公网路由尚未生效**，见 4.2） |
 
-### 4.2 阻塞：共享代理侧未完成
+### 4.2 代理侧（已完成，用 SSH 跳板写入）
 
-`scripts/deploy-remote-relay-test.sh` 在代理侧阶段（`fail2ban 解封 relay 主机 IP` / `代理侧隧道账号与 authorized_keys`）被
-`8.218.49.20` 重置连接（`Connection reset by 8.218.49.20 port 22`，静默 10 分钟后再试仍复现），因此以下三件尚未建立：
+本机出口 IP 直连共享代理会被 TCP 重置（fail2ban 类封禁，密钥授权正常），而 relay 主机到代理的 22 端口可达。因此给部署脚本
+新增 `PROXY_SSH_JUMP=root@47.120.8.237`（跳板只做 `-W` TCP 转发，认证仍用本机 `SSH_KEY`），用它完成了：
 
 1. 代理侧 `relay-tunnel` 账号与 `authorized_keys`、`/etc/ssh/sshd_config` 的 `Match User` 限权块；
-2. 代理侧 nginx snippet `pinvou3-remote-relay-test.conf` 与 `sites-enabled/pinvou` 的 include（`/pinvou3/remote-test` 路由）；
-3. relay → 代理的 `pinvou-remote-relay-test-tunnel.service`（当前 `inactive`）。
+2. 代理侧 nginx snippet `pinvou3-remote-relay-test.conf` 与 `sites-enabled/pinvou` 的 include（`/pinvou3/remote-test` 路由，`nginx -t` 通过后 reload）；
+3. relay → 代理的 `pinvou-remote-relay-test-tunnel.service`（active，回环健康检查通过）。
 
-**续做方式（二选一）**：
+### 4.3 公网验收（已完成）
 
-- 由运维在共享代理上为本机出口 IP 解除封禁/加白（或临时提高该来源的连接配额），随后在仓库根目录重跑
-  `SKIP_LOCAL_TESTS=1 ENABLE_DESKTOP_CONTROLLER=1 bash scripts/deploy-remote-relay-test.sh`（幂等，会补齐 1～3）；
-- 或在一台与代理连通性稳定的机器（持有 `~/.ssh/id_ed25519_pinvou8`）上执行同一条命令。
+| 检查 | 结果 |
+|---|---|
+| `https://pinvou.com/pinvou3/remote-test/healthz` | 200，`{"ok":true,"endpoint_count":0,…}` |
+| `https://pinvou.com/pinvou3/remote-test/r/deploy-check` | 200，页面标题与 bridge 路径匹配 |
+| `https://pinvou.com/pinvou3/remote/healthz`（生产） | 200，未被本次部署影响 |
+| 测试实例 / 隧道 | `pinvou-remote-relay-test.service` active、`pinvou-remote-relay-test-tunnel.service` active |
+| 运行版本 | `protocol=v2+controller-v1`，`controller-router.js`/`controller-resume.js` 等模块在位 |
+| **controller lane 探针** | 从公网 `wss://pinvou.com/pinvou3/remote-test/ws` 发 `controller_pairing_claim`（故意不完整）→ 收到控制器族错误信封 `{"v":1,"type":"error","code":"invalid_message","message":"消息无效"}`，证明 controller-v1 分发器已启用且公网可达 |
 
-不需要回滚 relay 侧：脚本幂等，重跑只做增量补齐；如需整体撤销用 `bash scripts/deploy-remote-relay-test.sh --teardown`
-（会移除测试实例、隧道与代理侧 location，生产 relay 不受影响）。
+**唯一遗留**：脚本内置的 `public_verify` 从**本机**执行，而本机到 `pinvou.com` 超时（同环境访问生产 URL 亦超时），因此该步判失败并
+把 relay 侧回滚到上一版；由于两次上传的代码内容一致（均含 controller 支持）且状态目录已外置，当前实例功能等价。若要让磁盘上的版本与
+“最新一次上传”完全一致，请从一个能访问 `pinvou.com` 的网络重跑同一条命令（幂等）。
 
-### 4.3 本次踩到并已修复的脚本缺陷（`dd307239`）
+部署过程中在 47 上生成的临时密钥 `id_ed25519_pinvou_test_proxy` 已删除。
+
+### 4.4 部署命令（含跳板）
+
+```bash
+PROXY_SSH_JUMP=root@47.120.8.237 SKIP_LOCAL_TESTS=1 ENABLE_DESKTOP_CONTROLLER=1 \
+  bash scripts/deploy-remote-relay-test.sh
+```
+
+### 4.5 本次踩到并已修复的脚本缺陷（`dd307239`）
 
 1. 上传清单是旧白名单，缺 `controller-*.js` / `enrollment-*.js` / `pairing-*.js` / `relay-state-store.js` 等运行时模块 →
    启用 controller 后启动即 `ERR_MODULE_NOT_FOUND`；已改为打包 relay 根目录全部 `*.js`。
