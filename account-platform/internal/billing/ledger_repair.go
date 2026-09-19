@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -33,6 +34,46 @@ type LedgerRepairResult struct {
 // ledgerRepairCommand is the closed command name shared by the proof
 // authority, the activation projection and the consumer mapping.
 const ledgerRepairCommand = "LEDGER_REPAIR"
+
+// ledgerRepairProofInput is the closed request-assembly projection shared with
+// the authoritative proof recomputation. It is deliberately not
+// activation-gated: a request may be assembled while the command is INACTIVE,
+// and only proof issuance and execution require the live ACTIVE row.
+func (r *PostgresRepository) LedgerRepairProofInput(ctx context.Context, target LedgerRepairCommandInput, reasonCode string) (approvalencoding.LegacyProofInput, error) {
+	if strings.TrimSpace(reasonCode) == "" || strings.TrimSpace(reasonCode) != reasonCode || len(reasonCode) > 80 {
+		return approvalencoding.LegacyProofInput{}, ErrConflict
+	}
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return approvalencoding.LegacyProofInput{}, err
+	}
+	var activation ApprovalCommandActivation
+	for _, item := range snapshot.Activations {
+		if item.CommandType == ledgerRepairCommand {
+			activation = item
+			break
+		}
+	}
+	if activation.CommandType == "" {
+		return approvalencoding.LegacyProofInput{}, ErrConflict
+	}
+	plan, err := r.LedgerRepairPlanForCommand(ctx, target, activation.PolicyVersion, int64(activation.SnapshotSchemaVersion), activation.Version)
+	if err != nil {
+		return approvalencoding.LegacyProofInput{}, err
+	}
+	critical, financial := ledgerRepairProofProjection(plan)
+	return approvalencoding.LegacyProofInput{
+		CommandType: ledgerRepairCommand, PolicyVersion: activation.PolicyVersion, SnapshotSchemaVersion: int(activation.SnapshotSchemaVersion),
+		TargetResourceType: "LEDGER_POSTING", TargetResourceID: plan.TargetPostingID.String(),
+		NormalizedCommand: encodeEntitlementCorrectionProjection(map[string]any{
+			"target_journal_entry_id": plan.TargetJournalEntryID, "target_posting_id": plan.TargetPostingID,
+			"wrong_ledger_account_id": plan.WrongLedgerAccountID, "correct_ledger_account_id": plan.CorrectLedgerAccountID,
+			"amount_microcredits": plan.AmountMicrocredits, "reason_code": reasonCode,
+		}),
+		CriticalResourceVersions: critical,
+		FinancialSnapshot:        financial,
+	}, nil
+}
 
 // ledgerRepairProofProjection is the closed proof projection of one repair:
 // the frozen critical revision and the financial facts Account stores on the

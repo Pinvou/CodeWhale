@@ -58,8 +58,9 @@ type activationVersion struct {
 // This is the closed compatibility set, not a mutable execution allowlist.
 // New policy versions require an explicit reader/owner-domain rollout: the
 // entitlement correction command keeps exactly one v1 row as immutable history
-// and may append a still-INACTIVE v2 row, so this reader accepts either pair and
-// never rewrites the frozen version of an existing request.
+// and may append a v2 row, so this reader accepts either pair and never rewrites
+// the frozen version of an existing request. LEDGER_REPAIR keeps exactly one
+// v1/s1 pair, which is the only projection of that command that may be active.
 var activationVersions = map[string][]activationVersion{
 	"CHARGEBACK_FINANCIAL_REPAIR":      {{1, 1}},
 	"ENTITLEMENT_COMPONENT_ADJUSTMENT": {{1, 1}, {2, 2}},
@@ -102,6 +103,14 @@ func ValidateSnapshot(s Snapshot) error {
 		}
 		switch activation.CommandType {
 		case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		case "LEDGER_REPAIR":
+			// The ledger repair command owns exactly one v1/s1 projection and is the
+			// only version of it that may report ACTIVE. It stays INACTIVE until a
+			// separately authorized activation, so accepting ACTIVE here opens no
+			// command by itself.
+			if activation.State == "ACTIVE" && (activation.PolicyVersion != 1 || activation.SnapshotSchemaVersion != 1) {
+				return ErrUnavailable
+			}
 		case "ENTITLEMENT_COMPONENT_ADJUSTMENT":
 			// Only the appended policy v2 / snapshot schema v2 projection may be
 			// activated; the v1 projection stays INACTIVE history.

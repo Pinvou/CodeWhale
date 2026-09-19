@@ -1314,6 +1314,16 @@
         "file": "000061_ledger_repair_cases.up.sql",
         "version": 61,
         "sha256": "4608ab7aecb7acee194b201f2ef455d2561c87895cd88c7c88cab98893ea9d3a"
+      },
+      {
+        "file": "000062_ledger_repair_proof_claim_allowlist.down.sql",
+        "version": 62,
+        "sha256": "f16b9438ef63443bf4d561fc5be46877c457bf5ac3c61929f23dcd5adf23619e"
+      },
+      {
+        "file": "000062_ledger_repair_proof_claim_allowlist.up.sql",
+        "version": 62,
+        "sha256": "2056779f11083fa02dd1cdd697e98235df681d082695a0012e9b5b898bddca0a"
       }
     ],
     "payment-simulator": [

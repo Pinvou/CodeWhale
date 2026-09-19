@@ -231,3 +231,31 @@ func containsJSONCode(raw []byte, expected string) bool {
 	}
 	return json.Unmarshal(raw, &body) == nil && body.Code == expected
 }
+
+// TestLedgerRepairActivationMayBeActive covers the GSA-24 activation
+// capability: the command's single v1/s1 projection may report ACTIVE once a
+// separately authorized activation runs, while every other version of it keeps
+// failing the whole projection closed.
+func TestLedgerRepairActivationMayBeActive(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := validBillingApprovalActivationSnapshot(now)
+	item := &snapshot.Activations[2]
+	if item.CommandType != ledgerRepairCommand {
+		t.Fatal("unexpected activation order")
+	}
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("deployed INACTIVE projection rejected: %v", err)
+	}
+	item.State = "ACTIVE"
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); err != nil {
+		t.Fatalf("activated ledger repair projection rejected: %v", err)
+	}
+	item.SnapshotSchemaVersion = 2
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("unknown ledger repair version accepted: %v", err)
+	}
+	item.SnapshotSchemaVersion, item.PolicyVersion = 1, 2
+	if err := validateApprovalCommandActivationSnapshot(snapshot, now); !errors.Is(err, ErrApprovalActivationUnavailable) {
+		t.Fatalf("unknown ledger repair policy accepted: %v", err)
+	}
+}

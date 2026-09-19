@@ -69,11 +69,17 @@ func validActivationItem(item ApprovalCommandActivation, commandType string, spe
 		(item.State != "ACTIVE" && item.State != "INACTIVE") {
 		return false
 	}
-	// The entitlement correction command is the only command whose appended
-	// policy v2 / snapshot schema v2 projection may be activated; its v1 row
-	// stays immutable INACTIVE history. Every other version of every command
-	// keeps the frozen mayBeActive contract.
+	// The entitlement correction command owns an appended policy v2 / snapshot
+	// schema v2 projection whose v1 row stays immutable INACTIVE history, and the
+	// ledger repair command owns exactly one v1/s1 projection. Those two are the
+	// only projections that may report ACTIVE; both stay INACTIVE until a
+	// separately authorized activation, so this capability opens no command by
+	// itself. Every other version of every command keeps the frozen mayBeActive
+	// contract.
 	if commandType == entitlementComponentAdjustmentCommand && item.PolicyVersion == 2 && item.SnapshotSchemaVersion == 2 {
+		return true
+	}
+	if commandType == ledgerRepairCommand && item.PolicyVersion == 1 && item.SnapshotSchemaVersion == 1 {
 		return true
 	}
 	if !spec.mayBeActive && item.State != "INACTIVE" {
