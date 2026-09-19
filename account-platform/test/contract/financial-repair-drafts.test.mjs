@@ -144,3 +144,28 @@ test('a missing or too short operator reason fails closed', () => {
     );
   }
 });
+
+// The owner encodes its int64 facts as JSON numbers (for example
+// `amount_microcredits: 30`), so a projection must stay usable in that shape --
+// otherwise the business page could never draft the ledger, write-off or
+// chargeback repairs. A degenerate number still fails closed.
+test('the owner numeric encoding of integer facts stays usable and is never coerced', () => {
+  for (const commandType of ['LEDGER_REPAIR', 'RECEIVABLE_WRITE_OFF', 'CHARGEBACK_FINANCIAL_REPAIR']) {
+    const projection = precheck(commandType);
+    for (const [key, value] of Object.entries(projection.normalized_command)) {
+      if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) projection.normalized_command[key] = Number(value);
+    }
+    const usable = financialRepairPrecheck(projection);
+    assert.ok(usable, `${commandType} must accept the owner numeric encoding`);
+    const draft = financialRepairApprovalDraft(projection, 'operator reviewed the frozen facts', `case-${commandType}`);
+    for (const [key, value] of Object.entries(usable.normalized)) {
+      assert.deepEqual(draft.normalized_command[key], value, `${commandType}.${key} is copied verbatim`);
+      if (typeof value === 'number') assert.equal(typeof draft.normalized_command[key], 'number', `${commandType}.${key} is not coerced`);
+    }
+    for (const degenerate of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const invalid = precheck(commandType);
+      invalid.normalized_command[[...usable.command.fields].find((field) => field.kind === 'integer').key] = degenerate;
+      assert.equal(financialRepairPrecheck(invalid), null, `${commandType} must reject ${degenerate}`);
+    }
+  }
+});

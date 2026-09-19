@@ -106,22 +106,24 @@ function closedString(value) {
 }
 
 function validField(value, field) {
+  switch (field.kind) {
+    case 'integer': {
+      // The owner encodes its int64 facts as JSON numbers, so a projection must
+      // be readable in both shapes. Anything outside a positive safe integer in
+      // either shape still fails closed instead of being coerced.
+      if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
+      return typeof value === 'string' && /^[1-9]\d*$/.test(value) && value.length <= 18;
+    }
+    default:
+      break;
+  }
   const text = closedString(value);
   if (!text || text !== value) {
     return false;
   }
-  switch (field.kind) {
-    case 'uuid':
-      return uuidPattern.test(text);
-    case 'date':
-      return datePattern.test(text);
-    case 'enum':
-      return field.allowed.includes(text);
-    case 'integer':
-      return /^[1-9]\d*$/.test(text) && text.length <= 18;
-    default:
-      return false;
-  }
+  if (field.kind === 'uuid') return uuidPattern.test(text);
+  if (field.kind === 'date') return datePattern.test(text);
+  return field.kind === 'enum' && field.allowed.includes(text);
 }
 
 // financialRepairPrecheck validates the read-only precheck projection the
