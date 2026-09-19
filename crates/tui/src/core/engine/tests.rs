@@ -17092,6 +17092,38 @@ fn forkguard_subagent_context_hint_names_active_tools() {
             && !context.contains("read_file")
             && !context.contains("list_dir")
     );
+    assert!(
+        !context.contains("handle_read"),
+        "this receipt carries no transcript_handle, so the hint would name a \
+         value the model never received:\n{context}"
+    );
+    assert!(
+        !context.contains("call `handle_read` directly anyway"),
+        "calling a deferred tool by name is not a hydration contract; the \
+         hint must not promise what allowlist-filtered hosts refuse:\n{context}"
+    );
+
+    // A receipt that does carry a transcript_handle (verbose projection,
+    // terminal status row) keeps the guidance — with the honest fallback
+    // that names the degradation instead of a direct-call promise.
+    let with_handle = ToolResult::success(
+        json!({
+            "agent_id": "agent_1234abcd",
+            "agent_type": "explore",
+            "assignment": {
+                "objective": "Inspect the RLM rendering path and report the smallest fix."
+            },
+            "model": "deepseek-v4-flash",
+            "status": "Completed",
+            "result": long_result,
+            "steps_taken": 12,
+            "duration_ms": 3456,
+            "transcript_handle": "agent:agent_1234abcd/full_transcript"
+        })
+        .to_string(),
+    );
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_handle);
+
     assert!(context.contains("handle_read"));
     assert!(
         context.contains("activate it via `tool_search` first"),
@@ -17100,9 +17132,16 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          {context}"
     );
     assert!(
-        context.contains("call `handle_read` directly anyway"),
-        "allowed_tools-filtered sessions can strip tool_search too; the hint \
-         must keep the direct-call fallback instead of dead-ending:\n{context}"
+        context.contains("transcript reads are unavailable in this session"),
+        "when tool_search cannot surface handle_read the hint must degrade \
+         honestly instead of promising a direct call works:\n{context}"
+    );
+    assert!(
+        !context.contains("call `handle_read` directly anyway")
+            && !context.contains("hydrate when called by name"),
+        "registered deferred tools do not hydrate-and-execute when called by \
+         name on allowlist-filtered hosts; the false promise must stay gone:\n\
+         {context}"
     );
 }
 
