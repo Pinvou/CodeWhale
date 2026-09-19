@@ -96,6 +96,11 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
   activatedRefundRepair.activations[8].state = 'ACTIVE';
   assert.equal(validate(activatedRefundRepair), true, JSON.stringify(validate.errors));
 
+  // The chargeback financial repair command owns exactly one v1/s1 projection.
+  const activatedChargebackRepair = snapshot();
+  activatedChargebackRepair.activations[0].state = 'ACTIVE';
+  assert.equal(validate(activatedChargebackRepair), true, JSON.stringify(validate.errors));
+
   for (const [name, mutate] of [
     ['partial', value => value.activations.pop()],
     ['extra', value => value.activations.push({ ...value.activations[10] })],
@@ -103,12 +108,13 @@ test('Billing activation OpenAPI accepts only the fixed complete version-bound p
     ['wrong-order', value => { [value.activations[0], value.activations[1]] = [value.activations[1], value.activations[0]]; }],
     ['wrong-policy-version', value => { value.activations[5].policy_version = 1; }],
     ['wrong-snapshot-schema', value => { value.activations[10].snapshot_schema_version = 2; }],
-    ['policy-only-active', value => { value.activations[0].state = 'ACTIVE'; }],
+    ['policy-only-active', value => { value.activations[9].state = 'ACTIVE'; }],
     ['mixed-ledger-repair-policy', value => { value.activations[2].policy_version = 2; }],
     ['mixed-ledger-repair-schema', value => { value.activations[2].snapshot_schema_version = 2; }],
     ['mixed-write-off-policy', value => { value.activations[6].policy_version = 2; }],
     ['mixed-payment-repair-schema', value => { value.activations[3].snapshot_schema_version = 2; }],
     ['mixed-refund-repair-policy', value => { value.activations[8].policy_version = 2; }],
+    ['mixed-chargeback-repair-schema', value => { value.activations[0].snapshot_schema_version = 2; }],
     ['mixed-correction-version', value => { value.activations[1].policy_version = 2; }],
     ['unknown-correction-version', value => { value.activations[1].policy_version = 3; value.activations[1].snapshot_schema_version = 3; }],
     ['active-correction-v1-history', value => { value.activations[1].state = 'ACTIVE'; }],

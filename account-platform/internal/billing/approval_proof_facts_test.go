@@ -11,21 +11,28 @@ import (
 )
 
 type billingProofFactsStub struct {
-	adjustment      ManualAdjustment
-	wallet          Wallet
-	provider        ProviderResumeVersions
-	product         ProductResumeVersions
-	confirmed       bool
-	correction      entitlementCorrectionReadPlan
-	ledgerRepair    LedgerRepairPlan
-	ledgerRepairErr error
-	writeOff        ReceivableWriteOffPlan
-	writeOffErr     error
-	paymentRepair   PaymentFinancialRepairPlan
-	paymentRepairErr error
-	refundRepair    RefundExceptionRepairPlan
-	refundRepairErr error
-	reads           int
+	adjustment          ManualAdjustment
+	wallet              Wallet
+	provider            ProviderResumeVersions
+	product             ProductResumeVersions
+	confirmed           bool
+	correction          entitlementCorrectionReadPlan
+	ledgerRepair        LedgerRepairPlan
+	ledgerRepairErr     error
+	writeOff            ReceivableWriteOffPlan
+	writeOffErr         error
+	paymentRepair       PaymentFinancialRepairPlan
+	paymentRepairErr    error
+	refundRepair        RefundExceptionRepairPlan
+	refundRepairErr     error
+	chargebackRepair    ChargebackFinancialRepairPlan
+	chargebackRepairErr error
+	reads               int
+}
+
+func (s *billingProofFactsStub) chargebackFinancialRepairPlan(context.Context, ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error) {
+	s.reads++
+	return s.chargebackRepair, s.chargebackRepairErr
 }
 
 func (s *billingProofFactsStub) refundExceptionRepairPlan(context.Context, RefundExceptionRepairCommandInput) (RefundExceptionRepairPlan, error) {

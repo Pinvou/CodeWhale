@@ -25,6 +25,35 @@ type billingProofFacts interface {
 	receivableWriteOffPlan(context.Context, ReceivableWriteOffCommandInput) (ReceivableWriteOffPlan, error)
 	paymentFinancialRepairPlan(context.Context, PaymentFinancialRepairCommandInput) (PaymentFinancialRepairPlan, error)
 	refundExceptionRepairPlan(context.Context, RefundExceptionRepairCommandInput) (RefundExceptionRepairPlan, error)
+	chargebackFinancialRepairPlan(context.Context, ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error)
+}
+
+// chargebackFinancialRepairPlan re-reads the owner activation row and recomputes
+// the closed chargeback shortfall projection. The activation row must be ACTIVE
+// with the current version, and neither this path nor execution calls the
+// provider.
+func (r *PostgresRepository) chargebackFinancialRepairPlan(ctx context.Context, input ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error) {
+	snapshot, err := r.ApprovalCommandActivations(ctx)
+	if err != nil {
+		return ChargebackFinancialRepairPlan{}, err
+	}
+	active, err := activeBillingProofCommand(snapshot, chargebackFinancialRepairCommand, r.now())
+	if err != nil {
+		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ChargebackFinancialRepairPlan{}, err
+	}
+	defer tx.Rollback(ctx)
+	plan, err := chargebackFinancialRepairPlanFrom(ctx, tx, input, active.PolicyVersion, int64(active.SnapshotSchemaVersion), active.Version)
+	if err != nil {
+		return ChargebackFinancialRepairPlan{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ChargebackFinancialRepairPlan{}, err
+	}
+	return plan, nil
 }
 
 // refundExceptionRepairPlan re-reads the owner activation row and recomputes the
@@ -360,6 +389,34 @@ func currentBillingProofInput(ctx context.Context, repository billingProofFacts,
 		critical, financial := refundExceptionRepairProofProjection(plan)
 		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
 		if plan.RefundID != command.RefundID || plan.EvidenceID != command.PaymentEvidenceID || plan.AnomalyCaseID != command.AnomalyCaseID {
+			return current, "SNAPSHOT_MISMATCH", ownerState, nil
+		}
+	case chargebackFinancialRepairCommand:
+		var command struct {
+			ChargebackCaseID    uuid.UUID `json:"chargeback_case_id"`
+			PaymentEvidenceID   uuid.UUID `json:"payment_evidence_id"`
+			ExpectedCaseVersion int64     `json:"expected_case_version"`
+			ReasonCode          string    `json:"reason_code"`
+		}
+		if json.Unmarshal(frozen.NormalizedCommand, &command) != nil || command.ChargebackCaseID == uuid.Nil ||
+			command.PaymentEvidenceID == uuid.Nil || command.ExpectedCaseVersion < 1 ||
+			strings.TrimSpace(command.ReasonCode) != chargebackFinancialRepairReason {
+			return current, "", "", ErrApprovalSnapshotMismatch
+		}
+		plan, err := repository.chargebackFinancialRepairPlan(ctx, ChargebackFinancialRepairCommandInput{
+			ChargebackCaseID: command.ChargebackCaseID, PaymentEvidenceID: command.PaymentEvidenceID,
+		})
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrNotFound) {
+			return current, "DOMAIN_INVARIANT_FAILED", ownerState, nil
+		}
+		if err != nil {
+			return current, "", "", err
+		}
+		ownerState = plan.ProviderChargebackID
+		critical, financial := chargebackFinancialRepairProofProjection(plan)
+		current.CriticalResourceVersions, current.FinancialSnapshot = critical, financial
+		if plan.ChargebackCaseID != command.ChargebackCaseID || plan.EvidenceID != command.PaymentEvidenceID ||
+			plan.CaseVersion != command.ExpectedCaseVersion {
 			return current, "SNAPSHOT_MISMATCH", ownerState, nil
 		}
 	default:

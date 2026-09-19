@@ -351,6 +351,31 @@ func validBillingRecoveryPayload(command string, domainResult, ledgerReferences 
 			result.RevokedMicrocredits+result.ShortfallMicrocredits > 0 &&
 			strings.TrimSpace(result.ProviderRefundID) != "" && lowerHexDigest(result.FactsDigest) &&
 			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
+	case "CHARGEBACK_FINANCIAL_REPAIR":
+		var result struct {
+			CaseID                    uuid.UUID `json:"case_id"`
+			ChargebackCaseID          uuid.UUID `json:"chargeback_case_id"`
+			WalletID                  uuid.UUID `json:"wallet_id"`
+			PackageID                 uuid.UUID `json:"package_id"`
+			PaymentEvidenceID         uuid.UUID `json:"payment_evidence_id"`
+			BaseShortfallMicrocredits int64     `json:"base_shortfall_microcredits"`
+			ComponentDigest           string    `json:"component_digest"`
+			FactsDigest               string    `json:"facts_digest"`
+			JournalEntryID            uuid.UUID `json:"journal_entry_id"`
+			ReceivableID              uuid.UUID `json:"receivable_id"`
+			ProviderChargebackID      string    `json:"provider_chargeback_id"`
+			Status                    string    `json:"status"`
+		}
+		var ledger struct {
+			JournalEntryID uuid.UUID `json:"journal_entry_id"`
+		}
+		return decode(domainResult, &result) && decode(ledgerReferences, &ledger) &&
+			result.CaseID != uuid.Nil && result.ChargebackCaseID != uuid.Nil && result.WalletID != uuid.Nil &&
+			result.PackageID != uuid.Nil && result.PaymentEvidenceID != uuid.Nil &&
+			result.BaseShortfallMicrocredits > 0 && lowerHexDigest(result.ComponentDigest) &&
+			lowerHexDigest(result.FactsDigest) && result.JournalEntryID != uuid.Nil &&
+			result.ReceivableID != uuid.Nil && strings.TrimSpace(result.ProviderChargebackID) != "" &&
+			result.Status == "SUCCEEDED" && ledger.JournalEntryID == result.JournalEntryID
 	}
 	return false
 }

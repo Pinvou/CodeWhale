@@ -132,13 +132,13 @@ type approvalReceivableWriteOffSummary struct {
 // the owner revision digest. Provider payloads, evidence internals and free text
 // are never presented.
 type approvalPaymentFinancialRepairSummary struct {
-	PaymentOrderID         uuid.UUID `json:"payment_order_id"`
-	AmountFen              string    `json:"amount_fen"`
-	CreditMicrocredits     string    `json:"credit_microcredits"`
-	AppliedToReceivables   string    `json:"applied_to_receivables"`
-	WalletVersion          string    `json:"wallet_version"`
-	FactsDigest            string    `json:"facts_digest"`
-	ReasonCode             string    `json:"reason_code"`
+	PaymentOrderID       uuid.UUID `json:"payment_order_id"`
+	AmountFen            string    `json:"amount_fen"`
+	CreditMicrocredits   string    `json:"credit_microcredits"`
+	AppliedToReceivables string    `json:"applied_to_receivables"`
+	WalletVersion        string    `json:"wallet_version"`
+	FactsDigest          string    `json:"facts_digest"`
+	ReasonCode           string    `json:"reason_code"`
 }
 
 // approvalRefundExceptionRepairSummary is the closed read-only projection of
@@ -157,6 +157,20 @@ type approvalRefundExceptionRepairSummary struct {
 	ReasonCode            string    `json:"reason_code"`
 }
 
+// approvalChargebackFinancialRepairSummary is the closed read-only projection of
+// the chargeback BASE shortfall compensation: the target case, the owner-derived
+// shortfall and both owner digests. Provider payloads, evidence internals and
+// free text are never presented.
+type approvalChargebackFinancialRepairSummary struct {
+	ChargebackCaseID          uuid.UUID `json:"chargeback_case_id"`
+	WalletID                  uuid.UUID `json:"wallet_id"`
+	PackageID                 uuid.UUID `json:"package_id"`
+	BaseShortfallMicrocredits string    `json:"base_shortfall_microcredits"`
+	ComponentDigest           string    `json:"component_digest"`
+	FactsDigest               string    `json:"facts_digest"`
+	ReasonCode                string    `json:"reason_code"`
+}
+
 func approvalPresenterAvailable(command string, policyVersion int64, snapshotVersion int) bool {
 	switch command {
 	case "WALLET_ADJUSTMENT", "PAYMENT_PRODUCT_RESUME", "TOKEN_CREDENTIAL_REVOKE":
@@ -172,6 +186,8 @@ func approvalPresenterAvailable(command string, policyVersion int64, snapshotVer
 	case "PAYMENT_FINANCIAL_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "REFUND_EXCEPTION_REPAIR":
+		return policyVersion == 1 && snapshotVersion == 1
+	case "CHARGEBACK_FINANCIAL_REPAIR":
 		return policyVersion == 1 && snapshotVersion == 1
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
 		return policyVersion == 2 && snapshotVersion == 2
@@ -291,6 +307,15 @@ func approvalV2Command(item ApprovalRequest) any {
 			return nil
 		}
 		return approvalRefundExceptionRepairSummary{RefundID: id}
+	case "CHARGEBACK_FINANCIAL_REPAIR":
+		if item.TargetResourceType != "CHARGEBACK_CASE" {
+			return nil
+		}
+		id, err := uuid.Parse(value)
+		if err != nil || id.String() != value {
+			return nil
+		}
+		return approvalChargebackFinancialRepairSummary{ChargebackCaseID: id}
 	case "TOKEN_MODEL_LIFECYCLE_CHANGE":
 		if item.TargetResourceType != "MODEL" {
 			return nil
@@ -354,12 +379,13 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			ReceivableID           uuid.UUID `json:"receivable_id"`
 			PaymentOrderID         uuid.UUID `json:"payment_order_id"`
 			RefundID               uuid.UUID `json:"refund_id"`
+			ChargebackCaseID       uuid.UUID `json:"chargeback_case_id"`
 			ReasonCode             string    `json:"reason_code"`
 		} `json:"normalized_command"`
 		Critical struct {
-			EntryType        string `json:"entry_type"`
-			PostingSetDigest string `json:"posting_set_digest"`
-			FactsDigest      string `json:"facts_digest"`
+			EntryType             string `json:"entry_type"`
+			PostingSetDigest      string `json:"posting_set_digest"`
+			FactsDigest           string `json:"facts_digest"`
 			PaymentOrderUpdatedAt string `json:"payment_order_updated_at"`
 		} `json:"critical_resource_versions"`
 		Financial struct {
@@ -378,6 +404,8 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 			PackageID                    string `json:"package_id"`
 			RevokedMicrocredits          string `json:"revoked_microcredits"`
 			ShortfallMicrocredits        string `json:"shortfall_microcredits"`
+			BaseShortfallMicrocredits    string `json:"base_shortfall_microcredits"`
+			ComponentDigest              string `json:"component_digest"`
 		} `json:"financial_snapshot"`
 	}
 	if json.Unmarshal(artifacts.ProofInputJSON, &proof) != nil {
@@ -461,6 +489,22 @@ func approvalV2Detail(item ApprovalRequest, controlVersion int64) (ApprovalV2Det
 		target.CreditMicrocredits = proof.Financial.CreditMicrocredits
 		target.RevokedMicrocredits = proof.Financial.RevokedMicrocredits
 		target.ShortfallMicrocredits = proof.Financial.ShortfallMicrocredits
+		target.FactsDigest = proof.Critical.FactsDigest
+		target.ReasonCode = proof.Normalized.ReasonCode
+		command = target
+	case approvalChargebackFinancialRepairSummary:
+		walletID, walletErr := uuid.Parse(proof.Financial.WalletID)
+		packageID, packageErr := uuid.Parse(proof.Financial.PackageID)
+		if proof.Normalized.ChargebackCaseID != target.ChargebackCaseID || !approvalPaginationHexDigest(proof.Critical.FactsDigest) ||
+			walletErr != nil || walletID == uuid.Nil || packageErr != nil || packageID == uuid.Nil ||
+			!approvalPaginationHexDigest(proof.Financial.ComponentDigest) ||
+			proof.Normalized.ReasonCode != "BASE_SHORTFALL_COMPENSATION" {
+			return ApprovalV2Detail{}, ErrApprovalDetailPresentationUnavailable
+		}
+		target.WalletID = walletID
+		target.PackageID = packageID
+		target.BaseShortfallMicrocredits = proof.Financial.BaseShortfallMicrocredits
+		target.ComponentDigest = proof.Financial.ComponentDigest
 		target.FactsDigest = proof.Critical.FactsDigest
 		target.ReasonCode = proof.Normalized.ReasonCode
 		command = target

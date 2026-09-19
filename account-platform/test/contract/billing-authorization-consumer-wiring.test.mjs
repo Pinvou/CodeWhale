@@ -125,6 +125,23 @@ test('Billing starts the dedicated refund exception repair durable only from an 
     'each opt-in only starts its own durable');
 });
 
+test('Billing starts the dedicated chargeback financial repair durable only from an explicit trusted receipt', async () => {
+  const source = await readFile(path.join(root, 'cmd/billing-service/main.go'), 'utf8');
+  const durable = 'billing-chargeback-financial-repair-executor-p1-v1';
+  assert.match(source, /optionalBooleanEnvironment\("BILLING_CHARGEBACK_FINANCIAL_REPAIR_CONSUMER_ENABLED", false\)/,
+    'the dedicated durable must stay opt-in with a disabled default');
+  assert.match(source, new RegExp(`NewAuthorizationCommandConsumer\\(service, approvalGate, "${durable}"\\)`));
+  assert.match(source, new RegExp(`ConsumeAuthorization\\(workerContext, "${durable}", chargebackFinancialRepairConsumer\\.Handle\\)`));
+  assert.match(source, /log\.Fatal\("BILLING_CHARGEBACK_FINANCIAL_REPAIR_CONSUMER_RESOURCES_UNAVAILABLE"\)/,
+    'a missing or untrusted binding must fail startup, not silently skip the durable');
+  const enabledBranch = source.slice(source.lastIndexOf('if chargebackFinancialRepairConsumerEnabled {'));
+  assert.ok(enabledBranch.includes(`ConsumeAuthorization(workerContext, "${durable}"`));
+  assert.equal(enabledBranch.includes('"billing-command-executor-v1"'), false,
+    'the legacy shared durable must keep starting unconditionally');
+  assert.equal(enabledBranch.includes('billing-refund-exception-repair-executor-p1-v1'), false,
+    'each opt-in only starts its own durable');
+});
+
 test('the legacy generic authorization handler is permanently fail closed', async () => {
   const source = await readFile(path.join(root, 'internal/billing/approval_consumer.go'), 'utf8');
   assert.match(source, /generic approval authorization consumption is forbidden/);

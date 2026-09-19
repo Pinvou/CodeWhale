@@ -742,6 +742,16 @@
         "file": "000074_refund_exception_repair_consumer_route.up.sql",
         "version": 74,
         "sha256": "7cdeb575ee80a95a75fe5818c39ea25e3ed38d1b68df4412499001b5b2a46f5f"
+      },
+      {
+        "file": "000075_chargeback_financial_repair_consumer_route.down.sql",
+        "version": 75,
+        "sha256": "f0f40a3680404dc610cd60d0fd67c39c3a7a3a4c3b16464e5bde0186c5817d07"
+      },
+      {
+        "file": "000075_chargeback_financial_repair_consumer_route.up.sql",
+        "version": 75,
+        "sha256": "9f1b944e0a8a02c995dec46f0e132e34d8379df38749dcc34cbbddb46a6c4f40"
       }
     ],
     "billing": [
@@ -1424,6 +1434,26 @@
         "file": "000069_entitlement_package_stale_composition_check.up.sql",
         "version": 69,
         "sha256": "3e58dd5cfe84082b2ec1580a063804807852d844f3e463cd0fb53355230eb4f6"
+      },
+      {
+        "file": "000070_chargeback_financial_repair_cases.down.sql",
+        "version": 70,
+        "sha256": "9f3dd5ddef9e354c4aa1e6d7b4bd1c065efbd418fb12a616c79b0d5c146c82fa"
+      },
+      {
+        "file": "000070_chargeback_financial_repair_cases.up.sql",
+        "version": 70,
+        "sha256": "a0fc087420bb0c576cf20197076896331fc732b1c406ad6f6d99eb6d3b67643e"
+      },
+      {
+        "file": "000071_chargeback_financial_repair_proof_claim_allowlist.down.sql",
+        "version": 71,
+        "sha256": "d2e3e5092b2457d352fa70a4006df7e13ea45cfc4bdc8e3d7d5944505e1999fd"
+      },
+      {
+        "file": "000071_chargeback_financial_repair_proof_claim_allowlist.up.sql",
+        "version": 71,
+        "sha256": "10b04921095e47c657aa2e8c87c136d4026659e6e0ec461381723288b5cd3dd3"
       }
     ],
     "payment-simulator": [

@@ -16,7 +16,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 && loaded[index].Version != 58 && loaded[index].Version != 59 && loaded[index].Version != 60 && loaded[index].Version != 61 && loaded[index].Version != 62 && loaded[index].Version != 63 && loaded[index].Version != 64 && loaded[index].Version != 65 && loaded[index].Version != 66 && loaded[index].Version != 67 && loaded[index].Version != 68 && loaded[index].Version != 69 {
+		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 && loaded[index].Version != 56 && loaded[index].Version != 57 && loaded[index].Version != 58 && loaded[index].Version != 59 && loaded[index].Version != 60 && loaded[index].Version != 61 && loaded[index].Version != 62 && loaded[index].Version != 63 && loaded[index].Version != 64 && loaded[index].Version != 65 && loaded[index].Version != 66 && loaded[index].Version != 67 && loaded[index].Version != 68 && loaded[index].Version != 69 && loaded[index].Version != 70 && loaded[index].Version != 71 {
 			continue
 		}
 		loaded[index].UpSQL = rewriteBillingPublicSchema(loaded[index].UpSQL, qualified)
@@ -26,7 +26,7 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 		if loaded[index].Version == 54 {
 			loaded[index].UpSQL = "GRANT USAGE ON SCHEMA " + qualified + " TO billing_service;\n" + loaded[index].UpSQL
 		}
-		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 || loaded[index].Version == 58 || loaded[index].Version == 59 || loaded[index].Version == 60 || loaded[index].Version == 61 || loaded[index].Version == 62 || loaded[index].Version == 63 || loaded[index].Version == 64 || loaded[index].Version == 65 || loaded[index].Version == 66 || loaded[index].Version == 67 || loaded[index].Version == 68 || loaded[index].Version == 69 {
+		if loaded[index].Version == 55 || loaded[index].Version == 56 || loaded[index].Version == 57 || loaded[index].Version == 58 || loaded[index].Version == 59 || loaded[index].Version == 60 || loaded[index].Version == 61 || loaded[index].Version == 62 || loaded[index].Version == 63 || loaded[index].Version == 64 || loaded[index].Version == 65 || loaded[index].Version == 66 || loaded[index].Version == 67 || loaded[index].Version == 68 || loaded[index].Version == 69 || loaded[index].Version == 70 || loaded[index].Version == 71 {
 			loaded[index].UpSQL += "\nRESET ROLE;"
 		}
 		if loaded[index].Version == 56 {
@@ -68,6 +68,14 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 		// owner must be able to see it as the table owner.
 		if loaded[index].Version == 69 {
 			loaded[index].UpSQL = "ALTER TABLE " + qualified + ".entitlement_packages OWNER TO billing_service;\n" + loaded[index].UpSQL
+		}
+		// 000070 grants REFERENCES on the chargeback/anomaly/ledger tables to the
+		// schema owner, so the isolated runtime must own them first (same reason as
+		// the 000067 prelude above).
+		if loaded[index].Version == 70 {
+			for _, table := range []string{"chargeback_cases", "payment_anomaly_cases", "wallets", "entitlement_packages", "payment_evidence", "journal_entries", "receivables"} {
+				loaded[index].UpSQL = "ALTER TABLE " + qualified + "." + table + " OWNER TO billing_service;\n" + loaded[index].UpSQL
+			}
 		}
 		loaded[index].DownSQL = rewriteBillingPublicSchema(loaded[index].DownSQL, qualified)
 		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")

@@ -765,11 +765,11 @@ components:
           type: array
           minItems: 11
           maxItems: 11
-          description: Fixed command_type ascending order; unknown, duplicate, missing, or mixed-version rows make the whole projection unavailable. ENTITLEMENT_COMPONENT_ADJUSTMENT keeps at most one v1 row plus at most one v2 correction row, projects the highest available version, and may report ACTIVE only for that appended v2 projection while the v1 row stays INACTIVE history. LEDGER_REPAIR, RECEIVABLE_WRITE_OFF, PAYMENT_FINANCIAL_REPAIR and REFUND_EXCEPTION_REPAIR keep exactly one v1/s1 row each, which is the only projection of those commands that may report ACTIVE. All of them stay INACTIVE until a separately authorized activation.
+          description: Fixed command_type ascending order; unknown, duplicate, missing, or mixed-version rows make the whole projection unavailable. ENTITLEMENT_COMPONENT_ADJUSTMENT keeps at most one v1 row plus at most one v2 correction row, projects the highest available version, and may report ACTIVE only for that appended v2 projection while the v1 row stays INACTIVE history. LEDGER_REPAIR, RECEIVABLE_WRITE_OFF, PAYMENT_FINANCIAL_REPAIR, REFUND_EXCEPTION_REPAIR and CHARGEBACK_FINANCIAL_REPAIR keep exactly one v1/s1 row each, which is the only projection of those commands that may report ACTIVE. All of them stay INACTIVE until a separately authorized activation.
           prefixItems:
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
-                - properties: { command_type: { const: CHARGEBACK_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+                - properties: { command_type: { const: CHARGEBACK_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
             - allOf:
                 - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
                 - properties: { command_type: { const: ENTITLEMENT_COMPONENT_ADJUSTMENT } }

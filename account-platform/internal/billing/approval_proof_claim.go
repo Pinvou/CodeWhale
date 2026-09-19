@@ -104,6 +104,19 @@ func (f billingTxProofFacts) refundExceptionRepairPlan(ctx context.Context, inpu
 	return refundExceptionRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
 }
 
+// The chargeback shortfall repair follows the same proof-era rule: the owner
+// recomputes the closed projection inside the claim transaction, so no provider
+// call and no activation drift is possible between proof and claim.
+func (f billingTxProofFacts) chargebackFinancialRepairPlan(ctx context.Context, input ChargebackFinancialRepairCommandInput) (ChargebackFinancialRepairPlan, error) {
+	var policyVersion, schemaVersion, version int64
+	var state string
+	if err := f.tx.QueryRow(ctx, `SELECT policy_version,snapshot_schema_version,state,version FROM billing_approval_command_activations WHERE command_type=$1`, chargebackFinancialRepairCommand).
+		Scan(&policyVersion, &schemaVersion, &state, &version); err != nil || state != "ACTIVE" || version < 1 {
+		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+	}
+	return chargebackFinancialRepairPlanFrom(ctx, f.tx, input, policyVersion, schemaVersion, version)
+}
+
 // ClaimBillingApprovalProof is the last zero-effect authorization boundary.
 // Once committed, a crash or provider failure is an unknown outcome, never
 // permission to run a second probe under a newly issued proof.

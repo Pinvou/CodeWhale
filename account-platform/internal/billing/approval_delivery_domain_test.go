@@ -178,6 +178,10 @@ type authorizationExecutionRepositoryStub struct {
 	refundRepairErr                 error
 	refundRunErr                    error
 	refundInput                     RefundExceptionRepairExecutionInput
+	chargebackRepair                ChargebackFinancialRepairResult
+	chargebackRepairErr             error
+	chargebackRunErr                error
+	chargebackInput                 ChargebackFinancialRepairExecutionInput
 	activations                     ApprovalCommandActivationSnapshot
 	activationsErr                  error
 	adjustmentRuns                  int
@@ -186,6 +190,7 @@ type authorizationExecutionRepositoryStub struct {
 	ledgerRuns                      int
 	writeOffRuns                    int
 	refundRuns                      int
+	chargebackRuns                  int
 }
 
 func (s *authorizationExecutionRepositoryStub) AdjustmentForExecution(context.Context, uuid.UUID) (ManualAdjustment, error) {
@@ -272,6 +277,19 @@ func (s *authorizationExecutionRepositoryStub) ApplyRefundExceptionRepair(_ cont
 		return RefundExceptionRepairResult{}, s.refundRunErr
 	}
 	return s.refundRepair, nil
+}
+
+func (s *authorizationExecutionRepositoryStub) ChargebackFinancialRepairForRequest(context.Context, uuid.UUID) (ChargebackFinancialRepairResult, error) {
+	return s.chargebackRepair, s.chargebackRepairErr
+}
+
+func (s *authorizationExecutionRepositoryStub) ApplyChargebackFinancialRepair(_ context.Context, input ChargebackFinancialRepairExecutionInput) (ChargebackFinancialRepairResult, error) {
+	s.chargebackRuns++
+	s.chargebackInput = input
+	if s.chargebackRunErr != nil {
+		return ChargebackFinancialRepairResult{}, s.chargebackRunErr
+	}
+	return s.chargebackRepair, nil
 }
 
 func TestBillingAuthorizationDomainWalletAttemptClassification(t *testing.T) {
