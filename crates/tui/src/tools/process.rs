@@ -35,6 +35,24 @@ use super::spec::ToolError;
 /// must not hold the tool call past a short bound.
 const CHILD_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// Appended to stderr when the post-exit drain grace expired. The captured
+/// output may be truncated (a grandchild still holds the pipes), and a
+/// caller that only surfaces stdout on success — the plugin tools parse
+/// stdout as their result — must be able to detect the truncation instead of
+/// reporting a silently cut output as a success.
+pub(crate) const DRAIN_TRUNCATED_NOTE: &[u8] =
+    b"[codewhale] output pipes did not close after the interpreter exited \
+      (inherited by a still-running grandchild?); returning the output \
+      captured before the drain grace expired\n";
+
+/// True when `output` carries the drain-truncation note.
+pub(crate) fn drain_truncated(output: &std::process::Output) -> bool {
+    output
+        .stderr
+        .windows(DRAIN_TRUNCATED_NOTE.len())
+        .any(|window| window == DRAIN_TRUNCATED_NOTE)
+}
+
 /// Run a pre-configured command under `budget`, capturing stdout/stderr.
 ///
 /// When `stdin_input` is `Some`, stdin is piped and the bytes are written by
@@ -115,11 +133,7 @@ pub(crate) async fn run_bounded_child(
                 if stderr.last() != Some(&b'\n') && !stderr.is_empty() {
                     stderr.push(b'\n');
                 }
-                stderr.extend_from_slice(
-                    b"[codewhale] output pipes did not close after the interpreter exited \
-                      (inherited by a still-running grandchild?); returning the output \
-                      captured before the drain grace expired\n",
-                );
+                stderr.extend_from_slice(DRAIN_TRUNCATED_NOTE);
                 std::process::Output {
                     status,
                     stdout: snapshot(&stdout_buf),
