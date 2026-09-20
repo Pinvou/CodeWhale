@@ -46,3 +46,16 @@ test('audit filters have accessible names and invalid dates do not crash export'
   }
   assert.match(view, /try \{ filter = queryFilters\(\); \} catch \{ setError\(copy\.audit\.exportRequestInvalid\); return; \}/);
 });
+
+test('a definite audit export rejection releases the frozen attempt while unknown results keep it', () => {
+  const view = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  // The server answering 4xx (except the two ambiguous ones) proves no export
+  // job was created: the operator must be able to correct the reason or PII
+  // choice instead of being trapped on a disabled form with no reset entry.
+  assert.match(view, /const status = typeof cause\?\.status === 'number' \? cause\.status : 0;/);
+  assert.match(view, /if \(status >= 400 && status < 500 && status !== 408 && status !== 409\) \{\s+exportAttemptRef\.current = null;\s+setExportAttempted\(false\);\s+\}/);
+  // An unknown result - 5xx, idempotency conflict, timeout, network loss or
+  // abort - must never release the frozen attempt, so no catch may clear it
+  // unconditionally.
+  assert.doesNotMatch(view, /catch \{[^}]*exportAttemptRef\.current = null/);
+});

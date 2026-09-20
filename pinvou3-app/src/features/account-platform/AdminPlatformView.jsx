@@ -5961,7 +5961,17 @@ function Audit({ copy, data, client, setData, permissions }) {
       const job = await submitAuditExportAttempt(client, exportAttemptRef.current);
       setExportJob(job);
       setExportKey(job.decryption_key || '');
-    } catch {
+    } catch (cause) {
+      // A definite rejection proves the server answered and created no export
+      // job, so the operator may correct the reason or PII choice and start a
+      // new attempt. Every other outcome - 5xx, idempotency conflict, request
+      // timeout, network loss, abort - is an unknown result and keeps the frozen
+      // attempt, leaving retrying the identical request as the only action.
+      const status = typeof cause?.status === 'number' ? cause.status : 0;
+      if (status >= 400 && status < 500 && status !== 408 && status !== 409) {
+        exportAttemptRef.current = null;
+        setExportAttempted(false);
+      }
       setError(copy.audit.exportFailed);
     } finally {
       setBusy(false);
