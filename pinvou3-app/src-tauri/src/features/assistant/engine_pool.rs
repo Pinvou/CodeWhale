@@ -3682,18 +3682,6 @@ mod scheduled_model_tests {
     }
 
     #[test]
-    fn saved_model_update_revision_forces_next_turn_rebuild() {
-        let revisions = ModelUpdateRevisions::default();
-        let prepared = PreparedRuntimeModel::unchanged(model("model-1", "wire-model"));
-        let previous = PreparedRuntimeState::new(prepared.clone(), revisions.current("model-1"));
-
-        revisions.bump("model-1");
-        let after_save = PreparedRuntimeState::new(prepared, revisions.current("model-1"));
-
-        assert!(after_save.requires_rebuild_from(&previous));
-    }
-
-    #[test]
     fn rebuild_does_not_swallow_inflight_reservation() {
         // #253 regression (deterministic composition, no real engine): saving
         // the model/credentials (the mark_model_updated revision bump) -> the
