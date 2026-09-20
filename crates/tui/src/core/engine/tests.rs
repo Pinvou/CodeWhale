@@ -17239,8 +17239,80 @@ fn forkguard_agent_receipt_passthrough_is_bounded() {
     );
     let prefix_len = "[sub-agent receipt]\n".len();
     assert!(
-        context.len() <= prefix_len + 4_000,
+        context.len()
+            <= prefix_len
+                + super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS
+                + "[receipt truncated: showing 2000 of 18446744073709551615 characters]".len(),
         "passthrough must stay bounded:\n{context}"
+    );
+}
+
+// The unscoped status/peek fleet listing is a collection, not one child:
+// passing it through bounded would hard-truncate every child past the cap
+// once two running projections exceed it. The rows are per-child snapshots,
+// so they summarize like one.
+#[test]
+fn forkguard_agent_unscoped_status_list_is_summarized_per_child() {
+    let fleet = json!({
+        "action": "status",
+        "count": 2,
+        "agents": [
+            {"agent_id": "agent_aaaa1111", "agent_type": "explore", "status": "Running",
+             "assignment": {"objective": "Map the rendering path"}},
+            {"agent_id": "agent_bbbb2222", "agent_type": "test", "status": "Completed",
+             "result": "12 tests green", "steps_taken": 4, "duration_ms": 900}
+        ]
+    })
+    .to_string();
+    let output = ToolResult::success(fleet);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent fleet status summarized for parent context]"),
+        "a fleet listing must summarize per child:\n{context}"
+    );
+    assert!(
+        context.contains("agent_aaaa1111") && context.contains("Running"),
+        "every listed child stays visible:\n{context}"
+    );
+    assert!(
+        context.contains("agent_bbbb2222") && context.contains("12 tests green"),
+        "completed children keep their self-reported result:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent receipt]"),
+        "a fleet listing must never be truncated as one opaque blob:\n{context}"
+    );
+}
+
+// `claim` receipts carry the recorded scope (roots/files/contracts) and no
+// snapshot shape, so they must keep passing through bounded — the scope is
+// the payload the model needs to reason about its own write permissions.
+#[test]
+fn forkguard_agent_claim_receipt_passes_through_to_context() {
+    let claim = json!({
+        "action": "claim",
+        "roots": ["src/foo"],
+        "exact_files": ["src/foo/bar.rs"],
+        "contracts": [],
+    })
+    .to_string();
+    let output = ToolResult::success(claim);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "a claim receipt is not a result snapshot:\n{context}"
+    );
+    assert!(
+        context.contains("\"src/foo\"") && context.contains("exact_files"),
+        "the claimed scope must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "collapsing a claim into snapshot noise would hide the scope:\n{context}"
     );
 }
 

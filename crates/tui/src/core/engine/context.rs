@@ -205,13 +205,30 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
 /// facts the snapshot summarizer cannot represent (the members catalog,
 /// settled/`timed_out` state). Pass them through bounded instead of
 /// collapsing them into "- unknown (agent) status=unknown" noise.
-const SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS: usize = 2_000;
+pub(crate) const SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS: usize = 2_000;
+
+const SUBAGENT_RESULT_SUMMARY_HEADER: &str = "[sub-agent result summarized for parent context]\n";
+const SUBAGENT_FLEET_SUMMARY_HEADER: &str =
+    "[sub-agent fleet status summarized for parent context]\n";
+const SUBAGENT_SELF_REPORT_NOTICE: &str = "Child results are self-reports; verify side effects with `read` or `bash` before claiming success.\n";
 
 /// A per-child result snapshot: an object carrying `agent_id` or `status`.
 fn subagent_snapshot_shaped(value: &serde_json::Value) -> bool {
     value
         .as_object()
         .is_some_and(|object| object.contains_key("agent_id") || object.contains_key("status"))
+}
+
+/// True when the parsed receipt structurally carries a `transcript_handle`
+/// for at least one child — the field the guidance names. Free text that
+/// merely mentions the word must not summon the hint (Pinvou #490 class).
+fn carries_transcript_handle(parsed: &serde_json::Value) -> bool {
+    match parsed {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| item.get("transcript_handle").is_some()),
+        _ => parsed.get("transcript_handle").is_some(),
+    }
 }
 
 /// Bounded verbatim passthrough for non-snapshot agent action receipts.
@@ -233,38 +250,61 @@ fn bounded_subagent_receipt(raw: &str) -> String {
     out
 }
 
+/// How the snapshot summarizer should treat a parsed agent receipt.
+enum SubagentSnapshotBatch<'a> {
+    /// Per-child result snapshots: spawn receipts and scoped status/peek
+    /// rows, where each object carries one child's identity and outcome.
+    ChildResults(Vec<&'a serde_json::Value>),
+    /// The unscoped status/peek fleet listing: the envelope is a
+    /// collection, not one child, and can outgrow any bounded passthrough
+    /// once two children are running — summarize the rows instead.
+    FleetStatus(Vec<&'a serde_json::Value>),
+}
+
 fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Option<String> {
     if tool_name != "agent" {
         return None;
     }
 
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let snapshots: Option<Vec<&serde_json::Value>> = match &parsed {
+    let batch: Option<SubagentSnapshotBatch> = match &parsed {
         serde_json::Value::Array(items) => {
             if !items.is_empty() && items.iter().all(subagent_snapshot_shaped) {
-                Some(items.iter().collect())
+                Some(SubagentSnapshotBatch::ChildResults(items.iter().collect()))
             } else {
                 None
             }
         }
-        serde_json::Value::Object(_) if subagent_snapshot_shaped(&parsed) => Some(vec![&parsed]),
+        serde_json::Value::Object(_) if subagent_snapshot_shaped(&parsed) => {
+            Some(SubagentSnapshotBatch::ChildResults(vec![&parsed]))
+        }
+        serde_json::Value::Object(object) => match object.get("agents").and_then(Value::as_array) {
+            Some(fleet) if !fleet.is_empty() && fleet.iter().all(subagent_snapshot_shaped) => {
+                Some(SubagentSnapshotBatch::FleetStatus(fleet.iter().collect()))
+            }
+            _ => None,
+        },
         _ => None,
     };
-    let Some(snapshots) = snapshots else {
+    let Some(batch) = batch else {
         // Not a per-child snapshot (`roster`/`wait`/`claim` receipts): the
         // raw JSON is the payload the model needs — pass it through bounded.
         return Some(bounded_subagent_receipt(raw));
     };
+    let (header, snapshots) = match batch {
+        SubagentSnapshotBatch::ChildResults(snapshots) => {
+            (SUBAGENT_RESULT_SUMMARY_HEADER, snapshots)
+        }
+        SubagentSnapshotBatch::FleetStatus(snapshots) => (SUBAGENT_FLEET_SUMMARY_HEADER, snapshots),
+    };
 
-    let mut out = String::from("[sub-agent result summarized for parent context]\n");
-    out.push_str(
-        "Child results are self-reports; verify side effects with `read` or `bash` before claiming success.\n",
-    );
+    let mut out = String::from(header);
+    out.push_str(SUBAGENT_SELF_REPORT_NOTICE);
     // Only point at `transcript_handle` when this receipt actually carries
     // one: compact spawn receipts strip the handle before it reaches the
     // parent, so an unconditional hint would name a value the model never
     // received (Pinvou #490 phantom-tool class).
-    if raw.contains("transcript_handle") {
+    if carries_transcript_handle(&parsed) {
         out.push_str(&format!(
             "Use `handle_read` on `transcript_handle` for bounded transcript slices when the returned summary is not enough — {handle_read_hint}.\n",
             handle_read_hint = crate::tools::subagent::HANDLE_READ_ACTIVATION_HINT
