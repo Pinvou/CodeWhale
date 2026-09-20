@@ -774,7 +774,9 @@ the first returned event advances past exactly the omitted history.
 `/v1/snapshots` lists recent side-git restore points for the runtime workspace.
 `limit` defaults to `20` and must be between `1` and `100`. `POST
 /v1/snapshots/{id}/restore` restores workspace files from the snapshot and
-returns `{"restored": "<snapshot-id>"}`.
+returns `{"restored": "<snapshot-id>"}`. The `id` must match a listed
+snapshot exactly (full id, case-sensitive); an unknown or malformed id
+returns `404` before any git command runs.
 
 ```json
 [

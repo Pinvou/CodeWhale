@@ -577,9 +577,10 @@ progress for the heartbeat window, the manager auto-cancels it, releases its
 sub-agent slot, and keeps the cancelled record inspectable through the returned
 transcript handle and persisted worker record. The default is 5 minutes,
 resolved to the highest of itself, 30 seconds above the resolved
-`api_timeout_secs`, and 30 seconds above the resolved `tool_timeout_secs`
-(so 1830 seconds with the 600-second default API timeout and the
-1800-second default tool timeout):
+`api_timeout_secs`, and 30 seconds above the built-in sub-agent tool
+timeout (so 1830 seconds with the 600-second default API timeout and the
+1800-second default tool timeout; the tool timeout is a compile-time
+constant — only `api_timeout_secs` is a config key):
 
 ```toml
 [subagents]
@@ -587,7 +588,7 @@ heartbeat_timeout_secs = 300  # clamped to 30..=3600
 ```
 
 The effective heartbeat is kept at least 30 seconds above both the resolved
-`api_timeout_secs` and the resolved `tool_timeout_secs` (the child records
+`api_timeout_secs` and the built-in sub-agent tool timeout (the child records
 progress at step boundaries, not mid-tool, so a silent build or MCP call must
 not be cleaned up mid-run), so neither a configured long model request nor a
 long in-flight tool is cancelled before its own timeout can fire.
