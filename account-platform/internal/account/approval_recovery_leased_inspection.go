@@ -128,6 +128,9 @@ func inspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPla
 				if resultState == "SUCCEEDED" && observation.EffectObservation == approvaleffect.StateAbsent {
 					inspectionErr = ErrApprovalRecoveryPlanInvalid
 				}
+				// Read-only verdict for the later governed terminal transition;
+				// it never changes state and never authorizes a retry.
+				observation.ZeroEffectProven, observation.ZeroEffectReason = recoveryZeroEffectVerdict(candidate, observation)
 			}
 			if inspectionErr == nil && resultState == "SUCCEEDED" && confirmer != nil {
 				confirmDeadline := lease.Until.Add(-time.Second)

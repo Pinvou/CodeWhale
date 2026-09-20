@@ -23,6 +23,52 @@ type ApprovalRecoveryInspection struct {
 	// ABSENT is only a point-in-time negative observation, never proof that
 	// an original attempt cannot still commit or an external probe had no effect.
 	Disposition string `json:"disposition"`
+	// ZeroEffectProven is a read-only verdict, never an authorization: it is
+	// true only when the owner effect authority answered ABSENT under a live
+	// lease, the owner result read proves no positive result, the failure class
+	// is a definite pre-effect failure and the original execution window has
+	// ended. A terminal transition still needs its own governed surface.
+	ZeroEffectProven bool   `json:"zero_effect_proven"`
+	ZeroEffectReason string `json:"zero_effect_reason,omitempty"`
+}
+
+const (
+	zeroEffectAbsentAfterDefiniteFailure = "ABSENT_EFFECT_AFTER_DEFINITE_PRE_EFFECT_FAILURE"
+	zeroEffectEffectObserved             = "EFFECT_OBSERVED_OR_UNAVAILABLE"
+	zeroEffectPositiveResult             = "POSITIVE_RESULT_OBSERVED"
+	zeroEffectWindowOpen                 = "WINDOW_OPEN"
+	zeroEffectClassNotDefinite           = "CLASSIFICATION_NOT_DEFINITE"
+	zeroEffectInvestigationNotQueryOnly  = "INVESTIGATION_NOT_QUERY_ONLY"
+	zeroEffectAlreadyTerminal            = "EXECUTION_ALREADY_TERMINAL"
+)
+
+// recoveryZeroEffectVerdict derives the closed zero-effect verdict from facts
+// the worker already gathered. It deliberately fails closed: anything uncertain
+// (an observed effect, a positive/unknown result, an open window, an UNKNOWN
+// classification or an execution that already reached a terminal state) keeps
+// the candidate query-only.
+func recoveryZeroEffectVerdict(candidate ApprovalRecoveryCandidate, observation ApprovalRecoveryInspection) (bool, string) {
+	if observation.EffectObservation != approvaleffect.StateAbsent {
+		return false, zeroEffectEffectObserved
+	}
+	if observation.ResultObservation != "" && observation.ResultObservation != "UNCONFIRMED" {
+		return false, zeroEffectPositiveResult
+	}
+	if !candidate.WindowElapsed || candidate.ExecutionDeadline.IsZero() {
+		return false, zeroEffectWindowOpen
+	}
+	if candidate.ExecutionStatus == "EXECUTED" || candidate.ExecutionStatus == "TERMINAL_CONFIRMED" {
+		return false, zeroEffectAlreadyTerminal
+	}
+	if candidate.Investigation.Retryable || !candidate.Investigation.QueryOnly {
+		return false, zeroEffectInvestigationNotQueryOnly
+	}
+	switch candidate.Investigation.Class {
+	case approvalconsumer.FailurePermanent, approvalconsumer.FailureFactOrPolicyChanged:
+	default:
+		return false, zeroEffectClassNotDefinite
+	}
+	return true, zeroEffectAbsentAfterDefiniteFailure
 }
 
 type ApprovalRecoveryInspectionBatch struct {
