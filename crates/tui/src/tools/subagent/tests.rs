@@ -20194,6 +20194,81 @@ async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
     );
 }
 
+/// The resume lane must honor the same isolation rule as a fresh worktree
+/// spawn: a worktree child's boundary is the worktree alone, so a multi-root
+/// parent's attached roots must not re-widen the resumed child. Both
+/// enforcement surfaces (`ToolContext::boundary_roots` and the gate's
+/// per-turn sandbox policy) materialize from the child's
+/// `(workspace, workspace_roots)` pair.
+#[tokio::test]
+async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root() {
+    let tmp = tempdir().unwrap();
+    let parent_workspace = tmp.path().join("parent");
+    let attached_root = tmp.path().join("attached");
+    let worktree = tmp.path().join("worktree");
+    for dir in [&parent_workspace, &attached_root, &worktree] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let (agent_id, _handle) = {
+        let mut guard = manager.write().await;
+        let (agent_id, handle) = guard.insert_test_interrupted_continuable_agent(
+            "paused_worktree_child",
+            &worktree,
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "prior work".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        );
+        // The interrupted child held an isolated-worktree write claim.
+        guard
+            .coordination
+            .register_claim(
+                WriteScopeClaim {
+                    owner: agent_id.clone(),
+                    roots: vec![".".to_string()],
+                    exact_files: Vec::new(),
+                    contracts: Vec::new(),
+                },
+                true,
+                |_| false,
+            )
+            .expect("isolated worktree claim");
+        (agent_id, handle)
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    // Multi-root parent: its primary workspace plus an attached root.
+    runtime.context.workspace = parent_workspace.clone();
+    runtime.context.workspace_roots = vec![parent_workspace.clone(), attached_root.clone()];
+
+    let resumed = {
+        let mut guard = manager.write().await;
+        guard
+            .resume_from_checkpoint(Arc::clone(&manager), runtime, &agent_id, "continue")
+            .expect("resume ok")
+    };
+
+    let guard = manager.read().await;
+    let child_roots = guard
+        .spawned_workspace_roots
+        .get(&resumed.agent_id)
+        .expect("the spawn seam captured the resumed child's root set");
+    assert!(
+        child_roots.is_empty(),
+        "an isolated worktree child must not carry the parent's attached roots: {child_roots:?}"
+    );
+    let boundary = codewhale_core::normalize_workspace_roots(&worktree, child_roots);
+    assert_eq!(
+        boundary,
+        vec![worktree],
+        "the resumed child's boundary materializes as the worktree alone"
+    );
+}
+
 #[test]
 fn user_follow_up_to_running_child_counts_queued_until_the_loop_takes_it() {
     let tmp = tempdir().expect("tempdir");

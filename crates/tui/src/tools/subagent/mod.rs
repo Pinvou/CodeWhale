@@ -3348,6 +3348,11 @@ pub struct SubAgentManager {
     pending_follow_ups: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
+    /// Test/observability: the workspace root set each spawned child was
+    /// launched with, keyed by child agent id. `ToolContext::boundary_roots`
+    /// and the gate's sandbox policy both materialize from this set.
+    #[cfg(test)]
+    spawned_workspace_roots: HashMap<String, Vec<PathBuf>>,
     /// Agent ids whose handle-store entries should be evicted on the next async
     /// drain. Populated by `cleanup()` when an agent record is retired; drained
     /// by async callers that hold the `HandleStore` lock (#3885).
@@ -3470,6 +3475,8 @@ impl SubAgentManager {
             queued_mail: HashMap::new(),
             pending_follow_ups: HashMap::new(),
             woken_agents: HashMap::new(),
+            #[cfg(test)]
+            spawned_workspace_roots: HashMap::new(),
             pending_handle_evictions: Vec::new(),
             resume_targets: HashMap::new(),
             child_approvals: HashMap::new(),
@@ -5905,10 +5912,22 @@ impl SubAgentManager {
             ));
         }
         let runtime = runtime.background_runtime();
+        let isolated_worktree = claim
+            .as_ref()
+            .map(|(_, isolated)| *isolated)
+            .unwrap_or(false);
         // Resume in the interrupted child's workspace, not the caller's
         // (worktree/cwd children must not resume in the parent directory).
         let mut runtime = runtime;
         runtime.context.workspace = workspace;
+        if isolated_worktree {
+            // Same isolation rule as a fresh worktree spawn: a worktree
+            // child's boundary is the worktree alone, so the parent's
+            // attached roots do not carry over into the resumed child
+            // (neither `boundary_roots` nor the gate's sandbox policy may
+            // resolve or write outside the worktree).
+            runtime.context.workspace_roots = Vec::new();
+        }
         let options = SubAgentSpawnOptions {
             name: None, // the old session name stays owned by the terminal record
             model: Some(model),
@@ -5917,10 +5936,7 @@ impl SubAgentManager {
             nickname: None,
             fork_context,
             write_claim: claim.as_ref().map(|(claim, _)| claim.clone()),
-            isolated_worktree: claim
-                .as_ref()
-                .map(|(_, isolated)| *isolated)
-                .unwrap_or(false),
+            isolated_worktree,
             claim_pre_namespaced: claim.is_some(),
             preserve_runtime_profile: preserved_profile,
             ..Default::default()
@@ -6725,6 +6741,9 @@ impl SubAgentManager {
         }
 
         let launch_gate = (runtime.spawn_depth == 1).then(|| self.launch_gate.clone());
+        #[cfg(test)]
+        self.spawned_workspace_roots
+            .insert(agent_id.clone(), runtime.context.workspace_roots.clone());
         let task = SubAgentTask {
             manager_handle,
             runtime,
