@@ -901,12 +901,14 @@ fn default_agent_inspect_tool() -> String {
 /// `handle_read` is deferred on stock hosts, so model-facing text that pairs
 /// it with a transcript handle must teach the activation path instead of
 /// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
-/// The fallback is an honest degradation, not a promise that calling the
-/// hidden tool by name works: `tool_search` hydration only reaches tools the
-/// host allowlist kept in the catalog, and it surfaces a schema, never an
-/// execution. `pub(crate)` so the engine's parent-context hint reuses the
-/// exact wording instead of re-typing a drifting copy.
-pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` first; if `tool_search` cannot surface it, transcript reads are unavailable in this session — rely on the returned summaries";
+/// The fallback names both rungs honestly: `tool_search` hydration only
+/// reaches tools the host allowlist kept in the catalog, but a direct call
+/// by name still succeeds when the allowlist kept `handle_read` and only
+/// removed `tool_search` — so the hint tries the direct call before
+/// declaring transcript reads unavailable. `pub(crate)` so the engine's
+/// parent-context hint reuses the exact wording instead of re-typing a
+/// drifting copy.
+pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` first; if `tool_search` cannot surface it, try calling `handle_read` directly; if that call errors, transcript reads are unavailable in this session — rely on the returned summaries";
 
 /// Shared inspect brief for worker records and takeover targets; both name
 /// `handle_read`, so both must carry the activation hint.
@@ -9198,13 +9200,16 @@ async fn wait_result_payload(
     } else {
         "Full results arrive as <codewhale:subagent.done> sentinels — read those before synthesizing; do not re-peek settled children unless you need the full projection."
     };
+    // Scalar control fields before the child array — see `wait_all_payload`
+    // in `coord.rs`; the bounded receipt passthrough truncates oversized
+    // receipts, and the schema promises `timed_out` unconditionally.
     let payload = json!({
         "action": "wait",
-        "settled": settled_entries,
         "running": running,
         "waited_ms": u64::try_from(waited_ms).unwrap_or(u64::MAX),
         "timed_out": timed_out,
         "note": note,
+        "settled": settled_entries,
     });
     let mut tool_result =
         ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
@@ -9960,7 +9965,7 @@ fn subagent_skill_catalog(context: &ToolContext) -> String {
     // children lack `tool_search` too. The header below must stay honest in
     // all three states.
     let mut output = String::from(
-        "## Skills\n\nLoad a Skill with `load_skill`, activating it via `tool_search` first if it is not in your tool list; if `tool_search` is absent or does not surface `load_skill`, try `load_skill` directly anyway — registered tools hydrate on demand — and treat Skills as unavailable only if that call fails too. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
+        "## Skills\n\nLoad a Skill with `load_skill`, activating it via `tool_search` first if it is not in your tool list; if `tool_search` is absent or does not surface `load_skill`, try `load_skill` directly anyway, and treat Skills as unavailable only if that call fails too. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
     );
     for skill in registry.list() {
         let source = match &skill.source {

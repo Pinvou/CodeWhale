@@ -143,16 +143,21 @@ mod tests {
             "the dispatch brief must teach the handle_read activation path:\n{message}"
         );
         assert!(
-            message.contains("transcript reads are unavailable in this session"),
-            "when tool_search cannot surface handle_read the brief must \
-             degrade honestly instead of dead-ending or over-promising:\n{message}"
+            message.contains("try calling `handle_read` directly"),
+            "allowlist-filtered hosts can keep handle_read in the catalog while \
+             removing tool_search; the brief must try the direct call before \
+             declaring transcript reads unavailable:\n{message}"
         );
         assert!(
-            !message.contains("directly anyway")
-                && !message.contains("hydrate when called by name"),
-            "registered deferred tools do not hydrate-and-execute when called \
-             by name on allowlist-filtered hosts; the false promise must stay \
-             gone:\n{message}"
+            message.contains("transcript reads are unavailable in this session"),
+            "when tool_search cannot surface handle_read and the direct call \
+             errors, the brief must degrade honestly instead of dead-ending or \
+             over-promising:\n{message}"
+        );
+        assert!(
+            !message.contains("hydrate when called by name"),
+            "registered deferred tools do not promise a hydration mechanism; \
+             the false mechanism assertion must stay gone:\n{message}"
         );
         assert!(
             !message.contains("the returned transcript_handle"),

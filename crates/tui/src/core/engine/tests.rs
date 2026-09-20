@@ -17097,11 +17097,6 @@ fn forkguard_subagent_context_hint_names_active_tools() {
         "this receipt carries no transcript_handle, so the hint would name a \
          value the model never received:\n{context}"
     );
-    assert!(
-        !context.contains("call `handle_read` directly anyway"),
-        "calling a deferred tool by name is not a hydration contract; the \
-         hint must not promise what allowlist-filtered hosts refuse:\n{context}"
-    );
 
     // A receipt that does carry a transcript_handle (verbose projection,
     // terminal status row) keeps the guidance — with the honest fallback
@@ -17150,15 +17145,20 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          {context}"
     );
     assert!(
-        context.contains("transcript reads are unavailable in this session"),
-        "when tool_search cannot surface handle_read the hint must degrade \
-         honestly instead of promising a direct call works:\n{context}"
+        context.contains("try calling `handle_read` directly"),
+        "allowlist-filtered hosts can keep handle_read in the catalog while \
+         removing tool_search; the hint must try the direct call before \
+         declaring transcript reads unavailable:\n{context}"
     );
     assert!(
-        !context.contains("call `handle_read` directly anyway")
-            && !context.contains("hydrate when called by name"),
-        "registered deferred tools do not hydrate-and-execute when called by \
-         name on allowlist-filtered hosts; the false promise must stay gone:\n\
+        context.contains("transcript reads are unavailable in this session"),
+        "when neither tool_search nor the direct call can reach handle_read \
+         the hint must degrade honestly instead of dead-ending:\n{context}"
+    );
+    assert!(
+        !context.contains("hydrate when called by name"),
+        "the hint must not assert a hydration mechanism; only the activation \
+         path and the direct-call fallback belong in model-facing text:\n\
          {context}"
     );
 
@@ -17590,6 +17590,12 @@ fn forkguard_goal_continuation_names_tool_search_activation() {
         "allowed_tools-filtered sessions can strip tool_search too; the \
          prompt must keep the direct-call fallback instead of dead-ending:\n\
          {prompt}"
+    );
+    assert!(
+        !prompt.contains("hydrate when called by name") && !prompt.contains("hydrate on demand"),
+        "the prompt must not assert a hydration mechanism; only the \
+         tool_search activation path and the direct-call fallback belong in \
+         model-facing text:\n{prompt}"
     );
 }
 
