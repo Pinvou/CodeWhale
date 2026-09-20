@@ -2108,29 +2108,50 @@ fn search_query_items(input: &Value) -> impl Iterator<Item = &Value> {
 /// exists only to pick a Chinese market for the keyless Bing/DuckDuckGo
 /// scrapes when the model omits `locale`, and forcing Japanese or Korean
 /// queries into the zh-CN market would be worse than sending no market
-/// signal at all. The known cost of the fallback: a purely Han-script
-/// Japanese query (「株価」, 「東京 天気」) or an unmarked Traditional
-/// Chinese query also lands on the Simplified Chinese market. An explicit
-/// `locale` always wins; the hint only replaces the cross-market drift
-/// observed with no signal at all, which degraded harder.
+/// signal at all.
 fn query_contains_han(query: &str) -> bool {
     query
         .chars()
         .any(|c| matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}'))
 }
 
+/// Whether `query` carries kana or hangul — the scripts that make a
+/// Han-bearing query Japanese or Korean rather than Chinese. Real Japanese
+/// queries almost always contain kana alongside kanji, so a Han-bearing
+/// query with any kana or hangul must keep the no-market request instead of
+/// being pushed onto the zh-CN market (the inverse of the drift the
+/// fallback exists to fix). Only a purely Han-script query — rare for
+/// search and indistinguishable from Chinese — still takes the fallback,
+/// alongside unmarked Traditional Chinese (the accepted cost).
+fn query_contains_kana_or_hangul(query: &str) -> bool {
+    query.chars().any(|c| {
+        matches!(
+            c,
+            '\u{3040}'..='\u{30FF}' // hiragana + katakana
+                | '\u{31F0}'..='\u{31FF}' // katakana phonetic extensions
+                | '\u{AC00}'..='\u{D7AF}' // hangul syllables
+                | '\u{1100}'..='\u{11FF}' // hangul jamo
+                | '\u{3130}'..='\u{318F}' // hangul compatibility jamo
+        )
+    })
+}
+
 /// Market tag the scrape backends should request, or `None` to keep the
 /// historical no-market-signal request. An explicit locale wins; otherwise a
-/// Han-script query falls back to zh-CN because without any market hint (and
-/// with an English `Accept-Language`) Bing serves unrelated Japanese results
-/// for Chinese queries. The model-supplied locale is shape-checked first so a
-/// malformed value cannot become a broken market tag or header.
+/// Han-script query without kana or hangul falls back to zh-CN because
+/// without any market hint (and with an English `Accept-Language`) Bing
+/// serves unrelated Japanese results for Chinese queries. The model-supplied
+/// locale is shape-checked first so a malformed value cannot become a broken
+/// market tag or header.
 fn scrape_market(locale: Option<&str>, query: &str) -> Option<String> {
     locale
         .map(str::trim)
         .filter(|tag| is_plausible_locale_tag(tag))
         .map(|tag| tag.replace('_', "-"))
-        .or_else(|| query_contains_han(query).then(|| "zh-CN".to_string()))
+        .or_else(|| {
+            (query_contains_han(query) && !query_contains_kana_or_hangul(query))
+                .then(|| "zh-CN".to_string())
+        })
 }
 
 /// Light shape check for a model-supplied `locale`: ASCII letters/digits
@@ -3361,6 +3382,27 @@ mod tests {
         assert_eq!(
             super::scrape_market(None, "凹语言 编程").as_deref(),
             Some("zh-CN")
+        );
+    }
+
+    #[test]
+    fn han_fallback_vetoes_kana_and_hangul_queries() {
+        // A Han-bearing query with kana is Japanese: pushing it onto the
+        // zh-CN market would be the inverse of the drift the fallback
+        // exists to fix, so it keeps the no-market request.
+        assert_eq!(super::scrape_market(None, "東京の天気"), None);
+        assert_eq!(super::scrape_market(None, "日本の地図"), None);
+        // Hangul-bearing queries likewise never take the fallback.
+        assert_eq!(super::scrape_market(None, "러스트 프로그래밍"), None);
+        // Purely Han queries (indistinguishable from Chinese) and an
+        // explicit locale keep the existing behavior.
+        assert_eq!(
+            super::scrape_market(None, "中国 的 首都").as_deref(),
+            Some("zh-CN")
+        );
+        assert_eq!(
+            super::scrape_market(Some("ja-JP"), "東京の天気").as_deref(),
+            Some("ja-JP")
         );
     }
 
