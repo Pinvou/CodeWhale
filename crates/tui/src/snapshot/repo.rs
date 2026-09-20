@@ -285,12 +285,20 @@ impl SnapshotRepo {
             })?;
             std::fs::create_dir_all(parent)?;
             // `git init` here uses the parent directory as the work tree
-            // and stores metadata in `.git`. We then continue to use
-            // explicit `--git-dir` / `--work-tree` flags for every other
-            // command so behaviour is invariant of cwd.
+            // and stores metadata in `.git`. Every later command targets the
+            // side repo through the GIT_DIR / GIT_WORK_TREE environment
+            // interface so behaviour is invariant of cwd. The init itself
+            // must ignore an ambient GIT_DIR/GIT_WORK_TREE exported by the
+            // launching shell — it would redirect the one-time init away
+            // from the hashed side-repo path.
             let mut init_cmd = crate::dependencies::Git::command()
                 .ok_or_else(|| io_other("git not found on PATH"))?;
-            init_cmd.arg("init").arg("--quiet").arg(parent);
+            init_cmd
+                .arg("init")
+                .arg("--quiet")
+                .arg(parent)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE");
             let init = run_bounded_git(&mut init_cmd, "init")
                 .map_err(|e| io_other(format!("failed to run git init: {e}")))?;
             if !init.status.success() {
