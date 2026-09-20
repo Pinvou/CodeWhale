@@ -39,11 +39,20 @@ for (const settingsI18nSource of settingsI18nSources) {
     'settings billing message must be provided in every UI language',
   );
 }
-// Legacy handleDetect auto-fill path is deleted; only handleLocalDetect remains.
-assert.strictEqual(
-  settingsViewSource.indexOf('async function handleDetect()'),
-  -1,
-  'legacy handleDetect auto-fill path must stay deleted (only handleLocalDetect may exist)',
+const detectStart = settingsViewSource.indexOf('async function handleDetect()');
+const detectEnd = settingsViewSource.indexOf('function vllmStatusLabel(', detectStart);
+assert.notStrictEqual(detectStart, -1, 'local model detect handler must exist');
+assert.notStrictEqual(detectEnd, -1, 'local model detect handler boundary must exist');
+const detectSource = settingsViewSource.slice(detectStart, detectEnd);
+assert.match(
+  detectSource,
+  /loaded === true/,
+  'automatic local-model fill must require an explicitly loaded model',
+);
+assert.doesNotMatch(
+  detectSource,
+  /loaded !== false/,
+  'unknown model state must not be treated as loaded during automatic fill',
 );
 const localDetectStart = settingsViewSource.indexOf('async function handleLocalDetect()');
 const localDetectEnd = settingsViewSource.indexOf('function startManualLocalModel()', localDetectStart);
