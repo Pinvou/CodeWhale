@@ -49,6 +49,26 @@ func approvalApproveGateError(control AdminApprovalControl) error {
 	}
 }
 
+// approvalDraftWriteGateError applies the same frozen mode matrix to the
+// create/update/submit entries. Only SAFE_ROLLBACK closes them; LEGACY,
+// QUIESCING and PROOF_REQUIRED keep the pre-existing draft contract. The gate
+// is evaluated inside the write transaction against the locked control row, so
+// a concurrent SAFE CAS and a draft write linearize on that row instead of on a
+// service-layer cache.
+func approvalDraftWriteGateError(control AdminApprovalControl) error {
+	actions, err := AdminApprovalActionsFor(control)
+	if err != nil {
+		return err
+	}
+	if actions.DraftWrites {
+		return nil
+	}
+	if control.Mode == AdminApprovalModeSafeRollback {
+		return ErrApprovalSafeRollback
+	}
+	return ErrApprovalAuthorizationControlChanged
+}
+
 type ApprovalAuthorizationRecord struct {
 	EventID              uuid.UUID
 	ApprovalRequestID    uuid.UUID

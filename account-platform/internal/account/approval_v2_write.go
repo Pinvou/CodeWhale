@@ -60,16 +60,34 @@ func invalidApprovalV2Write(w http.ResponseWriter, r *http.Request) {
 	api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "invalid v2 approval request", httpserver.RequestID(r.Context()))
 }
 
-func requireApprovalV2WriteControl(ctx context.Context, tx pgx.Tx) error {
-	expected := approvalV2ControlVersion(ctx)
-	if expected == 0 {
-		return nil
-	} // Existing v1 calls keep their frozen wire contract.
+// requireApprovalDraftWriteControl locks the sole control row shared and then
+// re-verifies, inside the caller's write transaction, both the frozen
+// SAFE_ROLLBACK write closure and (when the caller supplied one) the v2
+// action-control generation. Existing v1 callers pass no expected generation,
+// but they are no longer exempt from the mode matrix: design section 8.7
+// closes create/update/submit from the SAFE CAS onward, and section 5.4 fixes
+// the answer as 503 APPROVAL_SAFE_ROLLBACK with zero side effects.
+func requireApprovalDraftWriteControl(ctx context.Context, tx pgx.Tx) error {
 	control, err := LockAdminApprovalControlShared(ctx, tx)
 	if err != nil {
 		return err
 	}
-	if control.Version != expected {
+	if expected := approvalV2ControlVersion(ctx); expected > 0 && control.Version != expected {
+		return ErrApprovalActionControlChanged
+	}
+	return approvalDraftWriteGateError(control)
+}
+
+// requireApprovalDraftCloseControl keeps the safe-close entry (withdraw) on the
+// same shared control lock. The frozen matrix allows WITHDRAW/REJECT in every
+// mode, so it only re-verifies the v2 generation and never applies the
+// SAFE_ROLLBACK write closure.
+func requireApprovalDraftCloseControl(ctx context.Context, tx pgx.Tx) error {
+	control, err := LockAdminApprovalControlShared(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if expected := approvalV2ControlVersion(ctx); expected > 0 && control.Version != expected {
 		return ErrApprovalActionControlChanged
 	}
 	return nil
