@@ -140,9 +140,23 @@ fn summarize_subagent_status(status: &serde_json::Value) -> String {
     status.to_string()
 }
 
-fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> String {
+fn summarize_subagent_snapshot(
+    snapshot: &serde_json::Value,
+    index: usize,
+    transcript_handle_fallback: Option<&str>,
+) -> String {
+    // Session projections (`SubAgentSessionProjection`) keep `transcript_handle`
+    // on the outer envelope while the wrapped result row carries none, so the
+    // handle is captured before unwrapping and handed down as a fallback: the
+    // visible row prints the value the hint gate saw instead of a phantom.
+    let outer_transcript_handle = snapshot
+        .get("transcript_handle")
+        .and_then(transcript_handle_row_value);
     if let Some(inner) = snapshot.get("snapshot") {
-        return summarize_subagent_snapshot(inner, index);
+        let fallback = outer_transcript_handle
+            .as_deref()
+            .or(transcript_handle_fallback);
+        return summarize_subagent_snapshot(inner, index, fallback);
     }
 
     let Some(obj) = snapshot.as_object() else {
@@ -172,7 +186,8 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
     // below, and the value is engine-generated and never truncated.
     let transcript_handle = obj
         .get("transcript_handle")
-        .and_then(transcript_handle_row_value);
+        .and_then(transcript_handle_row_value)
+        .or_else(|| transcript_handle_fallback.map(str::to_string));
     let objective = obj
         .get("assignment")
         .and_then(|assignment| assignment.get("objective"))
@@ -238,8 +253,13 @@ fn subagent_snapshot_shaped(value: &serde_json::Value) -> bool {
 /// shapes that summarize rows are covered: a bare per-child object/array and
 /// the unscoped fleet listing whose rows live under `agents[]`, each looked
 /// through the same `snapshot` wrapper the row summarizer unwraps, so the
-/// hint always has a visible value to point at.
+/// hint always has a visible value to point at. Only the rows the summarizer
+/// actually renders gate the hint — it truncates past the eighth snapshot, so
+/// a handle stranded on a truncated row would print nothing.
 fn carries_transcript_handle(parsed: &serde_json::Value) -> bool {
+    // Must stay in step with the `idx >= 8` truncation in
+    // `compact_subagent_tool_result_for_context`.
+    const VISIBLE_SNAPSHOT_ROWS: usize = 8;
     fn row_carries(row: &serde_json::Value) -> bool {
         row.get("transcript_handle")
             .or_else(|| {
@@ -250,13 +270,15 @@ fn carries_transcript_handle(parsed: &serde_json::Value) -> bool {
             .is_some()
     }
     match parsed {
-        serde_json::Value::Array(items) => items.iter().any(row_carries),
+        serde_json::Value::Array(items) => {
+            items.iter().take(VISIBLE_SNAPSHOT_ROWS).any(row_carries)
+        }
         serde_json::Value::Object(object) => {
             row_carries(parsed)
                 || object
                     .get("agents")
                     .and_then(serde_json::Value::as_array)
-                    .is_some_and(|fleet| fleet.iter().any(row_carries))
+                    .is_some_and(|fleet| fleet.iter().take(VISIBLE_SNAPSHOT_ROWS).any(row_carries))
         }
         _ => false,
     }
@@ -385,7 +407,7 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
             ));
             break;
         }
-        out.push_str(&summarize_subagent_snapshot(snapshot, idx + 1));
+        out.push_str(&summarize_subagent_snapshot(snapshot, idx + 1, None));
         out.push('\n');
     }
     Some(out.trim_end().to_string())

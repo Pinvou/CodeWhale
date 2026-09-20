@@ -17354,6 +17354,182 @@ fn forkguard_agent_unscoped_status_list_is_summarized_per_child() {
     );
 }
 
+// Regression (Pinvou #490 phantom-value class): the production shape
+// `SubAgentSessionProjection` keeps `transcript_handle` on the outer envelope
+// while the wrapped `SubAgentResult` row carries no such field. The row
+// summarizer unwraps `snapshot` before reading the row, so the outer handle
+// used to vanish: the hint gate saw it (it checks both layers) but the
+// visible row printed no `transcript:` line. The outer value must now fall
+// through to the row, reduced to the session_id/name form handle_read
+// accepts.
+#[test]
+fn forkguard_subagent_projection_outer_handle_reaches_summary_row() {
+    let transcript_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_aaaa1111".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 7,
+        repr_preview: "…".to_string(),
+        sha256: "aa11".to_string(),
+    })
+    .expect("var handle serializes");
+    // Mirrors the real projection: transcript_handle on the envelope, the
+    // nested result row has agent identity/status but no handle field.
+    let projection = json!({
+        "name": "scout",
+        "agent_id": "agent_aaaa1111",
+        "run_id": "run-1",
+        "status": "Running",
+        "context_mode": "fork",
+        "fork_context": true,
+        "transcript_handle": transcript_object,
+        "snapshot": {
+            "name": "scout",
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "context_mode": "fork",
+            "fork_context": true,
+            "status": "Running",
+            "result": "mapped the rendering path"
+        }
+    })
+    .to_string();
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(projection),
+    );
+
+    assert!(
+        context.contains("handle_read"),
+        "the projection carries a handle, so the hint must fire:\n{context}"
+    );
+    assert!(
+        context.contains("transcript: agent_aaaa1111/full_transcript"),
+        "the outer envelope handle must fall through to the visible row:\n\
+         {context}"
+    );
+
+    // When the inner row carries its own handle, the inner value wins — a
+    // row-level handle is the more specific fact and must not be shadowed
+    // by the envelope fallback.
+    let inner_handle = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_inner2222".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 9,
+        repr_preview: "…".to_string(),
+        sha256: "cc33".to_string(),
+    })
+    .expect("var handle serializes");
+    let both = json!({
+        "name": "scout",
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "transcript_handle": transcript_object,
+        "snapshot": {
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": "done",
+            "transcript_handle": inner_handle
+        }
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(both));
+
+    assert!(
+        context.contains("transcript: agent_inner2222/full_transcript"),
+        "an inner-row handle outranks the envelope fallback:\n{context}"
+    );
+    assert!(
+        !context.contains("transcript: agent_aaaa1111/full_transcript"),
+        "the envelope fallback must not shadow the inner value:\n{context}"
+    );
+}
+
+// The hint names `transcript_handle`, so it must gate on rows the summarizer
+// actually renders: past the eighth snapshot the receipt truncates, and a
+// handle stranded on a truncated row would print no value at all — a phantom
+// the model can never act on.
+#[test]
+fn forkguard_subagent_hint_gates_on_visible_rows_only() {
+    let handle_row = |agent_id: &str| {
+        serde_json::to_value(crate::tools::handle::VarHandle {
+            kind: "var_handle".to_string(),
+            session_id: agent_id.to_string(),
+            name: "full_transcript".to_string(),
+            type_name: "str".to_string(),
+            length: 7,
+            repr_preview: "…".to_string(),
+            sha256: "dd44".to_string(),
+        })
+        .expect("var handle serializes")
+    };
+    // Nine children; only the ninth carries a handle, and the ninth row is
+    // beyond the eight-row rendering cap.
+    let fleet: serde_json::Value = json!({
+        "action": "status",
+        "count": 9,
+        "agents": (1..=9)
+            .map(|n| {
+                let agent_id = format!("agent_{n:08x}");
+                let mut row = json!({
+                    "agent_id": agent_id,
+                    "agent_type": "explore",
+                    "status": "Running",
+                });
+                if n == 9 {
+                    row["transcript_handle"] = handle_row(&agent_id);
+                }
+                row
+            })
+            .collect::<Vec<_>>()
+    });
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(fleet.to_string()),
+    );
+
+    assert!(
+        !context.contains("handle_read"),
+        "a handle on a row past the truncation cap must not summon the hint:\n\
+         {context}"
+    );
+    assert!(
+        !context.contains("transcript: agent_"),
+        "the truncated row's handle must never print:\n{context}"
+    );
+    assert!(
+        context.contains("omitted from context summary"),
+        "the ninth row is beyond the cap, so the omission note must show:\n\
+         {context}"
+    );
+
+    // Sanity: the same fleet with the handle on a visible row keeps both the
+    // hint and the value — the cap limits the gate, not handle support.
+    let mut visible = fleet;
+    visible["agents"][8]["transcript_handle"] = serde_json::Value::Null;
+    visible["agents"][0]["transcript_handle"] = handle_row("agent_00000001");
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(visible.to_string()),
+    );
+    assert!(
+        context.contains("handle_read"),
+        "a handle on a rendered row must still fire the hint:\n{context}"
+    );
+    assert!(
+        context.contains("transcript: agent_00000001/full_transcript"),
+        "the visible row prints the handle it gates on:\n{context}"
+    );
+}
+
 // `claim` receipts carry the recorded scope (roots/files/contracts) and no
 // snapshot shape, so they must keep passing through bounded — the scope is
 // the payload the model needs to reason about its own write permissions.
