@@ -3497,7 +3497,11 @@ impl Engine {
                             self.config.plugin_registry = Some(Arc::clone(&self.plugin_registry));
                             // A pool may contain plugin servers and authority
                             // receipts from the previous workspace snapshot.
+                            // Drop the receipts with it, or the briefing
+                            // reconcile would re-announce the previous
+                            // workspace's failures into the new conversation.
                             self.mcp_pool = None;
+                            self.mcp_connection_errors.clear();
                         }
                         let ctx =
                             crate::project_context::load_project_context_with_parents(&workspace);
@@ -7014,7 +7018,13 @@ impl Engine {
             return;
         }
         if self.mcp_boot_briefing_generation == Some(generation) {
-            return;
+            // This boot pass already briefed. Skip only while the briefing
+            // still covers every current failure; a stale subset (restored
+            // from history mid-boot, or narrowed by later recoveries) must
+            // be re-announced so the delta is not silently unbriefed.
+            if self.briefing_covers_current_failures(&self.mcp_boot_briefing_servers) {
+                return;
+            }
         }
         self.mcp_boot_briefing_generation = Some(generation);
         let mut failures: Vec<(String, String)> =
@@ -7065,22 +7075,26 @@ impl Engine {
     /// hold and the restored history carries no briefing; when the restored
     /// history already carries one (same-conversation reload of a persisted
     /// history), reseed the correction bookkeeping from it instead, keeping
-    /// servers the history reports as recovered excluded. Runs on the idle
-    /// seam of `Op::SyncSession`, never mid-tool-loop.
+    /// servers the history reports as recovered excluded — unless it names
+    /// fewer servers than currently fail, in which case the delta must still
+    /// be re-announced. While the startup boot is still in flight its finish
+    /// seam owns the briefing, so this only seeds bookkeeping and never
+    /// advances the event counter (that would stale-drop the boot's own
+    /// finish). Runs on the idle seam of `Op::SyncSession`, never
+    /// mid-tool-loop.
     async fn reconcile_mcp_boot_briefing_after_session_sync(&mut self) {
         let briefed_generation = self.mcp_boot_briefing_generation.take();
         self.mcp_boot_briefing_servers.clear();
         if self.api_config.runtime_chat_isolated || self.mcp_connection_errors.is_empty() {
             return;
         }
-        let restored_briefing = self
+        let mut restored_briefing = self
             .session
             .messages
             .iter()
             .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
             .and_then(crate::runtime_handoff::mcp_boot_failure_briefing_servers);
-        let generation = briefed_generation.unwrap_or_else(|| self.next_mcp_event_generation());
-        if let Some(mut briefed) = restored_briefing {
+        if let Some(briefed) = restored_briefing.as_mut() {
             for message in self.session.messages.iter() {
                 if let Some(recovered) =
                     crate::runtime_handoff::mcp_boot_recovery_notice_servers(message)
@@ -7088,13 +7102,45 @@ impl Engine {
                     briefed.retain(|name| !recovered.contains(name));
                 }
             }
-            // The installed conversation already saw this boot's briefing:
-            // keep its correction bookkeeping without briefing twice.
-            self.mcp_boot_briefing_generation = Some(generation);
-            self.mcp_boot_briefing_servers = briefed;
+        }
+        if self.mcp_boot_in_flight {
+            // The finish seam briefs with the complete error map once the
+            // pass settles. Pinning the boot's generation here (never a
+            // fresh one) suppresses that finish briefing only when the
+            // restored briefing already covers every current failure;
+            // otherwise the finish must re-brief the delta.
+            if let Some(briefed) = restored_briefing {
+                if self.briefing_covers_current_failures(&briefed) {
+                    self.mcp_boot_briefing_generation = self.mcp_boot_generation;
+                    self.mcp_boot_briefing_servers = briefed;
+                }
+            }
             return;
         }
+        let generation = briefed_generation.unwrap_or_else(|| self.next_mcp_event_generation());
+        if let Some(briefed) = restored_briefing {
+            if self.briefing_covers_current_failures(&briefed) {
+                // The installed conversation already saw this boot's
+                // briefing: keep its correction bookkeeping without
+                // briefing twice.
+                self.mcp_boot_briefing_generation = Some(generation);
+                self.mcp_boot_briefing_servers = briefed;
+                return;
+            }
+            // A restored briefing naming fewer servers than currently fail
+            // must not suppress the delta: fall through and re-brief from
+            // the live error map.
+        }
         self.maybe_inject_mcp_boot_briefing(generation).await;
+    }
+
+    /// Whether every currently failing server is named by `briefed` (already
+    /// adjusted for servers the history reports as recovered), so the
+    /// conversation needs no new briefing for them.
+    fn briefing_covers_current_failures(&self, briefed: &[String]) -> bool {
+        self.mcp_connection_errors
+            .keys()
+            .all(|name| briefed.contains(name))
     }
 
     async fn emit_mcp_session_boot(&self, generation: u64, finished: bool) {

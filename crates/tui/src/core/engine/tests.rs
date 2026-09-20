@@ -23761,8 +23761,10 @@ async fn forkguard_session_sync_reseeds_briefed_servers_from_restored_history_an
     let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
     engine.mcp_event_generation = 3;
     engine.mcp_boot_generation = Some(3);
+    // The live failure map agrees with the restored history: alpha already
+    // recovered (its retry removed it from the map), beta still fails.
     engine.mcp_connection_errors = HashMap::from([(
-        "alpha".to_string(),
+        "beta".to_string(),
         "connect timed out after 5s".to_string(),
     )]);
     // A same-conversation reload restores a history that already carries the
@@ -23836,6 +23838,134 @@ async fn forkguard_session_sync_reseeds_briefed_servers_from_restored_history_an
     assert_eq!(
         beta_notices, 1,
         "a still-briefed server is corrected exactly once after the reseed"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_sync_mid_boot_keeps_the_boot_finish_briefing_authoritative() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    // The desktop host sends its one-shot sync right after spawn, while the
+    // boot pass is still connecting; a login-pending server has already
+    // preloaded an authority error into the map.
+    engine.mcp_connection_errors = HashMap::from([(
+        "needs-login".to_string(),
+        "authentication required: run /mcp login needs-login".to_string(),
+    )]);
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&Vec::new()).into();
+
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+    assert_eq!(
+        engine.mcp_event_generation, 3,
+        "reconciling mid-boot must not advance the counter past the in-flight boot"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_generation, None,
+        "the in-flight boot's finish seam owns the briefing"
+    );
+
+    // The boot settles with a connection failure the partial map never had.
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([
+                (
+                    "needs-login".to_string(),
+                    "authentication required: run /mcp login needs-login".to_string(),
+                ),
+                (
+                    "slow-fs".to_string(),
+                    "connect timed out after 5s".to_string(),
+                ),
+            ]),
+        })
+        .await;
+
+    assert!(
+        engine.mcp_connection_errors.contains_key("slow-fs"),
+        "the boot finish must not be stale-dropped by the mid-boot reconcile"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("the finish seam briefs the restored conversation");
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(
+        text.contains("slow-fs"),
+        "the briefing must name the server that failed after the sync:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_sync_rebriefs_failures_missing_from_restored_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_connection_errors = HashMap::from([
+        (
+            "alpha".to_string(),
+            "connect timed out after 5s".to_string(),
+        ),
+        (
+            "gamma".to_string(),
+            "connect timed out after 5s".to_string(),
+        ),
+    ]);
+    // A persisted history restored mid-life can carry a briefing from an
+    // older boot pass that named fewer servers than currently fail.
+    let restored = vec![crate::runtime_handoff::mcp_boot_failure_briefing_message(&[
+        (
+            "alpha".to_string(),
+            "connect timed out after 5s".to_string(),
+        ),
+    ])];
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&restored).into();
+
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+
+    let briefings: Vec<_> = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .collect();
+    assert_eq!(
+        briefings.len(),
+        2,
+        "a restored briefing naming a subset must not suppress the delta"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &briefings[1].content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(
+        text.contains("gamma"),
+        "the re-briefing must cover the server the restored briefing lacked:\n{text}"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["alpha".to_string(), "gamma".to_string()],
     );
 }
 
