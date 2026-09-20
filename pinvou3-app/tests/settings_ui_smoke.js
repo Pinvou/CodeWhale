@@ -86,25 +86,10 @@ for (const settingsI18nSource of settingsI18nSources) {
     'local model port validation message must be provided in every UI language',
   );
 }
-// Memory delete / feedback close must route through in-app confirm dialogs
-// (the native window.confirm does not render in Tauri WebView2; see
-// tests/settings_window_confirm.test.mjs).
-assert.doesNotMatch(
-  settingsViewSource,
-  /window\.confirm\s*\(/,
-  'settings page must not call window.confirm (does not render in Tauri WebView2; use in-app confirm dialogs)',
-);
-for (const confirmTestId of [
-  'memory-delete-confirm',
-  'memory-delete-confirm-ok',
-  'feedback-close-confirm',
-  'feedback-close-confirm-ok',
-]) {
-  assert.ok(
-    settingsViewSource.includes(`data-testid="${confirmTestId}"`),
-    `missing in-app confirm dialog testid: ${confirmTestId}`,
-  );
-}
+// Memory delete / feedback close confirm-dialog wiring (no native
+// window.confirm, testid pins) is asserted by tests/settings_window_confirm.test.mjs,
+// which runs on every `npm test`; the runtime click flows below (①e/①f/①g/⑰.5)
+// still exercise the dialogs end to end in this smoke.
 
 function loadPuppeteer() {
   try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
@@ -581,7 +566,8 @@ async function modalWidth(page, headingText) {
     (document.querySelector('#voice-shortcut-intro-title')?.textContent || '').length > 0));
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.querySelector('#voice-shortcut-intro-title'), { timeout: 4000 });
-  rec('①g Esc closes the intro card', true);
+  rec('①g Esc closes the intro card', await page.evaluate(() =>
+    !document.querySelector('#voice-shortcut-intro-title')));
 
   await page.click('[data-testid="settings-section-memory"]');
   await page.waitForFunction(() => (document.querySelector('[data-testid="memory-profile-call-name"]')?.textContent || '').includes('升级前称呼'));
