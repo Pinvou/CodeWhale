@@ -24,6 +24,9 @@
 
     if (!logic) throw new Error("desktop remote control state logic not loaded");
 
+    // 安装时先镜像一次初始状态，保证 UI 首次读取 bs.controlledDevice 就不是 undefined。
+    mirrorSlices(current());
+
     var unlisten = [];
     var subscribed = false;
     function isAvailable() {
@@ -32,8 +35,30 @@
       return typeof can === "function" && can("desktopRemoteControl") === true;
     }
 
+    // 域切片（bridge.js 的 STATE_SLICE_FIELDS.desktopRemoteControl）读的是**顶层键**
+    // （controlledDevice / controllerConnection / …），而本 feature 过去只把整份状态挂在
+    // 嵌套键 state.desktopRemoteControl 上，导致 UI 的 bs.controlledDevice 恒为
+    // undefined——后端已 waiting_connection 且带连接码，面板却显示未开启（2026-09-20 实测）。
+    var STATE_SLICES = [
+      "controlledDevice",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteHistories",
+      "tasks",
+      "remotePermissions",
+    ];
+
+    function mirrorSlices(next) {
+      for (var i = 0; i < STATE_SLICES.length; i++) {
+        var key = STATE_SLICES[i];
+        if (next && Object.prototype.hasOwnProperty.call(next, key)) state[key] = next[key];
+      }
+    }
+
     function publish(next) {
       state.desktopRemoteControl = next;
+      mirrorSlices(next);
       if (typeof notify === "function") notify("desktopRemoteControl");
       return next;
     }
