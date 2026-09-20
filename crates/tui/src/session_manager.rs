@@ -874,9 +874,7 @@ impl SavedSession {
         let messages = journal.to_messages();
         let now = Utc::now();
         let spawn_depth = journal.spawn_depth.saturating_add(1);
-        let title = messages
-            .iter()
-            .find(|m| m.role == "user")
+        let title = first_user_prompt_message(&messages)
             .and_then(|m| {
                 m.content.iter().find_map(|b| match b {
                     ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -2187,10 +2185,10 @@ pub fn create_saved_session_with_id_and_mode(
 ) -> SavedSession {
     let now = Utc::now();
 
-    // Generate title from first user message
-    let title = messages
-        .iter()
-        .find(|m| m.role == "user")
+    // Generate title from the first person-authored user message; runtime
+    // handoff envelopes (MCP boot briefing, Operate contract, ...) are also
+    // persisted with role=user and must not become the title.
+    let title = first_user_prompt_message(messages)
         .and_then(|m| {
             m.content.iter().find_map(|block| match block {
                 ContentBlock::Text { text, .. } => {
@@ -2439,6 +2437,19 @@ fn system_prompt_to_string(system_prompt: Option<&SystemPrompt>) -> Option<Strin
 /// Returns a `&str` borrowing from the input — no allocation.
 pub fn truncate_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+/// First person-authored user message in `messages`.
+///
+/// Runtime handoff envelopes (MCP boot briefing, Operate contract, subagent
+/// completions) persist with `role = "user"` because strict chat templates
+/// reject anything else mid-conversation. Titles and previews must come from
+/// the person, not the runtime's bookkeeping — `session_peek` already drops
+/// these the same way before rendering.
+fn first_user_prompt_message(messages: &[Message]) -> Option<&Message> {
+    messages
+        .iter()
+        .find(|m| m.role == "user" && !crate::runtime_handoff::is_internal_runtime_handoff(m))
 }
 
 /// Strip a leading `<turn_meta>...</turn_meta>` block from saved user text.
@@ -3930,6 +3941,58 @@ mod tests {
             session.metadata.title,
             "Fix the session picker history pane"
         );
+    }
+
+    #[test]
+    fn forkguard_saved_session_title_skips_internal_runtime_handoffs() {
+        let tmp = tempdir().expect("tempdir");
+        let briefing = crate::runtime_handoff::mcp_boot_failure_briefing_message(&[(
+            "fs".to_string(),
+            "connection refused".to_string(),
+        )]);
+        let operate = crate::runtime_handoff::operate_contract_runtime_message();
+        assert!(
+            crate::runtime_handoff::is_internal_runtime_handoff(&briefing)
+                && crate::runtime_handoff::is_internal_runtime_handoff(&operate),
+            "briefing and operate contract must be recognised as internal runtime handoffs"
+        );
+        let messages = vec![
+            briefing,
+            operate,
+            make_test_message("user", "Ship the release notes"),
+        ];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 100, None);
+        assert_eq!(session.metadata.title, "Ship the release notes");
+    }
+
+    #[test]
+    fn forkguard_saved_session_title_defaults_when_only_runtime_handoffs() {
+        let tmp = tempdir().expect("tempdir");
+        let messages = vec![crate::runtime_handoff::mcp_boot_failure_briefing_message(
+            &[("fs".to_string(), "connection refused".to_string())],
+        )];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 100, None);
+        assert_eq!(session.metadata.title, DEFAULT_SESSION_TITLE);
+    }
+
+    #[test]
+    fn forkguard_import_foreign_title_skips_internal_runtime_handoff() {
+        let briefing = crate::runtime_handoff::mcp_boot_failure_briefing_message(&[(
+            "fs".to_string(),
+            "connection refused".to_string(),
+        )]);
+        let journal = SessionJournal::from_messages(
+            vec![briefing, make_test_message("user", "Resume the migration")],
+            0,
+        );
+        let container = SessionImportContainer::new("test".to_string(), &journal, None);
+        let session = SavedSession::import_foreign(
+            container,
+            PathBuf::from("/tmp/project"),
+            "test-model".to_string(),
+        )
+        .expect("import");
+        assert_eq!(session.metadata.title, "Resume the migration");
     }
 
     #[test]
