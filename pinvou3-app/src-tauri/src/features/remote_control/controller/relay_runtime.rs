@@ -43,12 +43,14 @@ const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
 const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// B 端排障日志（追加写入 `~/.pinvou3/logs/remote-control.log`）。
+/// 双端共用的排障日志写入器（追加写入 `~/.pinvou3/logs/remote-control.log`）。
 ///
-/// 只在「启停/注册/握手」这些用户可感知的失败与成功节点写一行有界文本：
-/// 不含占位符之外的任何标识（不写 endpoint_id/lease/token），便于用户把文件
-/// 直接发给支持而不担心泄漏。写失败一律忽略，绝不影响主流程。
-pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
+/// `scope` 只区分端别：`controlled`（B 端）与 `controller`（A 端），便于同一台机器
+/// 或同一份日志里对照同一次连接的阶段。只在「启停/注册/握手/连接结果」这些用户可
+/// 感知的失败与成功节点写一行有界文本：不含占位符之外的任何标识（不写
+/// endpoint_id/lease/token/连接码），便于用户把文件直接发给支持而不担心泄漏。
+/// 写失败一律忽略，绝不影响主流程。
+pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     use std::io::Write as _;
     let dir = crate::platform::paths::pinvou3_home().join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -61,17 +63,48 @@ pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
     else {
         return;
     };
-    let bounded: String = detail
+    let _ = writeln!(
+        file,
+        "[{scope}] stage={} detail={}",
+        bounded_log_token(stage),
+        bounded_log_token(detail)
+    );
+}
+
+/// 有界化按位洗白：只保留可以安全落盘的字符集并限制长度，
+/// 空白、`=`、`?`、`&` 等分隔符一律丢掉，避免把连接码或凭据片段带进日志。
+pub(crate) fn bounded_log_token(value: &str) -> String {
+    value
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
         .take(160)
-        .collect();
-    let _ = writeln!(file, "[controlled] stage={stage} detail={bounded}");
+        .collect()
+}
+
+/// B 端（被控端）排障日志。
+pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
+    log_relay_event("controlled", stage, detail);
+}
+
+/// A 端（控制端）排障日志。A 端此前没有任何落盘痕迹，导致「连接码无效或已过期」
+/// 这类失败只能靠猜；这里补上与 B 端对称的阶段与结果码。
+pub(crate) fn log_controller_event(stage: &str, detail: &str) {
+    log_relay_event("controller", stage, detail);
 }
 
 /// 测试/内联断言用：日志行格式（不含时间戳，便于跨平台断言）。
+pub(crate) fn relay_log_line(scope: &str, stage: &str, detail: &str) -> String {
+    format!("[{scope}] stage={stage} detail={detail}")
+}
+
+/// 测试/内联断言用：B 端日志行格式。
 pub(crate) fn controlled_log_line(stage: &str, detail: &str) -> String {
-    format!("[controlled] stage={stage} detail={detail}")
+    relay_log_line("controlled", stage, detail)
+}
+
+/// 测试/内联断言用：A 端日志行格式。
+pub(crate) fn controller_log_line(stage: &str, detail: &str) -> String {
+    relay_log_line("controller", stage, detail)
 }
 const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1517,6 +1550,27 @@ mod tests {
     use crate::features::remote_control::controller::test_support::PairingFixture;
     use std::collections::VecDeque;
     use std::time::Duration;
+
+    #[test]
+    fn relay_log_lines_are_scoped_and_keep_the_legacy_controlled_prefix() {
+        assert_eq!(
+            controlled_log_line("registered", "waiting_connection"),
+            "[controlled] stage=registered detail=waiting_connection"
+        );
+        assert_eq!(
+            controller_log_line("connect_failed", "pairing_code_invalid"),
+            "[controller] stage=connect_failed detail=pairing_code_invalid"
+        );
+    }
+
+    #[test]
+    fn bounded_log_token_drops_separators_so_credentials_cannot_be_pasted_in() {
+        assert_eq!(
+            bounded_log_token("code=AB12CD3 token=hunter2?x=1"),
+            "codeAB12CD3tokenhunter2x1"
+        );
+        assert_eq!(bounded_log_token(&"a".repeat(400)).len(), 160);
+    }
 
     /// Deterministic fake lane: queued messages, then either hang or close.
     struct FakePort {

@@ -446,13 +446,35 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 
 ### 13.3 端上排障能力（保留）
 
-- `~/.pinvou3/logs/remote-control.log`：B 端起停/注册/握手/端点就绪/relay 拒绝码，以及前端 `event`/`result`/`ui` 三类投影
+- `~/.pinvou3/logs/remote-control.log`：B 端（`[controlled]`）起停/注册/握手/端点就绪/relay 拒绝码，以及前端 `event`/`result`/`ui` 三类投影
   （`desktop_remote_client_log` 命令 + bridge `clientLog`）。只写阶段与有界值，不含 endpoint/lease/token。
+- A 端（`[controller]`）：`connect_requested`（含 `profile/source/path` 端点标记）、`connect_rejected`、`connect_started`、
+  每次状态投影 `status`（与界面同源的 `state`/`error`）、`connected` / `connect_failed`（有界结果码）。
 - 验收记录（2026-09-20 16:29）：`registered=waiting_connection` 与前端 `event/result/ui` 四层一致 `code=yes`，被控端成功显示 7 位连接码。
 
 ### 13.4 剩余
 
 - A 端用该连接码连接并完成普通文本任务（真机或第二实例；同机受单实例插件限制）。
 - E2E-07 浏览器冒烟、E2E-08 完整旅程与发布缺口登记、以及关闭 TOFU 的前置（端点清单 + registry 迁移）。
+
+### 13.5 A 端「连接码无效或已过期」根因与 A 端日志补齐（2026-09-20）
+
+- **现象**：使用另一台设备（B 端，连接码注册在**生产** Relay）的连接码，在**未过期**的情况下仍报
+  「连接码无效或已过期」（映射自 Relay 的 `pairing_code_invalid`）。
+- **根因**：本机 A 端残留 **User 级**环境变量 `PINVOU_REMOTE_PUBLIC_URL` / `PINVOU_REMOTE_RELAY_WS_URL` /
+  `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`（指向测试端点
+  `/pinvou3/remote-test`），且运行中的 dev 实例继承了这份环境。于是 A 端把 claim 发到测试 Relay，而 B 的码
+  注册在生产 Relay，两端不在同一实例 → claim 必然 `pairing_code_invalid`。
+  生产 Relay 的健康检查（`endpoint_count=29 / desktop_open_count=16`）与测试 Relay（`endpoint_count=0 /
+  ws_connection_count=1（未认证）`）互相对照即是证据。
+- **修复**：清除本机 User 级覆盖变量并以干净环境重启；同时补 A 端有界排障日志（此前 A 端完全没有落盘痕迹，
+  失败只能从界面文案反推，这是本次排查最耗时的原因）。日志写入器泛化为 `log_relay_event(scope, …)`，
+  `controlled` / `controller` 两个 scope 共用同一份有界规则与同一文件。
+- **保守默认（登记）**：保留 `PINVOU_REMOTE_*` 覆盖能力供本地/测试使用，但**生产环境不得设置任何
+  `PINVOU_REMOTE_*` 环境变量**；一旦被覆盖，A 端每次连接都会写出 `source:env|settings|profile` 与端点路径，
+  可直接自查，无需再靠猜。生产默认走内置 `production` profile（地址 + 信任根均内置，用户零配置）。
+- **验证**：`cargo test remote_control::` **328 通过 / 0 失败**（新增 3 条：A/B 日志行格式、有界洗白、端点路径脱敏）；
+  `cargo test remote_control::controller::relay_runtime` **17 通过 / 0 失败**；
+  `cargo test remote_control::manager::persistence` **1 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
 
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。

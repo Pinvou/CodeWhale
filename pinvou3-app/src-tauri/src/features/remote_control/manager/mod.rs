@@ -999,6 +999,12 @@ impl RemoteControlManager {
         persistence::controller_relay_ws_url()
     }
 
+    /// A 端排障日志用的一行端点标记（内置 profile / 来源 / 路径）。
+    /// 只含公开信息，绝不含 endpoint_id、token 或查询串。
+    pub fn controller_endpoint_log_detail(&self) -> String {
+        persistence::controller_endpoint_log_detail()
+    }
+
     /// Close the generation-bound controller lane without touching the legacy
     /// desktop endpoint. The synthetic message lets the worker leave its recv
     /// loop deterministically; dropping the stored sender then closes it.

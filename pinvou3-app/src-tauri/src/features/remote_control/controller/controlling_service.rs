@@ -44,6 +44,7 @@ use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
     ControllerTransportSender, spawn_controller_transport,
 };
+use super::relay_runtime::log_controller_event;
 use crate::features::remote_control::RemoteControlManager;
 
 pub(crate) const CONTROLLER_STATUS_EVENT: &str = "desktop-remote-controller-status";
@@ -1086,6 +1087,22 @@ fn task_event_projection(lease: &LeaseContext, payload: &Value) -> Option<Value>
     }))
 }
 
+/// 把状态投影压成一行排障文本：与 UI 收到的 `status` / `errorCode` 同源，
+/// 不含连接码、租约、指纹或设备标识。
+fn controller_status_log_detail(status: &ControllingStatus) -> String {
+    let Ok(value) = serde_json::to_value(status) else {
+        return "unavailable".to_owned();
+    };
+    let state = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match value.get("errorCode").and_then(Value::as_str) {
+        Some(code) => format!("state:{state}/error:{code}"),
+        None => format!("state:{state}"),
+    }
+}
+
 /// A 端连接入口：加载信任根、生成握手密钥、绑定受控 Relay 通道、推进握手，
 /// 并在成功后把通道保活交给后台任务。
 pub(crate) async fn connect_controlling_device(
@@ -1116,10 +1133,16 @@ pub(crate) async fn connect_controlling_device(
     let business = app.state::<ControllingLaneState>();
     business.clear();
 
+    // A 端排障日志：先把「这次到底连的是哪个端点的哪条路径」写死，再把每个状态
+    // 投影与最终结果码记下来。没有这几行时，「连接码无效或已过期」无法区分
+    // 「码不对」与「两端其实在各自的 Relay 上」。
+    let endpoint_detail = relay.controller_endpoint_log_detail();
+    log_controller_event("connect_started", &endpoint_detail);
     let mut emit = |status: &ControllingStatus| {
+        log_controller_event("status", &controller_status_log_detail(status));
         let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
     };
-    let status = run_controlling_connection(
+    let status = match run_controlling_connection(
         manager,
         operation,
         &mut port,
@@ -1129,7 +1152,18 @@ pub(crate) async fn connect_controlling_device(
         HANDSHAKE_DEADLINE,
         &mut emit,
     )
-    .await?;
+    .await
+    {
+        Ok(status) => {
+            log_controller_event("connected", &endpoint_detail);
+            status
+        }
+        Err(error) => {
+            // 错误码已由 `fail_connection` 收敛为有界集合，直接落盘即可。
+            log_controller_event("connect_failed", &error);
+            return Err(error);
+        }
+    };
 
     let keeper = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -1138,6 +1172,7 @@ pub(crate) async fn connect_controlling_device(
         let business = keeper.state::<ControllingLaneState>();
         let device = manager.inner();
         let mut on_status = |status: &ControllingStatus| {
+            log_controller_event("status", &controller_status_log_detail(status));
             let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
         };
         let mut on_session = |projection: &ControllingSessionProjection| {
