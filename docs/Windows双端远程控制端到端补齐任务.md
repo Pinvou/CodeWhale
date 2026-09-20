@@ -426,4 +426,33 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 错误边界接住（用户侧表现为「设置页面加载失败」），而源码契约测试与 `build:ui` 都发现不了——只有
 jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）。
 
+## 13. 生产打通与端上排障记录（2026-09-20）
+
+### 13.1 生产 controller lane 已启用
+
+生产 relay（8787）已部署含 controller-v1 的版本并启用 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`（`development + TOFU`，安全降级经用户确认），
+配置、密钥、验收与回滚见 `Windows双端远程控制发布与回滚.md` 第 8 节。
+
+### 13.2 排障中修复的 6 个端上缺陷（全部为客户端，均有提交与回归证据）
+
+| 现象 | 根因 | 修复 |
+|---|---|---|
+| 点「开启远程控制」报 `desktop_remote_control_unsupported` | 面板可见性用 `shared/platform.js` 的 `can`（桌面端“非 false 即允许”），bridge 注入的 `can` 却要求显式 `true` | 统一 bridge 的能力语义（`33c6a6515`） |
+| 日志出现 `registration_sent` 后 30 秒超时 | `controller_relay_message` 白名单漏了 `desktop_pairing_registered`，relay 生成的连接码回包从未进入控制通道（relay 侧 registrations 已增长） | 放行该结果帧并补回归用例（`f952553bd`） |
+| 端点通道偶发 20 秒未就绪即失败 | 注册前未等待端点 socket 认证为 B，且就绪等待无重试 | `wait_endpoint_ready` + 注册有界重试（幂等复用 `registration_request_id`）（`ac421eb90`、`eac888b3f`） |
+| 面板只显示 `(error)` / `(desktop_remote_control_failed)` | Tauri 对 `Err(String)` 直接抛字符串，bridge 只读 `code/message` 导致真实有界码被兜底吞掉 | `asBoundedError` 支持字符串并面向前端透出（`84d2ec1b6`、`eac888b3f`） |
+| 后端已 `waiting_connection` 但界面无码 | 状态代际门只认旧拼写 `registering/waiting_for_pairing`，新 generation 的 `waiting_connection` 被丢弃 | `starting` 接受 `reserving/waiting_connection`（`ddc376767`） |
+| 同上（更深一层） | 域切片 `snapshotStateSlice` 读顶层键，而 feature 只把状态挂在嵌套键 `desktopRemoteControl` → `bs.controlledDevice` 恒为 `undefined` | `publish` 时把 7 个切片镜像到顶层，并在安装时镜像初始状态（`2edc456cf`；注意必须在 `STATE_SLICES` 初始化之后调用，见 `0fba53786` 的回归修复） |
+
+### 13.3 端上排障能力（保留）
+
+- `~/.pinvou3/logs/remote-control.log`：B 端起停/注册/握手/端点就绪/relay 拒绝码，以及前端 `event`/`result`/`ui` 三类投影
+  （`desktop_remote_client_log` 命令 + bridge `clientLog`）。只写阶段与有界值，不含 endpoint/lease/token。
+- 验收记录（2026-09-20 16:29）：`registered=waiting_connection` 与前端 `event/result/ui` 四层一致 `code=yes`，被控端成功显示 7 位连接码。
+
+### 13.4 剩余
+
+- A 端用该连接码连接并完成普通文本任务（真机或第二实例；同机受单实例插件限制）。
+- E2E-07 浏览器冒烟、E2E-08 完整旅程与发布缺口登记、以及关闭 TOFU 的前置（端点清单 + registry 迁移）。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。

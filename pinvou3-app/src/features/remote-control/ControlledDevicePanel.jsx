@@ -215,11 +215,6 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
       )}
       <p className="settings-hint">{copy.codeHint}</p>
 
-      {/* TEMP 诊断：定位「后端已出码、界面无码」。确认后删除。 */}
-      <p className="settings-hint" data-remote-debug="1">
-        {`debug: status=${String(status)} code=${device.pairingCode ? 'yes' : 'no'} expires=${String(device.expiresAtMs)} gen=${String(device.generation)}`}
-      </p>
-
       <div className="settings-actions">
         <button
           type="button"
