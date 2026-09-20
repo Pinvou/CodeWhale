@@ -559,6 +559,10 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
+	if approvalV1WriteResource(r.Method, resource) && s.v2LockedApprovalSession(r.Context(), session) {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_PROTOCOL_UNAVAILABLE", "approval protocol is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
 	target := *upstream
 	target.Path = strings.TrimRight(target.Path, "/") + resource
 	target.RawQuery = r.URL.RawQuery
@@ -626,6 +630,51 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+}
+
+// approvalV1WriteResource reports whether a proxied resource is one of the
+// legacy v1 approval write entries: create, update, submit, withdraw or decide.
+//
+// The frozen wire contract keeps v1 reads available for the whole audit window
+// and deliberately leaves the v1 write entries in the allowlist, because a
+// session that never entered the approval centre is still a v1 session. What
+// must not happen is a session that already locked v2 completing a write
+// through the v1 wire, and that is the single case the gate below closes.
+func approvalV1WriteResource(method, resource string) bool {
+	if resource == "/admin/v1/approval-requests" {
+		return method == http.MethodPost
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(path.Clean(resource), "/"), "/")
+	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" || parts[2] != "approval-requests" {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	if len(parts) == 4 {
+		return method == http.MethodPut
+	}
+	return len(parts) == 6 && parts[4] == "actions" &&
+		(parts[5] == "submit" || parts[5] == "withdraw" || parts[5] == "decide") && method == http.MethodPost
+}
+
+// v2LockedApprovalSession reports whether this session must stay off the v1
+// approval write entries. The selection is written once by the approval BFF and
+// is authoritative for the whole session lifetime, so a v2 session keeps using
+// the v2 entries instead of silently falling back to v1. Only an explicit v1
+// selection - or no selection at all, which the frozen contract reads as v1 -
+// may write through v1; an unreadable or unexpected selection fails closed,
+// like the other governed approval surfaces.
+func (s *Service) v2LockedApprovalSession(ctx context.Context, session Session) bool {
+	reader, ok := s.store.(ApprovalWireLocker)
+	if !ok {
+		return true
+	}
+	wire, err := reader.ApprovalWireVersion(ctx, session)
+	return err != nil || wire != 1
 }
 
 func (s *Service) captureApprovalClassification(ctx context.Context, session Session, method, resource string, response *http.Response) {

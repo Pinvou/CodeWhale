@@ -17,6 +17,11 @@ var ErrApprovalWireUnavailable = errors.New("approval wire selection unavailable
 
 type ApprovalWireLocker interface {
 	LockApprovalWireVersion(context.Context, Session, int) (int, error)
+	// ApprovalWireVersion reads the immutable per-session wire selection
+	// without creating one. A session that never entered the approval centre
+	// has no stored selection and is interpreted as v1, exactly like a session
+	// persisted before the field existed.
+	ApprovalWireVersion(context.Context, Session) (int, error)
 }
 
 type Store interface {
@@ -118,6 +123,32 @@ func (s *RedisStore) LockApprovalWireVersion(ctx context.Context, session Sessio
 		return preferred, nil
 	}
 	locked, err := s.client.Get(ctx, key).Result()
+	if err != nil {
+		return 0, ErrApprovalWireUnavailable
+	}
+	switch locked {
+	case "1":
+		return 1, nil
+	case "2":
+		return 2, nil
+	default:
+		return 0, ErrApprovalWireUnavailable
+	}
+}
+
+// ApprovalWireVersion is the read-only companion of LockApprovalWireVersion.
+// It never selects a version: an absent key means the session has not entered
+// the approval centre yet and therefore stays on v1. A key that holds anything
+// other than "1"/"2", or a store failure, fails closed so a corrupted or
+// unreadable selection can never be read as v1.
+func (s *RedisStore) ApprovalWireVersion(ctx context.Context, session Session) (int, error) {
+	if s == nil || s.client == nil || session.ID == "" {
+		return 0, ErrApprovalWireUnavailable
+	}
+	locked, err := s.client.Get(ctx, approvalWireKey(session.ID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return 1, nil
+	}
 	if err != nil {
 		return 0, ErrApprovalWireUnavailable
 	}

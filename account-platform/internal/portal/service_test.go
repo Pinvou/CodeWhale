@@ -88,6 +88,14 @@ func (s *memoryStore) LockApprovalWireVersion(_ context.Context, session Session
 	s.approvalWires[session.ID] = preferred
 	return preferred, nil
 }
+func (s *memoryStore) ApprovalWireVersion(_ context.Context, session Session) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if selected, ok := s.approvalWires[session.ID]; ok {
+		return selected, nil
+	}
+	return 1, nil
+}
 func (s *memoryStore) SaveApprovalClassification(_ context.Context, proof ApprovalClassification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
