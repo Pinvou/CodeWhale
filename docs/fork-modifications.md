@@ -28,8 +28,7 @@
 - All shell-specific guidance now lives in named constants, including cmd, fish, and the shared fallback. A before/after comparison across 14 shell cases confirmed identical output after constant extraction.
 - Following the 40-call curl ablation, remove the tool-level curl alias reminder only. Preserve the other PowerShell guidance and application instructions used in that experiment; both arms achieved 19/20 correct executions with no shell mismatch errors.
 
-## 0. 当前状态（2026-09-17 · r1 基线 + 18 个登记提交，r2 收口未切 tag）
-## 0. 当前状态（2026-09-17 · r1 基线 + 18 个登记提交，r2 收口未切 tag；由 Community PR #453 回流接入，过渡期语义来自 Community PR #482）
+## 0. 当前状态（2026-09-21 · r2 已收口：tag `pinvou-v0.9.12-r2` 切在 `6f780290f`，三方相等；r1 基线之上 24 个登记提交，过渡期语义由 Community PR #453/#482 接入）
 
 | 项 | 当前值 |
 |---|---|
@@ -37,9 +36,9 @@
 | 维护分支 | `pinvou3-clean` = `6f780290f1c35e8a3c5dff86b4f76da142744b0c`（r1 基线 `1fafee7e2` 之上 24 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66，以及 2026-09-21 批次 #64/#67） |
 | 发布状态 | r2 已收口（2026-09-21）：不可变 tag `pinvou-v0.9.12-r2` 切在合并头 `6f780290f`，父仓 gitlink、维护分支与 tag 三方相等；r1 tag `pinvou-v0.9.12-r1` 仍钉在其收口 `1fafee7e2`（15 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141 与 2026-09-18/20 的 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 r2 收口对齐 |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
-| 历史组织 | 上游之上 33 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 2 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理）；r1 之后 18 个提交全部经 PR squash 合入并过五项必需门禁 |
-| drift | `167 files, +11480/-1470`，净增 10010 行；r1 为 `94 files, +5022/-944`，旧 r13 为 `110 files, +10895/-1195` |
-| 守护 | 72 条独立 CodeWhale `forkguard_*` 行为测试（66 条默认 + 6 条 `benchmark-eval-controls`；guard 下限保持 54）+ 父仓指纹与行为测试 |
+| 历史组织 | 上游之上 39 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 2 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理）；r1 之后 24 个提交全部经 PR squash 合入并过五项必需门禁 |
+| drift | `190 files, +19135/-2628`，净增 16507 行；r1 为 `94 files, +5022/-944`，旧 r13 为 `110 files, +10895/-1195` |
+| 守护 | 133 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 57）+ 父仓指纹与行为测试 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
 ### 轮次绑定取消：宿主 stop 按轮身份分派（父仓适配，本 PR）
@@ -118,7 +117,7 @@
 | `7fc36e587` | T3 治理 | subagent governor 评审跟进：按 tokio Semaphore 重建 DynamicGate（#55） |
 | `c4e6caf9` | T1 修复 | Windows PowerShell 回退受策略绕过与命令行上限约束，行为测试迁入 forkguard 前缀（#66） |
 | `8e5988119` | CI 同步 | CNB 镜像在 `CNB_GIT_TOKEN` 未配置的仓库探针跳过而非红检（#64） |
-| `6f780290f` | T1/T3 修复 | agent/search/vision/MCP 面与运行时对齐：直呼兜底话术并入 `HANDLE_READ_ACTIVATION_HINT` 共享常量、挂载/卸载等面收敛（#67），fork-guard 两条指纹随之更新 |
+| `6f780290f` | T1/T2/T3 修复 | agent/search/vision 工具面与运行时对齐，MCP boot 失败/恢复简报区分处理，直呼兜底话术并入 `HANDLE_READ_ACTIVATION_HINT` 共享常量（#67），fork-guard 两条指纹随之更新 |
 
 所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 

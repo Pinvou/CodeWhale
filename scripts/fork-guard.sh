@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 33 commits, six maintained themes (r2 tag pending).
+# CodeWhale v0.9.12 clean re-fork guard: 39 commits, six maintained themes (r2 tagged at HEAD).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
