@@ -19706,3 +19706,53 @@ mod telemetry_surface_tests;
 #[cfg(test)]
 #[path = "tests/telemetry_counters.rs"]
 mod telemetry_counter_tests;
+
+#[cfg(test)]
+mod fork_session_tests {
+    use super::*;
+    use crate::session_manager::SessionManager;
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+
+    /// The CLI fork continues the same conversation over the same accessible
+    /// set: the source's roots must reach the persisted fork, or the
+    /// disk-authority lifecycle merge keeps re-erasing any later correction.
+    #[test]
+    fn fork_session_stamps_the_source_workspace_roots() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = EnvVarGuard::set("HOME", &home);
+
+        let workspace = tmp.path().join("workspace");
+        let shared = tmp.path().join("shared");
+        let manager = SessionManager::default_location().expect("default manager");
+        let mut source = create_saved_session(
+            &[crate::models::Message {
+                role: crate::models::Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "fork me with my roots".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-chat",
+            &workspace,
+            0,
+            None,
+        );
+        source.metadata.workspace_roots = vec![workspace.clone(), shared.clone()];
+        manager.save_session(&source).expect("save source");
+
+        let config = Config::default();
+        let forked_id = fork_session(&config, Some(source.metadata.id.clone()), false, &workspace)
+            .expect("fork session");
+
+        let forked = manager.load_session(&forked_id).expect("fork persisted");
+        assert_eq!(forked.metadata.workspace, workspace);
+        assert_eq!(
+            forked.metadata.workspace_roots,
+            vec![workspace, shared],
+            "the fork must persist the source's root set, not the freshly constructed empty one"
+        );
+    }
+}

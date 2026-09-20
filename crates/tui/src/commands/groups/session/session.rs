@@ -876,6 +876,56 @@ mod tests {
     }
 
     #[test]
+    fn fork_stamps_the_live_workspace_roots() {
+        let tmpdir = TempDir::new().unwrap();
+        let _lock = crate::test_support::lock_test_env();
+        let home = tmpdir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_guard = EnvVarGuard::set("HOME", &home);
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.current_session_id = Some("parent-roots".to_string());
+        let shared = tmpdir.path().join("shared");
+        app.workspace_roots = vec![app.workspace.clone(), shared.clone()];
+        app.api_messages.push(crate::models::Message {
+            role: Role::User,
+            content: vec![crate::models::ContentBlock::Text {
+                text: "fork with roots".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let result = fork(&mut app);
+
+        assert!(!result.is_error, "{:?}", result.message);
+        let manager = crate::session_manager::SessionManager::default_location().unwrap();
+        let expected = vec![app.workspace.clone(), shared];
+        let parent = manager.load_session("parent-roots").expect("parent saved");
+        assert_eq!(
+            parent.metadata.workspace_roots, expected,
+            "the /fork parent save must persist the live set, or the fork's own \
+             save degrades it on the next snapshot"
+        );
+        let fork_id = app.current_session_id.clone().expect("fork session id");
+        let child = manager.load_session(&fork_id).expect("child saved");
+        assert_eq!(
+            child.metadata.workspace_roots, expected,
+            "the forked session inherits the parent's live set"
+        );
+        match result.action {
+            Some(AppAction::SyncSession {
+                workspace_roots, ..
+            }) => {
+                assert_eq!(
+                    workspace_roots, expected,
+                    "the SyncSession handoff carries the same set the fork persisted"
+                );
+            }
+            other => panic!("fork must hand off a SyncSession, got {other:?}"),
+        }
+        drop(home_guard);
+    }
+
+    #[test]
     fn fork_rejects_active_runtime_without_switching_sessions() {
         let tmpdir = TempDir::new().unwrap();
         let mut app = create_test_app_with_tmpdir(&tmpdir);
