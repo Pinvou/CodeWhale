@@ -3502,6 +3502,10 @@ impl Engine {
                             // workspace's failures into the new conversation.
                             self.mcp_pool = None;
                             self.mcp_connection_errors.clear();
+                            // The previous workspace's in-flight connect pass
+                            // must not finish into the freshly synced
+                            // conversation (see the method).
+                            self.invalidate_mcp_boot_for_workspace_change();
                         }
                         let ctx =
                             crate::project_context::load_project_context_with_parents(&workspace);
@@ -6993,6 +6997,26 @@ impl Engine {
         self.mcp_boot_rx = None;
         self.mcp_boot_done = None;
         true
+    }
+
+    /// Invalidate the connect pass and boot-briefing bookkeeping owned by the
+    /// previous workspace. `Op::SyncSession` drops the pool and the error map
+    /// on a workspace change; without this the pass started for the old
+    /// workspace would still pass its generation check once it finished,
+    /// re-filling the cleared error map and injecting the old workspace's
+    /// failure briefing into the freshly synced conversation. Dropping the
+    /// receiver also disarms the idle poll, so late `Progress`/`Finished`
+    /// updates fall back to the stale-generation drop (or fail to send at
+    /// all). The briefing bookkeeping belongs to the old conversation too: a
+    /// same-named server recovering later must not announce a briefing the
+    /// new history never saw.
+    fn invalidate_mcp_boot_for_workspace_change(&mut self) {
+        self.mcp_boot_generation = None;
+        self.mcp_boot_in_flight = false;
+        self.mcp_boot_rx = None;
+        self.mcp_boot_done = None;
+        self.mcp_boot_briefing_generation = None;
+        self.mcp_boot_briefing_servers.clear();
     }
 
     /// Append the one-shot model-readable briefing for the servers that failed

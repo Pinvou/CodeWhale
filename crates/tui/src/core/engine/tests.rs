@@ -24183,6 +24183,386 @@ async fn forkguard_sync_rebriefs_failures_missing_from_restored_briefing() {
     );
 }
 
+#[tokio::test]
+async fn forkguard_workspace_sync_invalidates_in_flight_boot() {
+    let workspace_a = tempdir().expect("workspace a");
+    let workspace_b = tempdir().expect("workspace b");
+    let mut features = crate::features::Features::with_defaults();
+    features.disable(crate::features::Feature::Mcp);
+    let engine_config = EngineConfig {
+        workspace: workspace_a.path().to_path_buf(),
+        features,
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(engine_config, &Config::default());
+    // The spawn-time boot is disabled above so this seeded state survives
+    // `Engine::run`: a workspace-A connect pass is still in flight when the
+    // host syncs a workspace-B conversation.
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    let (boot_tx, boot_rx) = tokio::sync::mpsc::unbounded_channel();
+    engine.mcp_boot_rx = Some(boot_rx);
+    engine.mcp_connection_errors = HashMap::from([(
+        "w1-server".to_string(),
+        "connect timed out after 5s".to_string(),
+    )]);
+    engine.mcp_boot_briefing_generation = Some(3);
+    engine.mcp_boot_briefing_servers = vec!["w1-server".to_string()];
+
+    let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("workspace-b-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace_b.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync workspace-b session");
+    let synced = handle
+        .get_session_snapshot()
+        .await
+        .expect("drain the session sync");
+    assert_eq!(synced.workspace, workspace_b.path());
+
+    // The workspace-A pass settles late; its finish must have no living
+    // delivery path into the engine anymore.
+    let late = boot_tx.send(McpBootUpdate::Finished {
+        generation: 3,
+        authority_errors: Arc::new(HashMap::new()),
+        connection_errors: HashMap::from([(
+            "w1-server".to_string(),
+            "connect timed out after 5s".to_string(),
+        )]),
+    });
+    assert!(
+        late.is_err(),
+        "a workspace switch must drop the previous pass's update channel"
+    );
+
+    // Give a wrongly delivered finish nowhere to land: the synced session
+    // stays free of the old workspace's failure briefing.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled = handle
+        .get_session_snapshot()
+        .await
+        .expect("settled snapshot");
+    assert!(
+        settled.messages.iter().all(|message| {
+            !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)
+        }),
+        "the previous workspace's failure briefing must not reach the new session"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_late_boot_finish_after_workspace_sync_is_stale_dropped() {
+    let workspace_a = tempdir().expect("workspace a");
+    let engine_config = EngineConfig {
+        workspace: workspace_a.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    let (_boot_tx, boot_rx) = tokio::sync::mpsc::unbounded_channel();
+    engine.mcp_boot_rx = Some(boot_rx);
+    engine.mcp_connection_errors = HashMap::from([(
+        "w1-server".to_string(),
+        "connect timed out after 5s".to_string(),
+    )]);
+    engine.mcp_boot_briefing_generation = Some(3);
+    engine.mcp_boot_briefing_servers = vec!["w1-server".to_string()];
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&Vec::new()).into();
+
+    // The workspace-change branch of Op::SyncSession drops the error map and
+    // invalidates the pass; mirror that pairing here.
+    engine.mcp_connection_errors.clear();
+    engine.invalidate_mcp_boot_for_workspace_change();
+
+    assert_eq!(engine.mcp_boot_generation, None);
+    assert!(!engine.mcp_boot_in_flight);
+    assert!(engine.mcp_boot_rx.is_none());
+    assert!(engine.mcp_boot_done.is_none());
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+    assert!(
+        engine.mcp_boot_briefing_servers.is_empty(),
+        "the briefing bookkeeping belongs to the old conversation"
+    );
+
+    // The pass now settles late. Both update kinds are dropped by the
+    // stale-generation path: neither back-fills the cleared error map nor
+    // briefs the new conversation.
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Progress {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "w1-server".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+            connecting: Vec::new(),
+        })
+        .await;
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "w1-server".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+
+    assert!(
+        engine.mcp_connection_errors.is_empty(),
+        "the old workspace's failures must not refill the cleared map"
+    );
+    assert!(
+        engine.session.messages.iter().all(|message| {
+            !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)
+        }),
+        "the old workspace's failure briefing must not reach the new session"
+    );
+
+    // Bookkeeping consequence: a same-named server "recovering" later must
+    // not announce a briefing the new conversation never saw.
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["w1-server".to_string()])
+        .await;
+    assert!(
+        engine.session.messages.iter().all(|message| {
+            !crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message)
+        }),
+        "a recovery notice requires a briefing this conversation actually saw"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_reload_injects_recovery_notice_exactly_once() {
+    // Minimal streamable-HTTP MCP fixture: one JSON-RPC POST per connection,
+    // answered as an SSE event (202 for the initialized notification), the
+    // same contract the client integration tests pin.
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut buf).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    async fn write_json_sse(socket: &mut tokio::net::TcpStream, response: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+        let body = format!("event: message\ndata: {response}\n\n");
+        // Connection: close keeps the one-shot fixture honest with the
+        // client's connection pool: this handler answers exactly one request
+        // per accepted socket, so a pooled keep-alive reuse would write the
+        // next request into a socket the server is about to close ("connection
+        // closed before message completed" under load).
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let config_path = tmp.path().join("mcp.json");
+    // Reserve a port, then release it so the boot below fails fast with
+    // connection refused; the fixture rebinds the same port for the reload.
+    let port = {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    std::fs::write(
+        &config_path,
+        format!(r#"{{"servers":{{"alpha":{{"url":"http://127.0.0.1:{port}/mcp"}}}}}}"#),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: workspace.clone(),
+        mcp_config_path: config_path.clone(),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &Config::default());
+    let run = tokio::spawn(engine.run());
+
+    // Boot while nothing listens: the server fails, the finish seam briefs.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let snapshot = handle
+            .get_session_snapshot()
+            .await
+            .expect("snapshot while booting");
+        let briefed = snapshot
+            .messages
+            .iter()
+            .any(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message));
+        if briefed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the failed boot never briefed the model"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap_or_else(|error| panic!("rebind the loopback port {port}: {error}"));
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let request = read_http_request(&mut socket).await;
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+                if body.is_empty() {
+                    // The client also opens bodyless probe/stream
+                    // connections; there is nothing to answer there.
+                    return;
+                }
+                let value: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                };
+                let Some(method) = value["method"].as_str() else {
+                    return;
+                };
+                if method == "notifications/initialized" {
+                    use tokio::io::AsyncWriteExt;
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    return;
+                }
+                let id = value["id"].clone();
+                let result = match method {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {"name": "loopback-recovery", "version": "1.0.0"},
+                        "capabilities": {"tools": {}, "resources": {}, "prompts": {}}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Echo input",
+                            "inputSchema": {"type": "object"}
+                        }]
+                    }),
+                    "resources/list" => serde_json::json!({"resources": []}),
+                    "resources/templates/list" => serde_json::json!({"resourceTemplates": []}),
+                    "prompts/list" => serde_json::json!({"prompts": []}),
+                    other => panic!("unexpected method: {other}"),
+                };
+                write_json_sse(
+                    &mut socket,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result
+                    }),
+                )
+                .await;
+            });
+        }
+    });
+
+    let recovery_notices = |snapshot: &SessionSnapshot| {
+        snapshot
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+            .count()
+    };
+
+    // The public reload entry reconnects alpha against the now-live server;
+    // the briefed server counts as recovered and is corrected exactly once.
+    let (reload_tx, reload_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::ReloadMcp {
+            config_path: config_path.clone(),
+            tx: Arc::new(std::sync::Mutex::new(Some(reload_tx))),
+        })
+        .await
+        .expect("queue reload");
+    let reloaded = tokio::time::timeout(Duration::from_secs(10), reload_rx)
+        .await
+        .expect("reload response")
+        .expect("reload result")
+        .expect("reload connects the loopback server");
+    assert!(
+        reloaded
+            .snapshot
+            .servers
+            .iter()
+            .any(|server| server.name == "alpha" && server.connected),
+        "alpha must be connected after the reload: {:?}",
+        reloaded.snapshot.servers
+    );
+    let snapshot = handle
+        .get_session_snapshot()
+        .await
+        .expect("snapshot after reload");
+    assert_eq!(
+        recovery_notices(&snapshot),
+        1,
+        "the recovery notice injects exactly once"
+    );
+
+    // A second reload has nothing left to correct.
+    let (reload_tx, reload_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::ReloadMcp {
+            config_path,
+            tx: Arc::new(std::sync::Mutex::new(Some(reload_tx))),
+        })
+        .await
+        .expect("queue second reload");
+    tokio::time::timeout(Duration::from_secs(10), reload_rx)
+        .await
+        .expect("second reload response")
+        .expect("second reload result")
+        .expect("second reload keeps alpha connected");
+    let snapshot = handle
+        .get_session_snapshot()
+        .await
+        .expect("snapshot after second reload");
+    assert_eq!(
+        recovery_notices(&snapshot),
+        1,
+        "an already-corrected server must not be announced again"
+    );
+
+    server.abort();
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
 // Action receipts — message/followup acks, roster catalogs, the unchanged
 // nudge — are coordination payloads: snapshot-summarizing them drops the
 // queued/woke/queue_depth/note facts the model coordinates with, and renders
