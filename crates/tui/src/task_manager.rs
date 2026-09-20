@@ -958,6 +958,11 @@ async fn drive_engine_turn(
             }
             match event.event.as_str() {
                 "item.started" => {
+                    // Journal tool items carry a `tool` payload key;
+                    // non-tool items do not. A silent context compaction is
+                    // therefore invisible to this set (disclosed gap: a
+                    // background task mid-compaction can still hit the idle
+                    // deadline — compaction has no heartbeat of its own).
                     if event.payload.get("tool").is_some()
                         && let Some(item_id) = journal_item_id(&event)
                     {
@@ -2671,6 +2676,11 @@ fn execution_event_persist_urgent(event: &TaskExecutionEvent) -> bool {
         TaskExecutionEvent::MessageDelta { .. }
             | TaskExecutionEvent::ToolProgress { .. }
             | TaskExecutionEvent::RuntimeEvent { .. }
+            // Liveness-only signal (see the variant doc): it arrives up to
+            // ~5×/s throughout a silent build, and persisting it would
+            // rewrite the whole task record on every tick while holding the
+            // manager-wide state lock.
+            | TaskExecutionEvent::ToolHeartbeat { .. }
     )
 }
 
@@ -3121,6 +3131,70 @@ mod tests {
                 .iter()
                 .any(|entry| entry.summary.contains("item_tool_hb")),
             "heartbeats are supervisor-side liveness only and must not surface on the timeline"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_heartbeat_is_liveness_only_and_never_persists() -> Result<()> {
+        // The heartbeat arrives up to ~5x/s during a silent build; if it
+        // counted as persist-urgent it would rewrite the whole task record
+        // on every tick while holding the manager-wide state lock. The
+        // exclusion list must keep treating it as transient state.
+        assert!(!execution_event_persist_urgent(
+            &TaskExecutionEvent::ToolHeartbeat {
+                id: "item-1".into()
+            }
+        ));
+        assert!(execution_event_persist_urgent(
+            &TaskExecutionEvent::ToolStarted {
+                id: "item-1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }
+        ));
+
+        // Wiring-level pin: applying a heartbeat leaves the record
+        // unpersisted, while a real lifecycle edge still flushes.
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        let task = manager
+            .add_task(NewTaskRequest {
+                owner_session_id: Some("session-hb-persist".to_string()),
+                ..NewTaskRequest::from_prompt("heartbeat persistence pin")
+            })
+            .await?;
+
+        let outcome = manager
+            .apply_execution_event(
+                &task.id,
+                TaskExecutionEvent::ToolHeartbeat {
+                    id: "item-1".into(),
+                },
+            )
+            .await?;
+        assert!(
+            !outcome.persisted,
+            "a liveness-only heartbeat must not trigger a task-record write"
+        );
+
+        let outcome = manager
+            .apply_execution_event(
+                &task.id,
+                TaskExecutionEvent::ToolStarted {
+                    id: "item-1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                },
+            )
+            .await?;
+        assert!(
+            outcome.persisted,
+            "a real tool lifecycle edge must still flush the record"
         );
         Ok(())
     }
