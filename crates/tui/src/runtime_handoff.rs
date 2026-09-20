@@ -250,14 +250,49 @@ pub(crate) fn shell_completion_runtime_message(
     )
 }
 
+/// Purify an MCP server name for the briefing line protocol (`- name: reason`
+/// and `- name` rows). Config does not charset-validate server names, and a
+/// name carrying `": "` or whitespace would make `handoff_list_item_name`
+/// truncate at the first separator, corrupting the reseed bookkeeping parsed
+/// back from persisted history. Names therefore enter the rows — and so the
+/// reseed bookkeeping, which is parsed from exactly those rows — in sanitized
+/// form: `:` and every whitespace character become `-`.
+///
+/// Bounded, accepted consequences for a server with such a pathological name:
+/// its recovery-notice rows carry the sanitized name, which never matches the
+/// real config name the engine compares against, so that server's recovery
+/// notice may never fire; and the coverage comparison in
+/// `Engine::briefing_covers_current_failures` compares real config names
+/// against the sanitized bookkeeping names, which never match, so every
+/// `SyncSession` re-briefs that one name. Both are bounded noise confined to
+/// the pathological name.
+fn sanitize_briefing_server_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch == ':' || ch.is_whitespace() {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
 /// Build the one-shot model-readable briefing for MCP servers that failed to
 /// connect during session boot. Reasons are the engine's display-formatted,
 /// secret-redacted diagnoses; callers pass them sorted by server name so
-/// replays stay byte-stable.
+/// replays stay byte-stable. Server names are sanitized for the line protocol
+/// (see [`sanitize_briefing_server_name`]).
 pub(crate) fn mcp_boot_failure_briefing_message(failures: &[(String, String)]) -> Message {
     let payload = failures
         .iter()
-        .map(|(server, reason)| format!("- {server}: {}", bounded_briefing_reason(reason)))
+        .map(|(server, reason)| {
+            format!(
+                "- {}: {}",
+                sanitize_briefing_server_name(server),
+                bounded_briefing_reason(reason)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     runtime_handoff_message_with_meta(
@@ -282,11 +317,13 @@ pub(crate) fn is_mcp_boot_failure_briefing_message(message: &Message) -> bool {
 /// Build the corrective runtime notice for servers named in an earlier
 /// boot-failure briefing that have since reconnected, so a recovered
 /// surface is not permanently shadowed by the startup ban. Server names
-/// are sorted so replays stay byte-stable.
+/// are sorted so replays stay byte-stable and sanitized for the line
+/// protocol (see [`sanitize_briefing_server_name`]), matching the briefing
+/// rows the reseed bookkeeping parses back.
 pub(crate) fn mcp_boot_recovery_notice_message(servers: &[String]) -> Message {
     let payload = servers
         .iter()
-        .map(|server| format!("- {server}"))
+        .map(|server| format!("- {}", sanitize_briefing_server_name(server)))
         .collect::<Vec<_>>()
         .join("\n");
     runtime_handoff_message_with_meta(
@@ -315,17 +352,47 @@ pub(crate) fn is_mcp_boot_recovery_notice_message(message: &Message) -> bool {
 const MCP_BRIEFING_REASON_MAX_CHARS: usize = 280;
 
 fn bounded_briefing_reason(reason: &str) -> String {
-    let flattened: String = reason
+    flatten_and_bound_text(reason, MCP_BRIEFING_REASON_MAX_CHARS, true, false)
+}
+
+/// Shared single-line flattener for model-facing and display text: control
+/// characters become spaces (so a captured multi-line diagnosis cannot forge
+/// list rows or close a runtime-event envelope), whitespace runs optionally
+/// collapse to one space, and overlong text is truncated by character count
+/// with an ellipsis appended.
+///
+/// `max_chars` counts characters, not bytes — do not substitute
+/// `crate::utils::truncate_with_ellipsis`, which budgets bytes. When
+/// `ellipsis_within_budget` is true the result never exceeds `max_chars`
+/// (`max_chars - 1` content characters plus the ellipsis); when false the
+/// budget covers content characters and the ellipsis may push the result one
+/// character past it. Both shapes are pinned by established callers.
+pub(crate) fn flatten_and_bound_text(
+    value: &str,
+    max_chars: usize,
+    fold_whitespace: bool,
+    ellipsis_within_budget: bool,
+) -> String {
+    let flat: String = value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
-    let reason = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
-    if reason.chars().count() <= MCP_BRIEFING_REASON_MAX_CHARS {
-        return reason;
+    let flat = if fold_whitespace {
+        flat.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        flat
+    };
+    if flat.chars().count() <= max_chars {
+        return flat;
     }
-    let mut bounded: String = reason.chars().take(MCP_BRIEFING_REASON_MAX_CHARS).collect();
-    bounded.push('…');
-    bounded
+    let content_budget = if ellipsis_within_budget {
+        max_chars.saturating_sub(1)
+    } else {
+        max_chars
+    };
+    let mut out: String = flat.chars().take(content_budget).collect();
+    out.push('…');
+    out
 }
 
 /// Server names carried by a persisted boot-failure briefing, so a session
@@ -2295,5 +2362,46 @@ mod tests {
         // ellipsis).
         let long = "word ".repeat(200);
         assert_eq!(bounded_briefing_reason(&long).chars().count(), 281);
+    }
+
+    #[test]
+    fn forkguard_briefing_sanitizes_server_names_for_line_protocol() {
+        // Server names are not charset-validated at config time. A name
+        // carrying ": " or whitespace must not let handoff_list_item_name
+        // truncate mid-name: the reseed parser must read back exactly the
+        // sanitized name the constructor wrote, never a fragment that
+        // mismatches the bookkeeping or forges extra server rows.
+        let hostile = "weird: name with spaces";
+        let sanitized = "weird--name-with-spaces";
+        let message = mcp_boot_failure_briefing_message(&[(
+            hostile.to_string(),
+            "connect refused".to_string(),
+        )]);
+        let crate::models::ContentBlock::Text { text, .. } = &message.content[0] else {
+            panic!("briefing opens with a text block");
+        };
+        assert!(
+            text.contains(&format!("- {sanitized}: connect refused")),
+            "the row carries the sanitized name:\n{text}"
+        );
+        assert_eq!(
+            mcp_boot_failure_briefing_servers(&message),
+            Some(vec![sanitized.to_string()]),
+            "reseed must parse back the sanitized name, not a ': '-truncated fragment"
+        );
+
+        let notice = mcp_boot_recovery_notice_message(&[hostile.to_string()]);
+        assert_eq!(
+            mcp_boot_recovery_notice_servers(&notice),
+            Some(vec![sanitized.to_string()]),
+            "recovery rows must use the same sanitized form so text round-trips"
+        );
+
+        // Ordinary names are untouched and still round-trip.
+        let plain = mcp_boot_failure_briefing_message(&[("zeta".to_string(), "down".to_string())]);
+        assert_eq!(
+            mcp_boot_failure_briefing_servers(&plain),
+            Some(vec!["zeta".to_string()])
+        );
     }
 }
