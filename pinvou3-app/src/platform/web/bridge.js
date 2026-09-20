@@ -1646,7 +1646,7 @@
     // 手机可能在桌面仍停留草稿页/其他 session 时先唤醒这个后台 session。
     // 仅 hydrate messages 而把 chatItems 留空，会让后续 switchToSession 命中缓存快路径，
     // 不再 rerenderFromMessages，桌面便只看得到手机唤醒后的新内容，历史像是“丢了”。
-    // 在首次磁盘 hydration 后先完整重建展示层，再由 mobile_user_message 追加当前轮；
+    // 在首次磁盘 hydration 后先完整重建展示层，流式增量随后照常追加；
     // buf.busy 时上方已提前返回，不会覆盖正在流式生成的实时 chatItems。
     runSyncOnSession(sid, function () {
       resetPendingAssistant();
@@ -5124,7 +5124,7 @@
           error_present: true,
         }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
         if (turnOwnerBuffer) turnOwnerBuffer.localTurnOwned = false;
-        emitPetEvent("pet:turn_end", sid);
+        emitPetEvent();
         runSyncOnSession(sid, function () {
           // 按引用移除本地乐观提交：buffer 权威重载后引用自然消失，无需按位置
           // 二次限定（位置过滤在"引用仍在但位置移动"时会残留本地消息，且与
@@ -8317,7 +8317,7 @@
     if (editBuffer) saveWorkingSetTo(editBuffer);
     notify();
     turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护
-    emitPetEvent("pet:turn_start", sid);
+    emitPetEvent();
     try {
       await invoke("edit_last_turn", {
         newMessage: newText,
@@ -9275,8 +9275,10 @@
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
         await invoke("install_update", { installerPath: downloadResult.installer_path, info: state.updateInfo });
       } else {
-        // Linux/macOS:download_update 返回纯路径字符串(JSON untagged),走 debPath 分支。
-        // 传 info 让 macOS 后端做安装前 sha256 复验(TOCTOU 纵深防御);Linux 后端目前忽略此参数。
+        // Linux/macOS: download_update now only fetches and reports progress
+        // (resolves null); install_update's debPath argument is reserved for
+        // future platform implementations. `info` is still passed so the
+        // backend can re-verify sha256 before installing (TOCTOU defense).
         await invoke("install_update", { debPath: downloadResult, info: state.updateInfo });
       }
       state.updateReady = true;

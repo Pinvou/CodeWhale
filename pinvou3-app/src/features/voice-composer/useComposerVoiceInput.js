@@ -417,7 +417,6 @@ function useComposerVoiceInput(adapter) {
     if (!current.targetId) return;
     return registerVoiceTarget({
       targetId: current.targetId,
-      ownerKind: current.ownerKind,
       voiceSessionId,
       workspaceId: current.workspaceId,
       sessionId: current.sessionId,
@@ -435,7 +434,6 @@ function useComposerVoiceInput(adapter) {
     });
   }, [
     adapter.targetId,
-    adapter.ownerKind,
     adapter.workspaceId,
     adapter.sessionId,
     voiceSessionId,
@@ -445,7 +443,6 @@ function useComposerVoiceInput(adapter) {
   ]);
 
   return {
-    voiceSessionId,
     editPreview,
     triggerVoice,
     cancelVoice,

@@ -31,7 +31,6 @@
     var resetPendingAssistant = context.resetPendingAssistant;
     var flushQueued = context.flushQueued;
     var isBusyFor = context.isBusyFor;
-    var doSendFor = context.doSendFor;
     var ensureSessionBufferLoaded = context.ensureSessionBufferLoaded;
     var getBuffer = context.getBuffer;
     var markRemoteTurn = context.markRemoteTurn;
@@ -1357,42 +1356,6 @@
       // (file_watcher 递归会推 tmp/ _state/ 等子目录与 infra 文件 → 此处兜住)。
       if (isDeliverable(p.path) || findPresentedArtifact(p.path)) trackArtifact(p.path);
     });
-  });
-
-  listen("remote_control:mobile_user_message", async function (e) {
-    var p = e.payload || {};
-    var sid = p.session_id;
-    var content = (p.content || "").trim();
-    var attachments = p.attachments || [];
-    // 允许纯附件消息(content 为空但 attachments 非空),对齐 Group E user_message 改造。
-    if (!sid || (!content && !attachments.length)) return;
-    try { await ensureSessionBufferLoaded(sid); }
-    catch (err) {
-      console.warn("remote session hydrate failed", err);
-      return;
-    }
-    var attachmentNames = attachments.map(function (attachment) {
-      return attachment && attachment.basename;
-    }).filter(Boolean);
-    var displayText = attachmentNames.length
-      ? content + (content ? "\n\n" : "") + "📎 " + JSON.stringify(attachmentNames)
-      : content;
-    var remoteBuffer = getBuffer(sid);
-    if (isBusyFor(sid) || (remoteBuffer && remoteBuffer.queued && remoteBuffer.queued.length > 0)) {
-      runSyncOnSession(sid, function () {
-        state.queued.push({
-          id: ++context.itemIdSeq,
-          text: content,
-          displayText: displayText,
-          attachments: attachments,
-          meta: { remoteClientMessageId: p.client_message_id || null },
-        });
-      });
-      notify();
-      if (!isBusyFor(sid)) flushQueued(sid);
-      return;
-    }
-    doSendFor(sid, content, displayText, attachments, { remoteClientMessageId: p.client_message_id || null });
   });
 
   // 远程 mobile 改工具开关 → Rust emit remote_control:tools_changed → 这里桥接到

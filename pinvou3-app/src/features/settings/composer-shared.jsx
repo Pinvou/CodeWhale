@@ -418,6 +418,18 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       );
     };
 
+    // CLI 连接器（飞书/企微/钉钉/腾讯会议）共用一份配置表：探测命令（固定
+    // `<key>_skills_state`）与菜单行标题 key 都由它派生，避免四份手写拷贝漂移。
+    const COMPOSER_CONNECTORS = [
+      { key: 'feishu', titleKey: 'serviceFeishu' },
+      { key: 'wecom', titleKey: 'serviceWecom' },
+      { key: 'dingtalk', titleKey: 'serviceDingtalk' },
+      { key: 'tmeet', titleKey: 'serviceTmeet' },
+    ];
+    const initialConnectorStates = () => Object.fromEntries(
+      COMPOSER_CONNECTORS.map(({ key }) => [key, { on: false, enabled: true }]),
+    );
+
     // 输入框底栏:工具菜单(只展示已装工具 + 跳工具商店;无会话级开关——后端无此概念)。
     // 可选触发器变体：triggerVariant='pill' 时触发器渲染为代码页配置组同款 pill
     //（triggerLabel 为可选 10px 前缀文案；triggerTestId 覆盖默认 testid），

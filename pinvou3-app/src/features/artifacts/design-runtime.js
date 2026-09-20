@@ -705,7 +705,7 @@ function buildDesignRuntimeScript() {
     } catch (error) {
       post(TYPES.ERROR, { error: String(error && error.message || error) });
     }
-  }.toString()})();`;
+  }.toString()})(${JSON.stringify(DESIGN_MESSAGE_TYPES)});`;
 }
 
 export {

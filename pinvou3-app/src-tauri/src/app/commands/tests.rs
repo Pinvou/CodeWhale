@@ -2052,7 +2052,6 @@ fn image_input_capability_info_serializes_stable_fields() {
     let info = super::settings::ImageInputCapabilityInfo {
         capability: "unknown".to_string(),
         image_mode: "vision_tool_fallback".to_string(),
-        has_vision_model: true,
         is_local_endpoint: false,
         vision_is_local_endpoint: Some(false),
     };
@@ -2062,7 +2061,6 @@ fn image_input_capability_info_serializes_stable_fields() {
         serde_json::json!({
             "capability": "unknown",
             "image_mode": "vision_tool_fallback",
-            "has_vision_model": true,
             "is_local_endpoint": false,
             "vision_is_local_endpoint": false,
         })
@@ -2071,7 +2069,6 @@ fn image_input_capability_info_serializes_stable_fields() {
     let no_vision = super::settings::ImageInputCapabilityInfo {
         capability: "unsupported".to_string(),
         image_mode: "unsupported".to_string(),
-        has_vision_model: false,
         is_local_endpoint: true,
         vision_is_local_endpoint: None,
     };

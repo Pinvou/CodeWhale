@@ -6,14 +6,11 @@
   "use strict";
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["updater"] = function (context) {
-    var state = context.state;
-    var notify = context.notify;
-    var invoke = context.invoke;
-    var refreshHistoryList = context.refreshHistoryList;
-    var listen = context.listen;
-    var getBuffer = context.getBuffer;
-    var bt = context.bt;
-  var UPDATE_PROGRESS_NOTIFY_INTERVAL_MS = 200;
+  const state = context.state;
+  const notify = context.notify;
+  const invoke = context.invoke;
+  const listen = context.listen;
+  const UPDATE_PROGRESS_NOTIFY_INTERVAL_MS = 200;
   /** @type {number | null} */
   var updateProgressNotifyTimer = null;
 
@@ -50,26 +47,6 @@
   listen("update:progress", function (e) {
     if (!state.updateDownloading || state.updateCancelling || state.updateProgress >= 100) return;
     publishUpdateProgress(e.payload || {});
-  });
-  listen("remote_control:status", function (e) {
-    state.remoteControl = Object.assign({}, state.remoteControl, e.payload || {});
-    notify();
-  });
-  listen("remote_control:session_created", function (e) {
-    var s = e && e.payload && e.payload.session;
-    if (s && s.id) {
-      getBuffer(s.id);
-      if (!state.sessions.some(function (item) { return item.id === s.id; })) {
-        state.sessions.unshift({
-          id: s.id,
-          title: s.title || bt("newChatFallbackTitle"),
-          updated_at: s.updated_at || "",
-          message_count: s.message_count || 0,
-        });
-      }
-      notify();
-    }
-    refreshHistoryList().then(function () { notify(); }).catch(function () {});
   });
   async function loadAppVersion() {
     try {

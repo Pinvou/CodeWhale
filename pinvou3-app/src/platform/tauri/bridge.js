@@ -241,8 +241,6 @@
       codexAcpSupported: false,
       teamRelaySupported: true,
       browserNativeDisplay: false,
-      browserAgentAutomation: false,
-      browserCdp: false,
     },
     settings: null,
     behaviorTelemetry: null,
@@ -1835,7 +1833,6 @@
   var parseLooseJsonObject = scheduledFeature.parseLooseJsonObject;
   var normalizeScheduledTaskDraft = scheduledFeature.normalizeScheduledTaskDraft;
   var activeScheduledTaskModelConfig = scheduledFeature.activeScheduledTaskModelConfig;
-  var activeScheduledTaskModel = scheduledFeature.activeScheduledTaskModel;
   var lockScheduledTaskDraftModel = scheduledFeature.lockScheduledTaskDraftModel;
   var parseScheduledTaskDraftFromText = scheduledFeature.parseScheduledTaskDraftFromText;
   var clearScheduledTaskDraft = scheduledFeature.clearScheduledTaskDraft;
@@ -2626,11 +2623,18 @@
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
-  async function pickFolder() {
+  // Shared system directory-picker scaffold for pickFolder / pickFolders /
+  // sessions.pickDraftWorkspace: returns null when the dialog is unavailable
+  // or the user cancels, otherwise the normalized array of selected paths.
+  async function pickDirectory(options) {
     if (!dialogOpen) return null;
     var selected = await dialogOpen({ directory: true, multiple: false, title: bt("pickFolderTitle") });
     if (!selected) return null;
-    return Array.isArray(selected) ? (selected[0] || null) : selected;
+    return Array.isArray(selected) ? selected : [selected];
+  }
+  async function pickFolder() {
+    const selected = await pickDirectory({ directory: true, multiple: false, title: bt("pickFolderTitle") });
+    return (selected && selected[0]) || null;
   }
   async function pickFolders() {
     if (!dialogOpen) return [];
