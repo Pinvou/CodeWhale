@@ -16,11 +16,9 @@ pub mod platform;
 )]
 unsafe extern "C" {}
 
-pub use features::assistant::attachments::{
-    build_message_with_attachments, stage_file_in_workspace,
-};
-
 use tauri::Manager;
+
+pub use features::assistant::attachments::stage_file_in_workspace;
 
 #[cfg(feature = "benchmark-hooks")]
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
