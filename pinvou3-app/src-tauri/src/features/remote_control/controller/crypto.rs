@@ -506,11 +506,26 @@ impl ReceiptSecret {
         Ok(commitment)
     }
 
-    /// E2E-02 所需的冻结契约增量：`finished_receipt_ack` 必须把本端 receipt
-    /// secret 只经已认证角色 socket 回传给 Relay（用于校验它与此前 commitment
-    /// 一致）。明文只在此显式路径出 Rust，Debug/Display/普通序列化仍全部脱敏。
+    /// E2E-02 所需的冻结契约增量：`finished_receipt_ack` 必须把 `sender_role`
+    /// 那一方（即刚收到对端 Finished 的一侧解开的**对端** receipt secret）经已认证
+    /// 角色 socket 回传给 Relay，供它核对对端此前的 commitment
+    /// （`remote-control-relay/controller-lease.js` 的 `acceptReceipt`：按
+    /// `sender_role` 取 commitment 后重算比对）。明文只在此显式路径出 Rust，
+    /// Debug/Display/普通序列化仍全部脱敏。
     pub(crate) fn to_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD.encode(&self.0[..])
+    }
+
+    /// 测试用：按 Relay 的校验路径复原 receipt secret（重算 commitment 做同构核对）。
+    #[cfg(test)]
+    pub(crate) fn from_base64_for_test(value: &str) -> CryptoResult<Self> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(|_| ControllerCryptoError::new("invalid_receipt", "receipt"))?;
+        let secret: [u8; RECEIPT_SECRET_BYTES] = bytes
+            .try_into()
+            .map_err(|_| ControllerCryptoError::new("invalid_receipt", "receipt"))?;
+        Ok(Self(Zeroizing::new(secret)))
     }
 
     #[cfg(test)]

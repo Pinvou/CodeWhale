@@ -508,4 +508,33 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 - **验证**：`cargo test remote_control::` **330 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
 - **端上影响（登记）**：B 端必须安装含本修复的包才能通过握手；对方设备上的旧包会稳定停在这一步。
 
+### 13.8 真机 A↔B 第二处失败：`finished_receipt_ack` 误传本端 receipt（已修复）
+
+- **现象**：自帧回投修复后 A 端推进到 `safety_handshake`，随即失败，界面提示
+  「对方返回的数据无法识别，请重试；若持续出现请检查双方版本」（= `<code>invalid_message</code>`）。
+- **根因**：Relay 的收据校验要求 `finished_receipt_ack` 携带 **`sender_role` 那一方**（即刚收到
+  对端 Finished、因此解开对端 receipt 的一侧）的 receipt secret：`controller-lease.js:312-337`
+  先按 `sender_role` 取对端先前的 commitment，再用帧里的 secret 重算比对；契约样例见
+  `remote-control-relay/test/controller-handshake.test.js:153-158`（A 的 receipt 由 B 提交、B 的
+  receipt 由 A 提交）。两端实现却都回传了**本端** receipt，于是 Relay 报 `finished_receipt_invalid`；
+  该码不在端上公共错误闭集内，被兜底成 `invalid_message`，界面文案因此指向「数据无法识别」。
+- **修复**：两端 `accept_peer_finished` 改为回传刚从对端 Finished 解开的 `peer_receipt`；同步修正
+  `crypto.rs` 里 `to_base64` 的误导性注释（原注释写成「回传本端 receipt」，正是缺陷来源）。
+- **回归**：新增与 Relay 同构的校验用例（`receipt_ack_carries_the_peer_receipt_matching_its_commitment`）：
+  用 ack 里的 secret 按 `sender_role` 重算 commitment，必须等于对端先前提交的 commitment；反向用例
+  确认「拿本端 receipt 当对端 receipt」必然对不上（即修复前的行为）。
+- **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+- **端上影响（登记）**：两端都需安装含本修复的包；只有一端更新时仍会在收据阶段失败。
+
+### 13.9 A 端失败归因日志（Relay 原始码 + 本地握手码）
+
+- **动机**：13.7/13.8 两轮都出现了「公共码掩盖真实原因」：闭集外的 Relay 错误码会被
+  `public_failure_code` 兜底成 `invalid_message`，单看界面文案分不清是 Relay 拒绝还是本地校验拒绝。
+- **改动**：A 端 transport 收到 `error` 帧时把**原始有界码**写入排障日志（`stage=relay_error`），
+  并记录是否收到过 Relay 错误帧；失败时补两行：
+  `stage=handshake_failed detail=<本地握手码>` 与
+  `stage=connect_failed detail=<公共码>/origin:relay|lane|local`。
+  所有值仍是协议枚举名，不含文案、连接码或凭据。
+- **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。

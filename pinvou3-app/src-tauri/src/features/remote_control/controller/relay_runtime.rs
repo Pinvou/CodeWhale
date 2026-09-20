@@ -1589,6 +1589,69 @@ mod tests {
     /// Relay 会把发送方的 commit 原样回投（router 契约）：B 只吃 `sender_role == A`
     /// 的对端帧，自己的回投必须被跳过，否则真机上会在拿到预留的下一帧直接
     /// `controller_handshake_rejected`（2026-09-20 实测）。
+    /// Relay 的收据校验契约（`controller-lease.js` 的 `acceptReceipt`）：
+    /// `finished_receipt_ack` 里带的必须是 `sender_role` 那一方（对端）的 receipt
+    /// secret，且能重算出对端先前的 commitment。这里在客户端侧做同构校验——真机
+    /// 首次暴露的 `finished_receipt_invalid`（端上兜底成 `invalid_message`）就是
+    /// 两端各自误传了自己的 receipt。
+    #[test]
+    fn receipt_ack_carries_the_peer_receipt_matching_its_commitment() {
+        use crate::features::remote_control::controller::crypto::{
+            ControllerRole as HandshakeRole, ReceiptSecret,
+        };
+        use crate::features::remote_control::controller::test_support::{
+            handshake_binding, hex_lower, pairing_fixture,
+        };
+
+        let PairingFixture {
+            relay,
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-runtime");
+        let binding = handshake_binding(&reservation);
+        let mut driver = ControlledHandshakeDriver::new(b_keys);
+        let mut a = ControllingHandshake::new(
+            reservation["request_id"].as_str().unwrap(),
+            "claim-0001",
+            "2345678",
+            a_keys,
+            relay.trust.clone(),
+        );
+        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let a_commit = a.accept_reserved(&reservation).unwrap();
+        let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
+        let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
+        let b_ack = driver.accept_peer_finished(&a_finished).unwrap();
+        let a_ack = a.accept_peer_finished(&b_finished).unwrap();
+
+        // A 提交的 ack 声明 sender_role=B：必须携带 B 的 receipt（对得上 B 的 commitment）。
+        let from_a_ack = ReceiptSecret::from_base64_for_test(
+            a_ack["receipt_secret_b64"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            hex_lower(&from_a_ack.commitment(&binding, HandshakeRole::B).unwrap()),
+            b_commit["commitment"].as_str().unwrap()
+        );
+        // B 提交的 ack 声明 sender_role=A：必须携带 A 的 receipt。
+        let from_b_ack = ReceiptSecret::from_base64_for_test(
+            b_ack["receipt_secret_b64"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            hex_lower(&from_b_ack.commitment(&binding, HandshakeRole::A).unwrap()),
+            a_commit["commitment"].as_str().unwrap()
+        );
+        // 反向核对：把 A 的 receipt 当成 B 的 receipt 去算，必然对不上 B 的 commitment
+        //（这正是修复前两端实际发出的内容）。
+        assert_ne!(
+            hex_lower(&from_b_ack.commitment(&binding, HandshakeRole::B).unwrap()),
+            b_commit["commitment"].as_str().unwrap()
+        );
+    }
+
     #[test]
     fn only_peer_handshake_frames_are_dispatched_on_the_controlled_lane() {
         let frame = |kind: &str, role: &str| {
