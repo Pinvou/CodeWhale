@@ -507,6 +507,109 @@ fn install_parent_death_signal(cmd: &mut Command) {
     }
 }
 
+/// Whether PowerShell refused to load the tool's temporary `-File` script
+/// because of the machine's execution policy.
+///
+/// Only what the console formatter never translates is matched. The refusal
+/// prose is localized; what survives is the error-record metadata:
+///
+/// * `unauthorizedaccess` - the `FullyQualifiedErrorId` of a script the
+///   security manager refused (its label stays English under en-US, zh-CN, and
+///   ja-JP);
+/// * `parentcontainserrorrecordexception` or `pssecurityexception` - the
+///   exception type of that refusal, for the host `-File` path and the
+///   in-session `&` path respectively. .NET type names are never localized,
+///   and a command that fails on its own reports its own exception type, so an
+///   ordinary access-denied error inside the script cannot trigger a retry.
+///
+/// `about_execution_policies` (the help topic both refusals cite) stays English
+/// too and covers a truncated metadata block. The `LinkID=135170` fwlink is
+/// deliberately *not* matched: the formatter wraps it mid-token at its line
+/// width, so it is absent from the captured text of a real refusal.
+///
+/// Two structural rules keep a *different* refusal out of the retry, because a
+/// retry is only safe when nothing ran yet:
+///
+/// * a `<path>.ps1:<line>` location line rules every branch out: it means a
+///   statement already ran, so the failure happened *inside* a script rather
+///   than at the host's load boundary, and retrying would duplicate whatever
+///   executed before it (a top-level load refusal prints no location line);
+/// * the refusal has to name the exact `-File` path this invocation passed. A
+///   command that spawns its own child (`powershell -File inner.ps1`, which
+///   gets no dispatcher bypass) reports a top-level-shaped refusal with no
+///   location line, yet the outer script did run the statements before that
+///   call, so only a refusal of our own temporary script is retried.
+fn powershell_execution_policy_rejection(stderr: &str, stdout: &str, refused_script: &str) -> bool {
+    let mut haystack = String::with_capacity(stderr.len() + stdout.len() + 1);
+    haystack.push_str(stderr);
+    haystack.push('\n');
+    haystack.push_str(stdout);
+    let haystack = haystack.to_ascii_lowercase();
+    // Windows paths are case-insensitive, and the localized message always
+    // carries the path it refused.
+    if !haystack.contains(&refused_script.to_ascii_lowercase()) {
+        return false;
+    }
+    if haystack.match_indices(".ps1:").any(|(index, _)| {
+        haystack[index + 5..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+    }) {
+        return false;
+    }
+    (haystack.contains("unauthorizedaccess")
+        && (haystack.contains("parentcontainserrorrecordexception")
+            || haystack.contains("pssecurityexception")))
+        || haystack.contains("about_execution_policies")
+}
+
+/// The temporary `-File` script this invocation handed to PowerShell, when the
+/// spec is a temp-script launch at all.
+fn powershell_temp_script(spec: &CommandSpec) -> Option<&str> {
+    let mut args = spec.args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "-File" {
+            return args.next().map(String::as_str);
+        }
+    }
+    None
+}
+
+/// Whether a finished PowerShell attempt is a refusal the inline retry may
+/// repair: only a *failed* temp `-File` run qualifies. A completed run keeps
+/// its result, and a `Killed` (the user cancelled) or `TimedOut` attempt must
+/// never be re-run - that would defeat the stop or double the wall clock.
+fn powershell_refusal_needs_inline_retry(spec: &CommandSpec, result: &ShellResult) -> bool {
+    if result.status != ShellStatus::Failed {
+        return false;
+    }
+    let Some(refused_script) = powershell_temp_script(spec) else {
+        return false;
+    };
+    powershell_execution_policy_rejection(&result.stderr, &result.stdout, refused_script)
+}
+
+/// Keep the first attempt's result when the inline retry cannot even start.
+///
+/// Reaching the retry means the first attempt was already a refusal, so the
+/// recovery path's own spawn failure is strictly less informative than the
+/// refusal evidence it would otherwise replace: annotate that stderr and
+/// return the first result.
+fn keep_first_result_after_a_failed_retry(
+    mut first: ShellResult,
+    error: &anyhow::Error,
+) -> ShellResult {
+    if !first.stderr.is_empty() && !first.stderr.ends_with('\n') {
+        first.stderr.push('\n');
+    }
+    first.stderr.push_str(&format!(
+        "[codewhale] the inline -EncodedCommand retry could not start ({error}); \
+         the temporary script was refused by the local execution policy\n"
+    ));
+    first
+}
+
 /// Attach `args` to a `std::process::Command`, honoring shell-quoting on
 /// Windows.
 ///
@@ -2106,8 +2209,65 @@ impl ShellManager {
                     "TTY mode requires background execution (set background: true)."
                 ));
             }
-            Self::execute_sync_sandboxed(command, &work_dir, timeout_ms, stdin_data, &exec_env)
+            let first = Self::execute_sync_sandboxed(
+                command, &work_dir, timeout_ms, stdin_data, &exec_env,
+            )?;
+            // Only a failed temp `-File` run the host refused to load is
+            // retried: a completed run, a cancellation, a timeout, and the
+            // command's own output all keep the first result. The refusal runs
+            // no statement, so the inline rerun cannot duplicate side effects.
+            if !powershell_refusal_needs_inline_retry(&spec, &first) {
+                return Ok(first);
+            }
+            self.retry_powershell_without_script_file(
+                command, &work_dir, timeout_ms, stdin_data, &spec, first,
+            )
         }
+    }
+
+    /// PowerShell's temporary `-File` script is subject to the machine's
+    /// execution policy, so a locked-down machine refuses a script this tool
+    /// wrote itself. PowerShell rejects the file before running a single
+    /// statement, which makes one inline retry side-effect free: the identical
+    /// payload is re-sent as `-EncodedCommand` (no file to refuse, no quoting
+    /// surface, no BOM), which is also what survives a Group Policy
+    /// `-ExecutionPolicy` override or an AppLocker script rule. Any other
+    /// failure keeps the first result untouched.
+    fn retry_powershell_without_script_file(
+        &self,
+        command: &str,
+        work_dir: &std::path::Path,
+        timeout_ms: u64,
+        stdin_data: Option<&str>,
+        spec: &CommandSpec,
+        first: ShellResult,
+    ) -> Result<ShellResult> {
+        let Some(encoded) = CommandSpec::powershell_encoded_shell(
+            command,
+            work_dir.to_path_buf(),
+            Duration::from_millis(timeout_ms),
+        ) else {
+            return Ok(first);
+        };
+        let encoded = encoded
+            .with_policy(spec.sandbox_policy.clone())
+            .with_env(spec.env.clone());
+        let exec_env = self.sandbox_manager.prepare(&encoded);
+        let mut retried = match Self::execute_sync_sandboxed(
+            command, work_dir, timeout_ms, stdin_data, &exec_env,
+        ) {
+            Ok(retried) => retried,
+            Err(error) => return Ok(keep_first_result_after_a_failed_retry(first, &error)),
+        };
+        if !retried.stderr.is_empty() && !retried.stderr.ends_with('\n') {
+            retried.stderr.push('\n');
+        }
+        retried.stderr.push_str(
+            "[codewhale] the local execution policy refused the temporary script; \
+             the same command was re-run inline with -EncodedCommand\n",
+        );
+        retried.duration_ms = retried.duration_ms.saturating_add(first.duration_ms);
+        Ok(retried)
     }
 
     /// Interactive variant that accepts extra env vars (#456 shell_env hook).
