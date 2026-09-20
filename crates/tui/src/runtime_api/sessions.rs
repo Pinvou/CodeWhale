@@ -739,6 +739,23 @@ pub(super) async fn save_current_session(
         }
     };
 
+    // A session open in this process's interactive surface is owned by that
+    // surface: its autosave rebuilds the document from live state (including
+    // the workspace root set) and would revert this write. Fail closed with
+    // a typed conflict — the same guard `rename_session` applies to external
+    // mutators — rather than let the two writers flip-flop with no
+    // arbitration. Refuse before touching the thread engine so the guard
+    // does not depend on the thread's state.
+    if let Some(ref session_id) = req.session_id
+        && crate::session_manager::is_live_session(session_id)
+    {
+        return Err(map_session_err(
+            session_id,
+            crate::session_manager::live_session_conflict(session_id),
+            "save",
+        ));
+    }
+
     // Get the engine handle (loads the thread into an engine if needed),
     // then request a session snapshot. This reuses the same code path as
     // TUI's `build_session_snapshot`: the engine holds the authoritative

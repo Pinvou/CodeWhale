@@ -5192,6 +5192,55 @@ async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<
     Ok(())
 }
 
+/// `PUT /v1/sessions` against a session the TUI holds open is refused with a
+/// typed 409 before any write, so a stale engine snapshot cannot erase the
+/// live owner's non-empty workspace root set (the PUT/autosave flip-flop).
+#[tokio::test]
+async fn session_put_route_refuses_a_live_session_without_erasing_its_roots() -> Result<()> {
+    // The live-session claim is process-global, same as the PATCH route test.
+    let _lock = lock_test_env();
+    let Some((addr, sessions_dir, handle)) =
+        spawn_server_with_saved_sessions(&[("sess-live-put", "Held open", false)]).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // Persist the non-empty set the live owner's last autosave stamped.
+    let manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    let mut stored = manager.load_session("sess-live-put")?;
+    stored.metadata.workspace_roots = vec![
+        stored.metadata.workspace.clone(),
+        PathBuf::from("/shared-live-root"),
+    ];
+    manager.save_session(&stored)?;
+
+    crate::session_manager::set_live_session(Some("sess-live-put"));
+    let conflict = client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": "thr-stale-snapshot",
+            "session_id": "sess-live-put"
+        }))
+        .send()
+        .await?;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    crate::session_manager::set_live_session(None);
+
+    let reloaded = manager.load_session("sess-live-put")?;
+    assert_eq!(
+        reloaded.metadata.workspace_roots,
+        vec![
+            reloaded.metadata.workspace.clone(),
+            PathBuf::from("/shared-live-root")
+        ],
+        "the refused PUT must leave the live root set untouched"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
 /// `?peek=true` returns the bounded redacted projection, and the plain route
 /// still returns the full detail shape.
 #[tokio::test]

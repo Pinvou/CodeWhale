@@ -351,7 +351,7 @@ pub fn is_live_session(session_id: &str) -> bool {
 ///
 /// `ResourceBusy` so callers can map it to a typed conflict rather than
 /// pattern-matching on a message.
-fn live_session_conflict(session_id: &str) -> std::io::Error {
+pub(crate) fn live_session_conflict(session_id: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::ResourceBusy,
         format!(
