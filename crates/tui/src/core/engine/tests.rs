@@ -22183,7 +22183,7 @@ async fn mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
 }
 
 #[tokio::test]
-async fn mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
+async fn forkguard_mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -22243,6 +22243,14 @@ async fn mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
     assert!(
         !text.contains("entire session"),
         "the briefing must not promise a session-long outage:\n{text}"
+    );
+    // An auth-required failure synthesizes an mcp_<server>_authenticate tool
+    // that is present from the first turn; the ban must carve it out
+    // explicitly or the model receives contradictory instructions in the
+    // same request.
+    assert!(
+        text.contains("mcp_<server>_authenticate") && text.contains("One exception"),
+        "the briefing must exempt the synthetic authenticate recovery tool:\n{text}"
     );
     assert_eq!(engine.mcp_boot_briefing_generation, Some(3));
     assert_eq!(
@@ -22367,6 +22375,93 @@ async fn successful_mcp_boot_injects_no_briefing() {
         "a fully successful boot must not brief the model"
     );
     assert_eq!(engine.mcp_boot_briefing_generation, None);
+}
+
+#[tokio::test]
+async fn forkguard_mcp_boot_briefing_and_recovery_orderings_are_byte_stable() {
+    // The briefing and the recovery notice promise byte-stable ordering so
+    // session replays keep a stable KV-cache prefix. HashMap iteration order
+    // is nondeterministic, so the injection paths must sort explicitly.
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([
+                ("zeta".to_string(), "connect timed out after 5s".to_string()),
+                (
+                    "alpha".to_string(),
+                    "connect timed out after 5s".to_string(),
+                ),
+                (
+                    "midway".to_string(),
+                    "connect timed out after 5s".to_string(),
+                ),
+            ]),
+        })
+        .await;
+
+    let briefing_text = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .map(|message| match &message.content[0] {
+                crate::models::ContentBlock::Text { text, .. } => text.clone(),
+                _ => String::new(),
+            })
+            .expect("briefing present")
+    };
+    let text = briefing_text(&engine);
+    let alpha_at = text.find("- alpha:").expect("alpha row");
+    let midway_at = text.find("- midway:").expect("midway row");
+    let zeta_at = text.find("- zeta:").expect("zeta row");
+    assert!(
+        alpha_at < midway_at && midway_at < zeta_at,
+        "briefing rows must be sorted by server name:\n{text}"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec![
+            "alpha".to_string(),
+            "midway".to_string(),
+            "zeta".to_string()
+        ]
+    );
+
+    // The recovery notice sorts the same way even when the caller does not.
+    engine
+        .maybe_inject_mcp_recovery_notice(vec![
+            "zeta".to_string(),
+            "alpha".to_string(),
+            "midway".to_string(),
+        ])
+        .await;
+    let notice_text = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .map(|message| match &message.content[0] {
+            crate::models::ContentBlock::Text { text, .. } => text.clone(),
+            _ => String::new(),
+        })
+        .expect("recovery notice present");
+    let alpha_at = notice_text.find("- alpha").expect("alpha row");
+    let midway_at = notice_text.find("- midway").expect("midway row");
+    let zeta_at = notice_text.find("- zeta").expect("zeta row");
+    assert!(
+        alpha_at < midway_at && midway_at < zeta_at,
+        "recovery rows must be sorted by server name:\n{notice_text}"
+    );
 }
 
 #[tokio::test]
@@ -23553,5 +23648,157 @@ fn engine_adopts_host_owned_session_id_from_config() {
         uuid::Uuid::parse_str(engine.session_id()).is_ok(),
         "headless callers keep the generated uuid, got {:?}",
         engine.session_id()
+    );
+}
+
+#[tokio::test]
+async fn forkguard_mcp_boot_briefing_survives_a_session_sync_that_wipes_history() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "slow-fs".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(briefing_count(&engine), 1, "boot failure briefs once");
+
+    // The host reads the persisted history before spawning the engine, so
+    // the synced-in history can never contain a briefing this engine
+    // appended during its own startup boot.
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&Vec::new()).into();
+    assert_eq!(
+        briefing_count(&engine),
+        0,
+        "precondition: the sync wiped the injected briefing"
+    );
+
+    // The SyncSession seam must rebuild the bookkeeping for the installed
+    // conversation and re-brief, because the failures still hold.
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "a wiped briefing is re-briefed for the restored conversation"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["slow-fs".to_string()]
+    );
+    engine.maybe_inject_mcp_boot_briefing(3).await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "the re-briefing is still stamped: one briefing per conversation"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_session_sync_reseeds_briefed_servers_from_restored_history_and_drops_recovered()
+{
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_connection_errors = HashMap::from([(
+        "alpha".to_string(),
+        "connect timed out after 5s".to_string(),
+    )]);
+    // A same-conversation reload restores a history that already carries the
+    // briefing for two servers and a recovery notice for one of them.
+    let restored = vec![
+        crate::runtime_handoff::mcp_boot_failure_briefing_message(&[
+            (
+                "alpha".to_string(),
+                "connect timed out after 5s".to_string(),
+            ),
+            ("beta".to_string(), "connect timed out after 5s".to_string()),
+        ]),
+        crate::runtime_handoff::mcp_boot_recovery_notice_message(&["alpha".to_string()]),
+    ];
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&restored).into();
+
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "a restored history that already carries the briefing is never briefed twice"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["beta".to_string()],
+        "the reseeded set excludes the server the history reports as recovered"
+    );
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["alpha".to_string()])
+        .await;
+    let alpha_notices = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .filter(|message| {
+            crate::runtime_handoff::mcp_boot_recovery_notice_servers(message)
+                .is_some_and(|servers| servers.iter().any(|server| server == "alpha"))
+        })
+        .count();
+    assert_eq!(
+        alpha_notices, 1,
+        "a recovered server stays recovered across the session sync"
+    );
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["beta".to_string()])
+        .await;
+    let beta_notices = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .filter(|message| {
+            crate::runtime_handoff::mcp_boot_recovery_notice_servers(message)
+                .is_some_and(|servers| servers.iter().any(|server| server == "beta"))
+        })
+        .count();
+    assert_eq!(
+        beta_notices, 1,
+        "a still-briefed server is corrected exactly once after the reseed"
     );
 }

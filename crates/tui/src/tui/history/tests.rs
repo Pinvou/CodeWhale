@@ -2651,3 +2651,26 @@ fn superseded_todo_snapshots_collapse_to_their_header() {
         "the collapsed row keeps the progress reading: {header}"
     );
 }
+
+#[test]
+fn mcp_boot_handoffs_render_as_system_cells_not_user_turns() {
+    // The startup briefing and the recovery notice are runtime control
+    // traffic in a user-role carrier; replayed history must not present
+    // them as composer-authored turns.
+    let briefing = crate::runtime_handoff::mcp_boot_failure_briefing_message(&[(
+        "slow-fs".to_string(),
+        "connect timed out after 5s".to_string(),
+    )]);
+    let cells = super::history_cells_from_message(&briefing);
+    assert_eq!(cells.len(), 1, "one system cell per handoff: {cells:?}");
+    assert!(
+        matches!(cells[0], super::HistoryCell::System { .. }),
+        "the briefing must render as a system cell, not a user turn: {:?}",
+        cells[0]
+    );
+
+    let notice = crate::runtime_handoff::mcp_boot_recovery_notice_message(&["slow-fs".to_string()]);
+    let cells = super::history_cells_from_message(&notice);
+    assert_eq!(cells.len(), 1);
+    assert!(matches!(cells[0], super::HistoryCell::System { .. }));
+}

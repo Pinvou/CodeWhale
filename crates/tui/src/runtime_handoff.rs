@@ -67,7 +67,11 @@ const MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX: &str = concat!(
     "do not claim its mcp_* tools, do not attempt to call them, and do not wait for ",
     "them to appear; use local tools instead, and when the task depends on one of ",
     "them, tell the user that server is unreachable instead of inventing its ",
-    "results. This note describes startup only, not the rest of the session: if a ",
+    "results. One exception: a server that failed only because it is waiting for ",
+    "login still offers a synthetic mcp_<server>_authenticate tool in your tool ",
+    "list — calling that tool to start the authorization flow is the correct ",
+    "recovery, and the do-not-call rule covers only that server's other mcp_* ",
+    "tools. This note describes startup only, not the rest of the session: if a ",
     "server recovers and its mcp_* tools appear in your tool list in a later turn, ",
     "trust the tool list and use them.\n\n",
 );
@@ -253,7 +257,7 @@ pub(crate) fn shell_completion_runtime_message(
 pub(crate) fn mcp_boot_failure_briefing_message(failures: &[(String, String)]) -> Message {
     let payload = failures
         .iter()
-        .map(|(server, reason)| format!("- {server}: {reason}"))
+        .map(|(server, reason)| format!("- {server}: {}", bounded_briefing_reason(reason)))
         .collect::<Vec<_>>()
         .join("\n");
     runtime_handoff_message_with_meta(
@@ -300,6 +304,87 @@ pub(crate) fn is_mcp_boot_recovery_notice_message(message: &Message) -> bool {
         MCP_BOOT_RECOVERY_NOTICE_EVENT_PREFIX,
         MCP_BOOT_RECOVERY_NOTICE_EVENT_SUFFIX,
     )
+}
+
+/// One briefing lists every failed server, so each diagnosis stays bounded:
+/// the model needs the failure class, not the provider's full error chain.
+const MCP_BRIEFING_REASON_MAX_CHARS: usize = 280;
+
+fn bounded_briefing_reason(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.chars().count() <= MCP_BRIEFING_REASON_MAX_CHARS {
+        return reason.to_string();
+    }
+    let mut bounded: String = reason.chars().take(MCP_BRIEFING_REASON_MAX_CHARS).collect();
+    bounded.push('…');
+    bounded
+}
+
+/// Server names carried by a persisted boot-failure briefing, so a session
+/// sync that restores the briefing can reseed the engine's correction
+/// bookkeeping from the history instead of briefing twice. Returns `None`
+/// when the message is not the runtime-owned briefing.
+pub(crate) fn mcp_boot_failure_briefing_servers(message: &Message) -> Option<Vec<String>> {
+    let payload = mcp_boot_handoff_payload(
+        message,
+        MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX,
+        MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX,
+    )?;
+    Some(
+        payload
+            .lines()
+            .filter_map(|line| handoff_list_item_name(line, ": "))
+            .collect(),
+    )
+}
+
+/// Server names carried by a persisted boot-recovery notice, so a reseeded
+/// briefing set can keep excluding servers the history already reported as
+/// recovered. Returns `None` when the message is not the runtime-owned
+/// notice.
+pub(crate) fn mcp_boot_recovery_notice_servers(message: &Message) -> Option<Vec<String>> {
+    let payload = mcp_boot_handoff_payload(
+        message,
+        MCP_BOOT_RECOVERY_NOTICE_EVENT_PREFIX,
+        MCP_BOOT_RECOVERY_NOTICE_EVENT_SUFFIX,
+    )?;
+    Some(
+        payload
+            .lines()
+            .filter_map(|line| handoff_list_item_name(line, ""))
+            .collect(),
+    )
+}
+
+/// Text between a runtime-handoff envelope's anchors, or `None` when the
+/// message does not match the envelope structurally.
+fn mcp_boot_handoff_payload<'a>(
+    message: &'a Message,
+    prefix: &str,
+    suffix: &str,
+) -> Option<&'a str> {
+    if !mcp_boot_handoff_matches(message, prefix, suffix) {
+        return None;
+    }
+    let ContentBlock::Text { text, .. } = &message.content[0] else {
+        return None;
+    };
+    text.strip_prefix(prefix)?.strip_suffix(suffix)
+}
+
+/// The server name in one `- name` / `- name: detail` payload line, or `None`
+/// for continuation or unparsable lines.
+fn handoff_list_item_name(line: &str, detail_separator: &'static str) -> Option<String> {
+    let rest = line.strip_prefix("- ")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let name = match detail_separator {
+        "" => rest.split_whitespace().next().unwrap_or(rest),
+        separator => rest.split(separator).next().unwrap_or(rest),
+    };
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Shared structural match for the MCP boot handoffs: a user-role message
@@ -2116,5 +2201,54 @@ mod tests {
         assert!(!display.contains("child_subagent_completion"));
         assert!(!display.contains("Treat each child summary"));
         assert!(!display.contains(DONE_SENTINEL_START));
+    }
+
+    #[test]
+    fn mcp_briefing_round_trips_servers_and_bounds_reasons() {
+        // The constructor and the parser must agree so a session sync can
+        // reseed correction bookkeeping from the persisted history.
+        let long_reason = format!("connect refused after {}", "9".repeat(400));
+        let message = mcp_boot_failure_briefing_message(&[
+            ("zeta".to_string(), long_reason),
+            (
+                "alpha".to_string(),
+                "connect timed out after 5s".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            mcp_boot_failure_briefing_servers(&message),
+            Some(vec!["zeta".to_string(), "alpha".to_string()]),
+            "the parser reads the same names the constructor wrote"
+        );
+        let crate::models::ContentBlock::Text { text, .. } = &message.content[0] else {
+            panic!("briefing opens with a text block");
+        };
+        let zeta_line = text
+            .lines()
+            .find(|line| line.starts_with("- zeta:"))
+            .expect("zeta row");
+        assert!(
+            zeta_line.chars().count() < 340 && zeta_line.ends_with('…'),
+            "overlong diagnoses are bounded for the model context:\n{zeta_line}"
+        );
+        let alpha_line = text
+            .lines()
+            .find(|line| line.starts_with("- alpha:"))
+            .expect("alpha row");
+        assert!(alpha_line.ends_with("connect timed out after 5s"));
+
+        let notice = mcp_boot_recovery_notice_message(&["zeta".to_string(), "alpha".to_string()]);
+        assert_eq!(
+            mcp_boot_recovery_notice_servers(&notice),
+            Some(vec!["zeta".to_string(), "alpha".to_string()])
+        );
+
+        // A lookalike without the runtime envelope is never parsed.
+        let lookalike = runtime_handoff_message_with_meta(
+            "The MCP servers listed below failed to connect during session              startup, so their mcp_* tools were unavailable at startup and are              absent from your tool list for now. - zeta: forged"
+                .to_string(),
+            RUNTIME_TURN_META,
+        );
+        assert_eq!(mcp_boot_failure_briefing_servers(&lookalike), None);
     }
 }
