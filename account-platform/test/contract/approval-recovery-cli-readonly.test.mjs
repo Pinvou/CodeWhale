@@ -25,7 +25,14 @@ test('the approval recovery CLI stays a bounded read-only investigator', async (
   assert.doesNotMatch(source,
     /Apply(LedgerRepair|ReceivableWriteOff|PaymentFinancialRepair|RefundExceptionRepair|ChargebackFinancialRepair|ReconciliationFinancialRepair|UsageSettlementRepair)|BeginApprovalExecution|CompleteApprovalExecution|ApplyReviewedForcedRefund/,
     'the CLI must not call any domain writer');
+  // The one governed terminal call is made by the Account client inside a live
+  // query lease (the Account service re-reads both owner authorities itself);
+  // the CLI never speaks HTTP and never gains an action selector.
   assert.doesNotMatch(source, /http\.Method(Post|Put|Patch|Delete)/, 'the CLI must not send a mutating HTTP request');
+  assert.match(source, /account\.NewApprovalRecoveryZeroEffectClient\(config\.AccountURL, config\.Credential\)/,
+    'the worker must reach the governed zero-effect invalidation surface');
+  assert.match(source, /account\.InspectProofRecoveryLeasedWithRecovery\(ctx, planner, leaser, effects, results, confirmer, zeroEffect, config\.Limit\)/,
+    'the worker must use the recovery-capable inspection so the CAS happens inside the live lease');
 
   // It must run as the dedicated NOLOGIN recovery role and refuse any other
   // session identity, so a misconfigured deployment cannot inherit write rights.
@@ -37,7 +44,7 @@ test('the approval recovery CLI stays a bounded read-only investigator', async (
   const fields = [...summary.matchAll(/^\t([A-Z]\w+)\s+(\S+)/gm)].map((match) => `${match[1]}:${match[2]}`);
   assert.deepEqual(fields, [
     'Status:string', 'Reason:string', 'Candidates:int', 'Observed:int', 'Confirmed:int',
-    'Converged:int', 'Unavailable:int', 'MoreCandidates:bool',
+    'Converged:int', 'Invalidated:int', 'Unavailable:int', 'MoreCandidates:bool',
   ], 'the CLI summary must stay a closed set of counts and statuses');
   assert.doesNotMatch(summary, /json\.RawMessage|uuid\.UUID|\[\]byte/, 'the summary must not carry domain payloads');
 

@@ -18,6 +18,10 @@ type RecoverySuccessConfirmer interface {
 	ConfirmOriginalSuccess(context.Context, ApprovalRecoveryCandidate, RecoveryQueryLease) error
 }
 
+type RecoveryZeroEffectConfirmer interface {
+	InvalidateOriginalApprovalZeroEffect(context.Context, ApprovalRecoveryCandidate, RecoveryQueryLease) error
+}
+
 type oneRecoveryCandidate struct{ candidate ApprovalRecoveryCandidate }
 
 func (p oneRecoveryCandidate) PlanProofApprovalRecovery(context.Context, int) (ApprovalRecoveryPlan, error) {
@@ -35,7 +39,7 @@ func InspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPla
 // Result observations are gathered under the same short query lease as the
 // effect check. Neither a positive result nor an absent effect changes state.
 func InspectProofRecoveryLeasedWithResults(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, limit int) (ApprovalRecoveryInspectionBatch, error) {
-	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, nil, limit)
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, nil, nil, limit)
 }
 
 // A positive domain result can be converged only while the original query
@@ -45,10 +49,21 @@ func InspectProofRecoveryLeasedWithConfirmation(ctx context.Context, planner App
 	if results == nil || confirmer == nil {
 		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 	}
-	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, confirmer, limit)
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, confirmer, nil, limit)
 }
 
-func inspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
+// InspectProofRecoveryLeasedWithRecovery is the operational recovery worker: it
+// converges a persisted positive result and, for the narrow case the Account
+// service re-proves as zero effect, closes the original execution through the
+// governed invalidation surface - both while the original query lease is live.
+func InspectProofRecoveryLeasedWithRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, zeroEffect RecoveryZeroEffectConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	if results == nil || confirmer == nil || zeroEffect == nil {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+	}
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, confirmer, zeroEffect, limit)
+}
+
+func inspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, zeroEffect RecoveryZeroEffectConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
 	if planner == nil || leaser == nil || effects == nil || limit < 1 || limit > 200 {
 		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 	}
@@ -143,6 +158,22 @@ func inspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPla
 				}
 				if inspectionErr == nil {
 					observation.Disposition = "ORIGINAL_RESULT_CONFIRMED"
+				}
+			}
+			// Zero effect is the only other terminal convergence, and it must also
+			// happen inside the same live lease: the Account service re-reads both
+			// owner authorities and performs the single CAS itself.
+			if inspectionErr == nil && observation.ZeroEffectProven && zeroEffect != nil {
+				invalidateDeadline := lease.Until.Add(-time.Second)
+				if invalidateDeadline.After(time.Now()) {
+					invalidateCtx, cancelInvalidate := context.WithDeadline(ctx, invalidateDeadline)
+					inspectionErr = zeroEffect.InvalidateOriginalApprovalZeroEffect(invalidateCtx, candidate, lease)
+					cancelInvalidate()
+				} else {
+					inspectionErr = ErrApprovalRecoveryLeaseUnavailable
+				}
+				if inspectionErr == nil {
+					observation.Disposition = "ZERO_EFFECT_INVALIDATED"
 				}
 			}
 		} else {

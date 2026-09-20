@@ -33,6 +33,7 @@ type commandSummary struct {
 	Observed       int    `json:"observed,omitempty"`
 	Confirmed      int    `json:"confirmed,omitempty"`
 	Converged      int    `json:"converged,omitempty"`
+	Invalidated    int    `json:"invalidated,omitempty"`
 	Unavailable    int    `json:"unavailable,omitempty"`
 	MoreCandidates bool   `json:"more_candidates,omitempty"`
 }
@@ -122,7 +123,11 @@ func investigate(ctx context.Context, config commandConfig) (commandSummary, err
 	if err != nil {
 		return commandSummary{}, err
 	}
-	batch, err := account.InspectProofRecoveryLeasedWithConfirmation(ctx, planner, leaser, effects, results, confirmer, config.Limit)
+	zeroEffect, err := account.NewApprovalRecoveryZeroEffectClient(config.AccountURL, config.Credential)
+	if err != nil {
+		return commandSummary{}, err
+	}
+	batch, err := account.InspectProofRecoveryLeasedWithRecovery(ctx, planner, leaser, effects, results, confirmer, zeroEffect, config.Limit)
 	if err != nil {
 		return commandSummary{}, err
 	}
@@ -139,6 +144,13 @@ func investigate(ctx context.Context, config commandConfig) (commandSummary, err
 		if inspection.Disposition == "ORIGINAL_RESULT_CONFIRMED" {
 			summary.Converged++
 		}
+		if inspection.Disposition == "ZERO_EFFECT_INVALIDATED" {
+			summary.Invalidated++
+		}
+	}
+	if summary.Invalidated > 0 {
+		summary.Status = "partial_recovery"
+		summary.Reason = "ZERO_EFFECT_ONLY"
 	}
 	if summary.Converged > 0 {
 		summary.Status = "partial_recovery"

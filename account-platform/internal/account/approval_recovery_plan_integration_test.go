@@ -237,6 +237,26 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	if err := repository.ConfirmOriginalApprovalSuccess(ctx, item, lease, badResult); !errors.Is(err, ErrApprovalRecoveryConfirmConflict) {
 		t.Fatalf("incomplete billing positive result confirmed: %v", err)
 	}
+	// The zero-effect invalidation is the only terminal transition this worker
+	// may trigger, so it must refuse everything the confirm path refuses and must
+	// leave the request untouched while doing so.
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, stale, lease); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("stale request version invalidated zero effect: %v", err)
+	}
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, item, wrong); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("wrong recovery lease invalidated zero effect: %v", err)
+	}
+	undecided := item
+	undecided.WindowElapsed = true
+	undecided.Investigation = approvalconsumer.RecoveryAssessment{Class: approvalconsumer.FailureUnknown, QueryOnly: true, MaxDomainAttempts: 1}
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, undecided, lease); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("unknown classification invalidated zero effect: %v", err)
+	}
+	var zeroEffectStatus, zeroEffectCode string
+	if err := db.adminPool.QueryRow(ctx, `SELECT status,coalesce(invalidation_code,'') FROM approval_requests WHERE id=$1`, item.RequestID).
+		Scan(&zeroEffectStatus, &zeroEffectCode); err != nil || zeroEffectStatus == "INVALIDATED" || zeroEffectCode != "" {
+		t.Fatalf("refused zero-effect invalidation still mutated the request: status=%s code=%s err=%v", zeroEffectStatus, zeroEffectCode, err)
+	}
 	confirmation, err := json.Marshal(approvalRecoveryConfirmation{Candidate: item, Lease: lease})
 	if err != nil {
 		t.Fatal(err)
