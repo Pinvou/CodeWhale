@@ -20,7 +20,7 @@
 | 运行时 | proof/claim/执行/消费者映射 | `internal/billing/approval_proof*.go`、`entitlement_correction_*.go`、`approval_delivery*.go` |
 | Presenter | 只读闭合详情 | `internal/account/approval_presenter.go`（`approvalEntitlementCorrectionSummary`） |
 | Runbook | 受控激活与回滚 | `deploy/runbooks/entitlement-correction-activation.md` |
-| 迁移清单 | 规范化 SHA-256 清单（330 项） | `migrations/manifest.json` |
+| 迁移清单 | 规范化 SHA-256 清单（378 项，2026-09-20 复核） | `migrations/manifest.json` |
 
 ## 2. 只读 readiness 检查（全部只读，输出可归档）
 

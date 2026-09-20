@@ -17,7 +17,7 @@
 共同资源：
 
 - 受信收据输入（六个一组，专属 durable 共用）：`BILLING_APPROVAL_CONSUMER_{PUBLIC_KEYS,MANIFEST,RECEIPT}_{FILE,SHA256}`；由 `cmd/billing-service/approval_consumer.go` 经 `events.ApprovalConsumerResourceFiles.Load` 校验。任一缺项、摘要不符或读取失败都以 `<SWITCH>_CONSUMER_RESOURCES_UNAVAILABLE` 启动失败关闭。
-- 事件入口与权限：`deploy/authorization-entrypoints.json` 中每个 durable 一条 `account.approval-command.authorized.v1` 条目，权限 `internal.event.consume.account-approval-command-authorized`；授权覆盖门禁当前为 376 HTTP / 28 task / 15 event / 23 CLI。
+- 事件入口与权限：`deploy/authorization-entrypoints.json` 中每个 durable 一条 `account.approval-command.authorized.v1` 条目，权限 `internal.event.consume.account-approval-command-authorized`；授权覆盖门禁当前为 378 HTTP / 28 task / 15 event / 23 CLI（GSA-37 补充两个只读预检端点后由 376 增至 378，2026-09-20 复核 `node scripts/check-account-platform-authorization-coverage.mjs` exit 0）。
 - 只读预检接口面（业务页构造草稿的唯一入口）：Billing `POST /internal/v1/approval-command-prechecks`（Account 服务身份、复用 `internal.billing.approval-proof.read`）与 Account 代理 `POST /admin/v2/approval-command-prechecks`（复用 `platform.billing.repairs.request`）。两者都只读、不缓存、不落库，且与 proof 输入共用同一闭合装配路径。
 - 注册表闭合：`internal/platform/approvalconsumer/registry.go`（durable/命令/工作负载/起始序）、`internal/platform/approvalpolicy/registry.go`（Account 四入口可执行集合）、`contracts/openapi/{billing,account}.yaml`（激活投影与 `canonical_durable` 枚举）。
 - 迁移清单：`migrations/manifest.json`（当前 378 项，`account-platform-migration-manifest.mjs check` 必须通过）。
