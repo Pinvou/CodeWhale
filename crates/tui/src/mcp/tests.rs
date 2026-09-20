@@ -2937,6 +2937,10 @@ async fn call_method_bounds_a_stalled_send_inside_the_request_budget() {
         err.to_string().contains("timed out sending after 2s"),
         "unexpected error: {err:#}"
     );
+    // A timed-out write may have left a partial line in the pipe, which
+    // desyncs the line protocol: the pool must rebuild instead of handing
+    // the broken transport back out.
+    assert_eq!(conn.state(), ConnectionState::Disconnected);
 }
 
 #[tokio::test]
@@ -2957,6 +2961,10 @@ async fn call_method_times_out_while_waiting_for_response() {
         "unexpected error: {err:#}"
     );
     assert_eq!(sent.lock().unwrap().len(), 1);
+    // The widened inner wait cannot fire before the outer budget, so an
+    // elapsed outer wait means the answer may still arrive late and would
+    // be read as the next request's response: the connection is poison.
+    assert_eq!(conn.state(), ConnectionState::Disconnected);
 }
 
 /// JSON-RPC requires exactly one of `result` / `error` on a response. A

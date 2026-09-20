@@ -2171,9 +2171,12 @@ impl McpConnection {
         // The send leg shares the request budget: a server that wedges
         // without draining stdin would otherwise block `write_all` forever,
         // outside every budget — the same liveness hole the read leg's
-        // per-request budget closed. A timed-out partial write desyncs the
-        // line protocol, so this goes through finish_guarded_error like the
-        // read-side timeout (the caller reconnects).
+        // per-request budget closed. A timed-out write may have left a
+        // partial line in the pipe, which desyncs the line protocol, and a
+        // timed-out outer read wait may still be answered late — either way
+        // the connection is poison for the next request. Mark it
+        // Disconnected (like the inner read timeout in `recv`) so the pool
+        // rebuilds instead of handing the broken transport back out.
         match tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             self.send(serde_json::json!({
@@ -2188,6 +2191,10 @@ impl McpConnection {
             Ok(Ok(())) => {}
             Ok(Err(error)) => return self.finish_guarded_error(error).await,
             Err(error) => {
+                // A timed-out write can linger as a partial line; the
+                // connection must not be reused (see the budget comment
+                // above).
+                self.state = ConnectionState::Disconnected;
                 return self
                     .finish_guarded_error(anyhow::anyhow!(
                         "MCP method '{}' on server '{}' timed out sending after {}s: {error}",
@@ -2217,7 +2224,14 @@ impl McpConnection {
         }) {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => return self.finish_guarded_error(error).await,
-            Err(error) => return self.finish_guarded_error(error).await,
+            Err(error) => {
+                // The inner wait cannot fire first (it is widened to this
+                // request's own budget), so an elapsed outer budget means
+                // the response may still arrive late and would be read as
+                // the answer to the NEXT request. Poison the connection.
+                self.state = ConnectionState::Disconnected;
+                return self.finish_guarded_error(error).await;
+            }
         };
 
         if let Some(error) = response.get("error") {
