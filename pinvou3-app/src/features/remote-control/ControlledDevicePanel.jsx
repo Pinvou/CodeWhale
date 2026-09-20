@@ -133,6 +133,17 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     return () => { cancelled = true; };
   }, []);
 
+  // 把前端持有的被控状态写入 Rust 日志文件，支持人员可直接读取定位
+  // 「后端已出码、界面无码」这类投影问题（确认问题后随诊断行一起移除）。
+  useEffect(() => {
+    const remote = bridge && bridge.available && bridge.desktopRemoteControl;
+    if (!remote || typeof remote.clientLog !== 'function') return undefined;
+    Promise.resolve(remote.clientLog(
+      `ui status=${String(status)} code=${device.pairingCode ? 'yes' : 'no'} expires=${String(device.expiresAtMs)} gen=${String(device.generation)}`,
+    )).catch(() => {});
+    return undefined;
+  }, [status, device.pairingCode, device.expiresAtMs, device.generation]);
+
   const endpointLabelKey = (id) => `endpoint${String(id || '').charAt(0).toUpperCase()}${String(id || '').slice(1)}`;
   const canSwitchEndpoint = !!(
     bridge

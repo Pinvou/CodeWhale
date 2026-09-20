@@ -90,6 +90,18 @@ fn emit_status(app: &AppHandle, status: &ControlledStatus) {
     let _ = app.emit(STATUS_EVENT, status);
 }
 
+/// 前端排障日志（仅用于定位「后端已出码、界面无码」这类投影问题）：
+/// 把前端持有的被控状态写成一行有界文本，落到与 Rust 相同的日志文件里，
+/// 支持人员可直接读取，不需要用户在界面上转述。
+#[tauri::command]
+pub fn desktop_remote_client_log(message: String) -> Result<(), String> {
+    super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "client",
+        &message,
+    );
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn desktop_remote_controlled_start(
     app: AppHandle,

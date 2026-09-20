@@ -55,6 +55,11 @@
       subscribed = true;
       listen("desktop-remote-controlled-status", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
+        clientLog(
+          "event status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
+          + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
+          + " gen=" + String(payload.generation || ""),
+        );
         publish(logic.applyControlledStatus(current(), payload));
       }).then(function (off) {
         unlisten.push(off);
@@ -104,6 +109,11 @@
 
     function applyControlled(intent, result) {
       var payload = result && typeof result === "object" ? result : {};
+      clientLog(
+        "result status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
+        + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
+        + " gen=" + String(payload.generation || ""),
+      );
       publish(logic.applyControlledStatus(current(), {
         intent: intent,
         status: payload.kind || payload.status || "idle",
@@ -188,6 +198,13 @@
           return applyControlled(intent, result);
         })
         .catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /// 前端排障日志：写入与 Rust 相同的日志文件，支持人员可直接读取。
+    function clientLog(message) {
+      if (!isAvailable()) return Promise.resolve();
+      return invoke("desktop_remote_client_log", { message: String(message || "") })
+        .catch(function () {});
     }
 
     /**
@@ -659,6 +676,7 @@
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
       controlledStatus: controlledStatus,
+      clientLog: clientLog,
       endpointProfiles: endpointProfiles,
       setEndpointProfile: setEndpointProfile,
       controlledListWorkspaces: controlledListWorkspaces,
