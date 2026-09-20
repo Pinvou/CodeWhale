@@ -214,7 +214,11 @@
      * 这里把码恢复成 `error.code`，UI 才能给出对应的三语文案而不是笼统兜底。
      */
     function asBoundedError(failure) {
-      var raw = (failure && failure.code) || (failure && failure.message) || "";
+      // Tauri 对 `Err(String)` 直接抛**字符串**（既没有 code 也没有 message），
+      // 之前会被兜底成 desktop_remote_control_failed，真实原因就此丢失。
+      var raw = typeof failure === "string"
+        ? failure
+        : (failure && (failure.code || failure.message)) || "";
       var text = String(raw || "desktop_remote_control_failed");
       var error = new Error(text);
       error.code = text;

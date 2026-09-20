@@ -39,6 +39,9 @@ use super::resume::{
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
+/// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。
+const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// B 端排障日志（追加写入 `~/.pinvou3/logs/remote-control.log`）。
 ///
@@ -337,52 +340,73 @@ impl ControlledRelayWorker {
         let registration_request_id = manager
             .registration_request_id(self.operation.clone())
             .map_err(|error| error.code.to_owned())?;
-        // 控制通道注册必须在端点 socket 已认证为 B 之后：否则 relay 会以角色无效
-        // 拒绝（客户端只能看到 pairing_registration_rejected）。
-        match self
-            .relay
-            .wait_endpoint_ready(std::time::Duration::from_millis(20_000))
-            .await
-        {
-            Ok(()) => log_controlled_event("endpoint_ready", "ok"),
-            Err(error) => {
-                log_controlled_event("endpoint_ready", &error);
-                return Err(error);
-            }
-        }
-        let endpoint_id = self.relay.controller_endpoint_id()?;
-        let request = registration_request(
-            &registration_request_id,
-            &endpoint_id,
-            self.operation.generation(),
-            &self.code_wrap,
-            self.handshake
-                .as_ref()
-                .ok_or_else(|| "handshake_key_invalid".to_owned())?,
-        )?;
-        self.channel.try_send(request.clone())?;
-        // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
-        log_controlled_event("registration_sent", "waiting_registered");
-        loop {
-            match next_registration_step(
-                &mut self.channel,
-                &request,
-                &self.code_wrap,
-                std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
-            )
-            .await?
+        // 注册帧必须在端点 socket 已认证为 B 之后发出，否则会被 relay 以角色无效
+        // 拒绝；同时网络抖动可能让端点通道 20 秒内都没就绪，因此整体**有界重试**：
+        // 每次重试复用同一个 registration_request_id，relay 侧按幂等键返回同一结果。
+        const MAX_ATTEMPTS: u32 = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self
+                .relay
+                .wait_endpoint_ready(ENDPOINT_READY_TIMEOUT)
+                .await
             {
-                RegistrationStep::Ignore => continue,
-                RegistrationStep::Registered(registration) => {
-                    let status = manager
-                        .complete_registration(self.operation.clone(), *registration, 0)
-                        .map_err(|error| error.code.to_owned())?;
-                    log_controlled_event("registered", "waiting_connection");
-                    let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
-                    return Ok(status);
+                Ok(()) => log_controlled_event("endpoint_ready", "ok"),
+                Err(error) => {
+                    log_controlled_event("endpoint_ready", &error);
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+            let endpoint_id = self.relay.controller_endpoint_id()?;
+            let request = registration_request(
+                &registration_request_id,
+                &endpoint_id,
+                self.operation.generation(),
+                &self.code_wrap,
+                self.handshake
+                    .as_ref()
+                    .ok_or_else(|| "handshake_key_invalid".to_owned())?,
+            )?;
+            self.channel.try_send(request.clone())?;
+            // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
+            log_controlled_event("registration_sent", "waiting_registered");
+            loop {
+                match next_registration_step(
+                    &mut self.channel,
+                    &request,
+                    &self.code_wrap,
+                    std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
+                )
+                .await
+                {
+                    Ok(RegistrationStep::Ignore) => continue,
+                    Ok(RegistrationStep::Registered(registration)) => {
+                        let status = manager
+                            .complete_registration(self.operation.clone(), *registration, 0)
+                            .map_err(|error| error.code.to_owned())?;
+                        log_controlled_event("registered", "waiting_connection");
+                        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                        return Ok(status);
+                    }
+                    Err(error) => {
+                        log_controlled_event("registration_failed", &error);
+                        let retryable = matches!(
+                            error.as_str(),
+                            "pairing_registration_timeout" | "desktop_relay_disconnected"
+                        );
+                        if retryable && attempt < MAX_ATTEMPTS {
+                            tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                            break;
+                        }
+                        return Err(error);
+                    }
                 }
             }
         }
+        Err("pairing_registration_failed".to_owned())
     }
 
     fn fail_registration(&self, error: &str) {
