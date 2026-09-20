@@ -165,6 +165,80 @@ func (stub *recoveryConfirmerStub) ConfirmOriginalSuccess(_ context.Context, _ A
 	return stub.err
 }
 
+type recoveryZeroEffectStub struct {
+	calls int
+	err   error
+}
+
+func (stub *recoveryZeroEffectStub) InvalidateOriginalApprovalZeroEffect(_ context.Context, _ ApprovalRecoveryCandidate, _ RecoveryQueryLease) error {
+	stub.calls++
+	return stub.err
+}
+
+// The terminal invalidation may fire only for the narrow proven case, only
+// under a live lease, and only through the governed confirmer: everything else
+// (an open window, an UNKNOWN classification, an observed effect) must stay
+// query-only, and a positive result must take the confirmation path instead.
+func TestProofRecoveryInvalidatesOnlyAProvenZeroEffectUnderLease(t *testing.T) {
+	descriptor := approvalconsumer.BillingCommands()[0]
+	item := ApprovalRecoveryCandidate{RequestID: uuid.New(), ExecutionID: uuid.New(), OriginalEventID: uuid.New(), OriginalKey: "original-key",
+		Durable: descriptor.Durable, Workload: descriptor.Workload, CommandType: descriptor.CommandType,
+		PolicyVersion: descriptor.PolicyVersion, CommandFingerprint: "a1" + "00000000000000000000000000000000000000000000000000000000000000",
+		ApprovalEpoch: 1, RequestVersion: 1, ExecutionDeadline: time.Now().UTC().Add(-time.Minute), WindowElapsed: true,
+		Investigation: approvalconsumer.RecoveryAssessment{Class: approvalconsumer.FailurePermanent, QueryOnly: true, MaxDomainAttempts: 1}}
+	for _, tc := range []struct {
+		name, result, effect, wantDisposition string
+		mutate                                func(*ApprovalRecoveryCandidate)
+		wantInvalidated, wantConfirmed        int
+	}{
+		{"proven zero effect", "UNCONFIRMED", approvaleffect.StateAbsent, "ZERO_EFFECT_INVALIDATED", nil, 1, 0},
+		{"window still open", "UNCONFIRMED", approvaleffect.StateAbsent, "UNKNOWN_QUERY_ONLY", func(c *ApprovalRecoveryCandidate) {
+			c.WindowElapsed = false
+			c.ExecutionDeadline = time.Now().UTC().Add(time.Minute)
+		}, 0, 0},
+		{"unknown classification", "UNCONFIRMED", approvaleffect.StateAbsent, "UNKNOWN_QUERY_ONLY", func(c *ApprovalRecoveryCandidate) {
+			c.Investigation.Class = approvalconsumer.FailureUnknown
+		}, 0, 0},
+		{"effect observed", "UNCONFIRMED", approvaleffect.StateObserved, "UNKNOWN_QUERY_ONLY", nil, 0, 0},
+		{"positive result wins", "SUCCEEDED", approvaleffect.StateObserved, "ORIGINAL_RESULT_CONFIRMED", nil, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := item
+			if tc.mutate != nil {
+				tc.mutate(&candidate)
+			}
+			leaser := &recoveryLeaserStub{}
+			results := &recoveryResultStub{state: tc.result}
+			confirmer := &recoveryConfirmerStub{}
+			zeroEffect := &recoveryZeroEffectStub{}
+			batch, err := InspectProofRecoveryLeasedWithRecovery(context.Background(),
+				&recoveryPlannerStub{plan: ApprovalRecoveryPlan{Candidates: []ApprovalRecoveryCandidate{candidate}}},
+				leaser, &recoveryEffectStub{state: tc.effect}, results, confirmer, zeroEffect, 1)
+			if err != nil {
+				t.Fatalf("inspection: %v", err)
+			}
+			if batch.Inspections[0].Disposition != tc.wantDisposition || zeroEffect.calls != tc.wantInvalidated ||
+				confirmer.calls != tc.wantConfirmed || leaser.claimCalls != 1 || leaser.releaseCalls != 1 {
+				t.Fatalf("disposition=%s invalidated=%d confirmed=%d claim=%d release=%d",
+					batch.Inspections[0].Disposition, zeroEffect.calls, confirmer.calls, leaser.claimCalls, leaser.releaseCalls)
+			}
+			if batch.Inspections[0].ZeroEffectProven != (tc.wantInvalidated == 1) {
+				t.Fatalf("verdict=%v for %s", batch.Inspections[0].ZeroEffectProven, tc.name)
+			}
+		})
+	}
+	// A failed governed call never claims a convergence.
+	candidate := item
+	leaser := &recoveryLeaserStub{}
+	zeroEffect := &recoveryZeroEffectStub{err: ErrApprovalRecoveryZeroEffectUnavailable}
+	if _, err := InspectProofRecoveryLeasedWithRecovery(context.Background(),
+		&recoveryPlannerStub{plan: ApprovalRecoveryPlan{Candidates: []ApprovalRecoveryCandidate{candidate}}},
+		leaser, &recoveryEffectStub{state: approvaleffect.StateAbsent}, &recoveryResultStub{state: "UNCONFIRMED"},
+		&recoveryConfirmerStub{}, zeroEffect, 1); !errors.Is(err, ErrApprovalRecoveryZeroEffectUnavailable) || leaser.releaseCalls != 1 {
+		t.Fatalf("failed invalidation must surface with the lease released: err=%v release=%d", err, leaser.releaseCalls)
+	}
+}
+
 func (stub *recoveryResultStub) ObserveRecoveryResult(_ context.Context, _ ApprovalRecoveryCandidate) (RecoveryResultObservation, error) {
 	stub.calls++
 	if stub.err != nil {
