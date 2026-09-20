@@ -955,9 +955,9 @@ impl ThreadManager {
     }
 
     fn persist_thread(&self, thread: &Thread, rollout_path: Option<PathBuf>) -> Result<()> {
-        // This update payload carries no per-thread policy, so preserve any
-        // policy already stored for the thread rather than erasing it with
-        // NULLs on every persist/resume.
+        // This update payload carries no per-thread policy or archive
+        // timestamp, so preserve the ones already stored for the thread
+        // rather than erasing them with NULLs on every persist/resume.
         let existing = self.store.get_thread(&thread.id)?;
         self.store.upsert_thread(&ThreadMetadata {
             id: thread.id.clone(),
@@ -981,7 +981,7 @@ impl ThreadManager {
                 .as_ref()
                 .and_then(|metadata| metadata.approval_mode.clone()),
             archived: matches!(thread.status, ThreadStatus::Archived),
-            archived_at: None,
+            archived_at: existing.as_ref().and_then(|metadata| metadata.archived_at),
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
@@ -3124,6 +3124,66 @@ mod tests {
             .expect("resume unarchived thread")
             .expect("thread in cache");
         assert_eq!(restored.thread.status, ThreadStatus::Idle);
+    }
+
+    /// The cached-resume persist must not null the archive timestamp the
+    /// store recorded, the same way it already preserves the per-thread
+    /// policy fields.
+    #[test]
+    fn cached_resume_preserves_the_persisted_archive_timestamp() {
+        let store = temp_core_state("cached-resume-archived-at");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        manager.archive_thread(&thread_id).expect("archive thread");
+        let archived_at = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted")
+            .archived_at;
+        assert!(archived_at.is_some(), "archiving stamps archived_at");
+
+        let resumed = manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: None,
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume archived thread")
+            .expect("thread in cache");
+        assert_eq!(resumed.thread.status, ThreadStatus::Archived);
+        let persisted = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.archived_at, archived_at,
+            "a parameterless cached resume must not null the archive timestamp"
+        );
     }
 
     #[test]
