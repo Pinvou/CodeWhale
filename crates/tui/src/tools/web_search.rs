@@ -2157,9 +2157,7 @@ fn is_plausible_locale_tag(tag: &str) -> bool {
         return false;
     }
     subtags.all(|subtag| {
-        !subtag.is_empty()
-            && subtag.len() <= 8
-            && subtag.chars().all(|c| c.is_ascii_alphanumeric())
+        !subtag.is_empty() && subtag.len() <= 8 && subtag.chars().all(|c| c.is_ascii_alphanumeric())
     })
 }
 
@@ -3366,9 +3364,18 @@ mod tests {
         // Script+region Chinese tags reduce to their verified region pair:
         // the schema teaches BCP 47 where the script subtag is best
         // practice for Chinese.
-        assert_eq!(super::ddg_region_param("zh-Hans-CN").as_deref(), Some("cn-zh"));
-        assert_eq!(super::ddg_region_param("zh-Hant-TW").as_deref(), Some("tw-tzh"));
-        assert_eq!(super::ddg_region_param("zh-Hant-HK").as_deref(), Some("hk-tzh"));
+        assert_eq!(
+            super::ddg_region_param("zh-Hans-CN").as_deref(),
+            Some("cn-zh")
+        );
+        assert_eq!(
+            super::ddg_region_param("zh-Hant-TW").as_deref(),
+            Some("tw-tzh")
+        );
+        assert_eq!(
+            super::ddg_region_param("zh-Hant-HK").as_deref(),
+            Some("hk-tzh")
+        );
     }
 
     #[test]
@@ -3431,7 +3438,10 @@ mod tests {
         // or the value would be transmitted (and receipted as honored)
         // against schema text promising malformed values are ignored.
         assert_eq!(super::scrape_market(Some("12345"), "rust async"), None);
-        assert_eq!(super::scrape_market(Some("en-123456789"), "rust async"), None);
+        assert_eq!(
+            super::scrape_market(Some("en-123456789"), "rust async"),
+            None
+        );
         // Well-formed tags survive the shape check verbatim.
         assert_eq!(
             super::scrape_market(Some("zh-TW"), "rust async").as_deref(),

@@ -242,7 +242,10 @@ fn subagent_snapshot_shaped(value: &serde_json::Value) -> bool {
 fn carries_transcript_handle(parsed: &serde_json::Value) -> bool {
     fn row_carries(row: &serde_json::Value) -> bool {
         row.get("transcript_handle")
-            .or_else(|| row.get("snapshot").and_then(|inner| inner.get("transcript_handle")))
+            .or_else(|| {
+                row.get("snapshot")
+                    .and_then(|inner| inner.get("transcript_handle"))
+            })
             .and_then(transcript_handle_row_value)
             .is_some()
     }

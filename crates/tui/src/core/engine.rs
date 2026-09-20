@@ -7109,28 +7109,27 @@ impl Engine {
             // fresh one) suppresses that finish briefing only when the
             // restored briefing already covers every current failure;
             // otherwise the finish must re-brief the delta.
-            if let Some(briefed) = restored_briefing {
-                if self.briefing_covers_current_failures(&briefed) {
-                    self.mcp_boot_briefing_generation = self.mcp_boot_generation;
-                    self.mcp_boot_briefing_servers = briefed;
-                }
+            if let Some(briefed) = restored_briefing
+                && self.briefing_covers_current_failures(&briefed)
+            {
+                self.mcp_boot_briefing_generation = self.mcp_boot_generation;
+                self.mcp_boot_briefing_servers = briefed;
             }
             return;
         }
         let generation = briefed_generation.unwrap_or_else(|| self.next_mcp_event_generation());
-        if let Some(briefed) = restored_briefing {
-            if self.briefing_covers_current_failures(&briefed) {
-                // The installed conversation already saw this boot's
-                // briefing: keep its correction bookkeeping without
-                // briefing twice.
-                self.mcp_boot_briefing_generation = Some(generation);
-                self.mcp_boot_briefing_servers = briefed;
-                return;
-            }
-            // A restored briefing naming fewer servers than currently fail
-            // must not suppress the delta: fall through and re-brief from
-            // the live error map.
+        if let Some(briefed) = restored_briefing
+            && self.briefing_covers_current_failures(&briefed)
+        {
+            // The installed conversation already saw this boot's briefing:
+            // keep its correction bookkeeping without briefing twice.
+            self.mcp_boot_briefing_generation = Some(generation);
+            self.mcp_boot_briefing_servers = briefed;
+            return;
         }
+        // A restored briefing naming fewer servers than currently fail
+        // must not suppress the delta: fall through and re-brief from
+        // the live error map.
         self.maybe_inject_mcp_boot_briefing(generation).await;
     }
 

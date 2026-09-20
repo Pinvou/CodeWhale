@@ -17174,8 +17174,7 @@ fn forkguard_subagent_context_hint_names_active_tools() {
         })
         .to_string(),
     );
-    let context =
-        compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_string_handle);
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_string_handle);
     assert!(context.contains("handle_read"));
     assert!(
         context.contains("transcript: agent:agent_1234abcd/full_transcript"),
@@ -23804,10 +23803,8 @@ async fn forkguard_session_sync_reseeds_briefed_servers_from_restored_history_an
     engine.mcp_boot_generation = Some(3);
     // The live failure map agrees with the restored history: alpha already
     // recovered (its retry removed it from the map), beta still fails.
-    engine.mcp_connection_errors = HashMap::from([(
-        "beta".to_string(),
-        "connect timed out after 5s".to_string(),
-    )]);
+    engine.mcp_connection_errors =
+        HashMap::from([("beta".to_string(), "connect timed out after 5s".to_string())]);
     // A same-conversation reload restores a history that already carries the
     // briefing for two servers and a recovery notice for one of them.
     let restored = vec![
@@ -23973,12 +23970,12 @@ async fn forkguard_sync_rebriefs_failures_missing_from_restored_briefing() {
     ]);
     // A persisted history restored mid-life can carry a briefing from an
     // older boot pass that named fewer servers than currently fail.
-    let restored = vec![crate::runtime_handoff::mcp_boot_failure_briefing_message(&[
-        (
+    let restored = vec![crate::runtime_handoff::mcp_boot_failure_briefing_message(
+        &[(
             "alpha".to_string(),
             "connect timed out after 5s".to_string(),
-        ),
-    ])];
+        )],
+    )];
     engine.session.messages =
         crate::runtime_handoff::project_messages_for_restore(&restored).into();
 
