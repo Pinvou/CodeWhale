@@ -7,6 +7,7 @@ import * as registry from "../src/registry.mjs";
 import { backendFor, installRemoteAgent, executorFor } from "../src/transport.mjs";
 import { TOOLS, TOOL_NAMES, READ_ONLY_TOOLS, REMOTE_TOOLS, BACKEND_METHOD } from "../src/tools.mjs";
 import { tryJson } from "../src/exec.mjs";
+import { zoomChildRaster } from "../src/raster.mjs";
 
 const VERSION = "0.1.0";
 const SERVER_NAME = "codewhale-cu";
@@ -14,7 +15,7 @@ const SERVER_NAME = "codewhale-cu";
 // ---------- per-session runtime state ----------
 let controlStopped = false;
 let stateCounter = 0;
-/** state_id -> { computerId, app_ref, windowIndex, elements } */
+/** state_id -> { computerId, app_ref, elements, ts } */
 const appStates = new Map();
 /** computerId -> last raster metadata {file, scale, origin} */
 const lastRasters = new Map();
@@ -47,9 +48,12 @@ async function getBackend(computer) {
 }
 
 /** Element target -> enriched target with cached app identity and AX path. */
-function resolveElement(target) {
+function resolveElement(computer, target) {
   const st = appStates.get(target.state_id);
   if (!st) throw new ServerError("unknown_state", `state_id "${target.state_id}" is unknown or expired — call get_app_state again`);
+  if (st.computerId !== computer.id) {
+    throw new ServerError("state_wrong_computer", `state_id "${target.state_id}" was observed on computer "${st.computerId}", not on "${computer.id}" — observe again on this computer`);
+  }
   const el = st.elements[target.index];
   if (!el) throw new ServerError("unknown_element", `element index ${target.index} is outside state ${target.state_id} (0..${st.elements.length - 1})`);
   return { state: st, element: el };
@@ -74,7 +78,7 @@ function normalizeTarget(computer, target, kind) {
     return { x: Math.round(pt.x), y: Math.round(pt.y), strategy: "event" };
   }
   if (target?.type === "element") {
-    const { state, element } = resolveElement(target);
+    const { state, element } = resolveElement(computer, target);
     if (kind === "semantic") {
       return {
         app_ref: state.app_ref, windowIndex: element.windowIndex ?? 0, path: element.path,
@@ -93,10 +97,35 @@ function bindRaster(computer, shot) {
   lastRasters.set(computer.id, {
     file: shot.file ?? shot.path,
     scale: shot.scale ?? 1,
-    origin: shot.points ?? { x: 0, y: 0 },
+    // Screenshots carry `points` (screen-space origin); a zoom child carries
+    // the precomputed `origin` from zoomChildRaster.
+    origin: shot.points ?? shot.origin ?? { x: 0, y: 0 },
     pixels: shot.pixels ?? null,
     capturedAt: shot.capturedAt ?? new Date().toISOString(),
   });
+}
+
+/**
+ * Rebind the frame after a zoom: the model aims from the child raster, so its
+ * pixels must resolve against the crop region, not the stale parent. The child
+ * file becomes the bound raster — backends also advance their own last raster
+ * to the child, so chained zooms and the `data.source === prev.file` check
+ * stay aligned. A zoom that cropped something else leaves the binding alone
+ * and says so instead of silently keeping a wrong frame.
+ */
+function rebindAfterZoom(computer, data) {
+  const prev = lastRasters.get(computer.id);
+  if (!prev) {
+    data.note = "no raster was bound on this computer, so the zoom child is unbound — screenshot to rebind";
+    return;
+  }
+  if (data.source && prev.file && data.source !== prev.file) {
+    data.note = "zoom cropped a raster other than the bound one; coordinate targets still resolve against the previous raster — screenshot again to rebind";
+    return;
+  }
+  const child = zoomChildRaster(prev, data.region);
+  if (child) bindRaster(computer, { ...child, file: data.file });
+  else data.note = "zoom region was unusable; coordinate targets still resolve against the previous raster";
 }
 
 function rememberState(computer, app_ref, result) {
@@ -106,6 +135,44 @@ function rememberState(computer, app_ref, result) {
     for (const k of appStates.keys()) { appStates.delete(k); break; }
   }
   return id;
+}
+
+/** Drop every piece of runtime state remembered for one computer id. */
+function forgetComputer(id) {
+  backendCache.delete(id);
+  lastRasters.delete(id);
+  // Element states observed on this computer must not survive a change of
+  // what the id points at: computer_remove, and computer_register over an
+  // existing id, which may now name another host.
+  for (const [sid, st] of appStates) if (st.computerId === id) appStates.delete(sid);
+}
+
+/**
+ * Connection identity of a registry entry: the fields whose change means the
+ * id now names a different computer. A re-register may change only the port,
+ * user, or hdc target while transport and host stay equal, and hdc entries
+ * have no host at all — so the whole connection is compared, not just the
+ * host. label/platform cosmetics do not count.
+ */
+function connectionKey(entry) {
+  return JSON.stringify([entry.transport, entry.host ?? null, entry.port ?? null, entry.user ?? null, entry.target ?? null]);
+}
+
+/**
+ * A racing computer_remove/computer_register can repoint an id at another
+ * computer while a call is in flight; remembering the result then would tag
+ * the old computer's observation with the new id. Fail closed instead.
+ */
+function assertComputerUnchanged(computer) {
+  let now;
+  try {
+    now = registry.get(computer.id);
+  } catch {
+    throw new ServerError("computer_repointed", `computer "${computer.id}" was removed while the call was in flight — observe again on the current computer`);
+  }
+  if (connectionKey(now) !== connectionKey(computer)) {
+    throw new ServerError("computer_repointed", `computer "${computer.id}" now points at a different computer, so the in-flight result is not its — observe again`);
+  }
 }
 
 // ---------- tool dispatch ----------
@@ -142,7 +209,14 @@ async function callTool(params) {
 
   if (name === "computer_register") {
     try {
+      // Re-registering an existing id may repoint it at another computer —
+      // the update merges in place, so state observed under the old
+      // connection must go when the connection changes. A byte-identical
+      // re-register keeps runtime state: a display choice or a running
+      // recorder must not be lost to a no-op.
+      const before = registry.list().computers[args.computer] ?? null;
       const entry = registry.register({ id: args.computer, transport: args.transport, label: args.label, host: args.host, port: args.port, user: args.user, target: args.target });
+      if (before && connectionKey(before) !== connectionKey(entry)) forgetComputer(args.computer);
       let installed = null;
       if (entry.transport === "ssh" && args.installAgent !== false) {
         installed = await installRemoteAgent(entry);
@@ -167,8 +241,7 @@ async function callTool(params) {
 
   if (name === "computer_remove") {
     const res = registry.remove(args.computer);
-    backendCache.delete(args.computer);
-    lastRasters.delete(args.computer);
+    forgetComputer(args.computer);
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, ...res })) }] };
   }
 
@@ -196,17 +269,65 @@ async function callTool(params) {
     const backendMethod = BACKEND_METHOD[name] === "request_access" ? "probe" : BACKEND_METHOD[name];
     let data;
 
+    if (computer.transport === "ssh" && ["recordingStart", "recordingStop", "recordingStatus"].includes(backendMethod)) {
+      // The ssh agent is a fresh process per call: a recorder started on the
+      // remote host would be orphaned, and one from an earlier call can no
+      // longer be reached (only its files remain). Fail closed with the
+      // reason instead of stranding the model in backend errors.
+      throw new ServerError("persistent_session_required", `"${name}" needs recorder state that cannot survive the one-shot ssh agent process. Start, stop, and inspect recordings on a local or hdc computer instead.`);
+    }
+    if (computer.transport === "ssh" && backendMethod === "switch_display") {
+      // The display choice lives in backend state, which dies with the
+      // one-shot agent process — the call would report ok and the setting
+      // would silently evaporate. Fail closed with the way out instead.
+      throw new ServerError("persistent_session_required", `"${name}" needs a display choice that cannot survive the one-shot ssh agent process. Pass display to screenshot/recording_start instead (honored on macOS; Linux and Windows captures already cover every display).`);
+    }
+    if (computer.transport === "ssh" && backendMethod === "left_mouse_down") {
+      // A press outlives the one-shot agent process: if the follow-up
+      // left_mouse_up never arrives (failed call, abandoned session), the
+      // remote button stays stuck with nothing left to detect or release it.
+      throw new ServerError("persistent_session_required", `"${name}" presses and holds across calls, which needs one live session — the ssh agent is a new process per call, so the press could outlive its release. Use a local computer for press-and-hold; HarmonyOS (hdc) does not expose it at all (use left_click_drag there).`);
+    }
     if (computer.transport === "ssh" && REMOTE_TOOLS.has(backendMethod)) {
       const ex = await executorFor(computer);
+      if (backendMethod === "zoom" && !lastRasters.get(computer.id)?.file) {
+        throw new ServerError("no_raster", "no screenshot bound on this computer yet — call screenshot first so the zoom has a raster to crop");
+      }
       const wireArgs = prepareWireArgs(computer, name, args);
-      const reply = await ex.remote({ tool: backendMethod, args: wireArgs }, { timeoutMs: backendMethod.startsWith("recording") || backendMethod === "get_app_state" ? 60_000 : 30_000 });
+      // The remote backend cannot know which raster "latest" means (its own
+      // state dies with each one-shot process) — the host tells it explicitly.
+      if (backendMethod === "zoom") wireArgs.source = lastRasters.get(computer.id).file;
+      const timeoutMs = backendMethod === "hold_key"
+        // A hold runs down → sleep → up inside the one remote call, so the
+        // wire timeout must cover the hold itself: at the flat 30s ceiling a
+        // 30s hold is killed right as it finishes and the key stays down.
+        ? 30_000 + Math.min(30, Number(wireArgs.duration) || 0) * 1000
+        : backendMethod.startsWith("recording") || backendMethod === "get_app_state" ? 60_000 : 30_000;
+      const reply = await ex.remote({ tool: backendMethod, args: wireArgs }, { timeoutMs });
       if (!reply.ok) throw new ServerError(reply.error?.code ?? "remote_error", reply.error?.message ?? "remote agent failed");
       data = reply.data;
       if (Array.isArray(data)) data = { items: data };
       if (backendMethod === "screenshot" && data?.file) {
-        // Raster lives on the remote machine; bind geometry for coordinate mapping.
-        bindRaster(computer, { ...data, file: null });
+        // Bind geometry for coordinate mapping; the file field is the remote
+        // path on purpose — the zoom below needs it as the crop source.
+        assertComputerUnchanged(computer);
+        bindRaster(computer, data);
         data.note = "file lives on the remote computer; pull it with scp if you need the bytes locally";
+      }
+      if (backendMethod === "zoom") {
+        assertComputerUnchanged(computer);
+        rebindAfterZoom(computer, data);
+        data.note = [data.note, "file lives on the remote computer; pull it with scp if you need the bytes locally"].filter(Boolean).join(" ");
+      }
+      if (backendMethod === "get_app_state" && data?.elements) {
+        // Element targets are resolved host-side (prepareWireArgs), so the
+        // observed remote tree must be remembered here too — otherwise
+        // state_id never exists for ssh computers and element actions
+        // dead-loop on "call get_app_state again".
+        assertComputerUnchanged(computer);
+        const stateId = rememberState(computer, args.app_ref ?? null, data);
+        data.state_id = stateId;
+        data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
       }
     } else {
       const backend = await getBackend(computer);
@@ -216,8 +337,10 @@ async function callTool(params) {
       const prepared = prepareLocalArgs(computer, name, args);
       data = await backend[backendMethod](prepared);
       if (Array.isArray(data)) data = { items: data }; // keep receipts objects
-      if (name === "screenshot") bindRaster(computer, data);
+      if (name === "screenshot") { assertComputerUnchanged(computer); bindRaster(computer, data); }
+      if (name === "zoom") { assertComputerUnchanged(computer); rebindAfterZoom(computer, data); }
       if (name === "get_app_state") {
+        assertComputerUnchanged(computer);
         const stateId = rememberState(computer, prepared.app_ref, data);
         data.state_id = stateId;
         data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
@@ -247,20 +370,23 @@ function prepareLocalArgs(computer, name, args) {
   return out;
 }
 
-/** Convert public tool args into remote-agent args (self-contained, element targets resolved to paths). */
+/** Convert public tool args into remote-agent args (self-contained: every
+ *  target is resolved host-side, because the remote never sees the bound
+ *  raster — coordinate targets arrive as raw pixels and must cross to screen
+ *  points here, exactly as prepareLocalArgs does for local backends). */
 function prepareWireArgs(computer, name, args) {
   const out = { ...args };
   delete out.computer;
   const semantic = new Set(["set_value", "select_text", "perform_action"]);
-  if (out.target?.type === "element") {
+  if (out.target?.type) {
     const t = normalizeTarget(computer, out.target, semantic.has(name) ? "semantic" : "pointer");
     out.target = { ...out.target, app_ref: t.app_ref, windowIndex: t.windowIndex, path: t.path, x: t.x, y: t.y };
   }
-  if (out.from_target?.type === "element") {
+  if (out.from_target?.type) {
     const t = normalizeTarget(computer, out.from_target, "pointer");
     out.from_target = { ...out.from_target, x: t.x, y: t.y };
   }
-  if (out.to?.type === "element") {
+  if (out.to?.type) {
     const t = normalizeTarget(computer, out.to, "pointer");
     out.to = { ...out.to, x: t.x, y: t.y };
   }

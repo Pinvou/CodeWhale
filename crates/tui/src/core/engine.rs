@@ -3351,7 +3351,7 @@ impl Engine {
                         self.config.subagent_api_timeout = Duration::from_secs(api_timeout_secs);
                         self.config.subagent_heartbeat_timeout =
                             Duration::from_secs(heartbeat_timeout_secs);
-                        let launch_gate_applied = {
+                        {
                             let mut manager = self.subagent_manager.write().await;
                             manager.update_runtime_limits(
                                 self.config.max_subagents,
@@ -3359,21 +3359,15 @@ impl Engine {
                                 self.config.subagent_heartbeat_timeout,
                                 self.config.launch_concurrency,
                                 self.config.subagent_token_budget,
-                            )
-                        };
-                        let launch_note = if launch_gate_applied {
-                            ""
-                        } else {
-                            "; launch_concurrency takes full effect after active sub-agents finish or the session restarts"
-                        };
+                            );
+                        }
                         let _ = self
                             .tx_event
                             .send(Event::status(format!(
-                                "Sub-agent runtime updated: enabled={enabled}, max_subagents={}, launch_concurrency={}, max_depth={}{}",
+                                "Sub-agent runtime updated: enabled={enabled}, max_subagents={}, launch_concurrency={}, max_depth={}",
                                 self.config.max_subagents,
                                 self.config.launch_concurrency,
                                 self.config.max_spawn_depth,
-                                launch_note
                             )))
                             .await;
                     }
@@ -3438,18 +3432,15 @@ impl Engine {
                         }
                         let compaction_checkpoint =
                             extract_compaction_summary_prompt(system_prompt.clone());
-                        let mut restored_messages =
+                        let restored_messages =
                             crate::runtime_handoff::project_messages_for_restore(&messages);
                         // The persisted carrier is authoritative for the one
-                        // history checkpoint. Drop stale projected copies so
-                        // repeated reloads cannot stack or retain an older one.
-                        restored_messages.retain(|message| {
-                            !crate::compaction::is_compaction_checkpoint_message(message)
-                        });
-                        if let Some(checkpoint) = compaction_checkpoint.as_ref() {
-                            restored_messages
-                                .push(crate::compaction::compaction_checkpoint_message(checkpoint));
-                        }
+                        // history checkpoint, at its saved location. Later
+                        // turns must remain after it for Chat wire ordering.
+                        let restored_messages = crate::compaction::restore_compaction_checkpoint(
+                            restored_messages,
+                            compaction_checkpoint.as_ref(),
+                        );
                         self.session.messages = restored_messages.into();
                         // Direct field assignment bypasses `add_message` /
                         // `replace_messages`, which own the messages-revision

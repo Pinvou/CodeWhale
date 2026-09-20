@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { parseBounds, flatten } from "../src/backends/harmonyos.mjs";
 
 function fakeJpeg(w, h) {
@@ -134,13 +135,18 @@ test("win32: module loads with the full backend surface", async () => {
 
 test("remote agent refuses tools outside the allow-list", async () => {
   const { run } = await import("../src/exec.mjs");
-  const sentinel = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cu-agent-deny-")), "x");
-  const payload = Buffer.from(JSON.stringify({ tool: "write_file", args: { path: sentinel } })).toString("base64");
-  const r = await run("node", [new URL("../agent.mjs", import.meta.url).pathname, payload]);
-  const reply = JSON.parse(r.stdout.trim());
-  assert.equal(reply.ok, false);
-  assert.equal(reply.error.code, "tool_not_allowed");
-  assert.ok(!fs.existsSync(sentinel));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-agent-deny-"));
+  try {
+    const sentinel = path.join(dir, "x");
+    const payload = Buffer.from(JSON.stringify({ tool: "write_file", args: { path: sentinel } })).toString("base64");
+    const r = await run("node", [new URL("../agent.mjs", import.meta.url).pathname, payload]);
+    const reply = JSON.parse(r.stdout.trim());
+    assert.equal(reply.ok, false);
+    assert.equal(reply.error.code, "tool_not_allowed");
+    assert.ok(!fs.existsSync(sentinel));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("remote agent answers the platform probe", async () => {
@@ -151,3 +157,228 @@ test("remote agent answers the platform probe", async () => {
   assert.equal(reply.ok, true);
   assert.equal(reply.platform, process.platform);
 });
+
+// ---- zoom crop semantics ----
+// Minimal PNG codec (8-bit RGB/RGBA, non-interlaced) so the crop tests can
+// verify actual pixel content instead of trusting command-line argument
+// order: a swapped cropOffset/crop argument fails the pixel assertions.
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([head, body, crc]);
+}
+
+function encodePNG(width, height, px) {
+  const raw = Buffer.alloc(height * (1 + width * 3));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const [r, g, b] = px(x, y);
+      const o = y * (1 + width * 3) + 1 + x * 3;
+      raw[o] = r; raw[o + 1] = g; raw[o + 2] = b;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", zlib.deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function decodePNG(buf) {
+  let off = 8;
+  let width, height, bitDepth, colorType, interlace;
+  const idat = [];
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString("ascii", off + 4, off + 8);
+    const data = buf.subarray(off + 8, off + 8 + len);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      bitDepth = data[8]; colorType = data[9]; interlace = data[12];
+    } else if (type === "IDAT") idat.push(data);
+    off += 12 + len;
+  }
+  if (bitDepth !== 8 || interlace !== 0 || ![2, 6].includes(colorType)) {
+    throw new Error(`unsupported PNG: depth=${bitDepth} color=${colorType} interlace=${interlace}`);
+  }
+  const ch = colorType === 6 ? 4 : 3;
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * ch;
+  const out = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const row = out.subarray(y * stride, (y + 1) * stride);
+    const prev = y > 0 ? out.subarray((y - 1) * stride, y * stride) : null;
+    for (let i = 0; i < stride; i++) {
+      const a = i >= ch ? row[i - ch] : 0;
+      const b = prev ? prev[i] : 0;
+      const c = i >= ch && prev ? prev[i - ch] : 0;
+      let v = raw[y * (stride + 1) + 1 + i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      row[i] = v & 0xff;
+    }
+  }
+  return {
+    width, height,
+    px(x, y) { const o = y * stride + x * ch; return [out[o], out[o + 1], out[o + 2]]; },
+  };
+}
+
+// Deterministic gradient so every sampled pixel identifies its source
+// coordinate: r=x*4, g=y*5, b=x+y (mod 256).
+const grad = (x, y) => [(x * 4) % 256, (y * 5) % 256, (x + y) % 256];
+
+test("darwin: zoom crops 1:1 in raster pixels and advances the last raster so chained zooms crop from the child", { skip: process.platform !== "darwin" && "pixel check runs real sips (macOS only)" }, async (t) => {
+  const { create } = await import("../src/backends/darwin.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-darwin-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
+  const backend = create({ exec: { run: async () => ({ code: 0, stdout: "", stderr: "" }) } });
+  const src = path.join(dir, "src.png");
+  fs.writeFileSync(src, encodePNG(64, 48, grad));
+
+  const one = await backend.zoom({ source: src, region: [10, 6, 40, 30], path: path.join(dir, "one.png") });
+  assert.equal(one.source, src);
+  const img1 = decodePNG(fs.readFileSync(one.file));
+  assert.equal(img1.width, 40);
+  assert.equal(img1.height, 30);
+  // child (0,0) is src (10,6); child (39,29) is src (49,35) — a swapped
+  // cropOffset or -c h/w would land on different gradient values.
+  assert.deepEqual(img1.px(0, 0), grad(10, 6));
+  assert.deepEqual(img1.px(39, 29), grad(49, 35));
+
+  // The zoom child became the last raster, so a source-less follow-up zoom
+  // crops from the child: child2 (0,0) = child1 (20,10) = src (30,16).
+  const two = await backend.zoom({ region: [20, 10, 10, 10], path: path.join(dir, "two.png") });
+  assert.equal(two.source, one.file, "chained zoom must default to the advanced child raster");
+  const img2 = decodePNG(fs.readFileSync(two.file));
+  assert.equal(img2.width, 10);
+  assert.equal(img2.height, 10);
+  assert.deepEqual(img2.px(0, 0), grad(30, 16));
+  assert.deepEqual(img2.px(9, 9), grad(39, 25));
+});
+
+test("linux: zoom crops 1:1 in raster pixels and advances the last raster so chained zooms crop from the child", { skip: process.platform !== "linux" && "pixel check runs real ffmpeg (linux CI)" }, async (t) => {
+  const { create } = await import("../src/backends/linux.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-linux-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
+  const backend = create({ exec: {} });
+  await backend.list_displays().catch(() => {}); // fills the tool probe cache; headless hosts may fail harmlessly
+  const src = path.join(dir, "src.png");
+  fs.writeFileSync(src, encodePNG(64, 48, grad));
+
+  const one = await backend.zoom({ source: src, region: [10, 6, 40, 30], path: path.join(dir, "one.png") });
+  assert.equal(one.source, src);
+  const img1 = decodePNG(fs.readFileSync(one.file));
+  assert.equal(img1.width, 40);
+  assert.equal(img1.height, 30);
+  assert.deepEqual(img1.px(0, 0), grad(10, 6));
+  assert.deepEqual(img1.px(39, 29), grad(49, 35));
+
+  const two = await backend.zoom({ region: [20, 10, 10, 10], path: path.join(dir, "two.png") });
+  assert.equal(two.source, one.file, "chained zoom must default to the advanced child raster");
+  const img2 = decodePNG(fs.readFileSync(two.file));
+  assert.deepEqual(img2.px(0, 0), grad(30, 16));
+});
+
+test("linux: zoom clips an out-of-bounds region and chained zooms clip against the child", { skip: process.platform !== "linux" && "pixel check runs real ffmpeg (linux CI)" }, async (t) => {
+  const { create } = await import("../src/backends/linux.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-linux-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
+  const backend = create({ exec: {} });
+  const src = path.join(dir, "src.png");
+  fs.writeFileSync(src, encodePNG(64, 48, grad));
+
+  // ffmpeg clamps an out-of-bounds origin silently (x 50 -> 32, y 30 -> 16),
+  // so the backend must crop AND return the clipped region — the server
+  // binds child pixels against the receipt's region.
+  const one = await backend.zoom({ source: src, region: [50, 30, 32, 32], path: path.join(dir, "one.png") });
+  assert.deepEqual(one.region, [32, 16, 32, 32]);
+  const img1 = decodePNG(fs.readFileSync(one.file));
+  assert.equal(img1.width, 32);
+  assert.equal(img1.height, 32);
+  assert.deepEqual(img1.px(0, 0), grad(32, 16));
+  assert.deepEqual(img1.px(31, 31), grad(63, 47));
+
+  // A chained zoom clips against the child raster (32x32): region
+  // [20,20,20,20] overshoots both edges and must crop [12,12,20,20] —
+  // child2 (0,0) is child1 (12,12) = src (44,28).
+  const two = await backend.zoom({ region: [20, 20, 20, 20], path: path.join(dir, "two.png") });
+  assert.equal(two.source, one.file, "chained zoom must default to the advanced child raster");
+  assert.deepEqual(two.region, [12, 12, 20, 20]);
+  const img2 = decodePNG(fs.readFileSync(two.file));
+  assert.deepEqual(img2.px(0, 0), grad(44, 28));
+  assert.deepEqual(img2.px(19, 19), grad(63, 47));
+});
+
+test("darwin: zoom clips an out-of-bounds region and chained zooms clip against the child", { skip: process.platform !== "darwin" && "pixel check runs real sips (macOS only)" }, async (t) => {
+  const { create } = await import("../src/backends/darwin.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-darwin-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+  process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
+  const backend = create({ exec: { run: async () => ({ code: 0, stdout: "", stderr: "" }) } });
+  const src = path.join(dir, "src.png");
+  fs.writeFileSync(src, encodePNG(64, 48, grad));
+
+  const one = await backend.zoom({ source: src, region: [50, 30, 32, 32], path: path.join(dir, "one.png") });
+  assert.deepEqual(one.region, [32, 16, 32, 32]);
+  const img1 = decodePNG(fs.readFileSync(one.file));
+  assert.equal(img1.width, 32);
+  assert.equal(img1.height, 32);
+  assert.deepEqual(img1.px(0, 0), grad(32, 16));
+  assert.deepEqual(img1.px(31, 31), grad(63, 47));
+
+  const two = await backend.zoom({ region: [20, 20, 20, 20], path: path.join(dir, "two.png") });
+  assert.equal(two.source, one.file, "chained zoom must default to the advanced child raster");
+  assert.deepEqual(two.region, [12, 12, 20, 20]);
+  const img2 = decodePNG(fs.readFileSync(two.file));
+  assert.deepEqual(img2.px(0, 0), grad(44, 28));
+  assert.deepEqual(img2.px(19, 19), grad(63, 47));
+});
+
+// Region validation runs before any tool probe or exec, so these run on
+// every platform and pin the named error instead of a NaN-driven failure.
+for (const [platform, module] of [["linux", "../src/backends/linux.mjs"], ["win32", "../src/backends/win32.mjs"]]) {
+  test(`${platform}: zoom refuses a malformed region with a named error`, async () => {
+    const { create } = await import(module);
+    const backend = create({ exec: {} });
+    for (const region of [undefined, ["a", 0, 10, 10], [10, 0, 10], [-1, 0, 10, 10], [0, 0, 0, 10]]) {
+      await assert.rejects(() => backend.zoom({ source: "/tmp/cu-unused.png", region }), /region must be \[x, y, w, h\] in last-raster pixels/u);
+    }
+  });
+}
+

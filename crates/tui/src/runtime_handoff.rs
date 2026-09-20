@@ -430,7 +430,7 @@ fn render_restored_agent_topology(checkpoint: &SavedAgentTopologyCheckpoint) -> 
     display
 }
 
-fn is_agent_topology_checkpoint(message: &Message) -> bool {
+pub(crate) fn is_agent_topology_checkpoint(message: &Message) -> bool {
     let [
         ContentBlock::Text {
             text,
@@ -452,17 +452,102 @@ fn is_agent_topology_checkpoint(message: &Message) -> bool {
         && text.ends_with(AGENT_TOPOLOGY_EVENT_SUFFIX)
 }
 
+/// True when a message carries a tool result, which strict paired chat
+/// templates treat as the user's half of the tool exchange: the next wire
+/// message must not be `role="user"`.
+pub(crate) fn carries_tool_result(message: &Message) -> bool {
+    message.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolResult { .. }
+                | ContentBlock::ToolSearchToolResult { .. }
+                | ContentBlock::CodeExecutionToolResult { .. }
+        )
+    })
+}
+
+/// The boundary a compaction-owned runtime message belongs to inside
+/// `messages[..before]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionAnchor {
+    /// The latest genuine user prompt. The message belongs after it, before
+    /// that round's assistant/tool chain, and merges into it on the wire.
+    Prompt(usize),
+    /// No prompt survives in the window; the message belongs before the first
+    /// assistant message.
+    Assistant(usize),
+}
+
+impl CompactionAnchor {
+    /// Saved position: after the prompt, before the assistant chain.
+    pub(crate) fn placement_index(self) -> usize {
+        match self {
+            CompactionAnchor::Prompt(index) => index + 1,
+            CompactionAnchor::Assistant(index) => index,
+        }
+    }
+
+    /// Request position: directly before the message a moved summary merges
+    /// into, so the pair reaches the wire as one user turn.
+    pub(crate) fn request_index(self) -> usize {
+        match self {
+            CompactionAnchor::Prompt(index) | CompactionAnchor::Assistant(index) => index,
+        }
+    }
+}
+
+/// Locate the boundary a compaction-owned runtime message belongs to: the
+/// latest genuine user prompt in `messages[..before]`, or the first assistant
+/// message when that window retains no prompt. `None` means the window offers
+/// neither, and callers fall back to "append at the end" / "leave in place".
+///
+/// One definition for save-time placement, restore repair, and request-time
+/// summary relocation; the three used to be near-copies that had already
+/// drifted on which messages count as a prompt.
+pub(crate) fn compaction_anchor(messages: &[Message], before: usize) -> Option<CompactionAnchor> {
+    let window = messages.get(..before)?;
+    window
+        .iter()
+        .rposition(|message| classify_user_turn_prompt(message) != UserTurnPromptKind::NotPrompt)
+        .map(CompactionAnchor::Prompt)
+        .or_else(|| {
+            window
+                .iter()
+                .position(|message| message.role.is_assistant_like())
+                .map(CompactionAnchor::Assistant)
+        })
+}
+
 /// Install one bounded, typed Agent-topology sidecar after replacement
 /// compaction. A current empty topology is still meaningful: it overrides a
 /// narrative summary or old runtime event that says an Agent remains live.
 /// Replays are idempotent because the previous sidecar is structurally removed
-/// before the replacement is appended.
+/// before the replacement is inserted. At a tool-result or trailing summary
+/// boundary, place it after the latest real user input, before that round's
+/// assistant/tool chain.
+/// Strict paired chat templates cannot encode a tool result followed by a
+/// user checkpoint. Compaction already replaces history; this does not mutate
+/// the session-pinned system/cache prefix or impersonate an assistant reply.
 pub(crate) fn replace_agent_topology_checkpoint(
     messages: &mut Vec<Message>,
     snapshots: &[SubAgentResult],
 ) {
-    messages.retain(|message| !is_agent_topology_checkpoint(message));
-    messages.push(agent_topology_checkpoint_message(snapshots));
+    // Both forms: a restored carrier is the projection of a sidecar a previous
+    // save already wrote, and keeping it beside the fresh one would persist a
+    // superseded duplicate that no later replay removes.
+    messages.retain(|message| {
+        !is_agent_topology_checkpoint(message) && !is_restored_agent_topology_checkpoint(message)
+    });
+    let ends_with_tool_result = messages.last().is_some_and(carries_tool_result);
+    let ends_with_compaction_summary = messages
+        .last()
+        .is_some_and(crate::compaction::is_generated_compaction_checkpoint);
+    let position = if ends_with_tool_result || ends_with_compaction_summary {
+        compaction_anchor(messages, messages.len()).map_or(0, CompactionAnchor::placement_index)
+    } else {
+        messages.len()
+    };
+    messages.insert(position, agent_topology_checkpoint_message(snapshots));
 }
 
 #[cfg(test)]
@@ -954,6 +1039,84 @@ pub(crate) fn restored_subagent_checkpoint_display(message: &Message) -> Option<
     Some(text)
 }
 
+/// Only the restored topology sidecar belongs to the compaction prompt
+/// cluster. Other restored Agent events keep their own message boundaries.
+pub(crate) fn is_restored_agent_topology_checkpoint(message: &Message) -> bool {
+    restored_subagent_checkpoint_display(message)
+        .is_some_and(|display| display.starts_with(RESTORED_TOPOLOGY_HEADER))
+}
+
+fn is_compaction_topology_carrier(message: &Message) -> bool {
+    is_agent_topology_checkpoint(message) || is_restored_agent_topology_checkpoint(message)
+}
+
+/// Where a restored topology carrier should sit, or `None` when it is already
+/// there. The placement the fix writes is "directly after the genuine prompt
+/// its summary is merged into, before that round's assistant/tool chain", so a
+/// carrier is misplaced when it trails its own summary or directly follows a
+/// tool result — the two shapes the pre-fix releases saved.
+fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize> {
+    let summary_before = messages[..index]
+        .iter()
+        .rposition(crate::compaction::is_compaction_checkpoint_message);
+    let follows_tool_result = index > 0 && carries_tool_result(&messages[index - 1]);
+    if summary_before.is_none() && !follows_tool_result {
+        return None;
+    }
+    let before = summary_before
+        .or_else(|| {
+            messages[index + 1..]
+                .iter()
+                .position(crate::compaction::is_compaction_checkpoint_message)
+                .map(|offset| index + 1 + offset)
+        })
+        .unwrap_or(messages.len());
+    let anchor = compaction_anchor(messages, before)?.placement_index();
+    (anchor < index).then_some(anchor)
+}
+
+/// Repair the topology sidecar of a session saved before the placement fix.
+///
+/// Those releases appended the sidecar to the end of the replacement history,
+/// so a restored session carries it after its own summary or directly after a
+/// tool result. Request-time rewriting only moves the summary, which leaves a
+/// `tool → user` wire that strict paired chat templates reject with the same
+/// 400 this pipeline exists to fix. Moving the carrier to its placement anchor
+/// on restore repairs the session in place instead of asking for a new one.
+/// Sessions saved by the fix are already at that anchor and stay untouched.
+pub(crate) fn relocate_restored_compaction_topology(messages: &mut Vec<Message>) {
+    let plan: Vec<Option<usize>> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            is_compaction_topology_carrier(message)
+                .then(|| restored_topology_anchor(messages, index))
+                .flatten()
+        })
+        .collect();
+    if plan.iter().all(Option::is_none) {
+        return;
+    }
+    let mut slots: Vec<Option<Message>> = std::mem::take(messages).into_iter().map(Some).collect();
+    let mut rebuilt = Vec::with_capacity(slots.len());
+    for index in 0..=slots.len() {
+        // `plan` holds insertion positions, matching the save-time
+        // `Vec::insert` the anchor was defined for, so a relocated carrier is
+        // emitted before the message that currently occupies that position.
+        for (from, anchor) in plan.iter().enumerate() {
+            if *anchor == Some(index)
+                && let Some(message) = slots[from].take()
+            {
+                rebuilt.push(message);
+            }
+        }
+        if let Some(message) = slots.get_mut(index).and_then(Option::take) {
+            rebuilt.push(message);
+        }
+    }
+    *messages = rebuilt;
+}
+
 /// Classification used when locating a user-authored turn in the session log.
 ///
 /// Runtime and tool messages are skipped because their provider-compatible
@@ -1044,6 +1207,10 @@ pub fn is_user_turn_prompt(message: &Message) -> bool {
 fn is_runtime_owned_user_message(message: &Message) -> bool {
     restored_subagent_checkpoint_display(message).is_some()
         || has_non_authoritative_turn_provenance(message)
+        // The compaction checkpoint is engine-written history, so `/edit` must
+        // not treat it as the turn to truncate at: doing so deletes the summary
+        // the session is built on. Structure decides, not the marker substring.
+        || crate::compaction::is_compaction_checkpoint_message(message)
 }
 
 /// Return engine-owned metadata in either the current trailing shape or the
@@ -1238,6 +1405,50 @@ mod tests {
     }
 
     #[test]
+    fn forkguard_compaction_topology_preserves_tool_round_boundary() {
+        let original: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Analyze the data"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"bash","input":{"command":"echo ready"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ready"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_2","name":"bash","input":{"command":"echo done"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"done"}]}
+        ])).unwrap();
+        for snapshots in [
+            vec![],
+            vec![topology_snapshot(
+                "agent_alpha",
+                "Tide",
+                SubAgentStatus::Running,
+            )],
+        ] {
+            let mut messages = original.clone();
+            replace_agent_topology_checkpoint(&mut messages, &snapshots);
+            assert_eq!(messages.len(), original.len() + 1);
+            assert_eq!(messages[0], original[0]);
+            assert!(is_agent_topology_checkpoint(&messages[1]));
+            assert_eq!(
+                &messages[2..],
+                &original[1..],
+                "assistant/tool chain must remain intact and end the request"
+            );
+            let once = messages.clone();
+            replace_agent_topology_checkpoint(&mut messages, &snapshots);
+            assert_eq!(messages, once);
+        }
+        let mut without_user = original.clone();
+        without_user[0].role = Role::System;
+        replace_agent_topology_checkpoint(&mut without_user, &[]);
+        assert_eq!(without_user[0].role, Role::System);
+        assert!(is_agent_topology_checkpoint(&without_user[1]));
+        assert_eq!(&without_user[2..], &original[1..]);
+
+        let mut corrupt_tool_only = vec![original[2].clone()];
+        replace_agent_topology_checkpoint(&mut corrupt_tool_only, &[]);
+        assert!(is_agent_topology_checkpoint(&corrupt_tool_only[0]));
+        assert_eq!(corrupt_tool_only[1], original[2]);
+    }
+
+    #[test]
     fn empty_current_topology_explicitly_overrides_old_agent_claims() {
         let lookalike = Message {
             role: Role::User,
@@ -1259,6 +1470,61 @@ mod tests {
         assert!(checkpoint.contains("\"total\":0"));
         assert!(checkpoint.contains("\"agents\":[]"));
         assert!(checkpoint.contains("all_prior_agent_lifecycle_claims"));
+    }
+
+    #[test]
+    fn compaction_checkpoint_is_never_the_edit_target() {
+        let prompt = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Ship the release".to_string(),
+                cache_control: None,
+            }],
+        };
+        let checkpoint =
+            crate::compaction::compaction_checkpoint_message(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("handoff", ""),
+            ));
+        assert_eq!(
+            classify_user_turn_prompt(&checkpoint),
+            UserTurnPromptKind::NotPrompt,
+            "the engine-written summary is not a user turn"
+        );
+        assert!(!is_user_turn_prompt(&checkpoint));
+        assert_eq!(
+            edit_last_turn_target(&[prompt, checkpoint]),
+            EditLastTurnTarget::Editable(0),
+            "/edit must truncate at the prompt, not delete the summary"
+        );
+    }
+
+    #[test]
+    fn replay_replaces_a_restored_topology_carrier_instead_of_stacking() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Ship the release".to_string(),
+                cache_control: None,
+            }],
+        }];
+        replace_agent_topology_checkpoint(&mut messages, &[]);
+
+        let mut recompacted = project_messages_for_restore(&messages);
+        assert!(is_restored_agent_topology_checkpoint(&recompacted[1]));
+        replace_agent_topology_checkpoint(&mut recompacted, &[]);
+
+        assert_eq!(
+            recompacted
+                .iter()
+                .filter(|message| {
+                    is_agent_topology_checkpoint(message)
+                        || is_restored_agent_topology_checkpoint(message)
+                })
+                .count(),
+            1,
+            "a superseded restored carrier must not survive beside the fresh one: {recompacted:?}"
+        );
+        assert_eq!(recompacted.len(), 2);
     }
 
     #[test]

@@ -4,19 +4,17 @@
 //! LLM provider, so parallel 429s are the steady state rather than an edge
 //! case. This module gives the sub-agent module two cooperating pieces:
 //!
-//! 1. [`DynamicGate`] — a launch gate with a *dynamically adjustable
-//!    capacity*. The previous gate was a `tokio::sync::Semaphore`, whose
-//!    capacity is fixed at construction; the only way to "shrink" it was to
-//!    replace the `Arc`, which silently fails while any child still holds a
-//!    permit (that is exactly why `update_runtime_limits` only applied
-//!    launch-concurrency changes when no sub-agent was running). A
-//!    custom gate can drop its capacity below the number of active holders:
-//!    existing children keep running to completion, while new admissions
-//!    block until `active < capacity`.
+//! 1. [`DynamicGate`] — a launch gate with a *dynamically adjustable*
+//!    capacity, built directly on `tokio::sync::Semaphore`.
+//!    `Semaphore::forget_permits` (stable since tokio 1.37) makes
+//!    shrink-below-outstanding possible on the stock primitive: shrinking
+//!    forgets free slots while children already holding permits keep running
+//!    to completion, and new admissions block until the outstanding count
+//!    drops under capacity.
 //!
 //! 2. [`RateLimitGovernor`] — a sliding-window observer fed by the sub-agent
 //!    LLM call path. Every rate-limited attempt and every successful attempt
-//!    is reported; when the recent failure rate crosses a threshold the
+//!    is reported; when the recent failure count crosses a threshold the
 //!    governor shrinks the gate (multiplicative decrease), and under a
 //!    sustained burst it pauses new admissions entirely. Sustained success
 //!    recovers capacity additively (AIMD), which converges without the
@@ -33,8 +31,6 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::oneshot;
-
 /// Observation window for rate-limit events. Events older than this are
 /// pruned on every governor interaction.
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
@@ -43,18 +39,14 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// starts shrinking launch concurrency (AIMD multiplicative decrease).
 const THROTTLE_EVENT_THRESHOLD: usize = 2;
 
-/// Recent rate-limit *ratio* (limited attempts / attempts) at which the
-/// governor also shrinks launch concurrency, even below the absolute count
-/// threshold. With very few in-flight calls, two 429s may be 100% of traffic.
-const THROTTLE_RATIO_THRESHOLD: f64 = 0.3;
-
 /// Rate-limit events inside the window at which the governor pauses new
 /// admissions entirely (gate capacity 0). Held permits are unaffected.
 const PAUSE_EVENT_THRESHOLD: usize = 4;
 
-/// Successful attempts required to add one unit of launch capacity back
-/// (AIMD additive increase). Successes are counted per gate-holder, so a
-/// shrunken fleet still recovers at a controlled pace.
+/// Successful LLM attempts required to add one unit of launch capacity back
+/// (AIMD additive increase). Successes are counted fleet-wide — every
+/// successful sub-agent LLM call advances the streak, regardless of which
+/// child made it — so a shrunken fleet still recovers at a controlled pace.
 const SUCCESS_PER_INCREASE_STEP: u32 = 3;
 
 /// Full-jitter exponential backoff for a rate-limited sub-agent API attempt
@@ -96,42 +88,49 @@ pub(crate) fn rate_limit_retry_delay(retry_number: u32) -> Duration {
 // === DynamicGate ===
 
 #[derive(Debug)]
-struct GateWaiter {
-    sender: oneshot::Sender<DynamicGatePermit>,
-}
-
-#[derive(Debug)]
-struct GateInner {
+struct GateState {
     capacity: usize,
-    active: usize,
-    waiters: VecDeque<GateWaiter>,
+    outstanding: usize,
 }
 
 /// A launch gate with runtime-adjustable capacity (see module docs).
 ///
-/// `acquire` returns a [`DynamicGatePermit`] whose `Drop` releases the slot
-/// and wakes one waiter. Reducing capacity below `active` is allowed: the
-/// surplus holders finish naturally and no new permit is granted until the
-/// active count drops under the new capacity.
+/// A thin accounting layer over [`tokio::sync::Semaphore`]: the semaphore
+/// owns the FIFO wait queue and cancellation safety, this struct owns the
+/// `capacity`/`outstanding` ledger that lets capacity drop below the
+/// number of outstanding holders. The ledger — not the semaphore token
+/// count — is the admission authority: a granted token is registered only
+/// while `outstanding < capacity`; one granted while the ledger is full is
+/// surplus and is destroyed (`forget`) instead of admitted. Two paths
+/// create such tokens while no slot is free, both invisible to
+/// `forget_permits` (which sees free tokens only): a grant that races a
+/// capacity change (handed out before the shrink can forget it), and a
+/// grant handed to a queued waiter that is cancelled before polling again
+/// (tokio re-injects it into the pool). Surplus tokens are harmless — they
+/// cannot admit — and the next admission attempt destroys them; every slot
+/// freed below capacity mints a fresh token on release, so no slot is ever
+/// lost. Once no surplus token remains and every in-flight admission has
+/// registered, `sem.available_permits() ==
+/// capacity.saturating_sub(outstanding)` holds exactly.
 ///
-/// Waiters receive an *already granted* permit through a oneshot channel, so
-/// a waiter future that is cancelled after the grant is dispatched simply
-/// drops the permit, whose `Drop` hands the slot to the next waiter. (A
-/// wake-and-recheck design would lose that wakeup — the cancelled waiter
-/// never re-checks, and with no remaining holders there is no later release
-/// to re-dispatch it.)
+/// `acquire` returns a [`DynamicGatePermit`] whose `Drop` returns the slot.
+/// Reducing capacity below `outstanding` is allowed: the surplus holders
+/// finish naturally and no new permit is granted until the outstanding
+/// count drops under the new capacity.
 #[derive(Debug)]
 pub(crate) struct DynamicGate {
-    inner: Mutex<GateInner>,
+    sem: tokio::sync::Semaphore,
+    inner: Mutex<GateState>,
 }
 
 impl DynamicGate {
     pub(crate) fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
-            inner: Mutex::new(GateInner {
-                capacity: capacity.max(1),
-                active: 0,
-                waiters: VecDeque::new(),
+            sem: tokio::sync::Semaphore::new(capacity),
+            inner: Mutex::new(GateState {
+                capacity,
+                outstanding: 0,
             }),
         }
     }
@@ -140,88 +139,83 @@ impl DynamicGate {
         self.inner.lock().expect("launch gate poisoned").capacity
     }
 
-    /// Free admission slots right now (`capacity - active`). Diagnostics and
-    /// tests only; racy by design.
+    /// Free semaphore permits right now — `capacity - outstanding` at
+    /// rest, plus any surplus tokens not yet destroyed by an admission
+    /// attempt (see the struct docs). Diagnostics and tests only; racy by
+    /// design.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn available_permits(&self) -> usize {
-        let inner = self.inner.lock().expect("launch gate poisoned");
-        inner.capacity.saturating_sub(inner.active)
+        self.sem.available_permits()
     }
 
-    /// Adjust the gate capacity. Raising it grants queued waiters the new
-    /// headroom immediately; lowering it simply stops new admissions until
-    /// the active count drains below the new capacity.
-    pub(crate) fn set_capacity(self: &std::sync::Arc<Self>, capacity: usize) {
+    /// Adjust the gate capacity. Raising it adds the new free headroom to
+    /// the semaphore immediately (queued acquirers wake in FIFO order);
+    /// lowering it forgets free slots — holders above the new capacity keep
+    /// running, and their releases are absorbed instead of re-admitted.
+    /// Grants already handed to queued waiters are invisible to the shrink;
+    /// if their acquirers are cancelled, admission destroys the returned
+    /// surplus token (see the struct docs).
+    pub(crate) fn set_capacity(&self, capacity: usize) {
         let mut inner = self.inner.lock().expect("launch gate poisoned");
+        let old = inner.capacity;
         inner.capacity = capacity;
-        Self::wake_locked(self, &mut inner);
-    }
-
-    /// Grant queued waiters while there is headroom. Called with the lock
-    /// held; each waiter receives an already-counted permit, so a cancelled
-    /// receiver's permit is disarmed (never `Drop`ped under the lock) and the
-    /// slot flows to the next waiter.
-    fn wake_locked(gate: &std::sync::Arc<Self>, inner: &mut GateInner) {
-        while inner.active < inner.capacity {
-            let Some(waiter) = inner.waiters.pop_front() else {
-                break;
-            };
-            let permit = DynamicGatePermit {
-                gate: Some(std::sync::Arc::clone(gate)),
-            };
-            match waiter.sender.send(permit) {
-                Ok(()) => inner.active += 1,
-                Err(mut returned) => {
-                    // The waiter future was cancelled before receiving the
-                    // grant. Disarm instead of dropping: `Drop` would call
-                    // `release()` and re-enter the lock we are holding.
-                    let _ = returned.disarm();
-                }
-            }
+        if capacity < old {
+            // `forget_permits` caps the reduction at the available count, so
+            // an over-subscribed shrink (capacity < outstanding) simply
+            // drains free slots to zero.
+            self.sem.forget_permits(old - capacity);
+        } else {
+            let free = |cap: usize| cap.saturating_sub(inner.outstanding);
+            self.sem.add_permits(free(capacity) - free(old));
         }
-    }
-
-    fn release(self: &std::sync::Arc<Self>) {
-        let mut inner = self.inner.lock().expect("launch gate poisoned");
-        inner.active = inner.active.saturating_sub(1);
-        Self::wake_locked(self, &mut inner);
     }
 
     /// Try to acquire a permit without waiting.
     pub(crate) fn try_acquire(self: &std::sync::Arc<Self>) -> Option<DynamicGatePermit> {
-        let mut inner = self.inner.lock().expect("launch gate poisoned");
-        (inner.active < inner.capacity).then(|| {
-            inner.active += 1;
-            DynamicGatePermit {
-                gate: Some(std::sync::Arc::clone(self)),
-            }
-        })
+        let sem_permit = self.sem.try_acquire().ok()?;
+        self.admit_grant(sem_permit)
     }
 
-    /// Acquire a permit, waiting until capacity is available. Cancellation
-    /// safe: a dropped future either leaves a stale queue entry (skipped and
-    /// disarmed by the granter) or drops an already-dispatched permit (whose
-    /// `Drop` re-releases the slot).
+    /// Register a granted semaphore token as a held slot. The ledger, not
+    /// the token count, is the admission authority: a token granted while
+    /// the ledger is full is surplus drift — a cancelled waiter's
+    /// re-injected grant, or a grant that raced a shrink — and is destroyed
+    /// with `forget` (never dropped: a drop would re-inject it). Since
+    /// `DynamicGatePermit::drop` mints one fresh token per slot freed below
+    /// capacity, destroying a token never loses a slot.
+    fn admit_grant(
+        self: &std::sync::Arc<Self>,
+        sem_permit: tokio::sync::SemaphorePermit<'_>,
+    ) -> Option<DynamicGatePermit> {
+        let mut inner = self.inner.lock().expect("launch gate poisoned");
+        if inner.outstanding < inner.capacity {
+            inner.outstanding += 1;
+            // Slot ownership moves from the semaphore permit into
+            // `DynamicGatePermit::drop`.
+            sem_permit.forget();
+            return Some(DynamicGatePermit {
+                gate: std::sync::Arc::clone(self),
+            });
+        }
+        sem_permit.forget();
+        None
+    }
+
+    /// Acquire a permit, waiting until capacity is available. The semaphore
+    /// queue is FIFO and cancel safe: a cancelled future dequeues itself and
+    /// never swallows a slot or loses a wakeup. A grant that turns out to be
+    /// surplus (see [`Self::admit_grant`]) is destroyed and the wait
+    /// continues for the release that mints a fresh one; each surplus round
+    /// consumes exactly one pool token, so the loop cannot spin.
     pub(crate) async fn acquire(self: &std::sync::Arc<Self>) -> DynamicGatePermit {
         loop {
-            let rx = {
-                let mut inner = self.inner.lock().expect("launch gate poisoned");
-                if inner.active < inner.capacity {
-                    inner.active += 1;
-                    return DynamicGatePermit {
-                        gate: Some(std::sync::Arc::clone(self)),
-                    };
-                }
-                let (tx, rx) = oneshot::channel();
-                inner.waiters.push_back(GateWaiter { sender: tx });
-                rx
-            };
-            // Defensive: a failed receive requires the queued sender to be
-            // dropped without sending — which requires the gate itself to be
-            // dropped, impossible while this future holds an `Arc` to it.
-            // Loop anyway so a future refactor that breaks that invariant
-            // degrades to re-queueing instead of unwrapping.
-            if let Ok(permit) = rx.await {
+            // The semaphore is never closed, so `acquire` cannot fail.
+            let sem_permit = self
+                .sem
+                .acquire()
+                .await
+                .expect("launch gate semaphore closed");
+            if let Some(permit) = self.admit_grant(sem_permit) {
                 return permit;
             }
         }
@@ -229,18 +223,8 @@ impl DynamicGate {
 }
 
 /// One held launch slot. Released on drop.
-///
-/// The gate is an `Option` so the wake path can disarm a permit whose
-/// receiver vanished without running `Drop` (which would re-enter the locked
-/// `release()`).
 pub(crate) struct DynamicGatePermit {
-    gate: Option<std::sync::Arc<DynamicGate>>,
-}
-
-impl DynamicGatePermit {
-    fn disarm(&mut self) -> Option<std::sync::Arc<DynamicGate>> {
-        self.gate.take()
-    }
+    gate: std::sync::Arc<DynamicGate>,
 }
 
 impl std::fmt::Debug for DynamicGatePermit {
@@ -251,9 +235,14 @@ impl std::fmt::Debug for DynamicGatePermit {
 
 impl Drop for DynamicGatePermit {
     fn drop(&mut self) {
-        if let Some(gate) = self.gate.take() {
-            gate.release();
+        let mut inner = self.gate.inner.lock().expect("launch gate poisoned");
+        inner.outstanding = inner.outstanding.saturating_sub(1);
+        if inner.outstanding < inner.capacity {
+            // Return the slot; a queued acquirer wakes in FIFO order.
+            self.gate.sem.add_permits(1);
         }
+        // Otherwise the capacity was shrunk below the outstanding count:
+        // the release is absorbed so the surplus drain does not over-admit.
     }
 }
 
@@ -267,7 +256,7 @@ struct GovernorState {
     /// Timestamps of rate-limited attempts inside the window.
     limited: VecDeque<Instant>,
     /// Timestamps of all reported attempts inside the window (successes and
-    /// rate limits) — the denominator of the recent rate-limit ratio.
+    /// rate limits) — surfaced as the recent-attempt count in snapshots.
     attempts: VecDeque<Instant>,
     consecutive_successes: u32,
     paused: bool,
@@ -335,7 +324,7 @@ impl RateLimitGovernor {
     }
 
     /// Report that a sub-agent LLM attempt is starting. Contributes to the
-    /// recent-attempt denominator for the ratio heuristic.
+    /// recent-attempt count surfaced in observability snapshots.
     pub(crate) fn record_attempt(&self, now: Instant) {
         let mut state = self.state.lock().expect("rate limit governor poisoned");
         Self::prune(&mut state, now);
@@ -406,7 +395,7 @@ impl RateLimitGovernor {
         // The denominator (`attempts`) already contains this attempt — the
         // call path reports `record_attempt` before every LLM call, retries
         // included. Pushing again would double-count failures and skew the
-        // ratio.
+        // recent-attempt count.
         state.consecutive_successes = 0;
 
         if state.paused {
@@ -432,13 +421,10 @@ impl RateLimitGovernor {
             return;
         }
 
-        // The ratio heuristic only fires once the window has real volume
-        // (>= 2 observed attempts): with a single attempt every 429 is 100%
-        // and would shrink the gate on the first blip, fighting the absolute
-        // count threshold that is meant to own small-fleet behavior.
-        if events >= THROTTLE_EVENT_THRESHOLD
-            || (state.attempts.len() >= 2 && ratio > THROTTLE_RATIO_THRESHOLD)
-        {
+        // The absolute event threshold owns all shrinking. A single 429
+        // inside the window — however bad the recent ratio looks — must not
+        // halve the gate on the first blip.
+        if events >= THROTTLE_EVENT_THRESHOLD {
             let current = self.gate.capacity();
             if current > 1 {
                 let capacity = (current / 2).max(1);
@@ -499,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn window_counts_and_prunes_events() {
+    fn forkguard_window_counts_and_prunes_events() {
         let (governor, _gate) = RateLimitGovernor::new(4);
         let t0 = Instant::now();
         for i in 0..5 {
@@ -518,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn multiplicative_decrease_halves_capacity_on_threshold() {
+    fn forkguard_multiplicative_decrease_halves_capacity_on_threshold() {
         let (governor, _gate) = RateLimitGovernor::new(8);
         let t0 = Instant::now();
         // First event: below both thresholds, no change.
@@ -540,24 +526,31 @@ mod tests {
         assert!(snap.paused);
     }
 
+    /// A single 429 inside the window — however bad the recent ratio looks —
+    /// must not shrink the gate: the absolute event threshold owns small
+    /// fleets, and shrinking on the first blip would fight it.
     #[test]
-    fn ratio_threshold_triggers_decrease_even_with_few_events() {
+    fn forkguard_single_rate_limit_blip_does_not_shrink_gate() {
         let (governor, _gate) = RateLimitGovernor::new(8);
         let t0 = Instant::now();
-        // One success then one 429: the absolute event count is below the
-        // threshold, but the 50% limit ratio must still shrink the gate.
+        // One success then one 429: a 50% limit ratio, but only one event.
         governor.record_attempt(t0);
         governor.record_success(t0);
         governor.record_attempt(t0 + ms(1));
         governor.record_rate_limited(t0 + ms(1));
-        assert!(
-            governor.snapshot(t0 + ms(2)).launch_capacity < 8,
-            "50% limit ratio should trigger a decrease"
+        assert_eq!(
+            governor.snapshot(t0 + ms(2)).launch_capacity,
+            8,
+            "a single 429 must not shrink the gate"
         );
+        // A second event crosses the absolute threshold and halves.
+        governor.record_attempt(t0 + ms(3));
+        governor.record_rate_limited(t0 + ms(3));
+        assert_eq!(governor.snapshot(t0 + ms(4)).launch_capacity, 4);
     }
 
     #[test]
-    fn additive_increase_recovers_capacity_gradually() {
+    fn forkguard_additive_increase_recovers_capacity_gradually() {
         let (governor, _gate) = RateLimitGovernor::new(8);
         let t0 = Instant::now();
         // Drive capacity down to 4 via two events.
@@ -595,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_releases_only_after_window_drains() {
+    fn forkguard_pause_releases_only_after_window_drains() {
         let (governor, gate) = RateLimitGovernor::new(8);
         let t0 = Instant::now();
         for i in 0..4 {
@@ -619,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_increase_is_capped_at_max() {
+    fn forkguard_capacity_increase_is_capped_at_max() {
         let (governor, _gate) = RateLimitGovernor::new(2);
         let t0 = Instant::now();
         for i in 0..12u32 {
@@ -630,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_blocks_when_full_and_releases_on_drop() {
+    fn forkguard_gate_blocks_when_full_and_releases_on_drop() {
         let (governor, gate) = RateLimitGovernor::new(1);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -653,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_set_capacity_shrinks_below_active_and_re_admits_later() {
+    fn forkguard_gate_set_capacity_shrinks_below_outstanding_and_re_admits_later() {
         let (governor, gate) = RateLimitGovernor::new(4);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -665,7 +658,7 @@ mod tests {
                 .collect();
             assert_eq!(gate.capacity(), 4);
 
-            // Shrink below the active count: no new permit is granted.
+            // Shrink below the outstanding count: no new permit is granted.
             governor.gate().set_capacity(1);
             assert_eq!(gate.capacity(), 1);
             assert!(gate.try_acquire().is_none());
@@ -673,11 +666,14 @@ mod tests {
             let g2 = std::sync::Arc::clone(&gate);
             let waiter = tokio::spawn(async move { g2.acquire().await });
             tokio::time::sleep(ms(20)).await;
-            assert!(!waiter.is_finished(), "must wait while active >= capacity");
+            assert!(
+                !waiter.is_finished(),
+                "must wait while outstanding >= capacity"
+            );
 
-            // Releasing holders drains `active` toward the new capacity; the
-            // waiter is admitted only once every held permit is released
-            // (active 4 -> 0 < capacity 1).
+            // Releasing holders drains `outstanding` toward the new capacity;
+            // the waiter is admitted only once every held permit is released
+            // (outstanding 4 -> 0 < capacity 1).
             drop(held.swap_remove(0));
             drop(held.swap_remove(0));
             drop(held.swap_remove(0));
@@ -685,6 +681,47 @@ mod tests {
             let _permit = waiter.await.expect("waiter admitted after drain");
             assert!(gate.try_acquire().is_none(), "capacity 1 is now full");
             drop(_permit);
+        });
+    }
+
+    /// The semaphore permit count — not just the bookkeeping `capacity()`
+    /// field — must track capacity changes while holders are outstanding.
+    /// The capacity-focused tests above assert the bookkeeping alone, so
+    /// this is the direct pin on the `set_capacity` expand/shrink and
+    /// `Drop` absorb arithmetic.
+    #[test]
+    fn forkguard_gate_semaphore_permits_track_capacity_with_holders_outstanding() {
+        let (_governor, gate) = RateLimitGovernor::new(4);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let a = gate.try_acquire().expect("first admission");
+            let b = gate.try_acquire().expect("second admission");
+            assert_eq!(gate.available_permits(), 2);
+
+            // Expand with holders outstanding: the semaphore gains only the
+            // new free headroom (4 - 2 -> 6 - 2).
+            gate.set_capacity(6);
+            assert_eq!(gate.available_permits(), 4);
+
+            // Shrink below the outstanding count: free slots drain to zero
+            // and the surplus holders' releases are absorbed.
+            gate.set_capacity(1);
+            assert_eq!(gate.available_permits(), 0);
+            drop(b);
+            assert_eq!(
+                gate.available_permits(),
+                0,
+                "release above capacity must be absorbed"
+            );
+            drop(a);
+            assert_eq!(
+                gate.available_permits(),
+                1,
+                "release below capacity must return the slot"
+            );
         });
     }
 
@@ -752,9 +789,11 @@ mod tests {
         );
     }
 
-    /// A waiter cancelled *after* its grant was dispatched must not swallow
-    /// the slot: the permit is dropped with the cancelled future and its
-    /// `Drop` re-releases it for the next waiter.
+    /// A waiter cancelled *after* its slot was handed out must not swallow
+    /// it: either the aborted task never polled (the permit was never taken
+    /// from the semaphore) or it drops its `GatePermit`, whose `Drop`
+    /// returns the slot. Both interleavings leave the gate with one free
+    /// slot.
     #[test]
     fn forkguard_dynamic_gate_redispatches_grant_of_cancelled_waiter() {
         let (_governor, gate) = RateLimitGovernor::new(1);
@@ -769,9 +808,8 @@ mod tests {
             tokio::time::sleep(ms(20)).await;
             assert!(!waiter.is_finished(), "waiter must be queued");
 
-            // Releasing the holder dispatches the grant into the waiter's
-            // channel; on a current-thread runtime the waiter has not polled
-            // yet when we abort it, so the permit is dropped mid-flight.
+            // Releasing the holder wakes the waiter; on a current-thread
+            // runtime the waiter has not polled yet when we abort it.
             drop(holder);
             waiter.abort();
             tokio::time::sleep(ms(20)).await;
@@ -783,11 +821,10 @@ mod tests {
         });
     }
 
-    /// The mirror case of the redispatch test: a waiter cancelled *before*
-    /// its grant was dispatched leaves a stale queue entry with a dead
-    /// receiver. The granter must skip that entry — disarming the already
-    /// built permit instead of dropping it, which would re-enter the gate
-    /// lock held by `wake_locked` — and the slot must stay usable.
+    /// The mirror case of the redispatch test: a waiter cancelled *while
+    /// still queued* dequeues itself from the semaphore (tokio `acquire` is
+    /// cancel safe), so releasing the holder must leave exactly one free
+    /// slot — neither swallowed by the cancelled waiter nor leaked.
     #[test]
     fn forkguard_dynamic_gate_skips_stale_queued_waiter_without_leaking_slot() {
         let (_governor, gate) = RateLimitGovernor::new(1);
@@ -805,12 +842,12 @@ mod tests {
                 "waiter must be queued behind the holder"
             );
 
-            // Cancel while the gate is full: no grant was ever dispatched,
-            // so the stale entry stays queued with a dead receiver.
+            // Cancel while the gate is full: the future dequeues itself.
             waiter.abort();
             tokio::time::sleep(ms(20)).await;
 
-            // Releasing the holder runs the granter over the stale entry.
+            // Releasing the holder runs the semaphore wake with the queue
+            // already empty.
             drop(holder);
             assert_eq!(
                 gate.available_permits(),
@@ -819,8 +856,68 @@ mod tests {
             );
             let permit = gate
                 .try_acquire()
-                .expect("slot usable after the stale entry is skipped");
+                .expect("slot usable after the cancelled waiter dequeued");
             drop(permit);
+        });
+    }
+
+    /// The third cancel interleaving: a grant already handed to a queued
+    /// waiter comes back *after* the shrink. tokio re-injects a grant that
+    /// its waiter never polled when the waiter's future is dropped, and
+    /// `forget_permits` cannot see it — so a pause (capacity 0) can find a
+    /// surplus token sitting in the pool. The slot ledger is the admission
+    /// authority: the surplus token must be refused and destroyed, never
+    /// admit. Deterministic on a current-thread runtime: the waiter is
+    /// granted on `drop(holder)` and aborted before it can poll again.
+    #[test]
+    fn forkguard_cancelled_grant_returned_after_shrink_cannot_bypass_pause() {
+        let (_governor, gate) = RateLimitGovernor::new(1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move {
+            let holder = gate.try_acquire().expect("holder");
+            let g2 = std::sync::Arc::clone(&gate);
+            let waiter = tokio::spawn(async move { g2.acquire().await });
+            tokio::time::sleep(ms(20)).await;
+            assert!(!waiter.is_finished(), "waiter must be queued");
+
+            // The release assigns the freed grant to the queued waiter; on
+            // a current-thread runtime the waiter has not polled yet.
+            drop(holder);
+            // The shrink forgets free permits only: the assigned grant is
+            // invisible to it.
+            gate.set_capacity(0);
+            waiter.abort();
+            tokio::time::sleep(ms(20)).await;
+
+            // The cancelled waiter's grant is back in the pool. The pause
+            // must hold for both admission paths.
+            assert!(
+                gate.try_acquire().is_none(),
+                "surplus token returned by a cancelled waiter must not bypass the pause"
+            );
+            assert_eq!(
+                gate.available_permits(),
+                0,
+                "the refused surplus token must be destroyed, not left in the pool"
+            );
+            let g2 = std::sync::Arc::clone(&gate);
+            let async_waiter = tokio::spawn(async move { g2.acquire().await });
+            tokio::time::sleep(ms(20)).await;
+            assert!(
+                !async_waiter.is_finished(),
+                "acquire must keep waiting while the pause holds"
+            );
+
+            // Recovery mints a fresh token for the freed capacity; the
+            // surplus never took part.
+            gate.set_capacity(1);
+            let _permit = async_waiter
+                .await
+                .expect("waiter admitted after the pause lifts");
+            assert_eq!(gate.available_permits(), 0, "capacity 1 is now full");
         });
     }
 
@@ -855,9 +952,9 @@ mod tests {
                         tokio::time::sleep(ms(u64::from(i % 4))).await;
                     }));
                 }
-                // Abort every third task: some while still queued (stale
-                // queue entries), some already holding a permit (the
-                // drop-releases-and-rewakes path).
+                // Abort every third task: some while still queued (the
+                // cancel-dequeues path), some already holding a permit (the
+                // drop-releases path).
                 for handle in handles.iter().step_by(3) {
                     handle.abort();
                 }
@@ -869,14 +966,14 @@ mod tests {
                 for handle in handles {
                     // A task that cannot finish inside the budget means a
                     // lost wakeup, a leaked permit, or a slot swallowed by a
-                    // stale entry — fail the round instead of hanging.
+                    // cancelled waiter — fail the round instead of hanging.
                     tokio::time::timeout(ms(2000), handle)
                         .await
                         .expect("task must finish: stuck rounds mean lost wakeups or leaked slots")
                         .ok();
                 }
-                // Let straggler permit drops (cancelled waiter re-release)
-                // run before asserting the drain.
+                // Let straggler permit drops (cancelled waiters whose tasks
+                // never re-ran) settle before asserting the drain.
                 tokio::time::sleep(ms(5)).await;
                 assert_eq!(
                     gate.available_permits(),

@@ -21,7 +21,8 @@ runs it. Nothing here writes to your Codewhale configuration.
 - **Observe & resolve** — `list_apps`, `list_windows`, `list_displays`,
   `switch_display`, `get_app_state` (accessibility/UIA/uitest tree with
   element indices + `state_id`), `screenshot` (display/region, raster-bound
-  coordinates), `zoom` (close-up crop of the last raster), `cursor_position`,
+  coordinates), `zoom` (close-up crop of the last raster, region clipped
+  to it), `cursor_position`,
   `open_application` (exact-name rule), `request_access` (fail-closed
   permission/capability probe).
 - **Pointer** — left/double/triple/right/middle click, move, drag,
@@ -29,7 +30,8 @@ runs it. Nothing here writes to your Codewhale configuration.
 - **Keyboard & text** — `type` (unicode), `key` (chords + repeat),
   `hold_key`, `set_value` (semantic, background-safe), `select_text`,
   `perform_action` (element's own actions: AXPress / UIA Invoke / AT-SPI / uitest).
-- **Recording** — `recording_start/stop/status/list` (see below).
+- **Recording** — `recording_start/stop/status` on local and hdc computers
+  (see below); `recording_list` also lists the files saved on an ssh computer.
 - **Computers** — `computer_list`, `computer_switch`, `computer_register`
   (ssh agent auto-push), `computer_remove`.
 - **Safety** — `stop_computer_control` kill switch; permission probes that
@@ -74,6 +76,17 @@ through it, and pins the result. Remote calls run
 `node agent.mjs <base64 json>` — one JSON receipt line back. Only an
 allow-listed tool set executes remotely; arguments travel as data, never as
 shell. Requires publickey ssh (BatchMode) and Node ≥ 20 on the remote.
+
+Zoom aiming works over ssh: the server remembers the remote raster, crops
+through the agent, and rebinds coordinates to the child raster. The crop file
+stays on the remote computer and the plugin has no pull tool — view it only
+with out-of-band access (scp from a shell). Recording start/stop/status and
+press-and-hold (`left_mouse_down`) do not work over ssh: the one-shot agent
+process cannot keep a recorder alive or guarantee a press outlives its release, so
+they fail closed (`persistent_session_required`). Press-and-hold additionally
+needs a macOS, Windows, or Linux computer: the HarmonyOS backend does not
+expose it at all (`left_click_drag` is the closest alternative there).
+`recording_list` still lists the files on the remote computer.
 
 ## HarmonyOS computers
 

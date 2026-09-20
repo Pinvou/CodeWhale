@@ -15863,7 +15863,17 @@ async fn sync_session_migrates_one_checkpoint_and_strips_its_system_carrier() {
     ));
 
     let run = tokio::spawn(engine.run());
-    let mut messages = vec![old_checkpoint];
+    let mut messages = vec![
+        old_checkpoint,
+        serde_json::from_value(json!({
+            "role": "assistant", "content": [{"type": "text", "text": "Later answer"}]
+        }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "role": "user", "content": [{"type": "text", "text": "Later question"}]
+        }))
+        .unwrap(),
+    ];
     for round in 0..2 {
         handle
             .send(Op::SyncSession {
@@ -15896,6 +15906,12 @@ async fn sync_session_migrates_one_checkpoint_and_strips_its_system_carrier() {
             .filter(|message| crate::compaction::is_compaction_checkpoint_message(message))
             .collect::<Vec<_>>();
         assert_eq!(checkpoints.len(), 1, "round {round}: {checkpoints:?}");
+        assert!(
+            crate::compaction::is_compaction_checkpoint_message(&snapshot.messages[0]),
+            "round {round}: later turns must remain after the saved checkpoint"
+        );
+        assert_eq!(message_text_of(&snapshot.messages[1]), "Later answer");
+        assert_eq!(message_text_of(&snapshot.messages[2]), "Later question");
         let checkpoint_text = message_text_of(checkpoints[0]);
         assert!(
             checkpoint_text.contains("new checkpoint"),
