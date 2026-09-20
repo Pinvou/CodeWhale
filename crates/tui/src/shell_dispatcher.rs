@@ -153,6 +153,14 @@ fn powershell_base_args() -> Vec<String> {
     ]
 }
 
+/// Windows `CreateProcess` refuses a command line longer than 32,767
+/// characters, and the encoded form is the long one: UTF-16LE base64 expands a
+/// payload to roughly 2.67 characters per input character on top of the flags.
+/// The temp `-File` form this replaces kept the payload inside the script file
+/// and never came near that ceiling, so a payload that cannot fit inline keeps
+/// its first result instead of trading a policy refusal for a spawn failure.
+const MAX_ENCODED_COMMAND_LINE: usize = 32_767;
+
 /// Wrap a model/user PowerShell command so native program failures surface
 /// through `$LASTEXITCODE` without using `Invoke-Expression`.
 fn powershell_exit_aware_command(shell_command: &str) -> String {
@@ -373,8 +381,9 @@ impl ShellDispatcher {
     ///
     /// Nothing touches the disk, so the execution policy cannot refuse it (the
     /// policy governs script *files*), and a base64 argument needs neither
-    /// quoting nor a BOM. Returns `None` for a non-PowerShell shell, and the
-    /// caller then keeps the original invocation.
+    /// quoting nor a BOM. Returns `None` for a non-PowerShell shell or for a
+    /// payload whose encoded command line would exceed what Windows can spawn,
+    /// and the caller then keeps the original invocation.
     pub fn build_powershell_encoded_parts(
         &self,
         shell_command: &str,
@@ -392,7 +401,14 @@ impl ShellDispatcher {
         let mut args = powershell_base_args();
         args.push("-EncodedCommand".to_string());
         args.push(base64::engine::general_purpose::STANDARD.encode(utf16));
-        Some((self.kind.binary().to_string(), args))
+        let program = self.kind.binary().to_string();
+        // `CreateProcess` counts the program, one separating space per
+        // argument, and the quotes Windows may add around it.
+        let command_line = program.len() + args.iter().map(|arg| arg.len() + 3).sum::<usize>();
+        if command_line > MAX_ENCODED_COMMAND_LINE {
+            return None;
+        }
+        Some((program, args))
     }
 
     /// Build a `Command` from separate program + args (bypasses the shell).
@@ -719,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn powershell_encoded_fallback_avoids_the_script_file() {
+    fn forkguard_powershell_encoded_fallback_avoids_the_script_file() {
         let dispatcher = ShellDispatcher {
             kind: ShellKind::Pwsh,
         };
@@ -752,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn powershell_encoded_fallback_is_none_for_other_shells() {
+    fn forkguard_powershell_encoded_fallback_is_none_for_other_shells() {
         for kind in [ShellKind::Bash, ShellKind::Cmd, ShellKind::Sh] {
             let dispatcher = ShellDispatcher { kind };
             assert!(
@@ -762,6 +778,31 @@ mod tests {
                 "only PowerShell has an encoded form"
             );
         }
+    }
+
+    #[test]
+    fn forkguard_powershell_encoded_fallback_skips_a_payload_past_the_command_line_limit() {
+        let dispatcher = ShellDispatcher {
+            kind: ShellKind::Pwsh,
+        };
+        // A payload the temp `-File` form handles fine stays retryable...
+        let moderate = "x".repeat(8_000);
+        assert!(
+            dispatcher
+                .build_powershell_encoded_parts(&moderate)
+                .is_some(),
+            "8k characters encode to well under the Windows command-line limit"
+        );
+        // ...while one whose base64 form cannot be spawned inline keeps its
+        // first result: UTF-16LE doubles the bytes and base64 adds another
+        // third, so 13k characters are already past 32,767.
+        let oversized = "x".repeat(13_000);
+        assert!(
+            dispatcher
+                .build_powershell_encoded_parts(&oversized)
+                .is_none(),
+            "an unspawnable encoded command line must not replace the refusal"
+        );
     }
 
     #[test]

@@ -4389,7 +4389,7 @@ fn a_finished_job_reports_its_duration_not_a_growing_elapsed() {
 // host" versus "the command itself failed", and it must not depend on the
 // language of the machine.
 #[test]
-fn powershell_execution_policy_rejection_is_locale_independent() {
+fn forkguard_powershell_execution_policy_rejection_is_locale_independent() {
     // Captured verbatim from the real invocation the tool makes
     // (`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Restricted
     // -File <temp>.ps1`, stderr piped). Two details decide the predicate: the
@@ -4397,6 +4397,8 @@ fn powershell_execution_policy_rejection_is_locale_independent() {
     // "linkid=135170" is not in the captured text at all, and this host path
     // reports ParentContainsErrorRecordException rather than
     // PSSecurityException.
+    let host_script = r"C:\Users\u\AppData\Local\Temp\codewhale-shell-1-2.ps1";
+    let script = r"C:\Temp\codewhale-shell-1-2.ps1";
     let raw_en = concat!(
         "File C:\\Users\\u\\AppData\\Local\\Temp\\codewhale-shell-1-2.ps1 cannot be loaded because running scripts is disa\n",
         "bled on this system. For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=13517\n",
@@ -4404,7 +4406,15 @@ fn powershell_execution_policy_rejection_is_locale_independent() {
         "    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n",
         "    + FullyQualifiedErrorId : UnauthorizedAccess\n",
     );
-    assert!(powershell_execution_policy_rejection(raw_en, ""));
+    assert!(powershell_execution_policy_rejection(
+        raw_en,
+        "",
+        host_script
+    ));
+    assert!(
+        !powershell_execution_policy_rejection(raw_en, "", script),
+        "a refusal that does not name this invocation's own script is not ours"
+    );
     assert!(
         !raw_en.to_ascii_lowercase().contains("linkid=135170"),
         "the wrapped URL must not be the signal the predicate depends on"
@@ -4417,21 +4427,41 @@ fn powershell_execution_policy_rejection_is_locale_independent() {
     assert!(powershell_execution_policy_rejection(
         "无法加载文件 C:\\Temp\\codewhale-shell-1-2.ps1，因为在此系统上禁止运行脚本。有关详细信息，请参阅 https:/go.microsoft.com/fwlink/?LinkID=135170 中的 about_Execution_Policies。\n    + CategoryInfo          : SecurityError: (:) []，PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
     ));
     assert!(powershell_execution_policy_rejection(
         "未对文件 C:\\Temp\\codewhale-shell-1-2.ps1 进行数字签名。无法在当前系统上运行该脚本。有关运行脚本和设置执行策略的详细信息，请参阅 https:/go.microsoft.com/fwlink/?LinkID=135170 中的 about_Execution_Policies。\n    + CategoryInfo          : SecurityError: (:) []，PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
     ));
     // ja-JP refusal, where even the category name is translated
-    // ("セキュリティ エラー"), and the same refusal with every localized part
-    // stripped away: the error-record metadata alone still identifies it.
+    // ("セキュリティ エラー").
     assert!(powershell_execution_policy_rejection(
         "このシステムではスクリプトの実行が無効になっているため、ファイル C:\\Temp\\codewhale-shell-1-2.ps1 を読み込むことができません。詳細については、「about_Execution_Policies」(https://go.microsoft.com/fwlink/?LinkID=135170) を参照してください。\n    + CategoryInfo          : セキュリティ エラー: (: ) []、PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
     ));
-    assert!(powershell_execution_policy_rejection(
+    // The refusal must name this invocation's own temporary script. A capture
+    // that keeps only the localized-stripped metadata (no path) keeps its
+    // result, and so does a nested child's refusal: `powershell -File
+    // inner.ps1` spawned by the command itself is refused at *its* top level
+    // (no location line) after the outer script already ran its earlier
+    // statements, so the exact-path rule is what keeps the retry from
+    // repeating that side effect.
+    assert!(!powershell_execution_policy_rejection(
         "    + CategoryInfo          : セキュリティ エラー: (: ) []、PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
+    ));
+    assert!(!powershell_execution_policy_rejection(
+        concat!(
+            "File C:\\Temp\\inner.ps1 cannot be loaded because running scripts is disabled on this system. ",
+            "For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\n",
+            "    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n",
+            "    + FullyQualifiedErrorId : UnauthorizedAccess",
+        ),
+        "",
+        script,
     ));
     // A statement location rules it out even when every other signal matches:
     // here the outer script ran, then the policy refused an inner script, so
@@ -4439,10 +4469,12 @@ fn powershell_execution_policy_rejection_is_locale_independent() {
     assert!(!powershell_execution_policy_rejection(
         "未对文件 C:\\Temp\\inner.ps1 进行数字签名。无法在当前系统上运行该脚本。有关运行脚本和设置执行策略的详细信息，请参阅 https:/go.microsoft.com/fwlink/?LinkID=135170 中的 about_Execution_Policies。\n    所在位置 C:\\Temp\\codewhale-shell-1-2.ps1:2 字符: 3\n    + CategoryInfo          : SecurityError: (:) []，PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
     ));
     assert!(!powershell_execution_policy_rejection(
         "File C:\\Temp\\inner.ps1 is not digitally signed. You cannot run this script on the current system. For more information see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\n    At C:\\Temp\\codewhale-shell-1-2.ps1:2 char:1\n    + CategoryInfo          : SecurityError: (:) [], PSSecurityException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
     ));
     // A command failing on its own keeps its result: UnauthorizedAccess is
     // present, but with the command's own exception type and its location
@@ -4450,20 +4482,22 @@ fn powershell_execution_policy_rejection_is_locale_independent() {
     assert!(!powershell_execution_policy_rejection(
         "Get-Content: C:\\private\\secret.txt: Access to the path is denied.\n    At C:\\Temp\\codewhale-shell-1-2.ps1:3 char:1\n    + CategoryInfo          : PermissionDenied: (:) [Get-Content], UnauthorizedAccessException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
         "",
+        script,
     ));
     assert!(!powershell_execution_policy_rejection(
         "The term 'foo' is not recognized as a name of a cmdlet, function, script file, \
          or executable program.",
         "",
+        script,
     ));
-    assert!(!powershell_execution_policy_rejection("", ""));
+    assert!(!powershell_execution_policy_rejection("", "", script));
 }
 
 // End-to-end: the encoded form really runs the payload the temp `-File` form
 // was written for (multiline + non-ASCII), with no file on disk.
 #[cfg(windows)]
 #[test]
-fn powershell_encoded_spec_runs_a_non_ascii_payload() {
+fn forkguard_powershell_encoded_spec_runs_a_non_ascii_payload() {
     use std::process::{Command, Stdio};
 
     let spec = CommandSpec::powershell_encoded_shell(
@@ -4532,20 +4566,20 @@ fn temp_file_spec(script: &std::path::Path, cwd: &std::path::Path) -> CommandSpe
 // The retry gate: only a failed temp `-File` refusal may be retried, so a
 // cancellation or a timeout can never re-run a command the user stopped.
 #[test]
-fn powershell_inline_retry_only_for_a_failed_file_refusal() {
+fn forkguard_powershell_inline_retry_only_for_a_failed_file_refusal() {
     let dir = tempdir().expect("tempdir");
     let script = dir.path().join("codewhale-shell-1-9.ps1");
-    let refusal = concat!(
-        "File C:\\Temp\\codewhale-shell-1-9.ps1 cannot be loaded because running scripts is disabled on this system. ",
-        "For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\n",
-        "    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n",
-        "    + FullyQualifiedErrorId : UnauthorizedAccess",
+    // The refusal names the script this spec actually passed to `-File`, which
+    // is what a real refusal does.
+    let refusal = format!(
+        "File {} cannot be loaded because running scripts is disabled on this system. For more information, see about_Execution_Policies at https:/go.microsoft.com/fwlink/?LinkID=135170.\n    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : UnauthorizedAccess",
+        script.display()
     );
     let spec = temp_file_spec(&script, dir.path());
 
     assert!(powershell_refusal_needs_inline_retry(
         &spec,
-        &failed_result_with(ShellStatus::Failed, refusal)
+        &failed_result_with(ShellStatus::Failed, &refusal)
     ));
     for status in [
         ShellStatus::Completed,
@@ -4556,11 +4590,20 @@ fn powershell_inline_retry_only_for_a_failed_file_refusal() {
         assert!(
             !powershell_refusal_needs_inline_retry(
                 &spec,
-                &failed_result_with(status.clone(), refusal)
+                &failed_result_with(status.clone(), &refusal)
             ),
             "{status:?} must never be retried"
         );
     }
+    // A refusal naming a different script (a nested child the command spawned)
+    // must not be retried either, even without a statement location line.
+    assert!(!powershell_refusal_needs_inline_retry(
+        &spec,
+        &failed_result_with(
+            ShellStatus::Failed,
+            &refusal.replace(&script.display().to_string(), r"C:\Temp\inner.ps1")
+        )
+    ));
     // A direct invocation has no temp script to refuse, and an ordinary
     // failure keeps its own result.
     let direct = CommandSpec::program(
@@ -4571,7 +4614,7 @@ fn powershell_inline_retry_only_for_a_failed_file_refusal() {
     );
     assert!(!powershell_refusal_needs_inline_retry(
         &direct,
-        &failed_result_with(ShellStatus::Failed, refusal)
+        &failed_result_with(ShellStatus::Failed, &refusal)
     ));
     assert!(!powershell_refusal_needs_inline_retry(
         &spec,
@@ -4586,7 +4629,7 @@ fn powershell_inline_retry_only_for_a_failed_file_refusal() {
 // the fallback, and accounts for both attempts.
 #[cfg(windows)]
 #[test]
-fn powershell_inline_retry_runs_the_command_and_notes_the_fallback() {
+fn forkguard_powershell_inline_retry_runs_the_command_and_notes_the_fallback() {
     let dir = tempdir().expect("tempdir");
     let manager = ShellManager::new(dir.path().to_path_buf());
     let command = "Write-Output '中文-ok'";
@@ -4624,7 +4667,7 @@ fn powershell_inline_retry_runs_the_command_and_notes_the_fallback() {
 // policy bypass, so a restricted machine runs the script this tool wrote.
 #[cfg(windows)]
 #[test]
-fn powershell_temp_script_form_runs_a_non_ascii_payload() {
+fn forkguard_powershell_temp_script_form_runs_a_non_ascii_payload() {
     use std::process::{Command, Stdio};
 
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
@@ -4649,4 +4692,29 @@ fn powershell_temp_script_form_runs_a_non_ascii_payload() {
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("编码-ok"), "stdout={stdout}");
     assert!(stdout.contains("line2"), "stdout={stdout}");
+}
+
+// A recovery path that cannot even start must not replace the refusal that
+// sent it there: the first attempt's evidence is what the user needs, so it is
+// kept and annotated with the retry failure.
+#[test]
+fn forkguard_powershell_retry_keeps_the_first_result_when_it_cannot_start() {
+    let first = failed_result_with(ShellStatus::Failed, "refused by the local policy");
+    let annotated = keep_first_result_after_a_failed_retry(
+        first,
+        &anyhow::anyhow!("spawn failed: the command line is too long"),
+    );
+
+    assert_eq!(annotated.status, ShellStatus::Failed);
+    assert!(
+        annotated.stderr.contains("refused by the local policy"),
+        "the refusal evidence must survive: {}",
+        annotated.stderr
+    );
+    assert!(
+        annotated.stderr.contains("could not start")
+            && annotated.stderr.contains("command line is too long"),
+        "the retry failure must be annotated: {}",
+        annotated.stderr
+    );
 }

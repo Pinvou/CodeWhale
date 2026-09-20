@@ -126,7 +126,8 @@ impl CommandSpec {
     /// argument instead of a temp `.ps1`, so the Windows execution policy
     /// (which governs script files) cannot refuse it and no quoting or BOM
     /// handling is involved. Returns `None` when the detected shell is not
-    /// PowerShell, and the caller then keeps the original invocation.
+    /// PowerShell or when the encoded payload cannot fit a Windows command
+    /// line, and the caller then keeps the original invocation.
     pub fn powershell_encoded_shell(
         command: &str,
         cwd: PathBuf,
@@ -952,7 +953,7 @@ mod tests {
     // on both the normal shell spec and the encoded fallback.
     #[cfg(windows)]
     #[test]
-    fn windows_shell_text_matches_the_shell_family() {
+    fn forkguard_windows_shell_text_matches_the_shell_family() {
         use crate::shell_dispatcher::ShellKind;
 
         let command = "Write-Output 'x'";
