@@ -292,4 +292,21 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	if _, err := store.Claim(ctx, item); !errors.Is(err, ErrApprovalRecoveryLeaseUnavailable) {
 		t.Fatalf("backoff was bypassed: %v", err)
 	}
+	// A request that already converged to EXECUTED is terminal: the zero-effect
+	// invalidation must refuse it and must not append a second state event, even
+	// when the caller replays the original candidate and lease.
+	var stateEventsBefore int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM approval_state_events WHERE approval_request_id=$1`, request.ID).Scan(&stateEventsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, item, lease); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("an executed request was invalidated by the recovery path: %v", err)
+	}
+	var stateEventsAfter int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM approval_state_events WHERE approval_request_id=$1`, request.ID).Scan(&stateEventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if stateEventsAfter != stateEventsBefore {
+		t.Fatalf("refused invalidation appended a state event: before=%d after=%d", stateEventsBefore, stateEventsAfter)
+	}
 }
