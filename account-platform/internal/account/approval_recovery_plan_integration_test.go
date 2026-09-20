@@ -50,11 +50,11 @@ func awaitApprovalWriterReady(t *testing.T, ctx context.Context, repository *Pos
 	}
 }
 
-// seedZeroEffectRecoveryCandidate drives a fresh proof-era request through the
+// seedZeroEffectRecoveryFailure drives a fresh proof-era request through the
 // real approval, relay, delivery and execution path until it fails before any
-// effect, then forces the execution window into the past and reports the
-// candidate a real plan produces for it. It proves nothing on its own.
-func seedZeroEffectRecoveryCandidate(t *testing.T, ctx context.Context, db *approvalAuthorizationIntegrationDatabase, repository *PostgresRepository, relay *ApprovalRelayStore, vector authorizationProofVector, durable, failureCode string, sequence approvalconsumer.Sequence) (ApprovalRequest, ApprovalRecoveryCandidate) {
+// effect. The execution window is left untouched, so the caller decides when
+// the candidate becomes eligible. It proves nothing on its own.
+func seedZeroEffectRecoveryFailure(t *testing.T, ctx context.Context, db *approvalAuthorizationIntegrationDatabase, repository *PostgresRepository, relay *ApprovalRelayStore, vector authorizationProofVector, durable, failureCode string, sequence approvalconsumer.Sequence) ApprovalRequest {
 	t.Helper()
 	request := seedAuthorizationProofRequest(t, ctx, db, vector)
 	approver := seedTokenOwnerCandidateActor(t, ctx, db.adminPool, "PLATFORM_SUPER_ADMIN", "recovery-zero-effect-"+uuid.NewString())
@@ -98,26 +98,7 @@ func seedZeroEffectRecoveryCandidate(t *testing.T, ctx context.Context, db *appr
 	if _, err := repository.RecordApprovalAuthorizationDomainFailure(ctx, eventID, durable, binding.Workload, state.Version, failureCode); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests SET execution_deadline=now()-interval '1 second',updated_at=now() WHERE id=$1`, request.ID); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := repository.PlanProofApprovalRecovery(ctx, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, candidate := range plan.Candidates {
-		if candidate.RequestID != request.ID {
-			continue
-		}
-		if !candidate.WindowElapsed || candidate.Investigation.Class != approvalconsumer.FailurePermanent ||
-			candidate.Investigation.Retryable || !candidate.Investigation.QueryOnly || candidate.Investigation.MaxDomainAttempts != 1 ||
-			candidate.RequestStatus != "EXECUTION_FAILED" || candidate.ExecutionStatus != "FAILED" {
-			t.Fatalf("zero-effect candidate is not eligible: %+v", candidate)
-		}
-		return request, candidate
-	}
-	t.Fatalf("zero-effect candidate missing from the recovery plan: %+v", plan)
-	return ApprovalRequest{}, ApprovalRecoveryCandidate{}
+	return request
 }
 
 func TestProofRecoveryPlanExcludesLegacyAndNeverMutatesIntegration(t *testing.T) {
@@ -403,11 +384,55 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	// window has elapsed and whose owner authorities keep reporting an absent
 	// effect and no positive result must actually converge to INVALIDATED, and
 	// must do so only through the governed Account surface.
-	zeroEffectRequest, zeroEffectCandidate := seedZeroEffectRecoveryCandidate(t, ctx, db, repository, relay, vector, durable,
+	zeroEffectRequest := seedZeroEffectRecoveryFailure(t, ctx, db, repository, relay, vector, durable,
 		"DOMAIN_RESOURCE_NOT_FOUND", 102)
-	zeroEffectLease, err := store.Claim(ctx, zeroEffectCandidate)
+	planZeroEffect := func() ApprovalRecoveryCandidate {
+		t.Helper()
+		plan, planErr := repository.PlanProofApprovalRecovery(ctx, 5)
+		if planErr != nil {
+			t.Fatal(planErr)
+		}
+		for _, candidate := range plan.Candidates {
+			if candidate.RequestID != zeroEffectRequest.ID {
+				continue
+			}
+			if candidate.Investigation.Class != approvalconsumer.FailurePermanent || candidate.Investigation.Retryable ||
+				!candidate.Investigation.QueryOnly || candidate.Investigation.MaxDomainAttempts != 1 ||
+				candidate.RequestStatus != "EXECUTION_FAILED" || candidate.ExecutionStatus != "FAILED" {
+				t.Fatalf("zero-effect candidate is not eligible: %+v", candidate)
+			}
+			return candidate
+		}
+		t.Fatalf("zero-effect candidate missing from the recovery plan: %+v", plan)
+		return ApprovalRecoveryCandidate{}
+	}
+	openCandidate := planZeroEffect()
+	if openCandidate.WindowElapsed {
+		t.Fatalf("seeded request had already left its execution window: %+v", openCandidate)
+	}
+	zeroEffectLease, err := store.Claim(ctx, openCandidate)
 	if err != nil || zeroEffectLease.RequestID != zeroEffectRequest.ID || zeroEffectLease.Token == uuid.Nil {
 		t.Fatalf("zero-effect query lease invalid: lease=%+v err=%v", zeroEffectLease, err)
+	}
+	// The window is rechecked from the request row under lock, so a candidate
+	// that merely claims the window has elapsed must still be refused while the
+	// row says otherwise - and the refusal must write nothing.
+	forged := openCandidate
+	forged.WindowElapsed = true
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, forged, zeroEffectLease); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("a forged window claim invalidated the original execution: %v", err)
+	}
+	var openStatus, openCode string
+	if err := db.adminPool.QueryRow(ctx, `SELECT status,coalesce(invalidation_code,'') FROM public.approval_requests WHERE id=$1`, zeroEffectRequest.ID).
+		Scan(&openStatus, &openCode); err != nil || openStatus != "EXECUTION_FAILED" || openCode != "" {
+		t.Fatalf("refused forged window claim mutated the request: status=%s code=%s err=%v", openStatus, openCode, err)
+	}
+	if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests SET execution_deadline=now()-interval '1 second',updated_at=now() WHERE id=$1`, zeroEffectRequest.ID); err != nil {
+		t.Fatal(err)
+	}
+	zeroEffectCandidate := planZeroEffect()
+	if !zeroEffectCandidate.WindowElapsed {
+		t.Fatalf("elapsed execution window was not observed: %+v", zeroEffectCandidate)
 	}
 	zeroEffectBody, err := json.Marshal(approvalRecoveryConfirmation{Candidate: zeroEffectCandidate, Lease: zeroEffectLease})
 	if err != nil {
