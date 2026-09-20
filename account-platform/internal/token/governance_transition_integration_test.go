@@ -53,8 +53,8 @@ func TestTokenGovernanceTransitionPostgresIntegration(t *testing.T) {
 			break
 		}
 	}
-	if activationIndex < 0 || loaded[len(loaded)-1].Version != 32 {
-		t.Fatal("activation migration 31 and Token head 32 must both be present")
+	if activationIndex < 0 || loaded[len(loaded)-1].Version != 33 {
+		t.Fatal("activation migration 31 and Token head 33 must both be present")
 	}
 	if err = migrations.Up(ctx, connection, loaded[:activationIndex]); err != nil {
 		t.Fatal(err)

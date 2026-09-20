@@ -813,6 +813,13 @@ END $$`); err != nil {
 			t.Errorf("drop disposable three-service database: %v", err)
 		}
 	})
+	// Several three-service gates apply the real Account migration chain to this
+	// fresh database, and Account migration 000050 asserts that the migrator
+	// holds CREATE on the current database. Every Account-suite fixture grants
+	// the same privilege on its own disposable database.
+	if _, err = bootstrap.Exec(ctx, `GRANT CREATE ON DATABASE `+identifier+` TO account_migrator`); err != nil {
+		t.Fatal(err)
+	}
 	isolatedURL := threeServiceDatabaseURL(t, databaseURL, database)
 	isolatedConfig, err := pgx.ParseConfig(isolatedURL)
 	if err != nil {
