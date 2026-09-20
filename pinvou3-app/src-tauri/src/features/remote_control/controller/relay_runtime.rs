@@ -299,6 +299,7 @@ impl ControlledRelayWorker {
         let channel = relay
             .start_controller_relay(operation.generation())
             .await?;
+        log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
             app,
@@ -338,6 +339,8 @@ impl ControlledRelayWorker {
                 .ok_or_else(|| "handshake_key_invalid".to_owned())?,
         )?;
         self.channel.try_send(request.clone())?;
+        // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
+        log_controlled_event("registration_sent", "waiting_registered");
         loop {
             match next_registration_step(
                 &mut self.channel,
