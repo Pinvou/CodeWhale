@@ -839,15 +839,19 @@ fn wait_all_payload(
     } else {
         "Every watched child has settled. Full results arrive as <codewhale:subagent.done> sentinels — synthesize from those."
     };
+    // Scalar control fields come before the child arrays: receipts pass
+    // through a bounded verbatim passthrough, and a large fan-out must not
+    // push `timed_out`/`note` past the truncation cut (the schema promises
+    // timed_out unconditionally).
     let payload = json!({
         "action": "wait",
         "until": "all",
         "all_settled": still_running.is_empty(),
-        "settled": settled,
-        "still_running": still_running,
         "waited_ms": u64::try_from(waited_ms).unwrap_or(u64::MAX),
         "timed_out": timed_out,
         "note": note,
+        "settled": settled,
+        "still_running": still_running,
     });
     let mut tool_result =
         ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
@@ -969,17 +973,18 @@ async fn wait_for_activity(
         };
 
         if !outcome.0.is_empty() || !outcome.1.is_empty() {
+            // Scalars before child arrays — see `wait_all_payload`.
             let payload = json!({
                 "action": "wait",
                 "until": "activity",
+                "running": outcome.2,
+                "elapsed_ms": started.elapsed().as_millis(),
+                "timed_out": false,
                 "settled": outcome.0.iter().map(|s| json!({
                     "agent_id": s.agent_id,
                     "status": subagent_status_name(&s.status),
                 })).collect::<Vec<_>>(),
                 "activity": outcome.1,
-                "running": outcome.2,
-                "elapsed_ms": started.elapsed().as_millis(),
-                "timed_out": false,
             });
             let mut tool_result = ToolResult::json(&payload)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
@@ -993,15 +998,16 @@ async fn wait_for_activity(
         }
 
         if started.elapsed() >= timeout {
+            // Scalars before child arrays — see `wait_all_payload`.
             let payload = json!({
                 "action": "wait",
                 "until": "activity",
-                "settled": [],
-                "activity": [],
                 "running": outcome.2,
                 "elapsed_ms": started.elapsed().as_millis(),
                 "timed_out": true,
                 "note": "Timed out before child activity or completion.",
+                "settled": [],
+                "activity": [],
             });
             let mut tool_result = ToolResult::json(&payload)
                 .map_err(|err| ToolError::execution_failed(err.to_string()))?;
@@ -2372,5 +2378,62 @@ mod tests {
         guard.get_result(resumed_id).expect("resumed agent exists");
         let prior = guard.get_result(&agent_id).expect("prior record");
         assert!(matches!(prior.status, SubAgentStatus::Interrupted(_)));
+    }
+
+    #[test]
+    fn wait_all_timeout_receipt_puts_control_fields_before_fanout() {
+        let settled = vec![json!({
+            "agent_id": "agent_00000001",
+            "name": "done_child",
+            "status": "completed",
+        })];
+        let still_running: Vec<Value> = (1..=18)
+            .map(|n| {
+                json!({
+                    "agent_id": format!("agent_{n:08x}"),
+                    "name": format!("fanout_child_{n:02}_with_a_long_name"),
+                    "status": "running",
+                    "detail": format!("still working on the bounded slice number {n}"),
+                })
+            })
+            .collect();
+        let result = wait_all_payload(&settled, &still_running, 30_000, true)
+            .expect("timeout is a partial receipt, not an error");
+        // 2_000 mirrors `SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS` in
+        // core/engine/context.rs; the module is private outside the engine,
+        // so the cap is named here rather than imported.
+        assert!(
+            result.content.len() > 2_000,
+            "fixture must exceed the passthrough cap to exercise truncation: {}",
+            result.content.len()
+        );
+        let timed_out_at = result
+            .content
+            .find("\"timed_out\":true")
+            .expect("schema promises timed_out unconditionally");
+        let fanout_at = result
+            .content
+            .find("\"still_running\":")
+            .expect("fan-out array present");
+        assert!(
+            timed_out_at < fanout_at,
+            "scalar control fields must precede the child arrays so the \
+             bounded passthrough cannot truncate timed_out away:\n{}",
+            result.content
+        );
+
+        // End to end through the engine's bounded passthrough: the truncated
+        // view the model actually sees still carries the control fields.
+        let context = crate::core::engine::compact_tool_result_for_context(
+            "deepseek-v4-pro",
+            "agent",
+            &result,
+        );
+        assert!(context.contains("[receipt truncated:"), "{context}");
+        assert!(
+            context.contains("\"timed_out\":true") && context.contains("\"all_settled\":false"),
+            "truncation must not drop the schema-promised control fields:\n\
+             {context}"
+        );
     }
 }

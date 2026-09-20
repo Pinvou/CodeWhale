@@ -17258,6 +17258,62 @@ fn forkguard_agent_wait_receipt_passes_through_to_context() {
     );
 }
 
+// The bounded verbatim passthrough hard-truncates receipts past the cap, and
+// serde_json preserves insertion order, so a fan-out wait receipt that puts
+// the child arrays before the scalar control fields would lose `timed_out`
+// under truncation while the schema promises it unconditionally. The producer
+// must emit scalars first; this pins that the truncated view keeps them.
+#[test]
+fn forkguard_wait_timeout_receipt_keeps_control_fields_before_fanout() {
+    let child = |n: usize| {
+        json!({
+            "agent_id": format!("agent_{n:08x}"),
+            "name": format!("fanout_child_{n:02}_with_a_long_name"),
+            "status": "running",
+            "detail": format!("still working on the bounded slice number {n}"),
+        })
+    };
+    let wait = json!({
+        "action": "wait",
+        "until": "all",
+        "all_settled": false,
+        "waited_ms": 30_000,
+        "timed_out": true,
+        "note": "Timed out with children still running. Do not poll — wait again (until=all), or end your turn; results arrive as <codewhale:subagent.done> sentinels.",
+        "settled": [],
+        "still_running": (1..=18).map(child).collect::<Vec<_>>(),
+    })
+    .to_string();
+    assert!(
+        wait.len() > super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS,
+        "fixture must exceed the passthrough cap to exercise truncation: {}",
+        wait.len()
+    );
+    let output = ToolResult::success(wait);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[receipt truncated:"),
+        "the oversized fan-out receipt must truncate:\n{context}"
+    );
+    assert!(
+        context.contains("\"timed_out\":true"),
+        "truncation must not drop the schema-promised timed_out field; the \
+         scalar control fields must precede the child arrays:\n{context}"
+    );
+    assert!(
+        context.contains("\"all_settled\":false") && context.contains("\"waited_ms\":30000"),
+        "the all_settled/running scalars must survive truncation ahead of \
+         the fan-out:\n{context}"
+    );
+    assert!(
+        context.contains("Timed out with children still running."),
+        "the timeout note must survive truncation ahead of the fan-out:\n\
+         {context}"
+    );
+}
+
 #[test]
 fn forkguard_agent_receipt_passthrough_is_bounded() {
     let huge_member = "x".repeat(4_000);
