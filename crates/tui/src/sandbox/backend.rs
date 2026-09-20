@@ -69,10 +69,12 @@ use crate::config::Config;
 
 /// Total budget for one OpenSandbox HTTP exec. The request *is* the remote
 /// command: connect, execution, and response transfer all sit under this
-/// client-level deadline. 600s matches the Bash tool's foreground cap — a
-/// remote sandbox command is the same class of work (builds, test runs),
-/// and the previous hardcoded 30s cut legitimate long commands off at the
-/// HTTP layer with no way to raise it.
+/// client-level deadline. 600s matches the interpreter tools' execution cap
+/// (js/code/plugin scripts) — a remote sandbox command is the same class of
+/// work (builds, test runs), and the previous hardcoded 30s cut legitimate
+/// long commands off at the HTTP layer with no way to raise it. The Bash
+/// tool keeps its own much larger cap; this bound is the client-side backstop
+/// for the remote-exec transport, not a per-command policy.
 const OPEN_SANDBOX_EXEC_TIMEOUT_SECS: u64 = 600;
 
 /// Create the configured sandbox backend from config.
