@@ -95,12 +95,21 @@ telemetry 数据目录独立（`/var/lib/pinvou-telemetry-test`），与生产�
 
 ### 桌面 app 指向测试端点
 
-环境变量驱动（`pinvou3-app/src-tauri/src/remote_control/manager.rs` 读取）：
+首选内置 profile：地址与信任根同源（`pinvou3-app/src-tauri/src/features/remote_control/manager/` 内置）。
+`run-dev.sh` 默认就选中 `test`，因此调试构建开箱即指向测试端点：
+
+```bash
+PINVOU_REMOTE_ENDPOINT_PROFILE=test pinvou3-tauri   # 或 ./pinvou3-app/run-dev.sh
+PINVOU_REMOTE_ENDPOINT_PROFILE=production pinvou3-tauri   # 临时切回生产
+```
+
+仅当自建 Relay 与当前 profile 共用信任根时，才用地址环境变量单独覆盖
+（**只覆盖地址不会同步换信任根**，两端不在同一信任根时 controller 握手会失败关闭）：
 
 ```bash
 PINVOU_REMOTE_PUBLIC_URL="https://pinvou.com/pinvou3/remote-test" \
 PINVOU_REMOTE_RELAY_WS_URL="wss://pinvou.com/pinvou3/remote-test/ws" \
-pinvou3-tauri        # 或 ./pinvou3-app/run-dev.sh 调试构建
+pinvou3-tauri
 ```
 
 之后正常「开远程控制 → 手机扫码」，二维码自动指向测试端点。

@@ -73,8 +73,9 @@ use workspace_grants::{
     require_host_workspace_authorization,
 };
 
-// 正式安装包默认连接生产 Relay；本地联调由 run-dev.sh 显式覆盖到隔离的
-// remote-test 端点。用户保存的自定义 Relay 设置仍具有最高优先级。
+// 正式安装包默认连接生产 Relay；本地联调由 run-dev.sh 选中内置的隔离
+// remote-test profile（地址与信任根同源）。用户保存的自定义 Relay 设置与
+// PINVOU_REMOTE_* 环境变量仍具有更高优先级。
 const DEFAULT_PUBLIC_BASE_URL: &str = "https://pinvou.com/pinvou3/remote";
 const DEFAULT_RELAY_WS_URL: &str = "wss://pinvou.com/pinvou3/remote/ws";
 

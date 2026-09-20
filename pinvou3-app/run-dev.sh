@@ -22,12 +22,15 @@ fi
 
 # ── 完整 WebUI v2 relay ──────────────────────────────────────────
 # 仅本地开发启动默认走组内 remote-test 中继，避免调试版本误连生产 8787。
-# 正式安装包不经过本脚本，使用 Rust 内置的 /pinvou3/remote；外部覆盖时 public
-# 页面和 WebSocket 都必须保留 Relay 的公开 base path：
-#   PINVOU_REMOTE_PUBLIC_URL=http://10.x.x.x:8787/pinvou3/remote
-#   PINVOU_REMOTE_RELAY_WS_URL=ws://10.x.x.x:8787/pinvou3/remote/ws
-export PINVOU_REMOTE_PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote-test}"
-export PINVOU_REMOTE_RELAY_WS_URL="${PINVOU_REMOTE_RELAY_WS_URL:-wss://pinvou.com/pinvou3/remote-test/ws}"
+# 选择内置 `test` profile 而不是只覆盖地址：地址与信任根都由 Rust 侧内置且同源，
+# 避免「地址指向 remote-test、信任根仍取 production」导致 controller 握手必然失败。
+# 正式安装包不经过本脚本，默认走内置 `production` profile，用户零配置。
+# 需要临时指向别处时显式覆盖：
+#   PINVOU_REMOTE_ENDPOINT_PROFILE=production   # 切回生产（含地址与信任根）
+#   PINVOU_REMOTE_RUNTIME_RELAY_WS_URL=ws://10.x.x.x:8787/pinvou3/remote/ws
+# 直接用 PINVOU_REMOTE_RELAY_WS_URL / PINVOU_REMOTE_PUBLIC_URL 只覆盖地址，信任根
+# 仍来自当前 profile；只有自建 Relay 与该 profile 共用信任根时才这样用。
+export PINVOU_REMOTE_ENDPOINT_PROFILE="${PINVOU_REMOTE_ENDPOINT_PROFILE:-test}"
 
 # ── 编译器自身线程栈注入(仅编译期 rustc)────────────────────────
 # v0.9.5 升级后 dev 对依赖开 O2 + 256 codegen-units 时,rustc/LLVM 编译

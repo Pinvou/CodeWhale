@@ -477,4 +477,16 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
   `cargo test remote_control::controller::relay_runtime` **17 通过 / 0 失败**；
   `cargo test remote_control::manager::persistence` **1 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
 
+### 13.6 开发入口不再单独覆盖 Relay 地址（同类根因收口）
+
+- **同类隐患**：`pinvou3-app/run-dev.sh` 原先只 `export PINVOU_REMOTE_PUBLIC_URL` /
+  `PINVOU_REMOTE_RELAY_WS_URL`（指向 remote-test），**不设置**信任根，于是 controller 握手会用内置
+  production 信任根去验 remote-test 的 transcript，必然失败关闭；同时这与
+  `docs/PINVOU-开源执行代办.md` 中「移除生产远控默认地址」的登记项同源。
+- **修复**：改为选中内置 `test` profile（`PINVOU_REMOTE_ENDPOINT_PROFILE=test`），地址与信任根同源；
+  切回生产只需 `PINVOU_REMOTE_ENDPOINT_PROFILE=production`；地址级覆盖仍保留给自建 Relay，
+  并在脚本注释与 `docs/remote-e2e-test-endpoint.md` 中写明「只覆盖地址不会同步换信任根」。
+- **验证**：`node --test pinvou3-app/tests/tauri_platform_layout.test.js` 通过；
+  `node --test pinvou3-app/tests/knowledge_host_packaging.test.mjs` 通过；`python scripts/architecture-guard.py` 通过。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
