@@ -29,8 +29,9 @@ use super::crypto::{
 use super::encrypted_lane::ControlledLaneState;
 use super::protocol::LeaseContext;
 use super::protocol::{
-    validate_controller_message_json, validate_controller_registration_message_json,
-    RegistrationValidationContext, SenderRole,
+    is_self_echoed_handshake_frame, validate_controller_message_json,
+    validate_controller_registration_message_json, RegistrationValidationContext, SenderRole,
+    ROLE_B,
 };
 use super::resume::{
     build_controller_post_activation_liveness, build_controller_resume_activation_ack,
@@ -79,6 +80,12 @@ pub(crate) fn bounded_log_token(value: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
         .take(160)
         .collect()
+}
+
+/// B 端预握手阶段的自帧回投过滤：Relay 会把发送方的 `finished_receipt_commit`
+/// 原样回投，B 只处理 `sender_role == A` 的对端帧，自己的回投必须跳过。
+pub(crate) fn skip_self_echoed_frame(message: &Value) -> bool {
+    is_self_echoed_handshake_frame(message, ROLE_B)
 }
 
 /// B 端（被控端）排障日志。
@@ -546,6 +553,13 @@ impl ControlledRelayWorker {
                             }
                             _ => {}
                         }
+                        continue 'serve;
+                    }
+                    // Relay 会把本端 commit 原样回投（router 契约，见
+                    // `controller-router.test.js`）。自帧回投不是对端输入，跳过而不是
+                    // 失败关闭：否则 B 会在收到自己 commitment 的瞬间以
+                    // `controller_handshake_rejected` 结束整条通道（2026-09-20 真机）。
+                    if skip_self_echoed_frame(&message) {
                         continue 'serve;
                     }
                     let result = match message.get("type").and_then(Value::as_str) {
@@ -1570,6 +1584,37 @@ mod tests {
             "codeAB12CD3tokenhunter2x1"
         );
         assert_eq!(bounded_log_token(&"a".repeat(400)).len(), 160);
+    }
+
+    /// Relay 会把发送方的 commit 原样回投（router 契约）：B 只吃 `sender_role == A`
+    /// 的对端帧，自己的回投必须被跳过，否则真机上会在拿到预留的下一帧直接
+    /// `controller_handshake_rejected`（2026-09-20 实测）。
+    #[test]
+    fn only_peer_handshake_frames_are_dispatched_on_the_controlled_lane() {
+        let frame = |kind: &str, role: &str| {
+            json!({
+                "v": 1,
+                "type": kind,
+                "request_id": "request-0001",
+                "pairing_id": "pairing-0001",
+                "reservation_id": "reservation-0001",
+                "remote_control_generation": "generation-0001",
+                "relay_epoch": "relay-epoch-0001",
+                "transcript_hash": "00".repeat(32),
+                "sender_role": role,
+                "commitment": "11".repeat(32),
+                "ciphertext_b64": "AQID",
+                "ciphertext_bytes": "3",
+            })
+        };
+        assert!(skip_self_echoed_frame(&frame("finished_receipt_commit", "B")));
+        assert!(!skip_self_echoed_frame(&frame("finished_receipt_commit", "A")));
+        assert!(skip_self_echoed_frame(&frame("encrypted_handshake_finished", "B")));
+        assert!(!skip_self_echoed_frame(&frame("encrypted_handshake_finished", "A")));
+        // 其它帧（预留、joined、加密业务帧）绝不按自帧吞掉。
+        assert!(!skip_self_echoed_frame(&frame("controller_pairing_reserved", "B")));
+        assert!(!skip_self_echoed_frame(&frame("controller_joined", "B")));
+        assert!(!skip_self_echoed_frame(&frame("encrypted_frame", "B")));
     }
 
     /// Deterministic fake lane: queued messages, then either hang or close.

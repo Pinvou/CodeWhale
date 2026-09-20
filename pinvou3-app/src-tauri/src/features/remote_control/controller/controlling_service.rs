@@ -1254,8 +1254,18 @@ mod tests {
             self.step += 1;
             match self.step {
                 1 => Some(self.reservation.clone()),
-                2 => Some(self.peer.commit().unwrap()),
-                3 => {
+                // Relay router 契约：发送方的 `finished_receipt_commit` 会被原样回投
+                // 给发送方（`remote-control-relay/test/controller-router.test.js`）。
+                // 这里按真实链路注入自帧回投：A 端必须跳过它，而不是当成对端
+                // commitment 失败关闭（2026-09-20 真机正是此处的对偶问题）。
+                2 => self
+                    .outbound
+                    .borrow()
+                    .iter()
+                    .find(|message| message["type"] == "finished_receipt_commit")
+                    .cloned(),
+                3 => Some(self.peer.commit().unwrap()),
+                4 => {
                     let a_commit = self
                         .outbound
                         .borrow()
@@ -1265,7 +1275,7 @@ mod tests {
                     self.peer.accept_peer_commitment(&a_commit).unwrap();
                     Some(self.peer.finished().unwrap())
                 }
-                4 => {
+                5 => {
                     let a_finished = self
                         .outbound
                         .borrow()

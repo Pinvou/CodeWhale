@@ -489,4 +489,23 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 - **验证**：`node --test pinvou3-app/tests/tauri_platform_layout.test.js` 通过；
   `node --test pinvou3-app/tests/knowledge_host_packaging.test.mjs` 通过；`python scripts/architecture-guard.py` 通过。
 
+### 13.7 真机首次 A↔B 握手失败：Relay 自帧回投未被两端过滤（已修复）
+
+- **现象**：A 端拿到 `controller_pairing_reserved`（日志 `status state:safety_handshake`）后约 40 秒以
+  `endpoint_offline` 收尾；B 端界面报错，B 端日志为
+  `[controlled] stage=handshake_failed detail=controller_handshake_rejected`。
+- **根因**：Relay router 契约会把**发送方自己的** `finished_receipt_commit` **原样回投**给发送方
+  （`remote-control-relay/test/controller-router.test.js:84-86` 明确断言 socket-A 与 socket-B 都收到该帧；
+  `controller-router.js:170-176` 先投发送方再投对端）。两端此前都把该类型的入站帧当作对端 commitment 处理，
+  于是 `sender_role` 与本端不符 → B 端在发出自己的 commit 后立刻收到回投并 `controller_handshake_rejected`
+  结束整条通道，A 端随后因对端离线收到 `endpoint_offline`。E2E-02 此后一直只有单测（无 Relay 回投），
+  真机首跑才暴露。
+- **修复**：`protocol.rs` 新增 `is_self_echoed_handshake_frame(message, own_role)`（只按本端角色匹配
+  `finished_receipt_commit` / `encrypted_handshake_finished`）；A 端 `next_of_type` 与 B 端预握手分派
+  都跳过自帧回投并继续等待，绝不吞掉对端帧，其余类型的分派与失败关闭语义不变。
+- **回归**：A 端单测夹具（`ControlledPeerPort`）改为按真实链路注入自帧回投再推进握手；B 端新增自帧判定用例
+  （对端帧/预留/joined/加密业务帧均不受影响）。
+- **验证**：`cargo test remote_control::` **330 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+- **端上影响（登记）**：B 端必须安装含本修复的包才能通过握手；对方设备上的旧包会稳定停在这一步。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
