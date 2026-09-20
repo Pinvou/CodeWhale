@@ -101,6 +101,7 @@ pub(crate) struct ControllerTransportPort {
     sender: ControllerTransportSender,
     inbound: mpsc::UnboundedReceiver<ControllerLaneEvent>,
     relay_error_code: Option<&'static str>,
+    relay_error_seen: bool,
     lane_disconnected: bool,
 }
 
@@ -138,6 +139,14 @@ impl ControllingRelayPort for ControllerTransportPort {
                     };
                     if value.get("type").and_then(Value::as_str) == Some("error") {
                         self.relay_error_code = relay_error_code(&value);
+                        self.relay_error_seen = true;
+                        // 原始码（协议枚举名，不含文案或凭据）直接落盘：闭集外的码会
+                        // 被公共错误映射兜底成 invalid_message，只在端上排障日志里
+                        // 保留原文才能定位 Relay 到底拒绝在哪一步。
+                        log_controller_event(
+                            "relay_error",
+                            value.get("code").and_then(Value::as_str).unwrap_or("unknown"),
+                        );
                     }
                     return Some(value);
                 }
@@ -147,6 +156,10 @@ impl ControllingRelayPort for ControllerTransportPort {
 
     fn relay_error_code(&self) -> Option<&'static str> {
         self.relay_error_code
+    }
+
+    fn relay_error_seen(&self) -> bool {
+        self.relay_error_seen
     }
 
     fn lane_disconnected(&self) -> bool {
@@ -176,6 +189,7 @@ fn spawn_controlling_lane(relay_url: &str) -> (ControllerTransportSender, Contro
         sender: sender.clone(),
         inbound: inbound_rx,
         relay_error_code: None,
+        relay_error_seen: false,
         lane_disconnected: false,
     };
     (sender, port)
@@ -204,6 +218,19 @@ fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'s
         return PEER_UNAVAILABLE_ERROR;
     }
     GENERIC_CONNECT_ERROR
+}
+
+/// 失败归因（有界、不含凭据）：公共码 + 来源（Relay 明确报错 / 通道断开 / 本地校验）。
+/// 只用于端上排障日志，不改变任何面向用户的错误语义。
+fn failure_origin_detail(port: &impl ControllingRelayPort, code: &str) -> String {
+    let origin = if port.relay_error_seen() {
+        "relay"
+    } else if port.lane_disconnected() {
+        "lane"
+    } else {
+        "local"
+    };
+    format!("{code}/origin:{origin}")
 }
 
 /// A 端连接核心：推到 `controller_joined`、安装租约并进入 connected。
@@ -245,14 +272,20 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
 
     let outcome = match driven {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(_handshake_error)) => {
+        Ok(Err(handshake_error)) => {
             let code = public_failure_code(port, false);
+            // 本地握手层的原始有界码 + 失败归因：公共码会把闭集外的 Relay 错误码
+            // 兜底成 invalid_message，只留公共码时无法区分「Relay 报了什么」与
+            // 「本地校验拒绝」。两者都是协议枚举名，不含任何凭据。
+            log_controller_event("handshake_failed", handshake_error.code);
+            log_controller_event("connect_failed", &failure_origin_detail(port, code));
             sender.stop();
             business.clear();
             return Err(fail_connection(manager, operation, code, on_status));
         }
         Err(_elapsed) => {
             let code = public_failure_code(port, true);
+            log_controller_event("connect_failed", &failure_origin_detail(port, code));
             sender.stop();
             business.clear();
             return Err(fail_connection(manager, operation, code, on_status));

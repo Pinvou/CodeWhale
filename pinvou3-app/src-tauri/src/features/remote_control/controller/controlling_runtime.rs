@@ -23,6 +23,13 @@ pub(crate) trait ControllingRelayPort: Send {
         None
     }
 
+    /// 是否收到过 Relay 的 `error` 帧（**无论其码是否在闭集内**）。只用于把
+    /// 失败归因到 Relay 还是本地校验：闭集外的码会被 `relay_error_code` 丢弃，
+    /// 单看公共码无法区分「Relay 拒绝」与「本地握手校验拒绝」。
+    fn relay_error_seen(&self) -> bool {
+        false
+    }
+
     /// 通道是否已断开。用于把失败映射为「对端不可达」而不是协议错误。
     fn lane_disconnected(&self) -> bool {
         false
