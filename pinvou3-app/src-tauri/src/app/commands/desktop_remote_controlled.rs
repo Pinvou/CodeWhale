@@ -125,6 +125,10 @@ pub async fn desktop_remote_controlled_start(
                 .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
                 .take(64)
                 .collect::<String>();
+            super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "start_failed",
+                &bounded,
+            );
             let status = manager
                 .fail_operation(operation, bounded)
                 .map_err(controlled_error)?;
@@ -134,8 +138,20 @@ pub async fn desktop_remote_controlled_start(
     };
     match done.await {
         Ok(Ok(status)) => Ok(status),
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err("pairing_registration_failed".to_owned()),
+        Ok(Err(error)) => {
+            super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "start_failed",
+                &error,
+            );
+            Err(error)
+        }
+        Err(_) => {
+            super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "start_failed",
+                "pairing_registration_failed",
+            );
+            Err("pairing_registration_failed".to_owned())
+        }
     }
 }
 

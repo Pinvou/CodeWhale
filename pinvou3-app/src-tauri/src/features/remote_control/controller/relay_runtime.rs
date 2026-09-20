@@ -39,6 +39,37 @@ use super::resume::{
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
+
+/// B 端排障日志（追加写入 `~/.pinvou3/logs/remote-control.log`）。
+///
+/// 只在「启停/注册/握手」这些用户可感知的失败与成功节点写一行有界文本：
+/// 不含占位符之外的任何标识（不写 endpoint_id/lease/token），便于用户把文件
+/// 直接发给支持而不担心泄漏。写失败一律忽略，绝不影响主流程。
+pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
+    use std::io::Write as _;
+    let dir = crate::platform::paths::pinvou3_home().join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("remote-control.log"))
+    else {
+        return;
+    };
+    let bounded: String = detail
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
+        .take(160)
+        .collect();
+    let _ = writeln!(file, "[controlled] stage={stage} detail={bounded}");
+}
+
+/// 测试/内联断言用：日志行格式（不含时间戳，便于跨平台断言）。
+pub(crate) fn controlled_log_line(stage: &str, detail: &str) -> String {
+    format!("[controlled] stage={stage} detail={detail}")
+}
 const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
     "encrypted_frames_v1",
@@ -321,6 +352,7 @@ impl ControlledRelayWorker {
                     let status = manager
                         .complete_registration(self.operation.clone(), *registration, 0)
                         .map_err(|error| error.code.to_owned())?;
+                    log_controlled_event("registered", "waiting_connection");
                     let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
                     return Ok(status);
                 }
@@ -329,6 +361,7 @@ impl ControlledRelayWorker {
     }
 
     fn fail_registration(&self, error: &str) {
+        log_controlled_event("registration_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
@@ -690,6 +723,7 @@ impl ControlledRelayWorker {
 /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
 /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
+        log_controlled_event("handshake_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
