@@ -17126,6 +17126,11 @@ fn forkguard_subagent_context_hint_names_active_tools() {
 
     assert!(context.contains("handle_read"));
     assert!(
+        context.contains("transcript: agent:agent_1234abcd/full_transcript"),
+        "the hint names transcript_handle, so the summarized row must carry \
+         the value it points at:\n{context}"
+    );
+    assert!(
         context.contains("activate it via `tool_search` first"),
         "handle_read is deferred on stock hosts; the hint must name the \
          activation path instead of commanding a tool the model cannot see:\n\
@@ -17244,6 +17249,37 @@ fn forkguard_agent_receipt_passthrough_is_bounded() {
                 + super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS
                 + "[receipt truncated: showing 2000 of 18446744073709551615 characters]".len(),
         "passthrough must stay bounded:\n{context}"
+    );
+
+    // The cap is inclusive and the note is exact: a receipt of exactly the
+    // cap passes through verbatim, one character over it truncates.
+    let make_receipt_of_len = |target: usize| -> String {
+        let template = "{\"action\":\"roster\",\"pad\":\"PAD\"}";
+        let fixed = template.len() - 3;
+        assert!(target > fixed, "target length must leave room for the pad");
+        template.replace("PAD", &"p".repeat(target - fixed))
+    };
+    let exact = make_receipt_of_len(super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS);
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(exact.clone()),
+    );
+    assert!(
+        !context.contains("[receipt truncated"),
+        "a receipt exactly at the cap is not truncated:\n{context}"
+    );
+    assert!(
+        context.contains(&exact),
+        "the exact-cap receipt passes through verbatim:\n{context}"
+    );
+
+    let one_over = make_receipt_of_len(super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS + 1);
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(one_over));
+    assert!(
+        context.contains("[receipt truncated: showing 2000 of 2001 characters]"),
+        "one character over the cap truncates with an exact note:\n{context}"
     );
 }
 
@@ -23801,4 +23837,99 @@ async fn forkguard_session_sync_reseeds_briefed_servers_from_restored_history_an
         beta_notices, 1,
         "a still-briefed server is corrected exactly once after the reseed"
     );
+}
+
+// Action receipts — message/followup acks, spawn starts, the unchanged
+// nudge — are coordination payloads: snapshot-summarizing them drops the
+// queued/woke/queue_depth/note facts the model coordinates with, and renders
+// an ack as a placeholder child result ("result: not available yet").
+#[test]
+fn forkguard_agent_action_receipts_pass_through_to_context() {
+    let ack = json!({
+        "action": "message",
+        "agent_id": "agent_m1a2b3c4",
+        "queued": true,
+        "woke": false,
+        "queue_depth": 2,
+        "status": "running",
+        "note": "Message queued without waking the child."
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(ack));
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "an action ack must pass through, not summarize:\n{context}"
+    );
+    assert!(
+        context.contains("\"queue_depth\":2") && context.contains("Message queued without waking"),
+        "the coordination facts must survive:\n{context}"
+    );
+    assert!(
+        !context.contains("not available yet"),
+        "an ack must never be rendered as a placeholder child result:\n{context}"
+    );
+
+    let followup = json!({
+        "action": "followup",
+        "agent_id": "agent_m1a2b3c4",
+        "queued": true,
+        "woke": true,
+        "queue_depth": 0,
+        "status": "running",
+        "continued_from_checkpoint": true,
+        "continuation_handle": "checkpoint_42",
+        "note": "Resumed from checkpoint."
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(followup));
+    assert!(context.contains("[sub-agent receipt]"));
+    assert!(
+        context.contains("\"continuation_handle\":\"checkpoint_42\""),
+        "the continuation handle must survive:\n{context}"
+    );
+
+    let nudge = json!({
+        "action": "status",
+        "agent_id": "agent_m1a2b3c4",
+        "name": "scout",
+        "status": "running",
+        "unchanged": true,
+        "hint": "No change since your last check."
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(nudge));
+    assert!(context.contains("[sub-agent receipt]"));
+    assert!(
+        context.contains("No change since your last check"),
+        "the anti-pattern hint must survive:\n{context}"
+    );
+}
+
+// Fleet rows carry transcript_handle values; the hint fires for the fleet
+// listing too, and every row shows the value it points at.
+#[test]
+fn forkguard_agent_fleet_listing_with_handles_names_the_hint_with_visible_values() {
+    let fleet = json!({
+        "action": "status",
+        "count": 2,
+        "agents": [
+            {"agent_id": "agent_aaaa1111", "status": "Running",
+             "transcript_handle": "agent:agent_aaaa1111/full_transcript"},
+            {"agent_id": "agent_bbbb2222", "status": "Completed", "result": "done",
+             "transcript_handle": "agent:agent_bbbb2222/full_transcript"}
+        ]
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(fleet));
+
+    assert!(
+        context.contains("handle_read"),
+        "fleet rows carry handles, so the hint must fire:\n{context}"
+    );
+    assert!(context.contains("transcript: agent:agent_aaaa1111/full_transcript"));
+    assert!(context.contains("transcript: agent:agent_bbbb2222/full_transcript"));
 }

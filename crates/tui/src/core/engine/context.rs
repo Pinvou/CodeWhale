@@ -164,6 +164,15 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
         .get("status")
         .map(summarize_subagent_status)
         .unwrap_or_else(|| "unknown".to_string());
+    // The hint below names `transcript_handle`, so the summarized rows must
+    // carry the value it points at — otherwise the hint would name a value
+    // the model never receives (the Pinvou #490 phantom-value class). The
+    // handle is engine-generated and never truncated.
+    let transcript_handle = obj
+        .get("transcript_handle")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|handle| !handle.is_empty());
     let objective = obj
         .get("assignment")
         .and_then(|assignment| assignment.get("objective"))
@@ -181,6 +190,9 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
     let duration_ms = obj.get("duration_ms").and_then(serde_json::Value::as_u64);
 
     let mut lines = vec![format!("- {agent_id} ({agent_type}) status={status}")];
+    if let Some(transcript_handle) = transcript_handle {
+        lines.push(format!("  transcript: {transcript_handle}"));
+    }
     if let Some(objective) = objective {
         lines.push(format!("  objective: {objective}"));
     }
@@ -222,12 +234,27 @@ fn subagent_snapshot_shaped(value: &serde_json::Value) -> bool {
 /// True when the parsed receipt structurally carries a `transcript_handle`
 /// for at least one child — the field the guidance names. Free text that
 /// merely mentions the word must not summon the hint (Pinvou #490 class).
+/// Both shapes that summarize rows are covered: a bare per-child object/array
+/// and the unscoped fleet listing whose rows live under `agents[]` (the row
+/// summarizer prints each row's `transcript:` value, so the hint always has
+/// a visible value to point at).
 fn carries_transcript_handle(parsed: &serde_json::Value) -> bool {
     match parsed {
         serde_json::Value::Array(items) => items
             .iter()
             .any(|item| item.get("transcript_handle").is_some()),
-        _ => parsed.get("transcript_handle").is_some(),
+        serde_json::Value::Object(object) => {
+            object.get("transcript_handle").is_some()
+                || object
+                    .get("agents")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|fleet| {
+                        fleet
+                            .iter()
+                            .any(|row| row.get("transcript_handle").is_some())
+                    })
+        }
+        _ => false,
     }
 }
 
@@ -275,20 +302,36 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
                 None
             }
         }
-        serde_json::Value::Object(_) if subagent_snapshot_shaped(&parsed) => {
-            Some(SubagentSnapshotBatch::ChildResults(vec![&parsed]))
-        }
-        serde_json::Value::Object(object) => match object.get("agents").and_then(Value::as_array) {
-            Some(fleet) if !fleet.is_empty() && fleet.iter().all(subagent_snapshot_shaped) => {
+        serde_json::Value::Object(object) => {
+            // The unscoped fleet listing is matched before the action-receipt
+            // rule: its envelope carries `action` too, and its rows must
+            // summarize per child instead of truncating as one blob.
+            if let Some(fleet) = object.get("agents").and_then(Value::as_array)
+                && !fleet.is_empty()
+                && fleet.iter().all(subagent_snapshot_shaped)
+            {
                 Some(SubagentSnapshotBatch::FleetStatus(fleet.iter().collect()))
+            } else if object.contains_key("action") {
+                // Action receipts — spawn starts, message/followup/interrupt
+                // acks, roster catalogs, write claims — are coordination
+                // payloads: the queued/woke/queue_depth/note facts are what
+                // the model coordinates with, and snapshot-summarizing them
+                // collapses the receipt into "- unknown (agent) status=…"
+                // placeholder noise. Pass them through bounded like the
+                // other non-snapshot receipts.
+                None
+            } else if subagent_snapshot_shaped(&parsed) {
+                Some(SubagentSnapshotBatch::ChildResults(vec![&parsed]))
+            } else {
+                None
             }
-            _ => None,
-        },
+        }
         _ => None,
     };
     let Some(batch) = batch else {
-        // Not a per-child snapshot (`roster`/`wait`/`claim` receipts): the
-        // raw JSON is the payload the model needs — pass it through bounded.
+        // Not a per-child snapshot (`roster`/`wait`/`claim`/action-ack
+        // receipts): the raw JSON is the payload the model needs — pass it
+        // through bounded.
         return Some(bounded_subagent_receipt(raw));
     };
     let (header, snapshots) = match batch {

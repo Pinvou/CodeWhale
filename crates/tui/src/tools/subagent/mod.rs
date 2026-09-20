@@ -3696,11 +3696,13 @@ impl SubAgentManager {
             };
             let role_matches = record.spec.agent_type == expected
                 || record.spec.role.as_deref().is_some_and(|role| {
-                    role.trim().eq_ignore_ascii_case(label)
-                        || (expected == FleetRole::Reviewer
-                            && role.trim().eq_ignore_ascii_case("reviewer"))
-                        || (expected == FleetRole::Verifier
-                            && role.trim().eq_ignore_ascii_case("verifier"))
+                    let stated = role.trim();
+                    // Canonical tokens (`test`) and registered aliases
+                    // (`verifier`) both migrate to the same FleetRole; the
+                    // free-text label stays accepted for host-authored
+                    // specs that never carried a canonical token.
+                    FleetRole::from_str(stated).is_some_and(|parsed| parsed == expected)
+                        || stated.eq_ignore_ascii_case(label)
                 });
             if !role_matches || record.status != AgentWorkerStatus::Completed {
                 return Err(format!(
@@ -15989,15 +15991,15 @@ fn subagent_status_name(status: &SubAgentStatus) -> &'static str {
 use crate::prompts::text::SUBAGENT_OUTPUT_FORMAT;
 
 const GENERAL_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet worker. Your job is to complete the one task you were given, end-to-end, and report back concisely.\n",
+    "You are a trusted general Fleet agent (role: `general`). Your job is to complete the one task you were given, end-to-end, and report back concisely.\n",
     "Stay inside the assigned scope; put adjacent work under RISKS/BLOCKERS.\n",
     "For genuinely multi-step work, track progress with `todo_write`; skip it for short, focused tasks.\n",
     "**Stop quickly on failure**: if the same tool call fails 2 times in a row, stop retrying and return what you have so far with a one-line note explaining what's missing. Do not loop on impossible queries (e.g. external API unreachable, rate-limited, or returning empty).\n",
-    "For builder or repair-style work, keep going within the assigned scope; checkpoint before broadening the task or after repeated failures instead of forcing a tiny tool-call cap.\n\n"
+    "For implement or repair-style work, keep going within the assigned scope; checkpoint before broadening the task or after repeated failures instead of forcing a tiny tool-call cap.\n\n"
 );
 
 const EXPLORE_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet scout (role: `explore`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
+    "You are a trusted Fleet explorer (role: `explore`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
     "Default to `EFFORT: quick`: aim for about 3-5 tool calls unless the brief explicitly asks for more.\n",
     "Orient first: confirm the workspace/project root, read relevant AGENTS.md/README guidance when the tree is unfamiliar, then search only the likely scope.\n",
     "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
@@ -16026,7 +16028,7 @@ const REVIEW_AGENT_INTRO: &str = concat!(
 );
 
 const CUSTOM_AGENT_INTRO: &str = concat!(
-    "You are a trusted custom Fleet worker (role: `custom`) with a narrowed tool registry. Your job is to stay tightly scoped to the assigned objective.\n",
+    "You are a trusted custom Fleet agent (role: `custom`) with a narrowed tool registry. Your job is to stay tightly scoped to the assigned objective.\n",
     "Use only tools available at runtime; put missing capabilities under BLOCKERS and stop.\n\n"
 );
 
@@ -16034,7 +16036,7 @@ const IMPLEMENTER_AGENT_INTRO: &str = concat!(
     "You are a trusted Fleet implement agent (role: `implement`). Your job is to land the assigned change with minimal surrounding edits.\n",
     "Use `edit` for precise unique replacements, `write` for whole-file changes, and discover `apply_patch` for unified multi-file patches when needed.\n",
     "Run relevant verification after edit batches; write needed tests with the implementation.\n",
-    "You are not limited to a scout-style 3-5 tool-call cap. Checkpoint before expanding scope or after repeated failures, then continue only inside the assigned brief.\n",
+    "You are not limited to an explore-style 3-5 tool-call cap. Checkpoint before expanding scope or after repeated failures, then continue only inside the assigned brief.\n",
     "CHANGES is load-bearing: list every modified file with a one-line why.\n",
     "Before finishing, end with a VERDICT block: PASS or FAIL, the exact commands you ran (or why verification was impossible), and brief evidence. A diff alone is not completion.\n\n"
 );
@@ -16060,7 +16062,7 @@ const CONSULTANT_AGENT_INTRO: &str = concat!(
     "Name what the asker appears not to have considered: the failure mode, the constraint, the cheaper alternative, the reason this is harder than it looks.\n",
     "Distinguish what you verified by reading from what you are inferring. An unverified hunch is still useful — labelled as one.\n",
     "If the question is underspecified in a way that changes the answer, say which detail decides it rather than answering both ways at length.\n",
-    "CHANGES will always be \"None.\" for a consultant.\n\n"
+    "CHANGES will always be \"None.\" for an advisor.\n\n"
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(
@@ -16068,7 +16070,7 @@ const VERIFIER_AGENT_INTRO: &str = concat!(
     "Report PASS/FAIL/FLAKY at the top of SUMMARY with exact command evidence.\n",
     "Capture failing assertion and file:line; put obvious fixes under RISKS.\n",
     "You may use more tool calls than quick exploration, but stop after decisive pass/fail evidence.\n",
-    "CHANGES will almost always be \"None.\" for a verifier.\n\n"
+    "CHANGES will almost always be \"None.\" for a test agent.\n\n"
 );
 
 // === Tests ===

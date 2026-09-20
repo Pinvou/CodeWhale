@@ -235,7 +235,7 @@ impl ToolSpec for WebSearchTool {
                 },
                 "locale": {
                     "type": "string",
-                    "description": "Requested result locale as a BCP 47-style tag such as zh-CN or ja-JP; malformed values are ignored. The keyless Bing and DuckDuckGo scrapes honor it; unsupported backends report it as degraded."
+                    "description": "Requested result locale as a BCP 47-style tag such as zh-CN or ja-JP; malformed values are ignored. The keyless Bing scrape honors it via its mkt/setlang market parameters; the keyless DuckDuckGo scrape maps a fixed region list and reports malformed or unmapped regions as ignored; unsupported backends report it as degraded."
                 }
             }
         })
@@ -1131,12 +1131,26 @@ fn finalize_search_response(
         honored.domains = true;
     }
     if query.locale.is_some() {
+        // The scrapes can flag an explicit locale as ignored before this
+        // point (malformed value, or a DuckDuckGo region outside the
+        // verified `kl` list). In that case the knob was not honored and
+        // the receipt must not claim it was — the degraded entry already
+        // says so.
+        let locale_flagged_ignored = raw.degraded.iter().any(|reason| {
+            matches!(
+                reason,
+                DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale,
+                }
+            )
+        });
         if matches!(
             capabilities.locale,
             super::web::contract::CapabilityState::Supported
-        ) {
+        ) && !locale_flagged_ignored
+        {
             honored.locale = true;
-        } else {
+        } else if !locale_flagged_ignored {
             raw.degraded.push(DegradedReason::KnobIgnored {
                 knob: QueryKnob::Locale,
             });
@@ -1189,7 +1203,7 @@ pub(crate) fn apply_domain_constraints(
     rerank(&mut raw.results);
     let provider_honored = matches!(
         capabilities.domains,
-        super::web::contract::CapabilityState::Supported
+        crate::tools::web::contract::CapabilityState::Supported
     );
     let filtered_any = raw.results.len() != before;
     if raw.backend == BackendId::ProviderNative && (!provider_honored || filtered_any) {
@@ -1380,6 +1394,11 @@ async fn run_scrape_search_with_endpoints(
 
     if provider == SearchProvider::Bing {
         check_policy(decider, BING_HOST)?;
+        if bing_locale_was_ignored(query.locale.as_deref()) {
+            degraded.push(DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale,
+            });
+        }
         let results = run_bing_search(
             &client,
             &query.query,
@@ -1399,6 +1418,11 @@ async fn run_scrape_search_with_endpoints(
     }
 
     let market = scrape_market(query.locale.as_deref(), &query.query);
+    if ddg_locale_was_ignored(query.locale.as_deref(), market.as_deref()) {
+        degraded.push(DegradedReason::KnobIgnored {
+            knob: QueryKnob::Locale,
+        });
+    }
     let (url, duckduckgo_host) = duckduckgo_search_url(
         context.search_base_url.as_deref(),
         &query.query,
@@ -1483,6 +1507,22 @@ async fn run_scrape_search_with_endpoints(
                 from: BackendId::DuckDuckGo,
                 to: BackendId::Bing,
             });
+            // The fallback consumed the same raw locale; if the flag was not
+            // already pushed for the DuckDuckGo leg, push it for Bing.
+            if bing_locale_was_ignored(query.locale.as_deref())
+                && !degraded.iter().any(|reason| {
+                    matches!(
+                        reason,
+                        DegradedReason::KnobIgnored {
+                            knob: QueryKnob::Locale,
+                        }
+                    )
+                })
+            {
+                degraded.push(DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale,
+                });
+            }
             Ok(BackendSearch {
                 backend: BackendId::Bing,
                 source: "bing".to_string(),
@@ -2089,7 +2129,7 @@ fn scrape_market(locale: Option<&str>, query: &str) -> Option<String> {
     locale
         .map(str::trim)
         .filter(|tag| is_plausible_locale_tag(tag))
-        .map(str::to_string)
+        .map(|tag| tag.replace('_', "-"))
         .or_else(|| query_contains_han(query).then(|| "zh-CN".to_string()))
 }
 
@@ -2126,7 +2166,19 @@ fn scrape_accept_language(market: Option<&str>) -> String {
                 .next()
                 .filter(|tag| !tag.is_empty())
                 .unwrap_or("en");
-            format!("{market},{primary};q=0.9,en;q=0.8")
+            let mut value = if market.eq_ignore_ascii_case(primary) {
+                format!("{market};q=0.9")
+            } else {
+                format!("{market},{primary};q=0.9")
+            };
+            // The generic `en` fallback duplicates the primary tag for
+            // English markets (`en-US,en;q=0.9,en;q=0.8`), where two q-values
+            // for one range have no defined precedence — only add it when it
+            // contributes a distinct range.
+            if !primary.eq_ignore_ascii_case("en") {
+                value.push_str(",en;q=0.8");
+            }
+            value
         }
     }
 }
@@ -2145,15 +2197,32 @@ fn scrape_locale_params(locale: Option<&str>, query: &str) -> (Vec<(String, Stri
         .filter(|tag| !tag.is_empty())
         .unwrap_or("en");
     // Bing expects `setlang` to carry a script tag for Chinese (a bare `zh`
-    // is invalid and silently defaults to `en`); pick the script from the
-    // market's region subtag, defaulting to Simplified because the heuristic
-    // that reaches this branch without an explicit region is Han-driven.
+    // is invalid and silently defaults to `en`). An explicit script subtag
+    // wins (`zh-Hant-TW` must not degrade to Simplified); otherwise the
+    // script is picked from the market's region subtag, defaulting to
+    // Simplified because the heuristic that reaches this branch without an
+    // explicit region is Han-driven.
     let setlang = if primary.eq_ignore_ascii_case("zh") {
-        match market.split(['-', '_']).nth(1) {
-            Some(region) if matches!(region.to_ascii_lowercase().as_str(), "tw" | "hk" | "mo") => {
-                "zh-Hant"
+        let segments: Vec<&str> = market.split(['-', '_']).collect();
+        if segments
+            .iter()
+            .any(|segment| segment.eq_ignore_ascii_case("hant"))
+        {
+            "zh-Hant"
+        } else if segments
+            .iter()
+            .any(|segment| segment.eq_ignore_ascii_case("hans"))
+        {
+            "zh-Hans"
+        } else {
+            match segments.get(1) {
+                Some(region)
+                    if matches!(region.to_ascii_lowercase().as_str(), "tw" | "hk" | "mo") =>
+                {
+                    "zh-Hant"
+                }
+                _ => "zh-Hans",
             }
-            _ => "zh-Hans",
         }
     } else {
         primary
@@ -2165,6 +2234,23 @@ fn scrape_locale_params(locale: Option<&str>, query: &str) -> (Vec<(String, Stri
         ],
         accept_language,
     )
+}
+
+/// True when an explicit `locale` was supplied but cannot shape a market
+/// signal for the Bing scrape (`mkt`/`setlang`): the value is malformed, so
+/// the request proceeds with no locale signal at all and the receipt must
+/// say so instead of claiming the knob was honored.
+fn bing_locale_was_ignored(locale: Option<&str>) -> bool {
+    locale.is_some_and(|tag| !is_plausible_locale_tag(tag.trim()))
+}
+
+/// True when an explicit `locale` was supplied but the DuckDuckGo scrape
+/// sends no region signal for it: either the value is malformed (no market
+/// tag resolves) or the resolved market is outside the verified `kl` region
+/// list, in which case nothing from the locale reaches the request and the
+/// receipt must say so instead of claiming the knob was honored.
+fn ddg_locale_was_ignored(locale: Option<&str>, market: Option<&str>) -> bool {
+    locale.is_some() && market.and_then(ddg_region_param).is_none()
 }
 
 async fn run_bing_search(
@@ -3107,7 +3193,7 @@ mod tests {
                 ("setlang".to_string(), "en".to_string()),
             ]
         );
-        assert_eq!(accept_language, "en-US,en;q=0.9,en;q=0.8");
+        assert_eq!(accept_language, "en-US,en;q=0.9");
 
         // Bing's setlang table keys the Chinese script off the region:
         // Taiwan/Hong Kong/Macao are Traditional, everything else (including
@@ -3139,6 +3225,56 @@ mod tests {
         let (params, accept_language) = super::scrape_locale_params(None, "rust async");
         assert!(params.is_empty());
         assert_eq!(accept_language, "en-US,en;q=0.9");
+    }
+
+    #[test]
+    fn bing_locale_params_normalize_underscore_separators() {
+        // The model often writes `zh_CN`; the underscore must not leak into
+        // the `mkt` parameter or the `Accept-Language` ranges.
+        let (params, accept_language) = super::scrape_locale_params(Some("zh_CN"), "rust async");
+        assert_eq!(
+            params,
+            vec![
+                ("mkt".to_string(), "zh-CN".to_string()),
+                ("setlang".to_string(), "zh-Hans".to_string()),
+            ]
+        );
+        assert_eq!(accept_language, "zh-CN,zh;q=0.9,en;q=0.8");
+    }
+
+    #[test]
+    fn bing_setlang_keeps_an_explicit_script_subtag() {
+        // `zh-Hant-TW` must not degrade to Simplified: the explicit script
+        // subtag wins over the region-derived default.
+        let (params, _) = super::scrape_locale_params(Some("zh-Hant-TW"), "rust async");
+        assert_eq!(params[1].1, "zh-Hant");
+        let (params, _) = super::scrape_locale_params(Some("zh-Hans-CN"), "rust async");
+        assert_eq!(params[1].1, "zh-Hans");
+        let (params, _) = super::scrape_locale_params(Some("zh-Hant"), "rust async");
+        assert_eq!(params[1].1, "zh-Hant");
+    }
+
+    #[test]
+    fn ddg_locale_ignored_only_when_an_explicit_locale_yields_no_region() {
+        // Mapped regions are honored.
+        assert!(!super::ddg_locale_was_ignored(Some("zh-CN"), Some("zh-CN")));
+        // Unmapped but well-formed regions send no `kl`: the receipt must
+        // not claim the knob was honored.
+        assert!(super::ddg_locale_was_ignored(Some("fr-FR"), Some("fr-FR")));
+        // Malformed values resolve no market at all.
+        assert!(super::ddg_locale_was_ignored(Some("zh CN"), None));
+        // No explicit locale: the Han fallback is the tool's own choice,
+        // never a dropped knob.
+        assert!(!super::ddg_locale_was_ignored(None, Some("zh-CN")));
+        assert!(!super::ddg_locale_was_ignored(None, None));
+    }
+
+    #[test]
+    fn bing_locale_ignored_only_for_malformed_explicit_values() {
+        assert!(!super::bing_locale_was_ignored(Some("zh-CN")));
+        assert!(!super::bing_locale_was_ignored(None));
+        assert!(super::bing_locale_was_ignored(Some("zh CN")));
+        assert!(super::bing_locale_was_ignored(Some("-CN")));
     }
 
     #[test]
@@ -4289,6 +4425,71 @@ mod tests {
         assert_eq!(response.results[0].title, "A");
         assert_eq!(response.results[1].title, "B");
         assert!(response.message.contains('2'), "{}", response.message);
+    }
+
+    #[test]
+    fn finalize_search_response_does_not_claim_an_ignored_locale_was_honored() {
+        // A scrape flagged the explicit locale as ignored (here: an unmapped
+        // DuckDuckGo region): the receipt must keep `honored.locale` false
+        // instead of claiming the knob was honored.
+        let query = SearchQuery::new(
+            "query".to_string(),
+            5,
+            None,
+            Vec::new(),
+            Some("fr-FR".to_string()),
+        );
+        let raw = BackendSearch {
+            backend: BackendId::DuckDuckGo,
+            source: "duckduckgo".to_string(),
+            backend_detail: None,
+            results: Vec::new(),
+            degraded: vec![DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale,
+            }],
+            note: None,
+        };
+        let capabilities = crate::tools::web::contract::QueryCapabilities {
+            max_results: crate::tools::web::contract::CapabilityState::Supported,
+            recency: crate::tools::web::contract::CapabilityState::Unsupported,
+            domains: crate::tools::web::contract::CapabilityState::Unsupported,
+            locale: crate::tools::web::contract::CapabilityState::Supported,
+            published_date: crate::tools::web::contract::CapabilityState::Unknown,
+        };
+        let response = finalize_search_response(query, capabilities.clone(), raw, Instant::now());
+        assert!(
+            !response.receipt.honored.locale,
+            "an ignored locale must not be reported as honored"
+        );
+        assert!(
+            response.receipt.degraded.iter().any(|reason| matches!(
+                reason,
+                DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale
+                }
+            )),
+            "the degraded receipt must carry the locale flag exactly once"
+        );
+        assert_eq!(response.receipt.degraded.len(), 1);
+
+        // A mapped locale with no scrape flag stays honored.
+        let query = SearchQuery::new(
+            "query".to_string(),
+            5,
+            None,
+            Vec::new(),
+            Some("zh-CN".to_string()),
+        );
+        let raw = BackendSearch {
+            backend: BackendId::DuckDuckGo,
+            source: "duckduckgo".to_string(),
+            backend_detail: None,
+            results: Vec::new(),
+            degraded: Vec::new(),
+            note: None,
+        };
+        let response = finalize_search_response(query, capabilities, raw, Instant::now());
+        assert!(response.receipt.honored.locale);
     }
 
     #[test]

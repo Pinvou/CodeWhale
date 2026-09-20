@@ -2707,13 +2707,13 @@ fn test_implementer_and_verifier_have_distinct_prompts() {
 #[test]
 fn test_agent_type_prompts_include_shared_output_contract_once() {
     for (agent_type, marker) in [
-        (FleetRole::Worker, "Fleet worker"),
-        (FleetRole::Scout, "Fleet scout"),
+        (FleetRole::Worker, "general Fleet agent"),
+        (FleetRole::Scout, "Fleet explorer"),
         (FleetRole::Planner, "Fleet planner"),
         (FleetRole::Reviewer, "Fleet reviewer"),
         (FleetRole::Builder, "Fleet implement agent"),
         (FleetRole::Verifier, "Fleet test agent"),
-        (FleetRole::Custom, "custom Fleet worker"),
+        (FleetRole::Custom, "custom Fleet agent"),
     ] {
         let prompt = agent_type.system_prompt();
         assert!(prompt.contains(marker));
@@ -2778,7 +2778,7 @@ fn explore_prompt_is_quick_bounded_and_read_only() {
 #[test]
 fn implementer_prompt_is_not_forced_into_explorer_cap() {
     let prompt = FleetRole::Builder.system_prompt();
-    assert!(prompt.contains("not limited to a scout-style 3-5 tool-call cap"));
+    assert!(prompt.contains("not limited to an explore-style 3-5 tool-call cap"));
     assert!(prompt.contains("Checkpoint before expanding scope"));
     assert!(!prompt.contains("Default to `EFFORT: quick`"));
 }
