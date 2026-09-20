@@ -85,9 +85,11 @@ jobs:
           set -euo pipefail
 
           if [ -z "${CNB_TOKEN:-}" ]; then
-            # The gate above already skipped this job; keep the guard as a
-            # belt-and-suspenders check for a manual `workflow_dispatch` run
-            # that reuses an older revision of this file.
+            # Whenever this revision of the workflow runs, the gate above has
+            # already skipped this job. This guard still covers runs that carry
+            # an older revision of this file (a push from a branch that predates
+            # the gate), plus the narrow window where the secret is deleted
+            # between the gate's probe and this step.
             echo "::error::CNB_GIT_TOKEN secret is not set; cannot push to CNB." >&2
             exit 1
           fi
