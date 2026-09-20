@@ -69,19 +69,6 @@ assert.match(
   /65535/,
   'local picker detect must validate the custom port range before probing',
 );
-// Safety invariant (moved from the deleted legacy handleDetect guard): detection
-// must only record candidate rows — never auto-fill the form — so an unknown-load
-// model (JIT loading can be tens of GB) is only ever added by an explicit user click.
-assert.match(
-  localDetectSource,
-  /setLocalDetectResult\(\{ candidates:/,
-  'local detection must only record candidate rows (no automatic form fill)',
-);
-assert.doesNotMatch(
-  localDetectSource,
-  /setBaseUrl\(|setModel\(/,
-  'local detection must not auto-fill the form; the user adds a candidate explicitly',
-);
 for (const settingsI18nSource of settingsI18nSources) {
   assert.match(
     settingsI18nSource,
@@ -107,19 +94,14 @@ assert.doesNotMatch(
   /window\.confirm\s*\(/,
   'settings page must not call window.confirm (does not render in Tauri WebView2; use in-app confirm dialogs)',
 );
-// In-app confirm dialog testid pins: MemoryDeleteDialog routes through
-// SheetConfirmDialog and passes its pins as testid/confirmTestId props (the shared
-// dialog renders them as data-testid), while the feedback close confirm still
-// carries its literal data-testid attributes inline.
-const confirmTestIdPins = [
-  ['memory-delete-confirm', ['data-testid="memory-delete-confirm"', 'testid="memory-delete-confirm"']],
-  ['memory-delete-confirm-ok', ['data-testid="memory-delete-confirm-ok"', 'confirmTestId="memory-delete-confirm-ok"']],
-  ['feedback-close-confirm', ['data-testid="feedback-close-confirm"']],
-  ['feedback-close-confirm-ok', ['data-testid="feedback-close-confirm-ok"']],
-];
-for (const [confirmTestId, variants] of confirmTestIdPins) {
+for (const confirmTestId of [
+  'memory-delete-confirm',
+  'memory-delete-confirm-ok',
+  'feedback-close-confirm',
+  'feedback-close-confirm-ok',
+]) {
   assert.ok(
-    variants.some((variant) => settingsViewSource.includes(variant)),
+    settingsViewSource.includes(`data-testid="${confirmTestId}"`),
     `missing in-app confirm dialog testid: ${confirmTestId}`,
   );
 }

@@ -15,7 +15,7 @@ import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
   MODEL_CATALOG_SECTIONS, MODEL_CATALOG, CLOUD_MODEL_PROVIDERS,
   BRAND_ICON_BY_PRESET, BRAND_ICON_BY_VENDOR,
-  presetProviderLabel,
+  presetOptionsI18n, presetProviderLabel,
   normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel, catalogItemMatchesModel,
   catalogImageCapableForModel,
   groupModelsForSelector,
@@ -754,10 +754,6 @@ const formatMemoryTime = (item, copy) => {
           credential_action: 'keep_existing',
         };
       }
-      // 本机模型检测（本地选择页「检测」按钮）：只列出候选行，绝不自动填充表单——
-      // Ollama/LM Studio 的列表接口返回全部已下载模型，JIT 机制下加载未运行模型可能
-      // 静默载入几十 GB；候选是否添加由用户显式点击决定（安全不变量，由
-      // tests/settings_ui_smoke.js 的源码守卫钉住）。
       async function handleLocalDetect() {
         if (!bridge.available || !bridge.vllm.discoverLocalVllm || localDetecting) return;
         // Optional custom port: the draft keeps the raw input as typed; anything
@@ -1579,17 +1575,16 @@ const formatMemoryTime = (item, copy) => {
       </div>
     );
     // iOS-style confirm dialog (stacked buttons: red confirm on top, blue cancel below; backdrop click does not close).
-    // Three isomorphic sites: model delete / search source delete / memory delete; RestartDialog (two-column grid, wider) is not one of them.
-    // Optional testid/confirmTestId mount the memory delete dialog's test pins; desc is omitted where the dialog carries no description row.
-    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel, testid, confirmTestId }) => (
-      <div data-testid={testid} className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+    // Two isomorphic sites: model delete / search source delete; RestartDialog (two-column grid, wider) is not one of them.
+    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel }) => (
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
         <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
           <div className="px-5 pt-5 pb-4 text-center">
             <h3 className="text-[17px] leading-6 font-semibold">{title}</h3>
-            {desc && <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{desc}</p>}
+            <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{desc}</p>
           </div>
           <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
-            <button type="button" data-testid={confirmTestId} onClick={onConfirm} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{confirmLabel}</button>
+            <button type="button" onClick={onConfirm} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{confirmLabel}</button>
             <button type="button" onClick={onCancel} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{cancelLabel}</button>
           </div>
         </div>
@@ -1619,15 +1614,17 @@ const formatMemoryTime = (item, copy) => {
     );
     /** @param {{ item: MemoryItem, copy: { memoryDeleteConfirm: string }, detailCopy: { delete: string, cancel: string }, onConfirmDelete: (item: MemoryItem) => void, setMemoryDeleteConfirm: (next: MemoryItem | null) => void }} props - Delete-memory confirm state and actions. The native window.confirm does not render in Tauri WebView2, so this uses the same in-app confirm dialog as the model/search deletes. */
     const MemoryDeleteDialog = ({ item, copy, detailCopy, onConfirmDelete, setMemoryDeleteConfirm }) => (
-      <SheetConfirmDialog
-        testid="memory-delete-confirm"
-        confirmTestId="memory-delete-confirm-ok"
-        title={copy.memoryDeleteConfirm}
-        confirmLabel={detailCopy.delete}
-        cancelLabel={detailCopy.cancel}
-        onConfirm={() => { onConfirmDelete(item); setMemoryDeleteConfirm(null); }}
-        onCancel={() => setMemoryDeleteConfirm(null)}
-      />
+      <div data-testid="memory-delete-confirm" className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+        <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
+          <div className="px-5 pt-5 pb-4 text-center">
+            <h3 className="text-[17px] leading-6 font-semibold">{copy.memoryDeleteConfirm}</h3>
+          </div>
+          <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
+            <button type="button" data-testid="memory-delete-confirm-ok" onClick={() => { onConfirmDelete(item); setMemoryDeleteConfirm(null); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{detailCopy.delete}</button>
+            <button type="button" onClick={() => setMemoryDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{detailCopy.cancel}</button>
+          </div>
+        </div>
+      </div>
     );
 
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
@@ -2620,6 +2617,9 @@ const formatMemoryTime = (item, copy) => {
       const renderCommunity = () => (
         <CommunityPanel
           copy={t}
+          groupName={COMMUNITY_QQ_GROUP_NAME}
+          groupNumber={COMMUNITY_QQ_GROUP_NUMBER}
+          qrImageSrc={COMMUNITY_QQ_QR_IMAGE_SRC}
           onOpenDiscussions={() => {
             if (!bridge.available || !bridge.artifacts?.openUserExternalUrl) return;
             bridge.artifacts.openUserExternalUrl(COMMUNITY_DISCUSSIONS_URL).catch(() => {});
@@ -2931,4 +2931,4 @@ const formatMemoryTime = (item, copy) => {
     // ==========================================
     // 安装工具后新建会话弹出的介绍卡片（纯前端，不发 LLM query，点 chip 才发消息）
 
-export { WebAccessModal, SettingsView };
+export { SSegmented, MODEL_PRESET_DEFS, presetOptionsI18n, presetProviderLabel, WebAccessModal, ModelFormModal, SettingsView };
