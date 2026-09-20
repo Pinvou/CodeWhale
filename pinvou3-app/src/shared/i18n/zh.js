@@ -2063,5 +2063,5 @@ dictZh["remoteConversation"] = {
   errorGeneric: "操作失败，请稍后重试。",
 };
 
-// 「双端控制」独立二级页面的侧栏标签（设置页分区调整）。
-dictZh.uiSettings.remoteControl = '双端控制';
+// 「远程控制」独立二级页面的侧栏标签（设置页分区调整）。
+dictZh.uiSettings.remoteControl = '远程控制';
