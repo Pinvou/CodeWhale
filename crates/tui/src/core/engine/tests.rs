@@ -23919,10 +23919,12 @@ async fn user_input_human_wait_is_excluded_from_the_turn_wall_clock() {
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
     let engine_config = EngineConfig {
-        // A 1s budget: the 1.2s answer delay below exceeds it, so without
+        // A 2s budget: the 3s answer delay below exceeds it, so without
         // the human-wait exclusion the turn would fail right after the
-        // answer finally lands.
-        turn_wall_clock: std::time::Duration::from_secs(1),
+        // answer finally lands. The margin above the pre-pause work stays
+        // generous so a loaded CI host cannot trip the budget before the
+        // wait even begins.
+        turn_wall_clock: std::time::Duration::from_secs(2),
         ..deterministic_engine_config(workspace.path())
     };
     let (mut engine, handle) =
@@ -23954,9 +23956,9 @@ async fn user_input_human_wait_is_excluded_from_the_turn_wall_clock() {
     );
     let mut turn = crate::core::turn::TurnContext::new(engine.config.max_steps);
 
-    // Answer after 1.2s — past the 1s budget, well inside the test timeout.
+    // Answer after 3s — past the 2s budget, well inside the test timeout.
     let submit_task = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
         handle
             .submit_user_input(
                 "call_1",
