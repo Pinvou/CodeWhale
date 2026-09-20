@@ -300,7 +300,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // identical; every behavioral difference is collapsed into a createConnectorFlow config option (each maps to the original
     // implementation — do not casually "unify" them):
     //   twoStep        Feishu two-stage QR scan: after ensure_cli advance the connect step, then begin; the rest single-stage.
-    //   progressEvent  Only feishu has the fine-grained feishu:progress event (backend-driven progress).
     //   qrStepsExtra   Feishu's QR event additionally marks the connect step done (two-stage stage one already finished).
     //   qrPayloadExtra Extra fields on the QR event: dingtalk user_code; tmeet browserAuth flag.
     //   openAuthUrl    When tmeet's QR event carries a url, open the browser directly (embedded-QR render fallback).
@@ -341,19 +340,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         const ev = isTauriAvailable() ? tauriEvents : null;
         if (!ev) return;
         conn.listenersReady = true;
-        if (cfg.progressEvent) {
-          ev.listen(cfg.progressEvent, (e) => {
-            const p = e.payload || {};
-            conn.setFlow(f => {
-              const nf = f ? { ...f, steps: { ...f.steps } } : { phase: 'running', steps: {}, active: null, pct: 0, sec: 0, log: '' };
-              if (p.step) { nf.active = p.step; nf.steps[p.step] = p.status === 'done' ? 'done' : 'active'; }
-              if (typeof p.pct === 'number') nf.pct = p.pct;
-              if (p.log) nf.log = p.log;
-              if (nf.phase !== 'error') nf.phase = 'running';
-              return nf;
-            });
-          });
-        }
         ev.listen(cfg.events.qr, (e) => {
           const p = e.payload || {};
           conn.stopTick();
@@ -475,7 +461,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
     const feishuFlowApi = createConnectorFlow({
       key: 'feishu', conn: feishuConn, twoStep: true,
-      progressEvent: 'feishu:progress',
       events: { qr: 'feishu:qr', connected: 'feishu:connected', error: 'feishu:error' },
       commands: { ensureCli: 'feishu_ensure_cli', begin: 'feishu_connect_begin', cancel: 'feishu_cancel', logout: 'feishu_logout', applySkills: 'feishu_apply_skills' },
       qrStepsExtra: { connect: 'done' },
@@ -1245,8 +1230,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const [feishuFlow, setFeishuFlow] = useState(feishuConn.flow); // 从跨视图 store 水合：切走再回来不丢进度
 
       // 企业微信(CLI 路线)连接流程卡(跨视图水合);连接态由 bundleStates 派生(见上)
-      const [wecomQr, setWecomQr] = useState(null); // { qr: dataUrl, url } 扫码弹窗(单段)
       const [wecomFlow, setWecomFlow] = useState(wecomConn.flow); // 企微连接流程卡(跨视图水合)
+      const [wecomQr, setWecomQr] = useState(null); // { qr: dataUrl, url } 扫码弹窗(单段)
 
       // 钉钉(CLI 路线)连接流程卡;连接态由 bundleStates 派生
       const [dingtalkFlow, setDingtalkFlow] = useState(dingtalkConn.flow);
@@ -2293,9 +2278,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // connect*/disconnect*/*ResetFlow*/*Retry quartets; event-driven, busyId cleared in event/error branches).
       const flowDeps = { setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert, beginToolConfiguration, finishToolConfiguration, findLocalizedTool };
       const connectConnector = (key) => CONNECTOR_FLOW_APIS[key].connect(flowDeps);
+      const retryConnector = (key) => { connectConnector(key); };
       const disconnectConnector = (key) => CONNECTOR_FLOW_APIS[key].disconnect(flowDeps);
       const resetConnectorFlow = (key) => CONNECTOR_FLOW_APIS[key].resetFlow(flowDeps);
-      const retryConnector = (key) => { connectConnector(key); };
       // Fallback toast when "Open in browser" fails (e.g. the external-url allowlist rejects it); previously this failed silently.
       const browserOpenFailed = () => setAlert({ visible: true, loading: false, title: storeCopy.openBrowserFailed, isInstall: false, isError: true });
 
@@ -2454,14 +2439,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             // 关闭或切换工具时重建本地字段状态，避免把上一工具的 Key 带入安装请求。
             key={(externalAuthAvailable && configDialog?.backendId) || 'closed'}
             config={externalAuthAvailable ? configDialog : null}
-            theme={theme}
             copy={storeCopy}
             onCancel={() => { if (configDialog?.backendId) finishToolConfiguration(configDialog.backendId, false); setConfigDialog(null); }}
             onConfirm={(values) => { const bid = configDialog.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
           />, document.body)}
           {createPortal(<TsObsidianGuide
             guide={obsidianGuide}
-            theme={theme}
             copy={storeCopy}
             allowDownload={can('localModelSetup')}
             onCancel={() => setObsidianGuide(null)}
@@ -2484,31 +2467,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               confirmTone="blue"
               onConfirm={doSkillUpdate}
               onCancel={() => setUpdateConfirm(null)}
-            />
-          ), document.body)}
-          {/* 上传包展示名/说明编辑弹窗（edit_display 动作触发；条件挂载，state 初值即当前覆盖值）。
-              key 按 backendId 强制重挂载：编辑目标切换（重开/自动预填）时不得复用旧包的
-              useState 输入初值、保存却写进新包 id（串台）。弹窗开着时的拖放导入已在
-              canAccept 处拒绝（editDisplayRef），原位替换路径不再可达。 */}
-          {editDisplay && createPortal(<TsEditDisplayDialog
-            key={editDisplay.backendId}
-            dialog={editDisplay}
-            copy={storeCopy}
-            onCancel={() => setEditDisplay(null)}
-            onConfirm={doEditDisplaySave}
-          />, document.body)}
-          {/* 回收站彻底删除二次确认:物理删除包文件与回收站条目,不可恢复
-              (自绘确认,风格对齐预置技能更新确认) */}
-          {purgeConfirm && createPortal((
-            <SheetRowConfirm
-              title={storeCopy.recyclePurgeTitle(purgeConfirm.name)}
-              desc={storeCopy.recyclePurgeHint}
-              cancelLabel={storeCopy.cancel}
-              confirmLabel={storeCopy.recyclePurge}
-              confirmTone="rose"
-              confirmTestId="recycled-purge-confirm"
-              onConfirm={doPurgeRecycled}
-              onCancel={() => setPurgeConfirm(null)}
             />
           ), document.body)}
           {/* 飞书扫码二维码已内联进 FeishuFlowCard（详情弹窗内），不再单独浮层 */}
@@ -2545,6 +2503,31 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
             onDismiss={() => { setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }}
             onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }} />
+          {/* 上传包展示名/说明编辑弹窗（edit_display 动作触发；条件挂载，state 初值即当前覆盖值）。
+              key 按 backendId 强制重挂载：编辑目标切换（重开/自动预填）时不得复用旧包的
+              useState 输入初值、保存却写进新包 id（串台）。弹窗开着时的拖放导入已在
+              canAccept 处拒绝（editDisplayRef），原位替换路径不再可达。 */}
+          {editDisplay && createPortal(<TsEditDisplayDialog
+            key={editDisplay.backendId}
+            dialog={editDisplay}
+            copy={storeCopy}
+            onCancel={() => setEditDisplay(null)}
+            onConfirm={doEditDisplaySave}
+          />, document.body)}
+          {/* 回收站彻底删除二次确认:物理删除包文件与回收站条目,不可恢复
+              (自绘确认,风格对齐预置技能更新确认) */}
+          {purgeConfirm && createPortal((
+            <SheetRowConfirm
+              title={storeCopy.recyclePurgeTitle(purgeConfirm.name)}
+              desc={storeCopy.recyclePurgeHint}
+              cancelLabel={storeCopy.cancel}
+              confirmLabel={storeCopy.recyclePurge}
+              confirmTone="rose"
+              confirmTestId="recycled-purge-confirm"
+              onConfirm={doPurgeRecycled}
+              onCancel={() => setPurgeConfirm(null)}
+            />
+          ), document.body)}
           {/* 回收站子页面:点入口后整个插件中心内容区切换为回收站页面(非弹窗),
               返回按钮回到主列表;彻底删除二次确认仍用弹窗(见上方 purgeConfirm) */}
           {showRecycleBin && (
@@ -2944,9 +2927,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                       <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white mb-2 tracking-tight">{selectedTool.title}</h2>
                       <p className="text-[17px] text-slate-500 dark:text-slate-400 mb-5 font-medium">{selectedTool.subtitle}</p>
                       <div className="flex flex-col items-end gap-1.5">
-                        {(() => { const sf = selectedTool.feishuCli ? feishuFlow : selectedTool.wecomCli ? wecomFlow : selectedTool.dingtalkCli ? dingtalkFlow : selectedTool.tmeetCli ? tmeetFlow : null; return (externalAuthAvailable && sf && (sf.phase === 'running' || sf.phase === 'qr'))
-                          ? <FeishuMini flow={sf} onClick={() => {}} copy={storeCopy.mini} />
-                          : <PlatformToolAction tool={selectedTool} busy={busyId === selectedTool.backendId} onAction={handleAction} onUpdate={handleSkillUpdate} onEditDisplay={handleEditDisplay} onExport={handleExportInstalled} size="lg" copy={storeCopy} t={t} />; })()}
+                        <PlatformToolAction tool={selectedTool} busy={busyId === selectedTool.backendId} onAction={handleAction} onUpdate={handleSkillUpdate} onEditDisplay={handleEditDisplay} onExport={handleExportInstalled} size="lg" copy={storeCopy} t={t} />
                         {((selectedTool.feishuCli && !feishuConnected) || (selectedTool.wecomCli && !wecomConnected) || (selectedTool.dingtalkCli && !dingtalkConnected) || (selectedTool.tmeetCli && !tmeetConnected)) && <span className="text-[11px] text-slate-400">{storeCopy.firstUseOnlineInstall}</span>}
                       </div>
                     </div>
@@ -3016,5 +2997,5 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // Shared Components
     // ==========================================
 
-export { FeishuStepIcon, FeishuBar, FeishuFlowCard, FeishuMini, feishuConn, ensureFeishuListeners, wecomConn, ensureWecomListeners, dingtalkConn, ensureDingtalkListeners, tmeetConn, ensureTmeetListeners, TsAlert, TsConfigDialog, TsEditDisplayDialog, TsObsidianGuide, ToolStoreView };
+export { ToolStoreView };
 /* eslint-enable sonarjs/cognitive-complexity -- tool store main view;legacy view */

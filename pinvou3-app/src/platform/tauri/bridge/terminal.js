@@ -256,15 +256,6 @@
     }
   }
 
-  async function cancelTrackedShellTask(sessionId, taskId) {
-    var sid = sessionId || state.activeSessionId;
-    if (!sid || !taskId) return;
-    try {
-      await invoke("cancel_shell_task", { sessionId: sid, taskId: taskId });
-    } finally {
-      scheduleShellPoll(sid, true);
-    }
-  }
   function scheduleShellNotify() {
     if (shellNotifyTimer != null) return;
     shellNotifyTimer = window.setTimeout(function () {
@@ -522,29 +513,28 @@
 
 
     return {
-      updateToolItem: updateToolItem,
-      isShellExecutionTool: isShellExecutionTool,
-      mentionsShellTool: mentionsShellTool,
-      utf8Length: utf8Length,
-      formatShellSnapshot: formatShellSnapshot,
-      shellCommandForItem: shellCommandForItem,
-      shellSnapshotKey: shellSnapshotKey,
-      terminalShellHistoryMatch: terminalShellHistoryMatch,
-      applyShellSnapshots: applyShellSnapshots,
-      scheduleShellPoll: scheduleShellPoll,
-      runShellPoll: runShellPoll,
-      cancelTrackedShellTask: cancelTrackedShellTask,
-      scheduleShellNotify: scheduleShellNotify,
-      markBackgroundToolItem: markBackgroundToolItem,
-      finishBackgroundToolItem: finishBackgroundToolItem,
-      rememberPendingTerminalSequence: rememberPendingTerminalSequence,
-      stripTerminalSequences: stripTerminalSequences,
-      terminalParserState: terminalParserState,
-      mergeTerminalChunk: mergeTerminalChunk,
-      mergeTerminalTail: mergeTerminalTail,
-      normalizeTerminalTail: normalizeTerminalTail,
-      reconcileBackgroundTerminalOutput: reconcileBackgroundTerminalOutput,
-      appendToolItemOutput: appendToolItemOutput
+      updateToolItem,
+      isShellExecutionTool,
+      mentionsShellTool,
+      utf8Length,
+      formatShellSnapshot,
+      shellCommandForItem,
+      shellSnapshotKey,
+      terminalShellHistoryMatch,
+      applyShellSnapshots,
+      scheduleShellPoll,
+      runShellPoll,
+      scheduleShellNotify,
+      markBackgroundToolItem,
+      finishBackgroundToolItem,
+      rememberPendingTerminalSequence,
+      stripTerminalSequences,
+      terminalParserState,
+      mergeTerminalChunk,
+      mergeTerminalTail,
+      normalizeTerminalTail,
+      reconcileBackgroundTerminalOutput,
+      appendToolItemOutput
     };
   };
 })(window);

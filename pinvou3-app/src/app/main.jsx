@@ -60,6 +60,10 @@ import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRou
 import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
+
+// 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
+const SCHEDULED_TASKS_ENTRY_ENABLED = true;
+
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -73,9 +77,6 @@ import {
 import { listAcpSessions } from '../features/codex/acpClient.js';
 import { revealStartupWindow } from '../platform/tauri/startup-window.js';
 
-// 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
-const SCHEDULED_TASKS_ENTRY_ENABLED = true;
-
 // 后端默认会话标题哨兵集合(bridge 按当前语言生成三语兜底标题,并据此判断是否自动改名)——
 // 显示层把任意一种哨兵标题映射成当前语言的「新对话」文案。哨兵是跨语言的后端
 // 契约而非当前 UI 文案,直接使用 shared/i18n.js 的静态集合,与词典装载进度无关
@@ -83,7 +84,20 @@ const SCHEDULED_TASKS_ENTRY_ENABLED = true;
 function isDefaultChatTitle(title) {
   return DEFAULT_CHAT_TITLES.has(title);
 }
-// Static regression anchor: SCHEDULED_TASKS_ENTRY_ENABLED && (<NavItem icon={<Clock size={18} />} label={t.scheduledPlans} unread={!!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns) || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)))} />)
+// 定时运行侧栏条目的 leadingIcon(Clock 图标 + 未读角标):scheduledRunItems 与
+// decorateScheduledRunChat 共用同一节点形态,提取成纯函数避免两处拷贝漂移。
+function scheduledRunIcon(run, activeTheme) {
+  return (
+    <span className="relative inline-flex h-5 w-5 items-center justify-center">
+      <Clock size={18} />
+      {run.unread && (
+        <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full border-2"
+          style={{ background: '#0B57D0', borderColor: activeTheme === 'dark' ? '#1E1F20' : '#F0F4F9' }} />
+      )}
+    </span>
+  );
+}
+// Static regression anchor: (<NavItem icon={<Clock size={18} />} label={t.scheduledPlans} unread={!!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns) || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)))} />)
 const PREVIEW_SCHEDULED_RUN_SHORTCUTS = [
   { id: 'preview-run-1', automationId: 'preview-daily-brief', taskNameKey: 'previewTaskDailyBrief', sessionId: 'preview-session-1', status: 'completed', scheduledFor: '2026-07-14T08:00:00+08:00', unread: true },
   { id: 'preview-run-4', automationId: 'preview-follow-up', taskNameKey: 'previewTaskFollowUp', sessionId: 'preview-session-4', status: 'running', scheduledFor: '2026-07-14T09:00:00+08:00', unread: false },
@@ -1259,9 +1273,7 @@ const NAV_PREFETCH = {
       // engine 启动时生效的语言(= 进程启动时的 settings.language)。语言只写盘不重启
       // engine,LLM 的 locale_tag 要重启 app 才更新 —— 草稿偏离此基线就提示「需重启」。
       const bootedLanguageRef = useRef(null);
-      // dirty 基线:已保存的模型配置(默认值填充后) / 已保存的搜索源配置。
-      // 草稿偏离基线才显示「保存并重启」操作条。
-      const savedModelConfigRef = useRef(null);
+      // dirty 基线:已保存的搜索源配置。草稿偏离基线才显示「保存并重启」操作条。
       const savedSearchConfigRef = useRef(null);
 
       // Per-vendor default configs (used to backfill the legacy single-model
@@ -1537,6 +1549,7 @@ const NAV_PREFETCH = {
 
       // One-shot bootstrap for the model-config draft. When custom values are
       // absent, use the effective config so the inputs reflect what will run.
+      const savedModelConfigRef = useRef(null);
       const initModelConfigFromSettings = (settings, effectiveModelConfig) => {
         const advanced = settings.advanced || {};
         const effective = effectiveModelConfig || {};
@@ -1621,7 +1634,7 @@ const NAV_PREFETCH = {
           setCodeModeOn(false);
           setCurrentView('chat');
         }
-        if (SCHEDULED_TASKS_ENTRY_ENABLED && bs.scheduledTaskAutoOpenId && bs.scheduledTaskAutoOpenId !== scheduledTaskAutoOpenSeenRef.current) {
+        if (bs.scheduledTaskAutoOpenId && bs.scheduledTaskAutoOpenId !== scheduledTaskAutoOpenSeenRef.current) {
           scheduledTaskAutoOpenSeenRef.current = bs.scheduledTaskAutoOpenId;
           setCurrentView('scheduled');
         }
@@ -3537,7 +3550,7 @@ const NAV_PREFETCH = {
             document.body
           )}
 
-          {can('desktopChrome') && <TitleBar theme={activeTheme} t={t} sidebarOpen={isSidebarOpen} />}
+          {can('desktopChrome') && <TitleBar t={t} sidebarOpen={isSidebarOpen} />}
 
           {isCompactShell && (
             <MobileTopBar theme={activeTheme} t={t} title={mobileTitle}
@@ -4178,7 +4191,7 @@ const NAV_PREFETCH = {
                 nativeSurfaceSuspended={compactBrowserSurfaceSuspended}
               />
             )}
-            {currentView === 'toolStore' && <LazyToolStoreView theme={activeTheme} t={t} onNewChat={handleNewChat} />}
+            {currentView === 'toolStore' && <LazyToolStoreView t={t} onNewChat={handleNewChat} />}
             {currentView === 'cardpool' && <LazyCardPoolView theme={activeTheme} t={t} bs={bs} onEquipped={() => { setCodeModeOn(false); setCurrentView('chat'); }} onAICreate={startAICard} initialMyOnly={poolMyOnly} />}
             {currentView === 'chat' && (
               <ChatView
@@ -4213,7 +4226,7 @@ const NAV_PREFETCH = {
                 onGotoTools={() => navigateFromScheduledRun('toolStore')}
               />
             )}
-            {SCHEDULED_TASKS_ENTRY_ENABLED && currentView === 'scheduled' && (
+            {currentView === 'scheduled' && (
               bs && bs.scheduledRunContext ? (
                 <ChatView {...chatViewBaseProps} prefill="" onPrefillConsumed={() => {}} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} browserDockAvailable={browserDockAvailable} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} />
               ) : (
@@ -4442,7 +4455,7 @@ const NAV_PREFETCH = {
                 active: currentView === 'monitor',
                 onClick: () => mobileNavigate('monitor', () => {
                   const liveBridge = window.TauriBridge || bridge;
-                  if (liveBridge && typeof liveBridge.startMonitorPolling === 'function') liveBridge.startMonitorPolling();
+                  if (liveBridge?.monitor && typeof liveBridge.monitor.startMonitorPolling === 'function') liveBridge.monitor.startMonitorPolling();
                 }) },
               { key: 'more', label: t.mobileMore, icon: <MoreHorizontal size={18} />,
                 active: mobileMoreActive, dot: hasUpdate || scheduledUnread || teamRelayUnread,

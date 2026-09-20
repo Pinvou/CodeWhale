@@ -115,7 +115,7 @@ const expectedProtocolHashes = {
   // streaming-render trailing-edge timers, terminal toolMeta sweep, monitor
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh).
-  chat: 'd2c249c71e5c8da65d9020d547be38fa70ae7c377a0a702a5cf9253730698842',
+  chat: '6f40e4e0fe5a76048e8ddcf34a8c4dc15ef015fe9e0c76cf130cc1d8f7aac2e5',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -133,7 +133,7 @@ const expectedProtocolHashes = {
   // surfaces while retaining Official's materialization behavior.
   sessions: '24c9d103bfa90094b02200441222d387d86131836d0c7029d96c5ec28d071ddc',
   settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
-  updater: 'f48c27f765bd2dce06cc71299f18348fc734f6390667b20820169e3179cb455b',
+  updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
   projects: '4f0737d9a074629208d6a01e6b027907ad6f0676ef2ae456c95cc37350d8ca76',

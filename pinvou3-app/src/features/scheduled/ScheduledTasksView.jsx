@@ -1626,18 +1626,8 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         </div>
       );
 
-      const deleteTarget = deleteConfirmTask;
-
       return (
         <div data-testid="scheduled-page" aria-busy={!!busyAction} className={`relative z-10 flex min-h-0 w-full flex-1 overflow-hidden bg-transparent text-black dark:text-white`}>
-          {tasks[0] && (
-            <button
-              type="button"
-              aria-label={scheduledCopy.view(tasks[0].name)}
-              tabIndex={-1}
-              className="absolute left-0 top-0 h-px w-px opacity-0"
-            />
-          )}
           <div className="h-full w-full overflow-hidden p-4 sm:p-6 lg:p-10" data-testid="scheduled-list">
             <div className="relative mx-auto flex h-full min-h-0 w-full max-w-[1400px] flex-col overflow-hidden">
               <header data-testid="scheduled-list-intro" className={`mb-4 flex shrink-0 flex-col items-start justify-between gap-4 border-b pb-6 sm:flex-row sm:items-center ${iosSeparator}`}>
@@ -1675,7 +1665,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
           {DetailTaskDialog()}
           {CreateTaskDialog()}
 
-          {deleteTarget && renderModal(
+          {deleteConfirmTask && renderModal(
             <div className="fixed inset-0 z-[300] flex items-center justify-center px-4">
               <div className="absolute inset-0 bg-black/28 backdrop-blur-[1px]" onClick={(event) => cancelDeleteTask(event)} />
               <div
@@ -1691,7 +1681,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                     {scheduledCopy.deleteTitle}
                   </h3>
                   <p id="scheduled-delete-description" className={`mt-2 text-[12px] leading-4 ${mutedValue}`}>
-                    {scheduledCopy.deleteDescription(deleteTarget.name)}
+                    {scheduledCopy.deleteDescription(deleteConfirmTask.name)}
                   </p>
                 </div>
                 <div className={`grid grid-cols-2 divide-x divide-[#3C3C43]/16 dark:divide-[#545458]/50`}>
@@ -1702,7 +1692,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
                     {scheduledCopy.cancel}
                   </button>
                   <button type="button" data-testid="scheduled-detail-delete-confirm"
-                    onClick={(event) => confirmDeleteTask(event, deleteTarget)}
+                    onClick={(event) => confirmDeleteTask(event, deleteConfirmTask)}
                     disabled={!!busyAction}
                     className={`h-11 text-[15px] font-semibold text-[#FF3B30] transition-colors disabled:opacity-50 ${pressedRow}`}>
                     {scheduledCopy.delete}

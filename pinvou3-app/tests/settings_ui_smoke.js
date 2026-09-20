@@ -39,20 +39,11 @@ for (const settingsI18nSource of settingsI18nSources) {
     'settings billing message must be provided in every UI language',
   );
 }
-const detectStart = settingsViewSource.indexOf('async function handleDetect()');
-const detectEnd = settingsViewSource.indexOf('function vllmStatusLabel(', detectStart);
-assert.notStrictEqual(detectStart, -1, 'local model detect handler must exist');
-assert.notStrictEqual(detectEnd, -1, 'local model detect handler boundary must exist');
-const detectSource = settingsViewSource.slice(detectStart, detectEnd);
-assert.match(
-  detectSource,
-  /loaded === true/,
-  'automatic local-model fill must require an explicitly loaded model',
-);
-assert.doesNotMatch(
-  detectSource,
-  /loaded !== false/,
-  'unknown model state must not be treated as loaded during automatic fill',
+// Legacy handleDetect auto-fill path is deleted; only handleLocalDetect remains.
+assert.strictEqual(
+  settingsViewSource.indexOf('async function handleDetect()'),
+  -1,
+  'legacy handleDetect auto-fill path must stay deleted (only handleLocalDetect may exist)',
 );
 const localDetectStart = settingsViewSource.indexOf('async function handleLocalDetect()');
 const localDetectEnd = settingsViewSource.indexOf('function startManualLocalModel()', localDetectStart);
@@ -68,6 +59,19 @@ assert.match(
   localDetectSource,
   /65535/,
   'local picker detect must validate the custom port range before probing',
+);
+// Safety invariant (moved from the deleted legacy handleDetect guard): detection
+// must only record candidate rows — never auto-fill the form — so an unknown-load
+// model (JIT loading can be tens of GB) is only ever added by an explicit user click.
+assert.match(
+  localDetectSource,
+  /setLocalDetectResult\(\{ candidates:/,
+  'local detection must only record candidate rows (no automatic form fill)',
+);
+assert.doesNotMatch(
+  localDetectSource,
+  /setBaseUrl\(|setModel\(/,
+  'local detection must not auto-fill the form; the user adds a candidate explicitly',
 );
 for (const settingsI18nSource of settingsI18nSources) {
   assert.match(
@@ -86,10 +90,30 @@ for (const settingsI18nSource of settingsI18nSources) {
     'local model port validation message must be provided in every UI language',
   );
 }
-// Memory delete / feedback close confirm-dialog wiring (no native
-// window.confirm, testid pins) is asserted by tests/settings_window_confirm.test.mjs,
-// which runs on every `npm test`; the runtime click flows below (①e/①f/①g/⑰.5)
-// still exercise the dialogs end to end in this smoke.
+// Memory delete / feedback close must route through in-app confirm dialogs
+// (the native window.confirm does not render in Tauri WebView2; see
+// tests/settings_window_confirm.test.mjs).
+assert.doesNotMatch(
+  settingsViewSource,
+  /window\.confirm\s*\(/,
+  'settings page must not call window.confirm (does not render in Tauri WebView2; use in-app confirm dialogs)',
+);
+// In-app confirm dialog testid pins: MemoryDeleteDialog routes through
+// SheetConfirmDialog and passes its pins as testid/confirmTestId props (the shared
+// dialog renders them as data-testid), while the feedback close confirm still
+// carries its literal data-testid attributes inline.
+const confirmTestIdPins = [
+  ['memory-delete-confirm', ['data-testid="memory-delete-confirm"', 'testid="memory-delete-confirm"']],
+  ['memory-delete-confirm-ok', ['data-testid="memory-delete-confirm-ok"', 'confirmTestId="memory-delete-confirm-ok"']],
+  ['feedback-close-confirm', ['data-testid="feedback-close-confirm"']],
+  ['feedback-close-confirm-ok', ['data-testid="feedback-close-confirm-ok"']],
+];
+for (const [confirmTestId, variants] of confirmTestIdPins) {
+  assert.ok(
+    variants.some((variant) => settingsViewSource.includes(variant)),
+    `missing in-app confirm dialog testid: ${confirmTestId}`,
+  );
+}
 
 function loadPuppeteer() {
   try { return require('puppeteer-core'); } catch (_) { /* fall through */ }

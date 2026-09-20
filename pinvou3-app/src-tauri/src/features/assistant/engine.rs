@@ -179,7 +179,6 @@ struct TranscriptSanitizationRule {
     actual_user_content: String,
     display_message: Message,
     display_content: String,
-    #[allow(dead_code)]
     operation: TranscriptOperation,
     baseline_revision: Option<String>,
     admission_metadata: Option<TurnAdmissionMetadata>,
@@ -2260,11 +2259,6 @@ fn tool_call_result_parts(
 #[path = "forwarder.rs"]
 mod forwarder;
 pub(crate) use forwarder::spawn_event_forwarder;
-
-/// 让 main.rs 编译时知道这个模块（供 docs/CI 用）。
-pub fn _force_link() -> Arc<()> {
-    Arc::new(())
-}
 
 #[cfg(test)]
 mod tool_result_projection_tests {
