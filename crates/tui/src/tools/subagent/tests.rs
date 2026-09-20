@@ -4991,6 +4991,25 @@ fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
     );
 }
 
+// The two wait faces advertise from two independent constant sets, so each
+// face's own pin can stay green while the surfaces drift numerically apart;
+// this cross-assertion closes that gap.
+#[test]
+fn wait_bound_constants_agree_across_both_wait_faces() {
+    assert_eq!(
+        super::SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS,
+        super::coord::COORD_WAIT_DEFAULT_TIMEOUT_SECS,
+        "the agent broadcast face and the agents/wait face must advertise the \
+         same default timeout"
+    );
+    assert_eq!(
+        super::SUBAGENT_WAIT_MAX_TIMEOUT_SECS,
+        super::coord::COORD_WAIT_MAX_TIMEOUT_SECS,
+        "the agent broadcast face and the agents/wait face must advertise the \
+         same maximum timeout"
+    );
+}
+
 #[test]
 fn agent_tool_unadvertised_fields_remain_parse_accepted() {
     // #5324 compat: the fields removed from the advertised schema must stay

@@ -17196,9 +17196,9 @@ fn forkguard_agent_roster_receipt_passes_through_to_context() {
         "truncated": false,
         "members": [
             {"member_id": "general", "role": "general",
-             "description": "General-purpose worker with full tool access for multi-step tasks."},
+             "description": crate::fleet::role::FleetRole::Worker.description()},
             {"member_id": "explore", "role": "explore",
-             "description": "Fast read-only exploration for codebase search and analysis."}
+             "description": crate::fleet::role::FleetRole::Scout.description()}
         ],
         "selector_help": "Use type:<role> with one of the listed roles."
     })
@@ -17212,7 +17212,7 @@ fn forkguard_agent_roster_receipt_passes_through_to_context() {
         "roster receipt must pass through as a receipt:\n{context}"
     );
     assert!(
-        context.contains("\"selector_help\"") && context.contains("General-purpose worker"),
+        context.contains("\"selector_help\"") && context.contains("General-purpose agent"),
         "roster members and selector help must reach the model verbatim:\n{context}"
     );
     assert!(
@@ -22203,7 +22203,7 @@ async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
 }
 
 #[tokio::test]
-async fn mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
+async fn forkguard_mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace");
@@ -22344,7 +22344,7 @@ async fn forkguard_mcp_boot_failure_briefing_reaches_session_history_once_per_bo
 }
 
 #[tokio::test]
-async fn mcp_boot_recovery_notice_corrects_a_briefed_server_once() {
+async fn forkguard_mcp_boot_recovery_notice_corrects_a_briefed_server_once() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -22401,7 +22401,7 @@ async fn mcp_boot_recovery_notice_corrects_a_briefed_server_once() {
 }
 
 #[tokio::test]
-async fn recovery_notice_is_skipped_without_a_failure_briefing() {
+async fn forkguard_recovery_notice_is_skipped_without_a_failure_briefing() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -22425,7 +22425,7 @@ async fn recovery_notice_is_skipped_without_a_failure_briefing() {
 }
 
 #[tokio::test]
-async fn successful_mcp_boot_injects_no_briefing() {
+async fn forkguard_successful_mcp_boot_injects_no_briefing() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -22542,7 +22542,7 @@ async fn forkguard_mcp_boot_briefing_and_recovery_orderings_are_byte_stable() {
 }
 
 #[tokio::test]
-async fn isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
+async fn forkguard_isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -22584,7 +22584,7 @@ async fn isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
 }
 
 #[tokio::test]
-async fn drained_mcp_boot_finish_also_briefs_the_model() {
+async fn forkguard_drained_mcp_boot_finish_also_briefs_the_model() {
     let tmp = tempdir().expect("tempdir");
     let engine_config = EngineConfig {
         workspace: tmp.path().to_path_buf(),

@@ -151,9 +151,9 @@ const ROLES: [Choice; 9] = [
     },
     Choice {
         label: Cow::Borrowed("general"),
-        summary: Cow::Borrowed("General-purpose worker"),
+        summary: Cow::Borrowed("General-purpose agent"),
         description: Cow::Borrowed(
-            "A flexible worker with no specialized posture — use it when the task doesn't fit a named role.",
+            "A flexible agent with no specialized posture — use it when the task doesn't fit a named role.",
         ),
     },
     Choice {

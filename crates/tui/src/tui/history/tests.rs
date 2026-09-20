@@ -2653,7 +2653,7 @@ fn superseded_todo_snapshots_collapse_to_their_header() {
 }
 
 #[test]
-fn mcp_boot_handoffs_render_as_system_cells_not_user_turns() {
+fn forkguard_mcp_boot_handoffs_render_as_system_cells_not_user_turns() {
     // The startup briefing and the recovery notice are runtime control
     // traffic in a user-role carrier; replayed history must not present
     // them as composer-authored turns.

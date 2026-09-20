@@ -62,7 +62,7 @@ pub(crate) const VALID_ROLE_ALIASES: &str = "general; explore; planner; reviewer
 /// Fleet profile. The `FleetRole` type name remains a compatibility identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FleetRole {
-    /// General-purpose worker - full tool access for multi-step tasks.
+    /// General-purpose agent - full tool access for multi-step tasks.
     #[default]
     Worker,
     /// Fast exploration - read-only tools for codebase search.
@@ -181,7 +181,7 @@ impl FleetRole {
     #[must_use]
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Worker => "General-purpose worker with full tool access for multi-step tasks.",
+            Self::Worker => "General-purpose agent with full tool access for multi-step tasks.",
             Self::Scout => "Fast read-only exploration for codebase search and analysis.",
             Self::Planner => {
                 "Grounded strategy: reads the workspace and the web, runs read-only probes, never mutates."

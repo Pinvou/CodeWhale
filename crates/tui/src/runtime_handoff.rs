@@ -2212,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_briefing_round_trips_servers_and_bounds_reasons() {
+    fn forkguard_mcp_briefing_round_trips_servers_and_bounds_reasons() {
         // The constructor and the parser must agree so a session sync can
         // reseed correction bookkeeping from the persisted history.
         let long_reason = format!("connect refused after {}", "9".repeat(400));
@@ -2261,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn briefing_reasons_flatten_control_characters_before_bounding() {
+    fn forkguard_briefing_reasons_flatten_control_characters_before_bounding() {
         // A failing stdio server's captured stderr is multi-line and
         // server-controlled. Newlines and control characters must not
         // survive into the payload, where they could forge "- other_server:"

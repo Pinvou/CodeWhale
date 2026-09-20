@@ -515,7 +515,7 @@ impl FleetRoster {
                 "worker",
                 FleetSlot::General,
                 FleetLoadout::Inherit,
-                "General-purpose worker: full tool access for multi-step tasks. The unnamed dispatch default.",
+                "General-purpose agent: full tool access for multi-step tasks. The unnamed dispatch default.",
                 None,
             ),
             (
