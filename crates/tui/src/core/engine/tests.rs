@@ -17105,7 +17105,19 @@ fn forkguard_subagent_context_hint_names_active_tools() {
 
     // A receipt that does carry a transcript_handle (verbose projection,
     // terminal status row) keeps the guidance — with the honest fallback
-    // that names the degradation instead of a direct-call promise.
+    // that names the degradation instead of a direct-call promise. The
+    // fixture uses the producer's real shape: projections serialize the
+    // field as a full `var_handle` object, not a string.
+    let transcript_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_1234abcd".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 42,
+        repr_preview: "verified detail…".to_string(),
+        sha256: "0f1e2d3c4b5a".to_string(),
+    })
+    .expect("var handle serializes");
     let with_handle = ToolResult::success(
         json!({
             "agent_id": "agent_1234abcd",
@@ -17118,7 +17130,7 @@ fn forkguard_subagent_context_hint_names_active_tools() {
             "result": long_result,
             "steps_taken": 12,
             "duration_ms": 3456,
-            "transcript_handle": "agent:agent_1234abcd/full_transcript"
+            "transcript_handle": transcript_object
         })
         .to_string(),
     );
@@ -17126,9 +17138,10 @@ fn forkguard_subagent_context_hint_names_active_tools() {
 
     assert!(context.contains("handle_read"));
     assert!(
-        context.contains("transcript: agent:agent_1234abcd/full_transcript"),
+        context.contains("transcript: agent_1234abcd/full_transcript"),
         "the hint names transcript_handle, so the summarized row must carry \
-         the value it points at:\n{context}"
+         the value it points at, reduced to the session_id/name form \
+         handle_read accepts:\n{context}"
     );
     assert!(
         context.contains("activate it via `tool_search` first"),
@@ -17147,6 +17160,26 @@ fn forkguard_subagent_context_hint_names_active_tools() {
         "registered deferred tools do not hydrate-and-execute when called by \
          name on allowlist-filtered hosts; the false promise must stay gone:\n\
          {context}"
+    );
+
+    // The string shape exists too: the subagent.failed sentinel carries a
+    // `session_id/name` string, and the row must keep it verbatim.
+    let with_string_handle = ToolResult::success(
+        json!({
+            "agent_id": "agent_1234abcd",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": long_result,
+            "transcript_handle": "agent:agent_1234abcd/full_transcript"
+        })
+        .to_string(),
+    );
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_string_handle);
+    assert!(context.contains("handle_read"));
+    assert!(
+        context.contains("transcript: agent:agent_1234abcd/full_transcript"),
+        "string handles pass through untouched:\n{context}"
     );
 }
 
@@ -17325,13 +17358,21 @@ fn forkguard_agent_unscoped_status_list_is_summarized_per_child() {
 // `claim` receipts carry the recorded scope (roots/files/contracts) and no
 // snapshot shape, so they must keep passing through bounded — the scope is
 // the payload the model needs to reason about its own write permissions.
+// The fixture mirrors the real receipt: `PersistedWriteClaim` serializes as
+// {claim, sequence, isolated_worktree} with no `action` key (the translated
+// `action: "claim"` only exists on the tool-call input), so it survives via
+// the summarizer's shape fall-through, not the action rule.
 #[test]
 fn forkguard_agent_claim_receipt_passes_through_to_context() {
     let claim = json!({
-        "action": "claim",
-        "roots": ["src/foo"],
-        "exact_files": ["src/foo/bar.rs"],
-        "contracts": [],
+        "claim": {
+            "owner": "agent_1234abcd",
+            "roots": ["src/foo"],
+            "exact_files": ["src/foo/bar.rs"],
+            "contracts": [],
+        },
+        "sequence": 7,
+        "isolated_worktree": false,
     })
     .to_string();
     let output = ToolResult::success(claim);
@@ -23969,7 +24010,7 @@ async fn forkguard_sync_rebriefs_failures_missing_from_restored_briefing() {
     );
 }
 
-// Action receipts — message/followup acks, spawn starts, the unchanged
+// Action receipts — message/followup acks, roster catalogs, the unchanged
 // nudge — are coordination payloads: snapshot-summarizing them drops the
 // queued/woke/queue_depth/note facts the model coordinates with, and renders
 // an ack as a placeholder child result ("result: not available yet").
@@ -24039,17 +24080,39 @@ fn forkguard_agent_action_receipts_pass_through_to_context() {
 }
 
 // Fleet rows carry transcript_handle values; the hint fires for the fleet
-// listing too, and every row shows the value it points at.
+// listing too, and every row shows the value it points at. The rows use the
+// producer's real shape: running projections serialize the field as a full
+// `var_handle` object.
 #[test]
 fn forkguard_agent_fleet_listing_with_handles_names_the_hint_with_visible_values() {
+    let transcript_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_aaaa1111".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 7,
+        repr_preview: "…".to_string(),
+        sha256: "aa11".to_string(),
+    })
+    .expect("var handle serializes");
+    let settled_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_bbbb2222".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 9,
+        repr_preview: "…".to_string(),
+        sha256: "bb22".to_string(),
+    })
+    .expect("var handle serializes");
     let fleet = json!({
         "action": "status",
         "count": 2,
         "agents": [
             {"agent_id": "agent_aaaa1111", "status": "Running",
-             "transcript_handle": "agent:agent_aaaa1111/full_transcript"},
+             "transcript_handle": transcript_object},
             {"agent_id": "agent_bbbb2222", "status": "Completed", "result": "done",
-             "transcript_handle": "agent:agent_bbbb2222/full_transcript"}
+             "transcript_handle": settled_object}
         ]
     })
     .to_string();
@@ -24060,6 +24123,6 @@ fn forkguard_agent_fleet_listing_with_handles_names_the_hint_with_visible_values
         context.contains("handle_read"),
         "fleet rows carry handles, so the hint must fire:\n{context}"
     );
-    assert!(context.contains("transcript: agent:agent_aaaa1111/full_transcript"));
-    assert!(context.contains("transcript: agent:agent_bbbb2222/full_transcript"));
+    assert!(context.contains("transcript: agent_aaaa1111/full_transcript"));
+    assert!(context.contains("transcript: agent_bbbb2222/full_transcript"));
 }

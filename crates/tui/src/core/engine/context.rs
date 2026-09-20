@@ -166,13 +166,13 @@ fn summarize_subagent_snapshot(snapshot: &serde_json::Value, index: usize) -> St
         .unwrap_or_else(|| "unknown".to_string());
     // The hint below names `transcript_handle`, so the summarized rows must
     // carry the value it points at — otherwise the hint would name a value
-    // the model never receives (the Pinvou #490 phantom-value class). The
-    // handle is engine-generated and never truncated.
+    // the model never receives (the Pinvou #490 phantom-value class).
+    // Producers serialize the field either as a `session_id/name` string or
+    // as the full `var_handle` object; both reduce to the readable identity
+    // below, and the value is engine-generated and never truncated.
     let transcript_handle = obj
         .get("transcript_handle")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|handle| !handle.is_empty());
+        .and_then(transcript_handle_row_value);
     let objective = obj
         .get("assignment")
         .and_then(|assignment| assignment.get("objective"))
@@ -232,30 +232,47 @@ fn subagent_snapshot_shaped(value: &serde_json::Value) -> bool {
 }
 
 /// True when the parsed receipt structurally carries a `transcript_handle`
-/// for at least one child — the field the guidance names. Free text that
-/// merely mentions the word must not summon the hint (Pinvou #490 class).
-/// Both shapes that summarize rows are covered: a bare per-child object/array
-/// and the unscoped fleet listing whose rows live under `agents[]` (the row
-/// summarizer prints each row's `transcript:` value, so the hint always has
-/// a visible value to point at).
+/// whose value a summarized row can actually print — the field the guidance
+/// names. Free text that merely mentions the word must not summon the hint,
+/// and neither must an empty or shapeless handle (Pinvou #490 class). Both
+/// shapes that summarize rows are covered: a bare per-child object/array and
+/// the unscoped fleet listing whose rows live under `agents[]`, each looked
+/// through the same `snapshot` wrapper the row summarizer unwraps, so the
+/// hint always has a visible value to point at.
 fn carries_transcript_handle(parsed: &serde_json::Value) -> bool {
+    fn row_carries(row: &serde_json::Value) -> bool {
+        row.get("transcript_handle")
+            .or_else(|| row.get("snapshot").and_then(|inner| inner.get("transcript_handle")))
+            .and_then(transcript_handle_row_value)
+            .is_some()
+    }
     match parsed {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .any(|item| item.get("transcript_handle").is_some()),
+        serde_json::Value::Array(items) => items.iter().any(row_carries),
         serde_json::Value::Object(object) => {
-            object.get("transcript_handle").is_some()
+            row_carries(parsed)
                 || object
                     .get("agents")
                     .and_then(serde_json::Value::as_array)
-                    .is_some_and(|fleet| {
-                        fleet
-                            .iter()
-                            .any(|row| row.get("transcript_handle").is_some())
-                    })
+                    .is_some_and(|fleet| fleet.iter().any(row_carries))
         }
         _ => false,
     }
+}
+
+/// The value a summarized row prints for a `transcript_handle` field:
+/// a non-empty `session_id/name` string `handle_read` accepts directly.
+/// Producers serialize either that string shape or the full `var_handle`
+/// object whose `session_id`/`name` fields identify the payload; `None`
+/// means the field carries nothing the model could act on.
+fn transcript_handle_row_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(raw) = value.as_str() {
+        let raw = raw.trim();
+        return (!raw.is_empty()).then(|| raw.to_string());
+    }
+    let object = value.as_object()?;
+    let session_id = object.get("session_id")?.as_str()?.trim();
+    let name = object.get("name")?.as_str()?.trim();
+    (!session_id.is_empty() && !name.is_empty()).then(|| format!("{session_id}/{name}"))
 }
 
 /// Bounded verbatim passthrough for non-snapshot agent action receipts.
@@ -312,13 +329,17 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
             {
                 Some(SubagentSnapshotBatch::FleetStatus(fleet.iter().collect()))
             } else if object.contains_key("action") {
-                // Action receipts — spawn starts, message/followup/interrupt
-                // acks, roster catalogs, write claims — are coordination
-                // payloads: the queued/woke/queue_depth/note facts are what
-                // the model coordinates with, and snapshot-summarizing them
-                // collapses the receipt into "- unknown (agent) status=…"
-                // placeholder noise. Pass them through bounded like the
-                // other non-snapshot receipts.
+                // Action receipts — roster catalogs, message/followup/
+                // interrupt acks, wait joins, the unchanged nudge — are
+                // coordination payloads: the queued/woke/queue_depth/note
+                // facts are what the model coordinates with, and
+                // snapshot-summarizing them collapses the receipt into
+                // "- unknown (agent) status=…" placeholder noise. Pass them
+                // through bounded like the other non-snapshot receipts.
+                // Spawn-start projections and write-claim receipts carry no
+                // `action` key on their content (spawn's lives in tool
+                // metadata); they reach the passthrough through the
+                // shape fall-through below.
                 None
             } else if subagent_snapshot_shaped(&parsed) {
                 Some(SubagentSnapshotBatch::ChildResults(vec![&parsed]))
