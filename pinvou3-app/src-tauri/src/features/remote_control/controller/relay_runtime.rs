@@ -277,6 +277,15 @@ pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
                 {
                     return Ok(RegistrationStep::Ignore);
                 }
+                // relay 的拒绝必须保留原始有界码，便于定位（此前被映射成
+                // pairing_registration_rejected 后丢失了原因）。
+                if message.get("type").and_then(Value::as_str) == Some("error") {
+                    let code = message
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("relay_error");
+                    log_controlled_event("registration_rejected", code);
+                }
                 return registration_from_response(code_wrap, request, &message)
                     .map(|registration| RegistrationStep::Registered(Box::new(registration)));
             }
@@ -328,6 +337,19 @@ impl ControlledRelayWorker {
         let registration_request_id = manager
             .registration_request_id(self.operation.clone())
             .map_err(|error| error.code.to_owned())?;
+        // 控制通道注册必须在端点 socket 已认证为 B 之后：否则 relay 会以角色无效
+        // 拒绝（客户端只能看到 pairing_registration_rejected）。
+        match self
+            .relay
+            .wait_endpoint_ready(std::time::Duration::from_millis(20_000))
+            .await
+        {
+            Ok(()) => log_controlled_event("endpoint_ready", "ok"),
+            Err(error) => {
+                log_controlled_event("endpoint_ready", &error);
+                return Err(error);
+            }
+        }
         let endpoint_id = self.relay.controller_endpoint_id()?;
         let request = registration_request(
             &registration_request_id,

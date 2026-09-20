@@ -1208,6 +1208,33 @@ impl RemoteControlManager {
         Ok(self.relay_settings())
     }
 
+    /// 等待 desktop endpoint 在 Relay 侧完成注册（socket 认证为 B）。
+    ///
+    /// 控制通道的 `desktop_pairing_register` 必须在**同一 socket 已认证**之后才能
+    /// 通过 router 的角色校验，否则会被以 role invalid 拒绝（2026-09-20 实测：
+    /// worker 启动后立即注册 → relay 拒绝，客户端只看到 pairing_registration_rejected）。
+    pub async fn wait_endpoint_ready(&self, timeout: std::time::Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let ready = {
+                let inner = self.inner.lock();
+                inner.endpoint.as_ref().is_some_and(|endpoint| {
+                    !matches!(
+                        endpoint.status,
+                        WebAccessStatusKind::ConnectingRelay | WebAccessStatusKind::Error
+                    )
+                })
+            };
+            if ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("desktop_relay_inactive".to_owned());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     /// 恢复内置默认 Relay。语义与 `set_relay_address` 对称。
     pub fn reset_relay_address(&self) -> Result<RelaySettingsInfo, String> {
         remove_private_file(&relay_settings_path())?;
