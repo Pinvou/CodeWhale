@@ -34,8 +34,8 @@
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5` |
-| 维护分支 | `pinvou3-clean` = `c4e6caf9405bf6872df670d359731cbda7872d78`（r1 基线 `1fafee7e2` 之上 22 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55，以及 2026-09-20 批次 #66） |
-| 发布状态 | 过渡期（fork-policy 第 0 节豁免）：不可变 tag `pinvou-v0.9.12-r1` 保持 r1 收口状态（15 个提交），父仓 gitlink 指向 `c4e6caf9`、领先 tag 22 个提交，直至下一次 r2 发布收口对齐；父仓 gitlink 由 Official PR #1037 首次按 Community #453 回流内容与 #482 过渡语义对齐，其后由 Official PR #1141 随 2026-09-17 批次前移，再由 2026-09-18 与 2026-09-20 的 gitlink 对齐 PR 随批次前移 |
+| 维护分支 | `pinvou3-clean` = `6f780290f1c35e8a3c5dff86b4f76da142744b0c`（r1 基线 `1fafee7e2` 之上 24 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66，以及 2026-09-21 批次 #64/#67） |
+| 发布状态 | r2 已收口（2026-09-21）：不可变 tag `pinvou-v0.9.12-r2` 切在合并头 `6f780290f`，父仓 gitlink、维护分支与 tag 三方相等；r1 tag `pinvou-v0.9.12-r1` 仍钉在其收口 `1fafee7e2`（15 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141 与 2026-09-18/20 的 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 r2 收口对齐 |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
 | 历史组织 | 上游之上 33 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 2 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理）；r1 之后 18 个提交全部经 PR squash 合入并过五项必需门禁 |
 | drift | `167 files, +11480/-1470`，净增 10010 行；r1 为 `94 files, +5022/-944`，旧 r13 为 `110 files, +10895/-1195` |
@@ -117,6 +117,8 @@
 | `ce783728c` | T2 修复 | computer-use 尊重缩放栅格契约、ssh 元素状态留在宿主侧（#57） |
 | `7fc36e587` | T3 治理 | subagent governor 评审跟进：按 tokio Semaphore 重建 DynamicGate（#55） |
 | `c4e6caf9` | T1 修复 | Windows PowerShell 回退受策略绕过与命令行上限约束，行为测试迁入 forkguard 前缀（#66） |
+| `8e5988119` | CI 同步 | CNB 镜像在 `CNB_GIT_TOKEN` 未配置的仓库探针跳过而非红检（#64） |
+| `6f780290f` | T1/T3 修复 | agent/search/vision/MCP 面与运行时对齐：直呼兜底话术并入 `HANDLE_READ_ACTIVATION_HINT` 共享常量、挂载/卸载等面收敛（#67），fork-guard 两条指纹随之更新 |
 
 所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 
@@ -295,6 +297,6 @@
 ## 12. 发布与回退
 
 - 公开回退点是不可变 tag `pinvou-v0.9.5-r13`；本地 `backup/pre-v0.9.12-sync` 不是发布前提。
-- 不可变 `pinvou-v0.9.12-r1` 停在 r1 收口 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`；当前处于过渡期：`pinvou3-clean` 与父仓 gitlink 指向 `c4e6caf9`（领先 tag 22 个 squash 提交），下一次 r2 发布收口时在合并头切不可变 tag 并对齐三方（分支/tag/gitlink），以 `scripts/verify-public-submodule.sh` 验证公开可达性（过渡期断言 gitlink=分支头、tag 钉在 r1 收口，r2 收口后恢复三方相等；依据 `docs/fork-policy.md` 第 0 节过渡期豁免）。
+- r2 已收口：不可变 `pinvou-v0.9.12-r2` 切在合并头 `6f780290f1c35e8a3c5dff86b4f76da142744b0c`，`pinvou3-clean` 分支头、tag 与父仓 gitlink 三方相等，以 `scripts/verify-public-submodule.sh` 验证公开可达性；回退点保持 `pinvou-v0.9.12-r1`（钉在 r1 收口 `1fafee7e2`）；下次过渡期自 r2 起，按 `docs/fork-policy.md` 第 0 节豁免执行。
 - 发布过程中只为精确 head 的受保护分支更新临时移除无法在该维护分支触发的 required status contexts，完成快进后立即恢复原保护配置；未关闭 force-push 防护，也未重写已发布 tag。
 - 后续发布仍不得降低公开校验或把本地 object 当成发布成功。
