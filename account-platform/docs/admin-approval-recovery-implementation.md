@@ -50,6 +50,8 @@
 | broker 重投、epoch 切换、Billing 12 次界限、N/N-1 | 未覆盖，需要 NATS 与多版本环境，归 GSA-39 生产等价演练 |
 | 六命令领域结果权威的端到端查证链路 | 部分覆盖：权威读与闭集校验已有真实 PG/跨域证据（GSA-21～37），但恢复 worker 的调度与生产凭证仍未建立 |
 
-因此 GSA-16 的**代码与实现合同项已全部交付**，仍未完成的是独立审核与环境门禁（GSA-04、GSA-38～40）。
+因此 GSA-16 的**代码与实现合同项已全部交付**，独立审核已于 2026-09-20 完成（见下），仍未完成的是环境门禁（GSA-04、GSA-38～40）。
 
-在步骤 4 的剩余验收项（broker 重投、epoch 切换、12 次界限、N/N-1 及生产等价演练）与 GSA-04/GSA-38～40 环境门禁完成之前，GSA-16 只能保持 `IN_PROGRESS / PARTIAL / ZERO_EFFECT_CAS_GATED / REVIEW_PENDING / NOT_DEPLOYED`；本状态不授权生产启用、调度恢复 worker、人工重放或跨 epoch 补发。
+独立审核已于 2026-09-20 完成（`INDEPENDENT_REVIEW_PASS`）：审核方对零效果终态路径给出 `CHANGES_REQUESTED`，阻断项为「CAS 信任 worker 自报的失败分类，未在事务内从已锁定事实重算」，另含主机时钟与库内时钟不一致、本文件 `zero-effect` 端点的 OpenAPI 合同漏项、一处过时注释与两处 `gofmt` 未对齐；四项已由 `5cca2681d` 修复（含「伪造 `PERMANENT` 不得收敛 UNKNOWN 执行」的真实 PostgreSQL 负例），并在修复后的 HEAD 复核通过。
+
+在步骤 4 的剩余验收项（broker 重投、epoch 切换、12 次界限、N/N-1 及生产等价演练）与 GSA-04/GSA-38～40 环境门禁完成之前，GSA-16 只能保持 `IN_PROGRESS / PARTIAL / ZERO_EFFECT_CAS_GATED / INDEPENDENT_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED`；本状态不授权生产启用、调度恢复 worker、人工重放或跨 epoch 补发。
