@@ -439,14 +439,20 @@ fn snapshot_with_label(
         Ok(repo) => {
             let id = match repo.snapshot_with_session(label, session_id) {
                 Ok(id) => Some(id.0),
+                // A git command that times out here (e.g. a wedged `git add
+                // -A`) is the case that leaves the fresh index.lock behind;
+                // the once-per-workspace notice must cover it, not just
+                // open_or_init failures.
                 Err(e) => {
                     tracing::warn!(target: "snapshot", "snapshot '{label}' failed: {e}");
+                    maybe_notify_snapshots_disabled_once(workspace, &e);
                     return None;
                 }
             };
             // Prune oldest snapshots to cap disk usage (#1112).
             if let Err(e) = repo.prune_keep_last_n(crate::snapshot::DEFAULT_MAX_SNAPSHOTS) {
                 tracing::warn!(target: "snapshot", "snapshot prune failed: {e}");
+                maybe_notify_snapshots_disabled_once(workspace, &e);
             }
             id
         }
