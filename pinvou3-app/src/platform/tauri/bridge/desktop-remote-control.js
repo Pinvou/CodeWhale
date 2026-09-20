@@ -140,7 +140,7 @@
         workspaces: Array.isArray(workspaces) ? workspaces : [],
       }).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledRefresh() {
@@ -149,7 +149,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledStop() {
@@ -157,7 +157,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_stop", {}).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledDisconnectNow() {
@@ -165,13 +165,14 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_disconnect_now", {}).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledStatus() {
       ensureAvailable();
       subscribe();
-      return invoke("desktop_remote_controlled_status", {});
+      return invoke("desktop_remote_controlled_status", {})
+        .catch(function (failure) { throw asBoundedError(failure); });
     }
 
     /**

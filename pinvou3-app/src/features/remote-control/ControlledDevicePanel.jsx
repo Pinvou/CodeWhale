@@ -136,7 +136,9 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     try {
       await action(bridge.desktopRemoteControl);
     } catch (failure) {
-      setError((failure && failure.code) || 'error');
+      // 有界码优先；没有 code 时退回 message（至少能看出是哪条命令失败），
+      // 最后才是占位符——避免界面只显示 "(error)" 而无从定位。
+      setError((failure && (failure.code || failure.message)) || 'error');
     } finally {
       setBusy(null);
     }

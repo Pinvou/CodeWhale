@@ -100,9 +100,15 @@ pub async fn desktop_remote_controlled_start(
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
     let workspaces = workspace_requests(workspaces)?;
-    manager
-        .start(device_name.as_deref(), workspaces)
-        .map_err(controlled_error)?;
+    if let Err(error) = manager.start(device_name.as_deref(), workspaces) {
+        // 早期拒绝（例如上一代仍在等待配对 → desktop_remote_control_busy）此前完全
+        // 没有痕迹，UI 只会显示兜底文案；这里写入排障日志。
+        super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "start_rejected",
+            error.code,
+        );
+        return Err(controlled_error(error));
+    }
     let operation = manager
         .current_operation()
         .ok_or_else(|| "desktop_remote_generation_unavailable".to_owned())?;
