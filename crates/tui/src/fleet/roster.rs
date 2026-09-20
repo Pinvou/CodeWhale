@@ -176,6 +176,17 @@ impl FleetRoster {
                 }
             })
             .collect::<Vec<_>>();
+        // `FleetConfigToml.profiles` is a byte-order `BTreeMap`, so
+        // case-variant or whitespace-variant keys (`Expert` / `expert` /
+        // ` expert`) are distinct legal entries while [`Self::get`] resolves
+        // all of them to the first member in order (trimmed, ASCII
+        // case-insensitive). Collapse every duplicate to exactly that first
+        // member: the advertised listing must never contain an id that
+        // silently spawns a different profile. The directory profile loaders
+        // already enforce this invariant one layer up; this keeps the
+        // host-config layer consistent with them.
+        let mut resolved_keys = std::collections::HashSet::new();
+        members.retain(|member| resolved_keys.insert(member.id.trim().to_ascii_lowercase()));
         members.sort_by_key(|member| member.id.to_ascii_lowercase());
         Self {
             members,
@@ -812,6 +823,46 @@ mod tests {
         let dir = workspace.join(super::super::profile::WORKSPACE_AGENT_PROFILE_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(filename), contents).unwrap();
+    }
+
+    #[test]
+    fn from_host_config_collapses_ids_that_get_resolves_together() {
+        // `[fleet.profiles]` is a byte-order BTreeMap, so `Expert`, `expert`,
+        // and ` expert` are distinct legal keys while `get` resolves all of
+        // them (trimmed, ASCII case-insensitive) to the first member in
+        // order. The host roster must not advertise an id that silently
+        // spawns a different profile: every duplicate collapses to exactly
+        // that first member.
+        let profiles = BTreeMap::from([
+            ("expert".to_string(), config_profile("expert", None)),
+            ("Expert".to_string(), config_profile("Expert", None)),
+            (" expert ".to_string(), config_profile("indented", None)),
+            ("scout-aid".to_string(), config_profile("scout-aid", None)),
+        ]);
+        let roster = FleetRoster::from_host_config(&config_with_profiles(profiles));
+
+        // Byte order puts the whitespace variant first, so it is the member
+        // `get` always resolved to; both case variants collapse into it.
+        let ids: Vec<&str> = roster.members().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec![" expert ", "scout-aid"]);
+        assert_eq!(
+            roster.get("expert").expect("tolerant lookup").id,
+            " expert "
+        );
+        assert_eq!(
+            roster.get("EXPERT").expect("tolerant lookup").id,
+            " expert "
+        );
+        assert_eq!(
+            roster.get("Expert").expect("tolerant lookup").id,
+            " expert "
+        );
+
+        // Every advertised id resolves to itself — the listing/spawn
+        // invariant the roster action promises.
+        for member in roster.members() {
+            assert_eq!(roster.get(&member.id).expect("self lookup").id, member.id);
+        }
     }
 
     #[test]

@@ -4126,6 +4126,87 @@ async fn agent_roster_profile_query_discovers_members_beyond_the_listing_cap() {
 }
 
 #[tokio::test]
+async fn agent_roster_never_lists_ids_that_spawn_a_different_profile() {
+    // `[fleet.profiles]` is a byte-order BTreeMap, so `Expert`, `expert`, and
+    // ` editor`-style variants are distinct legal keys while spawn resolution
+    // (`FleetRoster::get`) folds them trimmed and ASCII case-insensitively to
+    // the first member in order. The listing must never advertise both of a
+    // colliding pair: every displayed member_id has to resolve back to
+    // itself, otherwise the model selects a row and silently launches a
+    // different profile's prompt.
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for (id, description) in [
+        ("Expert", "Senior localization reviewer"),
+        ("expert", "Junior localization reviewer"),
+        (" editor", "Copy editor"),
+    ] {
+        fleet.profiles.insert(
+            id.to_string(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.to_string()),
+                role: codewhale_config::FleetRole {
+                    name: id.to_string(),
+                    description: Some(description.to_string()),
+                    instructions: None,
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+    let mut runtime = stub_runtime();
+    let host_roster = std::sync::Arc::new(FleetRoster::from_host_config(&fleet));
+    runtime.host_agent_profiles = host_roster.clone();
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime,
+    );
+    let result = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect("roster action");
+    let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+
+    // Byte order puts the whitespace variant first, so `Expert` is the member
+    // `get` resolves the `expert` keys to; the `expert` key collapses into it
+    // and must not be listed alongside it.
+    assert_eq!(payload["host_profile_count"], json!(2));
+    let listed: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert_eq!(listed, vec![" editor", "Expert"]);
+
+    // Every advertised id resolves back to itself at spawn.
+    for member_id in &listed {
+        let mut request = parse_spawn_request(&json!({
+            "prompt": "review the change",
+            "profile": member_id,
+            "write_authority": "read_only"
+        }))
+        .expect("host profile request parses");
+        let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_roster)
+            .expect("listed id must resolve at spawn")
+            .expect("host member is returned");
+        assert_eq!(&resolved.id, member_id, "listed id must resolve to itself");
+    }
+
+    // A tolerant-spelling selection still lands on the one advertised member.
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": "expert",
+        "write_authority": "read_only"
+    }))
+    .expect("host profile request parses");
+    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_roster)
+        .expect("tolerant spelling must resolve")
+        .expect("host member is returned");
+    assert_eq!(resolved.id, "Expert");
+}
+
+#[tokio::test]
 async fn forkguard_agent_roster_lists_only_spawnable_host_profiles() {
     let tmp = tempdir().expect("tempdir");
     let mut fleet = codewhale_config::FleetConfigToml::default();
