@@ -275,7 +275,14 @@ fn controller_relay_message(value: &Value) -> bool {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
     matches!(
         kind,
-        "desktop_endpoint_registered" | "desktop_relay_connection" | "error"
+        // `desktop_pairing_registered` 是 controller-v1 注册的结果帧：它既不叫
+        // `controller_*` 也不在握手/业务列表里，之前被这条过滤挡在控制通道之外，
+        // 导致 B worker 永远等不到回包（30 秒超时），而 relay 其实已生成连接码
+        // （2026-09-20 实测：relay registrations=2 而客户端报 pairing_registration_timeout）。
+        "desktop_endpoint_registered"
+            | "desktop_pairing_registered"
+            | "desktop_relay_connection"
+            | "error"
     ) || kind.starts_with("controller_")
         || matches!(
             kind,
@@ -3336,6 +3343,31 @@ mod tests {
     fn packaged_defaults_target_the_production_remote_endpoint() {
         assert_eq!(DEFAULT_PUBLIC_BASE_URL, "https://pinvou.com/pinvou3/remote");
         assert_eq!(DEFAULT_RELAY_WS_URL, "wss://pinvou.com/pinvou3/remote/ws");
+    }
+
+    /// controller-v1 的注册结果帧必须进入控制通道：少了它 B 端永远收不到连接码
+    /// （relay 已生成、客户端超时，2026-09-20 实测）。
+    #[test]
+    fn controller_lane_filter_forwards_the_pairing_registration_result() {
+        for kind in [
+            "desktop_pairing_registered",
+            "desktop_endpoint_registered",
+            "desktop_relay_connection",
+            "error",
+            "controller_joined",
+            "encrypted_frame",
+        ] {
+            assert!(
+                controller_relay_message(&serde_json::json!({ "type": kind })),
+                "{kind} 必须转发给控制通道"
+            );
+        }
+        for kind in ["web_client_joined", "desktop_endpoint_replaced"] {
+            assert!(
+                !controller_relay_message(&serde_json::json!({ "type": kind })),
+                "{kind} 不得进入控制通道"
+            );
+        }
     }
 
     /// 内置端点 profile：地址与信任根随包分发，用户不需要再配置环境变量。
