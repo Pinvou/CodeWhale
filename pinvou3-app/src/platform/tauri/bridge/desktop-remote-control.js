@@ -24,9 +24,6 @@
 
     if (!logic) throw new Error("desktop remote control state logic not loaded");
 
-    // 安装时先镜像一次初始状态，保证 UI 首次读取 bs.controlledDevice 就不是 undefined。
-    mirrorSlices(current());
-
     var unlisten = [];
     var subscribed = false;
     function isAvailable() {
@@ -62,6 +59,11 @@
       if (typeof notify === "function") notify("desktopRemoteControl");
       return next;
     }
+
+    // 安装时先镜像一次初始状态，保证 UI 首次读取 bs.controlledDevice 就不是
+    // undefined。注意必须放在 STATE_SLICES 初始化之后：var 提升下提前调用会拿到
+    // undefined 并让整个 feature 安装失败（2026-09-20 实测：voice 域缺失）。
+    mirrorSlices(current());
 
     function current() {
       return state.desktopRemoteControl || logic.createState();
