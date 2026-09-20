@@ -134,9 +134,16 @@ const expectedProtocolHashes = {
   sessions: '24c9d103bfa90094b02200441222d387d86131836d0c7029d96c5ec28d071ddc',
   settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
   updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
+  // Recomputed for the comment-only English translation of the voice bridge
+  // (PR-added Chinese comments inside the postprocess_voice_text invoke
+  // span are part of the hashed source; no invoke/listen surface changed).
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
-  teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
-  projects: '4f0737d9a074629208d6a01e6b027907ad6f0676ef2ae456c95cc37350d8ca76',
+  // Recomputed for the rebind carryover feed-back (review #463 F-Major):
+  // rebind_workspace_root gains the optional previousPostBusySessionIds
+  // payload — the dialog's previous report fed back on retry, honored by the
+  // backend only as a reporting reclassification inside its own to-lane
+  // retry population. Same command surface, no new invoke or listen entries.
+  projects: '90c12ab7494aba3975ac4ece4b23594f4a4fcf309f6252b721ce15575b245979',
 };
 
 for (const [domain, files] of Object.entries(protocolSources)) {
