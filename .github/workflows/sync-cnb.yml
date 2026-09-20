@@ -46,7 +46,31 @@ permissions:
   contents: read
 
 jobs:
+  # The mirror is optional egress, and the token is a repository secret. On a
+  # fork — or on this repository before the secret is configured — the push
+  # cannot succeed no matter what the commit contains, so probe first and skip
+  # instead of failing a check no contributor can fix. `secrets` is unavailable
+  # in a job-level `if`, hence the output hand-off.
+  credentials:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.probe.outputs.configured }}
+    steps:
+      - id: probe
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_GIT_TOKEN }}
+        shell: bash
+        run: |
+          if [ -n "${CNB_TOKEN:-}" ]; then
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::CNB_GIT_TOKEN is not set for this repository; skipping the CNB mirror push."
+          fi
+
   sync:
+    needs: credentials
+    if: needs.credentials.outputs.configured == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -61,6 +85,11 @@ jobs:
           set -euo pipefail
 
           if [ -z "${CNB_TOKEN:-}" ]; then
+            # Whenever this revision of the workflow runs, the gate above has
+            # already skipped this job. This guard still covers runs that carry
+            # an older revision of this file (a push from a branch that predates
+            # the gate), plus the narrow window where the secret is deleted
+            # between the gate's probe and this step.
             echo "::error::CNB_GIT_TOKEN secret is not set; cannot push to CNB." >&2
             exit 1
           fi
