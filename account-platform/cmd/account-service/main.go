@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
@@ -112,6 +113,10 @@ func main() {
 	if err != nil {
 		log.Fatal("Approval recovery result reader configuration is invalid: ", err)
 	}
+	recoveryEffects, err := approvaleffect.NewClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal("Approval recovery effect reader configuration is invalid: ", err)
+	}
 	approvalPrechecks, err := account.NewHTTPApprovalPrecheckSource(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal("Approval precheck reader configuration is invalid: ", err)
@@ -143,6 +148,7 @@ func main() {
 	service := account.NewService(repository, wallets).
 		WithServiceToken(serviceCredential).
 		WithApprovalRecoveryResults(recoveryResults).
+		WithApprovalRecoveryEffects(recoveryEffects).
 		WithApprovalPrecheckSource(approvalPrechecks).
 		WithClientCompatibility(valueOrDefault("ACCOUNT_SERVICE_VERSION", "development"), valueOrDefault("ACCOUNT_CLIENT_CONTRACT_VERSION", "account-client-v1")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).

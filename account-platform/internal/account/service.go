@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
@@ -39,6 +40,7 @@ type Service struct {
 	ownerCandidateCursorKey     []byte
 	recoveryResults             ApprovalRecoveryResultReader
 	approvalPrechecks           ApprovalPrecheckSource
+	recoveryEffects             approvaleffect.Reader
 }
 
 func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
@@ -97,6 +99,13 @@ func (s *Service) WithApprovalPrecheckSource(source ApprovalPrecheckSource) *Ser
 	return s
 }
 
+// WithApprovalRecoveryEffects wires the owner effect authority the recovery
+// invalidation surface re-reads itself; without it the surface stays 503.
+func (s *Service) WithApprovalRecoveryEffects(reader approvaleffect.Reader) *Service {
+	s.recoveryEffects = reader
+	return s
+}
+
 func (s *Service) WithTokenOwnerCandidateCursorKey(key []byte) *Service {
 	s.ownerCandidateCursorKey = append([]byte(nil), key...)
 	return s
@@ -125,6 +134,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/approval-recovery/plan", serviceauth.Require("internal.approval-recovery.plan"), httpserver.AdaptFunc(s.internalApprovalRecoveryPlan))
 	internal.POST("/approval-recovery/confirm", serviceauth.Require("internal.approval-recovery.confirm"), httpserver.AdaptFunc(s.internalConfirmApprovalRecovery))
+	internal.POST("/approval-recovery/zero-effect", serviceauth.Require("internal.approval-recovery.zero-effect"), httpserver.AdaptFunc(s.internalInvalidateApprovalRecoveryZeroEffect))
 	internal.POST("/approval-requests/:approval_request_id/executions", serviceauth.Require("internal.approval-execution.begin"), approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
 	internal.POST("/approval-requests/:approval_request_id/executions/complete", serviceauth.Require("internal.approval-execution.complete"), approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
 	internal.GET("/approval-authorization/events/:event_id/route", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationRoute))
