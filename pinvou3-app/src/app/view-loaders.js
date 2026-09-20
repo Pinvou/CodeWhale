@@ -10,6 +10,7 @@ export const VIEW_LOADERS = {
   toolStore: () => import('../features/tools/ToolStoreView.jsx'),
   scheduled: () => import('../features/scheduled/ScheduledTasksView.jsx'),
   knowledge: () => import('../features/knowledge/KnowledgeView.jsx'),
+  modelStore: () => import('../features/model-store/ModelStoreView.jsx'),
   monitor: () => import('../features/monitor/MonitorView.jsx'),
   search: () => import('../features/search/SearchView.jsx'),
   // chat is not here: the main window renders ChatView at startup and imports

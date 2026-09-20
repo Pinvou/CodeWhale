@@ -840,6 +840,11 @@ pub fn run() {
                 }));
             }
             app.handle().manage(projects_store);
+            // 模型商店：全进程唯一的一份。它持有卡片级互斥表和下载队列，那是
+            // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
+            app.handle().manage(std::sync::Arc::new(
+                features::model_store::ModelStoreService::default(),
+            ));
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
             let remote_event_endpoint = remote_control_manager.clone();
@@ -1310,6 +1315,24 @@ pub fn run() {
             commands::llmapi::set_llmapi_user_enabled,
             commands::llmapi::get_llmapi_admin_overview,
             commands::monitor::discover_local_vllm,
+            commands::model_store::model_store_availability,
+            commands::model_store::model_store_cards,
+            commands::model_store::model_store_library,
+            commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_start_download,
+            commands::model_store::model_store_start_deploy,
+            commands::model_store::model_store_start_lifecycle,
+            commands::model_store::model_store_force_remove,
+            commands::model_store::model_store_run_log,
+            commands::model_store::model_store_cancel_run,
+            commands::model_store::model_store_answer_run,
+            commands::model_store::model_store_api_keys,
+            commands::model_store::model_store_create_api_key,
+            commands::model_store::model_store_test_store_state,
+            commands::model_store::model_store_unlock_test_store,
+            commands::model_store::model_store_disable_test_store,
+            commands::model_store::model_store_storage_settings,
+            commands::model_store::model_store_set_storage_settings,
             commands::settings::list_models,
             commands::settings::reveal_model_api_key,
             commands::settings::probe_local_server_kind,

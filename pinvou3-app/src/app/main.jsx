@@ -2,7 +2,7 @@ import { lazy, startTransition as scheduleViewTransition, Suspense, useCallback,
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import '../styles/base.css';
-import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
+import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, StoreFront, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
 import { ArchiveConfirmDialog, ArchiveToast, NavItem, RecentItem } from '../components/layout/NavigationComponents.jsx';
 import { SidePanelLayoutProvider } from '../components/layout/ResizableSidePanel.jsx';
 import {
@@ -109,6 +109,7 @@ const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ defau
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
 const LazyScheduledTasksView = lazy(() => VIEW_LOADERS.scheduled().then(m => ({ default: m.ScheduledTasksView })));
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
+const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
 const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
@@ -381,6 +382,20 @@ const NAV_ICON_MONITOR = <BarChart2 size={18} />;
 const NAV_ICON_TOOL_STORE = <Puzzle size={18} />;
 const NAV_ICON_CARD_POOL = <Layers size={18} />;
 const NAV_ICON_KNOWLEDGE = <BookOpen size={18} />;
+// 店铺,但不是 Lucide 那个 Store——它在 18px 下像垃圾桶。
+//
+// 两次返工的经过,省得下一个人再走一遍：
+//   Lucide Store  跟 Trash2 是同一副骨架（顶部一条长横线 + 圆角收窄的身子）,
+//                 24px 下还看得出雨棚斜边,18px 糊掉之后就是个桶。
+//   Cpu（芯片）    语义没错,但这个应用里芯片**已经是"模型"的符号**了——设置页的
+//                 「模型」分区、本地模型头像、对话框的模型选择器用的都是它。
+//                 侧栏再用一次,「模型商店」和「设置→模型」两个去处就长得一样。
+//   StoreFront    回到店铺意象,但把下摆画成扇贝形、身子改竖直,跟垃圾桶彻底分开。
+//                 画法上的取舍见 icons.jsx 里那段注释。
+const NAV_ICON_MODEL_STORE = <StoreFront size={18} />;
+// NavItem 没有 data-testid 透传口子;display:contents 的包裹层只承载测试钩子,
+// 自身不参与布局,侧栏 flex 间距与收起态圆钮尺寸保持不变。
+const NAV_TESTID_WRAPPER_STYLE = { display: 'contents' };
 const NAV_ICON_CURRENT_CHAT = <MessageSquare size={18} />;
 
 // Hover/focus prefetch callbacks (prefetchView is a module function):
@@ -388,6 +403,7 @@ const NAV_ICON_CURRENT_CHAT = <MessageSquare size={18} />;
 const NAV_PREFETCH = {
   scheduled: () => prefetchView('scheduled'),
   knowledge: () => prefetchView('knowledge'),
+  modelStore: () => prefetchView('modelStore'),
   monitor: () => prefetchView('monitor'),
   toolStore: () => prefetchView('toolStore'),
   cardpool: () => prefetchView('cardpool'),
@@ -1236,6 +1252,31 @@ const NAV_PREFETCH = {
         }
       }, [language]);
       const [superPerm, setSuperPerm] = useState(false);
+      // 侧栏「模型商店」入口是否渲染。
+      //
+      // 模型商店是纯 Linux 功能——要 docker 起推理引擎、要 pty 跑卡片脚本、装引擎时
+      // 要 pkexec 提权。Windows 和 macOS 上 `model_store_availability` 会回
+      // available:false(走 features/model_store/platform/unsupported.rs 的桩),入口
+      // 整个不渲染,这两端的界面跟加这个功能之前一模一样。
+      //
+      // 无条件渲染的话,这些平台会多出一个点进去只会说「不可用」的死入口。
+      //
+      // **catch 里必须留下痕迹**。这里原来是 `.catch(() => {})` 全吞:2026-09-18 模型
+      // 商店从 sidecar 改成原生模块时命令名从 `lmm_status` 换成了
+      // `model_store_availability`,而这一处漏改——调用抛「命令不存在」、被吞掉、
+      // 入口永远不渲染。界面上没有任何异常,只是那个功能凭空消失了,查了一轮才找到。
+      const [modelStoreAvailable, setModelStoreAvailable] = useState(false);
+      useEffect(() => {
+        let alive = true;
+        invokeTauri('model_store_availability')
+          .then((status) => { if (alive) setModelStoreAvailable(!!status?.available); })
+          .catch((error) => {
+            // 按「没有」处理(不弹错打扰用户),但把原因写进控制台:命令名对不上这类
+            // 接线问题,除此之外没有任何可观测的表现。
+            console.warn('[model-store] 可用性查询失败，入口不渲染：', error);
+          });
+        return () => { alive = false; };
+      }, []);
       const defaultTaskCompletedNotif = platformCapabilities.taskCompletionNotificationsDefault !== false;
       const [taskCompletedNotif, setTaskCompletedNotif] = useState(defaultTaskCompletedNotif);
       // search 后端配置:provider 默认 bing(对齐 bridge prefs::SearchProvider::default());
@@ -3246,12 +3287,14 @@ const NAV_PREFETCH = {
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.sidebarTaskFilterCode)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
       };
-      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', 'settings', 'browser'];
+      // 模型商店只在有这个功能的平台上进「更多」列表,跟侧栏入口用同一个门(modelStoreAvailable),
+      // 否则 Windows/macOS 的移动版「更多」会多出一项。
+      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', ...(modelStoreAvailable ? ['modelStore'] : []), 'settings', 'browser'];
       const mobileMoreActive = mobileMoreViews.includes(currentView)
         || (currentView === 'scheduled' && !(bs && bs.scheduledRunContext));
 
@@ -3339,6 +3382,7 @@ const NAV_PREFETCH = {
         toolStore: () => navigateFromScheduledRun('toolStore'),
         cardpool: () => navigateFromScheduledRun('cardpool', () => setPoolMyOnly(false)),
         knowledge: () => navigateFromScheduledRun('knowledge'),
+        modelStore: () => navigateFromScheduledRun('modelStore'),
         chat: () => navigateFromScheduledRun('chat'),
       }), [navigateFromScheduledRun]);
       const navPickUpHandlers = useMemo(() => ({
@@ -3722,6 +3766,21 @@ const NAV_PREFETCH = {
                 onPointerEnter={NAV_PREFETCH.knowledge} onFocus={NAV_PREFETCH.knowledge}
                 dragKind={canDetachWindows ? 'knowledge' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'knowledge:'} onPickUp={canDetachWindows ? navPickUpHandlers.knowledge : undefined}
               />
+              {/* 模型商店:只在 Linux 上渲染,见 modelStoreAvailable。
+                  NavItem 不透传 data-testid,套一层 display:contents 的容器挂测试
+                  钩子,不改变侧栏 flex 布局。 */}
+              {modelStoreAvailable && (
+                <div data-testid="nav-model-store" style={NAV_TESTID_WRAPPER_STYLE}>
+                  <NavItem
+                    icon={NAV_ICON_MODEL_STORE} label={t.modelStore}
+                    active={currentView === 'modelStore'}
+                    theme={activeTheme}
+                    isSidebarOpen={isSidebarOpen}
+                    onClick={navNavigateHandlers.modelStore}
+                    onPointerEnter={NAV_PREFETCH.modelStore} onFocus={NAV_PREFETCH.modelStore}
+                  />
+                </div>
+              )}
               {/* 收起态专属:展开态近期列表的高亮项就是回会话入口,不重复渲染 */}
               {!isSidebarOpen && (
                 <NavItem
@@ -4250,6 +4309,7 @@ const NAV_PREFETCH = {
             )}
             {currentView === 'outputs' && <LazyKnowledgeView theme={activeTheme} t={t} mode="outputs" />}
             {currentView === 'knowledge' && <LazyKnowledgeView theme={activeTheme} t={t} />}
+            {currentView === 'modelStore' && <LazyModelStoreView theme={activeTheme} t={t} bs={bs} />}
               </Suspense>
             </ViewErrorBoundary>
 
@@ -4467,6 +4527,8 @@ const NAV_PREFETCH = {
                 active: currentView === 'knowledge', onClick: () => mobileNavigate('knowledge') },
               { key: 'toolStore', label: t.toolStore, icon: <Puzzle size={18} />,
                 active: currentView === 'toolStore', onClick: () => mobileNavigate('toolStore') },
+              ...(modelStoreAvailable ? [{ key: 'modelStore', label: t.modelStore, icon: NAV_ICON_MODEL_STORE,
+                active: currentView === 'modelStore', onClick: () => mobileNavigate('modelStore') }] : []),
               { key: 'settings', label: t.settings, icon: <Settings size={18} />,
                 active: currentView === 'settings', dot: hasUpdate, onClick: () => mobileNavigate('settings') },
             ]} />

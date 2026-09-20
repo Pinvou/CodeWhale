@@ -271,6 +271,61 @@ function usesValidatedNsisStaging(args) {
   });
 }
 
+/**
+ * 从 `--target <三元组>` 解析出目标架构，按 node 的 arch 记法返回。
+ *
+ * 交叉构建时必须按**目标**架构挑 overlay，不能按宿主架构：否则
+ * `--target aarch64-unknown-linux-gnu` 会套上 x86_64 的配置，既引用了错误架构
+ * 的资源（报「安装包资源不存在」），又漏掉目标架构 overlay 里真正要打的东西。
+ *
+ * 没传 --target 时返回 null，调用方回退到 process.arch，原行为不变。
+ *
+ * @param {string[]} args 传给 tauri 的完整参数。
+ * @returns {string|null} "arm64" / "x64"，无法判定时 null。
+ */
+function targetArchitecture(args) {
+  let triple = null;
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--target" && i + 1 < args.length) triple = args[i + 1];
+    else if (args[i].startsWith("--target=")) triple = args[i].slice("--target=".length);
+  }
+  if (!triple) return null;
+  const machine = triple.split("-")[0];
+  if (machine === "aarch64" || machine === "arm64") return "arm64";
+  if (machine === "x86_64" || machine === "amd64") return "x64";
+  return null;
+}
+
+/**
+ * 跳过 ASR 运行时构建时，用一份摘掉了 ASR 资源声明的配置**顶替**架构 overlay。
+ *
+ * 跳过构建之后 `target/linux-asr-runtime/<arch>/sense-voice-main` 不存在，而架构
+ * overlay 里声明了它，`writeEffectiveArtifacts` 会以「安装包资源不存在」终止。
+ *
+ * 为什么是顶替而不是再叠一层：overlay 是**深合并**的，后面再加一个只含其余资源的
+ * `bundle.resources` 盖不掉前面已经声明的那条，ASR 那行会原样留下。
+ *
+ * 为什么不直接改那个纳入版本控制的配置文件：那样每次交叉构建都要「改了记得还原」，
+ * 而且 `tests/tauri_platform_layout.test.js` 会一直是红的。构建期的临时差异就该
+ * 留在构建脚本里。
+ *
+ * `--config` 既收路径也收内联 JSON 串（`linuxStartupWindowConfigSpec` 就是这么用的），
+ * 所以这里直接返回 JSON 串，不落临时文件——落文件的话资源路径的相对基准会变。
+ * @param {string} configPath 架构 overlay 的绝对路径。
+ * @returns {string} 摘掉 ASR 之后的内联 JSON；没有可摘的就原样返回路径。
+ */
+function architectureConfigWithoutAsr(configPath) {
+  const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const resources = raw?.bundle?.resources;
+  if (!resources || typeof resources !== "object") return configPath;
+  const kept = Object.fromEntries(
+    Object.entries(resources).filter(([source]) => !source.includes("linux-asr-runtime")),
+  );
+  if (Object.keys(kept).length === Object.keys(resources).length) return configPath;
+  return JSON.stringify({ ...raw, bundle: { ...raw.bundle, resources: kept } });
+}
+
+
 function prepareTauriArgs(
   args,
   {
@@ -304,8 +359,16 @@ function prepareTauriArgs(
 
   const automaticConfigs = [platformConfigPath(platform)];
   if (platform === "linux") automaticConfigs.push(linuxStartupWindowConfigSpec());
-  const architectureConfig = platformArchitectureConfigPath(platform, architecture);
-  if (architectureConfig) automaticConfigs.push(architectureConfig);
+  // 交叉构建时 overlay 必须跟 --target 走，不能跟宿主架构走。
+  const effectiveArchitecture = targetArchitecture(prepared) || architecture;
+  const architectureConfig = platformArchitectureConfigPath(platform, effectiveArchitecture);
+  if (architectureConfig) {
+    automaticConfigs.push(
+      process.env.PINVOU3_SKIP_LINUX_ASR === "1"
+        ? architectureConfigWithoutAsr(architectureConfig)
+        : architectureConfig,
+    );
+  }
   // bundle:nsis has already validated the staging overlay. Do not inject the
   // original runtime resource mappings again or Tauri will enumerate and
   // verify the pre-signed binaries that the NSIS hook owns.
@@ -500,11 +563,19 @@ async function main() {
     if (developmentHost?.configSpec) additionalConfigs.push(developmentHost.configSpec);
   }
   if (hasTauriBuildCommand) {
-    prepareLinuxAsrRuntime();
+    // SenseVoice 运行时按设计只能在目标架构上原生构建（build-sensevoice-runtime.sh
+    // 要求 requested_arch == host_arch，产物还链接宿主 glibc），交叉构建时这一步
+    // 必然失败。给一个显式开关跳过它——跳过后必须同时把 overlay 里的资源声明摘掉，
+    // 否则 bundle 会找不到文件。
+    if (process.env.PINVOU3_SKIP_LINUX_ASR !== "1") prepareLinuxAsrRuntime();
     prepareCodexBridge();
     await prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge(windowsBridgeOptions);
-    prepareKnowledgeHost();
+    // 共享知识库服务编的是**宿主架构**的二进制（cargo build 不带 --target），
+    // 交叉构建时它会被打进另一个架构的包里，本来就是错的；而且它的 local-embed
+    // 依赖 ort-sys 要从 parcel.pyke.io 下 ONNX Runtime，国内网络基本下不动。
+    // 跟 SenseVoice 同一类问题：这个包装器不认 --target，只按宿主架构备料。
+    if (process.env.PINVOU3_SKIP_KNOWLEDGE_HOST !== "1") prepareKnowledgeHost();
     if (process.platform === "win32") {
       additionalConfigs.push(WINDOWS_BRIDGE_CONFIG_PATH);
     }

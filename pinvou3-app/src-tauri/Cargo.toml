@@ -263,6 +263,14 @@ libc = "0.2"
 # Linux webview(webkit2gtk)默认拒绝 getUserMedia → 语音输入点麦克风被拒。
 # 连 permission-request 信号放行 UserMedia(麦克风)请求。版本对齐 wry 0.55 用的 2.0.x。
 [target.'cfg(target_os = "linux")'.dependencies]
+# 模型商店的脚本执行器要用**真 pty** 跑卡片脚本：卡片会在脚本里问用户话（下载源、
+# 从机密码……），而管道下大多数程序不做交互。开了 pty 之后必须立刻用 TCSANOW 关掉
+# ECHO——否则写回主端的答案会原样回显进日志，密码也一样。
+# 只在 Linux 编译，见 features/model_store/platform/。
+nix = { version = "0.29", features = ["fs", "term", "process", "signal", "poll"] }
+# HuggingFace token（下私有模型权重用）存系统密钥环。密钥环不可用时模型商店会
+# 自动退化成 0600 的本地文件，所以这个依赖不是硬前提，但有它就别把 token 落成明文。
+keyring = { version = "3", features = ["sync-secret-service"] }
 # Tauri 的 show/set_focus 是两条独立主循环消息；隐藏启动窗口在 release 下可能
 # 尚未完成 map 就执行 present。直接在 GTK 主线程原子 show/deiconify/present。
 gtk = "0.18"
