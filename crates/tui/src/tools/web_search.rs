@@ -1507,22 +1507,7 @@ async fn run_scrape_search_with_endpoints(
                 from: BackendId::DuckDuckGo,
                 to: BackendId::Bing,
             });
-            // The fallback consumed the same raw locale; if the flag was not
-            // already pushed for the DuckDuckGo leg, push it for Bing.
-            if bing_locale_was_ignored(query.locale.as_deref())
-                && !degraded.iter().any(|reason| {
-                    matches!(
-                        reason,
-                        DegradedReason::KnobIgnored {
-                            knob: QueryKnob::Locale,
-                        }
-                    )
-                })
-            {
-                degraded.push(DegradedReason::KnobIgnored {
-                    knob: QueryKnob::Locale,
-                });
-            }
+            prune_fallback_locale_ignored(&mut degraded, query.locale.as_deref());
             Ok(BackendSearch {
                 backend: BackendId::Bing,
                 source: "bing".to_string(),
@@ -2154,24 +2139,28 @@ fn scrape_market(locale: Option<&str>, query: &str) -> Option<String> {
         })
 }
 
-/// Light shape check for a model-supplied `locale`: ASCII letters/digits
-/// separated by `-`/`_`, no empty or separator-only edges. Anything else
+/// Light shape check for a model-supplied `locale`: an alphabetic primary
+/// language subtag followed by alphanumeric subtags separated by `-`/`_`,
+/// each at most 8 characters, with no empty or separator-only edges. The
+/// alphabetic primary matters for receipt honesty: `12345` is not a locale,
+/// and transmitting it (with `honored.locale=true`) would contradict the
+/// schema text promising that malformed values are ignored. Anything else
 /// (e.g. `-CN`, `zh CN`, an injection attempt) is treated as no locale and
 /// keeps the historical request shape.
 fn is_plausible_locale_tag(tag: &str) -> bool {
-    !tag.is_empty()
-        && tag.len() <= 35
-        && tag
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-        && tag
-            .chars()
-            .last()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-        && tag
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    if tag.is_empty() || tag.len() > 35 {
+        return false;
+    }
+    let mut subtags = tag.split(['-', '_']);
+    let primary = subtags.next().unwrap_or_default();
+    if primary.is_empty() || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    subtags.all(|subtag| {
+        !subtag.is_empty()
+            && subtag.len() <= 8
+            && subtag.chars().all(|c| c.is_ascii_alphanumeric())
+    })
 }
 
 /// `Accept-Language` matching [`scrape_market`]. With no market resolved the
@@ -2265,6 +2254,28 @@ fn bing_locale_was_ignored(locale: Option<&str>) -> bool {
     locale.is_some_and(|tag| !is_plausible_locale_tag(tag.trim()))
 }
 
+/// The Bing fallback resolves the locale through Bing's own market mapping,
+/// so a `KnobIgnored` flag pushed for the DuckDuckGo leg (whose verified
+/// `kl` list is narrow) no longer describes the backend that produced the
+/// results: drop it and re-derive from Bing's rule, where anything
+/// shape-valid was sent as `mkt`/`setlang` and only an implausible tag
+/// stays ignored.
+fn prune_fallback_locale_ignored(degraded: &mut Vec<DegradedReason>, locale: Option<&str>) {
+    degraded.retain(|reason| {
+        !matches!(
+            reason,
+            DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale,
+            }
+        )
+    });
+    if bing_locale_was_ignored(locale) {
+        degraded.push(DegradedReason::KnobIgnored {
+            knob: QueryKnob::Locale,
+        });
+    }
+}
+
 /// True when an explicit `locale` was supplied but the DuckDuckGo scrape
 /// sends no region signal for it: either the value is malformed (no market
 /// tag resolves) or the resolved market is outside the verified `kl` region
@@ -2349,15 +2360,19 @@ fn web_search_entry_from_scraped(entry: ScrapedSearchResult) -> WebSearchEntry {
 /// ignore `kl` entirely.
 fn ddg_region_param(market: &str) -> Option<String> {
     let normalized = market.to_ascii_lowercase().replace('_', "-");
-    match normalized.as_str() {
-        "zh-cn" => Some("cn-zh".to_string()),
-        "en-us" => Some("us-en".to_string()),
-        "ja-jp" => Some("jp-jp".to_string()),
-        "ko-kr" => Some("kr-kr".to_string()),
-        "zh-tw" => Some("tw-tzh".to_string()),
-        "zh-hk" => Some("hk-tzh".to_string()),
-        _ => None,
-    }
+    // Script+region Chinese tags reduce to their region pair: the schema
+    // teaches BCP 47, where the script subtag is best practice for Chinese,
+    // and the verified list maps the region form.
+    let region = match normalized.as_str() {
+        "zh-cn" | "zh-hans-cn" => "cn-zh",
+        "en-us" => "us-en",
+        "ja-jp" => "jp-jp",
+        "ko-kr" => "kr-kr",
+        "zh-tw" | "zh-hant-tw" => "tw-tzh",
+        "zh-hk" | "zh-hant-hk" => "hk-tzh",
+        _ => return None,
+    };
+    Some(region.to_string())
 }
 
 fn duckduckgo_search_url(
@@ -3348,6 +3363,45 @@ mod tests {
         assert_eq!(super::ddg_region_param("fr-FR"), None);
         assert_eq!(super::ddg_region_param("zh-Hans"), None);
         assert_eq!(super::ddg_region_param("zh"), None);
+        // Script+region Chinese tags reduce to their verified region pair:
+        // the schema teaches BCP 47 where the script subtag is best
+        // practice for Chinese.
+        assert_eq!(super::ddg_region_param("zh-Hans-CN").as_deref(), Some("cn-zh"));
+        assert_eq!(super::ddg_region_param("zh-Hant-TW").as_deref(), Some("tw-tzh"));
+        assert_eq!(super::ddg_region_param("zh-Hant-HK").as_deref(), Some("hk-tzh"));
+    }
+
+    #[test]
+    fn bing_fallback_rederives_the_locale_flag_from_bings_rule() {
+        // A shape-valid locale the DuckDuckGo leg could not map (no kl
+        // pair) is carried by the Bing fallback through mkt/setlang, so the
+        // stale DDG-leg flag must not keep the receipt claiming the knob
+        // was ignored.
+        let mut degraded = vec![DegradedReason::KnobIgnored {
+            knob: QueryKnob::Locale,
+        }];
+        super::prune_fallback_locale_ignored(&mut degraded, Some("fr-FR"));
+        assert!(
+            !degraded.iter().any(|reason| matches!(
+                reason,
+                DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale,
+                }
+            )),
+            "the DDG-leg ignored flag must not survive the Bing fallback: \
+             {degraded:?}"
+        );
+        // An implausible tag stays ignored on the fallback too.
+        let mut degraded = vec![DegradedReason::KnobIgnored {
+            knob: QueryKnob::Locale,
+        }];
+        super::prune_fallback_locale_ignored(&mut degraded, Some("zh CN"));
+        assert!(degraded.iter().any(|reason| matches!(
+            reason,
+            DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale,
+            }
+        )));
     }
 
     #[test]
@@ -3373,6 +3427,11 @@ mod tests {
         assert_eq!(super::scrape_market(Some(""), "rust async"), None);
         assert_eq!(super::scrape_market(Some("zh=CN"), "rust async"), None);
         assert_eq!(super::scrape_market(Some("  "), "rust async"), None);
+        // Digits are not a language: the primary subtag must be alphabetic,
+        // or the value would be transmitted (and receipted as honored)
+        // against schema text promising malformed values are ignored.
+        assert_eq!(super::scrape_market(Some("12345"), "rust async"), None);
+        assert_eq!(super::scrape_market(Some("en-123456789"), "rust async"), None);
         // Well-formed tags survive the shape check verbatim.
         assert_eq!(
             super::scrape_market(Some("zh-TW"), "rust async").as_deref(),
