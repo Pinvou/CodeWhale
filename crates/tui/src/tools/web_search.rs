@@ -3336,11 +3336,10 @@ mod tests {
             super::scrape_accept_language(Some("zh-CN")),
             "zh-CN,zh;q=0.9,en;q=0.8"
         );
-        // Bare-language locale must not panic or emit an empty primary tag.
-        assert_eq!(
-            super::scrape_accept_language(Some("-CN")),
-            "-CN,en;q=0.9,en;q=0.8"
-        );
+        // A bare-language market (reachable through an explicit `locale: en`)
+        // emits a single range and, like every English market, never appends
+        // a duplicate `en` fallback.
+        assert_eq!(super::scrape_accept_language(Some("en")), "en;q=0.9");
     }
 
     #[test]
