@@ -718,9 +718,10 @@ func (domain *billingAuthorizationDomain) executePaymentFinancialRepair(ctx cont
 	}
 	result, err := domain.payments.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
 		ApprovalRequestID: binding.ApprovalRequestID, AuthorizationEventID: binding.EventID, ApprovalEpoch: binding.ApprovalEpoch,
-		ApproverUserID: command.ApproverUserID,
-		ExecutionKey:   command.ExecutionIdempotencyKey,
-		PolicyVersion:  active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
+		ApproverUserID:  command.ApproverUserID,
+		RequesterUserID: command.RequesterUserID,
+		ExecutionKey:    command.ExecutionIdempotencyKey,
+		PolicyVersion:   active.PolicyVersion, SchemaVersion: int64(active.SnapshotSchemaVersion), ActivationVersion: active.Version,
 		Command: PaymentFinancialRepairCommandInput{
 			PaymentOrderID: normalized.PaymentOrderID, PaymentEvidenceID: normalized.PaymentEvidenceID,
 		},

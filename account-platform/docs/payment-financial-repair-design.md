@@ -30,7 +30,7 @@
 2. 一条 `REPAIR_CREDIT` journal（`business_reference='repair-payment-transaction:'||<payment_transaction_id>`）与其成对 posting：每个组件的可用额记入钱包负债账户（带 lot）、未结应收清偿记入 `RECEIVABLE_ASSET`、`PAYMENT_CLEARING −amount`；journal 合计 0。
 3. credit lot（每组件一个）、entitlement package（`source_type='PAYMENT'`）与 BASE/BONUS component，字段与既有路径逐字段一致。
 4. 钱包 `posted_microcredits += amount−appliedToReceivables`、`version+1`、`updated_at`；未结应收按既有 `CASH_RECHARGE_BASE` 顺序清偿（既有语义，不新造规则）。
-5. `payment_order_repairs` 一行（审计）：`actor_id`=审批执行身份（冻结在 wire 上的审批人 `approver_user_id`，与既有 `payment_provider_resume_executions.approver_user_id` 同义；执行时缺失即拒绝，不得写入全零 `actor_id`）、`reason`=审批冻结的原因摘要、`provider_snapshot`=冻结证据快照摘要、`payment_evidence_id`=冻结证据行、`entitlement_package_id`、`points_awarded`、`wallet_balance_before/after`，以及 GSA-28 前向迁移追加的审批联动列。
+5. `payment_order_repairs` 一行（审计）：`actor_id`=审批执行身份（冻结在 wire 上的审批人 `approver_user_id`，与既有 `payment_provider_resume_executions.approver_user_id` 同义；执行时缺失即拒绝，不得写入全零 `actor_id`）、`requester_user_id`=**申请人**（同一审批冻结的 `requester_user_id`；2026-09-21 用户决定要求审批驱动的修复同时记录独立审批的双方，故由前向 `000077` 追加该列——与审批联动列 all-or-none、且必须与 `actor_id` 不相等，非审批的运维修复行保持两者为空；执行时缺失或与审批人相同即拒绝）、`reason`=审批冻结的原因摘要、`provider_snapshot`=冻结证据快照摘要、`payment_evidence_id`=冻结证据行、`entitlement_package_id`、`points_awarded`、`wallet_balance_before/after`，以及 GSA-28 前向迁移追加的审批联动列。
 
 **明确禁止**：
 

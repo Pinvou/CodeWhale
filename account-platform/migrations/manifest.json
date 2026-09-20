@@ -1524,6 +1524,16 @@
         "file": "000076_usage_settlement_repair_proof_claim_allowlist.up.sql",
         "version": 76,
         "sha256": "b97d517e6f19597f642b7eaaeef02bbe51eec978b3932f3677d15aa10d02e008"
+      },
+      {
+        "file": "000077_payment_order_repairs_requester.down.sql",
+        "version": 77,
+        "sha256": "5495c708adb180c47e9fcfc1bd5653c422ec04c86bc11bcc98bcf09ec262e7da"
+      },
+      {
+        "file": "000077_payment_order_repairs_requester.up.sql",
+        "version": 77,
+        "sha256": "7432efde3c5dfa6a0c54ebdf39c862e147312830de494a06e125684ddc740564"
       }
     ],
     "payment-simulator": [

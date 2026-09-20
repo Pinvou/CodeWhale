@@ -103,7 +103,12 @@ type PaymentFinancialRepairExecutionInput struct {
 	// reused audit table requires a non-zero actor (design §4 item 5:
 	// "actor_id=审批执行身份"), so the execution refuses a nil approver instead
 	// of writing an unattributable row.
-	ApproverUserID    uuid.UUID
+	ApproverUserID uuid.UUID
+	// RequesterUserID is the requesting identity the same approval froze. The
+	// user decision of 2026-09-21 requires the audit row to record BOTH sides of
+	// the independent approval (migration 000077 adds the column), so the
+	// execution refuses a nil requester or a requester equal to the approver.
+	RequesterUserID   uuid.UUID
 	ExecutionKey      string
 	PolicyVersion     int64
 	SchemaVersion     int64
@@ -369,7 +374,7 @@ func (p *PaymentCoordinator) ApplyPaymentFinancialRepair(ctx context.Context, in
 	executionKey := strings.TrimSpace(input.ExecutionKey)
 	if p == nil || p.repository == nil || p.repository.pool == nil || input.ApprovalRequestID == uuid.Nil ||
 		input.AuthorizationEventID == uuid.Nil || input.ApprovalEpoch < 1 || executionKey == "" || executionKey != input.ExecutionKey ||
-		input.ApproverUserID == uuid.Nil ||
+		input.ApproverUserID == uuid.Nil || input.RequesterUserID == uuid.Nil || input.RequesterUserID == input.ApproverUserID ||
 		input.PolicyVersion < 1 || input.SchemaVersion < 1 || input.ActivationVersion < 1 {
 		return PaymentFinancialRepairResult{}, ErrConflict
 	}
@@ -435,15 +440,17 @@ WHERE transaction.payment_order_id=$1 AND transaction.provider_transaction_id=$2
 	repairID := uuid.Must(uuid.NewV7())
 	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,payment_transaction_id,payment_evidence_id,actor_id,reason,
 provider_snapshot,entitlement_package_id,points_awarded,wallet_balance_before,wallet_balance_after,created_at,
-approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,facts_digest)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,facts_digest,requester_user_id)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		// The audit row references the frozen evidence the approval froze (not the
-		// writer's own MANUAL_REPAIR provenance row) and records the approving
-		// identity as its actor, per design §4 item 5.
+		// writer's own MANUAL_REPAIR provenance row), records the approving
+		// identity as its actor and the requesting identity it approved for, per
+		// design §4 item 5 and the 2026-09-21 decision that both sides of the
+		// independent approval must be attributable.
 		repairID, plan.OrderID, transactionID, plan.EvidenceID, input.ApproverUserID, paymentFinancialRepairReason,
 		snapshot, packageID, plan.CreditMicrocredits, balanceBefore, balanceBefore+plan.CreditMicrocredits-plan.AppliedToReceivables,
 		now, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
-		ledgerRepairExecutionKeyDigest(executionKey), plan.FactsDigest); err != nil {
+		ledgerRepairExecutionKeyDigest(executionKey), plan.FactsDigest, input.RequesterUserID); err != nil {
 		return PaymentFinancialRepairResult{}, err
 	}
 	var journalID uuid.UUID
