@@ -155,8 +155,9 @@ type LedgerRepairExecutionInput struct {
 
 // ledgerRepairContractLeg freezes one account-type leg of an entry type.
 // Sign 0 means "any non-zero delta in either direction" (the ADJUSTMENT pair
-// legitimately appears in both directions); Optional legs may be absent when
-// the frozen amount is zero.
+// legitimately appears in both directions); Optional legs are the design's
+// conditional legs ("当 X>0 时必需"/"可出现"): they may be absent when the shape
+// produced by the writers omits them, and a present leg must be non-zero.
 type ledgerRepairContractLeg struct {
 	AccountType string
 	Sign        int64
@@ -164,18 +165,53 @@ type ledgerRepairContractLeg struct {
 }
 
 // ledgerRepairContracts is the frozen account-type contract table of the
-// GSA-23 design: the account types and net directions the existing writers of
-// each entry type produce. A ledger repair may only move one platform-account
-// posting back inside this contract.
+// GSA-23 design (design §5): the account types and net directions the existing
+// writers of each entry type produce. A ledger repair may only move one
+// platform-account posting back inside this contract.
+//
+// The design states the table is a *shape set* with per-leg conditions —
+// "同一 entry_type 允许多个合法形状（条件腿缺席即该形状），判据必须按形状集合做
+// 成员判定，不能把条件腿当必需腿" — and names the platform-only shapes of the
+// GSA-25 write-off (ADJUSTMENT −A + RECEIVABLE_ASSET +A) and the GSA-31
+// compensation (CHARGEBACK with only the two platform legs). A conditional leg
+// is therefore Optional, never mandatory; treating it as mandatory would make
+// every wallet-less legal shape look like an attribution error and refuse the
+// repair.
 var ledgerRepairContracts = map[string][]ledgerRepairContractLeg{
-	"RECHARGE":      {{AccountType: "PAYMENT_CLEARING", Sign: -1}, {AccountType: "WALLET_LIABILITY", Sign: 1}},
-	"USAGE":         {{AccountType: "USAGE_REVENUE", Sign: 1}, {AccountType: "WALLET_LIABILITY", Sign: -1}, {AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
-	"ADJUSTMENT":    {{AccountType: "ADJUSTMENT", Sign: 0}, {AccountType: "WALLET_LIABILITY", Sign: 0}},
-	"REFUND":        {{AccountType: "REFUND_CLEARING", Sign: 1}, {AccountType: "WALLET_LIABILITY", Sign: -1}, {AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
-	"EXPIRY":        {{AccountType: "ADJUSTMENT", Sign: 1}, {AccountType: "WALLET_LIABILITY", Sign: -1}},
-	"CHARGEBACK":    {{AccountType: "CHARGEBACK_CLEARING", Sign: 1}, {AccountType: "WALLET_LIABILITY", Sign: -1}, {AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
-	"REPAIR_CREDIT": {{AccountType: "PAYMENT_CLEARING", Sign: -1}, {AccountType: "WALLET_LIABILITY", Sign: 1}, {AccountType: "RECEIVABLE_ASSET", Sign: 1, Optional: true}},
-	"FORCED_REFUND": {{AccountType: "REFUND_CLEARING", Sign: 1}, {AccountType: "WALLET_LIABILITY", Sign: -1}, {AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
+	// PAYMENT_CLEARING −A 必需；WALLET_LIABILITY +A 当 available>0 时必需
+	// （全额清偿未结应收时无钱包腿）；RECEIVABLE_ASSET +R 当 appliedToReceivables>0 时可出现。
+	"RECHARGE": {{AccountType: "PAYMENT_CLEARING", Sign: -1},
+		{AccountType: "WALLET_LIABILITY", Sign: 1, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: 1, Optional: true}},
+	// USAGE_REVENUE +A 必需；WALLET_LIABILITY −S 当 settled>0 时必需；RECEIVABLE_ASSET −O 当 overage>0 时可出现。
+	"USAGE": {{AccountType: "USAGE_REVENUE", Sign: 1},
+		{AccountType: "WALLET_LIABILITY", Sign: -1, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
+	// WALLET_LIABILITY ±A 与 ADJUSTMENT ∓A 成对（adjustments.go 两方向），或
+	// ADJUSTMENT −A + RECEIVABLE_ASSET +A（GSA-25 核销形状，无钱包腿）。
+	"ADJUSTMENT": {{AccountType: "ADJUSTMENT", Sign: 0},
+		{AccountType: "WALLET_LIABILITY", Sign: 0, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: 1, Optional: true}},
+	// REFUND_CLEARING +T 必需；WALLET_LIABILITY −A 当 revoked>0 时必需；RECEIVABLE_ASSET −B 当缺口回收时出现。
+	"REFUND": {{AccountType: "REFUND_CLEARING", Sign: 1},
+		{AccountType: "WALLET_LIABILITY", Sign: -1, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
+	// ADJUSTMENT +E 必需；WALLET_LIABILITY −E 当 expiring>0 时必需。
+	"EXPIRY": {{AccountType: "ADJUSTMENT", Sign: 1},
+		{AccountType: "WALLET_LIABILITY", Sign: -1, Optional: true}},
+	// CHARGEBACK_CLEARING +R+B 必需；WALLET_LIABILITY −R 当 revocable>0 时必需；
+	// RECEIVABLE_ASSET −B 当 baseShortfall>0 时必需（仅剩短缺时只有两条平台腿，GSA-31 补偿形状）。
+	"CHARGEBACK": {{AccountType: "CHARGEBACK_CLEARING", Sign: 1},
+		{AccountType: "WALLET_LIABILITY", Sign: -1, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
+	// PAYMENT_CLEARING −A 必需；WALLET_LIABILITY +A 当 available>0 时必需；RECEIVABLE_ASSET +R 当 appliedToReceivables>0 时可出现。
+	"REPAIR_CREDIT": {{AccountType: "PAYMENT_CLEARING", Sign: -1},
+		{AccountType: "WALLET_LIABILITY", Sign: 1, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: 1, Optional: true}},
+	// REFUND_CLEARING +R+B 必需；WALLET_LIABILITY −R 当 revocable>0 时必需；RECEIVABLE_ASSET −B 当 shortfall>0 时必需。
+	"FORCED_REFUND": {{AccountType: "REFUND_CLEARING", Sign: 1},
+		{AccountType: "WALLET_LIABILITY", Sign: -1, Optional: true},
+		{AccountType: "RECEIVABLE_ASSET", Sign: -1, Optional: true}},
 }
 
 type ledgerRepairPosting struct {
@@ -351,16 +387,22 @@ func ledgerRepairLookupError(err error) error {
 // ledgerRepairSignatureMatches evaluates the frozen contract against an
 // account-type signature: every present account type must belong to the
 // contract, every mandatory leg must be present with the frozen direction, and
-// an account type may only appear once.
+// an account type may only appear once. Every writer shape in the frozen table
+// is a balanced journal (`ledger_postings_balanced` requires the postings of a
+// journal to sum to zero), which is also what the ADJUSTMENT disjunction needs
+// to stay a shape-set test: the write-off shape is `ADJUSTMENT −A` +
+// `RECEIVABLE_ASSET +A`, so a same-direction pair is not a legal shape.
 func ledgerRepairSignatureMatches(contract []ledgerRepairContractLeg, signature map[string]int64) bool {
 	allowed := map[string]ledgerRepairContractLeg{}
 	for _, leg := range contract {
 		allowed[leg.AccountType] = leg
 	}
+	var total int64
 	for accountType, delta := range signature {
 		if delta == 0 {
 			continue
 		}
+		total += delta
 		leg, ok := allowed[accountType]
 		if !ok {
 			return false
@@ -368,6 +410,9 @@ func ledgerRepairSignatureMatches(contract []ledgerRepairContractLeg, signature 
 		if leg.Sign != 0 && ((leg.Sign > 0 && delta < 0) || (leg.Sign < 0 && delta > 0)) {
 			return false
 		}
+	}
+	if total != 0 {
+		return false
 	}
 	for _, leg := range contract {
 		delta, present := signature[leg.AccountType]

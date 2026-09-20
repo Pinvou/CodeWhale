@@ -28,17 +28,17 @@ var paymentFinancialRepairSuccessStatuses = map[string]bool{
 }
 
 type PaymentFinancialRepairResult struct {
-	RepairID               uuid.UUID `json:"repair_id"`
-	PaymentOrderID         uuid.UUID `json:"payment_order_id"`
-	PaymentTransactionID   uuid.UUID `json:"payment_transaction_id"`
-	EntitlementPackageID   uuid.UUID `json:"entitlement_package_id"`
-	JournalEntryID         uuid.UUID `json:"journal_entry_id"`
-	ProviderTransactionID  string    `json:"provider_transaction_id"`
-	CreditMicrocredits     int64     `json:"credit_microcredits"`
-	AppliedToReceivables   int64     `json:"applied_to_receivables"`
-	WalletVersionAfter     int64     `json:"wallet_version_after"`
-	FactsDigest            string    `json:"facts_digest"`
-	Status                 string    `json:"status"`
+	RepairID              uuid.UUID `json:"repair_id"`
+	PaymentOrderID        uuid.UUID `json:"payment_order_id"`
+	PaymentTransactionID  uuid.UUID `json:"payment_transaction_id"`
+	EntitlementPackageID  uuid.UUID `json:"entitlement_package_id"`
+	JournalEntryID        uuid.UUID `json:"journal_entry_id"`
+	ProviderTransactionID string    `json:"provider_transaction_id"`
+	CreditMicrocredits    int64     `json:"credit_microcredits"`
+	AppliedToReceivables  int64     `json:"applied_to_receivables"`
+	WalletVersionAfter    int64     `json:"wallet_version_after"`
+	FactsDigest           string    `json:"facts_digest"`
+	Status                string    `json:"status"`
 }
 
 // PaymentFinancialRepairCommandInput is the closed command the approval froze.
@@ -99,12 +99,17 @@ type PaymentFinancialRepairExecutionInput struct {
 	ApprovalRequestID    uuid.UUID
 	AuthorizationEventID uuid.UUID
 	ApprovalEpoch        int64
-	ExecutionKey         string
-	PolicyVersion        int64
-	SchemaVersion        int64
-	ActivationVersion    int64
-	Command              PaymentFinancialRepairCommandInput
-	Frozen               PaymentFinancialRepairFrozenFacts
+	// ApproverUserID is the approving human identity the approval froze. The
+	// reused audit table requires a non-zero actor (design §4 item 5:
+	// "actor_id=审批执行身份"), so the execution refuses a nil approver instead
+	// of writing an unattributable row.
+	ApproverUserID    uuid.UUID
+	ExecutionKey      string
+	PolicyVersion     int64
+	SchemaVersion     int64
+	ActivationVersion int64
+	Command           PaymentFinancialRepairCommandInput
+	Frozen            PaymentFinancialRepairFrozenFacts
 }
 
 type paymentRepairReader interface {
@@ -261,24 +266,24 @@ WHERE wallet_id=$1 AND outstanding_microcredits>0`, plan.WalletID).Scan(&outstan
 		return PaymentFinancialRepairPlan{}, err
 	}
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": paymentFinancialRepairCommand,
+		"command_type":     paymentFinancialRepairCommand,
 		"payment_order_id": plan.OrderID.String(), "wallet_id": plan.WalletID.String(),
 		"merchant_order_no": plan.MerchantOrderNo, "channel": plan.Channel, "currency": plan.Currency,
 		"amount_fen": plan.AmountFen, "credit_microcredits": plan.CreditMicrocredits,
 		"base_microcredits": plan.BaseAmount, "bonus_microcredits": plan.BonusAmount,
 		"provider_id": plan.ProviderID, "provider_version": plan.ProviderVersion,
 		"provider_transaction_id": plan.ProviderTransactionID,
-		"order_status": orderStatus, "fulfillment_status": fulfillmentStatus,
+		"order_status":            orderStatus, "fulfillment_status": fulfillmentStatus,
 		"order_updated_at": plan.OrderUpdatedAt.UTC().Format(time.RFC3339Nano), "order_summary_version": plan.OrderSummaryVersion,
 		"evidence_id": plan.EvidenceID.String(), "evidence_type": evidenceType,
 		"evidence_status": evidenceStatus, "evidence_payload_digest": payloadDigest,
-		"evidence_paid_at": plan.PaidAt.Format(time.RFC3339Nano),
+		"evidence_paid_at":      plan.PaidAt.Format(time.RFC3339Nano),
 		"review_transaction_id": plan.ReviewTransactionID.String(),
-		"wallet_status": walletStatus, "wallet_posted_microcredits": plan.WalletPostedMicrocredits,
-		"wallet_version": plan.WalletVersion,
+		"wallet_status":         walletStatus, "wallet_posted_microcredits": plan.WalletPostedMicrocredits,
+		"wallet_version":               plan.WalletVersion,
 		"receivable_outstanding_total": outstandingTotal, "receivable_open_count": receivableCount,
 		"applied_to_receivables": plan.AppliedToReceivables,
-		"policy_version": policyVersion, "snapshot_schema_version": schemaVersion, "activation_version": activationVersion,
+		"policy_version":         policyVersion, "snapshot_schema_version": schemaVersion, "activation_version": activationVersion,
 	})
 	if err != nil {
 		return PaymentFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
@@ -364,6 +369,7 @@ func (p *PaymentCoordinator) ApplyPaymentFinancialRepair(ctx context.Context, in
 	executionKey := strings.TrimSpace(input.ExecutionKey)
 	if p == nil || p.repository == nil || p.repository.pool == nil || input.ApprovalRequestID == uuid.Nil ||
 		input.AuthorizationEventID == uuid.Nil || input.ApprovalEpoch < 1 || executionKey == "" || executionKey != input.ExecutionKey ||
+		input.ApproverUserID == uuid.Nil ||
 		input.PolicyVersion < 1 || input.SchemaVersion < 1 || input.ActivationVersion < 1 {
 		return PaymentFinancialRepairResult{}, ErrConflict
 	}
@@ -431,9 +437,10 @@ WHERE transaction.payment_order_id=$1 AND transaction.provider_transaction_id=$2
 provider_snapshot,entitlement_package_id,points_awarded,wallet_balance_before,wallet_balance_after,created_at,
 approval_request_id,authorization_event_id,approval_epoch,execution_key_digest,facts_digest)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-		// The audit row references the frozen evidence the approval froze, not the
-		// writer's own MANUAL_REPAIR provenance row.
-		repairID, plan.OrderID, transactionID, plan.EvidenceID, uuid.Nil, paymentFinancialRepairReason,
+		// The audit row references the frozen evidence the approval froze (not the
+		// writer's own MANUAL_REPAIR provenance row) and records the approving
+		// identity as its actor, per design §4 item 5.
+		repairID, plan.OrderID, transactionID, plan.EvidenceID, input.ApproverUserID, paymentFinancialRepairReason,
 		snapshot, packageID, plan.CreditMicrocredits, balanceBefore, balanceBefore+plan.CreditMicrocredits-plan.AppliedToReceivables,
 		now, input.ApprovalRequestID, input.AuthorizationEventID, input.ApprovalEpoch,
 		ledgerRepairExecutionKeyDigest(executionKey), plan.FactsDigest); err != nil {

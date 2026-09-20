@@ -71,6 +71,9 @@ func TestPaymentFinancialRepairPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
+	// The approving identity the approval froze; every approval-driven audit row
+	// must carry it as the actor.
+	approvingUserID := uuid.New()
 
 	seed := func(amountFen, credits, basePoints, bonusPoints int64, mergeResult, providerStatus string) (uuid.UUID, uuid.UUID, uuid.UUID) {
 		orderID, walletID, evidenceID := uuid.New(), uuid.New(), uuid.New()
@@ -166,9 +169,20 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 		cmd := PaymentFinancialRepairCommandInput{PaymentOrderID: order, PaymentEvidenceID: evidence}
 		return coordinator.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
 			ApprovalRequestID: requestID, AuthorizationEventID: eventID, ApprovalEpoch: 2,
-			ExecutionKey: "payment-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+			ApproverUserID: approvingUserID,
+			ExecutionKey:   "payment-repair:" + requestID.String(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
 			Command: cmd, Frozen: frozen,
 		})
+	}
+	// The reused audit table requires the approving identity as its actor
+	// (design §4 item 5), and a nil approver must be refused outright.
+	if _, err := coordinator.ApplyPaymentFinancialRepair(ctx, PaymentFinancialRepairExecutionInput{
+		ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2,
+		ExecutionKey: "payment-repair:no-approver", PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: 1,
+		Command: PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID},
+		Frozen:  frozenFacts(plan),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("execution without an approving identity err=%v", err)
 	}
 	requestID, eventID := uuid.New(), uuid.New()
 	applied, err := execute(requestID, eventID, orderID, evidenceID, frozenFacts(plan))
@@ -215,17 +229,17 @@ COALESCE(sum(original_microcredits) FILTER (WHERE component_type='BONUS'),0) FRO
 		t.Fatalf("components base=%d bonus=%d err=%v", baseTotal, bonusTotal, err)
 	}
 	var pointsAwarded, balanceBefore, balanceAfter, approvalEpoch int64
-	var linkRequestID, linkEventID uuid.UUID
+	var linkRequestID, linkEventID, actorID uuid.UUID
 	var factsDigest, executionKeyDigest string
 	if err := pool.QueryRow(ctx, `SELECT points_awarded,wallet_balance_before,wallet_balance_after,
 COALESCE(approval_request_id,'00000000-0000-0000-0000-000000000000'),COALESCE(authorization_event_id,'00000000-0000-0000-0000-000000000000'),
-COALESCE(approval_epoch,0),COALESCE(execution_key_digest,''),COALESCE(facts_digest,'')
+COALESCE(approval_epoch,0),COALESCE(execution_key_digest,''),COALESCE(facts_digest,''),actor_id
 FROM payment_order_repairs WHERE approval_request_id=$1`, requestID).
-		Scan(&pointsAwarded, &balanceBefore, &balanceAfter, &linkRequestID, &linkEventID, &approvalEpoch, &executionKeyDigest, &factsDigest); err != nil ||
+		Scan(&pointsAwarded, &balanceBefore, &balanceAfter, &linkRequestID, &linkEventID, &approvalEpoch, &executionKeyDigest, &factsDigest, &actorID); err != nil ||
 		pointsAwarded != 100 || balanceBefore != 0 || balanceAfter != 100 || linkRequestID != requestID || linkEventID != eventID ||
-		approvalEpoch != 2 || !validHexDigest(executionKeyDigest) || factsDigest != applied.FactsDigest {
-		t.Fatalf("repair row points=%d before=%d after=%d links=%v/%v epoch=%d err=%v",
-			pointsAwarded, balanceBefore, balanceAfter, linkRequestID, linkEventID, approvalEpoch, err)
+		approvalEpoch != 2 || !validHexDigest(executionKeyDigest) || factsDigest != applied.FactsDigest || actorID != approvingUserID {
+		t.Fatalf("repair row points=%d before=%d after=%d links=%v/%v epoch=%d actor=%v err=%v",
+			pointsAwarded, balanceBefore, balanceAfter, linkRequestID, linkEventID, approvalEpoch, actorID, err)
 	}
 	// The operational path keeps writing rows with NULL approval linkage.
 	var operationalRows int64
