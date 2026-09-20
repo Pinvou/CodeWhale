@@ -198,6 +198,13 @@ struct RuntimeBridge {
     auth_token: Option<String>,
     child: Option<Child>,
     thread_map: HashMap<String, String>,
+    /// The workspace root set each mapped runtime thread was created with,
+    /// keyed by the stdio thread id. A roots-bearing resume updates the
+    /// record and the hint without touching the mapped thread, so the bridge
+    /// must notice the disagreement and re-map — otherwise every later
+    /// bridged turn keeps running the set the old thread was built with
+    /// while `thread/read` reports the new one.
+    thread_roots: HashMap<String, Vec<PathBuf>>,
     last_seq_by_thread: HashMap<String, u64>,
 }
 
@@ -1428,6 +1435,7 @@ impl RuntimeBridge {
             auth_token: Some(auth_token),
             child: Some(child),
             thread_map: HashMap::new(),
+            thread_roots: HashMap::new(),
             last_seq_by_thread: HashMap::new(),
         };
         bridge.wait_until_ready().await?;
@@ -1519,14 +1527,44 @@ impl RuntimeBridge {
         hint: Option<RuntimeThreadHint>,
     ) -> Result<String> {
         if let Some(runtime_thread_id) = self.thread_map.get(stdio_thread_id) {
-            return Ok(runtime_thread_id.clone());
+            let roots_changed = hint.as_ref().is_some_and(|hint| {
+                self.thread_roots
+                    .get(stdio_thread_id)
+                    .is_some_and(|mapped| *mapped != hint.workspace_roots)
+            });
+            if !roots_changed {
+                return Ok(runtime_thread_id.clone());
+            }
+            // The hint now declares a different root set than the mapped
+            // runtime thread was created with (a roots-bearing resume after
+            // the first bridged turn). Turns execute on the runtime thread,
+            // not on the stdio record, so re-create the thread under the
+            // declared set and re-map instead of silently running the stale
+            // one. Chosen over rejecting the resume: the stdio contract
+            // already accepted the new set onto the record, and refusing
+            // here would strand the thread with no path to its own roots.
+            let hint = hint.expect("a root-set change implies a hint");
+            let roots = hint.workspace_roots.clone();
+            let runtime_thread_id = self
+                .create_runtime_thread(hint.model, hint.workspace, hint.workspace_roots)
+                .await?;
+            if let Some(old) = self
+                .thread_map
+                .insert(stdio_thread_id.to_string(), runtime_thread_id.clone())
+            {
+                self.last_seq_by_thread.remove(&old);
+            }
+            self.thread_roots.insert(stdio_thread_id.to_string(), roots);
+            return Ok(runtime_thread_id);
         }
         let hint = hint.unwrap_or_default();
+        let roots = hint.workspace_roots.clone();
         let runtime_thread_id = self
             .create_runtime_thread(hint.model, hint.workspace, hint.workspace_roots)
             .await?;
         self.thread_map
             .insert(stdio_thread_id.to_string(), runtime_thread_id.clone());
+        self.thread_roots.insert(stdio_thread_id.to_string(), roots);
         Ok(runtime_thread_id)
     }
 
@@ -1536,6 +1574,7 @@ impl RuntimeBridge {
         if let Some(runtime_thread_id) = self.thread_map.remove(stdio_thread_id) {
             self.last_seq_by_thread.remove(&runtime_thread_id);
         }
+        self.thread_roots.remove(stdio_thread_id);
     }
 
     async fn create_runtime_thread(
@@ -1794,6 +1833,7 @@ impl RuntimeBridge {
             auth_token: None,
             child: None,
             thread_map: HashMap::new(),
+            thread_roots: HashMap::new(),
             last_seq_by_thread: HashMap::new(),
         }
     }
@@ -2822,6 +2862,7 @@ mod tests {
             auth_token: None,
             child: None,
             thread_map: HashMap::from([("stdio-1".to_string(), "runtime-1".to_string())]),
+            thread_roots: HashMap::new(),
             last_seq_by_thread: HashMap::new(),
         }))
     }
@@ -3664,6 +3705,103 @@ mod tests {
         let _ = server.await;
 
         assert_eq!(runtime_id, "thr_single");
+    }
+
+    /// Round-9 M-B: a roots-bearing `thread/resume` after the first bridged
+    /// turn updates the stdio record and the hint, but the already-mapped
+    /// runtime thread was created with the old set. The bridge must re-create
+    /// and re-map so later turns execute the declared set; an unchanged hint
+    /// must keep the existing mapping.
+    #[tokio::test]
+    async fn stdio_runtime_bridge_remaps_when_the_hint_root_set_changes() {
+        let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = Arc::clone(&bodies);
+        async fn create_thread(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let ordinal = {
+                let mut bodies = captured.lock().await;
+                bodies.push(body.clone());
+                bodies.len()
+            };
+            Json(json!({ "id": format!("thr_runtime_{ordinal}") }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let app = Router::new()
+            .route("/v1/threads", post(create_thread))
+            .with_state(captured);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test runtime");
+        });
+
+        let hint = |roots: &[&str]| RuntimeThreadHint {
+            model: None,
+            workspace: Some(PathBuf::from("/tmp/codewhale-primary")),
+            workspace_roots: roots.iter().map(PathBuf::from).collect(),
+        };
+        let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+        let first = bridge
+            .ensure_runtime_thread(
+                "thr_stdio",
+                Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r1"])),
+            )
+            .await
+            .expect("initial runtime thread");
+        assert_eq!(first, "thr_runtime_1");
+
+        // An unchanged hint keeps the mapped thread: no second create.
+        let same = bridge
+            .ensure_runtime_thread(
+                "thr_stdio",
+                Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r1"])),
+            )
+            .await
+            .expect("unchanged hint keeps the mapping");
+        assert_eq!(same, "thr_runtime_1");
+        assert_eq!(
+            bridge.thread_map.get("thr_stdio").map(String::as_str),
+            Some("thr_runtime_1")
+        );
+
+        // A roots-bearing resume changed the declared set: the bridge must
+        // re-create the runtime thread under the new set and re-map.
+        let remapped = bridge
+            .ensure_runtime_thread(
+                "thr_stdio",
+                Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r2"])),
+            )
+            .await
+            .expect("changed roots re-map the runtime thread");
+        assert_eq!(remapped, "thr_runtime_2");
+        assert_eq!(
+            bridge.thread_map.get("thr_stdio").map(String::as_str),
+            Some("thr_runtime_2")
+        );
+        assert!(
+            !bridge.last_seq_by_thread.contains_key("thr_runtime_1"),
+            "the stale thread's seq cursor must not leak"
+        );
+        server.abort();
+        let _ = server.await;
+
+        let bodies = bodies.lock().await;
+        assert_eq!(bodies.len(), 2, "exactly the two distinct sets create");
+        assert_eq!(
+            bodies[0]["workspace_roots"],
+            json!(["/tmp/codewhale-primary", "/tmp/codewhale-r1"])
+        );
+        assert_eq!(
+            bodies[1]["workspace_roots"],
+            json!(["/tmp/codewhale-primary", "/tmp/codewhale-r2"]),
+            "the re-created thread carries the resumed root set"
+        );
     }
 
     // ── prompt routing runs a real turn ────────────────────────────────
