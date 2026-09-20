@@ -2094,3 +2094,6 @@ dictEn["remoteConversation"] = {
   resultUnknownHint: "The connection dropped, so this task's outcome cannot be confirmed.",
   errorGeneric: "The operation failed. Please try again.",
 };
+
+// Sidebar label of the dedicated "Remote Control" settings sub-page.
+dictEn.uiSettings.remoteControl = 'Remote Control';

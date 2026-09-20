@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Monitor, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
@@ -1644,6 +1644,9 @@ const formatMemoryTime = (item, copy) => {
       const canUpdateApp = can('appUpdate');
       const canInstallDependencies = can('dependencyInstall');
       const canConfigureDesktopNotifications = can('desktopNotifications');
+      // 双端远程控制（Windows 桌面互联）既需要平台能力，也在 Web 端被 allowlist 关闭：
+      // 能力为假时不注册该二级页面，避免出现点开即空的设置分区。
+      const canDesktopRemoteControl = can('desktopRemoteControl');
       const canManageModels = can('modelManagement');
       const acpProvidersTabVisible = !!platformCapabilities.codexAcpSupported;
       // The native hook for the global Alt voice shortcut only works on Windows; grey the
@@ -2270,14 +2273,13 @@ const formatMemoryTime = (item, copy) => {
               onDisable={onDisableTeamRelay}
             />
           )}
-          {/* Windows 双端远程控制：B 被控端面板（DEV-21）。与上方 Web 分享
-              卡片完全独立，非 Windows 或能力关闭时不渲染。 */}
-          {can('desktopRemoteControl') && (
-            <ControlledDevicePanel t={t} bs={bs} supported />
-          )}
         </>
         );
       };
+
+      // Windows 双端远程控制（DEV-21）：整块业务自「通用」迁到独立的二级页面，
+      // 不再与外观/通知/语音等常规偏好混排（E2E-08 后续 UX 调整）。
+      const renderRemote = () => <ControlledDevicePanel t={t} bs={bs} supported />;
       const renderModels = () => (
         <>
           {acpProvidersTabVisible && (
@@ -2632,6 +2634,7 @@ const formatMemoryTime = (item, copy) => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
+        if (activeSection === 'remote') return renderRemote();
         if (activeSection === 'permissions') return renderPermissions();
         if (activeSection === 'data') return renderData();
         if (activeSection === 'update') return renderUpdate();
@@ -2646,6 +2649,7 @@ const formatMemoryTime = (item, copy) => {
             model: t.uiSettings.model,
             search: t.uiSettings.search,
             memory: t.uiSettings.memory,
+            remote: t.uiSettings.remoteControl,
             permissions: t.uiSettings.permissions,
             data: t.uiSettings.data,
             update: t.uiSettings.update,
@@ -2683,6 +2687,7 @@ const formatMemoryTime = (item, copy) => {
               </div>
               <div className={`mt-7 mb-4 px-1 text-[12px] font-semibold max-sm:hidden text-[#8A8A8E] dark:text-[#8E8E93]`}>{t.uiSettings.system}</div>
               <div className="space-y-2 max-sm:flex max-sm:space-y-0 max-sm:gap-2">
+                {canDesktopRemoteControl && <SectionButton id="remote" icon={<Monitor size={17} />} label={t.uiSettings.remoteControl} active={activeSection === 'remote'} onSelect={setActiveSection} />}
                 {canUseSuperPermission && <SectionButton id="permissions" icon={<Wrench size={17} />} label={t.uiSettings.permissions} active={activeSection === 'permissions'} onSelect={setActiveSection} />}
                 {canUpdateApp && <SectionButton id="update" icon={<RefreshCw size={17} />} label={t.uiSettings.update} dot={hasUpdate} active={activeSection === 'update'} onSelect={setActiveSection} />}
                 <SectionButton id="help" icon={<MessageSquare size={17} />} label={t.uiSettings.help} active={activeSection === 'help'} onSelect={setActiveSection} />

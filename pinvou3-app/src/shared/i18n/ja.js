@@ -2094,3 +2094,6 @@ dictJa["remoteConversation"] = {
   resultUnknownHint: "接続が切れたため、このタスクの完了有無を確認できません。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
 };
+
+// 独立した「リモート操作」設定サブページのサイドバーラベル。
+dictJa.uiSettings.remoteControl = 'リモート操作';

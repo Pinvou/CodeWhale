@@ -73,3 +73,19 @@ test('settings keeps the Web share card and the desktop panel separate', () => {
   assert.ok(settings.includes("can('desktopRemoteControl')"));
   assert.ok(settings.includes('WebAccessModal'));
 });
+
+test('the desktop panel owns a dedicated settings sub-page', () => {
+  assert.ok(settings.includes('id="remote"'), 'nav registers a remote-control section');
+  assert.ok(settings.includes("activeSection === 'remote'"), 'content routes the remote-control section');
+  assert.ok(settings.includes('const renderRemote'), 'the section has its own renderer');
+  assert.ok(settings.includes('const canDesktopRemoteControl = can(\'desktopRemoteControl\')'), 'the section is capability gated');
+  const generalBody = settings.slice(
+    settings.indexOf('const renderGeneral'),
+    settings.indexOf('const renderRemote'),
+  );
+  assert.ok(generalBody.length > 0, 'general section must stay ahead of the remote section');
+  assert.ok(
+    !generalBody.includes('ControlledDevicePanel'),
+    'the desktop panel must not be rendered inside the general section anymore',
+  );
+});

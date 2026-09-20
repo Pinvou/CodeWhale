@@ -542,6 +542,28 @@ async function modalWidth(page, headingText) {
   await sleep(400);
   rec('① 设置页可打开且无错误边界', await page.evaluate(() => document.body.innerText.includes('通用') && !document.body.innerText.includes('设置页加载失败')));
 
+  // 双端控制：整块业务从「通用」迁到独立二级页面，页面内联渲染被控端面板。
+  const remoteNav = await page.evaluate(() => {
+    const button = document.querySelector('[data-testid="settings-section-remote"]');
+    if (button) button.click();
+    return { visible: !!button, label: (button?.textContent || '').trim() };
+  });
+  await sleep(300);
+  const remotePage = await page.evaluate(() => {
+    const content = document.querySelector('[data-testid="settings-content"]');
+    return {
+      heading: (content?.querySelector('h1')?.textContent || '').trim(),
+      panelTitle: (content?.querySelector('#controlled-device-title')?.textContent || '').trim(),
+      inGeneralActive: document.querySelector('[data-testid="settings-section-general"]')?.className.includes('bg-[#D8EAFE]'),
+    };
+  });
+  await clickSettingsSection(page, '通用');
+  const generalPage = await page.evaluate(() => ({
+    heading: (document.querySelector('[data-testid="settings-content"] h1')?.textContent || '').trim(),
+    hasPanel: !!document.querySelector('#controlled-device-title'),
+  }));
+  rec('①h 双端控制拥有独立二级页面且不再混在通用页', remoteNav.visible && remoteNav.label === '双端控制' && remotePage.heading === '双端控制' && !!remotePage.panelTitle && !remotePage.inGeneralActive && generalPage.heading === '通用' && !generalPage.hasPanel, JSON.stringify({ remoteNav, remotePage, generalPage }));
+
   // Exercise the Official App -> SettingsView callback and actual bridge payload.
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
   rec('① 旧显式浅色偏好不随系统变深', await page.evaluate(() => !document.documentElement.classList.contains('dark')));
