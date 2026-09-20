@@ -2275,12 +2275,19 @@ fn prune_fallback_locale_ignored(degraded: &mut Vec<DegradedReason>, locale: Opt
 }
 
 /// True when an explicit `locale` was supplied but the DuckDuckGo scrape
-/// sends no region signal for it: either the value is malformed (no market
-/// tag resolves) or the resolved market is outside the verified `kl` region
-/// list, in which case nothing from the locale reaches the request and the
-/// receipt must say so instead of claiming the knob was honored.
+/// honors no part of it as a region signal: the value is malformed (the
+/// shape check fails, independently of how [`scrape_market`] resolved the
+/// market — a pure-Han query still falls back to the `zh-CN` market for a
+/// malformed locale) or the resolved market is outside the verified `kl`
+/// region list. In the unmapped case no `kl` parameter is sent, but the
+/// `Accept-Language` header still carries the locale (see
+/// [`scrape_accept_language`]); only the missing region signal is
+/// receipted, so the schema's "malformed values are ignored" promise — and
+/// parity with the Bing leg — holds either way.
 fn ddg_locale_was_ignored(locale: Option<&str>, market: Option<&str>) -> bool {
-    locale.is_some() && market.and_then(ddg_region_param).is_none()
+    locale.is_some_and(|tag| {
+        !is_plausible_locale_tag(tag.trim()) || market.and_then(ddg_region_param).is_none()
+    })
 }
 
 async fn run_bing_search(
@@ -3297,10 +3304,86 @@ mod tests {
         assert!(super::ddg_locale_was_ignored(Some("fr-FR"), Some("fr-FR")));
         // Malformed values resolve no market at all.
         assert!(super::ddg_locale_was_ignored(Some("zh CN"), None));
+        // Malformed values stay ignored even when a pure-Han query makes
+        // scrape_market fall back to the zh-CN market — the shape check is
+        // independent of the market resolution, matching the Bing leg.
+        assert!(super::ddg_locale_was_ignored(Some("zh CN"), Some("zh-CN")));
+        assert!(super::ddg_locale_was_ignored(Some("中文"), Some("zh-CN")));
         // No explicit locale: the Han fallback is the tool's own choice,
         // never a dropped knob.
         assert!(!super::ddg_locale_was_ignored(None, Some("zh-CN")));
         assert!(!super::ddg_locale_was_ignored(None, None));
+    }
+
+    #[test]
+    fn forkguard_ddg_malformed_locale_with_han_query_receipt_stays_ignored() {
+        // End-to-end across the DDG leg: a malformed locale plus a pure-Han
+        // query resolves the zh-CN market via the Han heuristic, but the
+        // receipt must keep KnobIgnored (honored.locale=false), exactly what
+        // the Bing leg reports for the same input.
+        let locale = Some("中文");
+        let query = "凹语言 编程";
+        let market = super::scrape_market(locale, query);
+        assert_eq!(market.as_deref(), Some("zh-CN"));
+        let degraded: Vec<DegradedReason> =
+            if super::ddg_locale_was_ignored(locale, market.as_deref()) {
+                vec![DegradedReason::KnobIgnored {
+                    knob: QueryKnob::Locale,
+                }]
+            } else {
+                Vec::new()
+            };
+        let raw = BackendSearch {
+            backend: BackendId::DuckDuckGo,
+            source: "duckduckgo".to_string(),
+            backend_detail: None,
+            results: Vec::new(),
+            degraded,
+            note: None,
+        };
+        let query = SearchQuery::new(
+            query.to_string(),
+            5,
+            None,
+            Vec::new(),
+            locale.map(str::to_string),
+        );
+        let capabilities = crate::tools::web::contract::QueryCapabilities {
+            max_results: crate::tools::web::contract::CapabilityState::Supported,
+            recency: crate::tools::web::contract::CapabilityState::Unsupported,
+            domains: crate::tools::web::contract::CapabilityState::Unsupported,
+            locale: crate::tools::web::contract::CapabilityState::Supported,
+            published_date: crate::tools::web::contract::CapabilityState::Unknown,
+        };
+        let response = finalize_search_response(query, capabilities, raw, Instant::now());
+        assert!(
+            !response.receipt.honored.locale,
+            "a malformed locale must be receipted as ignored even when the \
+             Han heuristic supplies a market"
+        );
+        assert!(response.receipt.degraded.iter().any(|reason| matches!(
+            reason,
+            DegradedReason::KnobIgnored {
+                knob: QueryKnob::Locale
+            }
+        )));
+
+        // fr-FR (well-formed, unmapped on the verified kl list) stays
+        // ignored on the DDG leg, as before the fix.
+        let market = super::scrape_market(Some("fr-FR"), "rust async");
+        assert_eq!(market.as_deref(), Some("fr-FR"));
+        assert!(super::ddg_locale_was_ignored(
+            Some("fr-FR"),
+            market.as_deref()
+        ));
+
+        // A mapped, well-formed value (ja-JP) is honored.
+        let market = super::scrape_market(Some("ja-JP"), "rust async");
+        assert_eq!(market.as_deref(), Some("ja-JP"));
+        assert!(!super::ddg_locale_was_ignored(
+            Some("ja-JP"),
+            market.as_deref()
+        ));
     }
 
     #[test]
