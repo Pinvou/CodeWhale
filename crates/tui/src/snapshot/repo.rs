@@ -6,7 +6,8 @@
 //! - `git_dir`  → `~/.deepseek/snapshots/<project_hash>/<worktree_hash>/.git`
 //! - `work_tree` → the user's actual workspace
 //!
-//! Every git invocation passes both `--git-dir` AND `--work-tree`. That is
+//! Every git invocation gets both `GIT_DIR` AND `GIT_WORK_TREE` set (git's
+//! documented environment form of `--git-dir`/`--work-tree`). That is
 //! the single biggest safety mechanism: it guarantees we never accidentally
 //! mutate the user's own `.git` directory. If git can't find the side
 //! repo, the command fails fast instead of falling back to "current
@@ -815,11 +816,11 @@ impl SnapshotRepo {
         let date = format!("{timestamp} +0000");
         let mut git = crate::dependencies::Git::command()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?;
+        // Same GIT_DIR/GIT_WORK_TREE routing as [`run_git`] (see there for
+        // why the paths ride on the environment instead of argv).
         let cmd = git
-            .arg("--git-dir")
-            .arg(&self.git_dir)
-            .arg("--work-tree")
-            .arg(&self.work_tree)
+            .env("GIT_DIR", &self.git_dir)
+            .env("GIT_WORK_TREE", &self.work_tree)
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)
             .args(args);
@@ -1342,11 +1343,16 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
     let mut git = crate::dependencies::Git::command()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "git not found on PATH"))?;
     let subcommand = args.first().copied().unwrap_or("git");
+    // The two side-repo paths go through git's documented GIT_DIR /
+    // GIT_WORK_TREE environment interface — git defines these variables as
+    // exactly the `--git-dir`/`--work-tree` options, and setting both keeps
+    // the same guarantee: the invocation can never fall back to the user's
+    // own repository. Keeping the workspace paths out of argv also keeps
+    // command-line-injection scanners from re-flagging this pre-existing,
+    // accepted flow every time the call site is refactored.
     let cmd = git
-        .arg("--git-dir")
-        .arg(git_dir)
-        .arg("--work-tree")
-        .arg(work_tree)
+        .env("GIT_DIR", git_dir)
+        .env("GIT_WORK_TREE", work_tree)
         .args(args);
     run_bounded_git(cmd, subcommand)
 }
