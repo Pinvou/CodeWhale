@@ -8496,7 +8496,7 @@ impl ToolSpec for AgentTool {
                 },
                 "resume_from": {
                     "type": "string",
-                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implement → test). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
                 }
             },
             "dependentSchemas": {
@@ -9047,7 +9047,7 @@ async fn cancel_agent_from_input(
 /// turn and staying reachable is the preferred default — only `wait` when
 /// you must join before continuing.
 const SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
-/// Runtime floor is 1s (schema advertises 5) so tests can exercise the
+/// Runtime floor is 1s (schema advertises 1) so tests can exercise the
 /// timeout path without multi-second sleeps.
 const SUBAGENT_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
 const SUBAGENT_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
@@ -15997,7 +15997,7 @@ const GENERAL_AGENT_INTRO: &str = concat!(
 );
 
 const EXPLORE_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet scout (role: `scout`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
+    "You are a trusted Fleet scout (role: `explore`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
     "Default to `EFFORT: quick`: aim for about 3-5 tool calls unless the brief explicitly asks for more.\n",
     "Orient first: confirm the workspace/project root, read relevant AGENTS.md/README guidance when the tree is unfamiliar, then search only the likely scope.\n",
     "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
@@ -16031,7 +16031,7 @@ const CUSTOM_AGENT_INTRO: &str = concat!(
 );
 
 const IMPLEMENTER_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet builder (role: `builder`). Your job is to land the assigned change with minimal surrounding edits.\n",
+    "You are a trusted Fleet implement agent (role: `implement`). Your job is to land the assigned change with minimal surrounding edits.\n",
     "Use `edit` for precise unique replacements, `write` for whole-file changes, and discover `apply_patch` for unified multi-file patches when needed.\n",
     "Run relevant verification after edit batches; write needed tests with the implementation.\n",
     "You are not limited to a scout-style 3-5 tool-call cap. Checkpoint before expanding scope or after repeated failures, then continue only inside the assigned brief.\n",
@@ -16054,7 +16054,7 @@ const WRITE_CHILD_VERIFY_CONTRACT: &str = concat!(
 );
 
 const CONSULTANT_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet consultant (role: `consultant`). You are asked for judgement, not for labour.\n",
+    "You are a trusted Fleet advisor (role: `advisor`). You are asked for judgement, not for labour.\n",
     "You are read-only and have no shell. Read the workspace and the public web to ground your advice, then give counsel.\n",
     "Lead with your actual recommendation, not a survey of options. If you would do something different from what was proposed, say so first and say why.\n",
     "Name what the asker appears not to have considered: the failure mode, the constraint, the cheaper alternative, the reason this is harder than it looks.\n",
@@ -16064,7 +16064,7 @@ const CONSULTANT_AGENT_INTRO: &str = concat!(
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet verifier (role: `verifier`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
+    "You are a trusted Fleet test agent (role: `test`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
     "Report PASS/FAIL/FLAKY at the top of SUMMARY with exact command evidence.\n",
     "Capture failing assertion and file:line; put obvious fixes under RISKS.\n",
     "You may use more tool calls than quick exploration, but stop after decisive pass/fail evidence.\n",

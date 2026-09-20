@@ -2711,8 +2711,8 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
         (FleetRole::Scout, "Fleet scout"),
         (FleetRole::Planner, "Fleet planner"),
         (FleetRole::Reviewer, "Fleet reviewer"),
-        (FleetRole::Builder, "Fleet builder"),
-        (FleetRole::Verifier, "Fleet verifier"),
+        (FleetRole::Builder, "Fleet implement agent"),
+        (FleetRole::Verifier, "Fleet test agent"),
         (FleetRole::Custom, "custom Fleet worker"),
     ] {
         let prompt = agent_type.system_prompt();
@@ -2728,7 +2728,7 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
             // #5189 F5: scouts are read-only explorers and get a scaled-down
             // contract (SUMMARY+EVIDENCE) that drops CHANGES/RISKS/BLOCKERS.
             assert!(
-                prompt.contains("## Output contract (scout)"),
+                prompt.contains("## Output contract (explore)"),
                 "{agent_type:?} should use the scaled-down scout contract"
             );
             assert!(
@@ -2749,7 +2749,7 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
 #[test]
 fn explore_prompt_orients_before_searching() {
     let prompt = FleetRole::Scout.system_prompt();
-    assert!(prompt.contains("role: `scout`"));
+    assert!(prompt.contains("role: `explore`"));
     assert!(prompt.contains("AGENTS.md/README"));
     assert!(prompt.contains("workspace/project root"));
     assert!(prompt.contains("compressed evidence"));
@@ -4966,19 +4966,28 @@ fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
     let agent_schema = AgentTool::new(manager.clone(), stub_runtime()).input_schema();
     let until = schema_property_description(&agent_schema, "until");
+    // The advertised numbers are tied to the runtime constants so a drift in
+    // either direction (constant change, copy change) turns the other red.
     assert!(
-        until.contains("default 30s") && until.contains("max 120s") && until.contains("timed_out"),
-        "agent(action=wait) until description must disclose the timeout bound \
-         and the timed_out receipt:\n{until}"
+        until.contains(&format!(
+            "default {}s, max {}s",
+            super::SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS,
+            super::SUBAGENT_WAIT_MAX_TIMEOUT_SECS
+        )) && until.contains("timed_out"),
+        "agent(action=wait) until description must disclose the runtime \
+         timeout bound and the timed_out receipt:\n{until}"
     );
 
     let wait_tool = AgentsWaitTool::new(manager);
     let wait_description = wait_tool.description();
     assert!(
-        wait_description.contains("timeout_secs (default 30, max 120)")
-            && wait_description.contains("timed_out=true"),
-        "agents/wait description must disclose the timeout bound and the \
-         timed_out receipt:\n{wait_description}"
+        wait_description.contains(&format!(
+            "timeout_secs (default {}, max {})",
+            super::coord::COORD_WAIT_DEFAULT_TIMEOUT_SECS,
+            super::coord::COORD_WAIT_MAX_TIMEOUT_SECS
+        )) && wait_description.contains("timed_out=true"),
+        "agents/wait description must disclose the runtime timeout bound and \
+         the timed_out receipt:\n{wait_description}"
     );
 }
 

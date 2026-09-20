@@ -23,9 +23,9 @@ use crate::tools::spec::{
 /// Bounds for `agents/wait`. Short on purpose: a blocked wait makes the
 /// session deaf to typed input, and settled children already report back as
 /// `<codewhale:subagent.done>` sentinels that start a fresh turn (#4097).
-const COORD_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
+pub(crate) const COORD_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const COORD_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
-const COORD_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
+pub(crate) const COORD_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
 const COORD_WAIT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const RECENT_PROGRESS_LIMIT: usize = 8;
 pub(super) const COORDINATION_RECORD_LIMIT: usize = 128;
