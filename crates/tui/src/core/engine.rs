@@ -1139,6 +1139,10 @@ pub struct Engine {
     /// history. One boot pass briefs the model at most once; a genuinely new
     /// boot pass (new generation) that fails again may brief again.
     mcp_boot_briefing_generation: Option<u64>,
+    /// Servers named in the boot-failure briefing that have not yet been
+    /// announced as recovered. Guards the corrective notice so it only ever
+    /// corrects servers the model was actually told were unavailable.
+    mcp_boot_briefing_servers: Vec<String>,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
     api_provider: ApiProvider,
@@ -2014,6 +2018,7 @@ impl Engine {
             mcp_boot_generation: None,
             mcp_event_generation: 0,
             mcp_boot_briefing_generation: None,
+            mcp_boot_briefing_servers: Vec::new(),
             plugin_registry,
             api_provider,
             api_provider_identity,
@@ -6905,6 +6910,16 @@ impl Engine {
             .into_iter()
             .map(|(name, error)| (name, crate::mcp::format_mcp_error_for_display(&error)))
             .collect::<HashMap<_, _>>();
+        // Servers the boot briefing named as unavailable count as recovered
+        // only when they are still configured and now connect cleanly; a
+        // server removed from the config is gone, not recovered.
+        let still_configured = pool.enabled_server_names();
+        let recovered: Vec<String> = self
+            .mcp_boot_briefing_servers
+            .iter()
+            .filter(|name| !errors.contains_key(*name) && still_configured.contains(*name))
+            .cloned()
+            .collect();
         self.session.mcp_config_path = config_path;
         self.mcp_connection_errors = errors;
         let snapshot = pool.manager_snapshot(
@@ -6913,6 +6928,7 @@ impl Engine {
             &self.mcp_connection_errors,
         );
         drop(pool);
+        self.maybe_inject_mcp_recovery_notice(recovered).await;
         let generation = self.next_mcp_event_generation();
         Ok(McpManagerUpdate {
             snapshot,
@@ -6975,7 +6991,11 @@ impl Engine {
     /// `mcp_*` surface is unavailable instead of trusting capability claims
     /// that no longer hold. A fully successful boot injects nothing, isolated
     /// Runtime Chat sessions never inject, and the boot-generation stamp keeps
-    /// a single boot pass to exactly one briefing.
+    /// a single boot pass to exactly one briefing. The briefing text is
+    /// self-voiding — it describes startup only and defers to the live tool
+    /// list — because MCP recovers inside a session through the retry, reload,
+    /// login, and per-turn `connect_all` paths, which cannot all be answered
+    /// with a corrective append (see `maybe_inject_mcp_recovery_notice`).
     ///
     /// The runtime-handoff channel (see `runtime_handoff`) is deliberate: the
     /// inline registry instruction is composed once in `Engine::new`, before
@@ -6995,8 +7015,37 @@ impl Engine {
         let mut failures: Vec<(String, String)> =
             self.mcp_connection_errors.clone().into_iter().collect();
         failures.sort_by(|left, right| left.0.cmp(&right.0));
+        self.mcp_boot_briefing_servers = failures.iter().map(|(name, _)| name.clone()).collect();
         self.add_session_message(crate::runtime_handoff::mcp_boot_failure_briefing_message(
             &failures,
+        ))
+        .await;
+    }
+
+    /// Append the corrective notice for briefed servers that reconnected, so a
+    /// recovered surface is not permanently shadowed by the startup ban.
+    /// Names the briefing never carried are ignored — a server that failed
+    /// after boot was never announced as unavailable. Only the user-driven
+    /// recovery seams (`retry`/`reload` Op handlers) inject: they run while
+    /// the engine is idle. The per-turn `connect_all` refresh can also clear
+    /// errors mid-request-build, so it relies on the briefing's self-voiding
+    /// wording ("trust the tool list") instead of a mid-turn append.
+    async fn maybe_inject_mcp_recovery_notice(&mut self, recovered: Vec<String>) {
+        if self.api_config.runtime_chat_isolated || recovered.is_empty() {
+            return;
+        }
+        let mut recovered: Vec<String> = recovered
+            .into_iter()
+            .filter(|name| self.mcp_boot_briefing_servers.contains(name))
+            .collect();
+        if recovered.is_empty() {
+            return;
+        }
+        recovered.sort();
+        self.mcp_boot_briefing_servers
+            .retain(|briefed| !recovered.contains(briefed));
+        self.add_session_message(crate::runtime_handoff::mcp_boot_recovery_notice_message(
+            &recovered,
         ))
         .await;
     }
@@ -7276,9 +7325,11 @@ impl Engine {
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut pool = pool.lock().await;
+        let mut recovered: Option<String> = None;
         match pool.retry_connection(name).await {
             Ok(_) => {
                 self.mcp_connection_errors.remove(name);
+                recovered = Some(name.to_string());
             }
             Err(error) => {
                 self.mcp_connection_errors.insert(
@@ -7299,6 +7350,9 @@ impl Engine {
                 .any(|configured| configured.name == *server)
         });
         drop(pool);
+        if let Some(recovered) = recovered {
+            self.maybe_inject_mcp_recovery_notice(vec![recovered]).await;
+        }
         let generation = self.next_mcp_event_generation();
         let _ = self.tx_event.try_send(Event::McpSessionBoot {
             generation,

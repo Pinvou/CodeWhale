@@ -62,14 +62,25 @@ const SHELL_COMPLETION_EVENT_SUFFIX: &str = "\n</codewhale:runtime_event>";
 const MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX: &str = concat!(
     "<codewhale:runtime_event kind=\"mcp_boot_failed\" visibility=\"internal\">\n",
     "This is an internal runtime event, not user input. The MCP servers listed below ",
-    "failed to connect during session startup, so their mcp_* tools are unavailable ",
-    "for this entire session and are absent from your tool list. These mcp_* tools ",
-    "do not exist in this session: do not claim them, do not attempt to call them, ",
-    "and do not wait for them to appear; use local tools instead. When the task ",
-    "depends on one of them, tell the user that server is unreachable instead of ",
-    "inventing its results.\n\n",
+    "failed to connect during session startup, so their mcp_* tools were unavailable ",
+    "at startup and are absent from your tool list for now. While a server is down, ",
+    "do not claim its mcp_* tools, do not attempt to call them, and do not wait for ",
+    "them to appear; use local tools instead, and when the task depends on one of ",
+    "them, tell the user that server is unreachable instead of inventing its ",
+    "results. This note describes startup only, not the rest of the session: if a ",
+    "server recovers and its mcp_* tools appear in your tool list in a later turn, ",
+    "trust the tool list and use them.\n\n",
 );
 const MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX: &str = "\n</codewhale:runtime_event>";
+
+const MCP_BOOT_RECOVERY_NOTICE_EVENT_PREFIX: &str = concat!(
+    "<codewhale:runtime_event kind=\"mcp_boot_recovered\" visibility=\"internal\">\n",
+    "This is an internal runtime event, not user input. The MCP servers listed below ",
+    "failed to connect at session startup (see the earlier mcp_boot_failed note) and ",
+    "have reconnected: their mcp_* tools are available again from the next request. ",
+    "Trust the current tool list over the earlier startup note.\n\n",
+);
+const MCP_BOOT_RECOVERY_NOTICE_EVENT_SUFFIX: &str = "\n</codewhale:runtime_event>";
 
 const SUBAGENT_HANDOFF_TURN_META: &str = concat!(
     "<turn_meta>\n",
@@ -257,6 +268,44 @@ pub(crate) fn mcp_boot_failure_briefing_message(failures: &[(String, String)]) -
 /// Recognition is structural (exact envelope anchors plus the runtime
 /// provenance block) so a person quoting the envelope is never matched.
 pub(crate) fn is_mcp_boot_failure_briefing_message(message: &Message) -> bool {
+    mcp_boot_handoff_matches(
+        message,
+        MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX,
+        MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX,
+    )
+}
+
+/// Build the corrective runtime notice for servers named in an earlier
+/// boot-failure briefing that have since reconnected, so a recovered
+/// surface is not permanently shadowed by the startup ban. Server names
+/// are sorted so replays stay byte-stable.
+pub(crate) fn mcp_boot_recovery_notice_message(servers: &[String]) -> Message {
+    let payload = servers
+        .iter()
+        .map(|server| format!("- {server}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    runtime_handoff_message_with_meta(
+        format!(
+            "{MCP_BOOT_RECOVERY_NOTICE_EVENT_PREFIX}{payload}{MCP_BOOT_RECOVERY_NOTICE_EVENT_SUFFIX}"
+        ),
+        RUNTIME_TURN_META,
+    )
+}
+
+/// True when a message is the runtime-owned MCP boot-recovery notice.
+pub(crate) fn is_mcp_boot_recovery_notice_message(message: &Message) -> bool {
+    mcp_boot_handoff_matches(
+        message,
+        MCP_BOOT_RECOVERY_NOTICE_EVENT_PREFIX,
+        MCP_BOOT_RECOVERY_NOTICE_EVENT_SUFFIX,
+    )
+}
+
+/// Shared structural match for the MCP boot handoffs: a user-role message
+/// made of exactly two text blocks with no cache control, the runtime
+/// provenance meta, and the given envelope anchors.
+fn mcp_boot_handoff_matches(message: &Message, prefix: &str, suffix: &str) -> bool {
     let [
         ContentBlock::Text {
             text,
@@ -274,8 +323,8 @@ pub(crate) fn is_mcp_boot_failure_briefing_message(message: &Message) -> bool {
         && first_cache.is_none()
         && meta_cache.is_none()
         && turn_meta == RUNTIME_TURN_META
-        && text.starts_with(MCP_BOOT_FAILURE_BRIEFING_EVENT_PREFIX)
-        && text.ends_with(MCP_BOOT_FAILURE_BRIEFING_EVENT_SUFFIX)
+        && text.starts_with(prefix)
+        && text.ends_with(suffix)
 }
 
 #[derive(Debug, Serialize)]
@@ -699,7 +748,8 @@ Authority: non-authoritative runtime checkpoint"
 ///
 /// This covers every handoff the module builds — sub-agent completion, failure
 /// and waiting events, background-shell completions, the MCP boot-failure
-/// briefing, and the restore checkpoints projected from them.
+/// briefing, the MCP boot-recovery notice, and the restore
+/// checkpoints projected from them.
 /// [`raw_runtime_handoff_text`] answers a
 /// narrower question — can the restore projection rewrite *this* message? —
 /// and stays limited to the sub-agent shapes it knows how to rewrite.
@@ -721,6 +771,7 @@ pub(crate) fn is_internal_runtime_handoff(message: &Message) -> bool {
     if is_agent_topology_checkpoint(message)
         || is_operate_contract_message(message)
         || is_mcp_boot_failure_briefing_message(message)
+        || is_mcp_boot_recovery_notice_message(message)
     {
         return true;
     }

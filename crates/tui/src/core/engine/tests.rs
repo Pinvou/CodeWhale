@@ -22232,13 +22232,110 @@ async fn mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
     };
     assert!(text.contains("slow-fs: connect timed out after 5s"));
     assert!(text.contains("use local tools instead"));
+    // The briefing must be self-voiding: MCP recovers inside a session
+    // (retry/reload/login/next-turn connect_all), so an unconditional
+    // "unavailable for this entire session" would outlive the failure and
+    // teach the model to refuse tools that have come back.
+    assert!(
+        text.contains("trust the tool list"),
+        "the briefing must defer to a later, recovered tool list:\n{text}"
+    );
+    assert!(
+        !text.contains("entire session"),
+        "the briefing must not promise a session-long outage:\n{text}"
+    );
     assert_eq!(engine.mcp_boot_briefing_generation, Some(3));
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["slow-fs".to_string()]
+    );
 
     engine.maybe_inject_mcp_boot_briefing(3).await;
     assert_eq!(
         briefing_count(&engine),
         1,
         "the same boot generation never briefs twice"
+    );
+}
+
+#[tokio::test]
+async fn mcp_boot_recovery_notice_corrects_a_briefed_server_once() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_boot_briefing_generation = Some(3);
+    engine.mcp_boot_briefing_servers = vec!["slow-fs".to_string(), "auth-broken".to_string()];
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["slow-fs".to_string()])
+        .await;
+
+    let notice = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .expect("a briefed server reconnecting must correct the startup ban");
+    assert!(
+        crate::runtime_handoff::is_internal_runtime_handoff(notice),
+        "the recovery notice is runtime control traffic, not a user turn"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &notice.content[0] else {
+        panic!("notice opens with a text block");
+    };
+    assert!(text.contains("- slow-fs"));
+    assert!(
+        text.contains("Trust the current tool list"),
+        "the notice must hand authority back to the live tool list:\n{text}"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["auth-broken".to_string()],
+        "only the recovered server leaves the briefed set"
+    );
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["auth-broken".to_string()])
+        .await;
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["auth-broken".to_string()])
+        .await;
+    let notice_count = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .count();
+    assert_eq!(
+        notice_count, 2,
+        "each briefed server is corrected exactly once; repeats are dropped"
+    );
+}
+
+#[tokio::test]
+async fn recovery_notice_is_skipped_without_a_failure_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    assert!(engine.mcp_boot_briefing_servers.is_empty());
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["never-briefed".to_string()])
+        .await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message)),
+        "a server the model was never told about needs no correction"
     );
 }
 
@@ -22300,6 +22397,18 @@ async fn isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
         "isolated Runtime Chat must stay free of host runtime briefings"
     );
     assert_eq!(engine.mcp_boot_briefing_generation, None);
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["bad".to_string()])
+        .await;
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message)),
+        "isolated Runtime Chat must stay free of host recovery notices"
+    );
 }
 
 #[tokio::test]
