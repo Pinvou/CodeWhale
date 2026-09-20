@@ -2095,5 +2095,6 @@ dictJa["remoteConversation"] = {
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
 };
 
-// 独立した「遠隔操作」設定サブページのサイドバーラベル（既存の ja 表記に合わせる）。
-dictJa.uiSettings.remoteControl = '遠隔操作';
+// 独立した「デスクトップ遠隔操作」設定サブページのサイドバーラベル
+// （既存の「モバイル遠隔操作」と対になる ja 表記に合わせる）。
+dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';

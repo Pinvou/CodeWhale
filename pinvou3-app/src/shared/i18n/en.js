@@ -2095,5 +2095,5 @@ dictEn["remoteConversation"] = {
   errorGeneric: "The operation failed. Please try again.",
 };
 
-// Sidebar label of the dedicated "Remote Control" settings sub-page.
-dictEn.uiSettings.remoteControl = 'Remote Control';
+// Sidebar label of the dedicated "Desktop Remote Control" settings sub-page.
+dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
