@@ -1059,6 +1059,166 @@ const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// pipeline.
 const GIT_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// Interval at which the pipe readers wake up to check the cancellation
+/// flag. Bounds both how long a cancelled reader lingers and (on Windows)
+/// the peek-poll cadence for data on an otherwise quiet pipe.
+const GIT_PIPE_READER_POLL: Duration = Duration::from_millis(50);
+
+/// Number of bounded-git pipe readers currently running. The thread-leak
+/// regression uses this to prove a cancelled reader actually exits: a
+/// reader detached while blocked on a grandchild-held pipe would keep this
+/// above zero until that unrelated process happened to exit.
+static LIVE_GIT_PIPE_READERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// RAII guard pairing with the [`LIVE_GIT_PIPE_READERS`] increment, so the
+/// count drops even if the drain loop panics.
+struct GitPipeReaderGuard;
+
+impl Drop for GitPipeReaderGuard {
+    fn drop(&mut self) {
+        LIVE_GIT_PIPE_READERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Drain `reader` into `buf` until EOF, an unrecoverable read error, or
+/// cancellation.
+///
+/// The reader must stay cancellable because its pipe can outlive the git
+/// command: a grandchild that inherited the write ends holds them open for
+/// as long as it runs, and a plain blocking `read` would pin this thread
+/// until that unrelated process exited. On Unix the descriptor is switched
+/// to non-blocking and polled in [`GIT_PIPE_READER_POLL`] intervals, so the
+/// loop always rechecks `cancel` within one interval; on Windows
+/// [`PeekNamedPipe`](windows_sys::Win32::System::Pipes::PeekNamedPipe)
+/// probes for data without consuming it, with the same interval checks.
+/// Cancelling drops the read end, handing the grandchild an EPIPE on its
+/// next write — the join in [`run_bounded_git`] is then bounded by one poll
+/// interval instead of the grandchild's lifetime.
+#[cfg(unix)]
+fn drain_git_pipe<R>(
+    mut reader: R,
+    buf: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    cancel: &std::sync::atomic::AtomicBool,
+) where
+    R: std::io::Read + std::os::fd::AsRawFd,
+{
+    use std::io::ErrorKind;
+    use std::sync::atomic::Ordering;
+
+    let fd = reader.as_raw_fd();
+    // Best effort: a failure here leaves the descriptor blocking, and the
+    // EAGAIN arm below then simply never fires — the loop still ends on
+    // EOF, error, or cancellation at the next data arrival.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags != -1 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let ready = unsafe { libc::poll(&mut pollfd, 1, GIT_PIPE_READER_POLL.as_millis() as i32) };
+        if ready < 0 {
+            if io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                return;
+            }
+            continue;
+        }
+        if ready == 0 {
+            // Poll timeout: loop back around and recheck the cancel flag.
+            continue;
+        }
+        if pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+            continue;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(n) => {
+                if let Ok(mut buf) = buf.lock() {
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => continue,
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Windows variant of [`drain_git_pipe`]: anonymous pipes have no
+/// non-blocking mode in `std`, but `PeekNamedPipe` reports how many bytes
+/// are buffered without consuming them, so data is only read when it is
+/// already there and the loop otherwise wakes on the poll interval to
+/// recheck `cancel`. A peek failure with `ERROR_BROKEN_PIPE` is EOF (the
+/// last write end closed).
+#[cfg(windows)]
+fn drain_git_pipe<R>(
+    mut reader: R,
+    buf: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    cancel: &std::sync::atomic::AtomicBool,
+) where
+    R: std::io::Read + std::os::windows::io::AsRawHandle,
+{
+    use std::io::ErrorKind;
+    use std::sync::atomic::Ordering;
+
+    use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let handle = reader.as_raw_handle() as HANDLE;
+    let mut chunk = [0u8; 8192];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut available: u32 = 0;
+        let peeked = unsafe {
+            PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if peeked == 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+                return;
+            }
+            // Unexpected peek failure: back off and retry. The cancel flag
+            // still ends the loop on the next iteration.
+            std::thread::sleep(GIT_PIPE_READER_POLL);
+            continue;
+        }
+        if available == 0 {
+            std::thread::sleep(GIT_PIPE_READER_POLL);
+            continue;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(n) => {
+                if let Ok(mut buf) = buf.lock() {
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 /// Run a pre-configured git command under [`GIT_COMMAND_TIMEOUT`] with both
 /// pipes drained concurrently. Every git invocation in this module goes
 /// through here (or the thin [`run_git`] wrapper), so a wedged git —
@@ -1083,7 +1243,10 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
     // crate::run_sandbox_command.
     // Readers stream into shared buffers so a grace expiry below can still
     // return what was captured; the completion channels carry a () once
-    // each reader has seen EOF.
+    // each reader has seen EOF. The readers are cancellable (see
+    // [`drain_git_pipe`]) so both exits below can join them instead of
+    // leaving a thread pinned on a grandchild-held pipe.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<()>();
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<()>();
     let stdout_pipe = child.stdout.take();
@@ -1092,40 +1255,24 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
     let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let stdout_thread = {
         let buf = std::sync::Arc::clone(&stdout_buf);
+        let cancel = std::sync::Arc::clone(&cancel);
         std::thread::spawn(move || {
-            if let Some(mut reader) = stdout_pipe {
-                use std::io::Read as _;
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match reader.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if let Ok(mut buf) = buf.lock() {
-                                buf.extend_from_slice(&chunk[..n]);
-                            }
-                        }
-                    }
-                }
+            LIVE_GIT_PIPE_READERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _guard = GitPipeReaderGuard;
+            if let Some(reader) = stdout_pipe {
+                drain_git_pipe(reader, &buf, &cancel);
             }
             let _ = stdout_tx.send(());
         })
     };
     let stderr_thread = {
         let buf = std::sync::Arc::clone(&stderr_buf);
+        let cancel = std::sync::Arc::clone(&cancel);
         std::thread::spawn(move || {
-            if let Some(mut reader) = stderr_pipe {
-                use std::io::Read as _;
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match reader.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if let Ok(mut buf) = buf.lock() {
-                                buf.extend_from_slice(&chunk[..n]);
-                            }
-                        }
-                    }
-                }
+            LIVE_GIT_PIPE_READERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _guard = GitPipeReaderGuard;
+            if let Some(reader) = stderr_pipe {
+                drain_git_pipe(reader, &buf, &cancel);
             }
             let _ = stderr_tx.send(());
         })
@@ -1138,12 +1285,14 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
         std::thread::spawn(move || {
             let _ = child.wait();
         });
-        // Detach (don't join) the reader threads: killing the child closes
-        // only the child's write ends. A grandchild that inherited the
-        // pipes keeps them open, so read_to_end would never see EOF and
-        // joining here would block the turn pipeline past the timeout —
-        // exactly what this bound exists to prevent. The detached threads
-        // end on their own once the last write end closes.
+        // Cancel and join the readers: killing the child closes only the
+        // child's write ends, and a grandchild that inherited the pipes
+        // would hold a plain reader open forever. A cancelled reader ends
+        // within one poll interval, so the joins are bounded — see
+        // [`drain_git_pipe`].
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
@@ -1152,10 +1301,13 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
             ),
         ));
     };
-    // Bounded drain join, same grandchild rationale as the timeout arm: a
+    // Wait for the readers up to the grace, then cancel and join them. A
     // clean git already closed its write ends so the readers deliver
     // immediately; the grace only covers a pipe held open by an inherited
-    // copy. On expiry return what was captured, with a note on stderr.
+    // copy. On expiry return what was captured, with a note on stderr. The
+    // joins cannot hang: a reader that has not seen EOF is cancelled and
+    // ends within one poll interval (see [`drain_git_pipe`]), so the call
+    // provably leaves no reader threads behind.
     let mut partial = false;
     if stdout_rx.recv_timeout(GIT_PIPE_DRAIN_GRACE).is_err() {
         partial = true;
@@ -1163,8 +1315,9 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
     if stderr_rx.recv_timeout(GIT_PIPE_DRAIN_GRACE).is_err() {
         partial = true;
     }
-    drop(stdout_thread);
-    drop(stderr_thread);
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
     let stdout = stdout_buf.lock().map(|buf| buf.clone()).unwrap_or_default();
     let mut stderr = stderr_buf.lock().map(|buf| buf.clone()).unwrap_or_default();
     if partial {
@@ -1206,8 +1359,21 @@ fn io_other(msg: impl Into<String>) -> io::Error {
 mod bounded_git_tests {
     use super::*;
 
+    // The two tests below both drive the bounded-git core with real
+    // children and reason about global state (the live-reader count), so
+    // they must not overlap. Poison is ignored: the count itself is
+    // panic-safe via its guard.
+    static BOUNDED_GIT_TEST_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn bounded_git_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        BOUNDED_GIT_TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
     #[test]
     fn bounded_git_returns_promptly_when_a_grandchild_holds_the_pipes() {
+        let _serial = bounded_git_test_lock();
         // The direct child (sh) exits after the echo; the backgrounded
         // sleep inherits both pipes and holds them for 30s. The call must
         // still return promptly with the output captured before the grace,
@@ -1235,6 +1401,52 @@ mod bounded_git_tests {
             elapsed < Duration::from_secs(15),
             "a pipe-holding grandchild must not hold the call past the grace; took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn repeated_calls_with_a_permanent_grandchild_do_not_leak_reader_threads() {
+        use std::sync::atomic::Ordering;
+
+        let _serial = bounded_git_test_lock();
+        // A grandchild that never exits during the test inherits both pipes
+        // and holds them forever, so every call exercises the drain-grace
+        // expiry. The readers are cancelled and joined before the call
+        // returns, so this call's readers are gone by the time it does — a
+        // reader detached instead of joined would only end when the
+        // unrelated grandchild exited, accumulating one thread per pipe per
+        // call.
+        for _ in 0..2 {
+            let mut sh = std::process::Command::new("sh");
+            sh.arg("-c")
+                .arg("echo bounded-git-thread-leak; sleep 300 &");
+            let output = run_bounded_git(&mut sh, "sh").expect("sh must succeed");
+            assert!(output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("bounded-git-thread-leak"),
+                "output captured before the grace must survive: {:?}",
+                output.stdout
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("git output pipes did not close after git exited"),
+                "the partial-output note must explain the early return: {:?}",
+                output.stderr
+            );
+        }
+        // The live-reader count must drain back to zero. Other tests in
+        // this binary drive the same core concurrently, so wait briefly for
+        // their in-flight readers to finish as well; a reverted detach
+        // would keep this test's own four readers pinned on the
+        // `sleep 300` pipes for its whole 300s and fail here.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed) != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled pipe readers must be joined, not detached; {} still running",
+                LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
