@@ -235,7 +235,7 @@ impl ToolSpec for WebSearchTool {
                 },
                 "locale": {
                     "type": "string",
-                    "description": "Requested result locale. Unsupported backends report it as degraded."
+                    "description": "Requested result locale as a BCP 47-style tag such as zh-CN or ja-JP; malformed values are ignored. The keyless Bing and DuckDuckGo scrapes honor it; unsupported backends report it as degraded."
                 }
             }
         })
@@ -2068,7 +2068,11 @@ fn search_query_items(input: &Value) -> impl Iterator<Item = &Value> {
 /// exists only to pick a Chinese market for the keyless Bing/DuckDuckGo
 /// scrapes when the model omits `locale`, and forcing Japanese or Korean
 /// queries into the zh-CN market would be worse than sending no market
-/// signal at all.
+/// signal at all. The known cost of the fallback: a purely Han-script
+/// Japanese query (「株価」, 「東京 天気」) or an unmarked Traditional
+/// Chinese query also lands on the Simplified Chinese market. An explicit
+/// `locale` always wins; the hint only replaces the cross-market drift
+/// observed with no signal at all, which degraded harder.
 fn query_contains_han(query: &str) -> bool {
     query
         .chars()
@@ -2079,16 +2083,40 @@ fn query_contains_han(query: &str) -> bool {
 /// historical no-market-signal request. An explicit locale wins; otherwise a
 /// Han-script query falls back to zh-CN because without any market hint (and
 /// with an English `Accept-Language`) Bing serves unrelated Japanese results
-/// for Chinese queries.
+/// for Chinese queries. The model-supplied locale is shape-checked first so a
+/// malformed value cannot become a broken market tag or header.
 fn scrape_market(locale: Option<&str>, query: &str) -> Option<String> {
     locale
+        .map(str::trim)
+        .filter(|tag| is_plausible_locale_tag(tag))
         .map(str::to_string)
         .or_else(|| query_contains_han(query).then(|| "zh-CN".to_string()))
 }
 
-/// `Accept-Language` matching [`scrape_market`]. Keeps the long-standing
-/// English default when no market was resolved so Latin-script requests stay
-/// byte-identical to the previous behavior.
+/// Light shape check for a model-supplied `locale`: ASCII letters/digits
+/// separated by `-`/`_`, no empty or separator-only edges. Anything else
+/// (e.g. `-CN`, `zh CN`, an injection attempt) is treated as no locale and
+/// keeps the historical request shape.
+fn is_plausible_locale_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 35
+        && tag
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && tag
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `Accept-Language` matching [`scrape_market`]. With no market resolved the
+/// English default is kept — the value the Bing path has always sent
+/// (`en-US,en;q=0.9`); the DuckDuckGo path previously sent `q=0.5` and now
+/// shares this one rule.
 fn scrape_accept_language(market: Option<&str>) -> String {
     match market {
         None => "en-US,en;q=0.9".to_string(),
@@ -2116,11 +2144,17 @@ fn scrape_locale_params(locale: Option<&str>, query: &str) -> (Vec<(String, Stri
         .next()
         .filter(|tag| !tag.is_empty())
         .unwrap_or("en");
-    // Bing expects `setlang` to carry a script tag for Chinese; default
-    // zh to Simplified because the heuristic that reaches this branch is
-    // Han-script driven.
+    // Bing expects `setlang` to carry a script tag for Chinese (a bare `zh`
+    // is invalid and silently defaults to `en`); pick the script from the
+    // market's region subtag, defaulting to Simplified because the heuristic
+    // that reaches this branch without an explicit region is Han-driven.
     let setlang = if primary.eq_ignore_ascii_case("zh") {
-        "zh-Hans"
+        match market.split(['-', '_']).nth(1) {
+            Some(region) if matches!(region.to_ascii_lowercase().as_str(), "tw" | "hk" | "mo") => {
+                "zh-Hant"
+            }
+            _ => "zh-Hans",
+        }
     } else {
         primary
     };
@@ -2198,23 +2232,24 @@ fn web_search_entry_from_scraped(entry: ScrapedSearchResult) -> WebSearchEntry {
     }
 }
 
-/// Translate a `zh-CN`-style market tag into DuckDuckGo's `kl` region value.
-/// DuckDuckGo's HTML endpoints expect lowercase region-language codes from a
-/// fixed list (for example `cn-zh` or `us-en`), which is the reverse order of
-/// a BCP 47 tag like `zh-CN`. A value outside that list is treated as no
-/// region, so this best-effort reorder can only help, never hurt; custom
-/// DuckDuckGo-compatible services typically ignore `kl` entirely. Tags whose
-/// second subtag is not a two-letter region (scripts such as `zh-Hans`, or
-/// bare languages) pass through lowercased.
-fn ddg_region_param(market: &str) -> String {
-    let lowered = market.to_ascii_lowercase();
-    let segments: Vec<&str> = lowered.split(['-', '_']).collect();
-    let is_region = |tag: &str| tag.len() == 2 && tag.chars().all(|c| c.is_ascii_alphabetic());
-    match segments.as_slice() {
-        [primary, region] if !primary.is_empty() && is_region(region) => {
-            format!("{region}-{primary}")
-        }
-        _ => lowered,
+/// Translate a BCP 47-style market tag into DuckDuckGo's `kl` region value.
+/// DuckDuckGo's HTML endpoints take `kl` from a fixed, non-systematic list
+/// (`cn-zh`, `us-en`, `jp-jp`, `kr-kr`, `tw-tzh`, `hk-tzh`, ...), so a
+/// mechanical reversal of a BCP 47 tag produces off-list junk for most
+/// non-English locales. Only verified pairs are translated; anything else
+/// sends no `kl` at all — exactly the no-region request the scrape made
+/// before this knob existed. Custom DuckDuckGo-compatible services typically
+/// ignore `kl` entirely.
+fn ddg_region_param(market: &str) -> Option<String> {
+    let normalized = market.to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "zh-cn" => Some("cn-zh".to_string()),
+        "en-us" => Some("us-en".to_string()),
+        "ja-jp" => Some("jp-jp".to_string()),
+        "ko-kr" => Some("kr-kr".to_string()),
+        "zh-tw" => Some("tw-tzh".to_string()),
+        "zh-hk" => Some("hk-tzh".to_string()),
+        _ => None,
     }
 }
 
@@ -2233,10 +2268,10 @@ fn duckduckgo_search_url(
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("q", query);
         // DuckDuckGo HTML endpoints take the market hint as `kl`; see
-        // [`ddg_region_param`] for the region-language format translation.
+        // [`ddg_region_param`] for the verified region-language mapping.
         // Custom DDG-compatible services simply ignore the extra parameter.
-        if let Some(market) = market {
-            pairs.append_pair("kl", &ddg_region_param(market));
+        if let Some(region) = market.and_then(ddg_region_param) {
+            pairs.append_pair("kl", &region);
         }
     }
     let host = url.host_str().ok_or_else(|| {
@@ -3073,6 +3108,14 @@ mod tests {
             ]
         );
         assert_eq!(accept_language, "en-US,en;q=0.9,en;q=0.8");
+
+        // Bing's setlang table keys the Chinese script off the region:
+        // Taiwan/Hong Kong/Macao are Traditional, everything else (including
+        // the Han-heuristic default) is Simplified.
+        let (params, _) = super::scrape_locale_params(Some("zh-TW"), "rust async");
+        assert_eq!(params[1].1, "zh-Hant");
+        let (params, _) = super::scrape_locale_params(Some("zh-HK"), "rust async");
+        assert_eq!(params[1].1, "zh-Hant");
     }
 
     #[test]
@@ -3117,22 +3160,37 @@ mod tests {
             "cn-zh"
         );
 
+        // A locale with no verified kl pair sends no kl at all rather than
+        // an off-list guess.
+        let (url, _) =
+            duckduckgo_search_url(None, "rust async", Some("fr-FR")).expect("duckduckgo url");
+        let parsed = reqwest::Url::parse(&url).expect("valid url");
+        assert!(parsed.query_pairs().all(|(key, _)| key != "kl"));
+
         let (url, _) = duckduckgo_search_url(None, "rust async", None).expect("duckduckgo url");
         let parsed = reqwest::Url::parse(&url).expect("valid url");
         assert!(parsed.query_pairs().all(|(key, _)| key != "kl"));
     }
 
     #[test]
-    fn ddg_region_param_translates_to_region_language_order() {
-        // DuckDuckGo's kl list is lowercase region-language (`cn-zh`,
-        // `us-en`), the reverse of BCP 47 order.
-        assert_eq!(super::ddg_region_param("zh-CN"), "cn-zh");
-        assert_eq!(super::ddg_region_param("en_US"), "us-en");
-        assert_eq!(super::ddg_region_param("ja-JP"), "jp-ja");
-        // Script subtags and bare languages cannot name a region; pass
-        // through lowercased rather than guessing.
-        assert_eq!(super::ddg_region_param("zh-Hans"), "zh-hans");
-        assert_eq!(super::ddg_region_param("zh"), "zh");
+    fn ddg_region_param_translates_only_verified_pairs() {
+        // DuckDuckGo's kl list is fixed and non-systematic; only pairs
+        // verified against that list are translated (China, US, Japan,
+        // Korea, Taiwan, Hong Kong). A mechanical reversal of a BCP 47 tag
+        // produced off-list junk such as `jp-ja` (the real value is
+        // `jp-jp`), so anything unverified sends no kl at all.
+        assert_eq!(super::ddg_region_param("zh-CN").as_deref(), Some("cn-zh"));
+        assert_eq!(super::ddg_region_param("en_US").as_deref(), Some("us-en"));
+        assert_eq!(super::ddg_region_param("ja-JP").as_deref(), Some("jp-jp"));
+        assert_eq!(super::ddg_region_param("ko-KR").as_deref(), Some("kr-kr"));
+        assert_eq!(super::ddg_region_param("zh-TW").as_deref(), Some("tw-tzh"));
+        assert_eq!(super::ddg_region_param("zh-HK").as_deref(), Some("hk-tzh"));
+        // Unverified locales and script/bare tags send no region hint —
+        // the no-kl request is the historical shape and strictly safer
+        // than guessing an off-list value.
+        assert_eq!(super::ddg_region_param("fr-FR"), None);
+        assert_eq!(super::ddg_region_param("zh-Hans"), None);
+        assert_eq!(super::ddg_region_param("zh"), None);
     }
 
     #[test]
@@ -3146,6 +3204,28 @@ mod tests {
         assert_eq!(
             super::scrape_accept_language(Some("-CN")),
             "-CN,en;q=0.9,en;q=0.8"
+        );
+    }
+
+    #[test]
+    fn implausible_locale_values_are_treated_as_no_locale() {
+        // The locale reaches URLs and the Accept-Language header, so a
+        // malformed model-supplied value keeps the historical no-market
+        // request instead of becoming a broken tag or header value.
+        assert_eq!(super::scrape_market(Some("-CN"), "rust async"), None);
+        assert_eq!(super::scrape_market(Some("zh CN"), "rust async"), None);
+        assert_eq!(super::scrape_market(Some(""), "rust async"), None);
+        assert_eq!(super::scrape_market(Some("zh=CN"), "rust async"), None);
+        assert_eq!(super::scrape_market(Some("  "), "rust async"), None);
+        // Well-formed tags survive the shape check verbatim.
+        assert_eq!(
+            super::scrape_market(Some("zh-TW"), "rust async").as_deref(),
+            Some("zh-TW")
+        );
+        // The Han fallback is untouched by the shape check.
+        assert_eq!(
+            super::scrape_market(None, "凹语言 编程").as_deref(),
+            Some("zh-CN")
         );
     }
 
