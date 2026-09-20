@@ -85,7 +85,7 @@ func TestRecoveryZeroEffectEndpointFailsClosed(t *testing.T) {
 		PolicyVersion: descriptor.PolicyVersion, CommandFingerprint: "a100000000000000000000000000000000000000000000000000000000000000",
 		ApprovalEpoch: 1, RequestVersion: 1, RequestStatus: "EXECUTION_FAILED", ExecutionStatus: "FAILED",
 		ExecutionDeadline: time.Now().UTC().Add(-time.Minute), WindowElapsed: true,
-		Investigation:     approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, ""),
+		Investigation: approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, ""),
 	}
 	lease := RecoveryQueryLease{RequestID: candidate.RequestID, Token: uuid.New(), Until: time.Now().UTC().Add(15 * time.Second), QueryCount: 1, Version: 1}
 	valid, err := json.Marshal(approvalRecoveryConfirmation{Candidate: candidate, Lease: lease})
@@ -177,7 +177,7 @@ func TestRecoveryZeroEffectEndpointRequiresEveryAuthority(t *testing.T) {
 		PolicyVersion: descriptor.PolicyVersion, CommandFingerprint: "a100000000000000000000000000000000000000000000000000000000000000",
 		ApprovalEpoch: 1, RequestVersion: 1, RequestStatus: "EXECUTION_FAILED", ExecutionStatus: "FAILED",
 		ExecutionDeadline: time.Now().UTC().Add(-time.Minute), WindowElapsed: true,
-		Investigation:     approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, "DOMAIN_RESOURCE_NOT_FOUND"),
+		Investigation: approvalconsumer.ClassifyProofFailure(descriptor.CommandType, descriptor.PolicyVersion, "DOMAIN_RESOURCE_NOT_FOUND"),
 	}
 	lease := RecoveryQueryLease{RequestID: candidate.RequestID, Token: uuid.New(), Version: 1}
 	body, err := json.Marshal(approvalRecoveryConfirmation{Candidate: candidate, Lease: lease})

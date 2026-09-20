@@ -36,7 +36,8 @@ func (r *PostgresRepository) InvalidateOriginalApprovalZeroEffect(ctx context.Co
 	case approvalconsumer.FailurePermanent, approvalconsumer.FailureFactOrPolicyChanged:
 	default:
 		// An UNKNOWN, window-ended or transient class can never invalidate: only a
-		// definite pre-effect failure is eligible.
+		// definite pre-effect failure is eligible. This caller-supplied value is
+		// re-derived from the locked row below; it is never authoritative.
 		return ErrApprovalRecoveryZeroEffectConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -44,6 +45,13 @@ func (r *PostgresRepository) InvalidateOriginalApprovalZeroEffect(ctx context.Co
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Compare against the database clock that wrote execution_deadline and
+	// lease_until, not the application's, so a skewed host cannot widen the
+	// execution window or extend a lease that the row says has expired.
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
+		return err
+	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, candidate.RequestID)
 	if err != nil {
 		return err
@@ -55,7 +63,6 @@ func (r *PostgresRepository) InvalidateOriginalApprovalZeroEffect(ctx context.Co
 		return ErrApprovalRecoveryZeroEffectConflict
 	}
 	// The window is rechecked from the row under lock, never from the caller.
-	now := time.Now().UTC()
 	if item.ExecutionDeadline.After(now) {
 		return ErrApprovalRecoveryZeroEffectConflict
 	}
@@ -98,10 +105,19 @@ FROM approval_recovery_query_leases WHERE approval_request_id=$1 FOR UPDATE`, ca
 		(candidate.Workload == approvalconsumer.BillingWorkload && delivery.DomainAttemptCount != 1) {
 		return ErrApprovalRecoveryZeroEffectConflict
 	}
+	// The failure class arrives over the wire from the worker, so the same closed
+	// registry is re-derived from the persisted delivery code under lock: an
+	// UNKNOWN/transient failure can never be turned terminal by a forged verdict,
+	// and the recorded evidence can only ever carry the re-derived class.
+	investigation := approvalconsumer.ClassifyProofFailure(candidate.CommandType, candidate.PolicyVersion, recoveryFailureCode(delivery))
+	if investigation.Class != candidate.Investigation.Class || investigation.Retryable || !investigation.QueryOnly ||
+		investigation.MaxDomainAttempts != 1 {
+		return ErrApprovalRecoveryZeroEffectConflict
+	}
 	evidence, err := json.Marshal(map[string]any{
 		"original_event_id": candidate.OriginalEventID.String(), "approval_epoch": candidate.ApprovalEpoch,
 		"durable": candidate.Durable, "effect_observation": "ABSENT", "result_observation": "UNCONFIRMED",
-		"failure_class": string(candidate.Investigation.Class), "lease_version": lease.Version,
+		"failure_class": string(investigation.Class), "lease_version": lease.Version,
 		"execution_deadline": candidate.ExecutionDeadline.UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
@@ -115,7 +131,7 @@ invalidation_details=$3,version=version+1,updated_at=$4 WHERE id=$1 AND status I
 	if err := appendApprovalStateEvent(ctx, tx, candidate.RequestID, item.Status, "INVALIDATED", "SERVICE", "account-approval-recovery",
 		approvalRecoveryZeroEffectCode, map[string]any{
 			"original_event_id": candidate.OriginalEventID, "lease_version": lease.Version,
-			"failure_class": string(candidate.Investigation.Class),
+			"failure_class": string(investigation.Class),
 		}, now); err != nil {
 		return err
 	}

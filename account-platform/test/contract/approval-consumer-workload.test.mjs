@@ -64,3 +64,24 @@ test('all nine consumer HTTP operations require the exact service permission', a
   const suffixes = ['route', 'binding', 'deliveries/:durable', 'observe', 'attempts/grant', 'attempts/failure', 'result', 'dlq-puback', 'terminal'];
   for (const suffix of suffixes) assert.equal(routes.filter(line => line.includes(`/${suffix}"`)).length, 1);
 });
+
+// The recovery worker reaches Account only through these three internal
+// operations, so each one must stay declared with its own exact permission and
+// a closed body. A new terminal surface without a contract entry is a gap.
+test('every approval-recovery surface is declared with its exact permission', async () => {
+  const document = YAML.parse(await read('contracts/openapi/account.yaml'));
+  for (const name of ['confirm', 'zero-effect', 'plan']) {
+    const path = `/internal/v1/approval-recovery/${name}`;
+    const operation = Object.values(document.paths[path] ?? {})[0];
+    assert.ok(operation, `${path} must be declared`);
+    assert.deepEqual(operation.security, [{ serviceToken: [] }], `${path} must require the service token`);
+    assert.ok(operation.description.includes(`internal.approval-recovery.${name}`),
+      `${path} must name its exact permission`);
+  }
+  const zeroEffect = document.paths['/internal/v1/approval-recovery/zero-effect'].post;
+  assert.equal(zeroEffect.operationId, 'invalidateOriginalApprovalRecoveryZeroEffect');
+  assert.deepEqual(zeroEffect.requestBody.content['application/json'].schema.required, ['candidate', 'lease']);
+  assert.equal(zeroEffect.requestBody.content['application/json'].schema.additionalProperties, false);
+  assert.equal(zeroEffect.responses['204'].headers['Cache-Control'].schema.const, 'no-store');
+  assert.deepEqual(Object.keys(zeroEffect.responses).sort(), ['204', '400', '403', '409', '503']);
+});

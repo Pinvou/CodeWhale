@@ -470,7 +470,7 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	}
 	// A positive domain result always wins over an absent effect.
 	positive := &fixedRecoveryResultReader{result: RecoveryResultObservation{State: "SUCCEEDED", ObservedAt: time.Now().UTC(),
-		DomainResult: json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`),
+		DomainResult:     json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`),
 		LedgerReferences: json.RawMessage(`{"journal_entry_id":"` + uuid.NewString() + `"}`)}}
 	if response := postZeroEffect(&recoveryEffectStub{state: approvaleffect.StateAbsent}, positive); response.Code != http.StatusConflict ||
 		!strings.Contains(response.Body.String(), "APPROVAL_RECOVERY_UNCONFIRMED") {
@@ -552,5 +552,50 @@ WHERE approval_request_id=$1 AND to_status='INVALIDATED'`, zeroEffectRequest.ID)
 	closed, err := repository.PlanProofApprovalRecovery(ctx, 5)
 	if err != nil || len(closed.Candidates) != 0 {
 		t.Fatalf("an invalidated request stayed in the recovery plan: %+v err=%v", closed, err)
+	}
+	// The failure classification is worker-supplied over the wire, so the CAS
+	// must re-derive it from the persisted row under lock: `DOMAIN_PRECONDITION_REJECTED`
+	// is a mixed code that classifies as UNKNOWN, and a candidate that merely
+	// claims PERMANENT must never converge that execution.
+	unknownRequest := seedZeroEffectRecoveryFailure(t, ctx, db, repository, relay, vector, durable,
+		"DOMAIN_PRECONDITION_REJECTED", 103)
+	if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests SET execution_deadline=now()-interval '1 second',updated_at=now() WHERE id=$1`, unknownRequest.ID); err != nil {
+		t.Fatal(err)
+	}
+	var unknownCandidate ApprovalRecoveryCandidate
+	unknownPlan, err := repository.PlanProofApprovalRecovery(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range unknownPlan.Candidates {
+		if candidate.RequestID == unknownRequest.ID {
+			unknownCandidate = candidate
+		}
+	}
+	if unknownCandidate.RequestID == uuid.Nil || !unknownCandidate.WindowElapsed ||
+		unknownCandidate.Investigation.Class != approvalconsumer.FailureUnknown {
+		t.Fatalf("mixed-code failure is not a query-only UNKNOWN candidate: %+v", unknownCandidate)
+	}
+	unknownLease, err := store.Claim(ctx, unknownCandidate)
+	if err != nil || unknownLease.RequestID != unknownRequest.ID {
+		t.Fatalf("unknown-class query lease invalid: lease=%+v err=%v", unknownLease, err)
+	}
+	forgedClass := unknownCandidate
+	forgedClass.Investigation.Class = approvalconsumer.FailurePermanent
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, forgedClass, unknownLease); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("a forged failure classification invalidated an UNKNOWN failure: %v", err)
+	}
+	var unknownStatus, unknownCode string
+	var unknownEvents int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT status,coalesce(invalidation_code,'') FROM public.approval_requests WHERE id=$1`, unknownRequest.ID).
+		Scan(&unknownStatus, &unknownCode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM public.approval_state_events WHERE approval_request_id=$1 AND to_status='INVALIDATED'`, unknownRequest.ID).
+		Scan(&unknownEvents); err != nil {
+		t.Fatal(err)
+	}
+	if unknownStatus != "EXECUTION_FAILED" || unknownCode != "" || unknownEvents != 0 {
+		t.Fatalf("refused classification forgery mutated the request: status=%s code=%s invalidated_events=%d", unknownStatus, unknownCode, unknownEvents)
 	}
 }

@@ -103,8 +103,9 @@ WHERE ar.id=$1`, item.ID).Scan(&version, &status, &failure)
 	if status == nil {
 		return nil, nil
 	}
-	// Automatic recovery is not implemented until GSA-16. Never infer a
-	// retryable action or schedule from an execution error or raw result.
+	// No automatic retry is exposed by GSA-16: it delivers read-only
+	// investigation plus the governed positive-result and proven-zero-effect
+	// terminal paths, never a second domain attempt scheduled from an error.
 	projection := &ApprovalV2Execution{AttemptStatus: *status, Retryable: false,
 		ExecutionDeadline: item.ExecutionDeadline}
 	if *status == "FAILED" {

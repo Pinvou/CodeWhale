@@ -55,6 +55,13 @@ func (r *PostgresRepository) ConfirmOriginalApprovalSuccess(ctx context.Context,
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Compare against the database clock that wrote execution_deadline and
+	// lease_until, not the application's, so a skewed host cannot extend a lease
+	// the row says has expired.
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
+		return err
+	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, candidate.RequestID)
 	if err != nil {
 		return err
@@ -93,7 +100,7 @@ FROM approval_recovery_query_leases WHERE approval_request_id=$1 FOR UPDATE`, ca
 		return err
 	}
 	if token != lease.Token || leaseVersion != lease.Version || leaseExecutionID != candidate.ExecutionID ||
-		leaseEventID != candidate.OriginalEventID || leaseEpoch != candidate.ApprovalEpoch || !leaseUntil.After(time.Now().UTC()) {
+		leaseEventID != candidate.OriginalEventID || leaseEpoch != candidate.ApprovalEpoch || !leaseUntil.After(now) {
 		return ErrApprovalRecoveryConfirmConflict
 	}
 	delivery, err := readRecoveryDeliveryState(ctx, tx, candidate)
@@ -104,7 +111,6 @@ FROM approval_recovery_query_leases WHERE approval_request_id=$1 FOR UPDATE`, ca
 		(candidate.Workload == approvalconsumer.BillingWorkload && delivery.DomainAttemptCount != 1) {
 		return ErrApprovalRecoveryConfirmConflict
 	}
-	now := time.Now().UTC()
 	previous := item.Status
 	if previous == "EXECUTION_FAILED" {
 		if err := updateExactlyOneRecoveryRow(ctx, tx, `UPDATE approval_executions SET status='EXECUTING',error_class=NULL,completed_at=NULL WHERE id=$1 AND status='FAILED'`, executionID); err != nil {

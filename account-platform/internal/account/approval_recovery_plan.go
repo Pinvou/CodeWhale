@@ -111,18 +111,7 @@ ORDER BY r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
 			(item.Workload == approvalconsumer.BillingWorkload && item.Delivery.DomainAttemptCount < 1) {
 			return ApprovalRecoveryPlan{}, ErrApprovalRecoveryPlanInvalid
 		}
-		code := ""
-		if item.Delivery.LastErrorCode != nil {
-			code = *item.Delivery.LastErrorCode
-		}
-		if item.Delivery.ExecutionErrorClass != nil && code != "" && code != *item.Delivery.ExecutionErrorClass {
-			// Competing codes are not evidence that either is authoritative.
-			code = ""
-		}
-		if code == "" && item.Delivery.ExecutionErrorClass != nil && item.Delivery.LastErrorCode == nil {
-			code = *item.Delivery.ExecutionErrorClass
-		}
-		item.Investigation = approvalconsumer.ClassifyProofFailure(item.CommandType, item.PolicyVersion, code)
+		item.Investigation = approvalconsumer.ClassifyProofFailure(item.CommandType, item.PolicyVersion, recoveryFailureCode(item.Delivery))
 		item.ExecutionDeadline = item.ExecutionDeadline.UTC()
 		item.WindowElapsed = !item.ExecutionDeadline.After(plan.ObservedAt)
 	}
@@ -131,6 +120,23 @@ ORDER BY r.status,r.expires_at,r.updated_at,r.id LIMIT $1`, limit+1)
 	}
 	plan.ObservedAt = plan.ObservedAt.UTC()
 	return plan, nil
+}
+
+// recoveryFailureCode picks the single stable failure code both the read-only
+// planner and the terminal CAS classify from. Competing recorded codes are not
+// evidence that either is authoritative, so they collapse to "unknown".
+func recoveryFailureCode(delivery ApprovalDeliveryState) string {
+	code := ""
+	if delivery.LastErrorCode != nil {
+		code = *delivery.LastErrorCode
+	}
+	if delivery.ExecutionErrorClass != nil && code != "" && code != *delivery.ExecutionErrorClass {
+		return ""
+	}
+	if code == "" && delivery.ExecutionErrorClass != nil && delivery.LastErrorCode == nil {
+		code = *delivery.ExecutionErrorClass
+	}
+	return code
 }
 
 func readRecoveryDeliveryState(ctx context.Context, tx pgx.Tx, item ApprovalRecoveryCandidate) (ApprovalDeliveryState, error) {

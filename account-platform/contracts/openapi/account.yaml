@@ -76,6 +76,39 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-recovery/zero-effect:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: invalidateOriginalApprovalRecoveryZeroEffect
+      summary: Recheck both owner authorities and atomically invalidate a proven zero-effect original execution
+      description: Requires internal.approval-recovery.zero-effect and the dedicated account-approval-recovery workload identity. The body contains only an original Account candidate and live read-query lease. Account independently re-reads the domain result authority, which must report no positive result, and the effect authority, which must report ABSENT for the same request and command, before its serializable same-execution CAS. It also re-derives the failure classification from the persisted delivery row under lock, so a worker-supplied verdict can never make an UNKNOWN or transient failure terminal. Only a definite pre-effect failure whose execution window has elapsed may converge; never starts a second domain attempt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [candidate, lease]
+              properties:
+                candidate: { $ref: "#/components/schemas/ApprovalRecoveryCandidate" }
+                lease:
+                  type: object
+                  additionalProperties: false
+                  required: [approval_request_id, lease_token, lease_until, query_count, version]
+                  properties:
+                    approval_request_id: { type: string, format: uuid }
+                    lease_token: { type: string, format: uuid }
+                    lease_until: { type: string, format: date-time }
+                    query_count: { type: integer, minimum: 1 }
+                    version: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "204": { description: Zero effect proven and the original request invalidated; no second domain execution, headers: { Cache-Control: { schema: { type: string, const: no-store } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/approval-recovery/plan:
     get:
       servers: [{ url: / }]
