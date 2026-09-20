@@ -1711,14 +1711,23 @@ impl RuntimeBridge {
         since_seq: u64,
         mut transcript: Option<&mut TurnTranscript>,
     ) -> Result<(u64, TurnTerminalStatus, Option<String>)> {
-        let mut response = self
-            .authed(self.client.get(format!(
+        // A runtime child that accepts the connection but never writes
+        // response headers would otherwise hold the bridge lock forever —
+        // the same accept-and-stall shape the chunk idle bound below covers
+        // for the body. The header wait shares that idle deadline; a per-
+        // request total is deliberately absent because reqwest's total would
+        // ride the returned body and hard-cut the live stream.
+        let mut response = tokio::time::timeout(
+            RUNTIME_BRIDGE_SSE_IDLE_TIMEOUT,
+            self.authed(self.client.get(format!(
                 "{}/v1/threads/{thread_id}/events?since_seq={since_seq}",
                 self.base_url
             )))
-            .send()
-            .await?
-            .error_for_status()?;
+            .send(),
+        )
+        .await
+        .context("runtime event stream stalled before the first byte")??
+        .error_for_status()?;
 
         let mut buffer = Vec::new();
         let mut last_seq = since_seq;
