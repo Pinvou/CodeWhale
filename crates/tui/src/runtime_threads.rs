@@ -9312,6 +9312,14 @@ impl RuntimeThreadManager {
                         tokio::select! {
                             biased;
                             _ = self.cancel_token.cancelled() => {
+                                // The biased order favors the cancel token,
+                                // but a decision already queued in the
+                                // oneshot is a choice the user actually
+                                // made — it must resolve the approval, not
+                                // be discarded as an interrupt.
+                                if let Ok(decision) = rx.try_recv() {
+                                    break ApprovalWakeup::Decision(Ok(decision));
+                                }
                                 break ApprovalWakeup::Interrupted;
                             }
                             decision = &mut rx => {
@@ -9327,6 +9335,12 @@ impl RuntimeThreadManager {
                                         .await
                                         .unwrap_or(false)
                                 {
+                                    // Same race as the cancel arm: honor a
+                                    // decision that arrived before the
+                                    // interrupt was observed.
+                                    if let Ok(decision) = rx.try_recv() {
+                                        break ApprovalWakeup::Decision(Ok(decision));
+                                    }
                                     break ApprovalWakeup::Interrupted;
                                 }
                             }

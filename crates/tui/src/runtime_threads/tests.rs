@@ -9970,6 +9970,98 @@ async fn approval_wait_ends_when_the_runtime_shuts_down() -> Result<()> {
 }
 
 #[tokio::test]
+async fn approval_decision_queued_before_shutdown_is_honored_not_interrupted() -> Result<()> {
+    // The wait's select favors the cancel token, but a decision already
+    // queued at that instant is a choice the user actually made: the
+    // documented contract says a made decision never carries
+    // `interrupted`. This pins the tie-break.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let _turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "decision racing shutdown".to_string(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_turn_race".to_string(),
+            created_at: chrono::Utc::now(),
+            route: None,
+            submission_id: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::ApprovalRequired {
+            approval_key: "race_key".to_string(),
+            approval_grouping_key: "race_key".to_string(),
+            id: "tool_race".to_string(),
+            tool_name: "exec_command".to_string(),
+            description: "queued decision vs shutdown".to_string(),
+            input: serde_json::json!({}),
+            intent_summary: None,
+            approval_force_prompt: false,
+        })
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && manager.pending_approvals_count() == 0 {
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(manager.pending_approvals_count(), 1);
+
+    // Queue the user's deny, then cancel the runtime before the wait task
+    // is polled again: both wakeup sources are ready at the same instant.
+    assert!(manager.deliver_external_approval(
+        "tool_race",
+        ExternalApprovalDecision::Deny { remember: false },
+    ));
+    manager.shutdown();
+
+    let decided = tokio::time::timeout(Duration::from_secs(2), harness.recv_approval_event())
+        .await
+        .context("the queued decision must still resolve the approval")?;
+    assert_eq!(
+        decided,
+        Some(MockApprovalEvent::Denied {
+            id: "tool_race".to_string(),
+        })
+    );
+    assert_eq!(manager.pending_approvals_count(), 0);
+    let events = manager.events_since(&thread.id, None)?;
+    let resolution = events
+        .iter()
+        .find(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_race")
+        })
+        .expect("queued decision must emit approval.decided");
+    assert_eq!(
+        resolution
+            .payload
+            .get("interrupted")
+            .and_then(Value::as_bool),
+        None,
+        "a decision the user actually made must not be reported as interrupted"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn approval_wait_ends_when_the_engine_dies() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
