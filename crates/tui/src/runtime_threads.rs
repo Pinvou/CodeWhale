@@ -1429,6 +1429,25 @@ impl RuntimeThreadStore {
     }
 
     pub fn save_thread(&self, thread: &ThreadRecord) -> Result<()> {
+        // Workspace/roots pairing guard (review #54 round-9 should-fix): the
+        // storage convention makes `workspace` a member of the declared set.
+        // A writer that moves the workspace without the set — or the set
+        // without the workspace — used to persist silently; this is the one
+        // choke point all persistence callers share, so a warn here turns
+        // that failure mode into a searchable signal.
+        if !thread.workspace_roots.is_empty()
+            && !thread
+                .workspace_roots
+                .iter()
+                .any(|root| root == &thread.workspace)
+        {
+            tracing::warn!(
+                "thread {} persists workspace {} outside its declared root set {:?}",
+                thread.id,
+                thread.workspace.display(),
+                thread.workspace_roots
+            );
+        }
         write_json_atomic(&self.thread_path(&thread.id)?, thread)
     }
 
