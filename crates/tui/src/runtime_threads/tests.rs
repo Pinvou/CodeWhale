@@ -5809,6 +5809,63 @@ async fn update_thread_workspace_persists_event_and_evicts_idle_engine() -> Resu
 }
 
 #[tokio::test]
+async fn update_thread_roots_preserves_session_and_turn_context() -> Result<()> {
+    // Review #484 round-9 must-fix 2: a roots-bearing resume must re-shape
+    // the SAME runtime thread (PATCH primitive), preserving session_id and
+    // the accumulated turns — re-creating the thread would run the next
+    // turn with correct roots but a blank memory.
+    let manager = test_manager(test_runtime_dir())?;
+    let primary = std::env::temp_dir().join("codewhale-ctx-primary");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(primary.clone()),
+            ..Default::default()
+        })
+        .await?;
+
+    // Simulate a session that already ran: a session binding and a
+    // recorded turn.
+    {
+        let mut record = manager.store.load_thread(&thread.id)?;
+        record.session_id = Some("ses_context".to_string());
+        record.latest_turn_id = Some("turn_context".to_string());
+        manager.store.save_thread(&record)?;
+    }
+
+    let updated = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(vec![primary.clone(), primary.join("extra")]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        updated.workspace_roots,
+        vec![primary.clone(), primary.join("extra")],
+        "the PATCH carries the new root set"
+    );
+    assert_eq!(
+        updated.session_id.as_deref(),
+        Some("ses_context"),
+        "context continuity: session binding survives the roots change"
+    );
+    assert_eq!(
+        updated.latest_turn_id.as_deref(),
+        Some("turn_context"),
+        "context continuity: the recorded turn survives the roots change"
+    );
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots.len(),
+        2,
+        "the persisted record carries the new set"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_workspace_rejects_empty_path() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager

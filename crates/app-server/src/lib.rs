@@ -10,7 +10,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use codewhale_agent::ModelRegistry;
 use codewhale_config::ConfigStore;
@@ -142,6 +142,11 @@ struct ToolCallRequest {
     call: ToolCall,
     #[serde(default)]
     cwd: Option<PathBuf>,
+    /// Session root set for the exec-policy context: attached-root ask and
+    /// deny rules only fire when the caller declares the set it recorded at
+    /// thread/start (review round-9, must-fix 1). Empty = single-root.
+    #[serde(default)]
+    workspace_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -665,9 +670,26 @@ async fn thread_handler(State(state): State<AppState>, Json(req): Json<ThreadReq
             Err(err) => http_error_from_jsonrpc(err).into_response(),
         };
     }
+    // The HTTP face feeds the same hint map the stdio dispatch feeds: a
+    // start/resume/fork that declares `workspace_roots` must land in the
+    // hint cache, or the turn-executing runtime thread is created
+    // single-root and the attached-root ask/deny rules never fire
+    // (review round-9, must-fix 1).
+    let should_record_hint = matches!(
+        &req,
+        ThreadRequest::Create { .. }
+            | ThreadRequest::Start(_)
+            | ThreadRequest::Resume(_)
+            | ThreadRequest::Fork(_)
+    );
     let mut runtime = state.runtime.write().await;
     match runtime.handle_thread(req).await {
-        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Ok(res) => {
+            if should_record_hint {
+                record_stdio_thread_hint(&state, &res).await;
+            }
+            (StatusCode::OK, Json(res)).into_response()
+        }
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ThreadResponse {
@@ -725,7 +747,10 @@ async fn tool_handler(
     // read guard: they run concurrently with each other and with status
     // reads instead of serializing every request behind one Mutex.
     let runtime = state.runtime.read().await;
-    match runtime.invoke_tool(req.call, approval_mode, &cwd).await {
+    match runtime
+        .invoke_tool(req.call, approval_mode, &cwd, &req.workspace_roots)
+        .await
+    {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1537,25 +1562,31 @@ impl RuntimeBridge {
             }
             // The hint now declares a different root set than the mapped
             // runtime thread was created with (a roots-bearing resume after
-            // the first bridged turn). Turns execute on the runtime thread,
-            // not on the stdio record, so re-create the thread under the
-            // declared set and re-map instead of silently running the stale
-            // one. Chosen over rejecting the resume: the stdio contract
-            // already accepted the new set onto the record, and refusing
-            // here would strand the thread with no path to its own roots.
+            // the first bridged turn). Re-shape the SAME runtime thread via
+            // the PATCH primitive instead of creating a fresh one: PATCH
+            // preserves session_id and the accumulated turns (the model's
+            // context), evicts the cached engine, and re-normalizes the set
+            // with the thread's workspace as the primary root. Re-creating
+            // the thread would run the next turn with correct roots but a
+            // blank memory, and strand the old thread unarchived in the
+            // store (review round-9, must-fix 2).
             let hint = hint.expect("a root-set change implies a hint");
-            let roots = hint.workspace_roots.clone();
-            let runtime_thread_id = self
-                .create_runtime_thread(hint.model, hint.workspace, hint.workspace_roots)
+            let body = json!({
+                "workspace": hint.workspace,
+                "workspace_roots": hint.workspace_roots,
+            });
+            let _record = self
+                .request_json(
+                    self.authed(
+                        self.client
+                            .patch(format!("{}/v1/threads/{runtime_thread_id}", self.base_url)),
+                    )
+                    .json(&body),
+                )
                 .await?;
-            if let Some(old) = self
-                .thread_map
-                .insert(stdio_thread_id.to_string(), runtime_thread_id.clone())
-            {
-                self.last_seq_by_thread.remove(&old);
-            }
-            self.thread_roots.insert(stdio_thread_id.to_string(), roots);
-            return Ok(runtime_thread_id);
+            self.thread_roots
+                .insert(stdio_thread_id.to_string(), hint.workspace_roots.clone());
+            return Ok(runtime_thread_id.clone());
         }
         let hint = hint.unwrap_or_default();
         let roots = hint.workspace_roots.clone();
@@ -3727,6 +3758,24 @@ mod tests {
             };
             Json(json!({ "id": format!("thr_runtime_{ordinal}") }))
         }
+        // Patches land in the same capture, tagged: the roots-changed resume
+        // must re-shape the SAME runtime thread instead of creating a fresh
+        // one.
+        async fn patch_thread(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            axum::extract::Path(id): axum::extract::Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let mut bodies = captured.lock().await;
+            let mut record = json!({ "patch": true });
+            record["id"] = json!(id);
+            // A live PATCH preserves the thread's accumulated turns — that is
+            // the context-continuity guarantee under test.
+            record["turns"] = json!([{ "input": "earlier", "output": "earlier" }]);
+            record["workspace_roots"] = body["workspace_roots"].clone();
+            bodies.push(record.clone());
+            Json(record)
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3734,6 +3783,7 @@ mod tests {
         let addr = listener.local_addr().expect("listener addr");
         let app = Router::new()
             .route("/v1/threads", post(create_thread))
+            .route("/v1/threads/{id}", patch(patch_thread))
             .with_state(captured);
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3771,36 +3821,56 @@ mod tests {
         );
 
         // A roots-bearing resume changed the declared set: the bridge must
-        // re-create the runtime thread under the new set and re-map.
+        // re-shape the SAME runtime thread via PATCH (context continuity)
+        // instead of creating a fresh one.
         let remapped = bridge
             .ensure_runtime_thread(
                 "thr_stdio",
                 Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r2"])),
             )
             .await
-            .expect("changed roots re-map the runtime thread");
-        assert_eq!(remapped, "thr_runtime_2");
+            .expect("changed roots re-shape the runtime thread");
+        assert_eq!(remapped, "thr_runtime_1", "the runtime thread is kept");
         assert_eq!(
             bridge.thread_map.get("thr_stdio").map(String::as_str),
-            Some("thr_runtime_2")
+            Some("thr_runtime_1")
         );
-        assert!(
-            !bridge.last_seq_by_thread.contains_key("thr_runtime_1"),
-            "the stale thread's seq cursor must not leak"
+        assert_eq!(
+            bridge.thread_roots.get("thr_stdio"),
+            Some(&vec![
+                PathBuf::from("/tmp/codewhale-primary"),
+                PathBuf::from("/tmp/codewhale-r2")
+            ]),
+            "the mapped root set carries the resumed roots"
         );
         server.abort();
         let _ = server.await;
 
         let bodies = bodies.lock().await;
-        assert_eq!(bodies.len(), 2, "exactly the two distinct sets create");
+        assert_eq!(bodies.len(), 2, "one create plus one PATCH");
         assert_eq!(
             bodies[0]["workspace_roots"],
             json!(["/tmp/codewhale-primary", "/tmp/codewhale-r1"])
         );
         assert_eq!(
+            bodies[1]["patch"],
+            json!(true),
+            "the roots change re-shapes via PATCH"
+        );
+        assert_eq!(
+            bodies[1]["id"],
+            json!("thr_runtime_1"),
+            "the PATCH lands on the same runtime thread"
+        );
+        assert_eq!(
             bodies[1]["workspace_roots"],
             json!(["/tmp/codewhale-primary", "/tmp/codewhale-r2"]),
-            "the re-created thread carries the resumed root set"
+            "the PATCH carries the resumed root set"
+        );
+        assert_eq!(
+            bodies[1]["turns"].as_array().map(Vec::len),
+            Some(1),
+            "context continuity: the patched thread keeps its turns"
         );
     }
 

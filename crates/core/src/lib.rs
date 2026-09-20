@@ -1411,6 +1411,7 @@ impl Runtime {
         call: ToolCall,
         approval_mode: AskForApproval,
         cwd: &Path,
+        workspace_roots: &[PathBuf],
     ) -> Result<Value> {
         let fallback_cwd = cwd.display().to_string();
         let (command, policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
@@ -1426,12 +1427,10 @@ impl Runtime {
             path: policy_path.as_deref(),
             ask_for_approval: approval_mode,
             sandbox_mode: None,
-            // Known lane gap (disclosed in the PR description, scheduled
-            // follow-up): this entrypoint cannot carry the session's root
-            // set, so attached-root ask and deny rules never fire on the
-            // app-server bridge. Byte-identical to base for the root set
-            // itself.
-            workspace_roots: Vec::new(),
+            // The caller supplies the session's root set (hint map on the
+            // app-server bridge); an empty slice keeps the byte-identical
+            // single-root posture for callers that have none.
+            workspace_roots: workspace_roots.to_vec(),
         })?;
         let precheck = policy_precheck_payload(&decision, &command, &policy_cwd, execution_kind);
         let response_id = format!("tool-{}", Uuid::new_v4());
@@ -3751,6 +3750,7 @@ mod tests {
                 },
                 AskForApproval::Never,
                 Path::new("/tmp/codewhale"),
+                &[],
             )
             .await
             .expect("invoke tool");
