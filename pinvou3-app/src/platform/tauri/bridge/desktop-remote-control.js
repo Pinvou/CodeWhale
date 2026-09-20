@@ -176,6 +176,21 @@
     }
 
     /**
+     * 主动拉取一次被控端状态并投影到本地状态：事件或命令回包一旦丢失，
+     * 面板仍能通过它拿回真实状态（例如后端已 waiting_connection 与连接码）。
+     */
+    function controlledSync() {
+      ensureAvailable();
+      subscribe();
+      var intent = controlledIntent();
+      return invoke("desktop_remote_controlled_status", {})
+        .then(function (result) {
+          return applyControlled(intent, result);
+        })
+        .catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /**
      * 随包内置的「服务端点」profile 列表（生产/测试）。用户不需要再配置
      * PINVOU_REMOTE_* 环境变量即可在应用内切换。
      */

@@ -121,6 +121,18 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     return () => { cancelled = true; };
   }, []);
 
+  // 进入面板时主动同步一次后端状态：事件丢失时（例如只错过了 status 事件）
+  // 也能立刻显示真实状态与连接码。dev 模式改完刷新窗口即生效。
+  useEffect(() => {
+    const remote = bridge && bridge.available && bridge.desktopRemoteControl;
+    if (!remote || typeof remote.controlledSync !== 'function') return undefined;
+    let cancelled = false;
+    Promise.resolve(remote.controlledSync()).catch(() => {
+      if (!cancelled) { /* 同步失败不阻塞面板渲染 */ }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   const endpointLabelKey = (id) => `endpoint${String(id || '').charAt(0).toUpperCase()}${String(id || '').slice(1)}`;
   const canSwitchEndpoint = !!(
     bridge
@@ -191,6 +203,11 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         </div>
       )}
       <p className="settings-hint">{copy.codeHint}</p>
+
+      {/* TEMP 诊断：定位「后端已出码、界面无码」。确认后删除。 */}
+      <p className="settings-hint" data-remote-debug="1">
+        {`debug: status=${String(status)} code=${device.pairingCode ? 'yes' : 'no'} expires=${String(device.expiresAtMs)} gen=${String(device.generation)}`}
+      </p>
 
       <div className="settings-actions">
         <button
