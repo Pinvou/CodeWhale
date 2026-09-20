@@ -4705,6 +4705,35 @@ fn restore_snapshot_endpoint_helper_restores_workspace_files() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn restore_snapshot_endpoint_helper_rejects_unknown_snapshot_id() -> Result<()> {
+    let _lock = lock_test_env();
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    fs::create_dir_all(&home)?;
+    let _home = EnvVarGuard::set("HOME", &home);
+
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
+    fs::write(workspace.join("a.txt"), "v1")?;
+    repo.snapshot("pre-turn:1")?;
+
+    // An id the side repo does not know must 404 without reaching git,
+    // instead of being handed over as an arbitrary treeish.
+    let err =
+        restore_snapshot_for_workspace(&workspace, "0123456789abcdef0123456789abcdef01234567")
+            .expect_err("an unknown snapshot id must be rejected");
+    assert_eq!(err.status, StatusCode::NOT_FOUND);
+    assert!(
+        err.message.contains("no such snapshot"),
+        "the rejection must say the id is unknown: {}",
+        err.message
+    );
+    assert_eq!(fs::read_to_string(workspace.join("a.txt"))?, "v1");
+    Ok(())
+}
+
 #[tokio::test]
 async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
     let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
