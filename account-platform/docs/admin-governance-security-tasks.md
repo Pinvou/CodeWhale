@@ -78,7 +78,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 
 `FAMILY_INVENTORY_GATED`（GSA-38）表示七个命令的开关、durable、手册、授权目录事件条目、恢复分类与激活投影闭集已由合同门禁逐条钉住，任何单层改名/版本漂移都会在合同阶段失败，而不是等到生产激活时才静默改 0 行。
 
-`RECOVERY_RESULT_AUTHORITY_ALIGNED`（GSA-16）表示恢复路径的正向结果权威已与投递路径复用同一读（`billingAuthorizationDomain.LookupAuthorizationResult`），不再维护第二张命令表；`READONLY_CLI_GATED` 表示 `approval-recovery` CLI 的只读姿态（仅 `-limit`/`-deadline`、无 apply/retry/invalidate/complete、无领域写入、专用 NOLOGIN 角色、输出为闭集计数）已由合同锁定。GSA-16 仍未完成的部分是零效果证明与终态 CAS。
+`RECOVERY_RESULT_AUTHORITY_ALIGNED`（GSA-16）表示恢复路径的正向结果权威已与投递路径复用同一读（`billingAuthorizationDomain.LookupAuthorizationResult`），不再维护第二张命令表；`READONLY_CLI_GATED` 表示 `approval-recovery` CLI 的只读姿态已由合同锁定：仅 `-limit`/`-deadline` 两个有界选项、无 apply/retry/invalidate/execute/force/complete 动作选择器、不调用任何领域写入、专用 NOLOGIN 角色、输出为闭集计数，且 CLI 自身不直接发 HTTP——两条受治理 POST（正向确认与零效果失效）都由 Account 客户端在存活租约内发起，Account 自己重读两个 owner 权威后再 CAS。零效果证明与终态 CAS 已交付，见下条 `ZERO_EFFECT_CAS_GATED`；GSA-16 此后只剩独立审核与环境/部署门禁。
 
 `ZERO_EFFECT_CAS_GATED`（GSA-16）表示「确定失败 + 窗口已过 + 效果 ABSENT + 无正向结果」这唯一一条零效果终态路径已可执行且只能由受治理面触发：只读判定、Serializable 终态 CAS、恢复身份专用失效端点与 worker 接线均已落地，并在真实 PostgreSQL 上同时覆盖正向收敛与失败关闭矩阵。它**不**表示恢复 worker 已启用、已调度或已部署：`account_approval_recovery` 仍是 `NOLOGIN`，生产 activation 与部署属 GSA-38～40。GSA-16 代码项至此全部交付，剩余的是独立审核（`REVIEW_PENDING`）与环境/部署门禁（`PARTIAL` / `NOT_DEPLOYED`）。
 

@@ -32,4 +32,24 @@
 3. 只有原结果已权威确认才可幂等完成 Account 的同一执行和消息确认；确定永久/漂移失败必须先证明零领域效果，才可在控制行和请求行CAS下 INVALIDATED，供业务页fresh superseding。窗口结束仍有未知效果时留待查，不以时间流逝推定无效果。
 4. 为每个命令验证首调成功/失败、首次响应丢失、提交不明、领域读不可用、broker重投、双worker抢租、租约到期、epoch切换、五分钟窗口前后、原结果晚到、无结果但已有claim/观测、12次界限和N/N-1。验证独立身份的负向权限、零第二execution和零重复领域效果。
 
-在步骤1～4全部完成及GSA-04/GSA-38～40环境门禁之前，GSA-16只能保持 `IN_PROGRESS / PARTIAL / NOT_DEPLOYED`。
+### 步骤 1～4 现状（2026-09-20）
+
+步骤 1（分类）与步骤 2（独立身份、有界租约、领域结果权威）已交付；步骤 3 的零效果终态路径亦已交付：`68748d4bf` 只读零效果判定、`0954baeea` Serializable 终态 CAS（复用既有 `INVALIDATED` 边，新封闭码 `RECOVERY_ZERO_EFFECT_PROVEN`）、`4ee73a0a9` 由 Account 自己重读结果与效果两个 owner 权威的专用端点（`internal.approval-recovery.zero-effect`，授权目录 377→378）、`03e4d6df8` worker 接线（`InspectProofRecoveryLeasedWithRecovery`；CLI 仍只发这一条受治理 POST，无 apply/retry/invalidate 开关）、`162e56720` 触发边界单测。真实 PostgreSQL 证据：`d9195dbe1` 证明已收敛为 `EXECUTED` 的终端请求即使重放原候选与租约也被拒绝且状态事件数不变；`726843cfd` 补齐正向场景——真实批准 → relay 发布 → 专属 durable → 执行 `FAILED(DOMAIN_RESOURCE_NOT_FOUND)` → 窗口强制过期，在同一个存活租约下依次断言「效果 OBSERVED → 409 且请求零变更」「结果 SUCCEEDED → 409 且请求零变更」「ABSENT + UNCONFIRMED → 204 且落 `INVALIDATED` + `RECOVERY_ZERO_EFFECT_PROVEN` + 证据 + 一条状态事件」，并断言原执行行与投递状态行逐字节不变、仍只有一条执行、同证据重放冲突零新增、被失效的请求不再出现在恢复计划中。
+
+步骤 4 的验收矩阵现状（除最后两行外均由 `go test ./internal/account -run TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration` 在真实 PostgreSQL 上执行，PASS 42.63s）：
+
+| 验收项 | 现状 |
+|---|---|
+| 首调失败（确定性前置失败且零领域效果） | 真实 PG 已覆盖 |
+| 原结果晚到（正向结果优先，绝不失效） | 真实 PG 已覆盖 |
+| 领域读不可用 / 分类未知（一律留待查，拒绝且零写入） | 真实 PG 覆盖分类未知、终态、过期版本、错误令牌；端点单测覆盖结果权威不可用、效果权威不可用、未接线（结果/效果/仓储任一缺失）与非法租约 |
+| 双 worker 抢租、租约到期、错误 token、释放退避 | 真实 PG 已覆盖（过期租约由单测覆盖） |
+| 独立身份负向权限（NOLOGIN、无表 DML、无 `SECURITY DEFINER` 继承） | 真实 PG 已覆盖 |
+| 零第二 execution 与零重复领域效果 | 真实 PG 已覆盖（执行行/投递行逐字节不变、仍一条执行） |
+| 五分钟窗口前后 | 部分覆盖：窗口过期后收敛由真实 PG 断言，窗口内不收敛由 CAS 守卫矩阵单测断言；"窗口结束仍有未知效果则留待查"由拒绝路径覆盖 |
+| broker 重投、epoch 切换、Billing 12 次界限、N/N-1 | 未覆盖，需要 NATS 与多版本环境，归 GSA-39 生产等价演练 |
+| 六命令领域结果权威的端到端查证链路 | 部分覆盖：权威读与闭集校验已有真实 PG/跨域证据（GSA-21～37），但恢复 worker 的调度与生产凭证仍未建立 |
+
+因此 GSA-16 的**代码与实现合同项已全部交付**，仍未完成的是独立审核与环境门禁（GSA-04、GSA-38～40）。
+
+在步骤 4 的剩余验收项（broker 重投、epoch 切换、12 次界限、N/N-1 及生产等价演练）与 GSA-04/GSA-38～40 环境门禁完成之前，GSA-16 只能保持 `IN_PROGRESS / PARTIAL / ZERO_EFFECT_CAS_GATED / REVIEW_PENDING / NOT_DEPLOYED`；本状态不授权生产启用、调度恢复 worker、人工重放或跨 epoch 补发。
