@@ -2080,17 +2080,7 @@ fn status_label(status: CloudJobStatus) -> &'static str {
 }
 
 fn one_line(value: &str, max: usize) -> String {
-    let flat: String = value
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    if flat.chars().count() <= max {
-        flat
-    } else {
-        let mut out: String = flat.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
+    crate::runtime_handoff::flatten_and_bound_text(value, max, false, true)
 }
 
 /// Sanitized (control-character-free, bounded) error text for job notes.

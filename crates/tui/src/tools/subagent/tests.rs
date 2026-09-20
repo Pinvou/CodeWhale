@@ -2707,13 +2707,13 @@ fn test_implementer_and_verifier_have_distinct_prompts() {
 #[test]
 fn test_agent_type_prompts_include_shared_output_contract_once() {
     for (agent_type, marker) in [
-        (FleetRole::Worker, "Fleet worker"),
-        (FleetRole::Scout, "Fleet scout"),
+        (FleetRole::Worker, "general Fleet agent"),
+        (FleetRole::Scout, "Fleet explorer"),
         (FleetRole::Planner, "Fleet planner"),
         (FleetRole::Reviewer, "Fleet reviewer"),
-        (FleetRole::Builder, "Fleet builder"),
-        (FleetRole::Verifier, "Fleet verifier"),
-        (FleetRole::Custom, "custom Fleet worker"),
+        (FleetRole::Builder, "Fleet implement agent"),
+        (FleetRole::Verifier, "Fleet test agent"),
+        (FleetRole::Custom, "custom Fleet agent"),
     ] {
         let prompt = agent_type.system_prompt();
         assert!(prompt.contains(marker));
@@ -2728,7 +2728,7 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
             // #5189 F5: scouts are read-only explorers and get a scaled-down
             // contract (SUMMARY+EVIDENCE) that drops CHANGES/RISKS/BLOCKERS.
             assert!(
-                prompt.contains("## Output contract (scout)"),
+                prompt.contains("## Output contract (explore)"),
                 "{agent_type:?} should use the scaled-down scout contract"
             );
             assert!(
@@ -2749,7 +2749,7 @@ fn test_agent_type_prompts_include_shared_output_contract_once() {
 #[test]
 fn explore_prompt_orients_before_searching() {
     let prompt = FleetRole::Scout.system_prompt();
-    assert!(prompt.contains("role: `scout`"));
+    assert!(prompt.contains("role: `explore`"));
     assert!(prompt.contains("AGENTS.md/README"));
     assert!(prompt.contains("workspace/project root"));
     assert!(prompt.contains("compressed evidence"));
@@ -2778,7 +2778,7 @@ fn explore_prompt_is_quick_bounded_and_read_only() {
 #[test]
 fn implementer_prompt_is_not_forced_into_explorer_cap() {
     let prompt = FleetRole::Builder.system_prompt();
-    assert!(prompt.contains("not limited to a scout-style 3-5 tool-call cap"));
+    assert!(prompt.contains("not limited to an explore-style 3-5 tool-call cap"));
     assert!(prompt.contains("Checkpoint before expanding scope"));
     assert!(!prompt.contains("Default to `EFFORT: quick`"));
 }
@@ -2838,6 +2838,43 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     assert!(description.contains("action=wait"));
     assert!(description.contains("action=claim"));
     assert!(description.contains("Fleet role"));
+    // The tool description must use the canonical role vocabulary the schema
+    // advertises (FLEET_ROLE_SCHEMA_VALUES / SUBAGENT_TYPE_DESCRIPTION); the
+    // legacy spellings stay parse-accepted but are never advertised.
+    for canonical in [
+        "general (full tool access)",
+        "explore (fast read-only exploration)",
+        "planner (grounded strategy",
+        "reviewer (reads and grades code)",
+        "implement (lands focused code changes)",
+        "test (runs tests and reports evidence)",
+        "advisor (read-only design counsel)",
+        "custom (allowed_tools",
+        "legacy aliases are still accepted",
+        "type=implement",
+        "type=test",
+    ] {
+        assert!(
+            description.contains(canonical),
+            "agent description must use canonical role vocabulary, missing \
+             {canonical:?}:\n{description}"
+        );
+    }
+    for legacy in [
+        "worker (",
+        "scout (",
+        "builder (",
+        "verifier (",
+        "consultant (",
+        "type=builder",
+        "type=verifier",
+    ] {
+        assert!(
+            !description.contains(legacy),
+            "agent description must not advertise legacy role {legacy:?}:\n\
+             {description}"
+        );
+    }
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"
@@ -4917,6 +4954,59 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
     assert!(
         worktree.contains("git worktree") && worktree.contains("parallel edit"),
         "worktree description should teach isolated parallel edits: {worktree}"
+    );
+}
+
+// The wait surfaces block the turn, so the model-facing text must disclose
+// the bounded block (default 30s, max 120s) and the timed_out receipt shape;
+// an undisclosed finite block reads as a hang when nothing settles.
+#[test]
+fn wait_schema_text_discloses_timeout_bound_and_timed_out_receipt() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
+    let agent_schema = AgentTool::new(manager.clone(), stub_runtime()).input_schema();
+    let until = schema_property_description(&agent_schema, "until");
+    // The advertised numbers are tied to the runtime constants so a drift in
+    // either direction (constant change, copy change) turns the other red.
+    assert!(
+        until.contains(&format!(
+            "default {}s, max {}s",
+            super::SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS,
+            super::SUBAGENT_WAIT_MAX_TIMEOUT_SECS
+        )) && until.contains("timed_out"),
+        "agent(action=wait) until description must disclose the runtime \
+         timeout bound and the timed_out receipt:\n{until}"
+    );
+
+    let wait_tool = AgentsWaitTool::new(manager);
+    let wait_description = wait_tool.description();
+    assert!(
+        wait_description.contains(&format!(
+            "timeout_secs (default {}, max {})",
+            super::coord::COORD_WAIT_DEFAULT_TIMEOUT_SECS,
+            super::coord::COORD_WAIT_MAX_TIMEOUT_SECS
+        )) && wait_description.contains("timed_out=true"),
+        "agents/wait description must disclose the runtime timeout bound and \
+         the timed_out receipt:\n{wait_description}"
+    );
+}
+
+// The two wait faces advertise from two independent constant sets, so each
+// face's own pin can stay green while the surfaces drift numerically apart;
+// this cross-assertion closes that gap.
+#[test]
+fn wait_bound_constants_agree_across_both_wait_faces() {
+    assert_eq!(
+        super::SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS,
+        super::coord::COORD_WAIT_DEFAULT_TIMEOUT_SECS,
+        "the agent broadcast face and the agents/wait face must advertise the \
+         same default timeout"
+    );
+    assert_eq!(
+        super::SUBAGENT_WAIT_MAX_TIMEOUT_SECS,
+        super::coord::COORD_WAIT_MAX_TIMEOUT_SECS,
+        "the agent broadcast face and the agents/wait face must advertise the \
+         same maximum timeout"
     );
 }
 

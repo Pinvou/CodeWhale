@@ -107,7 +107,10 @@ impl ToolSpec for WebTool {
                                 ]
                             },
                             "domains": { "type": "array", "items": { "type": "string" } },
-                            "locale": { "type": "string" }
+                            "locale": {
+                                "type": "string",
+                                "description": "BCP 47-style result locale tag such as zh-CN or ja-JP"
+                            }
                         }
                     }
                 },
@@ -133,7 +136,7 @@ impl ToolSpec for WebTool {
                 },
                 "locale": {
                     "type": "string",
-                    "description": "Requested result locale (action=search)"
+                    "description": "Requested result locale as a BCP 47-style tag such as zh-CN or ja-JP (action=search); malformed values are ignored and backends that cannot honor the region report it as degraded"
                 },
                 "url": {
                     "type": "string",

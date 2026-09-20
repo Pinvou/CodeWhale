@@ -224,8 +224,8 @@ state — files, command output, tests, runtime behavior, issue or PR state, or
 other authoritative evidence — then call `update_goal` with
 `status: "complete"` and concise evidence. `update_goal` may sit outside your
 first-turn tool list; if it does, activate it via `tool_search` first, and if
-`tool_search` is unavailable too, call `update_goal` directly anyway —
-registered deferred tools hydrate when called by name. If
+`tool_search` is unavailable too, call `update_goal` directly anyway; only if
+that call also errors is goal tracking unavailable in this session. If
 something genuinely prevents progress, call `update_goal` with
 `status: "blocked"` and explain it.
 "#;
@@ -292,7 +292,7 @@ capability. Then stop.
 /// Scout output contract — scaled down for small children (see #5189 F5).
 /// Keeps the parseable spine (SUMMARY+EVIDENCE) but drops
 /// CHANGES/RISKS/BLOCKERS ceremony; scouts are read-only explorers.
-pub const SUBAGENT_SCOUT_OUTPUT_FORMAT: &str = r#"## Output contract (scout)
+pub const SUBAGENT_SCOUT_OUTPUT_FORMAT: &str = r#"## Output contract (explore)
 
 End with these exact Markdown headings: `### SUMMARY` and `### EVIDENCE`.
 Keep each section compact. Cite only files you actually inspected and

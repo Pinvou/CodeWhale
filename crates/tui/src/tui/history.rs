@@ -678,6 +678,22 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
     if crate::runtime_handoff::is_operate_contract_message(msg) {
         return Vec::new();
     }
+    // Runtime-owned MCP handoffs (the startup briefing and the recovery
+    // notice) are control traffic, not user turns: render them as system
+    // notes so replayed history neither looks composer-authored nor counts
+    // them as user turns.
+    if crate::runtime_handoff::is_mcp_boot_failure_briefing_message(msg)
+        || crate::runtime_handoff::is_mcp_boot_recovery_notice_message(msg)
+    {
+        return match msg.content.first() {
+            Some(ContentBlock::Text { text, .. }) => {
+                vec![HistoryCell::System {
+                    content: text.clone(),
+                }]
+            }
+            _ => Vec::new(),
+        };
+    }
     if let Some(display) = crate::runtime_handoff::restored_subagent_checkpoint_display(msg) {
         return vec![HistoryCell::System {
             content: display.to_string(),

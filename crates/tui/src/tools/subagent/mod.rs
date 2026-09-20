@@ -901,10 +901,14 @@ fn default_agent_inspect_tool() -> String {
 /// `handle_read` is deferred on stock hosts, so model-facing text that pairs
 /// it with a transcript handle must teach the activation path instead of
 /// commanding a tool absent from the first-turn catalog (Pinvou #490 class).
-/// `pub(crate)` so the engine's parent-context hint reuses the exact wording
-/// instead of re-typing a drifting copy.
-pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str =
-    "if `handle_read` is not in your tool list, activate it via `tool_search` first";
+/// The fallback names both rungs honestly: `tool_search` hydration only
+/// reaches tools the host allowlist kept in the catalog, but a direct call
+/// by name still succeeds when the allowlist kept `handle_read` and only
+/// removed `tool_search` — so the hint tries the direct call before
+/// declaring transcript reads unavailable. `pub(crate)` so the engine's
+/// parent-context hint reuses the exact wording instead of re-typing a
+/// drifting copy.
+pub(crate) const HANDLE_READ_ACTIVATION_HINT: &str = "if `handle_read` is not in your tool list, activate it via `tool_search` first; if `tool_search` cannot surface it, try calling `handle_read` directly; if that call errors, transcript reads are unavailable in this session — rely on the returned summaries";
 
 /// Shared inspect brief for worker records and takeover targets; both name
 /// `handle_read`, so both must carry the activation hint.
@@ -3694,11 +3698,13 @@ impl SubAgentManager {
             };
             let role_matches = record.spec.agent_type == expected
                 || record.spec.role.as_deref().is_some_and(|role| {
-                    role.trim().eq_ignore_ascii_case(label)
-                        || (expected == FleetRole::Reviewer
-                            && role.trim().eq_ignore_ascii_case("reviewer"))
-                        || (expected == FleetRole::Verifier
-                            && role.trim().eq_ignore_ascii_case("verifier"))
+                    let stated = role.trim();
+                    // Canonical tokens (`test`) and registered aliases
+                    // (`verifier`) both migrate to the same FleetRole; the
+                    // free-text label stays accepted for host-authored
+                    // specs that never carried a canonical token.
+                    FleetRole::from_str(stated).is_some_and(|parsed| parsed == expected)
+                        || stated.eq_ignore_ascii_case(label)
                 });
             if !role_matches || record.status != AgentWorkerStatus::Completed {
                 return Err(format!(
@@ -8406,13 +8412,13 @@ impl ToolSpec for AgentTool {
         concat!(
             "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
-            "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
+            "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
             "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
             "Use action=roster to inspect the Fleet roles and their descriptions before choosing a type or profile. ",
             "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
             "A write-capable child defaults write scope to the parent workspace; narrow it with write_roots (repo-relative directory trees) so parallel children claim disjoint scope. ",
-            "Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
+            "Prefer type=implement for write work and type=test (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
             "action=claim widens your own enforced write scope: pass write_roots (and optionally exact_files, coordination_contracts) before mutating anything a fail-closed write refusal named. It records a durable claim receipt and fails on contention with a peer claim; it never touches another agent's scope. ",
             "Action contract: start requires prompt; message/followup require a target and message; peek/interrupt/cancel require a target; claim requires at least one scope entry; roster, status, and wait are unscoped. ",
@@ -8452,7 +8458,7 @@ impl ToolSpec for AgentTool {
                 "until": {
                     "type": "string",
                     "enum": ["completion", "all", "activity"],
-                    "description": "For action=wait. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
+                    "description": "For action=wait. A wait blocks until one child settles or the timeout (default 30s, max 120s) elapses; on timeout the receipt reports timed_out=true with any already-settled children, and full results still arrive as completion sentinels. completion (default) returns when any one child settles. all returns only once every child running at call time has settled, with each outcome — the fan-out join: start the batch, make one wait, then synthesize. activity also returns on progress."
                 },
                 "agent_id": {
                     "type": "string",
@@ -8494,7 +8500,7 @@ impl ToolSpec for AgentTool {
                 },
                 "resume_from": {
                     "type": "string",
-                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implementer → verifier). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
+                    "description": "Settled child agent_id or session name to continue. The source must not be running. Its full transcript is loaded and prepended as the new child's context (fork_context=true), continuing the transcript lineage under a new role or profile (e.g. explore → implement → test). Mutually exclusive with fork_context=false. Cross-workspace or missing sources are rejected with a clear error."
                 }
             },
             "dependentSchemas": {
@@ -9045,7 +9051,7 @@ async fn cancel_agent_from_input(
 /// turn and staying reachable is the preferred default — only `wait` when
 /// you must join before continuing.
 const SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS: u64 = 30;
-/// Runtime floor is 1s (schema advertises 5) so tests can exercise the
+/// Runtime floor is 1s (schema advertises 1) so tests can exercise the
 /// timeout path without multi-second sleeps.
 const SUBAGENT_WAIT_MIN_TIMEOUT_SECS: u64 = 1;
 const SUBAGENT_WAIT_MAX_TIMEOUT_SECS: u64 = 120;
@@ -9194,13 +9200,16 @@ async fn wait_result_payload(
     } else {
         "Full results arrive as <codewhale:subagent.done> sentinels — read those before synthesizing; do not re-peek settled children unless you need the full projection."
     };
+    // Scalar control fields before the child array — see `wait_all_payload`
+    // in `coord.rs`; the bounded receipt passthrough truncates oversized
+    // receipts, and the schema promises `timed_out` unconditionally.
     let payload = json!({
         "action": "wait",
-        "settled": settled_entries,
         "running": running,
         "waited_ms": u64::try_from(waited_ms).unwrap_or(u64::MAX),
         "timed_out": timed_out,
         "note": note,
+        "settled": settled_entries,
     });
     let mut tool_result =
         ToolResult::json(&payload).map_err(|err| ToolError::execution_failed(err.to_string()))?;
@@ -9956,7 +9965,7 @@ fn subagent_skill_catalog(context: &ToolContext) -> String {
     // children lack `tool_search` too. The header below must stay honest in
     // all three states.
     let mut output = String::from(
-        "## Skills\n\nLoad a Skill with `load_skill`, activating it via `tool_search` first if it is not in your tool list; if `tool_search` is absent or does not surface `load_skill`, try `load_skill` directly anyway — registered tools hydrate on demand — and treat Skills as unavailable only if that call fails too. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
+        "## Skills\n\nLoad a Skill with `load_skill`, activating it via `tool_search` first if it is not in your tool list; if `tool_search` is absent or does not surface `load_skill`, try `load_skill` directly anyway, and treat Skills as unavailable only if that call fails too. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
     );
     for skill in registry.list() {
         let source = match &skill.source {
@@ -15987,15 +15996,15 @@ fn subagent_status_name(status: &SubAgentStatus) -> &'static str {
 use crate::prompts::text::SUBAGENT_OUTPUT_FORMAT;
 
 const GENERAL_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet worker. Your job is to complete the one task you were given, end-to-end, and report back concisely.\n",
+    "You are a trusted general Fleet agent (role: `general`). Your job is to complete the one task you were given, end-to-end, and report back concisely.\n",
     "Stay inside the assigned scope; put adjacent work under RISKS/BLOCKERS.\n",
     "For genuinely multi-step work, track progress with `todo_write`; skip it for short, focused tasks.\n",
     "**Stop quickly on failure**: if the same tool call fails 2 times in a row, stop retrying and return what you have so far with a one-line note explaining what's missing. Do not loop on impossible queries (e.g. external API unreachable, rate-limited, or returning empty).\n",
-    "For builder or repair-style work, keep going within the assigned scope; checkpoint before broadening the task or after repeated failures instead of forcing a tiny tool-call cap.\n\n"
+    "For implement or repair-style work, keep going within the assigned scope; checkpoint before broadening the task or after repeated failures instead of forcing a tiny tool-call cap.\n\n"
 );
 
 const EXPLORE_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet scout (role: `scout`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
+    "You are a trusted Fleet explorer (role: `explore`). Your job is to map the relevant code quickly and stay strictly read-only.\n",
     "Default to `EFFORT: quick`: aim for about 3-5 tool calls unless the brief explicitly asks for more.\n",
     "Orient first: confirm the workspace/project root, read relevant AGENTS.md/README guidance when the tree is unfamiliar, then search only the likely scope.\n",
     "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
@@ -16024,15 +16033,15 @@ const REVIEW_AGENT_INTRO: &str = concat!(
 );
 
 const CUSTOM_AGENT_INTRO: &str = concat!(
-    "You are a trusted custom Fleet worker (role: `custom`) with a narrowed tool registry. Your job is to stay tightly scoped to the assigned objective.\n",
+    "You are a trusted custom Fleet agent (role: `custom`) with a narrowed tool registry. Your job is to stay tightly scoped to the assigned objective.\n",
     "Use only tools available at runtime; put missing capabilities under BLOCKERS and stop.\n\n"
 );
 
 const IMPLEMENTER_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet builder (role: `builder`). Your job is to land the assigned change with minimal surrounding edits.\n",
+    "You are a trusted Fleet implement agent (role: `implement`). Your job is to land the assigned change with minimal surrounding edits.\n",
     "Use `edit` for precise unique replacements, `write` for whole-file changes, and discover `apply_patch` for unified multi-file patches when needed.\n",
     "Run relevant verification after edit batches; write needed tests with the implementation.\n",
-    "You are not limited to a scout-style 3-5 tool-call cap. Checkpoint before expanding scope or after repeated failures, then continue only inside the assigned brief.\n",
+    "You are not limited to an explore-style 3-5 tool-call cap. Checkpoint before expanding scope or after repeated failures, then continue only inside the assigned brief.\n",
     "CHANGES is load-bearing: list every modified file with a one-line why.\n",
     "Before finishing, end with a VERDICT block: PASS or FAIL, the exact commands you ran (or why verification was impossible), and brief evidence. A diff alone is not completion.\n\n"
 );
@@ -16052,21 +16061,21 @@ const WRITE_CHILD_VERIFY_CONTRACT: &str = concat!(
 );
 
 const CONSULTANT_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet consultant (role: `consultant`). You are asked for judgement, not for labour.\n",
+    "You are a trusted Fleet advisor (role: `advisor`). You are asked for judgement, not for labour.\n",
     "You are read-only and have no shell. Read the workspace and the public web to ground your advice, then give counsel.\n",
     "Lead with your actual recommendation, not a survey of options. If you would do something different from what was proposed, say so first and say why.\n",
     "Name what the asker appears not to have considered: the failure mode, the constraint, the cheaper alternative, the reason this is harder than it looks.\n",
     "Distinguish what you verified by reading from what you are inferring. An unverified hunch is still useful — labelled as one.\n",
     "If the question is underspecified in a way that changes the answer, say which detail decides it rather than answering both ways at length.\n",
-    "CHANGES will always be \"None.\" for a consultant.\n\n"
+    "CHANGES will always be \"None.\" for an advisor.\n\n"
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet verifier (role: `verifier`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
+    "You are a trusted Fleet test agent (role: `test`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
     "Report PASS/FAIL/FLAKY at the top of SUMMARY with exact command evidence.\n",
     "Capture failing assertion and file:line; put obvious fixes under RISKS.\n",
     "You may use more tool calls than quick exploration, but stop after decisive pass/fail evidence.\n",
-    "CHANGES will almost always be \"None.\" for a verifier.\n\n"
+    "CHANGES will almost always be \"None.\" for a test agent.\n\n"
 );
 
 // === Tests ===

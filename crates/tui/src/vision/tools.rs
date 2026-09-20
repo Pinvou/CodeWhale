@@ -101,6 +101,18 @@ impl ImageAnalyzeTool {
         }
     }
 
+    /// Real pixel dimensions plus the format label derived from the same
+    /// extension decision as `detect_mime_type`. Header-only probe; returns
+    /// `None` when the header cannot be parsed (including BMP, whose decoder
+    /// is not compiled in) so callers can omit the metadata instead of
+    /// failing the tool. Animated GIF/WebP yield the first frame's size.
+    fn image_dimensions(path: &Path) -> Option<(u32, u32, String)> {
+        let mime_type = Self::detect_mime_type(path).ok()?;
+        let format = mime_type.strip_prefix("image/")?.to_string();
+        let (width, height) = image::image_dimensions(path).ok()?;
+        Some((width, height, format))
+    }
+
     fn base_url(&self) -> String {
         self.config
             .base_url
@@ -196,7 +208,13 @@ impl ToolSpec for ImageAnalyzeTool {
 
     fn description(&self) -> &str {
         "Analyze an image using the configured vision model. \
-         Supports PNG, JPEG, GIF, WebP, and BMP formats."
+         Supports PNG, JPEG, GIF, WebP, and BMP formats. \
+         When the runtime can determine them from the image container, the \
+         result includes the image's stored pixel width and height, plus a \
+         format label derived from the file extension — describe image size \
+         from that metadata instead of guessing by eye. The dimensions are \
+         as stored: camera rotation metadata is not applied, and the fields \
+         are omitted when the container cannot be sized."
     }
 
     fn input_schema(&self) -> Value {
@@ -228,6 +246,9 @@ impl ToolSpec for ImageAnalyzeTool {
             .unwrap_or("Describe this image in detail.");
 
         let resolved_path = Self::resolve_image_path(&context.workspace, image_path)?;
+        // Metadata probe; a parse failure degrades to omitted fields, never
+        // to a tool error — the vision request itself does not depend on it.
+        let dimensions = Self::image_dimensions(&resolved_path);
         let (image_data, mime_type) = Self::read_image_file(&resolved_path).await?;
 
         let payload = self.request_payload(prompt, &image_data, &mime_type);
@@ -305,10 +326,15 @@ impl ToolSpec for ImageAnalyzeTool {
             .unwrap_or(&self.config.model)
             .to_string();
 
-        let result = json!({
+        let mut result = json!({
             "analysis": content,
             "model": model,
         });
+        if let Some((width, height, format)) = dimensions {
+            result["width"] = json!(width);
+            result["height"] = json!(height);
+            result["format"] = json!(format);
+        }
 
         ToolResult::json(&result)
             .map_err(|e| ToolError::execution_failed(format!("Failed to serialize result: {e}")))
@@ -319,6 +345,8 @@ impl ToolSpec for ImageAnalyzeTool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[cfg(unix)]
     fn create_file_symlink(
@@ -531,5 +559,144 @@ mod tests {
             err.to_string().contains("resolve within the workspace"),
             "error must call out the canonical workspace boundary; got {err}"
         );
+    }
+
+    fn create_test_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("fixture png encodes");
+        cursor.into_inner()
+    }
+
+    fn create_test_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([120, 200, 50]));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .expect("fixture jpeg encodes");
+        cursor.into_inner()
+    }
+
+    /// Stand-in vision endpoint answering `/chat/completions` the way the
+    /// tool expects, so `execute` can be exercised end to end offline.
+    async fn mock_vision_endpoint() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "model": "test-vision-model",
+                "choices": [{"message": {"content": "a tiny square"}}]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn tool_with_base_url(base_url: String) -> ImageAnalyzeTool {
+        ImageAnalyzeTool::new(VisionModelConfig {
+            model: "test-vision-model".to_string(),
+            api_key: Some("test-key".to_string()),
+            base_url: Some(base_url),
+        })
+    }
+
+    #[tokio::test]
+    async fn execute_reports_real_pixel_dimensions_and_format() {
+        let server = mock_vision_endpoint().await;
+        let workspace = tempdir().expect("workspace tempdir");
+        std::fs::write(
+            workspace.path().join("tiny.png"),
+            create_test_png(64, 48, [12, 34, 56, 255]),
+        )
+        .expect("write fixture");
+        std::fs::write(workspace.path().join("tiny.jpg"), create_test_jpeg(30, 20))
+            .expect("write fixture");
+
+        let ctx = ToolContext::new(workspace.path().to_path_buf());
+        let tool = tool_with_base_url(server.uri());
+
+        let cases: [(&str, u32, u32, &str); 2] =
+            [("tiny.png", 64, 48, "png"), ("tiny.jpg", 30, 20, "jpeg")];
+        for (name, width, height, format) in cases {
+            let result = tool
+                .execute(json!({"image_path": name}), &ctx)
+                .await
+                .expect("tool must succeed");
+            assert!(result.success);
+            let payload: Value = serde_json::from_str(&result.content).expect("json tool content");
+            assert_eq!(
+                payload.get("width").and_then(Value::as_u64),
+                Some(u64::from(width)),
+                "{name} must report real pixel width"
+            );
+            assert_eq!(
+                payload.get("height").and_then(Value::as_u64),
+                Some(u64::from(height)),
+                "{name} must report real pixel height"
+            );
+            assert_eq!(
+                payload.get("format").and_then(Value::as_str),
+                Some(format),
+                "{name} format must match the mime-derived label"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_omits_dimension_metadata_for_unparsable_bytes() {
+        let server = mock_vision_endpoint().await;
+        let workspace = tempdir().expect("workspace tempdir");
+        std::fs::write(
+            workspace.path().join("broken.png"),
+            b"definitely not a png header",
+        )
+        .expect("write fixture");
+
+        let ctx = ToolContext::new(workspace.path().to_path_buf());
+        let tool = tool_with_base_url(server.uri());
+
+        let result = tool
+            .execute(json!({"image_path": "broken.png"}), &ctx)
+            .await
+            .expect("metadata failure must not fail the tool");
+        assert!(result.success);
+        let payload: Value = serde_json::from_str(&result.content).expect("json tool content");
+        assert!(payload.get("width").is_none(), "width must be omitted");
+        assert!(payload.get("height").is_none(), "height must be omitted");
+        assert!(payload.get("format").is_none(), "format must be omitted");
+        assert_eq!(
+            payload.get("analysis").and_then(Value::as_str),
+            Some("a tiny square")
+        );
+    }
+
+    #[test]
+    fn image_dimensions_omits_bmp_because_decoder_feature_is_off() {
+        // Minimal well-formed 1x1 24-bit BMP: even valid BMP input must
+        // degrade to `None` (no panic, no error) while the `bmp` feature of
+        // the `image` dependency is not enabled.
+        const MINIMAL_BMP: &[u8] = &[
+            b'B', b'M', //
+            0x3a, 0x00, 0x00,
+            0x00, // file size: 14-byte header + 40-byte DIB + 4-byte padded row
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x36, 0x00, 0x00, 0x00, // pixel data offset: 54
+            0x28, 0x00, 0x00, 0x00, // DIB header size: 40
+            0x01, 0x00, 0x00, 0x00, // width: 1
+            0x01, 0x00, 0x00, 0x00, // height: 1
+            0x01, 0x00, // planes
+            0x18, 0x00, // bits per pixel: 24
+            0x00, 0x00, 0x00, 0x00, // compression: none
+            0x04, 0x00, 0x00, 0x00, // image size: one padded row
+            0x00, 0x00, 0x00, 0x00, // x pixels per meter
+            0x00, 0x00, 0x00, 0x00, // y pixels per meter
+            0x00, 0x00, 0x00, 0x00, // colors used
+            0x00, 0x00, 0x00, 0x00, // important colors
+            0x00, 0x00, 0x00, 0x00, // single BGR pixel plus 1 pad byte
+        ];
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("tiny.bmp");
+        std::fs::write(&path, MINIMAL_BMP).expect("write fixture");
+        assert_eq!(ImageAnalyzeTool::image_dimensions(&path), None);
     }
 }

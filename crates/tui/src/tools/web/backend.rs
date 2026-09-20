@@ -305,9 +305,16 @@ impl SearchBackend for ConfiguredSearchBackend<'_> {
     }
 
     fn capabilities(&self) -> QueryCapabilities {
-        // All current adapters enforce result count. Other knobs are either
-        // post-filtered by the shared harness or reported as not honored.
-        QueryCapabilities::count_only()
+        // All current adapters enforce result count. The keyless Bing and
+        // DuckDuckGo scrapes honor `locale` directly in the request (Bing
+        // mkt/setlang, DuckDuckGo kl, plus a matching Accept-Language); the
+        // remaining knobs are post-filtered by the shared harness or reported
+        // as not honored.
+        let mut capabilities = QueryCapabilities::count_only();
+        if matches!(self, Self::Bing(_) | Self::DuckDuckGo(_)) {
+            capabilities.locale = QueryCapabilityState::Supported;
+        }
+        capabilities
     }
 
     async fn search(
@@ -540,6 +547,50 @@ mod tests {
             assert_eq!(
                 backend.capabilities().max_results,
                 super::super::contract::CapabilityState::Supported
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_scrape_backends_declare_locale_support() {
+        // Bing and DuckDuckGo honor the locale knob in their scrape requests;
+        // every other configured adapter must keep reporting it as ignored so
+        // the receipt does not overclaim.
+        let mut context = ToolContext::new(std::path::PathBuf::from("."));
+        context.search_provider = SearchProvider::Bing;
+        let backend = ConfiguredSearchBackend::from_provider(&context, SearchProvider::Bing);
+        assert_eq!(
+            backend.capabilities().locale,
+            QueryCapabilityState::Supported
+        );
+
+        context.search_provider = SearchProvider::DuckDuckGo;
+        let backend = ConfiguredSearchBackend::from_provider(&context, SearchProvider::DuckDuckGo);
+        assert_eq!(
+            backend.capabilities().locale,
+            QueryCapabilityState::Supported
+        );
+
+        for provider in [
+            SearchProvider::Firecrawl,
+            SearchProvider::Tavily,
+            SearchProvider::Bocha,
+            SearchProvider::Metaso,
+            SearchProvider::Searxng,
+            SearchProvider::Baidu,
+            SearchProvider::Volcengine,
+            SearchProvider::Sofya,
+        ] {
+            let backend = ConfiguredSearchBackend::from_provider(&context, provider);
+            assert_eq!(
+                backend.capabilities().locale,
+                QueryCapabilityState::Unsupported,
+                "{provider:?}"
+            );
+            assert_eq!(
+                backend.capabilities().recency,
+                QueryCapabilityState::Unsupported,
+                "{provider:?}"
             );
         }
     }

@@ -17092,7 +17092,52 @@ fn forkguard_subagent_context_hint_names_active_tools() {
             && !context.contains("read_file")
             && !context.contains("list_dir")
     );
+    assert!(
+        !context.contains("handle_read"),
+        "this receipt carries no transcript_handle, so the hint would name a \
+         value the model never received:\n{context}"
+    );
+
+    // A receipt that does carry a transcript_handle (verbose projection,
+    // terminal status row) keeps the guidance — with the honest fallback
+    // that names the degradation instead of a direct-call promise. The
+    // fixture uses the producer's real shape: projections serialize the
+    // field as a full `var_handle` object, not a string.
+    let transcript_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_1234abcd".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 42,
+        repr_preview: "verified detail…".to_string(),
+        sha256: "0f1e2d3c4b5a".to_string(),
+    })
+    .expect("var handle serializes");
+    let with_handle = ToolResult::success(
+        json!({
+            "agent_id": "agent_1234abcd",
+            "agent_type": "explore",
+            "assignment": {
+                "objective": "Inspect the RLM rendering path and report the smallest fix."
+            },
+            "model": "deepseek-v4-flash",
+            "status": "Completed",
+            "result": long_result,
+            "steps_taken": 12,
+            "duration_ms": 3456,
+            "transcript_handle": transcript_object
+        })
+        .to_string(),
+    );
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_handle);
+
     assert!(context.contains("handle_read"));
+    assert!(
+        context.contains("transcript: agent_1234abcd/full_transcript"),
+        "the hint names transcript_handle, so the summarized row must carry \
+         the value it points at, reduced to the session_id/name form \
+         handle_read accepts:\n{context}"
+    );
     assert!(
         context.contains("activate it via `tool_search` first"),
         "handle_read is deferred on stock hosts; the hint must name the \
@@ -17100,9 +17145,482 @@ fn forkguard_subagent_context_hint_names_active_tools() {
          {context}"
     );
     assert!(
-        context.contains("call `handle_read` directly anyway"),
-        "allowed_tools-filtered sessions can strip tool_search too; the hint \
-         must keep the direct-call fallback instead of dead-ending:\n{context}"
+        context.contains("try calling `handle_read` directly"),
+        "allowlist-filtered hosts can keep handle_read in the catalog while \
+         removing tool_search; the hint must try the direct call before \
+         declaring transcript reads unavailable:\n{context}"
+    );
+    assert!(
+        context.contains("transcript reads are unavailable in this session"),
+        "when neither tool_search nor the direct call can reach handle_read \
+         the hint must degrade honestly instead of dead-ending:\n{context}"
+    );
+    assert!(
+        !context.contains("hydrate when called by name"),
+        "the hint must not assert a hydration mechanism; only the activation \
+         path and the direct-call fallback belong in model-facing text:\n\
+         {context}"
+    );
+
+    // The string shape exists too: the subagent.failed sentinel carries a
+    // `session_id/name` string, and the row must keep it verbatim.
+    let with_string_handle = ToolResult::success(
+        json!({
+            "agent_id": "agent_1234abcd",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": long_result,
+            "transcript_handle": "agent:agent_1234abcd/full_transcript"
+        })
+        .to_string(),
+    );
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &with_string_handle);
+    assert!(context.contains("handle_read"));
+    assert!(
+        context.contains("transcript: agent:agent_1234abcd/full_transcript"),
+        "string handles pass through untouched:\n{context}"
+    );
+}
+
+// Regression (agent-domain audit): `agent(action=roster)` returns the Fleet
+// role catalog and `agent(action=wait)` returns the join outcome — neither is
+// a per-child result snapshot, so the snapshot summarizer must not destroy
+// them into "- unknown (agent) status=unknown" noise.
+#[test]
+fn forkguard_agent_roster_receipt_passes_through_to_context() {
+    let roster = json!({
+        "action": "roster",
+        "count": 2,
+        "total_count": 2,
+        "truncated": false,
+        "members": [
+            {"member_id": "general", "role": "general",
+             "description": crate::fleet::role::FleetRole::Worker.description()},
+            {"member_id": "explore", "role": "explore",
+             "description": crate::fleet::role::FleetRole::Scout.description()}
+        ],
+        "selector_help": "Use type:<role> with one of the listed roles."
+    })
+    .to_string();
+    let output = ToolResult::success(roster.clone());
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "roster receipt must pass through as a receipt:\n{context}"
+    );
+    assert!(
+        context.contains("\"selector_help\"") && context.contains("General-purpose agent"),
+        "roster members and selector help must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "roster is not a result snapshot; the summarizer header is a lie:\n{context}"
+    );
+    assert!(
+        !context.contains("status=unknown") && !context.contains("result: not available yet"),
+        "roster must not be collapsed into snapshot noise:\n{context}"
+    );
+}
+
+#[test]
+fn forkguard_agent_wait_receipt_passes_through_to_context() {
+    let wait = json!({
+        "action": "wait",
+        "settled": [
+            {"agent_id": "agent_1a2b3c4d", "name": "slash_agent", "status": "Completed"}
+        ],
+        "running": 1,
+        "waited_ms": 3_214,
+        "timed_out": true,
+        "note": "Wait timed out with children still running."
+    })
+    .to_string();
+    let output = ToolResult::success(wait);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "wait receipt must pass through as a receipt:\n{context}"
+    );
+    assert!(
+        context.contains("\"timed_out\":true")
+            && context.contains("\"waited_ms\":3214")
+            && context.contains("agent_1a2b3c4d")
+            && context.contains("Wait timed out with children still running."),
+        "settled/timed_out/waited_ms/note must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "wait is not a result snapshot; the summarizer header is a lie:\n{context}"
+    );
+}
+
+// The bounded verbatim passthrough hard-truncates receipts past the cap, and
+// serde_json preserves insertion order, so a fan-out wait receipt that puts
+// the child arrays before the scalar control fields would lose `timed_out`
+// under truncation while the schema promises it unconditionally. The producer
+// must emit scalars first; this pins that the truncated view keeps them.
+#[test]
+fn forkguard_wait_timeout_receipt_keeps_control_fields_before_fanout() {
+    let child = |n: usize| {
+        json!({
+            "agent_id": format!("agent_{n:08x}"),
+            "name": format!("fanout_child_{n:02}_with_a_long_name"),
+            "status": "running",
+            "detail": format!("still working on the bounded slice number {n}"),
+        })
+    };
+    let wait = json!({
+        "action": "wait",
+        "until": "all",
+        "all_settled": false,
+        "waited_ms": 30_000,
+        "timed_out": true,
+        "note": "Timed out with children still running. Do not poll — wait again (until=all), or end your turn; results arrive as <codewhale:subagent.done> sentinels.",
+        "settled": [],
+        "still_running": (1..=18).map(child).collect::<Vec<_>>(),
+    })
+    .to_string();
+    assert!(
+        wait.len() > super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS,
+        "fixture must exceed the passthrough cap to exercise truncation: {}",
+        wait.len()
+    );
+    let output = ToolResult::success(wait);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[receipt truncated:"),
+        "the oversized fan-out receipt must truncate:\n{context}"
+    );
+    assert!(
+        context.contains("\"timed_out\":true"),
+        "truncation must not drop the schema-promised timed_out field; the \
+         scalar control fields must precede the child arrays:\n{context}"
+    );
+    assert!(
+        context.contains("\"all_settled\":false") && context.contains("\"waited_ms\":30000"),
+        "the all_settled/running scalars must survive truncation ahead of \
+         the fan-out:\n{context}"
+    );
+    assert!(
+        context.contains("Timed out with children still running."),
+        "the timeout note must survive truncation ahead of the fan-out:\n\
+         {context}"
+    );
+}
+
+#[test]
+fn forkguard_agent_receipt_passthrough_is_bounded() {
+    let huge_member = "x".repeat(4_000);
+    let roster = json!({
+        "action": "roster",
+        "members": [{"member_id": "general", "description": huge_member}],
+    })
+    .to_string();
+    let output = ToolResult::success(roster);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]") && context.contains("characters]"),
+        "oversized receipts pass through bounded with a truncation note:\n{context}"
+    );
+    let prefix_len = "[sub-agent receipt]\n".len();
+    assert!(
+        context.len()
+            <= prefix_len
+                + super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS
+                + "[receipt truncated: showing 2000 of 18446744073709551615 characters]".len(),
+        "passthrough must stay bounded:\n{context}"
+    );
+
+    // The cap is inclusive and the note is exact: a receipt of exactly the
+    // cap passes through verbatim, one character over it truncates.
+    let make_receipt_of_len = |target: usize| -> String {
+        let template = "{\"action\":\"roster\",\"pad\":\"PAD\"}";
+        let fixed = template.len() - 3;
+        assert!(target > fixed, "target length must leave room for the pad");
+        template.replace("PAD", &"p".repeat(target - fixed))
+    };
+    let exact = make_receipt_of_len(super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS);
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(exact.clone()),
+    );
+    assert!(
+        !context.contains("[receipt truncated"),
+        "a receipt exactly at the cap is not truncated:\n{context}"
+    );
+    assert!(
+        context.contains(&exact),
+        "the exact-cap receipt passes through verbatim:\n{context}"
+    );
+
+    let one_over = make_receipt_of_len(super::context::SUBAGENT_RECEIPT_PASSTHROUGH_MAX_CHARS + 1);
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(one_over));
+    assert!(
+        context.contains("[receipt truncated: showing 2000 of 2001 characters]"),
+        "one character over the cap truncates with an exact note:\n{context}"
+    );
+}
+
+// The unscoped status/peek fleet listing is a collection, not one child:
+// passing it through bounded would hard-truncate every child past the cap
+// once two running projections exceed it. The rows are per-child snapshots,
+// so they summarize like one.
+#[test]
+fn forkguard_agent_unscoped_status_list_is_summarized_per_child() {
+    let fleet = json!({
+        "action": "status",
+        "count": 2,
+        "agents": [
+            {"agent_id": "agent_aaaa1111", "agent_type": "explore", "status": "Running",
+             "assignment": {"objective": "Map the rendering path"}},
+            {"agent_id": "agent_bbbb2222", "agent_type": "test", "status": "Completed",
+             "result": "12 tests green", "steps_taken": 4, "duration_ms": 900}
+        ]
+    })
+    .to_string();
+    let output = ToolResult::success(fleet);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent fleet status summarized for parent context]"),
+        "a fleet listing must summarize per child:\n{context}"
+    );
+    assert!(
+        context.contains("agent_aaaa1111") && context.contains("Running"),
+        "every listed child stays visible:\n{context}"
+    );
+    assert!(
+        context.contains("agent_bbbb2222") && context.contains("12 tests green"),
+        "completed children keep their self-reported result:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent receipt]"),
+        "a fleet listing must never be truncated as one opaque blob:\n{context}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-value class): the production shape
+// `SubAgentSessionProjection` keeps `transcript_handle` on the outer envelope
+// while the wrapped `SubAgentResult` row carries no such field. The row
+// summarizer unwraps `snapshot` before reading the row, so the outer handle
+// used to vanish: the hint gate saw it (it checks both layers) but the
+// visible row printed no `transcript:` line. The outer value must now fall
+// through to the row, reduced to the session_id/name form handle_read
+// accepts.
+#[test]
+fn forkguard_subagent_projection_outer_handle_reaches_summary_row() {
+    let transcript_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_aaaa1111".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 7,
+        repr_preview: "…".to_string(),
+        sha256: "aa11".to_string(),
+    })
+    .expect("var handle serializes");
+    // Mirrors the real projection: transcript_handle on the envelope, the
+    // nested result row has agent identity/status but no handle field.
+    let projection = json!({
+        "name": "scout",
+        "agent_id": "agent_aaaa1111",
+        "run_id": "run-1",
+        "status": "Running",
+        "context_mode": "fork",
+        "fork_context": true,
+        "transcript_handle": transcript_object,
+        "snapshot": {
+            "name": "scout",
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "context_mode": "fork",
+            "fork_context": true,
+            "status": "Running",
+            "result": "mapped the rendering path"
+        }
+    })
+    .to_string();
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(projection),
+    );
+
+    assert!(
+        context.contains("handle_read"),
+        "the projection carries a handle, so the hint must fire:\n{context}"
+    );
+    assert!(
+        context.contains("transcript: agent_aaaa1111/full_transcript"),
+        "the outer envelope handle must fall through to the visible row:\n\
+         {context}"
+    );
+
+    // When the inner row carries its own handle, the inner value wins — a
+    // row-level handle is the more specific fact and must not be shadowed
+    // by the envelope fallback.
+    let inner_handle = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_inner2222".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 9,
+        repr_preview: "…".to_string(),
+        sha256: "cc33".to_string(),
+    })
+    .expect("var handle serializes");
+    let both = json!({
+        "name": "scout",
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "transcript_handle": transcript_object,
+        "snapshot": {
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": "done",
+            "transcript_handle": inner_handle
+        }
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(both));
+
+    assert!(
+        context.contains("transcript: agent_inner2222/full_transcript"),
+        "an inner-row handle outranks the envelope fallback:\n{context}"
+    );
+    assert!(
+        !context.contains("transcript: agent_aaaa1111/full_transcript"),
+        "the envelope fallback must not shadow the inner value:\n{context}"
+    );
+}
+
+// The hint names `transcript_handle`, so it must gate on rows the summarizer
+// actually renders: past the eighth snapshot the receipt truncates, and a
+// handle stranded on a truncated row would print no value at all — a phantom
+// the model can never act on.
+#[test]
+fn forkguard_subagent_hint_gates_on_visible_rows_only() {
+    let handle_row = |agent_id: &str| {
+        serde_json::to_value(crate::tools::handle::VarHandle {
+            kind: "var_handle".to_string(),
+            session_id: agent_id.to_string(),
+            name: "full_transcript".to_string(),
+            type_name: "str".to_string(),
+            length: 7,
+            repr_preview: "…".to_string(),
+            sha256: "dd44".to_string(),
+        })
+        .expect("var handle serializes")
+    };
+    // Nine children; only the ninth carries a handle, and the ninth row is
+    // beyond the eight-row rendering cap.
+    let fleet: serde_json::Value = json!({
+        "action": "status",
+        "count": 9,
+        "agents": (1..=9)
+            .map(|n| {
+                let agent_id = format!("agent_{n:08x}");
+                let mut row = json!({
+                    "agent_id": agent_id,
+                    "agent_type": "explore",
+                    "status": "Running",
+                });
+                if n == 9 {
+                    row["transcript_handle"] = handle_row(&agent_id);
+                }
+                row
+            })
+            .collect::<Vec<_>>()
+    });
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(fleet.to_string()),
+    );
+
+    assert!(
+        !context.contains("handle_read"),
+        "a handle on a row past the truncation cap must not summon the hint:\n\
+         {context}"
+    );
+    assert!(
+        !context.contains("transcript: agent_"),
+        "the truncated row's handle must never print:\n{context}"
+    );
+    assert!(
+        context.contains("omitted from context summary"),
+        "the ninth row is beyond the cap, so the omission note must show:\n\
+         {context}"
+    );
+
+    // Sanity: the same fleet with the handle on a visible row keeps both the
+    // hint and the value — the cap limits the gate, not handle support.
+    let mut visible = fleet;
+    visible["agents"][8]["transcript_handle"] = serde_json::Value::Null;
+    visible["agents"][0]["transcript_handle"] = handle_row("agent_00000001");
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(visible.to_string()),
+    );
+    assert!(
+        context.contains("handle_read"),
+        "a handle on a rendered row must still fire the hint:\n{context}"
+    );
+    assert!(
+        context.contains("transcript: agent_00000001/full_transcript"),
+        "the visible row prints the handle it gates on:\n{context}"
+    );
+}
+
+// `claim` receipts carry the recorded scope (roots/files/contracts) and no
+// snapshot shape, so they must keep passing through bounded — the scope is
+// the payload the model needs to reason about its own write permissions.
+// The fixture mirrors the real receipt: `PersistedWriteClaim` serializes as
+// {claim, sequence, isolated_worktree} with no `action` key (the translated
+// `action: "claim"` only exists on the tool-call input), so it survives via
+// the summarizer's shape fall-through, not the action rule.
+#[test]
+fn forkguard_agent_claim_receipt_passes_through_to_context() {
+    let claim = json!({
+        "claim": {
+            "owner": "agent_1234abcd",
+            "roots": ["src/foo"],
+            "exact_files": ["src/foo/bar.rs"],
+            "contracts": [],
+        },
+        "sequence": 7,
+        "isolated_worktree": false,
+    })
+    .to_string();
+    let output = ToolResult::success(claim);
+
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
+
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "a claim receipt is not a result snapshot:\n{context}"
+    );
+    assert!(
+        context.contains("\"src/foo\"") && context.contains("exact_files"),
+        "the claimed scope must reach the model verbatim:\n{context}"
+    );
+    assert!(
+        !context.contains("[sub-agent result summarized for parent context]"),
+        "collapsing a claim into snapshot noise would hide the scope:\n{context}"
     );
 }
 
@@ -17128,6 +17646,12 @@ fn forkguard_goal_continuation_names_tool_search_activation() {
         "allowed_tools-filtered sessions can strip tool_search too; the \
          prompt must keep the direct-call fallback instead of dead-ending:\n\
          {prompt}"
+    );
+    assert!(
+        !prompt.contains("hydrate when called by name") && !prompt.contains("hydrate on demand"),
+        "the prompt must not assert a hydration mechanism; only the \
+         tool_search activation path and the direct-call fallback belong in \
+         model-facing text:\n{prompt}"
     );
 }
 
@@ -21916,6 +22440,431 @@ async fn stale_boot_finished_does_not_clear_a_newer_receiver() {
 }
 
 #[tokio::test]
+async fn forkguard_mcp_session_boot_finished_event_carries_per_server_failure_reasons() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        r#"{"servers":{"bad":{"command":"codewhale-mcp-missing-payload-9f8e7d6c"}}}"#,
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace,
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    let reason = "connect failed: spawn failure";
+    engine.mcp_connection_errors = HashMap::from([("bad".to_string(), reason.to_string())]);
+
+    engine.emit_mcp_session_boot(7, true).await;
+
+    let mut rx = handle.rx_event.write().await;
+    let mut other_events = 0;
+    let event = loop {
+        let event = rx.recv().await.expect("engine event channel stays open");
+        if matches!(event, Event::McpSessionBoot { .. }) {
+            break event;
+        }
+        other_events += 1;
+        assert!(other_events < 8, "no McpSessionBoot event arrived");
+    };
+    drop(rx);
+    let Event::McpSessionBoot {
+        snapshot,
+        connecting,
+        finished,
+        ..
+    } = event
+    else {
+        unreachable!("loop broke on McpSessionBoot");
+    };
+    assert!(finished, "the terminal receipt carries the final diagnoses");
+    assert!(connecting.is_empty());
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|server| server.name == "bad")
+        .expect("failed server row");
+    assert!(!server.connected);
+    assert_eq!(server.error.as_deref(), Some(reason));
+}
+
+#[tokio::test]
+async fn forkguard_mcp_boot_failure_briefing_reaches_session_history_once_per_boot() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "slow-fs".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "one failed boot pass briefs exactly once"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("briefing present");
+    assert!(
+        crate::runtime_handoff::is_internal_runtime_handoff(briefing),
+        "the briefing is runtime control traffic, not a user turn"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(text.contains("slow-fs: connect timed out after 5s"));
+    assert!(text.contains("use local tools instead"));
+    // The briefing must be self-voiding: MCP recovers inside a session
+    // (retry/reload/login/next-turn connect_all), so an unconditional
+    // "unavailable for this entire session" would outlive the failure and
+    // teach the model to refuse tools that have come back.
+    assert!(
+        text.contains("trust the tool list"),
+        "the briefing must defer to a later, recovered tool list:\n{text}"
+    );
+    assert!(
+        !text.contains("entire session"),
+        "the briefing must not promise a session-long outage:\n{text}"
+    );
+    // An auth-required failure synthesizes an mcp_<server>_authenticate tool
+    // that is present from the first turn; the ban must carve it out
+    // explicitly or the model receives contradictory instructions in the
+    // same request.
+    assert!(
+        text.contains("mcp_<server>_authenticate") && text.contains("One exception"),
+        "the briefing must exempt the synthetic authenticate recovery tool:\n{text}"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, Some(3));
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["slow-fs".to_string()]
+    );
+
+    engine.maybe_inject_mcp_boot_briefing(3).await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "the same boot generation never briefs twice"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_mcp_boot_recovery_notice_corrects_a_briefed_server_once() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_boot_briefing_generation = Some(3);
+    engine.mcp_boot_briefing_servers = vec!["slow-fs".to_string(), "auth-broken".to_string()];
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["slow-fs".to_string()])
+        .await;
+
+    let notice = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .expect("a briefed server reconnecting must correct the startup ban");
+    assert!(
+        crate::runtime_handoff::is_internal_runtime_handoff(notice),
+        "the recovery notice is runtime control traffic, not a user turn"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &notice.content[0] else {
+        panic!("notice opens with a text block");
+    };
+    assert!(text.contains("- slow-fs"));
+    assert!(
+        text.contains("Trust the current tool list"),
+        "the notice must hand authority back to the live tool list:\n{text}"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["auth-broken".to_string()],
+        "only the recovered server leaves the briefed set"
+    );
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["auth-broken".to_string()])
+        .await;
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["auth-broken".to_string()])
+        .await;
+    let notice_count = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .count();
+    assert_eq!(
+        notice_count, 2,
+        "each briefed server is corrected exactly once; repeats are dropped"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_recovery_notice_is_skipped_without_a_failure_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    assert!(engine.mcp_boot_briefing_servers.is_empty());
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["never-briefed".to_string()])
+        .await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message)),
+        "a server the model was never told about needs no correction"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_successful_mcp_boot_injects_no_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 2;
+    engine.mcp_boot_generation = Some(2);
+
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 2,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::new(),
+        })
+        .await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)),
+        "a fully successful boot must not brief the model"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+}
+
+#[tokio::test]
+async fn forkguard_mcp_boot_briefing_and_recovery_orderings_are_byte_stable() {
+    // The briefing and the recovery notice promise byte-stable ordering so
+    // session replays keep a stable KV-cache prefix. HashMap iteration order
+    // is nondeterministic, so the injection paths must sort explicitly.
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([
+                ("zeta".to_string(), "connect timed out after 5s".to_string()),
+                (
+                    "alpha".to_string(),
+                    "connect timed out after 5s".to_string(),
+                ),
+                (
+                    "midway".to_string(),
+                    "connect timed out after 5s".to_string(),
+                ),
+            ]),
+        })
+        .await;
+
+    let briefing_text = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .map(|message| match &message.content[0] {
+                crate::models::ContentBlock::Text { text, .. } => text.clone(),
+                _ => String::new(),
+            })
+            .expect("briefing present")
+    };
+    let text = briefing_text(&engine);
+    let alpha_at = text.find("- alpha:").expect("alpha row");
+    let midway_at = text.find("- midway:").expect("midway row");
+    let zeta_at = text.find("- zeta:").expect("zeta row");
+    assert!(
+        alpha_at < midway_at && midway_at < zeta_at,
+        "briefing rows must be sorted by server name:\n{text}"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec![
+            "alpha".to_string(),
+            "midway".to_string(),
+            "zeta".to_string()
+        ]
+    );
+
+    // The recovery notice sorts the same way even when the caller does not.
+    engine
+        .maybe_inject_mcp_recovery_notice(vec![
+            "zeta".to_string(),
+            "alpha".to_string(),
+            "midway".to_string(),
+        ])
+        .await;
+    let notice_text = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .map(|message| match &message.content[0] {
+            crate::models::ContentBlock::Text { text, .. } => text.clone(),
+            _ => String::new(),
+        })
+        .expect("recovery notice present");
+    let alpha_at = notice_text.find("- alpha").expect("alpha row");
+    let midway_at = notice_text.find("- midway").expect("midway row");
+    let zeta_at = notice_text.find("- zeta").expect("zeta row");
+    assert!(
+        alpha_at < midway_at && midway_at < zeta_at,
+        "recovery rows must be sorted by server name:\n{notice_text}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_isolated_runtime_chat_never_receives_the_mcp_boot_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let api_config = Config {
+        runtime_chat_isolated: true,
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+    engine.mcp_connection_errors = HashMap::from([(
+        "bad".to_string(),
+        "connect failed: spawn failure".to_string(),
+    )]);
+
+    engine.maybe_inject_mcp_boot_briefing(1).await;
+
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)),
+        "isolated Runtime Chat must stay free of host runtime briefings"
+    );
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["bad".to_string()])
+        .await;
+    assert!(
+        engine
+            .session
+            .messages
+            .iter()
+            .all(|message| !crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message)),
+        "isolated Runtime Chat must stay free of host recovery notices"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_drained_mcp_boot_finish_also_briefs_the_model() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 5;
+    engine.mcp_boot_generation = Some(5);
+    engine.mcp_boot_in_flight = true;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(McpBootUpdate::Finished {
+        generation: 5,
+        authority_errors: Arc::new(HashMap::new()),
+        connection_errors: HashMap::from([(
+            "auth-broken".to_string(),
+            "401 unauthorized".to_string(),
+        )]),
+    })
+    .expect("queue the boot finish");
+    engine.mcp_boot_rx = Some(rx);
+
+    engine.drain_mcp_boot_updates().await;
+
+    assert!(!engine.mcp_boot_in_flight);
+    assert_eq!(
+        engine.session.pending_prefix_change_reason.as_deref(),
+        Some("mcp-session-boot"),
+        "the drained finish still declares the next-turn catalog refresh"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("the drained finish still briefs the model");
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(text.contains("auth-broken: 401 unauthorized"));
+    assert_eq!(engine.mcp_boot_briefing_generation, Some(5));
+}
+
+#[tokio::test]
 async fn bootstrap_and_retry_mcp_use_the_engine_owned_pool() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().join("workspace");
@@ -23014,4 +23963,781 @@ fn engine_adopts_host_owned_session_id_from_config() {
         "headless callers keep the generated uuid, got {:?}",
         engine.session_id()
     );
+}
+
+#[tokio::test]
+async fn forkguard_mcp_boot_briefing_survives_a_session_sync_that_wipes_history() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "slow-fs".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(briefing_count(&engine), 1, "boot failure briefs once");
+
+    // The host reads the persisted history before spawning the engine, so
+    // the synced-in history can never contain a briefing this engine
+    // appended during its own startup boot.
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&Vec::new()).into();
+    assert_eq!(
+        briefing_count(&engine),
+        0,
+        "precondition: the sync wiped the injected briefing"
+    );
+
+    // The SyncSession seam must rebuild the bookkeeping for the installed
+    // conversation and re-brief, because the failures still hold.
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "a wiped briefing is re-briefed for the restored conversation"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["slow-fs".to_string()]
+    );
+    engine.maybe_inject_mcp_boot_briefing(3).await;
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "the re-briefing is still stamped: one briefing per conversation"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_session_sync_reseeds_briefed_servers_from_restored_history_and_drops_recovered()
+{
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    // The live failure map agrees with the restored history: alpha already
+    // recovered (its retry removed it from the map), beta still fails.
+    engine.mcp_connection_errors =
+        HashMap::from([("beta".to_string(), "connect timed out after 5s".to_string())]);
+    // A same-conversation reload restores a history that already carries the
+    // briefing for two servers and a recovery notice for one of them.
+    let restored = vec![
+        crate::runtime_handoff::mcp_boot_failure_briefing_message(&[
+            (
+                "alpha".to_string(),
+                "connect timed out after 5s".to_string(),
+            ),
+            ("beta".to_string(), "connect timed out after 5s".to_string()),
+        ]),
+        crate::runtime_handoff::mcp_boot_recovery_notice_message(&["alpha".to_string()]),
+    ];
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&restored).into();
+
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+    let briefing_count = |engine: &Engine| {
+        engine
+            .session
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .count()
+    };
+    assert_eq!(
+        briefing_count(&engine),
+        1,
+        "a restored history that already carries the briefing is never briefed twice"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["beta".to_string()],
+        "the reseeded set excludes the server the history reports as recovered"
+    );
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["alpha".to_string()])
+        .await;
+    let alpha_notices = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .filter(|message| {
+            crate::runtime_handoff::mcp_boot_recovery_notice_servers(message)
+                .is_some_and(|servers| servers.iter().any(|server| server == "alpha"))
+        })
+        .count();
+    assert_eq!(
+        alpha_notices, 1,
+        "a recovered server stays recovered across the session sync"
+    );
+
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["beta".to_string()])
+        .await;
+    let beta_notices = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+        .filter(|message| {
+            crate::runtime_handoff::mcp_boot_recovery_notice_servers(message)
+                .is_some_and(|servers| servers.iter().any(|server| server == "beta"))
+        })
+        .count();
+    assert_eq!(
+        beta_notices, 1,
+        "a still-briefed server is corrected exactly once after the reseed"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_sync_mid_boot_keeps_the_boot_finish_briefing_authoritative() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    // The desktop host sends its one-shot sync right after spawn, while the
+    // boot pass is still connecting; a login-pending server has already
+    // preloaded an authority error into the map.
+    engine.mcp_connection_errors = HashMap::from([(
+        "needs-login".to_string(),
+        "authentication required: run /mcp login needs-login".to_string(),
+    )]);
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&Vec::new()).into();
+
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+    assert_eq!(
+        engine.mcp_event_generation, 3,
+        "reconciling mid-boot must not advance the counter past the in-flight boot"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_generation, None,
+        "the in-flight boot's finish seam owns the briefing"
+    );
+
+    // The boot settles with a connection failure the partial map never had.
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([
+                (
+                    "needs-login".to_string(),
+                    "authentication required: run /mcp login needs-login".to_string(),
+                ),
+                (
+                    "slow-fs".to_string(),
+                    "connect timed out after 5s".to_string(),
+                ),
+            ]),
+        })
+        .await;
+
+    assert!(
+        engine.mcp_connection_errors.contains_key("slow-fs"),
+        "the boot finish must not be stale-dropped by the mid-boot reconcile"
+    );
+    let briefing = engine
+        .session
+        .messages
+        .iter()
+        .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .expect("the finish seam briefs the restored conversation");
+    let crate::models::ContentBlock::Text { text, .. } = &briefing.content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(
+        text.contains("slow-fs"),
+        "the briefing must name the server that failed after the sync:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_sync_rebriefs_failures_missing_from_restored_briefing() {
+    let tmp = tempdir().expect("tempdir");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_connection_errors = HashMap::from([
+        (
+            "alpha".to_string(),
+            "connect timed out after 5s".to_string(),
+        ),
+        (
+            "gamma".to_string(),
+            "connect timed out after 5s".to_string(),
+        ),
+    ]);
+    // A persisted history restored mid-life can carry a briefing from an
+    // older boot pass that named fewer servers than currently fail.
+    let restored = vec![crate::runtime_handoff::mcp_boot_failure_briefing_message(
+        &[(
+            "alpha".to_string(),
+            "connect timed out after 5s".to_string(),
+        )],
+    )];
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&restored).into();
+
+    engine
+        .reconcile_mcp_boot_briefing_after_session_sync()
+        .await;
+
+    let briefings: Vec<_> = engine
+        .session
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+        .collect();
+    assert_eq!(
+        briefings.len(),
+        2,
+        "a restored briefing naming a subset must not suppress the delta"
+    );
+    let crate::models::ContentBlock::Text { text, .. } = &briefings[1].content[0] else {
+        panic!("briefing opens with a text block");
+    };
+    assert!(
+        text.contains("gamma"),
+        "the re-briefing must cover the server the restored briefing lacked:\n{text}"
+    );
+    assert_eq!(
+        engine.mcp_boot_briefing_servers,
+        vec!["alpha".to_string(), "gamma".to_string()],
+    );
+}
+
+#[tokio::test]
+async fn forkguard_workspace_sync_invalidates_in_flight_boot() {
+    let workspace_a = tempdir().expect("workspace a");
+    let workspace_b = tempdir().expect("workspace b");
+    let mut features = crate::features::Features::with_defaults();
+    features.disable(crate::features::Feature::Mcp);
+    let engine_config = EngineConfig {
+        workspace: workspace_a.path().to_path_buf(),
+        features,
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(engine_config, &Config::default());
+    // The spawn-time boot is disabled above so this seeded state survives
+    // `Engine::run`: a workspace-A connect pass is still in flight when the
+    // host syncs a workspace-B conversation.
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    let (boot_tx, boot_rx) = tokio::sync::mpsc::unbounded_channel();
+    engine.mcp_boot_rx = Some(boot_rx);
+    engine.mcp_connection_errors = HashMap::from([(
+        "w1-server".to_string(),
+        "connect timed out after 5s".to_string(),
+    )]);
+    engine.mcp_boot_briefing_generation = Some(3);
+    engine.mcp_boot_briefing_servers = vec!["w1-server".to_string()];
+
+    let run = tokio::spawn(engine.run());
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("workspace-b-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            workspace: workspace_b.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync workspace-b session");
+    let synced = handle
+        .get_session_snapshot()
+        .await
+        .expect("drain the session sync");
+    assert_eq!(synced.workspace, workspace_b.path());
+
+    // The workspace-A pass settles late; its finish must have no living
+    // delivery path into the engine anymore.
+    let late = boot_tx.send(McpBootUpdate::Finished {
+        generation: 3,
+        authority_errors: Arc::new(HashMap::new()),
+        connection_errors: HashMap::from([(
+            "w1-server".to_string(),
+            "connect timed out after 5s".to_string(),
+        )]),
+    });
+    assert!(
+        late.is_err(),
+        "a workspace switch must drop the previous pass's update channel"
+    );
+
+    // Give a wrongly delivered finish nowhere to land: the synced session
+    // stays free of the old workspace's failure briefing.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled = handle
+        .get_session_snapshot()
+        .await
+        .expect("settled snapshot");
+    assert!(
+        settled.messages.iter().all(|message| {
+            !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)
+        }),
+        "the previous workspace's failure briefing must not reach the new session"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_late_boot_finish_after_workspace_sync_is_stale_dropped() {
+    let workspace_a = tempdir().expect("workspace a");
+    let engine_config = EngineConfig {
+        workspace: workspace_a.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.mcp_event_generation = 3;
+    engine.mcp_boot_generation = Some(3);
+    engine.mcp_boot_in_flight = true;
+    let (_boot_tx, boot_rx) = tokio::sync::mpsc::unbounded_channel();
+    engine.mcp_boot_rx = Some(boot_rx);
+    engine.mcp_connection_errors = HashMap::from([(
+        "w1-server".to_string(),
+        "connect timed out after 5s".to_string(),
+    )]);
+    engine.mcp_boot_briefing_generation = Some(3);
+    engine.mcp_boot_briefing_servers = vec!["w1-server".to_string()];
+    engine.session.messages =
+        crate::runtime_handoff::project_messages_for_restore(&Vec::new()).into();
+
+    // The workspace-change branch of Op::SyncSession drops the error map and
+    // invalidates the pass; mirror that pairing here.
+    engine.mcp_connection_errors.clear();
+    engine.invalidate_mcp_boot_for_workspace_change();
+
+    assert_eq!(engine.mcp_boot_generation, None);
+    assert!(!engine.mcp_boot_in_flight);
+    assert!(engine.mcp_boot_rx.is_none());
+    assert!(engine.mcp_boot_done.is_none());
+    assert_eq!(engine.mcp_boot_briefing_generation, None);
+    assert!(
+        engine.mcp_boot_briefing_servers.is_empty(),
+        "the briefing bookkeeping belongs to the old conversation"
+    );
+
+    // The pass now settles late. Both update kinds are dropped by the
+    // stale-generation path: neither back-fills the cleared error map nor
+    // briefs the new conversation.
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Progress {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "w1-server".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+            connecting: Vec::new(),
+        })
+        .await;
+    engine
+        .apply_mcp_boot_update(McpBootUpdate::Finished {
+            generation: 3,
+            authority_errors: Arc::new(HashMap::new()),
+            connection_errors: HashMap::from([(
+                "w1-server".to_string(),
+                "connect timed out after 5s".to_string(),
+            )]),
+        })
+        .await;
+
+    assert!(
+        engine.mcp_connection_errors.is_empty(),
+        "the old workspace's failures must not refill the cleared map"
+    );
+    assert!(
+        engine.session.messages.iter().all(|message| {
+            !crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message)
+        }),
+        "the old workspace's failure briefing must not reach the new session"
+    );
+
+    // Bookkeeping consequence: a same-named server "recovering" later must
+    // not announce a briefing the new conversation never saw.
+    engine
+        .maybe_inject_mcp_recovery_notice(vec!["w1-server".to_string()])
+        .await;
+    assert!(
+        engine.session.messages.iter().all(|message| {
+            !crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message)
+        }),
+        "a recovery notice requires a briefing this conversation actually saw"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_reload_injects_recovery_notice_exactly_once() {
+    // Minimal streamable-HTTP MCP fixture: one JSON-RPC POST per connection,
+    // answered as an SSE event (202 for the initialized notification), the
+    // same contract the client integration tests pin.
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut buf).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    async fn write_json_sse(socket: &mut tokio::net::TcpStream, response: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+        let body = format!("event: message\ndata: {response}\n\n");
+        // Connection: close keeps the one-shot fixture honest with the
+        // client's connection pool: this handler answers exactly one request
+        // per accepted socket, so a pooled keep-alive reuse would write the
+        // next request into a socket the server is about to close ("connection
+        // closed before message completed" under load).
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let config_path = tmp.path().join("mcp.json");
+    // Reserve a port, then release it so the boot below fails fast with
+    // connection refused; the fixture rebinds the same port for the reload.
+    let port = {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    std::fs::write(
+        &config_path,
+        format!(r#"{{"servers":{{"alpha":{{"url":"http://127.0.0.1:{port}/mcp"}}}}}}"#),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: workspace.clone(),
+        mcp_config_path: config_path.clone(),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(engine_config, &Config::default());
+    let run = tokio::spawn(engine.run());
+
+    // Boot while nothing listens: the server fails, the finish seam briefs.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let snapshot = handle
+            .get_session_snapshot()
+            .await
+            .expect("snapshot while booting");
+        let briefed = snapshot
+            .messages
+            .iter()
+            .any(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message));
+        if briefed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the failed boot never briefed the model"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap_or_else(|error| panic!("rebind the loopback port {port}: {error}"));
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let request = read_http_request(&mut socket).await;
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+                if body.is_empty() {
+                    // The client also opens bodyless probe/stream
+                    // connections; there is nothing to answer there.
+                    return;
+                }
+                let value: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                };
+                let Some(method) = value["method"].as_str() else {
+                    return;
+                };
+                if method == "notifications/initialized" {
+                    use tokio::io::AsyncWriteExt;
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    return;
+                }
+                let id = value["id"].clone();
+                let result = match method {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {"name": "loopback-recovery", "version": "1.0.0"},
+                        "capabilities": {"tools": {}, "resources": {}, "prompts": {}}
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Echo input",
+                            "inputSchema": {"type": "object"}
+                        }]
+                    }),
+                    "resources/list" => serde_json::json!({"resources": []}),
+                    "resources/templates/list" => serde_json::json!({"resourceTemplates": []}),
+                    "prompts/list" => serde_json::json!({"prompts": []}),
+                    other => panic!("unexpected method: {other}"),
+                };
+                write_json_sse(
+                    &mut socket,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result
+                    }),
+                )
+                .await;
+            });
+        }
+    });
+
+    let recovery_notices = |snapshot: &SessionSnapshot| {
+        snapshot
+            .messages
+            .iter()
+            .filter(|message| crate::runtime_handoff::is_mcp_boot_recovery_notice_message(message))
+            .count()
+    };
+
+    // The public reload entry reconnects alpha against the now-live server;
+    // the briefed server counts as recovered and is corrected exactly once.
+    let (reload_tx, reload_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::ReloadMcp {
+            config_path: config_path.clone(),
+            tx: Arc::new(std::sync::Mutex::new(Some(reload_tx))),
+        })
+        .await
+        .expect("queue reload");
+    let reloaded = tokio::time::timeout(Duration::from_secs(10), reload_rx)
+        .await
+        .expect("reload response")
+        .expect("reload result")
+        .expect("reload connects the loopback server");
+    assert!(
+        reloaded
+            .snapshot
+            .servers
+            .iter()
+            .any(|server| server.name == "alpha" && server.connected),
+        "alpha must be connected after the reload: {:?}",
+        reloaded.snapshot.servers
+    );
+    let snapshot = handle
+        .get_session_snapshot()
+        .await
+        .expect("snapshot after reload");
+    assert_eq!(
+        recovery_notices(&snapshot),
+        1,
+        "the recovery notice injects exactly once"
+    );
+
+    // A second reload has nothing left to correct.
+    let (reload_tx, reload_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::ReloadMcp {
+            config_path,
+            tx: Arc::new(std::sync::Mutex::new(Some(reload_tx))),
+        })
+        .await
+        .expect("queue second reload");
+    tokio::time::timeout(Duration::from_secs(10), reload_rx)
+        .await
+        .expect("second reload response")
+        .expect("second reload result")
+        .expect("second reload keeps alpha connected");
+    let snapshot = handle
+        .get_session_snapshot()
+        .await
+        .expect("snapshot after second reload");
+    assert_eq!(
+        recovery_notices(&snapshot),
+        1,
+        "an already-corrected server must not be announced again"
+    );
+
+    server.abort();
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+// Action receipts — message/followup acks, roster catalogs, the unchanged
+// nudge — are coordination payloads: snapshot-summarizing them drops the
+// queued/woke/queue_depth/note facts the model coordinates with, and renders
+// an ack as a placeholder child result ("result: not available yet").
+#[test]
+fn forkguard_agent_action_receipts_pass_through_to_context() {
+    let ack = json!({
+        "action": "message",
+        "agent_id": "agent_m1a2b3c4",
+        "queued": true,
+        "woke": false,
+        "queue_depth": 2,
+        "status": "running",
+        "note": "Message queued without waking the child."
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(ack));
+    assert!(
+        context.contains("[sub-agent receipt]"),
+        "an action ack must pass through, not summarize:\n{context}"
+    );
+    assert!(
+        context.contains("\"queue_depth\":2") && context.contains("Message queued without waking"),
+        "the coordination facts must survive:\n{context}"
+    );
+    assert!(
+        !context.contains("not available yet"),
+        "an ack must never be rendered as a placeholder child result:\n{context}"
+    );
+
+    let followup = json!({
+        "action": "followup",
+        "agent_id": "agent_m1a2b3c4",
+        "queued": true,
+        "woke": true,
+        "queue_depth": 0,
+        "status": "running",
+        "continued_from_checkpoint": true,
+        "continuation_handle": "checkpoint_42",
+        "note": "Resumed from checkpoint."
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(followup));
+    assert!(context.contains("[sub-agent receipt]"));
+    assert!(
+        context.contains("\"continuation_handle\":\"checkpoint_42\""),
+        "the continuation handle must survive:\n{context}"
+    );
+
+    let nudge = json!({
+        "action": "status",
+        "agent_id": "agent_m1a2b3c4",
+        "name": "scout",
+        "status": "running",
+        "unchanged": true,
+        "hint": "No change since your last check."
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(nudge));
+    assert!(context.contains("[sub-agent receipt]"));
+    assert!(
+        context.contains("No change since your last check"),
+        "the anti-pattern hint must survive:\n{context}"
+    );
+}
+
+// Fleet rows carry transcript_handle values; the hint fires for the fleet
+// listing too, and every row shows the value it points at. The rows use the
+// producer's real shape: running projections serialize the field as a full
+// `var_handle` object.
+#[test]
+fn forkguard_agent_fleet_listing_with_handles_names_the_hint_with_visible_values() {
+    let transcript_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_aaaa1111".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 7,
+        repr_preview: "…".to_string(),
+        sha256: "aa11".to_string(),
+    })
+    .expect("var handle serializes");
+    let settled_object = serde_json::to_value(crate::tools::handle::VarHandle {
+        kind: "var_handle".to_string(),
+        session_id: "agent_bbbb2222".to_string(),
+        name: "full_transcript".to_string(),
+        type_name: "str".to_string(),
+        length: 9,
+        repr_preview: "…".to_string(),
+        sha256: "bb22".to_string(),
+    })
+    .expect("var handle serializes");
+    let fleet = json!({
+        "action": "status",
+        "count": 2,
+        "agents": [
+            {"agent_id": "agent_aaaa1111", "status": "Running",
+             "transcript_handle": transcript_object},
+            {"agent_id": "agent_bbbb2222", "status": "Completed", "result": "done",
+             "transcript_handle": settled_object}
+        ]
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(fleet));
+
+    assert!(
+        context.contains("handle_read"),
+        "fleet rows carry handles, so the hint must fire:\n{context}"
+    );
+    assert!(context.contains("transcript: agent_aaaa1111/full_transcript"));
+    assert!(context.contains("transcript: agent_bbbb2222/full_transcript"));
 }

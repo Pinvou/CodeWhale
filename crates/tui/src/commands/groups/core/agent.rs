@@ -59,7 +59,7 @@ pub fn agent(_app: &mut App, arg: Option<&str>) -> CommandResult {
         }
     };
     let message = format!(
-        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on the returned transcript_handle if you need more detail; {handle_read_hint}; if `tool_search` cannot surface it, call `handle_read` directly anyway, since registered deferred tools hydrate when called by name. Verify any claimed side effects before reporting success.",
+        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on a sub-agent transcript handle if you need more detail (verbose spawn receipts and scoped status rows carry one); {handle_read_hint}. Verify any claimed side effects before reporting success.",
         handle_read_hint = crate::tools::subagent::HANDLE_READ_ACTIVATION_HINT
     );
     CommandResult::with_message_and_action(
@@ -143,10 +143,27 @@ mod tests {
             "the dispatch brief must teach the handle_read activation path:\n{message}"
         );
         assert!(
-            message.contains("call `handle_read` directly anyway"),
-            "allowed_tools-filtered sessions can strip tool_search too; the \
-             dispatch brief must keep the direct-call fallback instead of \
-             dead-ending:\n{message}"
+            message.contains("try calling `handle_read` directly"),
+            "allowlist-filtered hosts can keep handle_read in the catalog while \
+             removing tool_search; the brief must try the direct call before \
+             declaring transcript reads unavailable:\n{message}"
+        );
+        assert!(
+            message.contains("transcript reads are unavailable in this session"),
+            "when tool_search cannot surface handle_read and the direct call \
+             errors, the brief must degrade honestly instead of dead-ending or \
+             over-promising:\n{message}"
+        );
+        assert!(
+            !message.contains("hydrate when called by name"),
+            "registered deferred tools do not promise a hydration mechanism; \
+             the false mechanism assertion must stay gone:\n{message}"
+        );
+        assert!(
+            !message.contains("the returned transcript_handle"),
+            "the default spawn receipt strips the handle before the model \
+             sees it; naming it as returned is the phantom-value class the \
+             context summarizer fix removes:\n{message}"
         );
     }
 }

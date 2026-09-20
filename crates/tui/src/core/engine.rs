@@ -1135,6 +1135,14 @@ pub struct Engine {
     /// task updates retain their spawn generation so later passes can reject
     /// only genuinely stale work.
     mcp_event_generation: u64,
+    /// Boot generation whose boot-failure briefing already reached the session
+    /// history. One boot pass briefs the model at most once; a genuinely new
+    /// boot pass (new generation) that fails again may brief again.
+    mcp_boot_briefing_generation: Option<u64>,
+    /// Servers named in the boot-failure briefing that have not yet been
+    /// announced as recovered. Guards the corrective notice so it only ever
+    /// corrects servers the model was actually told were unavailable.
+    mcp_boot_briefing_servers: Vec<String>,
     /// Workspace-scoped immutable plugin catalogue and authority receipts.
     plugin_registry: Arc<crate::plugins::PluginRegistry>,
     api_provider: ApiProvider,
@@ -2009,6 +2017,8 @@ impl Engine {
             mcp_boot_done: None,
             mcp_boot_generation: None,
             mcp_event_generation: 0,
+            mcp_boot_briefing_generation: None,
+            mcp_boot_briefing_servers: Vec::new(),
             plugin_registry,
             api_provider,
             api_provider_identity,
@@ -3487,7 +3497,15 @@ impl Engine {
                             self.config.plugin_registry = Some(Arc::clone(&self.plugin_registry));
                             // A pool may contain plugin servers and authority
                             // receipts from the previous workspace snapshot.
+                            // Drop the receipts with it, or the briefing
+                            // reconcile would re-announce the previous
+                            // workspace's failures into the new conversation.
                             self.mcp_pool = None;
+                            self.mcp_connection_errors.clear();
+                            // The previous workspace's in-flight connect pass
+                            // must not finish into the freshly synced
+                            // conversation (see the method).
+                            self.invalidate_mcp_boot_for_workspace_change();
                         }
                         let ctx =
                             crate::project_context::load_project_context_with_parents(&workspace);
@@ -3498,6 +3516,11 @@ impl Engine {
                         };
                         self.session.rebuild_working_set();
                         self.reconcile_restored_work_bindings().await;
+                        // The MCP briefing bookkeeping belongs to one
+                        // conversation; rebuild it for the one just installed
+                        // (see the reconcile method for why this must happen
+                        // after the restored history lands, not before).
+                        self.reconcile_mcp_boot_briefing_after_session_sync().await;
                         self.emit_session_updated().await;
                         let _ = self
                             .tx_event
@@ -6900,6 +6923,16 @@ impl Engine {
             .into_iter()
             .map(|(name, error)| (name, crate::mcp::format_mcp_error_for_display(&error)))
             .collect::<HashMap<_, _>>();
+        // Servers the boot briefing named as unavailable count as recovered
+        // only when they are still configured and now connect cleanly; a
+        // server removed from the config is gone, not recovered.
+        let still_configured = pool.enabled_server_names();
+        let recovered: Vec<String> = self
+            .mcp_boot_briefing_servers
+            .iter()
+            .filter(|name| !errors.contains_key(*name) && still_configured.contains(*name))
+            .cloned()
+            .collect();
         self.session.mcp_config_path = config_path;
         self.mcp_connection_errors = errors;
         let snapshot = pool.manager_snapshot(
@@ -6908,6 +6941,7 @@ impl Engine {
             &self.mcp_connection_errors,
         );
         drop(pool);
+        self.maybe_inject_mcp_recovery_notice(recovered).await;
         let generation = self.next_mcp_event_generation();
         Ok(McpManagerUpdate {
             snapshot,
@@ -6963,6 +6997,173 @@ impl Engine {
         self.mcp_boot_rx = None;
         self.mcp_boot_done = None;
         true
+    }
+
+    /// Invalidate the connect pass and boot-briefing bookkeeping owned by the
+    /// previous workspace. `Op::SyncSession` drops the pool and the error map
+    /// on a workspace change; without this the pass started for the old
+    /// workspace would still pass its generation check once it finished,
+    /// re-filling the cleared error map and injecting the old workspace's
+    /// failure briefing into the freshly synced conversation. Dropping the
+    /// receiver also disarms the idle poll, so late `Progress`/`Finished`
+    /// updates fall back to the stale-generation drop (or fail to send at
+    /// all). The briefing bookkeeping belongs to the old conversation too: a
+    /// same-named server recovering later must not announce a briefing the
+    /// new history never saw.
+    fn invalidate_mcp_boot_for_workspace_change(&mut self) {
+        self.mcp_boot_generation = None;
+        self.mcp_boot_in_flight = false;
+        self.mcp_boot_rx = None;
+        self.mcp_boot_done = None;
+        self.mcp_boot_briefing_generation = None;
+        self.mcp_boot_briefing_servers.clear();
+    }
+
+    /// Append the one-shot model-readable briefing for the servers that failed
+    /// to connect during session boot, so the next turn's model learns the
+    /// `mcp_*` surface is unavailable instead of trusting capability claims
+    /// that no longer hold. A fully successful boot injects nothing, isolated
+    /// Runtime Chat sessions never inject, and the boot-generation stamp keeps
+    /// a single boot pass to exactly one briefing. The briefing text is
+    /// self-voiding — it describes startup only and defers to the live tool
+    /// list — because MCP recovers inside a session through the retry, reload,
+    /// login, and per-turn `connect_all` paths, which cannot all be answered
+    /// with a corrective append (see `maybe_inject_mcp_recovery_notice`).
+    ///
+    /// The runtime-handoff channel (see `runtime_handoff`) is deliberate: the
+    /// inline registry instruction is composed once in `Engine::new`, before
+    /// any connection is attempted, and the pinned system prompt must not move
+    /// after the fact. An appended user-role runtime event is plain
+    /// append-only history growth, so the KV-cache prefix only extends. Every
+    /// boot-finish seam that calls this runs while the engine is idle, so the
+    /// briefing is never appended mid-tool-loop.
+    async fn maybe_inject_mcp_boot_briefing(&mut self, generation: u64) {
+        if self.api_config.runtime_chat_isolated || self.mcp_connection_errors.is_empty() {
+            return;
+        }
+        if self.mcp_boot_briefing_generation == Some(generation) {
+            // This boot pass already briefed. Skip only while the briefing
+            // still covers every current failure; a stale subset (restored
+            // from history mid-boot, or narrowed by later recoveries) must
+            // be re-announced so the delta is not silently unbriefed.
+            if self.briefing_covers_current_failures(&self.mcp_boot_briefing_servers) {
+                return;
+            }
+        }
+        self.mcp_boot_briefing_generation = Some(generation);
+        let mut failures: Vec<(String, String)> =
+            self.mcp_connection_errors.clone().into_iter().collect();
+        failures.sort_by(|left, right| left.0.cmp(&right.0));
+        self.mcp_boot_briefing_servers = failures.iter().map(|(name, _)| name.clone()).collect();
+        self.add_session_message(crate::runtime_handoff::mcp_boot_failure_briefing_message(
+            &failures,
+        ))
+        .await;
+    }
+
+    /// Append the corrective notice for briefed servers that reconnected, so a
+    /// recovered surface is not permanently shadowed by the startup ban.
+    /// Names the briefing never carried are ignored — a server that failed
+    /// after boot was never announced as unavailable. Only the user-driven
+    /// recovery seams (`retry`/`reload` Op handlers) inject: they run while
+    /// the engine is idle. The per-turn `connect_all` refresh can also clear
+    /// errors mid-request-build, so it relies on the briefing's self-voiding
+    /// wording ("trust the tool list") instead of a mid-turn append.
+    async fn maybe_inject_mcp_recovery_notice(&mut self, recovered: Vec<String>) {
+        if self.api_config.runtime_chat_isolated || recovered.is_empty() {
+            return;
+        }
+        let mut recovered: Vec<String> = recovered
+            .into_iter()
+            .filter(|name| self.mcp_boot_briefing_servers.contains(name))
+            .collect();
+        if recovered.is_empty() {
+            return;
+        }
+        recovered.sort();
+        self.mcp_boot_briefing_servers
+            .retain(|briefed| !recovered.contains(briefed));
+        self.add_session_message(crate::runtime_handoff::mcp_boot_recovery_notice_message(
+            &recovered,
+        ))
+        .await;
+    }
+
+    /// Rebuild the boot-briefing bookkeeping for the conversation a session
+    /// sync just installed. The briefing state belongs to one conversation,
+    /// and the restored history was read by the host before this engine
+    /// appended anything — so a briefing injected during this process's
+    /// startup boot would otherwise be wiped by the sync and never re-added
+    /// (the generation stamp suppresses re-briefing, and the process runs a
+    /// single boot pass). After resetting, re-brief when the failures still
+    /// hold and the restored history carries no briefing; when the restored
+    /// history already carries one (same-conversation reload of a persisted
+    /// history), reseed the correction bookkeeping from it instead, keeping
+    /// servers the history reports as recovered excluded — unless it names
+    /// fewer servers than currently fail, in which case the delta must still
+    /// be re-announced. While the startup boot is still in flight its finish
+    /// seam owns the briefing, so this only seeds bookkeeping and never
+    /// advances the event counter (that would stale-drop the boot's own
+    /// finish). Runs on the idle seam of `Op::SyncSession`, never
+    /// mid-tool-loop.
+    async fn reconcile_mcp_boot_briefing_after_session_sync(&mut self) {
+        let briefed_generation = self.mcp_boot_briefing_generation.take();
+        self.mcp_boot_briefing_servers.clear();
+        if self.api_config.runtime_chat_isolated || self.mcp_connection_errors.is_empty() {
+            return;
+        }
+        let mut restored_briefing = self
+            .session
+            .messages
+            .iter()
+            .find(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message))
+            .and_then(crate::runtime_handoff::mcp_boot_failure_briefing_servers);
+        if let Some(briefed) = restored_briefing.as_mut() {
+            for message in self.session.messages.iter() {
+                if let Some(recovered) =
+                    crate::runtime_handoff::mcp_boot_recovery_notice_servers(message)
+                {
+                    briefed.retain(|name| !recovered.contains(name));
+                }
+            }
+        }
+        if self.mcp_boot_in_flight {
+            // The finish seam briefs with the complete error map once the
+            // pass settles. Pinning the boot's generation here (never a
+            // fresh one) suppresses that finish briefing only when the
+            // restored briefing already covers every current failure;
+            // otherwise the finish must re-brief the delta.
+            if let Some(briefed) = restored_briefing
+                && self.briefing_covers_current_failures(&briefed)
+            {
+                self.mcp_boot_briefing_generation = self.mcp_boot_generation;
+                self.mcp_boot_briefing_servers = briefed;
+            }
+            return;
+        }
+        let generation = briefed_generation.unwrap_or_else(|| self.next_mcp_event_generation());
+        if let Some(briefed) = restored_briefing
+            && self.briefing_covers_current_failures(&briefed)
+        {
+            // The installed conversation already saw this boot's briefing:
+            // keep its correction bookkeeping without briefing twice.
+            self.mcp_boot_briefing_generation = Some(generation);
+            self.mcp_boot_briefing_servers = briefed;
+            return;
+        }
+        // A restored briefing naming fewer servers than currently fail
+        // must not suppress the delta: fall through and re-brief from
+        // the live error map.
+        self.maybe_inject_mcp_boot_briefing(generation).await;
+    }
+
+    /// Whether every currently failing server is named by `briefed` (already
+    /// adjusted for servers the history reports as recovered), so the
+    /// conversation needs no new briefing for them.
+    fn briefing_covers_current_failures(&self, briefed: &[String]) -> bool {
+        self.mcp_connection_errors
+            .keys()
+            .all(|name| briefed.contains(name))
     }
 
     async fn emit_mcp_session_boot(&self, generation: u64, finished: bool) {
@@ -7031,6 +7232,7 @@ impl Engine {
                 self.finish_mcp_boot_generation(generation);
                 self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
                 self.emit_mcp_session_boot(generation, true).await;
+                self.maybe_inject_mcp_boot_briefing(generation).await;
             }
         }
     }
@@ -7076,6 +7278,7 @@ impl Engine {
                     self.finish_mcp_boot_generation(generation);
                     self.session.pending_prefix_change_reason =
                         Some("mcp-session-boot".to_string());
+                    self.maybe_inject_mcp_boot_briefing(generation).await;
                     break;
                 }
             }
@@ -7141,6 +7344,7 @@ impl Engine {
             self.mcp_boot_in_flight = false;
             self.mcp_boot_generation = None;
             self.emit_mcp_session_boot(generation, true).await;
+            self.maybe_inject_mcp_boot_briefing(generation).await;
             return;
         }
 
@@ -7237,9 +7441,11 @@ impl Engine {
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut pool = pool.lock().await;
+        let mut recovered: Option<String> = None;
         match pool.retry_connection(name).await {
             Ok(_) => {
                 self.mcp_connection_errors.remove(name);
+                recovered = Some(name.to_string());
             }
             Err(error) => {
                 self.mcp_connection_errors.insert(
@@ -7260,6 +7466,9 @@ impl Engine {
                 .any(|configured| configured.name == *server)
         });
         drop(pool);
+        if let Some(recovered) = recovered {
+            self.maybe_inject_mcp_recovery_notice(vec![recovered]).await;
+        }
         let generation = self.next_mcp_event_generation();
         let _ = self.tx_event.try_send(Event::McpSessionBoot {
             generation,
