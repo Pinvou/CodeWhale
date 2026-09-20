@@ -89,7 +89,7 @@ func TestBillingLegacyApprovalConsumerCompatibilityIntegration(t *testing.T) {
 	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{
 		Name: "ACCOUNT_PLATFORM", Description: "Pinvou account platform domain events",
 		Subjects: []string{"account.>", "billing.>", "token.>", "account-platform.dead-letter.>"},
-		Storage: jetstream.FileStorage, Retention: jetstream.LimitsPolicy, MaxAge: 30 * 24 * time.Hour, Duplicates: 24 * time.Hour,
+		Storage:  jetstream.FileStorage, Retention: jetstream.LimitsPolicy, MaxAge: 30 * 24 * time.Hour, Duplicates: 24 * time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)

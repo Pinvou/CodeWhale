@@ -103,17 +103,17 @@ func EncodeProofResponse(response ProofResponse) ([]byte, error) {
 		return nil, err
 	}
 	value := newObject(map[string]*jsonValue{
-		"approval_request_id": jsonString(response.ApprovalRequestID.String()),
-		"command_type": jsonString(response.CommandType),
-		"command_digest": jsonString(response.CommandDigest),
-		"snapshot_digest": jsonString(response.SnapshotDigest),
-		"policy_version": jsonInteger(response.PolicyVersion),
+		"approval_request_id":  jsonString(response.ApprovalRequestID.String()),
+		"command_type":         jsonString(response.CommandType),
+		"command_digest":       jsonString(response.CommandDigest),
+		"snapshot_digest":      jsonString(response.SnapshotDigest),
+		"policy_version":       jsonInteger(response.PolicyVersion),
 		"proof_schema_version": jsonString(response.ProofSchemaVersion),
-		"domain_revision": jsonString(response.DomainRevision),
-		"verdict": jsonString(response.Verdict),
-		"reason_code": jsonString(response.ReasonCode),
-		"issued_at": jsonString(response.IssuedAt.Format(time.RFC3339Nano)),
-		"expires_at": jsonString(response.ExpiresAt.Format(time.RFC3339Nano)),
+		"domain_revision":      jsonString(response.DomainRevision),
+		"verdict":              jsonString(response.Verdict),
+		"reason_code":          jsonString(response.ReasonCode),
+		"issued_at":            jsonString(response.IssuedAt.Format(time.RFC3339Nano)),
+		"expires_at":           jsonString(response.ExpiresAt.Format(time.RFC3339Nano)),
 	})
 	encoded, err := canonicalJSON(value)
 	if err != nil || len(encoded) > MaximumDocumentBytes {

@@ -94,6 +94,7 @@ func marshalRaw(value any) json.RawMessage {
 	encoded, _ := json.Marshal(value)
 	return encoded
 }
+
 // The consumed authorization freezes only the wire-visible owner projection, so
 // an empty facts digest means "the execution transaction recomputes it" while a
 // presented digest must still match the owner revision exactly.

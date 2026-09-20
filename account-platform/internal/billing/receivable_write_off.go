@@ -178,7 +178,7 @@ FROM receivables WHERE id=$1`, plan.ReceivableID).Scan(&usageRequestID, &package
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].SourceType < summaries[j].SourceType })
 	encoded, err := json.Marshal(map[string]any{
-		"command_type": receivableWriteOffCommand,
+		"command_type":  receivableWriteOffCommand,
 		"receivable_id": plan.ReceivableID.String(), "wallet_id": plan.WalletID.String(),
 		"source_type": plan.SourceType, "source_reference": plan.SourceReference,
 		"original_microcredits": plan.OriginalMicrocredits, "settled_microcredits": plan.SettledMicrocredits,

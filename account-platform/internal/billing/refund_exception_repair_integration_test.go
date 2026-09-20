@@ -13,12 +13,12 @@ import (
 )
 
 type refundExceptionFixture struct {
-	RefundID          uuid.UUID
-	WalletID          uuid.UUID
-	PackageID         uuid.UUID
-	AnomalyCaseID     uuid.UUID
-	EvidenceID        uuid.UUID
-	ProviderRefundID  string
+	RefundID           uuid.UUID
+	WalletID           uuid.UUID
+	PackageID          uuid.UUID
+	AnomalyCaseID      uuid.UUID
+	EvidenceID         uuid.UUID
+	ProviderRefundID   string
 	CreditMicrocredits int64
 }
 

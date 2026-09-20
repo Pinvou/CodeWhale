@@ -17,12 +17,12 @@ import (
 // can assert the frozen projection, the presenter and the committed repair
 // against the same identifiers.
 type ledgerRepairCrossDomainFacts struct {
-	WalletID        uuid.UUID
-	JournalEntryID  uuid.UUID
-	TargetPostingID uuid.UUID
-	WrongAccountID  uuid.UUID
-	CorrectAccountID uuid.UUID
-	WalletAccountID uuid.UUID
+	WalletID           uuid.UUID
+	JournalEntryID     uuid.UUID
+	TargetPostingID    uuid.UUID
+	WrongAccountID     uuid.UUID
+	CorrectAccountID   uuid.UUID
+	WalletAccountID    uuid.UUID
 	AmountMicrocredits int64
 }
 

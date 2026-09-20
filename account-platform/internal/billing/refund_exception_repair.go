@@ -355,7 +355,7 @@ func refundExceptionRepairProofProjection(plan RefundExceptionRepairPlan) ([]byt
 	})
 	financial, _ := json.Marshal(map[string]any{
 		"amount_fen": plan.AmountFen, "credit_microcredits": plan.CreditMicrocredits,
-		"provider_refund_id": plan.ProviderRefundID,
+		"provider_refund_id":   plan.ProviderRefundID,
 		"revoked_microcredits": plan.RevokedMicrocredits, "shortfall_microcredits": plan.ShortfallMicrocredits,
 		"wallet_id": plan.WalletID.String(), "wallet_version": plan.WalletVersion, "package_id": plan.PackageID.String(),
 	})
