@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,94 @@ type fixedRecoveryResultReader struct {
 func (reader *fixedRecoveryResultReader) ObserveRecoveryResult(context.Context, ApprovalRecoveryCandidate) (RecoveryResultObservation, error) {
 	reader.calls++
 	return reader.result, nil
+}
+
+// The approval writer readiness probe is a heavyweight ACL check with a
+// five-second budget, so a loaded fixture machine can miss it before any lock
+// or commit is taken. Wait for readiness outside the assertion instead of
+// letting an environment hiccup look like a behaviour regression.
+func awaitApprovalWriterReady(t *testing.T, ctx context.Context, repository *PostgresRepository) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for {
+		if err := repository.ApprovalWriterReady(ctx); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approval writer never became ready")
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// seedZeroEffectRecoveryCandidate drives a fresh proof-era request through the
+// real approval, relay, delivery and execution path until it fails before any
+// effect, then forces the execution window into the past and reports the
+// candidate a real plan produces for it. It proves nothing on its own.
+func seedZeroEffectRecoveryCandidate(t *testing.T, ctx context.Context, db *approvalAuthorizationIntegrationDatabase, repository *PostgresRepository, relay *ApprovalRelayStore, vector authorizationProofVector, durable, failureCode string, sequence approvalconsumer.Sequence) (ApprovalRequest, ApprovalRecoveryCandidate) {
+	t.Helper()
+	request := seedAuthorizationProofRequest(t, ctx, db, vector)
+	approver := seedTokenOwnerCandidateActor(t, ctx, db.adminPool, "PLATFORM_SUPER_ADMIN", "recovery-zero-effect-"+uuid.NewString())
+	awaitApprovalWriterReady(t, ctx, repository)
+	approved, err := repository.DecideApprovalRequest(ctx, approvalIntegrationPrincipal(approver), request.ID, request.Version,
+		"APPROVED", "independent zero effect recovery proof", nil)
+	if err != nil || approved.Status != "APPROVED" {
+		t.Fatalf("approve zero-effect proof=%s err=%v", approved.Status, err)
+	}
+	var eventID uuid.UUID
+	if err := db.adminPool.QueryRow(ctx, `SELECT event_id FROM public.outbox_events WHERE aggregate_id=$1 AND event_type='account.approval-command.authorized.v1'`, request.ID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := relay.ClaimFrozen(ctx, "recovery-zero-effect-fixture", 1, 30*time.Second)
+	if err != nil || len(claims) != 1 || claims[0].EventID != eventID {
+		t.Fatalf("zero-effect proof relay claim=%+v err=%v", claims, err)
+	}
+	if _, err := relay.ProcessFrozen(ctx, "recovery-zero-effect-fixture", claims[0], 12, time.Now().UTC(), func(context.Context, events.FrozenMessage) events.FrozenPublishResult {
+		return events.FrozenPublishResult{Disposition: events.FrozenPublished}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := repository.ResolveApprovalAuthorizationBinding(ctx, eventID, durable, approvalconsumer.BillingWorkload)
+	if err != nil || binding.ApprovalRequestID != request.ID {
+		t.Fatalf("zero-effect binding=%+v err=%v", binding, err)
+	}
+	state := observeApprovalDelivery(t, ctx, repository, binding, sequence)
+	state, err = repository.GrantApprovalAuthorizationDomainAttempt(ctx, eventID, durable, binding.Workload, state.Version)
+	if err != nil || state.DomainAttemptCount != 1 || state.State != "DOMAIN_INFLIGHT" {
+		t.Fatalf("zero-effect grant=%+v err=%v", state, err)
+	}
+	critical, financial := approvalExecutionSnapshots(t, ctx, db, request.ID)
+	execution, err := repository.BeginApprovalExecutionWithAuthorization(ctx, request.ID, binding.Workload, eventID.String(), critical, financial, binding)
+	if err != nil || !execution.FirstClaim {
+		t.Fatalf("zero-effect begin=%+v err=%v", execution, err)
+	}
+	if err := repository.CompleteApprovalExecution(ctx, request.ID, binding.Workload, eventID.String(), "FAILED",
+		json.RawMessage(`{}`), json.RawMessage(`{}`), failureCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.RecordApprovalAuthorizationDomainFailure(ctx, eventID, durable, binding.Workload, state.Version, failureCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests SET execution_deadline=now()-interval '1 second',updated_at=now() WHERE id=$1`, request.ID); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := repository.PlanProofApprovalRecovery(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range plan.Candidates {
+		if candidate.RequestID != request.ID {
+			continue
+		}
+		if !candidate.WindowElapsed || candidate.Investigation.Class != approvalconsumer.FailurePermanent ||
+			candidate.Investigation.Retryable || !candidate.Investigation.QueryOnly || candidate.Investigation.MaxDomainAttempts != 1 ||
+			candidate.RequestStatus != "EXECUTION_FAILED" || candidate.ExecutionStatus != "FAILED" {
+			t.Fatalf("zero-effect candidate is not eligible: %+v", candidate)
+		}
+		return request, candidate
+	}
+	t.Fatalf("zero-effect candidate missing from the recovery plan: %+v", plan)
+	return ApprovalRequest{}, ApprovalRecoveryCandidate{}
 }
 
 func TestProofRecoveryPlanExcludesLegacyAndNeverMutatesIntegration(t *testing.T) {
@@ -115,6 +204,7 @@ func TestProofRecoveryPlanReadsOriginalExecutionWithoutReplayIntegration(t *test
 		digest, err := approvalencoding.DeriveProofDigest(response)
 		return ApprovalProofResult{Response: response, Digest: hex.EncodeToString(digest[:])}, err
 	})
+	awaitApprovalWriterReady(t, ctx, repository)
 	approved, err := repository.DecideApprovalRequest(ctx, approvalIntegrationPrincipal(approver), request.ID, request.Version,
 		"APPROVED", "independent recovery plan proof", nil)
 	if err != nil || approved.Status != "APPROVED" {
@@ -308,5 +398,134 @@ WHERE n.nspname='public' AND p.proname NOT IN ('claim_approval_recovery_query','
 	}
 	if stateEventsAfter != stateEventsBefore {
 		t.Fatalf("refused invalidation appended a state event: before=%d after=%d", stateEventsBefore, stateEventsAfter)
+	}
+	// The positive scenario: a definite pre-effect failure whose execution
+	// window has elapsed and whose owner authorities keep reporting an absent
+	// effect and no positive result must actually converge to INVALIDATED, and
+	// must do so only through the governed Account surface.
+	zeroEffectRequest, zeroEffectCandidate := seedZeroEffectRecoveryCandidate(t, ctx, db, repository, relay, vector, durable,
+		"DOMAIN_RESOURCE_NOT_FOUND", 102)
+	zeroEffectLease, err := store.Claim(ctx, zeroEffectCandidate)
+	if err != nil || zeroEffectLease.RequestID != zeroEffectRequest.ID || zeroEffectLease.Token == uuid.Nil {
+		t.Fatalf("zero-effect query lease invalid: lease=%+v err=%v", zeroEffectLease, err)
+	}
+	zeroEffectBody, err := json.Marshal(approvalRecoveryConfirmation{Candidate: zeroEffectCandidate, Lease: zeroEffectLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postZeroEffect := func(effects approvaleffect.Reader, results ApprovalRecoveryResultReader) *httptest.ResponseRecorder {
+		t.Helper()
+		invalidateContext, contextErr := serviceauth.ContextForJob(ctx, "account-approval-recovery", "APPROVAL_RECOVERY_QUERY", uuid.NewString())
+		if contextErr != nil {
+			t.Fatal(contextErr)
+		}
+		invalidateRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/approval-recovery/zero-effect", bytes.NewReader(zeroEffectBody)).WithContext(invalidateContext)
+		invalidateRequest.Header.Set("Content-Type", "application/json")
+		invalidateResponse := httptest.NewRecorder()
+		NewService(repository, nil).WithApprovalRecoveryResults(results).WithApprovalRecoveryEffects(effects).
+			internalInvalidateApprovalRecoveryZeroEffect(invalidateResponse, invalidateRequest)
+		return invalidateResponse
+	}
+	unconfirmed := &fixedRecoveryResultReader{result: RecoveryResultObservation{State: "UNCONFIRMED", ObservedAt: time.Now().UTC()}}
+	var zeroEffectEventsBefore int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM public.approval_state_events WHERE approval_request_id=$1`, zeroEffectRequest.ID).Scan(&zeroEffectEventsBefore); err != nil {
+		t.Fatal(err)
+	}
+	var zeroEffectExecutionBefore, zeroEffectDeliveryBefore string
+	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(e)::text FROM public.approval_executions e WHERE e.approval_request_id=$1`, zeroEffectRequest.ID).Scan(&zeroEffectExecutionBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::text FROM account_approval_authorization.approval_delivery_states d WHERE d.original_event_id=$1`, zeroEffectCandidate.OriginalEventID).Scan(&zeroEffectDeliveryBefore); err != nil {
+		t.Fatal(err)
+	}
+	// An observed effect is never invalidated, however definite the failure is.
+	if response := postZeroEffect(&recoveryEffectStub{state: approvaleffect.StateObserved}, unconfirmed); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "APPROVAL_RECOVERY_EFFECT_OBSERVED") {
+		t.Fatalf("observed effect did not stop the invalidation: status=%d body=%s", response.Code, response.Body.String())
+	}
+	// A positive domain result always wins over an absent effect.
+	positive := &fixedRecoveryResultReader{result: RecoveryResultObservation{State: "SUCCEEDED", ObservedAt: time.Now().UTC(),
+		DomainResult: json.RawMessage(`{"adjustment_id":"` + uuid.NewString() + `","wallet_id":"` + uuid.NewString() + `","status":"POSTED","version":2}`),
+		LedgerReferences: json.RawMessage(`{"journal_entry_id":"` + uuid.NewString() + `"}`)}}
+	if response := postZeroEffect(&recoveryEffectStub{state: approvaleffect.StateAbsent}, positive); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "APPROVAL_RECOVERY_UNCONFIRMED") {
+		t.Fatalf("positive result did not stop the invalidation: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var untouchedStatus, untouchedCode string
+	var untouchedEvents int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT status,coalesce(invalidation_code,'') FROM public.approval_requests WHERE id=$1`, zeroEffectRequest.ID).
+		Scan(&untouchedStatus, &untouchedCode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM public.approval_state_events WHERE approval_request_id=$1`, zeroEffectRequest.ID).Scan(&untouchedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if untouchedStatus != "EXECUTION_FAILED" || untouchedCode != "" || untouchedEvents != zeroEffectEventsBefore {
+		t.Fatalf("refused zero-effect invalidations mutated the request: status=%s code=%s events=%d", untouchedStatus, untouchedCode, untouchedEvents)
+	}
+	// Only the fully proven case converges, and the Account service re-reads
+	// both owner authorities itself before the single CAS.
+	if response := postZeroEffect(&recoveryEffectStub{state: approvaleffect.StateAbsent}, unconfirmed); response.Code != http.StatusNoContent {
+		t.Fatalf("proven zero effect did not converge: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var provenStatus, provenCode string
+	var provenDetails map[string]any
+	if err := db.adminPool.QueryRow(ctx, `SELECT status,invalidation_code,invalidation_details FROM public.approval_requests WHERE id=$1`, zeroEffectRequest.ID).
+		Scan(&provenStatus, &provenCode, &provenDetails); err != nil {
+		t.Fatal(err)
+	}
+	if provenStatus != "INVALIDATED" || provenCode != "RECOVERY_ZERO_EFFECT_PROVEN" {
+		t.Fatalf("proven zero effect landed as status=%s code=%s", provenStatus, provenCode)
+	}
+	if provenDetails["effect_observation"] != "ABSENT" || provenDetails["result_observation"] != "UNCONFIRMED" ||
+		provenDetails["failure_class"] != string(approvalconsumer.FailurePermanent) || provenDetails["durable"] != durable ||
+		provenDetails["original_event_id"] != zeroEffectCandidate.OriginalEventID.String() ||
+		provenDetails["approval_epoch"] != float64(zeroEffectCandidate.ApprovalEpoch) {
+		t.Fatalf("zero-effect evidence is incomplete: %+v", provenDetails)
+	}
+	var zeroEffectFrom, zeroEffectTo, zeroEffectActor, zeroEffectReason string
+	if err := db.adminPool.QueryRow(ctx, `SELECT coalesce(from_status,''),to_status,actor_id,reason_code FROM public.approval_state_events
+WHERE approval_request_id=$1 AND to_status='INVALIDATED'`, zeroEffectRequest.ID).Scan(&zeroEffectFrom, &zeroEffectTo, &zeroEffectActor, &zeroEffectReason); err != nil {
+		t.Fatal(err)
+	}
+	if zeroEffectFrom != "EXECUTION_FAILED" || zeroEffectTo != "INVALIDATED" || zeroEffectActor != "account-approval-recovery" ||
+		zeroEffectReason != "RECOVERY_ZERO_EFFECT_PROVEN" {
+		t.Fatalf("zero-effect state event=%s -> %s by %s (%s)", zeroEffectFrom, zeroEffectTo, zeroEffectActor, zeroEffectReason)
+	}
+	// The transition is Account-only: no second domain attempt, no result, no
+	// rewrite of the original execution or its delivery binding.
+	var zeroEffectExecutionAfter, zeroEffectDeliveryAfter string
+	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(e)::text FROM public.approval_executions e WHERE e.approval_request_id=$1`, zeroEffectRequest.ID).Scan(&zeroEffectExecutionAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::text FROM account_approval_authorization.approval_delivery_states d WHERE d.original_event_id=$1`, zeroEffectCandidate.OriginalEventID).Scan(&zeroEffectDeliveryAfter); err != nil {
+		t.Fatal(err)
+	}
+	if zeroEffectExecutionAfter != zeroEffectExecutionBefore || zeroEffectDeliveryAfter != zeroEffectDeliveryBefore {
+		t.Fatalf("zero-effect invalidation rewrote domain state: execution=%s->%s delivery=%s->%s",
+			zeroEffectExecutionBefore, zeroEffectExecutionAfter, zeroEffectDeliveryBefore, zeroEffectDeliveryAfter)
+	}
+	var zeroEffectExecutions int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM public.approval_executions WHERE approval_request_id=$1`, zeroEffectRequest.ID).Scan(&zeroEffectExecutions); err != nil || zeroEffectExecutions != 1 {
+		t.Fatalf("zero-effect invalidation created another execution: count=%d err=%v", zeroEffectExecutions, err)
+	}
+	// The same evidence must never converge twice, through either surface.
+	if response := postZeroEffect(&recoveryEffectStub{state: approvaleffect.StateAbsent}, unconfirmed); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "APPROVAL_RECOVERY_CONFLICT") {
+		t.Fatalf("replayed zero-effect evidence converged again: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := repository.InvalidateOriginalApprovalZeroEffect(ctx, zeroEffectCandidate, zeroEffectLease); !errors.Is(err, ErrApprovalRecoveryZeroEffectConflict) {
+		t.Fatalf("replayed zero-effect evidence reached the repository: %v", err)
+	}
+	var zeroEffectEventsAfter int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM public.approval_state_events WHERE approval_request_id=$1`, zeroEffectRequest.ID).Scan(&zeroEffectEventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if zeroEffectEventsAfter != zeroEffectEventsBefore+1 {
+		t.Fatalf("zero-effect invalidation appended %d state events", zeroEffectEventsAfter-zeroEffectEventsBefore)
+	}
+	closed, err := repository.PlanProofApprovalRecovery(ctx, 5)
+	if err != nil || len(closed.Candidates) != 0 {
+		t.Fatalf("an invalidated request stayed in the recovery plan: %+v err=%v", closed, err)
 	}
 }
