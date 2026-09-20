@@ -214,7 +214,7 @@ GSA-19 Token目录申请受控写切片（仍PARTIAL / REVIEW_PENDING）：模�
 
 GSA-19 Token其余业务申请受控写切片（仍PARTIAL / REVIEW_PENDING）：模型计划生命周期和凭据撤销也复用同一Session锁BFF创建/详情/提交/只读恢复流程；三个Token业务入口不再直接调用Account v1创建/提交。定向合同和Portal构建通过，保留旧wire会话的完整v1详情校验与新wire的封闭详情校验。财务业务页、草稿编辑、替代申请及真实浏览器联调仍未交付。
 
-GSA-19 支付控制受控写切片（仍PARTIAL / REVIEW_PENDING）：Provider/Product恢复申请取消创建失败后的自动第二次写入，改走Session锁BFF；既有DRAFT须重读受控详情、验证版本1与SUBMIT动作后才能提交，未知提交仅携同一申请ID只读查证。新申请复用Token已验证的受控流程。此阶段支付控制的发现列表仍经原v1读取，钱包调整仍直连v1写，二者及业务草稿编辑/替代申请继续待接线；不宣称整项完成。
+GSA-19 支付控制受控写切片（仍PARTIAL / REVIEW_PENDING）：Provider/Product恢复申请取消创建失败后的自动第二次写入，改走Session锁BFF；既有DRAFT须重读受控详情、校验`SUBMIT`动作并按返回版本作`expected_version` CAS后提交，未知提交仅携同一申请ID只读查证。新申请复用Token已验证的受控流程。**口径修正（2026-09-20 独立审核）**：本行原文写作"验证版本1"，与冻结设计 §4.1 冲突——设计明确只有**审批中心的快捷提交**受"自创建后完全未修改"（版本1）限制，业务页 Update 成功后可按返回的新版本与最新`allowed_actions`再 precheck 并 submit，不因"已修改"被强制 fresh superseding；支付控制面板的"继续审批"属于后者，且既有合同用例 `admin-governed-approval-workflow.test.mjs` 已把 `DRAFT/version=2 → SUBMIT 成功` 钉死，故实现正确、原措辞过严，此处按设计收窄描述（审批中心的版本1限制见 GSA-18 动作矩阵）。若产品要求业务页也只能提交未修改草稿，需另行决策并同步服务端守卫与合同用例。此阶段支付控制的发现列表仍经原v1读取，钱包调整仍直连v1写，二者及业务草稿编辑/替代申请继续待接线；不宣称整项完成。
 
 GSA-19 钱包调整受控写切片（仍PARTIAL / REVIEW_PENDING）：保留Billing原生调整单创建与原请求幂等键，Account审批创建/详情重读/提交改走会话锁BFF；已有调整单的显式“继续审批”仍用同一申请幂等键，未知结果不会自动产生第二次写入。定向合同及Portal构建通过。钱包/支付控制的发现列表尚未迁移到受控读取，草稿编辑/替代申请和生产等价验收仍待完成。
 
