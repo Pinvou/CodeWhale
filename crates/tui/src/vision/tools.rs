@@ -209,8 +209,9 @@ impl ToolSpec for ImageAnalyzeTool {
     fn description(&self) -> &str {
         "Analyze an image using the configured vision model. \
          Supports PNG, JPEG, GIF, WebP, and BMP formats. \
-         The result includes the image's real pixel width and height; \
-         describe image size from that metadata instead of guessing by eye."
+         When the image header can be read, the result includes the image's \
+         real pixel width and height; describe image size from that metadata \
+         instead of guessing by eye."
     }
 
     fn input_schema(&self) -> Value {
