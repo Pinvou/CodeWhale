@@ -1157,6 +1157,7 @@
   }
   function purgeSessionBuffer(id) {
     if (typeof id !== "string" || !id) return;
+    cancelStreamTimers(id);
     delete sessionStates[id];
     // Real session deletion: any stashed draft is invalidated too and must not flow back into a rebuilt buffer with the same id.
     delete evictedSessionDrafts[id];
@@ -1740,7 +1741,7 @@
       }, authoritySyncBufferSnapshot(sid, buf)));
     }
   }
-  function onSessionEvent(e, fn) {
+  function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
       var eventBuffer = getBuffer(sid);
@@ -1752,7 +1753,7 @@
     }
     var isBg = sid && sid !== state.activeSessionId;
     runSyncOnSession(sid, fn);
-    if (isBg) notify();
+    if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
   function isScheduledRunSession(sid) {
     return !!sid && (
@@ -2130,6 +2131,10 @@
   var notificationDispatching = false;
   function notify() {
     if (suppressNotify) return;
+    // Any ordinary publication is a semantic stream boundary. Its snapshot
+    // already contains all accumulated text, so cancel the pending frame to
+    // avoid a duplicate callback after done/error/tool/session events.
+    cancelPendingStreamNotify(state.activeSessionId);
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -6170,7 +6175,96 @@
     }
   }
 
+  // Keep Web and Tauri streaming cadence aligned. requestAnimationFrame gives
+  // foreground rendering one update per paint; the timer keeps hidden tabs
+  // and throttled WebViews bounded. State is isolated per session so remote
+  // background streams cannot overwrite the visible working set.
+  var STREAM_NOTIFY_MAX_WAIT_MS = 32;
+  var pendingStreamNotifications = Object.create(null);
+  function cancelPendingStreamNotify(sid) {
+    if (!pendingStreamNotifications) return;
+    var pending = sid && pendingStreamNotifications[sid];
+    if (!pending) return;
+    if (pending.frame !== null && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(pending.frame);
+    }
+    if (pending.timer !== null && typeof clearTimeout === "function") clearTimeout(pending.timer);
+    delete pendingStreamNotifications[sid];
+  }
+  function scheduleStreamNotify(sid, firstDelta) {
+    if (!sid || firstDelta || typeof setTimeout !== "function") {
+      notify();
+      return;
+    }
+    if (pendingStreamNotifications[sid]) return;
+    var pending = { frame: null, timer: null };
+    pendingStreamNotifications[sid] = pending;
+    function publish() {
+      if (pendingStreamNotifications[sid] !== pending) return;
+      cancelPendingStreamNotify(sid);
+      var didRun = false;
+      var wasBackground = sid !== state.activeSessionId;
+      runSyncOnSession(sid, function () {
+        didRun = true;
+        notify();
+      });
+      if (didRun && wasBackground) notify();
+    }
+    if (typeof window.requestAnimationFrame === "function") {
+      pending.frame = window.requestAnimationFrame(publish);
+    }
+    pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+  }
+
+  // Markdown parsing is substantially heavier than snapshot publication in a
+  // real browser. Match the desktop bridge: render the first delta immediately
+  // and accumulate subsequent text behind one trailing-edge render per
+  // session. Every stream transition flushes synchronously before resetting
+  // the bubble, so final text and terminal cards cannot observe stale HTML.
+  var STREAM_RENDER_THROTTLE_MS = 180;
+  var streamRenderTimers = Object.create(null);
+  function renderStreamItemHtml() {
+    var item = state.chatItems.find(function (candidate) { return candidate.id === currentStreamId; });
+    if (!item) return false;
+    item.text = currentStreamText;
+    item.html = renderMarkdown(currentStreamText);
+    return true;
+  }
+  function flushPendingStreamRender() {
+    var sid = state.activeSessionId;
+    if (sid && streamRenderTimers[sid]) {
+      clearTimeout(streamRenderTimers[sid]);
+      delete streamRenderTimers[sid];
+    }
+    if (!currentStreamId || !currentStreamText) return false;
+    return renderStreamItemHtml();
+  }
+  function scheduleStreamRender(sid) {
+    if (!sid || typeof setTimeout !== "function") {
+      if (currentStreamId && currentStreamText) renderStreamItemHtml();
+      return;
+    }
+    if (streamRenderTimers[sid]) return;
+    streamRenderTimers[sid] = setTimeout(function () {
+      delete streamRenderTimers[sid];
+      var rendered = false;
+      runSyncOnSession(sid, function () {
+        if (!currentStreamId || !currentStreamText) return;
+        rendered = renderStreamItemHtml();
+      });
+      if (rendered) notify();
+    }, STREAM_RENDER_THROTTLE_MS);
+  }
+  function cancelStreamTimers(sid) {
+    cancelPendingStreamNotify(sid);
+    if (sid && streamRenderTimers[sid]) {
+      clearTimeout(streamRenderTimers[sid]);
+      delete streamRenderTimers[sid];
+    }
+  }
+
   function finalizeAssistantStreamBeforeReasoning() {
+    flushPendingStreamRender();
     flushPendingTextBlock();
     var item = state.chatItems.find(function (it) { return it.id === currentStreamId; });
     if (item) {
@@ -6219,10 +6313,11 @@
     if (!item) {
       item = startReasoningBlock(index);
     }
+    var firstDelta = !item.text;
     item.text += text;
     appendReasoningBlock(text);
-    notify();
-  }); });
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("chat:reasoning_done", function (e) { onSessionEvent(e, function () {
     var index = reasoningEventIndex(e);
@@ -6243,9 +6338,10 @@
     currentStreamText += text;
     // Update the streaming chat item
     var item = state.chatItems.find(function (it) { return it.id === currentStreamId; });
+    var firstDelta = !item;
     if (item) {
       item.text = currentStreamText;
-      item.html = renderMarkdown(currentStreamText);
+      if (!item.html) item.html = renderMarkdown(currentStreamText);
       item.streaming = true;
     } else {
       // New bubble needed (after tool card)
@@ -6259,8 +6355,9 @@
         streaming: true,
       });
     }
-    notify();
-  }); });
+    scheduleStreamRender(e.payload && e.payload.session_id || state.activeSessionId);
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("scheduled_task:run_updated", function (e) {
     scheduleScheduledRunRefresh();
@@ -6341,6 +6438,7 @@
     pendingAssistantBlocks.push({ type: "tool_use", id: p.id, name: p.name, input: p.args || {} });
 
     // Finalize current streaming bubble
+    flushPendingStreamRender();
     var streamItem = state.chatItems.find(function (it) { return it.id === currentStreamId; });
     if (streamItem) {
       streamItem.streaming = false;
@@ -6630,6 +6728,7 @@
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = terminalStatus === "interrupted" ||
         terminalStatus === "cancelled" || terminalStatus === "canceled";
+      flushPendingStreamRender();
       if (interrupted) preserveInterruptedAssistantPresentation();
       else flushAssistantMessageToHistory();
       // Refresh artifacts written in this turn in place when already presented.

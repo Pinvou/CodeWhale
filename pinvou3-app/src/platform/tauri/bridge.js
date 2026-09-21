@@ -1316,7 +1316,7 @@
       }, authoritySyncBufferSnapshot(sid, buf)));
     }
   }
-  function onSessionEvent(e, fn) {
+  function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
       var eventBuffer = getBuffer(sid);
@@ -1328,7 +1328,7 @@
     }
     var isBg = sid && sid !== state.activeSessionId;
     runSyncOnSession(sid, fn);
-    if (isBg) notify();
+    if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
   function isScheduledRunSession(sid) {
     return !!sid && (
