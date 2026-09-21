@@ -17540,6 +17540,150 @@ fn forkguard_subagent_projection_outer_handle_reaches_summary_row() {
     );
 }
 
+// Upstream 0c03b5a81 lets every compact status row carry the typed
+// `child_route` receipt, but the fork row summarizer dropped the field: the
+// unscoped fleet surface never told the model which provider/model each
+// child actually ran on. The row renderer must print a short `route:` line
+// when the receipt is present and stay silent when it is not — and stay
+// bounded even when a producer hands it an oversized receipt.
+#[test]
+fn forkguard_fleet_summary_rows_carry_bounded_child_route() {
+    let long_label = "p".repeat(400);
+    let fleet = json!({
+        "action": "status",
+        "count": 3,
+        "agents": [
+            {"agent_id": "agent_aaaa1111", "agent_type": "explore", "status": "Running",
+             "assignment": {"objective": "Map the rendering path"},
+             "child_route": {
+                 "requested_type": "explore",
+                 "resolved_profile_id": "conn-main",
+                 "canonical_role": "general",
+                 "provider_id": "atlas-main",
+                 "model_id": "gpt-5",
+                 "route_source": "requested_model",
+                 "requested_reasoning": "medium",
+                 "runtime_version": "1.0.0",
+                 "runtime_build_sha": "abc123"
+             }},
+            {"agent_id": "agent_bbbb2222", "agent_type": "test", "status": "Completed",
+             "result": "12 tests green",
+             "child_route": {
+                 "provider_id": long_label,
+                 "model_id": long_label,
+                 "route_source": long_label,
+                 "resolved_profile_id": long_label
+             }},
+            {"agent_id": "agent_cccc3333", "agent_type": "general", "status": "Completed",
+             "result": "done"}
+        ]
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(fleet));
+
+    assert!(
+        context.contains("  route: atlas-main/gpt-5 (source=requested_model, profile=conn-main)"),
+        "a row with a child_route receipt must print its provider/model routing:\n{context}"
+    );
+    let route_lines: Vec<&str> = context
+        .lines()
+        .filter(|line| line.trim_start().starts_with("route:"))
+        .collect();
+    assert_eq!(
+        route_lines.len(),
+        2,
+        "exactly the two rows that carry a receipt print a route line; a row \
+         without one must not get an empty placeholder:\n{context}"
+    );
+    for line in &route_lines {
+        assert!(
+            line.chars().count() <= 200,
+            "every route line must stay bounded:\n{line}"
+        );
+    }
+    assert!(
+        route_lines[1].contains("..."),
+        "oversized route fields must be preview-truncated:\n{}",
+        route_lines[1]
+    );
+}
+
+// The addressed projection wraps the result row in a `snapshot` envelope;
+// the route read must survive that unwrap (the wrapped `SubAgentResult`
+// carries its own receipt), fall through to the envelope when the wrapped
+// row predates the field, and tolerate a bare string label.
+#[test]
+fn forkguard_subagent_projection_child_route_reaches_summary_row() {
+    let envelope_route = json!({
+        "provider_id": "atlas-main",
+        "model_id": "gpt-5",
+        "route_source": "requested_model"
+    });
+    let wrapped = json!({
+        "name": "scout",
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "child_route": envelope_route,
+        "snapshot": {
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": "mapped the rendering path",
+            "child_route": {
+                "provider_id": "inner-provider",
+                "model_id": "inner-model",
+                "route_source": "fallback"
+            }
+        }
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(wrapped));
+    assert!(
+        context.contains("  route: inner-provider/inner-model (source=fallback)"),
+        "the wrapped row's route must reach the visible summary:\n{context}"
+    );
+
+    let envelope_only = json!({
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "child_route": envelope_route,
+        "snapshot": {
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": "done"
+        }
+    })
+    .to_string();
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(envelope_only),
+    );
+    assert!(
+        context.contains("  route: atlas-main/gpt-5"),
+        "the envelope route must fall through when the wrapped row lacks one:\n{context}"
+    );
+
+    let string_route = json!({
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "child_route": "atlas-main/gpt-5"
+    })
+    .to_string();
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(string_route),
+    );
+    assert!(
+        context.contains("  route: atlas-main/gpt-5"),
+        "a bare string route label must still print, bounded:\n{context}"
+    );
+}
+
 // The hint names `transcript_handle`, so it must gate on rows the summarizer
 // actually renders: past the eighth snapshot the receipt truncates, and a
 // handle stranded on a truncated row would print no value at all — a phantom
