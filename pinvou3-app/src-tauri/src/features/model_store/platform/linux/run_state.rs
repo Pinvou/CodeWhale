@@ -1,8 +1,8 @@
 //! 跨 command 共享的运行时状态。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
@@ -220,13 +220,19 @@ mod tests {
         // 同一张卡再来任何操作都要被拦下，并且要说清楚正在干什么
         let err = ops.try_begin("card-a", OP_ENABLE).unwrap_err();
         assert!(err.contains("启用"), "错误信息要点明正在进行的操作：{err}");
-        assert!(ops.try_begin("card-a", OP_STOP).is_err(), "启用期间不该放行停用");
+        assert!(
+            ops.try_begin("card-a", OP_STOP).is_err(),
+            "启用期间不该放行停用"
+        );
 
         // 别的卡不受影响
         assert!(ops.try_begin("card-b", OP_DOWNLOAD).is_ok());
 
         ops.finish("card-a");
-        assert!(ops.try_begin("card-a", OP_DEPLOY).is_ok(), "结束后应能再次占坑");
+        assert!(
+            ops.try_begin("card-a", OP_DEPLOY).is_ok(),
+            "结束后应能再次占坑"
+        );
     }
 
     #[test]

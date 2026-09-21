@@ -126,6 +126,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
   const tasks = useLmmTasks();
   const toastTimerRef = useRef(null);
+  // 当前有效的那次加载。见 loadAll —— 并发加载时用它丢掉过期响应。
+  const loadTokenRef = useRef(0);
 
   const showToast = useCallback((text) => {
     setToast({ text });
@@ -148,9 +150,19 @@ const ModelStoreView = ({ theme, t, bs }) => {
   }, []);
 
   const loadAll = useCallback(async () => {
+    // 这一次加载的序号。慢的旧响应落地时能认出自己已经过期,直接丢掉。
+    //
+    // 没有这道闸门时:切数据源胶囊(testMode 变化 → effect 重跑)、加载中点刷新、
+    // 或者后台任务完成触发的 loadAll 跟用户操作撞在一起,都会产生并发请求;
+    // 先发的那个若后回来,就会把新数据覆盖成旧数据——界面显示的卡片跟当前
+    // 数据源对不上,而 loading 早被先落地的那个复位了,看不出还有请求在飞。
+    // 同 PR 的 ModelDetailDialog 用的是同一个套路(loadTokenRef)。
+    const token = (loadTokenRef.current += 1);
+    const stale = () => token !== loadTokenRef.current;
     setLoading(true);
     try {
       const [cardList, libraryList] = await Promise.all([fetchStoreCards(testMode), fetchLibrary()]);
+      if (stale()) return;
       setCards(Array.isArray(cardList) ? cardList : []);
       setLibrary(libraryList || EMPTY_LIBRARY);
       setDataError(null);
@@ -159,9 +171,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
       const corrected = libraryList?.corrected ?? [];
       if (corrected.length > 0) showToast(copy.corrected(corrected[0]));
     } catch (error) {
-      setDataError(String(error?.message || error));
+      // 过期请求的失败也要丢掉:否则切到测试商店之后,正式商店那次的超时
+      // 会把已经加载好的测试商店列表打成错误态。
+      if (!stale()) setDataError(String(error?.message || error));
     } finally {
-      setLoading(false);
+      // loading 只由最后一次加载复位,否则先回来的旧请求会把转圈提前关掉。
+      if (!stale()) setLoading(false);
     }
   }, [copy, showToast, testMode]);
 
@@ -752,6 +767,9 @@ const ModelStoreView = ({ theme, t, bs }) => {
         cardId={detailCardId}
         copy={copy}
         theme={theme}
+        // 接入前要拿它查重：同一个本地模型重复接入会在品悟的模型列表里多出
+        // 一行指向同一个服务的死数据（见 ModelDetailDialog.useInPinvou）。
+        savedModels={bs?.savedModels}
         onToast={showToast}
         onClose={() => setDetailCardId(null)}
         onRedeploy={(record) => {

@@ -22,7 +22,7 @@
 //! | `import_scan` | 下载前去哪找已在本机的权重（可配的搜索根目录） |
 //! | `test_store_data` | 内置测试商店的卡片数据（脚本正文编进二进制） |
 //!
-//! 相对 LMM **刻意没有搬**的：`admin.rs`（1880 行，本地 HTTP 管理接口——那是 sidecar
+//! 相对 LMM **刻意没有搬**的：`admin.rs`（上游 919 行，本地 HTTP 管理接口——那是 sidecar
 //! 形态的产物，原生实现后前端直接走 Tauri 命令）、`updater.rs`（LMM 自己的 OTA，
 //! 品悟有自己的更新机制）、`gateway.rs` / `worker.rs` / `system_probe.rs`（分别是
 //! 局域网暴露、双机从机控制、硬件探测，排在后面的阶段）。
@@ -43,9 +43,10 @@ pub mod test_store_data;
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。
 pub use service::{
-    answer_run, api_keys, cancel_run, create_api_key, disable_test_store, force_remove, library,
-    list_cards, model_detail, run_log, set_storage_settings, start_deploy, start_download,
-    start_lifecycle, storage_settings, test_store_state, unlock_test_store, ModelStoreService,
+    ModelStoreService, answer_run, api_keys, cancel_run, create_api_key, disable_test_store,
+    force_remove, library, list_cards, model_detail, run_log, run_startup_cleanup,
+    set_storage_settings, start_deploy, start_download, start_lifecycle, storage_settings,
+    take_startup_cleanup, test_store_state, unlock_test_store,
 };
 
 /// Linux 上模型商店总是可用的。

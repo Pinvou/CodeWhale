@@ -34,14 +34,27 @@ function makeModelId() {
  *   模型会以 `credential_state: missing` 存下来，而品悟的探测会把这种状态误判成
  *   generic 类型。错得很隐蔽。
  * @param {{modelName: string, displayName: string, baseUrl: string,
- *          apiKey?: string|null, contextWindow?: number|null}} input 入参。
+ *          apiKey?: string|null, contextWindow?: number|null,
+ *          existingId?: string|null}} input 入参。
  * @returns {object} 可直接交给 bridge.models.saveModel 的一行配置。
  */
-function buildSavedModel({ modelName, displayName, baseUrl, apiKey = null, contextWindow = null }) {
+function buildSavedModel({
+  modelName,
+  displayName,
+  baseUrl,
+  apiKey = null,
+  contextWindow = null,
+  existingId = null,
+}) {
   if (!modelName) throw new Error('missing modelName');
   if (!baseUrl) throw new Error('missing baseUrl');
   return {
-    id: makeModelId(),
+    // 传了 existingId 就是**更新**那一行，不传才新建。
+    //
+    // 不给这个出口的话，每次接入都是一个新 id：同一个本地模型被接入两次，
+    // 品悟的模型列表里就有两行指向同一个服务，用户分不出哪个是哪个，而且
+    // 每次接入都会把新的那行设为当前模型。
+    id: existingId || makeModelId(),
     name: displayName,
     preset: 'openai_compatible',
     provider_kind: 'custom',

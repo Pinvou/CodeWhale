@@ -126,3 +126,11 @@ pub fn set_storage_settings(
 ) -> Result<Value, String> {
     nope()
 }
+
+/// 非 Linux 上没有脚本进程可收，直接返回。**不报错**：这是启动路径，
+/// 一个平台不支持的功能不该让应用启动时冒出一句错误。
+pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
+
+pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
+    nope()
+}

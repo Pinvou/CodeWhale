@@ -10,10 +10,17 @@
 //! H3C MegaCube / NVIDIA GB10（ARM64 Linux）。Windows 和 macOS 上这些前提
 //! 一个都不成立，所以那边只给一个 `available: false` 的桩，侧栏入口整个不渲染。
 
+// 两边都必须是 `pub mod`，不能一边 pub 一边私有。
+//
+// 下面那两行是**模块级 re-export**（`use <模块> as backend`），rustc 对非 pub 模块
+// 的模块级 re-export 无条件报 E0365。写成私有 `mod unsupported;` 时，Linux 上根本
+// 编不到这一支所以一直没露头，而 Windows/macOS 一编就是 E0365 加 20 处级联 E0603。
+//
+// 提成 pub 不会让任何名字逃出 crate：`platform` 和 `model_store` 这两层本身都是私有的。
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(not(target_os = "linux"))]
-mod unsupported;
+pub mod unsupported;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux as backend;

@@ -273,7 +273,10 @@ impl ScriptsSource {
             });
         }
 
-        let dir = config::data_dir().join("cards").join(card_id);
+        // card_id 来自商店响应，直接 join 的话 `../` 或绝对路径会整体逃出 cards 目录。
+        let safe_id = config::safe_path_component(card_id)
+            .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
+        let dir = config::data_dir().join("cards").join(safe_id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
 
@@ -293,7 +296,10 @@ impl ScriptsSource {
     }
 
     /// 单文件形态：把入口脚本落成一个可执行临时文件。
-    fn materialize_entry(&self, script_type: &str) -> Result<std::path::PathBuf, ModelManagerError> {
+    fn materialize_entry(
+        &self,
+        script_type: &str,
+    ) -> Result<std::path::PathBuf, ModelManagerError> {
         script_runner::materialize_script(&self.entry_content(script_type)?)
             .map_err(ModelManagerError::from)
     }
@@ -340,8 +346,14 @@ impl ScriptsSource {
             } => {
                 let mut out = BTreeMap::new();
                 for (path, url) in assets {
-                    let expected = asset_sha256.as_ref().and_then(|h| h.get(path)).map(|s| s.as_str());
-                    out.insert(path.clone(), script_runner::fetch_script_content(url, expected)?);
+                    let expected = asset_sha256
+                        .as_ref()
+                        .and_then(|h| h.get(path))
+                        .map(|s| s.as_str());
+                    out.insert(
+                        path.clone(),
+                        script_runner::fetch_script_content(url, expected)?,
+                    );
                 }
                 Ok(out)
             }
@@ -587,7 +599,11 @@ impl ModelManager {
         };
         let mut total = 0u64;
         for entry in entries.flatten() {
-            let cache = entry.path().join(".cache").join("huggingface").join("download");
+            let cache = entry
+                .path()
+                .join(".cache")
+                .join("huggingface")
+                .join("download");
             if cache.is_dir() {
                 total += collect_incomplete(&cache, delete);
             }
@@ -600,12 +616,28 @@ impl ModelManager {
         self.scan_download_cache(true)
     }
 
+    /// 下载前的余量预检查。
+    ///
+    /// **两个目录都要查，而且以更紧的那个为准。** 权重最终落在 `models_dir`，
+    /// 下载过程中的临时块落在 `staging_dir`——这两个现在默认同盘，所以只查一个
+    /// 也没炸过；但 `models_dir` 是设置页可以单独改到另一块盘的（「几十上百 GB
+    /// 的权重，用户很可能想放到别的盘」正是那个设置存在的理由）。
+    ///
+    /// 只查 staging 的后果是双向的：外部盘满了却放行，下到一半 ENOSPC；
+    /// 或者 staging 盘小、目标盘很空，平白把用户拦住。
     pub fn check_can_download(&self, size_bytes: u64) -> disk::SpaceCheck {
-        let check = disk::check_space(
-            &self.settings.staging_path(),
-            size_bytes,
-            self.settings.min_free_space_gb,
-        );
+        let staging = self.settings.staging_path();
+        let models = self.settings.models_path();
+        let mut check = disk::check_space(&staging, size_bytes, self.settings.min_free_space_gb);
+        // 同一块盘就不必查第二遍（绝大多数情况）。不比较挂载点而比较余量：
+        // 拿到同一个 free_bytes 基本就是同一个文件系统，而判断挂载点要读
+        // /proc/mounts 再做前缀匹配，为这点收益不值当。
+        if check.ok && models != staging {
+            let target = disk::check_space(&models, size_bytes, self.settings.min_free_space_gb);
+            if !target.ok {
+                check = target;
+            }
+        }
         if !check.ok {
             return check;
         }
@@ -783,9 +815,11 @@ impl ModelManager {
         let env = self.env_for_card(&card, &model_name);
 
         // 仅供最后 toast 提示措辞参考，不用来决定要不要跑脚本
-        let engine_reused = db::is_engine_installed(&card.summary.engine_name,
-                                            card.summary.engine_version.as_deref())
-            .unwrap_or(false);
+        let engine_reused = db::is_engine_installed(
+            &card.summary.engine_name,
+            card.summary.engine_version.as_deref(),
+        )
+        .unwrap_or(false);
         let model_reused = db::get_store_model(&card.summary.id)
             .ok()
             .flatten()
@@ -826,7 +860,10 @@ impl ModelManager {
             }
         };
 
-        on_progress(&format!("检查 {} 引擎是否已安装…", card.summary.engine_name));
+        on_progress(&format!(
+            "检查 {} 引擎是否已安装…",
+            card.summary.engine_name
+        ));
         // install_engine 需要 root（pkexec，每次都要输管理员密码）。所以先以普通
         // 用户身份跑一个只读探针（install_engine 读到 LMM_PROBE_ONLY=1 时只做
         // "装没装"检查、不发任何安装动作）：命中就跳过 root 步，避免每次下载都为
@@ -843,11 +880,13 @@ impl ModelManager {
         // 的哈希：跟上次成功执行的那份不一样，就算引擎在也要重跑一遍，把新的
         // 部署包刷下去。
         let current_hash = source.script_hash("install_engine");
-        let recorded_hash = db::get_installed_engine(&card.summary.engine_name,
-                                                    card.summary.engine_version.as_deref())
-            .ok()
-            .flatten()
-            .and_then(|r| r.install_script_sha256);
+        let recorded_hash = db::get_installed_engine(
+            &card.summary.engine_name,
+            card.summary.engine_version.as_deref(),
+        )
+        .ok()
+        .flatten()
+        .and_then(|r| r.install_script_sha256);
         let script_changed = match (&current_hash, &recorded_hash) {
             (Some(cur), Some(old)) => cur != old,
             // 记录里没有哈希（老版本装的）就不强制重跑，避免所有老用户平白
@@ -943,7 +982,11 @@ impl ModelManager {
                     "  {}（{}{}）",
                     c.path.display(),
                     disk::format_bytes(c.bytes as f64),
-                    if c.removable { "，可移动介质" } else { "" }
+                    if c.removable {
+                        "，可移动介质"
+                    } else {
+                        ""
+                    }
                 ));
             }
             if candidates.len() > 8 {
@@ -953,7 +996,10 @@ impl ModelManager {
         env.insert(
             "LMM_IMPORT_CANDIDATES".into(),
             import_scan::encode_dirs(
-                &candidates.iter().map(|c| c.path.clone()).collect::<Vec<_>>(),
+                &candidates
+                    .iter()
+                    .map(|c| c.path.clone())
+                    .collect::<Vec<_>>(),
             ),
         );
 
@@ -986,7 +1032,11 @@ impl ModelManager {
             status: &status,
             profiles: &card.profiles,
             deploy_topology: card.summary.deploy_topology,
-            card_source: if self.builtin_store { "builtin" } else { "store" },
+            card_source: if self.builtin_store {
+                "builtin"
+            } else {
+                "store"
+            },
         })
         .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
 
@@ -1130,7 +1180,10 @@ impl ModelManager {
     ) -> Result<Vec<String>, ModelManagerError> {
         // Local 来源直接落盘本地副本执行，全程不联网；Remote 才会下载+校验哈希。
         // 多文件卡片会把整棵文件树落到卡片目录，并以该目录为工作目录执行。
-        let card_id = env.get("LMM_CARD_ID").map(|s| s.as_str()).unwrap_or("unknown");
+        let card_id = env
+            .get("LMM_CARD_ID")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let prepared = source.prepare(card_id, script_type)?;
         let label = script_run_label(script_type, env);
         let mut relay = |p: ScriptProgress| {
@@ -1329,11 +1382,12 @@ impl ModelManager {
         &self,
         card: &StoreCardDetail,
     ) -> Result<CardPackage, ModelManagerError> {
-        let fetch = |url: &str, expected: Option<&str>| -> Result<db::ScriptBlob, ModelManagerError> {
-            let content = script_runner::fetch_script_content(url, expected)?;
-            let sha256 = script_runner::sha256_hex(&content);
-            Ok(db::ScriptBlob { content, sha256 })
-        };
+        let fetch =
+            |url: &str, expected: Option<&str>| -> Result<db::ScriptBlob, ModelManagerError> {
+                let content = script_runner::fetch_script_content(url, expected)?;
+                let sha256 = script_runner::sha256_hex(&content);
+                Ok(db::ScriptBlob { content, sha256 })
+            };
 
         let mut scripts = BTreeMap::new();
         for (script_type, url) in &card.scripts {
@@ -1394,9 +1448,10 @@ impl ModelManager {
             if card.script_sha256.is_empty() {
                 continue; // 商店没给哈希（老后台），无从比较
             }
-            let changed = card.script_sha256.iter().any(|(t, h)| {
-                m.scripts_content.get(t).map(|b| &b.sha256) != Some(h)
-            });
+            let changed = card
+                .script_sha256
+                .iter()
+                .any(|(t, h)| m.scripts_content.get(t).map(|b| &b.sha256) != Some(h));
             if changed {
                 outdated.push(OutdatedCard {
                     card_id: m.card_id.clone(),
@@ -1422,14 +1477,15 @@ impl ModelManager {
         let rec = self.get_record(card_id)?;
         let card = self.store.get_card(card_id)?;
         let pkg = self.fetch_and_store_scripts(&card)?;
-        let changed = pkg.scripts.len() != rec.scripts_content.len()
-            || pkg.assets.len() != rec.assets_content.len()
-            || pkg.scripts.iter().any(|(k, v)| {
-                rec.scripts_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
-            })
-            || pkg.assets.iter().any(|(k, v)| {
-                rec.assets_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
-            });
+        let changed =
+            pkg.scripts.len() != rec.scripts_content.len()
+                || pkg.assets.len() != rec.assets_content.len()
+                || pkg.scripts.iter().any(|(k, v)| {
+                    rec.scripts_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
+                })
+                || pkg.assets.iter().any(|(k, v)| {
+                    rec.assets_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
+                });
         if changed {
             db::set_scripts_content(card_id, &pkg.scripts, &pkg.assets)
                 .map_err(|e| ModelManagerError::new(format!("保存脚本副本失败：{e}")))?;
@@ -1784,12 +1840,17 @@ impl ModelManager {
                 candidates.push(models_dir.join(base));
             }
         }
-        // 有些卡按用户起的模型名建目录，一并看一眼
-        if !rec.model_name.is_empty() {
-            candidates.push(models_dir.join(&rec.model_name));
+        // 有些卡按用户起的模型名建目录，一并看一眼。同样要过一遍校验：
+        // model_name 由 suggest_model_name 从卡片名推导，理论上能推出 ".."。
+        if let Ok(safe_name) = config::safe_path_component(&rec.model_name) {
+            candidates.push(models_dir.join(safe_name));
         }
-        // 部署包（compose/scripts/runtime/cache 都在里面），install_engine 落的
-        candidates.push(config::data_dir().join("vendor").join(&rec.card_id));
+        // 部署包（compose/scripts/runtime/cache 都在里面），install_engine 落的。
+        // 这里在算"要删哪些目录"，逃出去的路径意味着删错地方，比落错地方更糟——
+        // 校验不过就整个不加，宁可漏删也不能乱删。
+        if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+            candidates.push(config::data_dir().join("vendor").join(safe_id));
+        }
 
         let mut out: Vec<PathBuf> = Vec::new();
         for p in candidates {
@@ -1819,8 +1880,11 @@ impl ModelManager {
                 } else {
                     0
                 };
-                let affected = db::list_model_names_using_engine(&rec.engine_name, rec.engine_version.as_deref())
-                    .unwrap_or_default();
+                let affected = db::list_model_names_using_engine(
+                    &rec.engine_name,
+                    rec.engine_version.as_deref(),
+                )
+                .unwrap_or_default();
                 InstalledEngineInfo {
                     engine_name: rec.engine_name,
                     engine_version: rec.engine_version,
@@ -1882,8 +1946,19 @@ impl ModelManager {
                 &HashMap::new(),
                 RunScriptOptions {
                     need_root: true,
-                    timeout: Some(Duration::from_secs(60)),
-                    idle_timeout: Some(Duration::from_secs(30)),
+                    // 跟 uninstall 同一档（LONG_RUNNING_IDLE_TIMEOUT，1800 秒）。
+                    //
+                    // 这个脚本是 `rm -rf ~/.ollama`：常有几十 GB，而且**全程零输出**。
+                    // 原来是 60 秒绝对 + 30 秒静默——静默 30 秒就 SIGKILL，磁盘被删到
+                    // 一半，而 `result?` 让引擎记录留在库里；引擎删除又没有 force_remove
+                    // 那样的逃生出口，用户从此卡死。
+                    //
+                    // 这正是 idle_timeout_for 把 uninstall 单独提到 1800 秒的那条教训
+                    // （本文件 :398 的注释里复盘过），同一个坑不该在隔壁再踩一遍。
+                    // 眼下 delete_engine 还没注册成命令、用户够不着，但代码已经在库里，
+                    // 接线的那天就会踩。
+                    timeout: None,
+                    idle_timeout: Some(LONG_RUNNING_IDLE_TIMEOUT),
                     ..Default::default()
                 },
             );
@@ -1949,7 +2024,10 @@ impl ModelManager {
         {
             if m.get("name").and_then(|v| v.as_str()) == Some(rec.model_name.as_str()) {
                 let size_vram = m.get("size_vram").and_then(|v| v.as_u64()).unwrap_or(0);
-                let mut lines = vec![format!("显存占用：{}", disk::format_bytes(size_vram as f64))];
+                let mut lines = vec![format!(
+                    "显存占用：{}",
+                    disk::format_bytes(size_vram as f64)
+                )];
                 if let Some(expires) = m.get("expires_at").and_then(|v| v.as_str()) {
                     lines.push(format!("到期自动卸载时间：{expires}"));
                 }
@@ -2039,7 +2117,12 @@ fn docker_image_size(image: &str) -> u64 {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
         .unwrap_or(0)
 }
 
@@ -2140,7 +2223,10 @@ mod tests {
         // 期望值是用 Python 版逐字符对拍出来的（")" 被换成 "-" 后跟原有的 "-"
         // 形成 "--"，Python 的 re.sub 就是这个行为，必须保持一致）
         assert_eq!(
-            suggest_model_name(&make_card("Qwen3.8-27B (NVFP4 + Native MTP)", Some("NVFP4"))),
+            suggest_model_name(&make_card(
+                "Qwen3.8-27B (NVFP4 + Native MTP)",
+                Some("NVFP4")
+            )),
             "qwen3.8-27b-nvfp4-native-mtp--nvfp4"
         );
         assert_eq!(suggest_model_name(&make_card("Simple", None)), "simple");
@@ -2156,7 +2242,10 @@ mod tests {
             "已取消",
             "脚本完整性校验失败：实际内容与商店登记的不一致",
         ] {
-            assert!(ModelManager::is_fatal_failure(fatal), "应判定为致命：{fatal}");
+            assert!(
+                ModelManager::is_fatal_failure(fatal),
+                "应判定为致命：{fatal}"
+            );
         }
         // 网络类失败：不自动重试（用户要自己掌控），但要明确告诉用户进度保留了
         for resumable in [
@@ -2187,7 +2276,7 @@ echo LMM_NEED_ROOT=1
 echo 'probe: engine missing' >&2
 exit 1
 "
-                        .to_string(),
+                    .to_string(),
                     sha256: String::new(),
                 },
             )]
@@ -2213,7 +2302,8 @@ exit 1
                     content: "#!/bin/sh
 echo 'probe: engine present'
 exit 0
-".to_string(),
+"
+                    .to_string(),
                     sha256: String::new(),
                 },
             )]
@@ -2238,8 +2328,7 @@ exit 0
         // 当场拒绝。它们需要提权的动作（注册 nvidia runtime、配直连网卡）由
         // 脚本自己在内部处理——所以这里只钉住探针约定，不强求 root 声明。
         for card in super::super::test_store_data::test_cards() {
-            let script =
-                super::super::test_store_data::script_content(&card, "install_engine")
+            let script = super::super::test_store_data::script_content(&card, "install_engine")
                 .expect("每张卡都该有 install_engine");
             assert!(
                 script.contains("LMM_PROBE_ONLY"),
@@ -2286,25 +2375,21 @@ exit 0
         }
         // stop 不放宽：compose down 一路都在打印容器停止进度，真静默五分钟就是
         // 卡住了。全都放宽等于这个阈值形同虚设。
-        assert_eq!(idle_timeout_for("stop"), None, "停用是快操作，要保留默认阈值");
+        assert_eq!(
+            idle_timeout_for("stop"),
+            None,
+            "停用是快操作，要保留默认阈值"
+        );
         assert_eq!(idle_timeout_for("download_model"), None);
     }
 
     /// db 测试同款：环境变量是进程全局的，而测试默认多线程并行，必须拿
     /// `config::ENV_TEST_LOCK` 串行化，否则两个测试会互相把数据目录切走。
-    fn setup_temp_db() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
-        let guard = config::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
-        // 只认 HOME。这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
-        // 原生化之后没有任何生产代码再读它，设了等于没隔离，测试会直接读写开发机
-        // 上真实的 ~/.pinvou3/model-store。
-        //
-        // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
-        // 这里由 ENV_TEST_LOCK 串行化（那是一把跨模块唯一的锁，见 config.rs）。
-        unsafe { std::env::set_var("HOME", dir.path()) };
+    fn setup_temp_db() -> config::TempHome {
+        // TempHome 自带那把跨模块的锁，并在析构时把 HOME 还原回去。
+        let home = config::TempHome::new();
         db::init_db().unwrap();
-        (guard, dir)
+        home
     }
 
     fn add_stuck_record(card_id: &str, repo: &str, size: i64) {
@@ -2346,7 +2431,7 @@ exit 0
     /// ——只清记录不报残留，那几十 GB 就变成谁也不知道的孤儿。
     #[test]
     fn force_remove_clears_the_record_and_names_what_is_still_on_disk() {
-        let (_ctx, tmp) = setup_temp_db();
+        let tmp = setup_temp_db();
         let models_dir = tmp.path().join("models");
         // 半删现场：目录还在、config.json 已经被删掉了（所以重试必然 die）
         let weights = models_dir.join("Ornith-1.5-35B-A3B");
@@ -2355,7 +2440,9 @@ exit 0
         add_stuck_record("card-stuck", "Org/Ornith-1.5-35B-A3B", 168_000_000_000);
         let mgr = manager_with_models_dir(&models_dir);
 
-        let removal = mgr.force_remove_record("card-stuck").expect("应当能强制移除");
+        let removal = mgr
+            .force_remove_record("card-stuck")
+            .expect("应当能强制移除");
         assert!(
             db::get_store_model("card-stuck").unwrap().is_none(),
             "记录必须真的从库里消失，否则卡片还是赖着"
@@ -2389,9 +2476,13 @@ exit 0
     /// 一个字节都没删，任何情况下都不能给出"已回收空间"的暗示。
     #[test]
     fn force_remove_never_claims_the_disk_is_clean() {
-        let (_ctx, tmp) = setup_temp_db();
+        let tmp = setup_temp_db();
         let models_dir = tmp.path().join("models");
-        add_stuck_record("card-elsewhere", "Org/Weights-Somewhere-Else", 133_000_000_000);
+        add_stuck_record(
+            "card-elsewhere",
+            "Org/Weights-Somewhere-Else",
+            133_000_000_000,
+        );
 
         let removal = manager_with_models_dir(&models_dir)
             .force_remove_record("card-elsewhere")
@@ -2451,7 +2542,7 @@ exit 0
     ///      绝不能像改之前那样把 card.json 里登记的 67GB 当成回收量报上去。
     #[test]
     fn keeping_the_weights_leaves_them_on_disk_and_reports_no_space_reclaimed() {
-        let (_ctx, tmp) = setup_temp_db();
+        let tmp = setup_temp_db();
         let models_dir = tmp.path().join("models");
         let weights = models_dir.join("Ornith-1.5-35B-A3B");
         make_fake_weights(&weights, 4096);
@@ -2485,7 +2576,10 @@ exit 0
             "登记体积照旧回报，但它在另一个字段里，不会被当成回收量"
         );
         assert!(
-            outcome.remaining_paths.iter().any(|p| p.ends_with("Ornith-1.5-35B-A3B")),
+            outcome
+                .remaining_paths
+                .iter()
+                .any(|p| p.ends_with("Ornith-1.5-35B-A3B")),
             "保留下来的权重目录要点名报出来：{:?}",
             outcome.remaining_paths
         );
@@ -2509,8 +2603,14 @@ exit 0
             "部署痕迹要一起清干净，否则界面会把一个不存在的服务显示成已部署"
         );
         assert!(rec.container_name.is_none(), "容器已删，容器名不能留");
-        assert!(rec.endpoint_url.is_none(), "服务地址已失效，不能留给网关继续转发");
-        assert!(outcome.record_kept, "record_kept 要如实告诉调用方卡片还在库里");
+        assert!(
+            rec.endpoint_url.is_none(),
+            "服务地址已失效，不能留给网关继续转发"
+        );
+        assert!(
+            outcome.record_kept,
+            "record_kept 要如实告诉调用方卡片还在库里"
+        );
         assert!(
             outcome.summary.contains("仍在模型库"),
             "这句话要让用户知道卡片还在、可以直接重新部署：{}",
@@ -2526,7 +2626,7 @@ exit 0
     /// 差好几个数量级，一旦有人把 freed_bytes 换回登记值，这条会当场红。
     #[test]
     fn purging_the_weights_really_deletes_them_and_reports_measured_bytes() {
-        let (_ctx, tmp) = setup_temp_db();
+        let tmp = setup_temp_db();
         let models_dir = tmp.path().join("models");
         let weights = models_dir.join("Ornith-1.5-35B-A3B");
         let real_bytes = make_fake_weights(&weights, 4096);
@@ -2573,7 +2673,7 @@ exit 0
     /// 带着错误的认知去清理磁盘。结论必须来自**卸完之后磁盘的实际样子**。
     #[test]
     fn a_card_that_ignores_the_flag_cannot_make_us_claim_the_weights_are_gone() {
-        let (_ctx, tmp) = setup_temp_db();
+        let tmp = setup_temp_db();
         let models_dir = tmp.path().join("models");
         let weights = models_dir.join("Ornith-1.5-35B-A3B");
         make_fake_weights(&weights, 4096);
@@ -2597,7 +2697,10 @@ exit 0
 
         assert_eq!(outcome.freed_bytes, 0, "脚本什么都没删，就不能报释放量");
         assert!(
-            outcome.remaining_paths.iter().any(|p| p.ends_with("Ornith-1.5-35B-A3B")),
+            outcome
+                .remaining_paths
+                .iter()
+                .any(|p| p.ends_with("Ornith-1.5-35B-A3B")),
             "还在盘上的权重必须被点名，否则这几十 GB 就成了没人知道的孤儿：{:?}",
             outcome.remaining_paths
         );

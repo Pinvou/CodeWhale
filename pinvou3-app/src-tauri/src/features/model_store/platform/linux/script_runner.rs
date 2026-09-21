@@ -15,14 +15,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{kill, killpg, Signal};
+use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 
-use super::errors::{humanize_script_message, AppError};
+use super::errors::{AppError, humanize_script_message};
 
 pub type ScriptError = AppError;
 
@@ -134,7 +134,9 @@ pub struct RunControl {
 
 impl RunControl {
     pub fn cancelled(&self) -> bool {
-        self.cancel.as_ref().is_some_and(|f| f.load(Ordering::SeqCst))
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
     }
 }
 
@@ -163,8 +165,9 @@ pub fn materialize_assets(
         let safe = sanitize_relative_path(rel)?;
         let target = dir.join(&safe);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ScriptError::new(format!("创建目录 {} 失败：{e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ScriptError::new(format!("创建目录 {} 失败：{e}", parent.display()))
+            })?;
         }
         std::fs::write(&target, content)
             .map_err(|e| ScriptError::new(format!("写入 {} 失败：{e}", target.display())))?;
@@ -179,6 +182,12 @@ pub fn materialize_assets(
     Ok(())
 }
 
+/// 绝不能出现在提权进程 argv 里的环境变量。
+///
+/// pkexec 不透传环境变量，我们只能把 env 拼进 argv，而 argv 对本机所有用户可见
+/// （`ps` / `/proc/<pid>/cmdline`）。列在这里的键在提权执行前会被剥掉。
+const SECRET_ENV_KEYS: [&str; 1] = ["LMM_HF_TOKEN"];
+
 /// 校验并归一化卡片里声明的相对路径。
 ///
 /// 拒绝绝对路径、`..`、以及 Windows 风格的盘符——卡片内容来自网络，路径直接
@@ -190,7 +199,9 @@ fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
     }
     let p = Path::new(&rel);
     if p.is_absolute() || rel.contains(':') {
-        return Err(ScriptError::new(format!("卡片文件路径不能是绝对路径：{rel}")));
+        return Err(ScriptError::new(format!(
+            "卡片文件路径不能是绝对路径：{rel}"
+        )));
     }
     let mut out = PathBuf::new();
     for comp in p.components() {
@@ -200,7 +211,7 @@ fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
             _ => {
                 return Err(ScriptError::new(format!(
                     "卡片文件路径不允许含有 .. 或根目录：{rel}"
-                )))
+                )));
             }
         }
     }
@@ -367,7 +378,11 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-fn drain_lines(buf: String, output_lines: &mut Vec<String>, on_progress: &mut Option<&mut ProgressCallback<'_>>) -> String {
+fn drain_lines(
+    buf: String,
+    output_lines: &mut Vec<String>,
+    on_progress: &mut Option<&mut ProgressCallback<'_>>,
+) -> String {
     let mut rest = buf;
     loop {
         let idx_n = rest.find('\n');
@@ -375,7 +390,11 @@ fn drain_lines(buf: String, output_lines: &mut Vec<String>, on_progress: &mut Op
         let (idx, skip) = match (idx_n, idx_r) {
             (None, None) => return rest,
             (idx_n, Some(idx_r)) if idx_n.is_none() || idx_r < idx_n.unwrap() => {
-                let skip = if rest[idx_r..].starts_with("\r\n") { 2 } else { 1 };
+                let skip = if rest[idx_r..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                };
                 (idx_r, skip)
             }
             (Some(idx_n), _) => (idx_n, 1),
@@ -559,7 +578,11 @@ pub fn run_script(
 
         // 脚本请求了输入：等界面把答案送回来，期间不判 idle 超时。
         if let Some(until) = prompt_deadline {
-            let slot = opts.control.prompt.as_ref().expect("有待答提示就一定注册过应答槽");
+            let slot = opts
+                .control
+                .prompt
+                .as_ref()
+                .expect("有待答提示就一定注册过应答槽");
             if slot.is_aborted() {
                 cancel_requested = true;
                 cancel_deadline = Instant::now() + cancel_grace;
@@ -589,7 +612,10 @@ pub fn run_script(
 
         if prompt_deadline.is_none() && Instant::now() >= idle_deadline {
             timed_out = true;
-            timeout_reason = format!("连续 {} 秒没有任何新输出，判定为卡死", idle_timeout.as_secs());
+            timeout_reason = format!(
+                "连续 {} 秒没有任何新输出，判定为卡死",
+                idle_timeout.as_secs()
+            );
             stop_process_tree(Signal::SIGKILL);
             break;
         }
@@ -697,11 +723,16 @@ pub fn run_script(
         cleanup_temp_files(&cancel_file, script_path);
         return Err(ScriptError::new(format!(
             "脚本执行超时：{}（{timeout_reason}）",
-            script_path.file_name().and_then(|s| s.to_str()).unwrap_or("")
+            script_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
         )));
     }
 
-    let status = child.wait().map_err(|e| ScriptError::new(format!("等待脚本退出失败：{e}")))?;
+    let status = child
+        .wait()
+        .map_err(|e| ScriptError::new(format!("等待脚本退出失败：{e}")))?;
     cleanup_temp_files(&cancel_file, script_path);
 
     let code = status.code().unwrap_or(-1);
@@ -712,7 +743,9 @@ pub fn run_script(
             .unwrap_or_else(|| "未知错误".to_string());
         let tail_start = output_lines.len().saturating_sub(20);
         let tail = output_lines[tail_start..].join("\n");
-        return Err(ScriptError::new(format!("脚本执行失败（退出码 {code}）：{summary}\n{tail}")));
+        return Err(ScriptError::new(format!(
+            "脚本执行失败（退出码 {code}）：{summary}\n{tail}"
+        )));
     }
 
     if let Some(cb) = opts.on_progress.as_deref_mut() {
@@ -735,7 +768,7 @@ fn try_wait_exited(child: &mut std::process::Child) -> bool {
 }
 
 fn poll_readable(file: &File, timeout: Duration) -> bool {
-    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     let mut fds = [PollFd::new(file.as_fd(), PollFlags::POLLIN)];
     let timeout_ms: u16 = timeout.as_millis().min(u16::MAX as u128) as u16;
     match poll(&mut fds, PollTimeout::from(timeout_ms)) {
@@ -765,14 +798,32 @@ fn build_command(
     // 到界面上——密码就这么漏进日志了。脚本需要 pty 是为了让 docker pull 这类
     // 工具认为自己接的是终端（进度条才实时刷新），跟输入回显没有关系。
     if let Ok(mut attrs) = nix::sys::termios::tcgetattr(&slave) {
-        attrs.local_flags.remove(nix::sys::termios::LocalFlags::ECHO);
+        attrs
+            .local_flags
+            .remove(nix::sys::termios::LocalFlags::ECHO);
         let _ = nix::sys::termios::tcsetattr(&slave, nix::sys::termios::SetArg::TCSANOW, &attrs);
     }
 
     let mut cmd = if need_root {
         let mut env_vars = env_vars.clone();
         if let Some(cf) = cancel_file {
-            env_vars.insert("LMM_CANCEL_FILE".to_string(), cf.to_string_lossy().to_string());
+            env_vars.insert(
+                "LMM_CANCEL_FILE".to_string(),
+                cf.to_string_lossy().to_string(),
+            );
+        }
+        // **提权这条路上不许带秘密。**
+        //
+        // pkexec 不透传环境变量，所以下面把整份 env 拼进 argv —— 而 argv 是公开的：
+        // 提权脚本跑着的那几分钟到几小时里（install_engine 要 docker pull 几十 GB），
+        // 本机**任何**用户都能从 `ps` 或 `/proc/<pid>/cmdline` 读到每一个值。
+        //
+        // 剥掉它是零代价的：需要 root 的只有 install_engine（配 NVIDIA runtime），
+        // 而用 token 的只有 download_model（下私有权重），两边从不重合——六张卡
+        // 逐个核对过。真哪天有卡片两样都要，也该用 fd 或 root-only 文件传，
+        // 而不是把它摆进 argv。
+        for key in SECRET_ENV_KEYS {
+            env_vars.remove(key);
         }
         let mut c = Command::new("pkexec");
         c.arg("--keep-cwd").arg("env");
@@ -794,8 +845,12 @@ fn build_command(
         cmd.current_dir(dir);
     }
 
-    let stdin_fd: OwnedFd = slave.try_clone().map_err(|e| ScriptError::new(format!("复制伪终端句柄失败：{e}")))?;
-    let stdout_fd: OwnedFd = slave.try_clone().map_err(|e| ScriptError::new(format!("复制伪终端句柄失败：{e}")))?;
+    let stdin_fd: OwnedFd = slave
+        .try_clone()
+        .map_err(|e| ScriptError::new(format!("复制伪终端句柄失败：{e}")))?;
+    let stdout_fd: OwnedFd = slave
+        .try_clone()
+        .map_err(|e| ScriptError::new(format!("复制伪终端句柄失败：{e}")))?;
     cmd.stdin(Stdio::from(stdin_fd));
     cmd.stdout(Stdio::from(stdout_fd));
     cmd.stderr(Stdio::from(slave));
@@ -819,21 +874,10 @@ mod tests {
     /// orphans 那边断言登记表内容的用例就会莫名其妙多出一条「后台脚本」。
     /// 用的是跟 orphans 测试同一把锁，两边才真的互斥。
     fn with_isolated_data_dir<T>(f: impl FnOnce() -> T) -> T {
-        let guard = super::super::config::ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
-        // 只认 HOME。这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
-        // 原生化之后没有任何生产代码再读它，设了等于没隔离，测试会直接读写开发机
-        // 上真实的 ~/.pinvou3/model-store。
-        //
-        // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
-        // 这里由 ENV_TEST_LOCK 串行化（那是一把跨模块唯一的锁，见 config.rs）。
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let out = f();
-        drop(guard);
-        out
+        // TempHome 自带那把跨模块的锁，并在析构时把 HOME 还原回去——
+        // 不还原会让 tempdir 删除后 HOME 悬空，污染同进程里读 HOME 的其他测试。
+        let _home = super::super::config::TempHome::new();
+        f()
     }
 
     fn write_script(body: &str) -> PathBuf {
@@ -853,14 +897,20 @@ mod tests {
     #[test]
     fn runs_successful_script_and_captures_output() {
         let path = write_script("#!/bin/sh\necho hello\necho world\nexit 0\n");
-        let lines = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), RunScriptOptions::default())).unwrap();
+        let lines = with_isolated_data_dir(|| {
+            run_script(&path, &HashMap::new(), RunScriptOptions::default())
+        })
+        .unwrap();
         assert_eq!(lines, vec!["hello".to_string(), "world".to_string()]);
     }
 
     #[test]
     fn nonzero_exit_is_an_error() {
         let path = write_script("#!/bin/sh\necho failing\nexit 7\n");
-        let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), RunScriptOptions::default())).unwrap_err();
+        let err = with_isolated_data_dir(|| {
+            run_script(&path, &HashMap::new(), RunScriptOptions::default())
+        })
+        .unwrap_err();
         assert!(err.to_string().contains("退出码 7"));
     }
 
@@ -869,15 +919,32 @@ mod tests {
         let path = write_script("#!/bin/sh\necho \"$LMM_MODEL_NAME\"\n");
         let mut env = HashMap::new();
         env.insert("LMM_MODEL_NAME".to_string(), "qwen38".to_string());
-        let lines = with_isolated_data_dir(|| run_script(&path, &env, RunScriptOptions::default())).unwrap();
+        let lines = with_isolated_data_dir(|| run_script(&path, &env, RunScriptOptions::default()))
+            .unwrap();
         assert_eq!(lines, vec!["qwen38".to_string()]);
+    }
+
+    /// 提权路径上必须剥掉秘密——pkexec 不透传 env，只能拼进 argv，而 argv
+    /// 对本机所有用户可见。
+    ///
+    /// 这里钉的是**清单本身**而不是去跑一次 pkexec：真跑要弹授权框，在 CI 和
+    /// 开发机上都跑不了。清单是那段剥离逻辑的唯一输入，钉住它就钉住了行为；
+    /// 将来谁往 common_env 里加了新的凭据，这条会提醒他也加进来。
+    #[test]
+    fn secrets_are_stripped_before_privileged_exec() {
+        assert!(
+            SECRET_ENV_KEYS.contains(&"LMM_HF_TOKEN"),
+            "HF token 必须在提权前被剥掉：install_engine 以 root 跑 docker pull 的几小时里，\
+             argv 对本机任何用户可见"
+        );
     }
 
     #[test]
     fn cancellation_raises_instead_of_returning_ok() {
         // 关键回归测试：取消必须报错，不能让调用方误以为脚本成功跑完
         // （v1.0.6 修过的那个"取消后误标记已完成"的 bug，Rust 版不能重蹈覆辙）。
-        let path = write_script("#!/bin/sh\nfor i in $(seq 1 100); do echo tick $i; sleep 0.1; done\n");
+        let path =
+            write_script("#!/bin/sh\nfor i in $(seq 1 100); do echo tick $i; sleep 0.1; done\n");
         let flag = Arc::new(AtomicBool::new(false));
         let flag_clone = flag.clone();
         thread::spawn(move || {
@@ -885,7 +952,10 @@ mod tests {
             flag_clone.store(true, Ordering::SeqCst);
         });
         let opts = RunScriptOptions {
-            control: RunControl { cancel: Some(flag), ..Default::default() },
+            control: RunControl {
+                cancel: Some(flag),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
@@ -908,7 +978,10 @@ mod tests {
             slot_ui.answer("192.168.11.30");
         });
         let opts = RunScriptOptions {
-            control: RunControl { prompt: Some(slot), ..Default::default() },
+            control: RunControl {
+                prompt: Some(slot),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let lines = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap();
@@ -932,7 +1005,10 @@ mod tests {
             slot_ui.abort();
         });
         let opts = RunScriptOptions {
-            control: RunControl { prompt: Some(slot), ..Default::default() },
+            control: RunControl {
+                prompt: Some(slot),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
@@ -943,10 +1019,11 @@ mod tests {
     /// 在 read 上一直挂到 idle 超时（默认 300 秒），界面上只看到一个转圈。
     #[test]
     fn prompt_without_a_channel_fails_fast_with_a_clear_reason() {
-        let path = write_script(
-            "#!/bin/sh\necho 'LMM_PROMPT=text|要点什么'\nread x\necho done\n",
-        );
-        let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), RunScriptOptions::default())).unwrap_err();
+        let path = write_script("#!/bin/sh\necho 'LMM_PROMPT=text|要点什么'\nread x\necho done\n");
+        let err = with_isolated_data_dir(|| {
+            run_script(&path, &HashMap::new(), RunScriptOptions::default())
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("没有开启输入通道"),
             "错误信息没说清原因：{err}"
@@ -969,7 +1046,10 @@ mod tests {
             slot_ui.answer("hunter2-super-secret");
         });
         let opts = RunScriptOptions {
-            control: RunControl { prompt: Some(slot), ..Default::default() },
+            control: RunControl {
+                prompt: Some(slot),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let lines = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap();
@@ -977,7 +1057,10 @@ mod tests {
             !lines.iter().any(|l| l.contains("hunter2")),
             "密码被 pty 回显进了日志：{lines:?}"
         );
-        assert!(lines.iter().any(|l| l.contains("收到，已处理")), "脚本没跑完：{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("收到，已处理")),
+            "脚本没跑完：{lines:?}"
+        );
     }
 
     /// 表单式输入：一次问齐多项，脚本读回一行 JSON。
@@ -996,12 +1079,17 @@ mod tests {
             slot_ui.answer("{\"ip\":\"192.168.10.42\",\"pw\":\"s3cret\"}");
         });
         let opts = RunScriptOptions {
-            control: RunControl { prompt: Some(slot), ..Default::default() },
+            control: RunControl {
+                prompt: Some(slot),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let lines = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap();
         assert!(
-            lines.iter().any(|l| l.contains("192.168.10.42") && l.contains("s3cret")),
+            lines
+                .iter()
+                .any(|l| l.contains("192.168.10.42") && l.contains("s3cret")),
             "表单答案没完整送到脚本：{lines:?}"
         );
     }
@@ -1048,7 +1136,12 @@ mod tests {
         }
         // 反斜杠按分隔符处理，交付方在 Windows 上打包也不会出问题
         assert_eq!(
-            sanitize_relative_path(r"runtime@patch@x.py".replace('@', &BSLASH.to_string()).as_str()).unwrap(),
+            sanitize_relative_path(
+                r"runtime@patch@x.py"
+                    .replace('@', &BSLASH.to_string())
+                    .as_str()
+            )
+            .unwrap(),
             std::path::PathBuf::from("runtime/patch/x.py")
         );
     }
@@ -1060,9 +1153,13 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), "user-state").unwrap();
 
         let mut files = std::collections::BTreeMap::new();
-        files.insert("megacube.sh".to_string(), "#!/bin/sh
+        files.insert(
+            "megacube.sh".to_string(),
+            "#!/bin/sh
 echo hi
-".to_string());
+"
+            .to_string(),
+        );
         files.insert("runtime/patch/a.py".to_string(), "print(1)".to_string());
         materialize_assets(dir.path(), &files).unwrap();
 
@@ -1094,13 +1191,19 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
 '
 ",
         );
-        let lines = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), RunScriptOptions::default())).unwrap();
+        let lines = with_isolated_data_dir(|| {
+            run_script(&path, &HashMap::new(), RunScriptOptions::default())
+        })
+        .unwrap();
         assert_eq!(lines, vec!["7e1f8fb7d4ba: Pulling fs layer".to_string()]);
     }
 
     #[test]
     fn strip_ansi_keeps_normal_text_untouched() {
-        assert_eq!(strip_ansi("LMM_PROGRESS_BYTES=123/456"), "LMM_PROGRESS_BYTES=123/456");
+        assert_eq!(
+            strip_ansi("LMM_PROGRESS_BYTES=123/456"),
+            "LMM_PROGRESS_BYTES=123/456"
+        );
         assert_eq!(strip_ansi("下载中 42%"), "下载中 42%");
         // 半截的转义序列（读到一半被切断）不能把后面的正文一起吃掉
         assert_eq!(strip_ansi("a[31mred[0m b"), "ared b");

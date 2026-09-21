@@ -842,9 +842,14 @@ pub fn run() {
             app.handle().manage(projects_store);
             // 模型商店：全进程唯一的一份。它持有卡片级互斥表和下载队列，那是
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
-            app.handle().manage(std::sync::Arc::new(
-                features::model_store::ModelStoreService::default(),
-            ));
+            let model_store =
+                std::sync::Arc::new(features::model_store::ModelStoreService::default());
+            // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
+            // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
+            // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
+            // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
+            features::model_store::run_startup_cleanup(&model_store);
+            app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
             let remote_event_endpoint = remote_control_manager.clone();
@@ -1331,6 +1336,7 @@ pub fn run() {
             commands::model_store::model_store_test_store_state,
             commands::model_store::model_store_unlock_test_store,
             commands::model_store::model_store_disable_test_store,
+            commands::model_store::model_store_take_startup_cleanup,
             commands::model_store::model_store_storage_settings,
             commands::model_store::model_store_set_storage_settings,
             commands::settings::list_models,

@@ -132,10 +132,7 @@ pub fn model_store_api_keys(card_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn model_store_create_api_key(
-    card_id: String,
-    label: Option<String>,
-) -> Result<Value, String> {
+pub fn model_store_create_api_key(card_id: String, label: Option<String>) -> Result<Value, String> {
     model_store::create_api_key(card_id, label)
 }
 
@@ -156,6 +153,20 @@ pub fn model_store_unlock_test_store(password: String) -> Result<Value, String> 
 #[tauri::command]
 pub fn model_store_disable_test_store() -> Result<Value, String> {
     model_store::disable_test_store()
+}
+
+// ------------------------------------------------------ 启动时回收残留进程
+
+/// 取走启动清理的报告（取一次就没了）。
+///
+/// 应用启动时会收掉上次没收干净的脚本进程（见 lib.rs setup），收掉了什么攒在
+/// 服务里等界面起来取。**取一次就没了**——否则用户每切一次视图就被同一条提示
+/// 弹一遍。没有残留时回的是两个空数组，不是错误。
+#[tauri::command]
+pub fn model_store_take_startup_cleanup(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::take_startup_cleanup(&service)
 }
 
 // ------------------------------------------------------ 权重目录与导入扫描

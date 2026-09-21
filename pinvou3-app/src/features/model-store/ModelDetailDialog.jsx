@@ -8,7 +8,7 @@ import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { createApiKey, fetchApiKeys, fetchModelDetail } from './model-store-api.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
-import { buildSavedModel, checkLinkable, pickApiKey } from './pinvou-model-link.js';
+import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStatusOf } from './model-store-logic.js';
 import {
   HOVER_SURFACE,
@@ -59,7 +59,7 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
  * 模型详情弹窗。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast }) {
+function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, savedModels }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -152,11 +152,19 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast }
     }
     setBusy(true);
     try {
+      const modelName = record.endpoint_model || record.model_name;
       const saved = buildSavedModel({
-        modelName: record.endpoint_model || record.model_name,
+        modelName,
         displayName: copy.linkModelName(record.card_name || record.model_name),
         baseUrl: record.endpoint_url,
         contextWindow: null,
+        // 已经接入过就**沿用那一行的 id**，让这次保存变成更新而不是新增。
+        //
+        // 不查重的话，`makeModelId()` 每次都生成新 id：用户连点两次、或者隔天
+        // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且
+        // 每次都会被设为当前模型。判据跟移除侧的 findLinkedRows 完全一致
+        // （model + 回环 base_url），两边用同一把尺子才不会出现"接得进、清不掉"。
+        existingId: findLinkedRows(savedModels, modelName)[0]?.id,
       });
       await bridge.models.saveModel(saved);
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 
@@ -317,19 +317,10 @@ mod tests {
     /// 进程级的环境变量，db 的测试也在改它。必须用同一把跨模块的锁串行化，
     /// 各锁各的等于没锁。
     fn with_temp_data_dir<T>(f: impl FnOnce() -> T) -> T {
-        let guard = config::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
-        // 只认 HOME。这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
-        // 原生化之后没有任何生产代码再读它，设了等于没隔离，测试会直接读写开发机
-        // 上真实的 ~/.pinvou3/model-store。
-        //
-        // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
-        // 这里由 ENV_TEST_LOCK 串行化（那是一把跨模块唯一的锁，见 config.rs）。
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let out = f();
-        drop(guard);
-        out
+        // TempHome 自带那把跨模块的锁，并在析构时把 HOME 还原回去——
+        // 不还原会让 tempdir 删除后 HOME 悬空，污染同进程里读 HOME 的其他测试。
+        let _home = config::TempHome::new();
+        f()
     }
 
     /// 起一个自成进程组的长命子进程当「残留进程」。
@@ -354,7 +345,10 @@ mod tests {
         // 后面几个测试会照着记录里的 pgid 杀整个进程组。万一没建成独立进程组，
         // 那个 pgid 就是测试进程自己所在的组——宁可当场失败，也不能真的杀下去。
         let (pgid, _) = proc_stat(pid).expect("刚起来的子进程应该能读到 /proc");
-        assert_eq!(pgid, pid, "子进程必须自成进程组，否则清理测试会误杀同批进程");
+        assert_eq!(
+            pgid, pid,
+            "子进程必须自成进程组，否则清理测试会误杀同批进程"
+        );
         child
     }
 

@@ -1,6 +1,6 @@
 //! 模型商店的服务层：把阻塞的生命周期操作包装成「立刻返回 run_id + 长轮询日志」。
 //!
-//! 这个文件顶替了 LMM 的 `core/admin.rs`（1880 行）。那一版是本地 HTTP 管理接口，
+//! 这个文件顶替了 LMM 的 `core/admin.rs`（上游 919 行）。那一版是本地 HTTP 管理接口，
 //! 为 sidecar 形态存在——宿主进程和 LMM 是两个进程，只能靠 HTTP 说话，于是要
 //! token 鉴权、要 JSON 序列化、要"token 永不出栈到前端"的安全约束。
 //!
@@ -21,10 +21,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::lifecycle::ModelManager;
-use super::run_state::{ActiveCardOps, CancelRegistry, DownloadQueue};
+use super::run_state::{ActiveCardOps, CancelRegistry, DownloadQueue, StartupCleanup};
 use super::{config, db, disk, import_scan, script_runner};
 
 /// 运行记录保留多久。一次下载的日志能有几万行，不清会一直涨。
@@ -103,6 +103,7 @@ pub struct ModelStoreService {
     active: Arc<ActiveCardOps>,
     queue: Arc<DownloadQueue>,
     runs: Mutex<HashMap<String, Arc<RunLog>>>,
+    startup_cleanup: StartupCleanup,
 }
 
 impl Default for ModelStoreService {
@@ -118,13 +119,16 @@ impl ModelStoreService {
             active: Arc::new(ActiveCardOps::default()),
             queue: Arc::new(DownloadQueue::default()),
             runs: Mutex::new(HashMap::new()),
+            startup_cleanup: StartupCleanup::default(),
         }
     }
 
     fn new_run(&self, run_id: &str) -> Arc<RunLog> {
         self.sweep_old_runs();
         let log = Arc::new(RunLog::new());
-        self.runs.lock().insert(run_id.to_string(), Arc::clone(&log));
+        self.runs
+            .lock()
+            .insert(run_id.to_string(), Arc::clone(&log));
         log
     }
 
@@ -190,7 +194,10 @@ fn needs_redeploy(record: &db::StoreModelRecord) -> bool {
     }
     if let (Some(deployed), Some(current)) = (
         record.deployed_script_sha256.as_deref(),
-        record.scripts_content.get("deploy").map(|b| b.sha256.as_str()),
+        record
+            .scripts_content
+            .get("deploy")
+            .map(|b| b.sha256.as_str()),
     ) {
         return deployed != current;
     }
@@ -402,41 +409,46 @@ pub fn start_download(
     let card_for_job = card_id.clone();
     let queue = Arc::clone(&service.queue);
 
-    spawn_op(service, &card_id, OP_DOWNLOAD, move |log, control, run_id| {
-        // 取号要在真正开跑之前：用户点下载的先后顺序就是排队顺序，等装完引擎再
-        // 取号会让装引擎快的插到慢的前面。
-        let ticket = queue.enqueue(run_id);
-        let log_gate = Arc::clone(log);
-        let control_gate = control.clone();
-        let mut announced = false;
-        let mut gate = move || -> Result<(), super::errors::AppError> {
-            loop {
-                if control_gate.cancelled() {
-                    return Err(super::errors::AppError::new("已取消"));
-                }
-                // 每轮重读设置：用户可能在排队期间调大并发数，应当立刻生效
-                let limit = config::load_settings().max_concurrent_downloads();
-                if queue.try_start(ticket, limit) {
-                    return Ok(());
-                }
-                if !announced {
-                    announced = true;
-                    let ahead = queue.position(ticket);
-                    log_gate.push(&format!(
-                        "引擎已就绪。当前有模型正在下载，本任务排队中（前面还有 {ahead} 个）\
+    spawn_op(
+        service,
+        &card_id,
+        OP_DOWNLOAD,
+        move |log, control, run_id| {
+            // 取号要在真正开跑之前：用户点下载的先后顺序就是排队顺序，等装完引擎再
+            // 取号会让装引擎快的插到慢的前面。
+            let ticket = queue.enqueue(run_id);
+            let log_gate = Arc::clone(log);
+            let control_gate = control.clone();
+            let mut announced = false;
+            let mut gate = move || -> Result<(), super::errors::AppError> {
+                loop {
+                    if control_gate.cancelled() {
+                        return Err(super::errors::AppError::new("已取消"));
+                    }
+                    // 每轮重读设置：用户可能在排队期间调大并发数，应当立刻生效
+                    let limit = config::load_settings().max_concurrent_downloads();
+                    if queue.try_start(ticket, limit) {
+                        return Ok(());
+                    }
+                    if !announced {
+                        announced = true;
+                        let ahead = queue.position(ticket);
+                        log_gate.push(&format!(
+                            "引擎已就绪。当前有模型正在下载，本任务排队中（前面还有 {ahead} 个）\
                          ——可以放着不管，轮到它会自动开始下载"
-                    ));
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
                 }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        };
-        let log_cb = Arc::clone(log);
-        let mut cb = move |line: &str| log_cb.push(line);
-        manager(test_mode)
-            .download_from_store(&card_for_job, &mut cb, control, Some(&mut gate))
-            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-            .map_err(|e| e.to_string())
-    })
+            };
+            let log_cb = Arc::clone(log);
+            let mut cb = move |line: &str| log_cb.push(line);
+            manager(test_mode)
+                .download_from_store(&card_for_job, &mut cb, control, Some(&mut gate))
+                .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 pub fn start_deploy(
@@ -445,14 +457,19 @@ pub fn start_deploy(
     profile_id: Option<String>,
 ) -> Result<Value, String> {
     let card = card_id.clone();
-    spawn_op(service, &card_id, OP_DEPLOY, move |log, control, _run_id| {
-        let log_cb = Arc::clone(log);
-        let mut cb = move |line: &str| log_cb.push(line);
-        ModelManager::new(None, None)
-            .deploy(&card, profile_id.as_deref(), &mut cb, control)
-            .map(|_| Value::Null)
-            .map_err(|e| e.to_string())
-    })
+    spawn_op(
+        service,
+        &card_id,
+        OP_DEPLOY,
+        move |log, control, _run_id| {
+            let log_cb = Arc::clone(log);
+            let mut cb = move |line: &str| log_cb.push(line);
+            ModelManager::new(None, None)
+                .deploy(&card, profile_id.as_deref(), &mut cb, control)
+                .map(|_| Value::Null)
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 /// 启用 / 停用 / 卸载三个动作形状一样，只差调哪个方法，合并成一个入口。
@@ -615,6 +632,38 @@ fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
     let mut settings = config::load_settings();
     settings.test_mode_enabled = enabled;
     config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))
+}
+
+// ------------------------------------------------------ 启动时回收残留进程
+
+/// 应用启动时收掉上次没收干净的脚本进程，报告留着给界面取。
+///
+/// **必须在启动阶段真的被调用**——这段防御原先写了、测了、没接线（`orphans` 模块
+/// 全仓零生产调用点），等于没有。它要防的事故是：应用被强杀或崩溃之后，`hf download`
+/// 之类的子进程还活着并占着权重目录的文件锁，用户下一次下载会**一直卡住且没有任何
+/// 提示**——真机上这么僵持过 16 小时。
+///
+/// 同步跑而不是丢后台：这一步只是读一个登记文件、对着 `/proc` 核对几条记录再发信号，
+/// 代价是毫秒级；而放后台就会跟前端 `take` 抢时序，用户可能永远看不到那条提示。
+pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
+    let report = super::orphans::cleanup_on_startup();
+    if report.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[model-store] 启动清理：收掉 {} 个残留进程，{} 个以 root 运行收不掉",
+        report.killed.len(),
+        report.skipped_root.len()
+    );
+    service.startup_cleanup.set(report);
+}
+
+/// 取走启动清理的报告。**取一次就没了**——否则用户每切一次视图就被同一条提示弹一遍。
+pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, String> {
+    Ok(match service.startup_cleanup.take() {
+        Some(r) => json!({ "killed": r.killed, "skipped_root": r.skipped_root }),
+        None => json!({ "killed": [], "skipped_root": [] }),
+    })
 }
 
 // ------------------------------------------------------ 权重目录与导入扫描

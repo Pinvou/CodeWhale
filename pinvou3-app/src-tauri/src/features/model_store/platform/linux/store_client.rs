@@ -266,7 +266,9 @@ impl StoreSource for LocalStoreClient {
                 .ok_or_else(|| StoreError::new(format!("测试卡片缺少 {script_type} 脚本")))?;
             scripts.insert(
                 script_type.to_string(),
-                dir.join(format!("{script_type}.sh")).to_string_lossy().to_string(),
+                dir.join(format!("{script_type}.sh"))
+                    .to_string_lossy()
+                    .to_string(),
             );
             hashes.insert(
                 script_type.to_string(),
@@ -280,9 +282,18 @@ impl StoreSource for LocalStoreClient {
                 rel.to_string(),
                 dir.join("assets").join(rel).to_string_lossy().to_string(),
             );
-            asset_hashes.insert(rel.to_string(), crate::platform::encoding::hex_lower(&Sha256::digest(content.as_bytes())));
+            asset_hashes.insert(
+                rel.to_string(),
+                crate::platform::encoding::hex_lower(&Sha256::digest(content.as_bytes())),
+            );
         }
-        Ok(super::test_store_data::to_detail(&card, scripts, hashes, assets, asset_hashes))
+        Ok(super::test_store_data::to_detail(
+            &card,
+            scripts,
+            hashes,
+            assets,
+            asset_hashes,
+        ))
     }
 }
 
@@ -319,7 +330,10 @@ mod tests {
     #[test]
     fn topology_round_trips_as_lowercase() {
         // 数据库里存的就是这两个字符串，跟服务端下发的写法必须一致
-        for (s, t) in [("single", DeployTopology::Single), ("dual", DeployTopology::Dual)] {
+        for (s, t) in [
+            ("single", DeployTopology::Single),
+            ("dual", DeployTopology::Dual),
+        ] {
             let parsed: DeployTopology = serde_json::from_str(&format!("\"{s}\"")).unwrap();
             assert_eq!(parsed, t);
             assert_eq!(serde_json::to_string(&t).unwrap(), format!("\"{s}\""));

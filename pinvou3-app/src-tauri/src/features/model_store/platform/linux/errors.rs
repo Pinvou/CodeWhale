@@ -58,7 +58,10 @@ const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
     ("model not found", "找不到对应的模型"),
     ("invalid file magic", "文件格式无效，可能不是有效的模型文件"),
     ("invalid gguf", "文件格式无效，可能不是有效的 GGUF 模型文件"),
-    ("connection refused", "无法连接到推理服务，请确认服务正在运行"),
+    (
+        "connection refused",
+        "无法连接到推理服务，请确认服务正在运行",
+    ),
     ("manifest unknown", "在远端找不到该模型/量化版本"),
     ("unauthorized", "没有访问权限，请检查凭据配置"),
     ("timeout", "操作超时，请稍后重试"),
@@ -159,7 +162,16 @@ fn is_cjk(c: char) -> bool {
 /// 扒掉脚本习惯性加的错误前缀。留着它只会让界面上出现两三层「错误」字样。
 fn strip_error_prefix(text: &str) -> String {
     let t = text.trim();
-    for p in ["ERROR:", "Error:", "error:", "ERROR -", "错误：", "错误:", "失败：", "失败:"] {
+    for p in [
+        "ERROR:",
+        "Error:",
+        "error:",
+        "ERROR -",
+        "错误：",
+        "错误:",
+        "失败：",
+        "失败:",
+    ] {
         if let Some(rest) = t.strip_prefix(p) {
             return rest.trim().to_string();
         }
@@ -289,7 +301,10 @@ mod tests {
     #[test]
     fn word_boundary_matching_handles_punctuation_and_multiword_keywords() {
         // 标点、括号算边界
-        assert!(contains_as_word("connection refused (retry)", "connection refused"));
+        assert!(contains_as_word(
+            "connection refused (retry)",
+            "connection refused"
+        ));
         assert!(contains_as_word("timeout:", "timeout"));
         assert!(contains_as_word("[timeout]", "timeout"));
         // 粘在字母数字上的不算
@@ -297,9 +312,15 @@ mod tests {
         assert!(!contains_as_word("timeouts", "timeout"));
         assert!(!contains_as_word("xtimeout", "timeout"));
         // 同一个词出现多次，只要有一次是独立的就算命中
-        assert!(contains_as_word("connecttimeout=10 and a real timeout", "timeout"));
+        assert!(contains_as_word(
+            "connecttimeout=10 and a real timeout",
+            "timeout"
+        ));
         // 带空格的多词关键词
-        assert!(contains_as_word("error: no space left on device", "no space left on device"));
+        assert!(contains_as_word(
+            "error: no space left on device",
+            "no space left on device"
+        ));
     }
 
     #[test]
@@ -330,7 +351,10 @@ mod tests {
             "没有检测到处于 ACTIVE 状态的直连接口，请检查 QSFP 线缆是否插好"
         );
         // 中文前缀同样扒掉
-        assert_eq!(humanize_script_message("错误：模型目录不可写"), "模型目录不可写");
+        assert_eq!(
+            humanize_script_message("错误：模型目录不可写"),
+            "模型目录不可写"
+        );
         // 没有前缀的中文原样返回
         assert_eq!(humanize_script_message("从机未开机"), "从机未开机");
     }

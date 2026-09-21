@@ -47,8 +47,7 @@ mod platform;
 
 /// 非 Linux 平台上给用户看的原因。放在这里而不是桩文件里，是为了让
 /// 「为什么没有这个功能」只有一处定义。
-pub(crate) const UNSUPPORTED_REASON: &str =
-    "模型商店只在 Linux 设备上可用：它需要 docker 起推理引擎、需要 pty 跑卡片脚本、\
+pub(crate) const UNSUPPORTED_REASON: &str = "模型商店只在 Linux 设备上可用：它需要 docker 起推理引擎、需要 pty 跑卡片脚本、\
      装引擎时需要提权，这些前提在 Windows 和 macOS 上都不成立。";
 
 /// 这台机器上有没有模型商店。
@@ -79,6 +78,7 @@ pub type ModelStoreService = platform::backend::ModelStoreService;
 // 解释」这件事收在 platform 里，命令层不必分支。
 pub use platform::backend::{
     answer_run, api_keys, cancel_run, create_api_key, disable_test_store, force_remove, library,
-    list_cards, model_detail, run_log, set_storage_settings, start_deploy, start_download,
-    start_lifecycle, storage_settings, test_store_state, unlock_test_store,
+    list_cards, model_detail, run_log, run_startup_cleanup, set_storage_settings, start_deploy,
+    start_download, start_lifecycle, storage_settings, take_startup_cleanup, test_store_state,
+    unlock_test_store,
 };

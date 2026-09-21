@@ -305,9 +305,16 @@ mod tests {
     #[test]
     fn user_configured_dirs_come_first() {
         let extra = vec!["/data/my-models".to_string(), "  ".to_string()];
-        let found = roots(&extra, Path::new("/tmp/configured"), Path::new("/tmp/staging"));
+        let found = roots(
+            &extra,
+            Path::new("/tmp/configured"),
+            Path::new("/tmp/staging"),
+        );
         assert_eq!(found[0], PathBuf::from("/data/my-models"));
-        assert!(!found.iter().any(|p| p.as_os_str().is_empty()), "空白项没滤掉");
+        assert!(
+            !found.iter().any(|p| p.as_os_str().is_empty()),
+            "空白项没滤掉"
+        );
     }
 
     /// 路径里有空格时，换行分隔才切得开——U 盘卷标带空格和中文是常事。
@@ -362,7 +369,11 @@ mod tests {
         let model = tmp.path().join("Model");
         mk_model(&model, 100);
         std::fs::create_dir_all(model.join(".cache/huggingface")).unwrap();
-        std::fs::write(model.join(".cache/huggingface/half.incomplete"), vec![0u8; 99999]).unwrap();
+        std::fs::write(
+            model.join(".cache/huggingface/half.incomplete"),
+            vec![0u8; 99999],
+        )
+        .unwrap();
         let found = scan(&[tmp.path().to_path_buf()]);
         assert_eq!(found[0].bytes, 102, "点目录里的半截文件被算进体积了");
     }

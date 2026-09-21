@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use rand::Rng as _;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::config;
 use super::store_client::{DeployProfile, DeployTopology};
@@ -280,7 +280,10 @@ fn engine_key(engine_version: Option<&str>) -> String {
     engine_version.unwrap_or("").to_string()
 }
 
-pub fn is_engine_installed(engine_name: &str, engine_version: Option<&str>) -> rusqlite::Result<bool> {
+pub fn is_engine_installed(
+    engine_name: &str,
+    engine_version: Option<&str>,
+) -> rusqlite::Result<bool> {
     let conn = connect()?;
     let exists: Option<i64> = conn
         .query_row(
@@ -877,7 +880,6 @@ pub fn find_api_key(key_value: &str) -> rusqlite::Result<Option<ApiKeyRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::MutexGuard;
 
     /// db 测试用环境变量（HOME）切换各自的临时数据库目录，但环境
     /// 变量是进程全局的，而 Rust 测试默认同进程多线程并行——两个 db 测试并发
@@ -885,21 +887,13 @@ mod tests {
     /// migration 测试刚 DROP 掉自己库里的表，lifecycle 测试的连接却被切到了
     /// 同一个库上）。用 config::ENV_TEST_LOCK 这把**跨模块共享**的锁串行化：
     /// 别的模块（orphans）也会改同一组环境变量，各锁各的等于没锁。
-    /// 拿锁 + 建独立临时目录。锁 guard 必须活到测试结束（跟 TempDir 一起
-    /// 返回），poisoned（之前有测试 panic 过）时照常拿锁继续。
-    fn setup_temp_db() -> (MutexGuard<'static, ()>, tempfile::TempDir) {
-        let guard = config::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
-        // 只认 HOME。这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
-        // 原生化之后没有任何生产代码再读它，设了等于没隔离，测试会直接读写开发机
-        // 上真实的 ~/.pinvou3/model-store。
-        //
-        // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
-        // 这里由 ENV_TEST_LOCK 串行化（那是一把跨模块唯一的锁，见 config.rs）。
-        unsafe { std::env::set_var("HOME", dir.path()) };
+    /// 拿锁 + 建独立临时目录。返回的守卫必须活到测试结束——它一析构就会
+    /// 还原 HOME 并放锁。
+    fn setup_temp_db() -> config::TempHome {
+        // TempHome 自带那把跨模块的锁，并在析构时把 HOME 还原回去。
+        let home = config::TempHome::new();
         init_db().unwrap();
-        (guard, dir)
+        home
     }
 
     #[test]
@@ -916,7 +910,10 @@ mod tests {
         assert!(is_engine_installed("ollama", Some("0.5.0")).unwrap());
         let engines = list_installed_engines().unwrap();
         assert_eq!(engines.len(), 1);
-        assert_eq!(engines[0].docker_image.as_deref(), Some("ollama/ollama:latest"));
+        assert_eq!(
+            engines[0].docker_image.as_deref(),
+            Some("ollama/ollama:latest")
+        );
         // install_engine 的版本哈希要能存下来——它决定了脚本更新后要不要
         // 重跑一遍安装以刷新部署包
         assert_eq!(engines[0].install_script_sha256.as_deref(), Some("abc123"));
@@ -932,28 +929,48 @@ mod tests {
     #[test]
     fn same_engine_name_different_versions_are_separate_rows() {
         let _ctx = setup_temp_db();
-        mark_engine_installed("vllm", Some("v0.27.1-aarch64"),
-                              Some("vllm/vllm-openai:v0.27.1-aarch64"), None).unwrap();
-        mark_engine_installed("vllm", Some("dspark-0.1.1"),
-                              Some("megacube/deepseek-direct:0.1.1"), None).unwrap();
+        mark_engine_installed(
+            "vllm",
+            Some("v0.27.1-aarch64"),
+            Some("vllm/vllm-openai:v0.27.1-aarch64"),
+            None,
+        )
+        .unwrap();
+        mark_engine_installed(
+            "vllm",
+            Some("dspark-0.1.1"),
+            Some("megacube/deepseek-direct:0.1.1"),
+            None,
+        )
+        .unwrap();
 
         let engines = list_installed_engines().unwrap();
         assert_eq!(engines.len(), 2, "同名不同版本被合成了一条：{engines:?}");
 
         // 各自的镜像不能串
         assert_eq!(
-            get_installed_engine("vllm", Some("v0.27.1-aarch64")).unwrap().unwrap().docker_image.as_deref(),
+            get_installed_engine("vllm", Some("v0.27.1-aarch64"))
+                .unwrap()
+                .unwrap()
+                .docker_image
+                .as_deref(),
             Some("vllm/vllm-openai:v0.27.1-aarch64")
         );
         assert_eq!(
-            get_installed_engine("vllm", Some("dspark-0.1.1")).unwrap().unwrap().docker_image.as_deref(),
+            get_installed_engine("vllm", Some("dspark-0.1.1"))
+                .unwrap()
+                .unwrap()
+                .docker_image
+                .as_deref(),
             Some("megacube/deepseek-direct:0.1.1")
         );
 
         // 删掉一个不能带走另一个
         delete_installed_engine("vllm", Some("dspark-0.1.1")).unwrap();
-        assert!(is_engine_installed("vllm", Some("v0.27.1-aarch64")).unwrap(),
-                "删一个版本把另一个版本也删了");
+        assert!(
+            is_engine_installed("vllm", Some("v0.27.1-aarch64")).unwrap(),
+            "删一个版本把另一个版本也删了"
+        );
         assert!(!is_engine_installed("vllm", Some("dspark-0.1.1")).unwrap());
     }
 
@@ -998,15 +1015,19 @@ mod tests {
     #[test]
     fn only_builtin_cards_get_their_scripts_refreshed() {
         let _ctx = setup_temp_db();
-        let blob = |c: &str| ScriptBlob { content: c.to_string(), sha256: c.to_string() };
+        let blob = |c: &str| ScriptBlob {
+            content: c.to_string(),
+            sha256: c.to_string(),
+        };
         let old_pkg = std::collections::BTreeMap::from([("deploy".to_string(), blob("旧脚本"))]);
         let new_pkg = std::collections::BTreeMap::from([("deploy".to_string(), blob("新脚本"))]);
         let empty = std::collections::BTreeMap::new();
 
         for (card_id, source) in [("builtin-card", "builtin"), ("store-card", "store")] {
-            let scripts = std::collections::BTreeMap::from([
-                ("deploy".to_string(), format!("/tmp/{card_id}/deploy.sh")),
-            ]);
+            let scripts = std::collections::BTreeMap::from([(
+                "deploy".to_string(),
+                format!("/tmp/{card_id}/deploy.sh"),
+            )]);
             add_store_model(AddStoreModelParams {
                 card_id,
                 model_name: "m",
@@ -1029,19 +1050,39 @@ mod tests {
             set_scripts_content(card_id, &old_pkg, &empty).unwrap();
         }
 
-        assert!(refresh_builtin_card_scripts("builtin-card", &new_pkg, &empty).unwrap(),
-                "内置卡片没被刷新");
-        assert!(!refresh_builtin_card_scripts("store-card", &new_pkg, &empty).unwrap(),
-                "真实商店的卡片不该被内置副本覆盖");
+        assert!(
+            refresh_builtin_card_scripts("builtin-card", &new_pkg, &empty).unwrap(),
+            "内置卡片没被刷新"
+        );
+        assert!(
+            !refresh_builtin_card_scripts("store-card", &new_pkg, &empty).unwrap(),
+            "真实商店的卡片不该被内置副本覆盖"
+        );
 
         let builtin = get_store_model("builtin-card").unwrap().unwrap();
-        assert!(builtin.scripts_content.get("deploy").unwrap().content.contains("新脚本"));
+        assert!(
+            builtin
+                .scripts_content
+                .get("deploy")
+                .unwrap()
+                .content
+                .contains("新脚本")
+        );
         let store = get_store_model("store-card").unwrap().unwrap();
-        assert!(store.scripts_content.get("deploy").unwrap().content.contains("旧脚本"));
+        assert!(
+            store
+                .scripts_content
+                .get("deploy")
+                .unwrap()
+                .content
+                .contains("旧脚本")
+        );
 
         // 内容没变时不该白写一遍（会把 scripts_fetched_at 刷掉、界面上凭空出现"更新过"）
-        assert!(!refresh_builtin_card_scripts("builtin-card", &new_pkg, &empty).unwrap(),
-                "内容没变还报告刷新过");
+        assert!(
+            !refresh_builtin_card_scripts("builtin-card", &new_pkg, &empty).unwrap(),
+            "内容没变还报告刷新过"
+        );
     }
 
     /// 存量记录（card_source 为 NULL）按脚本地址形态回填，而不是按卡片 id 猜。
@@ -1082,9 +1123,10 @@ mod tests {
     #[test]
     fn store_model_lifecycle() {
         let _ctx = setup_temp_db();
-        let scripts = std::collections::BTreeMap::from([
-            ("deploy".to_string(), "https://example.com/deploy.sh".to_string()),
-        ]);
+        let scripts = std::collections::BTreeMap::from([(
+            "deploy".to_string(),
+            "https://example.com/deploy.sh".to_string(),
+        )]);
         let rec = add_store_model(AddStoreModelParams {
             card_id: "card-1",
             model_name: "qwen38",
@@ -1105,7 +1147,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rec.status, "downloaded");
-        assert_eq!(rec.scripts.get("deploy").unwrap().as_deref(), Some("https://example.com/deploy.sh"));
+        assert_eq!(
+            rec.scripts.get("deploy").unwrap().as_deref(),
+            Some("https://example.com/deploy.sh")
+        );
 
         update_store_model_status("card-1", "deployed", Some("deadbeef")).unwrap();
         let fetched = get_store_model("card-1").unwrap().unwrap();

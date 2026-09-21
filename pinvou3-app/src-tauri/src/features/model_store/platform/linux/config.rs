@@ -16,7 +16,7 @@
 //! 权重目录（`models_dir`）单独可配：几十上百 GB 的东西，用户很可能想放到别的盘。
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,40 @@ fn dirs_home() -> PathBuf {
 
 fn config_file() -> PathBuf {
     config_dir().join("config.json")
+}
+
+/// 把一个来自商店的标识（card_id、模型名）收成**单一、安全的路径分量**。
+///
+/// # 为什么需要
+///
+/// `card_id` 来自商店响应，`Path::join` 遇到绝对路径会**整体替换前缀**、遇到
+/// `..` 会往上跳——于是 `cards/<card_id>` 可以落到 cards 目录之外的任何地方，
+/// 而那正是资产落地和卸载时扫描残留的位置。
+///
+/// `script_runner::sanitize_relative_path` 早就为"卡片内容来自网络"这个威胁模型
+/// 写了防线，但它只护住了**资产的相对路径**，没护住**存放它们的那个目录名**，
+/// 同一个威胁模型下自相矛盾。
+///
+/// 卡片脚本本身就是任意代码、执行时本来就有同等能力，所以这不是提权边界；
+/// 但既然防线已经建了，就不该留一个绕过它的口子。
+///
+/// 判据刻意收得很紧——只放行 `[A-Za-z0-9._-]`，且不允许 `.` / `..` 整体。
+/// 真实的 card_id 都是 `qwen38fn-nvfp4-single` 这种形状，收紧没有代价。
+pub fn safe_path_component(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("标识为空".to_string());
+    }
+    if s == "." || s == ".." {
+        return Err(format!("标识不能是 {s}"));
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(format!("标识含有不能用于路径的字符：{s}"));
+    }
+    Ok(s.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,12 +205,38 @@ pub fn load_settings() -> Settings {
     settings
 }
 
+/// 写配置。**先写临时文件再 rename**，并且一开始就以 0600 创建。
+///
+/// 两件事都不是讲究：
+///
+/// 1. 直接 `fs::write` 覆盖不是原子的。保存那一瞬断电或被杀，留下的是半截 JSON，
+///    而 `load_settings` 解析失败会**静默回退到全部默认值**——用户自己配的权重
+///    目录、商店地址、导入扫描目录、测试商店开关一起无声消失，界面上没有任何
+///    异常，他只会觉得"设置怎么自己变回去了"。同模块 orphans.rs 的 `store_unlocked`
+///    早就是这么写的，照搬即可。
+/// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有商店地址
+///    这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按 0600 建，
+///    窗口就不存在了。
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
+    use std::io::Write as _;
+
     let cfg_file = config_file();
     let json = serde_json::to_string_pretty(settings)?;
-    fs::write(&cfg_file, json)?;
-    let _ = fs::set_permissions(&cfg_file, fs::Permissions::from_mode(0o600));
-    Ok(())
+
+    let tmp = cfg_file.with_extension("json.tmp");
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        // 不 sync 就 rename 的话，掉电后可能 rename 生效而内容还在页缓存里没落盘，
+        // 结果是"文件在、内容是空的"——比半截 JSON 更难查。
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, &cfg_file)
 }
 
 // ---- HF Token：优先使用系统密钥环（GNOME Keyring / Secret Service），
@@ -233,6 +293,66 @@ pub fn set_hf_token(token: Option<&str>) {
 #[cfg(test)]
 pub static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 把 `HOME` 临时切到一个空目录，**离开作用域时一定还原**。
+///
+/// # 为什么必须还原
+///
+/// 这里原来是裸 `set_var("HOME", tmp.path())`，从不还原；测试结束 tempdir 析构
+/// 被删，`HOME` 就悬空指向一个已经不存在的路径。`cargo test --lib` 是**单进程
+/// 多线程**，于是污染的不只是自己：CI 上 `remote_control::file_access`（本模块
+/// 一行都没碰过）按 HOME 解析默认目录时读到那个已删路径，直接失败——
+/// 2420 passed / 1 failed，而失败信息里的 tempdir 路径只有模型商店的新测试会创建。
+///
+/// `ENV_TEST_LOCK` 保护不了它：那把锁只在模型商店自己的测试之间串行化，
+/// 读 `HOME` 的既有测试根本不知道有这把锁。所以**还原**才是真正的修复，
+/// 加锁只是让并发改动不至于互相撕裂。
+///
+/// 锁一并握在这个守卫里：这样「改 HOME」和「还原 HOME」之间全程持锁，
+/// 不会出现某个测试改完、还没还原就被另一个测试读到的窗口。
+#[cfg(test)]
+pub struct TempHome {
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+    // 声明在最后 => 最后析构：HOME 已经还原、临时目录也删掉之后才放锁。
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TempHome {
+    pub fn new() -> Self {
+        let lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("HOME");
+        // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
+        // 这里全程持有 ENV_TEST_LOCK，同一时刻只有一个测试在动 HOME。
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        Self {
+            dir,
+            previous,
+            _lock: lock,
+        }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        // SAFETY: 同上，仍在锁内。
+        unsafe {
+            match &self.previous {
+                Some(v) => std::env::set_var("HOME", v),
+                // 原来就没有 HOME 的环境（CI 容器里有过）：移除而不是设成空串，
+                // 空串会让 `$HOME/...` 拼成绝对路径 `/...`，比没有更糟。
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,11 +374,19 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         // 带不带结尾斜杠都算旧默认值
-        std::fs::write(&path, r#"{"store_url": "http://47.120.8.237/model-store/"}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://47.120.8.237/model-store/"}"#,
+        )
+        .unwrap();
         assert_eq!(load_settings().store_url, Settings::default().store_url);
 
         std::fs::write(&path, r#"{"store_url": "http://10.0.0.5:8088"}"#).unwrap();
-        assert_eq!(load_settings().store_url, "http://10.0.0.5:8088", "用户自定义的地址被改掉了");
+        assert_eq!(
+            load_settings().store_url,
+            "http://10.0.0.5:8088",
+            "用户自定义的地址被改掉了"
+        );
     }
 
     #[test]

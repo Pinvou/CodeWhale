@@ -9,17 +9,43 @@
 
 use std::collections::BTreeMap;
 
-use super::store_client::{DeployProfile, StoreCardDetail, StoreCardSummary, DeployTopology};
+use super::store_client::{DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary};
 
 macro_rules! card_scripts {
     ($dir:literal) => {{
         let mut m: BTreeMap<&'static str, &'static str> = BTreeMap::new();
-        m.insert("install_engine", include_str!(concat!("../../data/test-store/", $dir, "/install_engine.sh")));
-        m.insert("download_model", include_str!(concat!("../../data/test-store/", $dir, "/download_model.sh")));
-        m.insert("deploy", include_str!(concat!("../../data/test-store/", $dir, "/deploy.sh")));
-        m.insert("enable", include_str!(concat!("../../data/test-store/", $dir, "/enable.sh")));
-        m.insert("stop", include_str!(concat!("../../data/test-store/", $dir, "/stop.sh")));
-        m.insert("uninstall", include_str!(concat!("../../data/test-store/", $dir, "/uninstall.sh")));
+        m.insert(
+            "install_engine",
+            include_str!(concat!(
+                "../../data/test-store/",
+                $dir,
+                "/install_engine.sh"
+            )),
+        );
+        m.insert(
+            "download_model",
+            include_str!(concat!(
+                "../../data/test-store/",
+                $dir,
+                "/download_model.sh"
+            )),
+        );
+        m.insert(
+            "deploy",
+            include_str!(concat!("../../data/test-store/", $dir, "/deploy.sh")),
+        );
+        m.insert(
+            "enable",
+            include_str!(concat!("../../data/test-store/", $dir, "/enable.sh")),
+        );
+        m.insert(
+            "stop",
+            include_str!(concat!("../../data/test-store/", $dir, "/stop.sh")),
+        );
+        m.insert(
+            "uninstall",
+            include_str!(concat!("../../data/test-store/", $dir, "/uninstall.sh")),
+        );
         m
     }};
 }
@@ -50,7 +76,10 @@ fn qwen38fn_single_assets() -> BTreeMap<&'static str, &'static str> {
         ($rel:literal) => {
             m.insert(
                 $rel,
-                include_str!(concat!("../../data/test-store/qwen38fn-nvfp4-single/package/", $rel)),
+                include_str!(concat!(
+                    "../../data/test-store/qwen38fn-nvfp4-single/package/",
+                    $rel
+                )),
             );
         };
     }
@@ -168,7 +197,10 @@ fn qwen38_sglang0519_assets() -> BTreeMap<&'static str, &'static str> {
         ($rel:literal) => {
             m.insert(
                 concat!("vendor/", $rel),
-                include_str!(concat!("../../data/test-store/qwen38-27b-sglang0519/package/", $rel)),
+                include_str!(concat!(
+                    "../../data/test-store/qwen38-27b-sglang0519/package/",
+                    $rel
+                )),
             );
         };
     }
@@ -209,7 +241,10 @@ fn minimax_h3_single_assets() -> BTreeMap<&'static str, &'static str> {
         ($rel:literal) => {
             m.insert(
                 concat!("package/", $rel),
-                include_str!(concat!("../../data/test-store/minimax-h3-int8-single/package/", $rel)),
+                include_str!(concat!(
+                    "../../data/test-store/minimax-h3-int8-single/package/",
+                    $rel
+                )),
             );
         };
     }
@@ -471,7 +506,11 @@ pub fn to_detail(
     asset_sha256: BTreeMap<String, String>,
 ) -> StoreCardDetail {
     StoreCardDetail {
-        asset_sha256: if asset_sha256.is_empty() { None } else { Some(asset_sha256) },
+        asset_sha256: if asset_sha256.is_empty() {
+            None
+        } else {
+            Some(asset_sha256)
+        },
         assets,
         summary: card.summary.clone(),
         source_repo_id: card.source_repo_id.map(|s| s.to_string()),
@@ -490,7 +529,14 @@ mod tests {
     fn all_cards_have_six_scripts() {
         for c in test_cards() {
             assert_eq!(c.scripts.len(), 6, "卡片 {} 脚本数不对", c.summary.id);
-            for t in ["install_engine", "download_model", "deploy", "enable", "stop", "uninstall"] {
+            for t in [
+                "install_engine",
+                "download_model",
+                "deploy",
+                "enable",
+                "stop",
+                "uninstall",
+            ] {
                 let body = script_content(&c, t).expect(t);
                 assert!(body.starts_with("#!"), "{} 的 {t} 不像脚本", c.summary.id);
             }
@@ -505,7 +551,14 @@ mod tests {
     /// deploy.sh / stop.sh / uninstall.sh，所以整包挪到了 vendor/ 下。
     #[test]
     fn assets_never_shadow_the_six_entry_scripts() {
-        let entries = ["install_engine", "download_model", "deploy", "enable", "stop", "uninstall"];
+        let entries = [
+            "install_engine",
+            "download_model",
+            "deploy",
+            "enable",
+            "stop",
+            "uninstall",
+        ];
         for c in test_cards() {
             for name in entries {
                 let clash = format!("{name}.sh");
@@ -542,9 +595,9 @@ mod tests {
                 let (sha, name) = line
                     .split_once("  ")
                     .unwrap_or_else(|| panic!("{card} 的 SHA256SUMS 行格式不对：{line}"));
-                let content = assets
-                    .get(name)
-                    .unwrap_or_else(|| panic!("{card} 缺少交付文件：{name}（没在 assets 里列出来）"));
+                let content = assets.get(name).unwrap_or_else(|| {
+                    panic!("{card} 缺少交付文件：{name}（没在 assets 里列出来）")
+                });
                 assert_eq!(
                     crate::platform::encoding::hex_lower(&Sha256::digest(content.as_bytes())),
                     sha,
@@ -552,9 +605,16 @@ mod tests {
                 );
                 listed += 1;
             }
-            assert!(listed >= 20, "{card} 的 SHA256SUMS 只列了 {listed} 个文件，包像是残缺的");
+            assert!(
+                listed >= 20,
+                "{card} 的 SHA256SUMS 只列了 {listed} 个文件，包像是残缺的"
+            );
             // 清单之外只允许多出 SHA256SUMS 自己和我们加的 common.sh
-            assert_eq!(assets.len(), listed + extra, "{card} 的 assets 里有清单外的多余文件");
+            assert_eq!(
+                assets.len(),
+                listed + extra,
+                "{card} 的 assets 里有清单外的多余文件"
+            );
         }
     }
 
