@@ -137,6 +137,24 @@ test('the bridge forwards UI fields only and never builds protocol payloads', ()
   assert.ok(bridge.includes('applyControllerSession'));
 });
 
+test('controller command results map the nested Rust lease into UI state', () => {
+  const apply = bridge.slice(
+    bridge.indexOf('function applyController'),
+    bridge.indexOf('function controlledStart'),
+  );
+  assert.ok(apply.includes('controllerStatusPayload(result)'));
+  assert.ok(apply.includes('connectionId: payload.connectionId'));
+  assert.ok(apply.includes('leaseEpoch: payload.leaseEpoch'));
+  assert.ok(apply.includes('deviceName: payload.deviceName'));
+  const mapping = bridge.slice(
+    bridge.indexOf('function controllerStatusPayload'),
+    bridge.indexOf('function controllerSessionOpen'),
+  );
+  assert.ok(mapping.includes('wire.lease'));
+  assert.ok(mapping.includes('lease.connectionId'));
+  assert.ok(mapping.includes('lease.leaseEpoch'));
+});
+
 test('the desktop facade exposes the A-side session and task bridge methods', () => {
   for (const method of [
     'controllerSessionOpen',

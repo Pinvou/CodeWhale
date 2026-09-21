@@ -1,4 +1,4 @@
-// DEV-21 contract: the B-side panel must stay trilingual, accessible and free
+﻿// DEV-21 contract: the B-side panel must stay trilingual, accessible and free
 // of any Allow/Approve control. Source-level checks complement the language
 // parity test and the browser smoke lane.
 import assert from 'node:assert/strict';
@@ -19,12 +19,13 @@ const CONTROLLED_KEYS = [
   'endpointLabel', 'endpointProduction', 'endpointTest', 'endpointHint',
 ];
 
-test('the B panel switches the built-in service endpoint through the bridge', () => {
+test('the built-in service endpoint stays hidden from B-side controls', () => {
   const bridge = source('platform/tauri/bridge/desktop-remote-control.js');
-  assert.ok(panel.includes('endpointProfiles'), 'panel loads the built-in endpoint list');
-  assert.ok(panel.includes('setEndpointProfile'), 'panel switches endpoint through the bridge');
-  assert.ok(panel.includes('endpointLabel'), 'endpoint control uses shared i18n copy');
-  assert.ok(/id="controlled-device-endpoint"/.test(panel), 'endpoint control is addressable');
+  // 零配置后，服务端点由桥接/后端内置；被控面板不再暴露生产/测试切换。
+  assert.ok(!panel.includes('endpointProfiles'), 'panel must not load a user-facing endpoint list');
+  assert.ok(!panel.includes('setEndpointProfile'), 'panel must not switch endpoints');
+  assert.ok(!panel.includes('endpointLabel'), 'panel must not show endpoint switching copy');
+  assert.ok(!/id="controlled-device-endpoint"/.test(panel), 'panel must not expose an endpoint control');
   assert.ok(bridge.includes('desktop_remote_endpoint_profiles'));
   assert.ok(bridge.includes('desktop_remote_set_endpoint_profile'));
 });
@@ -47,19 +48,20 @@ test('controlled-device copy exists in all three languages', () => {
 
 test('the panel never exposes an approval control', () => {
   assert.ok(!/\bAllow\b|\bApprove\b|allowButton|approveButton/.test(panelCode));
-  assert.ok(panelCode.includes('noAllowControl'));
   assert.ok(panelCode.includes('readOnlyNotice'));
 });
 
 test('the panel uses the remote-control toggle as its only disconnect action', () => {
+  // 旧版同时提供开关和「立即断开」；二者最终都会 stop 并吊销代际，必须收敛。
+  assert.ok(panel.includes('<Toggle'));
   assert.ok(panel.includes('remote.controlledStop()'));
-  assert.ok(!panel.includes('controlledDisconnectNow'));
-  assert.ok(!panel.includes('disconnectNow'));
+  assert.ok(!panelCode.includes('controlledDisconnectNow'));
+  assert.ok(!panelCode.includes('disconnectNow'));
 });
 
 test('the panel is keyboard reachable and screen-reader friendly', () => {
   assert.ok(panel.includes('aria-live'));
-  assert.ok(panel.includes('role="status"'));
+  assert.ok(panel.includes('role="group"'));
   assert.ok(panel.includes('role="alert"'));
   assert.ok(panel.includes('<button'));
   assert.ok(panel.includes('type="button"'));

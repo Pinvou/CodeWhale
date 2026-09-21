@@ -92,3 +92,10 @@ test('the view is keyboard reachable with labelled controls', () => {
   assert.ok(view.includes('<button'));
   assert.ok(view.includes('type="radio"'));
 });
+
+test('the connected conversation has an inline composer', () => {
+  assert.ok(view.includes('remote-conversation-composer'));
+  assert.ok(view.includes('type="submit"'));
+  assert.ok(view.includes('controllerTaskSend(sessionRef, draft.trim(), modelSource)'));
+  assert.ok(view.includes('composerPlaceholder'));
+});

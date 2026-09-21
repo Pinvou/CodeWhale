@@ -47,10 +47,23 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   // 构造任务）；两者都失败关闭，不暴露半通路。
   const sessionRef = connection.sessionRef || null;
   const connected = connection.status === 'connected';
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionError, setSessionError] = useState(null);
+
+  const openSession = () => {
+    if (!remote || !connected || sessionRef || sessionBusy) return;
+    setSessionBusy(true);
+    setSessionError(null);
+    remote.controllerSessionOpen(copy.title || 'remote', 'chat')
+      .then(() => setSessionError(null))
+      .catch((failure) => setSessionError(failure && failure.code ? String(failure.code) : 'errorGeneric'))
+      .finally(() => setSessionBusy(false));
+  };
+
   useEffect(() => {
     if (!remote || !connected || sessionRef) return;
-    remote.controllerSessionOpen(copy.title || 'remote', 'chat').catch(function () {});
-  }, [remote, connected, sessionRef, copy.title]);
+    openSession();
+  }, [remote, connected, sessionRef]);
   useEffect(() => {
     if (!remote || !sessionRef || connection.capabilityRevision != null) return;
     remote.controllerCapabilitySend(sessionRef).catch(function () {});
@@ -62,7 +75,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
     setError(null);
     try {
       // E2E-04：只传会话引用与正文；协议字段与输入摘要全部由 Rust 构造并加密。
-      await remote.controllerTaskSend(sessionRef, draft.trim());
+      await remote.controllerTaskSend(sessionRef, draft.trim(), modelSource);
       setDraft('');
     } catch (failure) {
       setError((failure && failure.code) || 'errorGeneric');
@@ -153,6 +166,50 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
           </li>
         ))}
       </ol>
+
+      <form
+        className="sticky bottom-0 mt-3 flex items-center gap-2 border-t border-black/10 bg-white pt-3 dark:border-white/10 dark:bg-[#1F2023]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          send();
+        }}
+      >
+        <label className="sr-only" htmlFor="remote-conversation-composer">{copy.composerPlaceholder}</label>
+        <input
+          id="remote-conversation-composer"
+          data-testid="remote-conversation-composer"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder={copy.composerPlaceholder}
+          className="min-w-0 flex-1 rounded-full border border-black/10 px-4 py-2 text-[13px] outline-none dark:border-white/15 dark:bg-transparent"
+        />
+        <button
+          type="submit"
+          data-testid="remote-conversation-send"
+          disabled={busy || sessionBusy || !draft.trim() || !sessionRef}
+          className="shrink-0 rounded-full bg-[#1A73E8] px-4 py-2 text-[13px] text-white disabled:opacity-60"
+        >
+          {busy ? copy.sending : copy.send}
+        </button>
+      </form>
+      {!sessionRef && !sessionBusy && !sessionError && connected && (
+        <p className="mt-2 text-[11px] opacity-70">{copy.sessionInitializing}</p>
+      )}
+      {!sessionRef && sessionBusy && (
+        <p className="mt-2 text-[11px] opacity-70" role="status">{copy.sessionInitializing}</p>
+      )}
+      {!sessionRef && sessionError && (
+        <p className="mt-2 flex items-center gap-2 text-[11px] text-[#EA4335]" role="alert">
+          <span>{copy.sessionInitializeFailed} ({sessionError})</span>
+          <button
+            type="button"
+            onClick={openSession}
+            className="rounded-full border border-[#EA4335]/40 px-2 py-0.5"
+          >
+            {copy.retry}
+          </button>
+        </p>
+      )}
 
       {permissions.length > 0 && (
         <section aria-labelledby="remote-permission-title" className="mt-3">

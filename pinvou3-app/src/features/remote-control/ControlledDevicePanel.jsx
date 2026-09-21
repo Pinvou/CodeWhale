@@ -2,7 +2,7 @@
 //
 // 与 Web 分享卡片完全独立：这里只展示本机被控状态、5 分钟短期连接码、
 // 已授权工作区、模型来源和只读的审批请求。B 端没有 Allow/Approve 入口，
-// 只能查看或停止任务；所有文案走三语词条，倒计时通过
+// 只能查看、停止任务或用开关关闭远程控制；所有文案走三语词条，倒计时通过
 // aria-live 节流播报，键盘可达。
 
 import { useEffect, useMemo, useState } from 'react';
@@ -52,7 +52,7 @@ function statusKey(status) {
   }
 }
 
-/** 进行中的状态：只有这些状态才允许刷新/停止/立即断开。 */
+/** 进行中的状态：只有这些状态才允许刷新；开关负责开启或关闭被控。 */
 const ACTIVE_STATUSES = [
   'reserving',
   'registering',
@@ -154,12 +154,15 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
             <div className="text-sm font-medium">{copy.connectionTitle}</div>
             <div className="settings-hint">{copy[statusKey(status)] || copy.statusIdle}</div>
           </div>
-          <Toggle
-            checked={active}
-            disabled={busy === 'toggle'}
-            aria-label={active ? copy.disable : copy.enable}
-            onChange={() => run('toggle', (remote) => (active ? remote.controlledStop() : remote.controlledStart(null, [])))}
-          />
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] leading-4 opacity-70">{active ? copy.disable : copy.enable}</span>
+            <Toggle
+              checked={active}
+              disabled={busy === 'toggle'}
+              aria-label={active ? copy.disable : copy.enable}
+              onChange={() => run('toggle', (remote) => (active ? remote.controlledStop() : remote.controlledStart(null, [])))}
+            />
+          </div>
         </div>
         <div className="settings-actions">
           <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || busy === 'refresh'}>

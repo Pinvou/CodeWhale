@@ -29,7 +29,10 @@ export function connectionErrorKey(code) {
     case 'controller_busy':
     case 'desktop_controller_active':
     case 'desktop_controller_pending':
+    case 'pairing_code_generation_failed':
       return 'errorBusy';
+    case 'controller_already_connecting':
+      return 'errorLocalBusy';
     case 'endpoint_not_found':
     case 'controller_offline':
     case 'pairing_code_invalid':
@@ -44,6 +47,8 @@ export function connectionErrorKey(code) {
       return 'errorOffline';
     case 'invalid_message':
       return 'errorProtocol';
+    case 'desktop_remote_control_unsupported':
+      return 'errorUnsupported';
     default:
       return 'errorGeneric';
   }

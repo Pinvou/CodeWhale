@@ -560,9 +560,13 @@ async function modalWidth(page, headingText) {
     const content = document.querySelector('[data-testid="settings-content"]');
     return {
       heading: (content?.querySelector('h1')?.textContent || '').trim(),
+      controllerTitle: (content?.querySelector('#remote-controller-connect-title')?.textContent || '').trim(),
       panelTitle: (content?.querySelector('#controlled-device-title')?.textContent || '').trim(),
       hasBack: !!content?.querySelector('[data-testid="desktop-remote-control-back"]'),
       backLabel: (content?.querySelector('[data-testid="desktop-remote-control-back"]')?.textContent || '').trim(),
+      hasControllerPanel: !!content?.querySelector('[data-testid="remote-controller-panel"]'),
+      hasConnectForm: !!content?.querySelector('[data-testid="remote-controller-connect-form"]'),
+      hasCodeInput: !!content?.querySelector('[data-testid="remote-controller-code-input"]'),
     };
   });
   await page.click('[data-testid="desktop-remote-control-back"]');
@@ -572,6 +576,7 @@ async function modalWidth(page, headingText) {
     hasPanel: !!document.querySelector('#controlled-device-title'),
   }));
   rec('①h 桌面远程控制是「通用」下的二级菜单且返回可达', remoteEntry.inGeneral && remoteEntry.visible && remoteEntry.label === '桌面远程控制' && remoteEntry.hasChevron && !remoteEntry.panelInlineInGeneral && !remoteEntry.topLevelNav && remotePage.heading === '桌面远程控制' && !!remotePage.panelTitle && remotePage.hasBack && remotePage.backLabel === '返回通用' && backPage.heading === '通用' && !backPage.hasPanel, JSON.stringify({ remoteEntry, remotePage, backPage }));
+  rec('①i 主控连接与被控面板分区且连接码内嵌在控制页', remotePage.heading === '桌面远程控制' && remotePage.controllerTitle === '连接远程设备' && remotePage.panelTitle === '允许他人连接本机' && remotePage.hasControllerPanel && remotePage.hasConnectForm && remotePage.hasCodeInput, JSON.stringify({ remotePage }));
 
   // Exercise the Official App -> SettingsView callback and actual bridge payload.
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);

@@ -37,7 +37,7 @@ export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconn
   };
 
   return (
-    <section className="remote-connection-shell" aria-labelledby="remote-connection-title">
+    <section className="remote-connection-shell p-4 sm:p-5" aria-labelledby="remote-connection-title">
       <header className="flex items-center justify-between gap-2">
         <div>
           <h2 id="remote-connection-title" className="text-[15px] font-medium">{copy.title}</h2>

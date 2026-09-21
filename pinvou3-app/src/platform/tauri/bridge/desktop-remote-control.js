@@ -105,6 +105,15 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
+      // A 端状态事件：后台 keeper 会在 connecting / safety_handshake /
+      // connected / reconnecting / error 之间推进。没有这条监听时，前端只能
+      // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
+      listen("desktop-remote-controller-status", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControllerStatus(current(), controllerStatusPayload(payload)));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
       listen("desktop-remote-controller-journal", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         publish(logic.applyJournalEvent(current(), payload));
@@ -156,14 +165,14 @@
     }
 
     function applyController(intent, result) {
-      var payload = result && typeof result === "object" ? result : {};
+      var payload = controllerStatusPayload(result);
       publish(logic.applyControllerStatus(current(), {
         intent: intent,
-        status: payload.kind || payload.status || "idle",
-        connectionId: payload.connectionId || null,
-        leaseEpoch: payload.leaseEpoch || null,
-        deviceName: payload.deviceName || null,
-        error: payload.lastError || null,
+        status: payload.status,
+        connectionId: payload.connectionId,
+        leaseEpoch: payload.leaseEpoch,
+        deviceName: payload.deviceName,
+        error: payload.error,
       }));
       return result;
     }
@@ -262,6 +271,7 @@
 
     function controllerConnect(code) {
       ensureAvailable();
+      subscribe();
       var intent = controllerIntent();
       return invoke("desktop_remote_controller_connect", { code: code }).then(function (result) {
         return applyController(intent, result);
@@ -286,6 +296,7 @@
 
     function controllerDisconnect() {
       ensureAvailable();
+      subscribe();
       var intent = controllerIntent();
       return invoke("desktop_remote_controller_disconnect", {}).then(function (result) {
         return applyController(intent, result);
@@ -294,7 +305,25 @@
 
     function controllerStatus() {
       ensureAvailable();
-      return invoke("desktop_remote_controller_status", {});
+      subscribe();
+      return invoke("desktop_remote_controller_status", {}).then(function (result) {
+        var payload = controllerStatusPayload(result);
+        publish(logic.applyControllerStatus(current(), payload));
+        return result;
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /** Rust ControllingStatus -> pure-state controller envelope. */
+    function controllerStatusPayload(result) {
+      var wire = result && typeof result === "object" ? result : {};
+      var lease = wire.lease && typeof wire.lease === "object" ? wire.lease : {};
+      return {
+        status: wire.status || "idle",
+        connectionId: lease.connectionId || null,
+        leaseEpoch: lease.leaseEpoch || null,
+        deviceName: wire.deviceDisplayName || null,
+        error: wire.errorCode || null,
+      };
     }
 
     /**
@@ -692,6 +721,10 @@
     }
 
     publish(current());
+
+    // 窗口重载 / bridge 重建后，以 Rust 状态机为权威恢复 A 端连接状态；
+    // 否则后端 connected 而前端 idle，下一次连接会被本地状态机拒绝。
+    controllerStatus().catch(function () {});
 
     return {
       isAvailable: function () {
