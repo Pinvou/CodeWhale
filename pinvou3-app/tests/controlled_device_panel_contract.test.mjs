@@ -59,6 +59,15 @@ test('the panel uses the remote-control toggle as its only disconnect action', (
   assert.ok(!panelCode.includes('disconnectNow'));
 });
 
+test('refresh is unavailable while a controller is connected', () => {
+  const refresh = panel.slice(
+    panel.indexOf('remote.controlledRefresh()'),
+    panel.indexOf('</button>', panel.indexOf('remote.controlledRefresh()')),
+  );
+
+  assert.ok(refresh.includes("status === 'connected'"));
+});
+
 test('the pairing code appears in the controlled connection block', () => {
   const connectionStart = panel.indexOf('copy.connectionTitle');
   const deviceStart = panel.indexOf('copy.deviceLabel');
