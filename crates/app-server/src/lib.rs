@@ -10,7 +10,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use codewhale_agent::ModelRegistry;
 use codewhale_config::ConfigStore;
@@ -2574,6 +2574,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::extract::{Path as AxumPath, Query};
     use axum::http::header;
+    use axum::routing::patch;
     use codewhale_protocol::AppRequest;
     use std::collections::HashMap;
     use std::fs;
