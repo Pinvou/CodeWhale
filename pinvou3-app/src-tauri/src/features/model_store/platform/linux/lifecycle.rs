@@ -18,6 +18,7 @@ use super::db;
 use super::disk;
 use super::errors::AppError;
 use super::import_scan;
+use super::proc_timeout;
 use super::script_runner::{self, RunScriptOptions, ScriptProgress};
 use super::store_client::{
     DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
@@ -505,18 +506,18 @@ impl ModelManager {
         if records.is_empty() {
             return corrected;
         }
-        let Ok(out) = Command::new("docker")
-            .args(["ps", "--format", "{{.Names}}\t{{.Image}}"])
-            .output()
+        // 带超时：docker daemon 卡死时 `docker ps` 既不报错也不退出，而这里是
+        // `library()` 的第一步——用户看到的会是**整个模型商店永久转圈**，而不是
+        // 「拿不到运行状态」。同一文件里 ollama 那条分支早就设了 5 秒超时，
+        // 这两处没设，标准不一致本身就是漏了的信号。
+        let Some(stdout) =
+            proc_timeout::query("docker", &["ps", "--format", "{{.Names}}\t{{.Image}}"])
         else {
             return corrected;
         };
-        if !out.status.success() {
-            return corrected;
-        }
         let mut live_images: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut live_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
+        for line in stdout.lines() {
             let mut parts = line.splitn(2, '\t');
             if let Some(n) = parts.next() {
                 live_names.insert(n.trim().to_string());
@@ -2155,18 +2156,14 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
 }
 
 fn docker_image_size(image: &str) -> u64 {
-    Command::new("docker")
-        .args(["image", "inspect", image, "--format", "{{.Size}}"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })
-        .unwrap_or(0)
+    // 同样带超时。这个函数用在「已安装引擎」列表上，一个镜像一次调用——
+    // daemon 挂了的话，不设时限就是列表有几行就卡几次。
+    proc_timeout::query(
+        "docker",
+        &["image", "inspect", image, "--format", "{{.Size}}"],
+    )
+    .and_then(|s| s.trim().parse::<u64>().ok())
+    .unwrap_or(0)
 }
 
 fn ollama_size() -> u64 {
@@ -2186,19 +2183,17 @@ fn ollama_size() -> u64 {
 }
 
 fn gpu_runtime_lines() -> Vec<String> {
-    let out = Command::new("nvidia-smi")
-        .args([
+    // nvidia-smi 在驱动异常时会挂住不返回（真机上驱动重装期间遇到过）。
+    // 这条是详情弹窗里的「运行时信息」，拿不到就是少几行字，绝不该把弹窗卡死。
+    let Some(stdout) = proc_timeout::query(
+        "nvidia-smi",
+        &[
             "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
             "--format=csv,noheader",
-        ])
-        .output();
-    let Ok(out) = out else {
+        ],
+    ) else {
         return vec!["无法读取 GPU 状态（nvidia-smi 不可用）".into()];
     };
-    if !out.status.success() {
-        return vec!["无法读取 GPU 状态（nvidia-smi 不可用）".into()];
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.trim();
     if line.is_empty() {
         return vec!["无法读取 GPU 状态".into()];

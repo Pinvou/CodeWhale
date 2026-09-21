@@ -34,6 +34,7 @@ pub mod errors;
 pub mod import_scan;
 pub mod lifecycle;
 pub mod orphans;
+pub mod proc_timeout;
 pub mod run_state;
 pub mod script_runner;
 pub mod service;

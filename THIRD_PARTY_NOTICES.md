@@ -21,6 +21,9 @@ Their original licenses remain in effect.
 | Material Icon Theme | Iconify snapshot exported 2026-07-29 | 13 SVG file-type glyphs inlined in `pinvou3-app/src/shared/artifact-utils.js` | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
 | Material Icon Theme (file/folder icon subset) | Upstream `main` snapshot downloaded 2026-07-30 | 43 SVG file/folder icons vendored in `pinvou3-app/src/file-icons/theme/` | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
 | cc-switch (provider preset data) | Public preset list (trimmed 2026-08-05) | Base URL / protocol presets in `pinvou3-app/src/features/settings/acp-provider-catalog.js` | MIT | https://github.com/farion1231/cc-switch |
+| Qwen3.8-Flash-Next-NVFP4-DGX-Spark (MegaCube delivery package) | `1.0.0-rc3` | Card delivery package vendored under `pinvou3-app/src-tauri/src/features/model_store/data/test-store/qwen38fn-nvfp4-single/package/`; its text files are compiled into the Linux binary with `include_str!`. Upstream `LICENSE.upstream`, `NOTICE.upstream` and `runtime/patch/upstream-overlays/PROVENANCE.md` are preserved verbatim; changes are recorded in `SOURCE.md`. No model weights or container images are stored in Git. | Apache-2.0 | https://github.com/vllm-project/vllm (redistributed with modifications by Tony DeAngelo / Tech2Wild) |
+| MiniMax-H3 single-node video delivery package | Sources pinned in `package/sources/SOURCE_LOCKS.json` (ComfyUI 0.35.0 and ComfyUI-MiniMax-H3-Turbo source archives SHA-256-locked; model revisions pinned by commit) | Card delivery package vendored under `.../test-store/minimax-h3-int8-single/package/`; its own scripts and workflows are compiled into the Linux binary with `include_str!`. The ComfyUI and ComfyUI-MiniMax-H3-Turbo **source archives are not in this repository** — they are fetched at install time from the model store and SHA-256-verified against `SOURCE_LOCKS.json`. | **Not declared in the package — to be confirmed with the card author** (ComfyUI upstream is GPL-3.0; model weights carry their own upstream terms) | https://github.com/comfyanonymous/ComfyUI |
+| DeepSeek-V4-Flash-Vision dual-node delivery package | Unpublished; package retained for the dual-node path | Card delivery package vendored under `.../test-store/deepseek-v4-flash-vision-dual/package/`; `runtime/LICENSE.upstream` preserved verbatim. | MIT | Upstream package by Tony Deangelo |
 
 Vendored script attribution:
 
@@ -32,6 +35,21 @@ Vendored script attribution:
   `build/src/McpResponse.js` adds the `target_id` field to structured page
   entries so the host can enforce conversation and tab ownership. The adapted
   output is pinned by SHA-256.
+- Model store card delivery packages: the six packages under
+  `pinvou3-app/src-tauri/src/features/model_store/data/test-store/*/package/`
+  are third-party research deliverables vendored verbatim. Each keeps its own
+  `LICENSE.upstream` / `NOTICE.upstream` / `PROVENANCE.md` / `SOURCE.md` next to
+  the files they cover, and each package carries a `SHA256SUMS` that the card
+  scripts verify on the device before execution. They are listed here because the
+  Linux build compiles their text files into the binary with `include_str!`
+  (see `test_store_data.rs`), which makes the app a redistributor.
+  Ornith-1.5-35B-A3B and the two Qwen3.8-27B cards ship entry scripts only and
+  vendor no upstream sources, so they are not listed in the table above.
+- Open item: the MiniMax-H3 package carries no license file of its own. Its
+  `SOURCE_LOCKS.json` pins what gets fetched but says nothing about terms, and the
+  archives it points at are GPL-3.0 upstream. The license column above therefore
+  records what is verifiable rather than an assumption; it needs confirming with the
+  card author before this package ships outside internal validation.
 - Tailwind CSS: Copyright (c) Tailwind Labs, Inc.
 - Material Icon Theme: Copyright (c) 2025 Material Extensions. The glyphs
   were exported from the
