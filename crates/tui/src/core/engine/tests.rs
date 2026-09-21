@@ -24512,6 +24512,7 @@ async fn forkguard_workspace_sync_invalidates_in_flight_boot() {
             system_prompt_override: false,
             model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
             workspace: workspace_b.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
