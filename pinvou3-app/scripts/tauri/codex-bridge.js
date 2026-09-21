@@ -340,15 +340,32 @@ function prepareWindowsCodexBridge({
   }
 }
 
+/**
+ * 备料 Linux/macOS 的 Codex ACP Bridge。
+ *
+ * `targetArch` 是**交叉构建时要打进包的那个架构**（node 记法：`"arm64"` / `"x64"`）。
+ * 不传就按宿主架构走，行为跟改动前完全一样。
+ *
+ * 为什么 Bridge 能为另一个架构备料，而 SenseVoice 不能：Bridge 这一步不编译任何
+ * 东西，只是下 Node 官方 tarball、校验 sha256、解压；唯一的障碍是 `npm ci` 要用
+ * 一个能在**宿主**上执行的 node 去跑，脚本里已按此下两份（详见那个脚本的注释）。
+ * @param {{platform?: string, spawn?: Function, targetArch?: string, env?: object}} options 选项。
+ * @returns {boolean} 这个平台是否需要这一步。
+ */
 function prepareCodexBridge({
   platform = process.platform,
   spawn = spawnSync,
+  targetArch = null,
+  env = process.env,
 } = {}) {
   if (platform !== "linux" && platform !== "darwin") return false;
   const script = path.join(APP_ROOT, "scripts", "prepare-codex-bridge-runtime.sh");
+  // node 的 arch 记法 -> uname -m 的记法。脚本按 uname -m 分派。
+  const machine = { arm64: "aarch64", x64: "x86_64" }[targetArch];
   const result = spawn(script, [], {
     cwd: APP_ROOT,
     stdio: "inherit",
+    env: machine ? { ...env, PINVOU3_BRIDGE_TARGET_ARCH: machine } : env,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {

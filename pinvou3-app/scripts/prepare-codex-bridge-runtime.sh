@@ -50,6 +50,25 @@ bridge_runtime_valid() {
   local claude_package_json="$root/acp/node_modules/@agentclientprotocol/claude-agent-acp/package.json"
   local npm_cli="$root/node/lib/node_modules/npm/bin/npm-cli.js"
   local version_output
+
+  # 已有产物必须是**目标架构**的。
+  #
+  # 没有这一条就有个很隐蔽的坑：先做一次宿主构建（staging 里是 x64 node），
+  # 再做交叉构建，下面的执行检查会**通过**（x64 node 在 x64 宿主上跑得起来），
+  # 脚本打印「already ready」直接退出，于是 arm64 包里装进了 x64 的 node——
+  # 正是本次要修的那个 bug 换条路径重现。
+  #
+  # 用 manifest.json 里已有的 arch 字段，不另造标记文件：它本来就记着这个值
+  # （见文件末尾生成 manifest 那段），多一个标记就多一处会不同步的地方。
+  # darwin 打的是 universal（两个架构都在包里），不参与这个比对。
+  if [ -n "${NODE_CPU:-}" ] && [ "$OS_NAME" != "Darwin" ] && [ -s "$root/manifest.json" ]; then
+    local recorded
+    # 两段式，不用反向引用：先砍掉 `"arch": "` 之前的一切，再砍掉右引号之后的。
+    # sed 的反向引用穿过 heredoc/多层引号太容易被吃掉，而且吃掉之后是**静默**
+    # 取到空串——那会让这个检查永远判失败，退化成每次都重建，且没人看得出来。
+    recorded="$(sed -n 's/.*"arch"[[:space:]]*:[[:space:]]*"//p' "$root/manifest.json" | head -n 1 | sed 's/".*//')"
+    [ "$recorded" = "$NODE_CPU" ] || return 1
+  fi
   case "$OS_NAME-$(uname -m)" in
     Linux-x86_64|Linux-aarch64|Linux-arm64)
       node="$root/node/bin/node"
@@ -70,26 +89,62 @@ bridge_runtime_valid() {
       return 1
       ;;
   esac
+
+  # 下面两处检查跑的是**纯 JS**（ACP 包的 --version、读 package.json），拿哪个
+  # 解释器跑都一样。交叉构建时用宿主那份 node——包里那份是目标架构的，在这台
+  # 机器上根本执行不了（ENOEXEC），照原样跑只会把一份好产物判成坏的。
+  local runner="$node"
+  if [ -n "${NPM_NODE_ROOT:-}" ] && [ -x "$NPM_NODE_ROOT/bin/node" ]; then
+    runner="$NPM_NODE_ROOT/bin/node"
+  fi
   [ -x "$node" ] && [ -s "$npm_cli" ] && [ -s "$entry" ] && [ -s "$package_json" ] \
     && [ -s "$claude_entry" ] && [ -s "$claude_package_json" ] || return 1
   version_output="$(
     env CODEX_PATH="$(command -v codex || true)" \
-      "$node" "$entry" --version 2>/dev/null
+      "$runner" "$entry" --version 2>/dev/null
   )" || return 1
   [ "$version_output" = "$CODEX_ACP_PACKAGE $CODEX_ACP_VERSION" ] || return 1
   local claude_version
   claude_version="$(
-    "$node" -e 'process.stdout.write(require(process.argv[1]).version)' "$claude_package_json"
+    "$runner" -e 'process.stdout.write(require(process.argv[1]).version)' "$claude_package_json"
   )" || return 1
   [ "$claude_version" = "$CLAUDE_ACP_VERSION" ]
 }
 
-if bridge_runtime_valid "$OUT_DIR"; then
-  echo "Codex ACP Bridge already ready: $OUT_DIR"
-  exit 0
-fi
+# ---- 目标架构 vs 宿主架构 ----
+#
+# 交叉构建时这两者不同，而 Bridge 里要打进包的是**目标架构**的 Node。原先整段
+# 只看 `uname -m`，于是 x64 宿主交叉出的 arm64 包里躺着一个 x86_64 的 node，
+# 装上去一用就 ENOEXEC，而构建过程一句警告都没有。
+#
+# 跟 SenseVoice 不同，Bridge 是**可以**为另一个架构备料的：它不编译任何东西，
+# 只是下一个 Node 官方 tarball、校验 sha256、解压。唯一的障碍是 `npm ci` 要用
+# 一个能在**宿主**上执行的 node 去跑——所以交叉时下两份：宿主那份用来跑 npm，
+# 目标那份打进包。npm 本来就收 `--os/--cpu/--libc`（下面 npm_ci_for_target），
+# 按目标平台解依赖这件事它自己支持。
+#
+# macOS 那条分支早就在下两份（darwin-arm64 + darwin-x64）并都打进包，所以
+# 「下载多份、挑一份跑」这个形态本脚本里是现成的，不是新发明。
+HOST_MACHINE="$(uname -m)"
+TARGET_MACHINE="${PINVOU3_BRIDGE_TARGET_ARCH:-$HOST_MACHINE}"
 
-case "$OS_NAME-$(uname -m)" in
+# machine 名 -> Node 官方发行包的 target 名
+node_target_for() {
+  case "$OS_NAME-$1" in
+    Linux-x86_64) echo "linux-x64" ;;
+    Linux-aarch64|Linux-arm64) echo "linux-arm64" ;;
+    Darwin-x86_64) echo "darwin-x64" ;;
+    Darwin-arm64) echo "darwin-arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+HOST_NODE_TARGET="$(node_target_for "$HOST_MACHINE")" || {
+  echo "当前 Bridge 构建脚本仅支持 Linux/macOS x64/arm64（宿主 $HOST_MACHINE）" >&2
+  exit 1
+}
+
+case "$OS_NAME-$TARGET_MACHINE" in
   Linux-x86_64)
     NODE_OS="linux"
     NODE_CPU="x64"
@@ -115,10 +170,25 @@ case "$OS_NAME-$(uname -m)" in
     NODE_TARGETS=("darwin-arm64" "darwin-x64")
     ;;
   *)
-    echo "当前 Bridge 构建脚本仅支持 Linux/macOS x64/arm64" >&2
+    echo "当前 Bridge 构建脚本仅支持 Linux/macOS x64/arm64（目标 $TARGET_MACHINE）" >&2
     exit 1
     ;;
 esac
+
+# 交叉时把宿主那份也加进下载清单——它只用来跑 npm，不进包。
+if [ "$HOST_NODE_TARGET" != "$NODE_TARGET" ]; then
+  case " ${NODE_TARGETS[*]} " in
+    *" $HOST_NODE_TARGET "*) ;;
+    *) NODE_TARGETS+=("$HOST_NODE_TARGET") ;;
+  esac
+  echo "[codex-bridge] 交叉构建：目标 $NODE_TARGET，用宿主 $HOST_NODE_TARGET 的 node 跑 npm"
+fi
+
+if bridge_runtime_valid "$OUT_DIR"; then
+  echo "Codex ACP Bridge already ready: $OUT_DIR"
+  exit 0
+fi
+
 
 node_archive_ext() {
   case "$1" in
@@ -162,7 +232,10 @@ mkdir -p "$RESOURCE_PARENT"
 BUILD_DIR="$(mktemp -d "$RESOURCE_PARENT/.codex-bridge-build.XXXXXX")"
 trap 'rm -rf $DD "$BUILD_DIR"' EXIT
 
+# 要打进包的那份（目标架构）
 NODE_DIST_ROOT="$BUILD_DIR/node-v${NODE_VERSION}-${NODE_TARGET}"
+# 用来跑 npm 的那份（宿主架构）。不交叉时两者是同一个目录。
+NPM_NODE_ROOT="$BUILD_DIR/node-v${NODE_VERSION}-${HOST_NODE_TARGET}"
 for node_target in "${NODE_TARGETS[@]}"; do
   node_archive_ext="$(node_archive_ext "$node_target")"
   node_archive="node-v${NODE_VERSION}-${node_target}.${node_archive_ext}"
@@ -207,7 +280,10 @@ npm_ci_for_target() {
   if [ "$target_os" = "linux" ]; then
     npm_args+=(--libc=glibc)
   fi
-  PATH="$NODE_DIST_ROOT/bin:$PATH" "$NODE_DIST_ROOT/bin/npm" "${npm_args[@]}"
+  # 用**宿主**架构的 node 跑 npm：交叉时目标架构的 node 在这台机器上执行不了
+  # （ENOEXEC）。依赖解析的正确性由上面的 --os/--cpu/--libc 保证，跟拿哪个 node
+  # 解释器跑无关。非交叉时 NPM_NODE_ROOT 就等于 NODE_DIST_ROOT，行为不变。
+  PATH="$NPM_NODE_ROOT/bin:$PATH" "$NPM_NODE_ROOT/bin/npm" "${npm_args[@]}"
 }
 
 npm_ci_for_target "$ACP_ROOT" "$NODE_OS" "$NODE_CPU"
@@ -251,7 +327,9 @@ mkdir -p "$READY_DIR/node/lib/node_modules"
 cp -R $DD "$NODE_DIST_ROOT/lib/node_modules/npm" "$READY_DIR/node/lib/node_modules/npm"
 mv $DD "$ACP_ROOT/node_modules" "$READY_DIR/acp/node_modules"
 
-"$READY_NODE" -e '
+# 生成 manifest 用宿主那份 node：READY_NODE 是要打进包的目标架构二进制，交叉时
+# 在这台机器上执行不了。生成 manifest 是纯 JS，跟解释器架构无关。
+"${NPM_NODE_ROOT}/bin/node" -e '
 const fs = require("fs");
 const path = require("path");
 const out = process.argv[1];

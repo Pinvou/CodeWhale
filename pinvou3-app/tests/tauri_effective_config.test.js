@@ -504,13 +504,22 @@ assert.match(
   /prepareWindowsRustcStackWrapper\(\{ environment: tauriEnvironment \}\);\s*return runTauri\(preparedArgs, \{ environment: tauriEnvironment \}\);/u,
   "the direct npm/Tauri entry must inject the Windows compiler stack wrapper",
 );
-assert.match(
-  buildSource,
-  // 交叉构建要能显式跳过 ASR（SenseVoice 只能在目标架构上原生构建），所以这里
-  // 允许 PINVOU3_SKIP_LINUX_ASR 这道门，但「备料必须在清单生成之前」的顺序不变。
-  /if \(hasTauriBuildCommand\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(process\.env\.PINVOU3_SKIP_LINUX_ASR !== "1"\) prepareLinuxAsrRuntime\(\);/u,
+// 这条要钉的是**顺序**：备料必须发生在清单生成之前，否则 bundle 会以
+// 「安装包资源不存在」失败。
+//
+// 原先它是逐字匹配那一行的写法（`if (process.env.PINVOU3_SKIP_LINUX_ASR !== "1")
+// prepareLinuxAsrRuntime();`）。那样任何等价重构都会把它弄红，而真正要守的顺序
+// 反倒没被检查——把开关读取上移成局部常量就是这么撞上的。改成按位置比较。
+assert.ok(
+  buildSource.includes("prepareLinuxAsrRuntime()"),
+  "Linux packaging must still prepare the SenseVoice runtime",
+);
+assert.ok(
+  buildSource.indexOf("prepareLinuxAsrRuntime()") < buildSource.indexOf("writeEffectiveArtifacts("),
   "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
 );
+// 交叉构建要能显式跳过 ASR（SenseVoice 只能在目标架构上原生构建）。
+assert.match(buildSource, /skipLinuxAsr/u, "the ASR step must stay skippable for cross builds");
 const preparedBrowserPlatforms = [];
 for (const platform of ["win32", "darwin", "linux"]) {
   const result = prepareChromeDevtoolsMcpForPlatform({

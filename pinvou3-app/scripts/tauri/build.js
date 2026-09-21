@@ -314,17 +314,92 @@ function targetArchitecture(args) {
  * @param {string} configPath 架构 overlay 的绝对路径。
  * @returns {string} 摘掉 ASR 之后的内联 JSON；没有可摘的就原样返回路径。
  */
-function architectureConfigWithoutAsr(configPath) {
-  const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+function configWithoutResources(configPath, markers) {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch (error) {
+    // 原样抛 SyntaxError 的话只有一句 "Unexpected token"，看不出是哪个文件——
+    // 而这里读的是按平台/架构拼出来的路径，出错时最需要知道的就是文件名。
+    // 带上 cause：包装错误保留原始 SyntaxError 的位置信息，不然只剩一句文案。
+    throw new Error(`解析配置失败 ${configPath}: ${error.message}`, { cause: error });
+  }
   const resources = raw?.bundle?.resources;
   if (!resources || typeof resources !== "object") return configPath;
   const kept = Object.fromEntries(
-    Object.entries(resources).filter(([source]) => !source.includes("linux-asr-runtime")),
+    Object.entries(resources).filter(
+      ([source]) => !markers.some((marker) => source.includes(marker)),
+    ),
   );
   if (Object.keys(kept).length === Object.keys(resources).length) return configPath;
   return JSON.stringify({ ...raw, bundle: { ...raw.bundle, resources: kept } });
 }
 
+/**
+ * 跳过 ASR 运行时构建时，摘掉架构 overlay 里的 ASR 资源声明。
+ * @param {string} configPath 架构 overlay 的绝对路径。
+ * @returns {string} 摘掉之后的内联 JSON；没有可摘的就原样返回路径。
+ */
+function architectureConfigWithoutAsr(configPath) {
+  return configWithoutResources(configPath, ["linux-asr-runtime"]);
+}
+
+/**
+ * 跳过共享知识库服务时，摘掉**平台** overlay 里的 knowledge-host 资源声明。
+ *
+ * 为什么是平台层而不是架构层：`knowledge-host/` 这条声明写在
+ * `config/platforms/linux/tauri.conf.json` 里，架构 overlay 只声明了 ASR。
+ * 第一版只加了「跳过构建」的开关、没摘这条声明，后果分两种，**都不报错**：
+ *   - 干净树：目录不存在，资源枚举出零个文件，包里静默缺 server；
+ *   - 脏树：目录里躺着上次**宿主架构**构建留下的 server，它被原样打进 arm64 包。
+ * 两种都要等用户在设备上用到共享知识库才暴露，比构建时直接失败难查得多。
+ * @param {string} configPath 平台 overlay 的绝对路径。
+ * @returns {string} 摘掉之后的内联 JSON；没有可摘的就原样返回路径。
+ */
+function platformConfigWithoutKnowledgeHost(configPath) {
+  return configWithoutResources(configPath, ["knowledge-host"]);
+}
+
+
+/**
+ * 目标架构 ≠ 宿主架构时，检查那些「只会按宿主架构备料」的步骤有没有被妥善处理。
+ *
+ * 为什么必须是**硬失败**而不是警告：这两步出问题的表现都不是构建报错，而是
+ * 包**静默地错**——
+ *   - 忘开 `PINVOU3_SKIP_LINUX_ASR`：`build-sensevoice-runtime.sh` 硬断言
+ *     `requested_arch == host_arch`，这一步会当场失败，倒还算明显；
+ *   - 忘开 `PINVOU3_SKIP_KNOWLEDGE_HOST`：`cargo build` 不带 `--target`，编出来
+ *     的是**宿主架构**的 server，被原样打进另一个架构的包，构建全程零警告。
+ *     用户要等到在设备上用共享知识库时才发现，而那时候根本想不到是构建的问题。
+ *
+ * codex-bridge 不在这张清单上：它已经改成按目标架构备料了（见
+ * `prepare-codex-bridge-runtime.sh` 里的 `PINVOU3_BRIDGE_TARGET_ARCH`），
+ * 交叉构建能产出**正确**的包，不需要跳过、也就不需要闸门。
+ *
+ * @param {object} options 目标/宿主架构与两个跳过开关。
+ * @returns {string[]} 违规项的说明；空数组表示没问题。
+ */
+function crossBuildViolations({
+  platform,
+  targetArch,
+  hostArch,
+  skipLinuxAsr,
+  skipKnowledgeHost,
+}) {
+  if (platform !== "linux" || !targetArch || targetArch === hostArch) return [];
+  const problems = [];
+  if (!skipLinuxAsr) {
+    problems.push(
+      "语音识别运行时（SenseVoice）只能在目标架构上原生构建，交叉构建请设 PINVOU3_SKIP_LINUX_ASR=1",
+    );
+  }
+  if (!skipKnowledgeHost) {
+    problems.push(
+      "共享知识库服务的构建不认 --target，只会编出宿主架构的二进制，交叉构建请设 PINVOU3_SKIP_KNOWLEDGE_HOST=1",
+    );
+  }
+  return problems;
+}
 
 function prepareTauriArgs(
   args,
@@ -333,6 +408,15 @@ function prepareTauriArgs(
     architecture = process.arch,
     stageRuntime = stageWindowsRuntime,
     additionalConfigs = [],
+    // 两个跳过开关从参数进来，函数体里不直读 process.env。
+    //
+    // 这不是洁癖：同一个变量原先在这里和 main() 里各读一次，两处**永远有可能
+    // 读出两种结论**——比如中途有人改了环境，或者以后哪次重构把读取位置挪了。
+    // 而这两处一旦不一致，表现是「资源声明摘掉了但东西照样构建」或者反过来
+    // 「东西没构建但声明还在」，后者直接让 bundle 报「安装包资源不存在」。
+    // 本文件其余 env 读取一律集中在入口注入（见 :59-66、:409-416），这里补齐。
+    skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1",
+    skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1",
   } = {},
 ) {
   const prepared = [...args];
@@ -357,16 +441,21 @@ function prepareTauriArgs(
     return prepared;
   }
 
-  const automaticConfigs = [platformConfigPath(platform)];
+  // 平台 overlay。跳过共享知识库服务时要同时摘掉它那条资源声明——声明写在
+  // **平台层**（`knowledge-host/`），不在架构层，所以摘的是这个文件。
+  const platformConfig = platformConfigPath(platform);
+  const automaticConfigs = [
+    skipKnowledgeHost && platform === "linux"
+      ? platformConfigWithoutKnowledgeHost(platformConfig)
+      : platformConfig,
+  ];
   if (platform === "linux") automaticConfigs.push(linuxStartupWindowConfigSpec());
   // 交叉构建时 overlay 必须跟 --target 走，不能跟宿主架构走。
   const effectiveArchitecture = targetArchitecture(prepared) || architecture;
   const architectureConfig = platformArchitectureConfigPath(platform, effectiveArchitecture);
   if (architectureConfig) {
     automaticConfigs.push(
-      process.env.PINVOU3_SKIP_LINUX_ASR === "1"
-        ? architectureConfigWithoutAsr(architectureConfig)
-        : architectureConfig,
+      skipLinuxAsr ? architectureConfigWithoutAsr(architectureConfig) : architectureConfig,
     );
   }
   // bundle:nsis has already validated the staging overlay. Do not inject the
@@ -567,15 +656,38 @@ async function main() {
     // 要求 requested_arch == host_arch，产物还链接宿主 glibc），交叉构建时这一步
     // 必然失败。给一个显式开关跳过它——跳过后必须同时把 overlay 里的资源声明摘掉，
     // 否则 bundle 会找不到文件。
-    if (process.env.PINVOU3_SKIP_LINUX_ASR !== "1") prepareLinuxAsrRuntime();
-    prepareCodexBridge();
+    const targetArch = targetArchitecture(args);
+    const hostArch = process.arch;
+    const skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1";
+    const skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1";
+
+    // 交叉构建的一致性闸门：宁可现在就失败，也不要产出一个静默错架构的包。
+    const violations = crossBuildViolations({
+      platform: process.platform,
+      targetArch,
+      hostArch,
+      skipLinuxAsr,
+      skipKnowledgeHost,
+    });
+    if (violations.length > 0) {
+      const detail = violations.map((line) => `  - ${line}`).join("\n");
+      throw new Error(
+        `交叉构建（宿主 ${hostArch} → 目标 ${targetArch}）配置不完整：\n${detail}`,
+      );
+    }
+
+    if (!skipLinuxAsr) prepareLinuxAsrRuntime();
+    // Bridge 按**目标**架构备料：它不编译任何东西，只是下 Node 官方 tarball、
+    // 校验 sha256、解压，所以交叉构建能产出正确的包，不需要跳过开关。
+    // 不传 targetArch 时脚本回落到 uname -m，非交叉场景行为不变。
+    prepareCodexBridge(targetArch ? { targetArch } : {});
     await prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge(windowsBridgeOptions);
     // 共享知识库服务编的是**宿主架构**的二进制（cargo build 不带 --target），
     // 交叉构建时它会被打进另一个架构的包里，本来就是错的；而且它的 local-embed
     // 依赖 ort-sys 要从 parcel.pyke.io 下 ONNX Runtime，国内网络基本下不动。
     // 跟 SenseVoice 同一类问题：这个包装器不认 --target，只按宿主架构备料。
-    if (process.env.PINVOU3_SKIP_KNOWLEDGE_HOST !== "1") prepareKnowledgeHost();
+    if (!skipKnowledgeHost) prepareKnowledgeHost();
     if (process.platform === "win32") {
       additionalConfigs.push(WINDOWS_BRIDGE_CONFIG_PATH);
     }
@@ -611,8 +723,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  architectureConfigWithoutAsr,
+  configWithoutResources,
   configureIsolatedWindowsRustToolchain,
   configSpecs,
+  crossBuildViolations,
+  platformConfigWithoutKnowledgeHost,
+  targetArchitecture,
   chromeDevtoolsMcpEnvironment,
   ensureWindowsRustToolchain,
   formatElapsed,
