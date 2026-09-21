@@ -70,6 +70,7 @@ pub use fleet::profile::WORKSPACE_AGENT_PROFILE_DIR;
 pub use fleet::roster::FleetRoster;
 mod goal_loop;
 mod hashing;
+mod history_recognition;
 #[doc(hidden)]
 pub mod hooks;
 mod image_attach;
