@@ -10021,7 +10021,10 @@ async fn forkguard_idle_subagent_completion_self_start_ignores_a_stale_previous_
 /// submission started" apart from "an autonomous follow-up overtook it" and
 /// only ever consume the deferred submit-window stop replay on the former —
 /// the overtaking order itself is exercised app-side against the forwarder
-/// replay gate.
+/// replay gate. The three siblings below pin the same `None` echo on the
+/// other self-start dispatch paths (composer shell, background shell
+/// completion wake, goal continuation), so a refactor cannot swap one of
+/// their literal `None`s for a stale token without failing here.
 #[tokio::test]
 async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
     let workspace = tempdir().expect("tempdir");
@@ -10119,6 +10122,247 @@ async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
         .await
         .expect("timed out waiting for the self-start cancellation")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+/// Composer shell commands bypass `handle_send_message` entirely: the engine
+/// emits `TurnStarted` directly with a literal `None` because a typed `!`
+/// command has no host submission envelope to correlate with. Pins that
+/// emission so it cannot learn to echo a stale token (pinvou-agent#254).
+#[tokio::test]
+async fn forkguard_turn_started_composer_shell_self_start_stays_none() {
+    let workspace = tempdir().expect("tempdir");
+    // The composer shell turn never reaches the model; a client that would
+    // block forever turns any accidental dispatch into a bounded timeout
+    // instead of a silent pass.
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(CompleteOnceThenBlockModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+            request_dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(Op::RunShellCommand {
+            command: "echo composer-shell-forkguard".to_string(),
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: false,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+        })
+        .await
+        .expect("queue composer shell command");
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the composer shell turn")
+                .expect("engine event");
+            if let Event::TurnStarted { submission_id, .. } = event {
+                assert!(
+                    submission_id.is_none(),
+                    "a composer shell turn has no host submission to echo"
+                );
+                break;
+            }
+        }
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for the composer shell completion")
+        {
+            if let Event::TurnComplete { status, error, .. } = event {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+        }
+    }
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+/// A finished background shell task wakes the idle engine into a runtime
+/// turn (`UserInputProvenance::Runtime`, literal `None` submission id) so the
+/// completion reaches the model without waiting for the user to type. Pins
+/// the `None` echo on the wake-dispatched turn (pinvou-agent#254).
+#[tokio::test]
+async fn forkguard_turn_started_background_shell_wake_self_start_stays_none() {
+    let workspace = tempdir().expect("tempdir");
+    // The wake turn is the first provider request, so the canned completion
+    // lets the whole wake settle without a turn-bound cancel.
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(CompleteOnceThenBlockModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+            request_dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+    // The wake resolves the route engine-side via `current_runtime_route`, so
+    // the api config must name a resolvable provider even though the injected
+    // client answers the request itself.
+    let api_config = goal_custom_route_config();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &api_config,
+        client,
+    );
+    let owner_session_id = engine.session.id.clone();
+    {
+        let mut shell = engine.shell_manager.lock().expect("shell manager");
+        shell
+            .execute_with_options_env_for_owner_and_session(
+                "echo background-shell-wake-forkguard",
+                None,
+                30_000,
+                true,
+                None,
+                false,
+                None,
+                std::collections::HashMap::new(),
+                None,
+                &owner_session_id,
+            )
+            .expect("start background job");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let done = {
+            let mut shell = engine.shell_manager.lock().expect("shell manager");
+            shell.has_finished_unreported_jobs_for_session(&owner_session_id)
+        };
+        if done {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background job never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let task = tokio::spawn(engine.run());
+    // The engine idles with finished, unclaimed background work: the wake
+    // poll self-starts the runtime turn without any host submission, so the
+    // first TurnStarted of this session is the wake's.
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for the shell-wake turn")
+            .expect("engine event");
+        if let Event::TurnStarted { submission_id, .. } = event {
+            assert!(
+                submission_id.is_none(),
+                "a background shell completion wake must not present a submission id"
+            );
+            break;
+        }
+    }
+    drop(rx);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+/// An engine-scheduled or host-injected goal continuation dispatches
+/// `handle_send_message` with provenance Runtime and a literal `None`
+/// submission id. Pins the `None` echo on the continuation turn so a refactor
+/// cannot correlate it with a host submission that never happened
+/// (pinvou-agent#254).
+#[tokio::test]
+async fn forkguard_turn_started_goal_continuation_self_start_stays_none() {
+    let workspace = tempdir().expect("tempdir");
+    // calls starts pre-advanced so every provider request blocks: the
+    // continuation turn stays parked until the turn-bound cancel lands,
+    // mirroring the idle sub-agent sibling above.
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(CompleteOnceThenBlockModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(1),
+            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+            request_dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+    let api_config = goal_custom_route_config();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            goal_objective: Some("keep the goal continuation warm".to_string()),
+            goal_continuation_delay_seconds: 0,
+            ..EngineConfig::default()
+        },
+        &api_config,
+        client,
+    );
+    engine
+        .config
+        .goal_state
+        .lock()
+        .expect("goal lock")
+        .sync_from_host_status(
+            Some("keep the goal continuation warm"),
+            None,
+            crate::tools::goal::GoalStatus::Active,
+        );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(Op::ContinueGoal {
+            dynamic_tools: Vec::new(),
+            engine_schedule_id: None,
+        })
+        .await
+        .expect("queue goal continuation");
+    let continuation_turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the goal continuation turn")
+                .expect("engine event");
+            if let Event::TurnStarted {
+                turn_id,
+                submission_id,
+                ..
+            } = event
+            {
+                assert!(
+                    submission_id.is_none(),
+                    "a goal continuation must not present a submission id"
+                );
+                break turn_id;
+            }
+        }
+    };
+    // The continuation is parked in its blocked model request; a turn-bound
+    // cancel by its observed id still lands (unchanged contract) and lets the
+    // engine task finish.
+    assert!(handle.cancel_turn(
+        &continuation_turn_id,
+        CancelReason::User,
+        CancelMode::StopDropInbox,
+    ));
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the continuation cancellation")
     {
         if let Event::TurnComplete { status, error, .. } = event {
             assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
