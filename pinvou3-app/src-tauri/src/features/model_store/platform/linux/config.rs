@@ -16,7 +16,7 @@
 //! 权重目录（`models_dir`）单独可配：几十上百 GB 的东西，用户很可能想放到别的盘。
 
 use std::fs;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -273,8 +273,24 @@ pub fn set_hf_token(token: Option<&str>) {
     let f = token_fallback_file();
     match token {
         Some(t) => {
-            if fs::write(&f, t).is_ok() {
-                let _ = fs::set_permissions(&f, fs::Permissions::from_mode(0o600));
+            use std::io::Write as _;
+            // 用 `OpenOptions::mode(0o600)` 直接按 0600 创建，而不是「先 write 再
+            // chmod」。后者按 umask 先落成 0644，中间有一个同机其他用户读得到的
+            // 窗口，而这个文件里装的是 HF token。
+            //
+            // 同文件的 `save_settings` 已经是这么写的——那里存的只是商店地址，
+            // token 比它敏感得多，没有理由反而更松。
+            let written = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&f)
+                .and_then(|mut file| file.write_all(t.as_bytes()));
+            if let Err(e) = written {
+                // 不能静默：写不进去意味着下次下载私有权重会以"没有 token"失败，
+                // 而用户明明刚填过。至少让排查的人在日志里看见。
+                eprintln!("[model-store] HF token 回退文件写入失败：{e}");
             }
         }
         None => {

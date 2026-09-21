@@ -658,6 +658,27 @@ pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
     service.startup_cleanup.set(report);
 }
 
+/// 启动时把内置（测试商店）卡片的固化脚本刷新成应用当前版本。
+///
+/// **必须在启动阶段真的被调用**——`refresh_builtin_cards` 的文档一直写着「应用
+/// 启动时跑一次」，但在此之前全仓零调用点。它要防的事故在真机上发生过：推了新
+/// 应用、脚本改动一个都没生效，卡片跑的还是下载那天固化的旧脚本，白查了一轮。
+///
+/// 内置卡的脚本正文编译在二进制里，所以应用升级就等于脚本升级，不该还要用户
+/// 手动点一次「检查卡片更新」。
+///
+/// 失败不影响启动：它只碰 `card_source = 'builtin'` 的记录，刷不动就维持原样。
+pub fn run_startup_refresh() {
+    let refreshed = ModelManager::refresh_builtin_cards();
+    if !refreshed.is_empty() {
+        eprintln!(
+            "[model-store] 启动刷新：{} 张内置卡片的脚本已更新到当前应用版本（{}）",
+            refreshed.len(),
+            refreshed.join("、")
+        );
+    }
+}
+
 /// 取走启动清理的报告。**取一次就没了**——否则用户每切一次视图就被同一条提示弹一遍。
 pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, String> {
     Ok(match service.startup_cleanup.take() {

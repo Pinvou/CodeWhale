@@ -131,6 +131,9 @@ pub fn set_storage_settings(
 /// 一个平台不支持的功能不该让应用启动时冒出一句错误。
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
 
+/// 非 Linux 上没有内置卡片库可刷，直接返回。同样不报错——这是启动路径。
+pub fn run_startup_refresh() {}
+
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }

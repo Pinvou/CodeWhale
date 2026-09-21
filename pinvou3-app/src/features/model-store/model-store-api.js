@@ -208,6 +208,18 @@ function answerRun(runId, answer) {
 }
 
 /**
+ * 取走启动清理的报告（**取一次就没了**）。
+ *
+ * 应用启动时会收掉上次没收干净的脚本进程。不取的话这份报告永远烂在内存里——
+ * 而它要告诉用户的正是那起事故：上次强杀之后残留的下载进程占着文件锁，把下一次
+ * 下载堵了 16 小时且没有任何提示。收掉了要说一声，收不掉（root 身份）更要说。
+ * @returns {Promise<{killed:string[], skipped_root:string[]}>} 收掉的与收不掉的。
+ */
+function takeStartupCleanup() {
+  return invokeTauri('model_store_take_startup_cleanup');
+}
+
+/**
  * 权重目录、用户补充的扫描目录，以及**实际会扫的完整目录列表**。
  *
  * `scan_dirs` 是只读的，含内置位置（当前权重目录、`~/models`、下载/桌面）和当前
@@ -233,6 +245,7 @@ function saveStorageSettings({ modelsDir = null, importScanDirs = null } = {}) {
 
 export {
   storeAvailability,
+  takeStartupCleanup,
   fetchStorageSettings,
   saveStorageSettings,
   fetchStoreCards,

@@ -127,8 +127,15 @@ pub fn db_path() -> PathBuf {
     config::data_dir().join("models.db")
 }
 
+/// 每次用到库都新开一个连接。
+///
+/// `busy_timeout` 不是可选项：设计上允许同时下三个模型，加上界面轮询也在读写，
+/// sqlite 默认的 0 意味着**只要撞上一次并发写就立刻 SQLITE_BUSY**。真出事的样子
+/// 很难看——几个小时的下载跑到最后一步 `add_store_model` 撞上一个毫秒级的并发写，
+/// 整个任务被报成失败，而权重其实已经下完了。5 秒足够任何一次本地写让路。
 fn connect() -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(conn)
 }
@@ -769,15 +776,22 @@ pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<Stor
     .optional()
 }
 
+/// 删掉一个模型的库记录，连同它专属的 API Key。
+///
+/// **两条 DELETE 必须在同一个事务里。** 分开执行时，第二条失败会留下一个
+/// 「模型没了、key 还在」的中间态——而那些 key 仍然能被 `find_api_key` 命中，
+/// 跟下面那句注释说的「模型卸载了 key 也跟着失效」正好相反。这种状态没有任何
+/// 界面能看见，也没有任何入口能清掉。
 pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
-    let conn = connect()?;
-    conn.execute(
+    let mut conn = connect()?;
+    let tx = conn.transaction()?;
+    tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",
         params![card_id],
     )?;
     // 模型卸载了，专属它的 key 也跟着失效，不留着占地方
-    conn.execute("DELETE FROM api_keys WHERE card_id = ?1", params![card_id])?;
-    Ok(())
+    tx.execute("DELETE FROM api_keys WHERE card_id = ?1", params![card_id])?;
+    tx.commit()
 }
 
 pub fn total_managed_bytes() -> rusqlite::Result<i64> {

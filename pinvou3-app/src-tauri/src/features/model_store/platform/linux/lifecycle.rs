@@ -56,6 +56,13 @@ pub struct DownloadResult {
 pub struct ForcedRemoval {
     pub card_id: String,
     pub model_name: String,
+    /// 推理服务真正认的那个模型 id。**跟 `model_name` 不是一回事**，六张卡里没有
+    /// 一张两者相等（ornith：`Ornith-1.5-35B-A3B` vs `ornith15-bf16`）。
+    ///
+    /// 要带出来，是因为前端「在品悟里使用」存的是这个值；清理那几行死数据时
+    /// 只按 `model_name` 找必然落空，留下一行指向已删模型的默认模型。
+    /// 没部署过的记录拿不到它，所以是 Option。
+    pub endpoint_model: Option<String>,
     /// 记录里登记的体积。注意它**不是**"释放了多少空间"——这次什么都没释放。
     /// 名字特意不叫 freed_bytes，免得调用方顺手当成回收量显示给用户。
     pub recorded_bytes: i64,
@@ -970,10 +977,18 @@ impl ModelManager {
         ));
         let mut env = env;
         if candidates.is_empty() {
-            on_progress("本机未找到可复用的权重目录，将从网络下载");
+            on_progress("本机未找到已有的权重目录，将从网络下载");
         } else {
+            // 措辞必须停在「找到了」，**不能**说「会先尝试复用」。
+            //
+            // 复用这件事要卡片脚本消费 LMM_IMPORT_DIRS / LMM_IMPORT_CANDIDATES，
+            // 而当前没有任何一张卡这么做（排在二期）。说「会复用」对每一张卡都是
+            // 假的——而且恰好复刻了这个功能本来要消灭的那种误导：用户以为本机副本
+            // 会被用上，结果眼睁睁看着它重下几十个小时。
+            //
+            // 二期把卡片脚本接上之后，再把这句话改回来。
             on_progress(&format!(
-                "本机找到 {} 处权重目录，下载脚本会先尝试复用：",
+                "本机已有 {} 处权重目录（当前版本的卡片脚本暂不自动复用，仍会联网下载）：",
                 candidates.len()
             ));
             // 只列前几条。扫到十几个目录是常见的（`~/models` 下每个模型一个），
@@ -1811,6 +1826,7 @@ impl ModelManager {
         Ok(ForcedRemoval {
             card_id: rec.card_id,
             model_name: rec.model_name,
+            endpoint_model: rec.endpoint_model,
             recorded_bytes: rec.size_bytes,
             residual_paths,
             warning,
@@ -1843,10 +1859,18 @@ impl ModelManager {
     fn candidate_paths(&self, rec: &db::StoreModelRecord) -> Vec<PathBuf> {
         let models_dir = self.settings.models_path();
         let mut candidates: Vec<PathBuf> = Vec::new();
-        // 权重目录：卡片脚本统一放在 ${LMM_MODELS_DIR}/<HF 仓库名> 下
+        // 权重目录：卡片脚本统一放在 ${LMM_MODELS_DIR}/<HF 仓库名> 下。
+        //
+        // 末段同样要过 safe_path_component——本函数另外两个分支都过了，这一支漏了。
+        // `source_repo_id` 来自商店响应，`"x/.."` 的末段就是 `..`，join 之后指向
+        // models_dir 的**父目录**（默认就是用户主目录）：两次全树遍历能把卸载收尾
+        // 卡住，`freed_bytes` 因父子重复计数虚增，还会把用户主目录当成"残留"报给他。
+        // 这个函数只做测量和报告、不做删除，但同样违反本文件「宁可漏不能错」的原则。
         if let Some(repo) = rec.source_repo_id.as_deref() {
-            if let Some(base) = repo.rsplit('/').next().filter(|s| !s.is_empty()) {
-                candidates.push(models_dir.join(base));
+            if let Some(base) = repo.rsplit('/').next() {
+                if let Ok(safe) = config::safe_path_component(base) {
+                    candidates.push(models_dir.join(safe));
+                }
             }
         }
         // 有些卡按用户起的模型名建目录，一并看一眼。同样要过一遍校验：

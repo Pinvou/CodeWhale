@@ -849,6 +849,10 @@ pub fn run() {
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
             // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
             features::model_store::run_startup_cleanup(&model_store);
+            // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
+            // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
+            // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
+            features::model_store::run_startup_refresh();
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();

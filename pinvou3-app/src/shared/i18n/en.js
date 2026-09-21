@@ -413,6 +413,13 @@ export const dictEn = {
           linkBridgeMissing: 'Writing model settings is not supported here',
           linkKeyLabel: 'PINVOU',
           linkModelName: (name) => `Local · ${name}`,
+          // —— Startup reclamation of leftover processes ——
+          // Download processes left behind by a previous hard kill keep a lock on
+          // the weights directory and silently block the next download (16 hours
+          // once, on real hardware). Say so when they are reclaimed -- and
+          // especially when they cannot be.
+          startupCleanupKilled: (n) => `Cleaned up ${n} leftover background task(s) from the previous session`,
+          startupCleanupStuck: (n) => `${n} leftover background task(s) run as root and could not be cleaned up automatically; they may stall new downloads`,
           // —— Storage and import scan ——
           // If the weights directory does not match where the user actually put
           // the model, a download burns dozens of hours and nothing on screen

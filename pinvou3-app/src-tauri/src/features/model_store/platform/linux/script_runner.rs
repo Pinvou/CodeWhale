@@ -221,6 +221,42 @@ fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
     Ok(out)
 }
 
+/// 回收子进程，**有界**——绝不在取消/超时路径上无限等。
+///
+/// 原来这里是 `try_wait()`（结果丢掉）之后无条件 `wait()`，而 `wait()` 是无界阻塞。
+/// 在 `need_root` 的取消路径上这是致命的：pkexec 认证之后是**原位 exec 替换**，
+/// 子进程已经变成 root 进程，非 root 身份发 SIGTERM 得到 EPERM——杀不掉。于是
+/// `wait()` 一直挂到那个 root 脚本自然结束（install_engine 要 docker pull 几十 GB，
+/// 可达小时级）。
+///
+/// 后果是整条链路僵住，而且**用户只能重启应用**：工作线程不返回 →
+/// `OpCleanup::drop` 不执行 → 这张卡在 `ActiveCardOps` 里永不释放（此后任何操作
+/// 都被拒为「正在…请等待」）→ `RunLog::finish` 永不调用 → 前端长轮询永远等不到
+/// 结局。取消本是为了让用户脱身，结果反而把卡片彻底焊死，跟本文件
+/// 「取消必须中断调用链」的自订契约正好相反。
+///
+/// 做法：先轮询一小段（正常路径上进程刚被 SIGKILL，几十毫秒内就退出），到点还
+/// 没走就把那个阻塞的 `wait()` 丢给一个分离线程。这样既不挂住调用方，也不留下
+/// 僵尸进程——两者都要，只做前者会把回收问题换成句柄泄漏。真正遗留下来的进程
+/// 另有 orphans 机制兜底（它登记在案，下次启动会被收掉）。
+fn reap_child(mut child: std::process::Child) {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match child.try_wait() {
+            // 已退出，或者连状态都拿不到（那也没什么可做的）
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
 fn write_executable_temp(content: &str) -> Result<PathBuf, ScriptError> {
     let mut tmp = tempfile::Builder::new()
         .prefix("lmm-script-")
@@ -707,25 +743,18 @@ pub fn run_script(
         }
     }
 
-    // 不管从哪条路径出去，只要子进程已经不在跑了就真正 wait() 一次回收掉，
-    // 避免杀掉之后没人 wait() 造成僵尸进程。
-    let cleanup = |child: &mut std::process::Child| {
-        let _ = child.try_wait();
-        let _ = child.wait();
-    };
-
     if cancel_requested {
         if let Some(cb) = opts.on_progress.as_deref_mut() {
             cb(ScriptProgress::cancelled());
         }
-        cleanup(&mut child);
+        reap_child(child);
         cleanup_temp_files(&cancel_file, script_path);
         // 取消必须跟真正的失败一样中断调用链，不能让后续步骤（写数据库状态）
         // 继续跑下去——这是 v1.0.6 修过的一个大 bug：取消后误标记"已完成"。
         return Err(ScriptError::new("已取消"));
     }
     if timed_out {
-        cleanup(&mut child);
+        reap_child(child);
         cleanup_temp_files(&cancel_file, script_path);
         return Err(ScriptError::new(format!(
             "脚本执行超时：{}（{timeout_reason}）",
@@ -803,12 +832,33 @@ fn build_command(
     // 请求输入时，我们写回去的答案会被 pty 原样回显成一行输出，跟日志一起送
     // 到界面上——密码就这么漏进日志了。脚本需要 pty 是为了让 docker pull 这类
     // 工具认为自己接的是终端（进度条才实时刷新），跟输入回显没有关系。
-    if let Ok(mut attrs) = nix::sys::termios::tcgetattr(&slave) {
-        attrs
-            .local_flags
-            .remove(nix::sys::termios::LocalFlags::ECHO);
-        let _ = nix::sys::termios::tcsetattr(&slave, nix::sys::termios::SetArg::TCSANOW, &attrs);
-    }
+    // **关不掉就不跑。** 这里原来是 `if let Ok` + `let _`，两头都把失败悄悄咽掉——
+    // 而失败的后果正是这段代码存在的全部理由：本次运行带着回显跑，用户填进表单的
+    // 密码（从机 root 密码、HF token）原样进任务日志，界面上还没有任何提示。
+    //
+    // 防护措施 fail-open 比没有防护更糟：没有防护时大家知道日志里可能有密码，
+    // fail-open 会让所有人以为已经挡住了。
+    //
+    // 顺带清掉 ECHONL：它单独控制「换行也回显」，ECHO 关了而它开着时，答案末尾
+    // 那个换行仍会回显——不泄密，但会在日志里留下空行，让人怀疑是不是没关干净。
+    let mut attrs = nix::sys::termios::tcgetattr(&slave).map_err(|e| {
+        ScriptError::new(format!(
+            "无法读取伪终端属性，拒绝在可能回显的终端上执行脚本：{e}"
+        ))
+    })?;
+    attrs
+        .local_flags
+        .remove(nix::sys::termios::LocalFlags::ECHO);
+    attrs
+        .local_flags
+        .remove(nix::sys::termios::LocalFlags::ECHONL);
+    nix::sys::termios::tcsetattr(&slave, nix::sys::termios::SetArg::TCSANOW, &attrs).map_err(
+        |e| {
+            ScriptError::new(format!(
+                "无法关闭伪终端回显，拒绝执行脚本（否则输入的密码会进日志）：{e}"
+            ))
+        },
+    )?;
 
     let mut cmd = if need_root {
         let mut env_vars = env_vars.clone();

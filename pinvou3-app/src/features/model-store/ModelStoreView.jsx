@@ -26,6 +26,7 @@ import {
   startStop,
   startUninstall,
   storeAvailability,
+  takeStartupCleanup,
   unlockTestStore,
 } from './model-store-api.js';
 import {
@@ -192,6 +193,32 @@ const ModelStoreView = ({ theme, t, bs }) => {
     if (guide === 'ready') loadAll();
   }, [guide, loadAll]);
 
+  // 启动清理的结果：上次应用被强杀/崩溃后残留的脚本进程，这一轮启动时收掉了哪些。
+  //
+  // **必须真的来取。** 后端收完就把报告攒在内存里等人取（取一次就没了），没人取
+  // 就等于没做——而它要告诉用户的正是那起事故：残留的下载进程占着权重目录的文件
+  // 锁，把下一次下载堵了 16 小时，期间界面上一点提示都没有。
+  //
+  // root 身份跑的那些收不掉（普通用户没权限），更要说出来：用户得自己去处理，
+  // 否则下次下载还是会被堵住，而且他不会知道为什么。
+  useEffect(() => {
+    if (guide !== 'ready') return undefined;
+    let alive = true;
+    takeStartupCleanup()
+      .then((report) => {
+        if (!alive || !report) return;
+        const killed = report.killed?.length ?? 0;
+        const stuck = report.skipped_root?.length ?? 0;
+        if (stuck > 0) showToast(copy.startupCleanupStuck(stuck));
+        else if (killed > 0) showToast(copy.startupCleanupKilled(killed));
+      })
+      // 取不到不打扰用户：这只是一条事后提示，不该因为它冒出一个错误框。
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [copy, guide, showToast]);
+
   // 进页面读一次测试商店开关。sidecar 没起来时不问 —— 那只会拿到一个连接错误。
   //
   // 拿不到就当它关着:老版本 LMM 没有这条接口,而"问不出来"和"没开"在界面上
@@ -286,9 +313,11 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * @returns {Promise<boolean>} 清干净了(或本来就没什么要清)为 true;清不掉为 false。
    */
   const cleanLinkedRows = useCallback(
-    async (modelName, displayName, { quiet = false } = {}) => {
+    // names 要把这个模型的**全部标识**都带上（model_name 和 endpoint_model）。
+    // 接入时存的是 endpoint_model，只按 model_name 找必然落空——见 findLinkedRows。
+    async (names, displayName, { quiet = false } = {}) => {
       const bridge = tryGetTauriBridge();
-      const rows = findLinkedRows(bs?.savedModels, modelName);
+      const rows = findLinkedRows(bs?.savedModels, ...names);
       // 没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
       if (rows.length === 0) return true;
       // 有死行、但拿不到 deleteModel。这两个条件**不能**合并成一句 return:合并之后
@@ -426,7 +455,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
     if (!result?.ok) return;
     // 卸载成功后清掉品悟模型列表里指向它的那些行（理由见 cleanLinkedRows 的注释）。
     // 这条路径出声：用户主动卸载了一个模型，顺带清掉了几行配置，该让他知道。
-    await cleanLinkedRows(record.model_name, record.card_name);
+    await cleanLinkedRows([record.endpoint_model, record.model_name], record.card_name);
   }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle]);
 
   // 卸载失败 → 任务卡上那个「强制从列表移除」的入口点进来。
@@ -472,7 +501,11 @@ const ModelStoreView = ({ theme, t, bs }) => {
       //
       // 这里刻意不弹第二条 toast:强制移除的结果页已经在说"磁盘上还有残留"了,
       // 再叠一句"顺带清了几行配置"只会稀释那个更要紧的提醒。清不掉时才说话。
-      const linksCleaned = await cleanLinkedRows(result?.model_name, target.cardName, { quiet: true });
+      const linksCleaned = await cleanLinkedRows(
+        [result?.endpoint_model, result?.model_name],
+        target.cardName,
+        { quiet: true },
+      );
       const residual = Array.isArray(result?.residual_paths) ? result.residual_paths : [];
       // toast 只有一个槽位,后一条会把前一条顶掉。cleanLinkedRows 清不掉时已经弹了
       // 一条「请到设置里手动删除」——那是这条路径上唯一的提醒,再补一句"移除完成"

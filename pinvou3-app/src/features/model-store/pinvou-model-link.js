@@ -176,13 +176,24 @@ function isLocalGatewayUrl(baseUrl) {
  *
  * 匹配用 `model` + 回环 base_url 两个条件：光看 model 会误伤用户自己配的、指向
  * 别处同名模型的行。
+ *
+ * **收多个标识，命中任意一个就算。** 一个模型有两个名字：`model_name` 是模型商店
+ * 自己的标识（`ornith15-bf16`），`endpoint_model` 是推理服务真正认的那个
+ * （`Ornith-1.5-35B-A3B`），六张卡里没有一张两者相等。接入时存的是后者，而清理侧
+ * 原来只按前者找——于是「接得进、清不掉」：卸载之后那行死数据还在，且很可能正是
+ * 当前模型，用户下一次新建会话第一句话就 404，而那个报错里找不到任何通往模型商店
+ * 的路。
+ *
+ * 变长参数不只是图方便：它让**两侧只能用同一把尺子**。调用方少传一个名字，命中会
+ * 变少但不会变错；若改成「清理侧自己拼条件」，两边迟早再次漂移。
  * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
- * @param {string} modelName - LMM 的 model_name。
+ * @param {...(string|null|undefined)} names - 这个模型的全部标识（model_name / endpoint_model），空值自动忽略。
  * @returns {Array<object>} 需要清掉的行。
  */
-function findLinkedRows(savedModels, modelName) {
-  if (!Array.isArray(savedModels) || !modelName) return [];
-  return savedModels.filter((row) => row?.model === modelName && isLocalGatewayUrl(row?.base_url));
+function findLinkedRows(savedModels, ...names) {
+  const wanted = new Set(names.filter(Boolean));
+  if (!Array.isArray(savedModels) || wanted.size === 0) return [];
+  return savedModels.filter((row) => wanted.has(row?.model) && isLocalGatewayUrl(row?.base_url));
 }
 
 export {

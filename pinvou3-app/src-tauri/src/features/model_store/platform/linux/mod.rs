@@ -45,8 +45,8 @@ pub mod test_store_data;
 pub use service::{
     ModelStoreService, answer_run, api_keys, cancel_run, create_api_key, disable_test_store,
     force_remove, library, list_cards, model_detail, run_log, run_startup_cleanup,
-    set_storage_settings, start_deploy, start_download, start_lifecycle, storage_settings,
-    take_startup_cleanup, test_store_state, unlock_test_store,
+    run_startup_refresh, set_storage_settings, start_deploy, start_download, start_lifecycle,
+    storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
 };
 
 /// Linux 上模型商店总是可用的。
