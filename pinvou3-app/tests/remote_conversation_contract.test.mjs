@@ -88,7 +88,7 @@ test('the view is keyboard reachable with labelled controls', () => {
   assert.ok(view.includes('aria-labelledby'));
   assert.ok(view.includes('role="alert"'));
   assert.ok(view.includes('aria-live'));
-  assert.ok(view.includes('sr-only'));
+  assert.ok(view.includes('<fieldset'));
   assert.ok(view.includes('<button'));
   assert.ok(view.includes('type="radio"'));
 });
