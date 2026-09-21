@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
 import { isTaskTerminal, taskStatusKey } from './remote-control-logic.mjs';
 
-export default function RemoteConversationView({ t, bs }) {
+export default function RemoteConversationView({ t, bs, modelSource = 'controlled_device', onModelSourceChange }) {
   const copy = (t && t.remoteConversation) || {};
   const connection = (bs && bs.controllerConnection) || {};
   const capabilities = (bs && bs.remoteCapabilities) || null;
@@ -18,7 +18,6 @@ export default function RemoteConversationView({ t, bs }) {
   const transcript = (bs && bs.transcript) || [];
   const permissions = (bs && bs.remotePermissions) || [];
   const histories = (bs && bs.remoteHistories) || [];
-  const [modelSource, setModelSource] = useState('controlled_device');
   const [selectedModelId, setSelectedModelId] = useState(null);
   const [mode, setMode] = useState('chat');
   const [draft, setDraft] = useState('');
@@ -123,9 +122,11 @@ export default function RemoteConversationView({ t, bs }) {
 
       {/* E2E-07 首版能力开关：A 临时模型（含模型导出列表）保持隐藏，模型来源固定为
           B 本机模型；能力开放后再恢复选择器。 */}
-      <p className="mb-3 text-[11px] opacity-70">
-        {copy.modelPickerTitle}: {copy.modelSourceDevice}
-      </p>
+      <fieldset className="mb-3 text-[11px]">
+        <legend className="mb-1 opacity-70">{copy.modelPickerTitle}</legend>
+        <label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controlled_device'} onChange={() => onModelSourceChange?.('controlled_device')} />{copy.modelSourceDevice}</label>
+        <label className="inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controller_temporary'} onChange={() => onModelSourceChange?.('controller_temporary')} />{copy.modelSourceMine}</label>
+      </fieldset>
       {transcript.length === 0 && tasks.length === 0 && (
         <p className="text-[12px] opacity-70">{copy.empty}</p>
       )}

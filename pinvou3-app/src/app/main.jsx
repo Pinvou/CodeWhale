@@ -1386,6 +1386,7 @@ const NAV_PREFETCH = {
       const [webAccessOpen, setWebAccessOpen] = useState(false);
       const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
       const [remoteShellOpen, setRemoteShellOpen] = useState(false);
+      const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
@@ -4040,6 +4041,7 @@ const NAV_PREFETCH = {
                 rightDockActivePanelId={browserDockSelectedPanelId}
                 onRightDockPanelSelectionChange={selectRightDockPanel}
                 remoteConnection={remoteShellOpen ? bs?.controllerConnection : null}
+                remoteModelSource={remoteModelSource}
               />
             )}
             {codexAcpSupported && currentView === 'codex' && (
@@ -4127,6 +4129,8 @@ const NAV_PREFETCH = {
                   <LazyRemoteConnectionShell
                     t={t}
                     bs={bs}
+                    modelSource={remoteModelSource}
+                    onModelSourceChange={setRemoteModelSource}
                     onClose={() => setRemoteShellOpen(false)}
                     onRequestDisconnect={async () => {
                       if (bridge && bridge.available && bridge.desktopRemoteControl) {

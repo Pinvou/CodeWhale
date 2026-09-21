@@ -9,7 +9,7 @@ import RemoteConversationView from './RemoteConversationView.jsx';
 
 const TERMINAL_STATUSES = ['idle', 'disconnected', 'error'];
 
-export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconnect }) {
+export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconnect, modelSource, onModelSourceChange }) {
   const copy = (t && t.controllerConnection) || {};
   const connection = (bs && bs.controllerConnection) || {};
   const connected = connection.status === 'connected';
@@ -56,7 +56,7 @@ export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconn
       {error && <p role="alert" className="text-[12px] text-[#EA4335]">{copy.errorGeneric}</p>}
       {connected ? (
         // 远程会话窗口：模型/能力/审批/附件/成果/历史全部经 DEV-20 bridge。
-        <RemoteConversationView t={t} bs={bs} />
+        <RemoteConversationView t={t} bs={bs} modelSource={modelSource} onModelSourceChange={onModelSourceChange} />
       ) : (
         <p className="mt-3 text-[12px] opacity-70">{copy.codeHint}</p>
       )}

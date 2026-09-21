@@ -405,11 +405,12 @@
      * payload is built and sealed in Rust; the UI only supplies the session
      * reference plus the text or task id.
      */
-    function controllerTaskSend(remoteRef, text) {
+    function controllerTaskSend(remoteRef, text, modelSource) {
       ensureAvailable();
       return invoke("desktop_remote_controller_task_send", {
         remoteRef: remoteRef,
         text: String(text || ""),
+        modelSource: modelSource || "controlled_device",
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
