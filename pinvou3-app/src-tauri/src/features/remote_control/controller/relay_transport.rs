@@ -236,6 +236,7 @@ impl WirePayload {
 
 #[derive(Debug)]
 struct QueuedFrame {
+    flushed: Option<tokio::sync::oneshot::Sender<()>>,
     priority: FramePriority,
     transport_epoch: u64,
     lease_context: Option<LeaseContext>,
@@ -328,6 +329,23 @@ impl ControllerTransportSender {
         &self,
         value: &T,
     ) -> Result<(), ControllerSendError> {
+        self.enqueue_authenticated_control(value, None)
+    }
+
+    pub(crate) fn send_control_with_receipt<T: Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<tokio::sync::oneshot::Receiver<()>, ControllerSendError> {
+        let (sent, receipt) = tokio::sync::oneshot::channel();
+        self.enqueue_authenticated_control(value, Some(sent))?;
+        Ok(receipt)
+    }
+
+    fn enqueue_authenticated_control<T: Serialize>(
+        &self,
+        value: &T,
+        flushed: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), ControllerSendError> {
         let text = serde_json::to_string(value).map_err(|_| ControllerSendError::Serialization)?;
         enforce_frame_limit(text.len(), MAX_CONTROL_MESSAGE_BYTES)?;
         let lease = self
@@ -349,10 +367,11 @@ impl ControllerTransportSender {
         if validated.get("type").and_then(Value::as_str) == Some("encrypted_frame") {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
-        self.try_enqueue(
+        self.try_enqueue_with_receipt(
             FramePriority::Control,
             WirePayload::Plain(text),
             Some(lease_context),
+            flushed,
         )
     }
 
@@ -453,6 +472,16 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
     ) -> Result<(), ControllerSendError> {
+        self.try_enqueue_with_receipt(priority, payload, lease_context, None)
+    }
+
+    fn try_enqueue_with_receipt(
+        &self,
+        priority: FramePriority,
+        payload: WirePayload,
+        lease_context: Option<LeaseContext>,
+        flushed: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), ControllerSendError> {
         if self.shutdown.is_cancelled() {
             return Err(ControllerSendError::Closed);
         }
@@ -482,6 +511,7 @@ impl ControllerTransportSender {
             None
         };
         let frame = QueuedFrame {
+            flushed,
             priority,
             transport_epoch: self.transport_epoch.load(Ordering::Acquire),
             lease_context,
@@ -657,7 +687,11 @@ async fn run_transport(
                         result = write.send(Message::Text(frame.text().to_owned().into())) => result,
                     };
                     match result {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            if let Some(flushed) = frame.flushed {
+                                let _ = flushed.send(());
+                            }
+                        }
                         Err(error) => {
                             break format!("send Relay frame: {error}");
                         }
