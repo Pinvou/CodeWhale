@@ -2031,6 +2031,7 @@ dictEn["controllerConnection"] = {
   controlledSide: "Controlled device",
   remoteStatus: "Remote control active",
   remoteSessionPreparing: "Preparing session",
+  remoteSessionReady: "Session ready",
   connected: "Connected",
   connectedTo: device => `Connected to ${device}`,
   backgroundHint: "Closing the window keeps the connection and the task running. Use Disconnect device to end it.",

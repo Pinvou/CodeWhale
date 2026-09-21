@@ -119,7 +119,9 @@ test('connection is integrated into the remote-control page instead of a detache
   assert.ok(!panel.includes('<RemoteConnectionShell'));
   assert.ok(main.includes('LazyRemoteConnectionShell'));
   assert.ok(main.includes('remoteConversationOpen && ('));
-  assert.ok(main.includes('remoteConnection={remoteControllerConnected ? bs?.controllerConnection : null}'));
+  assert.ok(main.includes('remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === \'connected\')'));
+  assert.ok(main.includes('remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)'));
+  assert.ok(main.includes('remoteConnection={remoteChatConnection}'));
   assert.ok(main.includes('onRemoteConversationOpen={() => setRemoteConversationOpen(true)}'));
   assert.ok(main.includes('onRemoteConnected={() => {'));
   assert.ok(main.includes('setRemoteConversationOpen(false);'));
@@ -136,5 +138,7 @@ test('connected remote output renders in the ordinary ChatView timeline', () => 
   assert.ok(chatView.includes('const projectedRemoteChatItems = useMemo('));
   assert.ok(chatView.includes('const displayChatItems = remoteChatActive ? projectedRemoteChatItems : chatItems;'));
   assert.ok(chatView.includes('data-testid="chat-remote-status"'));
+  assert.ok(chatView.includes('data-testid="chat-remote-status-banner"'));
+  assert.ok(chatView.includes('remoteSessionReady'));
   assert.ok(chatView.includes('controllerSessionOpen(t.remoteConversation.title || \'remote\', \'chat\')'));
 });

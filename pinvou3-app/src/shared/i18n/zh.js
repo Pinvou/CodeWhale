@@ -1999,6 +1999,7 @@ dictZh["controllerConnection"] = {
   controlledSide: "被控端",
   remoteStatus: "远程控制中",
   remoteSessionPreparing: "会话准备中",
+  remoteSessionReady: "会话已就绪",
   connected: "已连接",
   connectedTo: device => `已连接到 ${device}`,
   backgroundHint: "关闭窗口不会断开连接，任务会在后台继续；需要断开请点击「断开对方设备」。",

@@ -2031,6 +2031,7 @@ dictJa["controllerConnection"] = {
   controlledSide: "操作される側",
   remoteStatus: "遠隔操作中",
   remoteSessionPreparing: "セッション準備中",
+  remoteSessionReady: "セッション準備完了",
   connected: "接続済み",
   connectedTo: device => `${device} に接続しました`,
   backgroundHint: "ウィンドウを閉じても接続とタスクは継続します。切断するには「相手の端末を切断」を押してください。",

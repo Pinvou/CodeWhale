@@ -1385,7 +1385,14 @@ const NAV_PREFETCH = {
       const [webAccessOpen, setWebAccessOpen] = useState(false);
       const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
       const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
+      const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
       const remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === 'connected');
+      const remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)
+        ? (bs?.controllerConnection?.status === 'connected' ? bs.controllerConnection : { status: 'connected' })
+        : null;
+      useEffect(() => {
+        if (!remoteControllerConnected) setRemoteConnectionReady(false);
+      }, [remoteControllerConnected]);
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
@@ -4001,6 +4008,7 @@ const NAV_PREFETCH = {
                   remoteConversationOpen={remoteConversationOpen}
                   onRemoteConversationOpen={() => setRemoteConversationOpen(true)}
                   onRemoteConnected={() => {
+                    setRemoteConnectionReady(true);
                     setRemoteConversationOpen(false);
                     navigateFromScheduledRun('chat');
                   }}
@@ -4033,10 +4041,11 @@ const NAV_PREFETCH = {
                 onBackScheduledRun={() => navigateFromScheduledRun('scheduled')}
                 codeModeAvailable={codexAcpSupported}
                 onSwitchHomeMode={handleSwitchHomeMode}
+                onRemoteModelSourceChange={setRemoteModelSource}
                 browserDockAvailable={browserDockAvailable}
                 rightDockActivePanelId={browserDockSelectedPanelId}
                 onRightDockPanelSelectionChange={selectRightDockPanel}
-                remoteConnection={remoteControllerConnected ? bs?.controllerConnection : null}
+                remoteConnection={remoteChatConnection}
                 remoteModelSource={remoteModelSource}
               />
             )}

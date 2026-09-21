@@ -666,7 +666,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
     };
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
-    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controlled_device' }) => {
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controlled_device' }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -2282,9 +2282,22 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 >
                   <Monitor size={15} className="shrink-0" />
                   <span className="max-w-[220px] truncate">{t.controllerConnection.remoteStatus}</span>
-                  {!remoteConnection.sessionRef && (
-                    <span className="text-[11px] opacity-70">{t.controllerConnection.remoteSessionPreparing}</span>
-                  )}
+                  <span
+                    className={`text-[11px] ${remoteConnection.sessionRef ? 'opacity-80' : 'animate-pulse opacity-90'}`}
+                  >
+                    {remoteConnection.sessionRef ? t.controllerConnection.modelSourceDevice : t.controllerConnection.remoteSessionPreparing}
+                  </span>
+                  <select
+                    data-testid="chat-remote-model-source"
+                    aria-label={t.remoteConversation.modelPickerTitle}
+                    value={remoteModelSource}
+                    onChange={(event) => onRemoteModelSourceChange?.(event.target.value)}
+                    disabled={remoteSessionBusy || !remoteConnection.sessionRef}
+                    className="max-w-[132px] rounded-full bg-transparent px-1 text-[12px] outline-none"
+                  >
+                    <option value="controlled_device">{t.remoteConversation.modelSourceDevice}</option>
+                    <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                  </select>
                 </div>
               )}
               {scheduledRunContext && (
@@ -2327,6 +2340,40 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
             }}
             className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar flex flex-col pt-20 max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>
+
+            {remoteChatActive && (
+              <div
+                data-testid="chat-remote-status-banner"
+                role="status"
+                aria-live="polite"
+                className={`mb-4 w-full max-w-[800px] px-4 max-sm:px-3 ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                <div className={`flex flex-wrap items-center gap-2 rounded-[20px] border px-4 py-3 text-[13px] font-medium shadow-sm ${'border-blue-500/20 bg-blue-500/10 text-[#174EA6] dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-[#A8C7FA]'}`}>
+                  <Monitor size={16} className="shrink-0" />
+                  <span>{t.controllerConnection.remoteStatus}</span>
+                  {remoteConnection.deviceName && (
+                    <span className="min-w-0 truncate opacity-80">· {remoteConnection.deviceName}</span>
+                  )}
+                  <span className={`text-[12px] ${remoteConnection.sessionRef ? 'opacity-80' : 'animate-pulse opacity-90'}`}>
+                    {remoteConnection.sessionRef ? t.controllerConnection.remoteSessionReady : t.controllerConnection.remoteSessionPreparing}
+                  </span>
+                  <div className="ml-auto flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-[12px] opacity-70">{t.remoteConversation.modelPickerTitle}</span>
+                    <select
+                      data-testid="chat-remote-model-source"
+                      aria-label={t.remoteConversation.modelPickerTitle}
+                      value={remoteModelSource}
+                      onChange={(event) => onRemoteModelSourceChange?.(event.target.value)}
+                      disabled={remoteSessionBusy || !remoteConnection.sessionRef}
+                      className="min-w-0 max-w-[180px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
+                    >
+                      <option value="controlled_device">{t.remoteConversation.modelSourceDevice}</option>
+                      <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {!hasMessages && !welcomeToolId && (
               /* Gemini Style Centered Empty State */
