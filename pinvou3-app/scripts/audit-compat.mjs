@@ -319,7 +319,8 @@ export function runAudit({ distDir = distRoot } = {}) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const violations = runAudit();
-  if (!existsSync(join(distRoot, 'assets'))) {
+  const distAssetsDir = join(distRoot, 'assets');
+  if (!existsSync(distAssetsDir)) {
     // Fail closed: the dist layer is the one that catches a marked@16-style
     // parse-time regression, so silently green-lighting without it would
     // defeat the gate. The static/inline layers were still audited above.
@@ -328,7 +329,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } else {
     // Same fail-closed principle for the CSS layer: a dist without CSS assets
     // predates the current build and would silently skip the inset scan.
-    const hasCssAssets = readdirSync(assetsDir).some((name) => name.endsWith('.css'));
+    const hasCssAssets = readdirSync(distAssetsDir).some((name) => name.endsWith('.css'));
     if (!hasCssAssets) {
       console.error('audit-compat: no CSS assets found in dist/assets — run `npm run build:ui` first');
       process.exitCode = 1;
