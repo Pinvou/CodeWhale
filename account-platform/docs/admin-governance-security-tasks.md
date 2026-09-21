@@ -23,14 +23,14 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 
 | 子任务 | 主任务 | 独立交付 | 技术依赖 | 类型 | 状态 |
 |---|---|---|---|---|---|
-| GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | DONE |
-| GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | DONE |
-| GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | DONE |
-| GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | IN_PROGRESS |
-| GSA-05 | APT-141 | typed closed RFC8785完整整数编码与legacy/新授权wire适配 | GSA-02 | CODE | DONE |
-| GSA-06 | APT-141 | 授权 Outbox epoch/sidecar 前向迁移及旧 writer 兼容 | GSA-04, GSA-05 | CODE | IN_PROGRESS / CODE_COMPLETE / B_CODE_REVIEW_PASS / DEPENDENCY_ENV_PENDING |
-| GSA-07 | APT-141 | fence-aware Relay 与授权事件永久禁止人工 replay | GSA-06 | CODE | IN_PROGRESS / CODE_COMPLETE / B_CODE_REVIEW_PASS / DEPENDENCY_ENV_PENDING |
-| GSA-08 | APT-141 | 六命令 consumer、持久尝试及确认式 DLQ 收口 | GSA-07 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
+| GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | DONE / REVIEW_ACCEPTED |
+| GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | DONE / REVIEW_ACCEPTED |
+| GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | DONE / REVIEW_ACCEPTED |
+| GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | IN_PROGRESS / DEPENDENCY_ENV_PENDING / REVIEW_ACCEPTED |
+| GSA-05 | APT-141 | typed closed RFC8785完整整数编码与legacy/新授权wire适配 | GSA-02 | CODE | DONE / REVIEW_ACCEPTED |
+| GSA-06 | APT-141 | 授权 Outbox epoch/sidecar 前向迁移及旧 writer 兼容 | GSA-04, GSA-05 | CODE | IN_PROGRESS / CODE_COMPLETE / B_CODE_REVIEW_PASS / DEPENDENCY_ENV_PENDING / REVIEW_ACCEPTED |
+| GSA-07 | APT-141 | fence-aware Relay 与授权事件永久禁止人工 replay | GSA-06 | CODE | IN_PROGRESS / CODE_COMPLETE / B_CODE_REVIEW_PASS / DEPENDENCY_ENV_PENDING / REVIEW_ACCEPTED |
+| GSA-08 | APT-141 | 六命令 consumer、持久尝试及确认式 DLQ 收口 | GSA-07 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED / REVIEW_ACCEPTED |
 | GSA-09 | APT-141 | 历史审批 reconciler、exclusion 与 SAFE 收敛 | GSA-08 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-10 | APT-141 | 安全命令目录、历史可见集合及无泄露读取 | GSA-03, GSA-04 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-11 | APT-141 | 有界 Account membership snapshot/cursor | GSA-10 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / INDEPENDENT_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
@@ -85,6 +85,8 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 `INDEPENDENT_REVIEW_PASS`（GSA-09～16，2026-09-20）表示本行 8 个 CODE 子任务已由另一审核方（独立于作者提交信息）完成只读复核：逐任务重读 HEAD 上的代码与迁移、机械化复核其声称的安全不变量、并在真实 PostgreSQL 与合同层重跑该任务的定向用例。它**只**覆盖代码与仓库证据：`DEPENDENCY_ENV_PENDING`（GSA-04 Linux 欠账传递）与 `NOT_DEPLOYED`（无 activation、无部署）同时保留，不能据此推断生产可用。GSA-16 的审核曾给出阻断项 F1–F4，已在同一行内修复并复核。
 
 `INDEPENDENT_REVIEW_PASS`（GSA-17～36，2026-09-20/2026-09-21）把上述口径扩展到界面线与八类财务命令线：GSA-17～22 由只读复核方在 HEAD 上重读 Portal/BFF 与 Account 服务端守卫、逐条比对白名单集合与真实注册路由，并在真实 PostgreSQL 与 Node 合同层重跑定向用例（关键结论另带反向探针），审核阻断项已就地修复；GSA-23～36 按“冻结设计 ↔ 迁移 ↔ 领域实现 ↔ 接线/激活门禁 ↔ 合同/手册”五层复核。两者同样**不**覆盖 `DEPENDENCY_ENV_PENDING`、浏览器与隔离环境验收、生产等价演练以及 activation/部署，逐项边界见 §5。
+
+`REVIEW_ACCEPTED`（GSA-01～08，2026-09-21 用户口径）：表示该行的审核要求**已由既有状态满足**，不再单列独立审核：`DONE` 行以其闭环证据为准；`B_CODE_REVIEW_PASS` 行由另一审核方（身份 B）完成审核；GSA-08 以其 `SELF_REVIEW_PASS` 与后续 §5 记录为准。该状态只说明"审核维度不再挂账"，**不**追认 `INDEPENDENT_REVIEW_PASS`、也不关闭任何环境或部署欠账：GSA-04 仍为 `IN_PROGRESS / DEPENDENCY_ENV_PENDING`（Linux 隔离验收未执行），GSA-06/07/08 的 `DEPENDENCY_ENV_PENDING` 与 `NOT_DEPLOYED` 照旧。若后续要求对这几行做正式独立复核，需用户另行指示。
 
 ### GSA-01～09：推进门禁与持久执行链
 
@@ -574,3 +576,5 @@ GSA-27/28 用户决定落地：审计行同时记录申请人（2026-09-21，用
 财务修复家族跨域确定性复核（2026-09-21，针对 2026-09-20 那次「2 绿 1 红、原因丢失」）：按当时的最坏条件复现——同一进程内串行运行八条跨域 E2E（`TestChargebackFinancialRepair`/`TestEntitlementCorrection`/`TestLedgerRepair`/`TestPaymentFinancialRepair`/`TestReceivableWriteOff`/`TestReconciliationFinancialRepair`/`TestRefundExceptionRepair`/`TestUsageSettlementRepair` 的 `...CrossDomainActivationPostgresIntegration`），同时后台并发运行整包 `go test ./internal/billing`，并把两个套件的完整 stdout 落盘（不再依赖任何会被截断的终端回显）。结果：**八条全部 PASS，无一条断言失败**，Account 包 `ok 435.848s`（逐条耗时 拒付 9.12s / 权益纠错 35.38s / 账本 32.40s / 支付 27.34s / 应收核销 82.66s / 对账 72.84s / 退款 92.19s / 用量 78.27s），并发 Billing 套件 `ok 452.498s`；对家族日志按 `unavailable|timeout|retry|panic` 全文过滤只命中 GIN debug 警告，没有任何就绪探测超时或重试痕迹。累计观测为 **4 次运行：3 绿 1 红**（红项发生在 2026-09-20，stdout 被会话截断、原因未取回）。结论与边界：该红项在保留证据范围内**不可复现**，且不构成任何一条断言或安全不变量被证伪；本次同时证明本机时序高度依赖负载——同一家族独立运行约 73s、与 Billing 套件并发时膨胀到 435.8s，与仓库已知的「5s 重活就绪探测在满载下超时」这一敏感机理一致。因此：**不得据此宣称该家族确定性**；再次出现红项时必须先完整落盘 stdout 再判定（这正是上次丢掉原因的直接教训）；GSA-39 生产等价演练仍须在专用环境重复该家族以获得确定性结论。本次不改变任何代码、迁移或 activation 状态（所有 activation 行保持 `INACTIVE`）。
 
 GSA-16 步骤 4 本地可覆盖行复核（2026-09-21）：按实现合同，步骤 4 的验收矩阵中四项原本整体归 GSA-39 生产等价演练；本轮把其中三项能在单机完成的先做实。①**broker 重投**：消费者崩溃边界在重投后收敛的两条定向用例（`TestAuthorizationCommandConsumerCrashBoundariesConvergeOnRedelivery`、`TestAuthorizationCommandConsumerDLQCrashBoundariesConvergeOnRedelivery`）PASS；并以外置隔离 NATS（便携 `nats-server` 2.11.9 + 测试自签 TLS 夹具，`PINVOU_TEST_NATS_SERVER_BINARY` 显式指向绝对路径）跑真实传输层兼容用例——`TestBillingLegacyApprovalConsumerCompatibilityIntegration` PASS 1.23s、`TestTokenApprovalConsumersNATSIntegration` PASS 2.95s，两者都断言在 `MaxDeliver=-1` 的显式 ACK 流上，授权 subject 不得被通用 Term/DLQ 终结（隔离流消息数不变），且投递悬挂时保持 `..._DELIVERY_PENDING` 而不误判成功或失败。②**Billing 12 次界限**：`TestAuthorizationCommandConsumerTwelfthDefiniteFailurePublishesThenAcknowledges` PASS（第十二次确定性失败先发布再确认，不出现第十三次领域调用）。③**epoch 切换**：`TestApprovalRelayDownRejectsAdvancedEpochIntegration` PASS 7.85s（真实 PG：relay down/重入时拒绝被推进的 epoch，旧 epoch 的 worker 不得推进结果）。同时复核 `TestProofEraReadyFailureCannotBeginOrGrantAgain` PASS。仍未覆盖、保持归 GSA-39 的：**N/N-1 兼容**与生产等价规模的故障/性能演练（需要多版本环境与专用容量），以及步骤 4 中依赖真实 Q/receipt 的行。以上证据均在单机隔离夹具上取得，不构成部署或生产可用结论；activation 行保持 `INACTIVE`，`account_approval_recovery` 保持 `NOLOGIN`。
+
+GSA-01～08 审核口径确认（2026-09-21，用户指示）：用户明确「01-08 标记为 done，表明已经审核过了，或者 `B_CODE_REVIEW_PASS` 也是审核过了」。据此：①不再为 GSA-01～08 排独立审核，也不追认 `INDEPENDENT_REVIEW_PASS`；②§2 表八行统一追加 `REVIEW_ACCEPTED`，其含义见 §3 状态口径补充——`DONE` 行以闭环证据为准、`B_CODE_REVIEW_PASS` 行由另一审核方完成审核、GSA-08 以其 `SELF_REVIEW_PASS` 为准；③环境与部署欠账不因该口径关闭：GSA-04 仍为 `IN_PROGRESS / DEPENDENCY_ENV_PENDING`（Linux 隔离验收未执行），GSA-06/07/08 保留 `DEPENDENCY_ENV_PENDING` 与 `NOT_DEPLOYED`。本轮已据此停掉为此派出的两个只读复核代理（未产出任何报告、未改动仓库），不改变任何代码、迁移或 activation 状态。
