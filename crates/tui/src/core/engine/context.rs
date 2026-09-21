@@ -169,13 +169,13 @@ fn subagent_route_line(route: &serde_json::Value) -> Option<String> {
         let mut line = format!("  route: {provider}/{model}");
         let source = field("route_source");
         let profile = field("resolved_profile_id");
-        if source.is_some() || profile.is_some() {
-            line.push_str(" (source=");
-            line.push_str(&source.unwrap_or_else(|| "-".to_string()));
-            if let Some(profile) = profile {
-                line.push_str(&format!(", profile={profile}"));
+        match (source, profile) {
+            (Some(source), Some(profile)) => {
+                line.push_str(&format!(" (source={source}, profile={profile})"));
             }
-            line.push(')');
+            (Some(source), None) => line.push_str(&format!(" (source={source})")),
+            (None, Some(profile)) => line.push_str(&format!(" (profile={profile})")),
+            (None, None) => {}
         }
         // Hard guard: field previews alone do not bound the assembled line.
         return Some(summarize_text(&line, SUBAGENT_ROUTE_LINE_MAX_CHARS));
@@ -727,7 +727,8 @@ pub(crate) fn compact_tool_result_for_route(
 
     // A `read` result that already fit its byte budget carries a resume
     // footer instead of mid-line truncation; compacting it again would
-    // discard content the budget deliberately kept. Honor the ordinary
+    // discard content the budget deliberately kept. A result that somehow
+    // exceeded its declared budget still falls through to the ordinary
     // limits below.
     if output
         .metadata
