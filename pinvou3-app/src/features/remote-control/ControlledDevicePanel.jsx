@@ -164,23 +164,24 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
             />
           </div>
         </div>
+
+        {CODE_STATUSES.includes(status) && device.pairingCode && (
+          <div className="mb-3 rounded-xl border border-blue-500/20 bg-blue-500/[0.06] p-3" role="group" aria-labelledby="controlled-device-code">
+            <div id="controlled-device-code" className="settings-hint">{copy.codeLabel}</div>
+            <output className="pairing-code mt-1 block text-2xl font-semibold tracking-[0.18em]" aria-live="polite" aria-label={`${copy.codeLabel} ${formatPairingCode(device.pairingCode)}`}>
+              {formatPairingCode(device.pairingCode)}
+            </output>
+            <div className="settings-hint mt-1" aria-live="polite">{seconds > 0 ? copy.codeExpires(seconds) : copy.codeExpired}</div>
+            {announce && <span className="sr-only" aria-live="polite">{copy.codeExpires(announce)}</span>}
+          </div>
+        )}
+
         <div className="settings-actions">
           <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || busy === 'refresh'}>
             <RefreshCw aria-hidden="true" /> {busy === 'refresh' ? copy.refreshing : copy.refresh}
           </button>
         </div>
       </div>
-
-      {CODE_STATUSES.includes(status) && device.pairingCode && (
-        <div className="mb-4 rounded-xl border border-blue-500/20 bg-blue-500/[0.04] p-4" role="group" aria-labelledby="controlled-device-code">
-          <div id="controlled-device-code" className="settings-hint">{copy.codeLabel}</div>
-          <output className="pairing-code mt-1 block text-2xl font-semibold tracking-[0.18em]" aria-live="polite" aria-label={`${copy.codeLabel} ${formatPairingCode(device.pairingCode)}`}>
-            {formatPairingCode(device.pairingCode)}
-          </output>
-          <div className="settings-hint mt-1" aria-live="polite">{seconds > 0 ? copy.codeExpires(seconds) : copy.codeExpired}</div>
-          {announce && <span className="sr-only" aria-live="polite">{copy.codeExpires(announce)}</span>}
-        </div>
-      )}
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2">
         <div className="rounded-xl border border-black/10 p-3 dark:border-white/10">

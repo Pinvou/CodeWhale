@@ -59,6 +59,22 @@ test('the panel uses the remote-control toggle as its only disconnect action', (
   assert.ok(!panelCode.includes('disconnectNow'));
 });
 
+test('the pairing code appears in the controlled connection block', () => {
+  const connectionStart = panel.indexOf('copy.connectionTitle');
+  const deviceStart = panel.indexOf('copy.deviceLabel');
+  const connectionCard = panel.slice(connectionStart, deviceStart);
+  const outerCardStart = panel.lastIndexOf('<div className="mb-4 rounded-xl border', connectionStart);
+  const nextCardStart = panel.indexOf('<div className="mb-4 grid gap-3 sm:grid-cols-2"', connectionStart);
+  const codeStart = panel.indexOf('controlled-device-code', connectionStart);
+  const codeEnd = panel.indexOf('copy.codeExpires(seconds)', codeStart);
+
+  assert.ok(connectionCard.includes('controlled-device-code'));
+  assert.ok(connectionCard.includes('formatPairingCode(device.pairingCode)'));
+  assert.ok(connectionCard.includes('copy.codeExpires(seconds)'));
+  assert.ok(outerCardStart !== -1 && nextCardStart !== -1);
+  assert.ok(outerCardStart < codeStart && codeStart < codeEnd && codeEnd < nextCardStart);
+});
+
 test('the panel is keyboard reachable and screen-reader friendly', () => {
   assert.ok(panel.includes('aria-live'));
   assert.ok(panel.includes('role="group"'));
