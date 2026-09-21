@@ -355,6 +355,7 @@ const jaBase = {
           detailProvider:'提供元', detailEngine:'推論エンジン', detailQuantization:'量子化', detailSize:'サイズ',
           detailSizeDual:'（各端末に 1 部ずつ）', detailClose:'閉じる',
           topologyDual:'2 台構成', topologySingle:'単機構成',
+          openDetail:'詳細を表示',
           dualNotice:'これは 2 台構成のデプロイです。2 台の端末を QSFP 直結ケーブルで接続します。ダウンロードとデプロイを行った端末がプライマリ、もう一方がセカンダリになります。',
           dualNoticeDownload:'ダウンロードはこの端末だけで完結します。直結ケーブルもセカンダリ機も不要です。',
           dualNoticeDeploy:'「デプロイ」時にセカンダリ機の管理 IP、ユーザー名、パスワードを一度だけ尋ねます。以降のネットワーク設定、パッケージ配布、ペアリング、重み配布、起動はすべて自動です。',

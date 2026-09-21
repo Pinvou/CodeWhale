@@ -358,6 +358,7 @@ export const dictEn = {
           detailProvider:'Provider', detailEngine:'Inference engine', detailQuantization:'Quantization', detailSize:'Size',
           detailSizeDual:'(one copy per device)', detailClose:'Close',
           topologyDual:'Dual-device', topologySingle:'Single device',
+          openDetail:'View details',
           dualNotice:'This is a dual-device deployment: two machines connected by a QSFP direct cable. Whichever device downloads and deploys becomes the primary; the other is the secondary.',
           dualNoticeDownload:'Downloading only needs this device — no direct cable and no secondary machine required.',
           dualNoticeDeploy:'Deploying asks once for the secondary machine’s management IP, username, and password. Networking, package push, pairing, weight distribution, and startup are then fully automatic.',

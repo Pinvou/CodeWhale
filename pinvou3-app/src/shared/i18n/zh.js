@@ -361,6 +361,7 @@ export const dictZh = {
           detailProvider:'提供商', detailEngine:'推理引擎', detailQuantization:'量化', detailSize:'体积',
           detailSizeDual:'（每台设备各一份）', detailClose:'关闭',
           topologyDual:'双机部署', topologySingle:'单机部署',
+          openDetail:'查看详情',
           dualNotice:'这是双机部署方案，需要两台设备用 QSFP 直连线接起来。下载和部署发生在哪台设备，哪台就是主机，另一台是从机。',
           dualNoticeDownload:'下载只需要当前这一台设备，不用接直连线、也不用从机在场。',
           dualNoticeDeploy:'点「部署」时会问一次从机的管理 IP、用户名和密码。之后配网、推包、配对、分发权重、启动全部自动完成，中途不需要再操作。',

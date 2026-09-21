@@ -414,6 +414,48 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// 按流解 UTF-8：**不完整的尾巴留到下一块**，不要当场判成坏字节。
+///
+/// 从 pty 读回来的是字节流，一次 read 切在哪里跟字符边界毫无关系。一个中文字
+/// 占 3 字节，4096 边界正好落在它中间的概率是 3/4096——按每 GB 日志算，一次
+/// 下载就能撞上几百次。原先每块单独 `from_utf8_lossy`，撞上就把那个字**永久**
+/// 变成两个替换符（前半截一个、后半截一个），而且是进度条这类高频刷新的行最
+/// 容易中招。留住尾巴之后，同一个字的两半会在下一块拼回去。
+///
+/// 真正的坏字节（`error_len()` 有值）还是要吐一个替换符顶掉——否则它会永远卡
+/// 在 pending 里，后面**所有**输出都跟着解不出来，日志直接哑掉。
+fn decode_utf8_stream(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
+    pending.extend_from_slice(chunk);
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(s) => {
+                out.push_str(s);
+                pending.clear();
+                return out;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if let Ok(s) = std::str::from_utf8(&pending[..valid]) {
+                    out.push_str(s);
+                }
+                match e.error_len() {
+                    // 尾部只是还没读完。UTF-8 一个字符最多 4 字节，所以留下来的
+                    // 永远不超过 3 字节，pending 不会无限涨。
+                    None => {
+                        pending.drain(..valid);
+                        return out;
+                    }
+                    Some(bad) => {
+                        out.push(char::REPLACEMENT_CHARACTER);
+                        pending.drain(..valid + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn drain_lines(
     buf: String,
     output_lines: &mut Vec<String>,
@@ -579,6 +621,8 @@ pub fn run_script(
 
     let mut output_lines: Vec<String> = Vec::new();
     let mut buf = String::new();
+    // 跨 read 的 UTF-8 残尾（见 decode_utf8_stream）。
+    let mut pending: Vec<u8> = Vec::new();
     let deadline = Instant::now() + timeout;
     let mut idle_deadline = Instant::now() + idle_timeout;
     let mut cancel_requested = false;
@@ -680,7 +724,7 @@ pub fn run_script(
                 }
                 Ok(n) => {
                     idle_deadline = Instant::now() + idle_timeout;
-                    buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
                     buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
                     // pty 是回显的：我们写回去的答案会原样再读回来一遍，所以
                     // 扫描只看新增的行，不会把自己写的东西当成新的提示。
@@ -728,12 +772,19 @@ pub fn run_script(
             match master_file.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
                     buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
                     grace_until = Instant::now() + Duration::from_secs(2);
                 }
             }
         }
+    }
+
+    // 收尾：pending 里还剩的残尾只能是被截断的半个字符（脚本被强杀时常见）。
+    // 到这里没有"下一块"了，按损坏处理吐出去，总比整段丢掉强。
+    if !pending.is_empty() {
+        buf.push_str(&String::from_utf8_lossy(&pending));
+        buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
     }
 
     if !buf.trim().is_empty() {
@@ -1274,5 +1325,50 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
         };
         let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
         assert!(err.to_string().contains("判定为卡死"));
+    }
+
+    /// 4096 边界切在一个中文字中间：两半必须拼回同一个字，而不是两个替换符。
+    #[test]
+    fn utf8_split_across_reads_is_reassembled() {
+        let text = "下载进度：完成";
+        let bytes = text.as_bytes();
+        // 在第一个中文字的三个字节中间切一刀。
+        let cut = 1;
+        let mut pending = Vec::new();
+        let mut out = String::new();
+        out.push_str(&decode_utf8_stream(&mut pending, &bytes[..cut]));
+        // 第一块只有半个字符，一个字都不该吐出来。
+        assert_eq!(out, "");
+        out.push_str(&decode_utf8_stream(&mut pending, &bytes[cut..]));
+        assert_eq!(out, text);
+        assert!(pending.is_empty());
+    }
+
+    /// 逐字节喂：每一步最多留 3 字节残尾，全部喂完必须一字不差。
+    #[test]
+    fn utf8_byte_by_byte_feed_loses_nothing() {
+        let text = "检查 vLLM 引擎是否已安装…（32.3GB）";
+        let mut pending = Vec::new();
+        let mut out = String::new();
+        for b in text.as_bytes() {
+            out.push_str(&decode_utf8_stream(&mut pending, &[*b]));
+            assert!(pending.len() <= 3, "残尾不该超过一个字符的长度");
+        }
+        assert_eq!(out, text);
+        assert!(pending.is_empty());
+    }
+
+    /// 真的坏字节要立刻顶掉。留在 pending 里的话，它后面所有输出都解不出来。
+    #[test]
+    fn utf8_real_bad_bytes_do_not_block_the_rest() {
+        let mut pending = Vec::new();
+        let mut chunk = vec![0xffu8, 0xfe];
+        chunk.extend_from_slice("正常".as_bytes());
+        let out = decode_utf8_stream(&mut pending, &chunk);
+        assert!(
+            out.ends_with("正常"),
+            "坏字节后面的内容必须照常出来：{out:?}"
+        );
+        assert!(pending.is_empty());
     }
 }

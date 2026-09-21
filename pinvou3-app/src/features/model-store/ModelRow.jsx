@@ -135,7 +135,7 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
   return (
     // 两条规则都要压：仓库里所有「只响应指针、不进 tab 序」的元素都是这么写的
     // （见 components/ComposerPopover.jsx、features/chat/ChatView.jsx）。
-    // biome-ignore lint/a11y/useKeyWithClickEvents: 整行是详情的快捷入口；键盘路径由右侧按钮承担，整行不进 tab 序
+    // biome-ignore lint/a11y/useKeyWithClickEvents: 整行是详情的快捷入口；键盘路径由模型名那个按钮承担，整行不进 tab 序
     // biome-ignore lint/a11y/noStaticElementInteractions: role="presentation" 的容器，交互语义由内部按钮承担
     <div
       data-testid="model-store-row"
@@ -155,9 +155,25 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
 
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[17px] font-semibold tracking-tight text-slate-900 dark:text-white">
+          {/* 模型名是一个**真按钮**，不是 span。整行的 onClick 只是指针端的快捷
+              方式，键盘走不到；而右侧那排按钮全是「下载/部署/启用/停用/卸载」，
+              没有一个能打开详情——详情里装着端点地址、运行日志、脚本正文和
+              API Key，键盘用户原先根本进不去。用按钮而不是给整行加
+              tabindex+onKeyDown：按钮自带回车/空格、焦点环和「可点」语义，
+              可访问名就是模型名本身，不用再编一个 aria-label。 */}
+          <button
+            type="button"
+            data-testid="model-store-row-open"
+            title={copy.openDetail}
+            className="min-w-0 truncate rounded text-left text-[17px] font-semibold tracking-tight text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:text-white"
+            onClick={(event) => {
+              // 不阻止冒泡的话整行的 onClick 会再开一次。
+              event.stopPropagation();
+              onOpen(model);
+            }}
+          >
             {model.name}
-          </span>
+          </button>
           <span
             data-testid="model-store-row-state"
             className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}

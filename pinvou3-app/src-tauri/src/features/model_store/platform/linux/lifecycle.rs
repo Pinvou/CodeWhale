@@ -1878,11 +1878,21 @@ impl ModelManager {
         if let Ok(safe_name) = config::safe_path_component(&rec.model_name) {
             candidates.push(models_dir.join(safe_name));
         }
-        // 部署包（compose/scripts/runtime/cache 都在里面），install_engine 落的。
+        // 卡片目录：入口脚本、厂商原件（vendor/）、部署包（compose/scripts/
+        // runtime/cache）都在这下面，install_engine 落的。
+        //
+        // 注意是 `cards/<id>`，**不是** `vendor/<id>`。卡片脚本里写的是
+        // `VENDOR_DIR="$CARD_DIR/vendor"`，而 `CARD_DIR` 就是这里的 `cards/<id>`
+        // （见 `PreparedScript::prepare`）——vendor 是卡片目录的子目录，不是
+        // data_dir 下的平级目录。原先按 `vendor/<id>` 猜，那个路径在磁盘上根本
+        // 不存在：`residual_paths` 的 `exists()` 会把它整条滤掉，于是强制移除
+        // 永远报"没有残留"，而实际上几百 MB 的部署包还躺在 cards/<id> 里；
+        // `uninstall` 的前后差值也因此漏算了这部分，"释放了多少"报小。
+        //
         // 这里在算"要删哪些目录"，逃出去的路径意味着删错地方，比落错地方更糟——
         // 校验不过就整个不加，宁可漏删也不能乱删。
         if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
-            candidates.push(config::data_dir().join("vendor").join(safe_id));
+            candidates.push(config::data_dir().join("cards").join(safe_id));
         }
 
         let mut out: Vec<PathBuf> = Vec::new();
