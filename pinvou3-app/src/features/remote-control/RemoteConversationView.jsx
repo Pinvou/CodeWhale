@@ -126,11 +126,11 @@ export default function RemoteConversationView({ t, bs }) {
       <p className="mb-3 text-[11px] opacity-70">
         {copy.modelPickerTitle}: {copy.modelSourceDevice}
       </p>
+      {transcript.length === 0 && tasks.length === 0 && (
+        <p className="text-[12px] opacity-70">{copy.empty}</p>
+      )}
 
       <ol className="remote-transcript" aria-live="polite">
-        {transcript.length === 0 && (
-          <li className="text-[12px] opacity-70">{copy.transcriptEmpty || copy.empty}</li>
-        )}
         {transcript.map((entry) => (
           <li
             key={`${entry.sessionId}:${entry.epoch}:${entry.sequence}`}
@@ -145,7 +145,6 @@ export default function RemoteConversationView({ t, bs }) {
       </ol>
 
       <ol className="remote-tasks" aria-live="polite">
-        {tasks.length === 0 && <li className="text-[12px] opacity-70">{copy.empty}</li>}
         {tasks.map((task) => (
           <li key={task.taskId} className="mb-1 text-[12px]">
             <span className="mr-2">{copy[taskStatusKey(task.status)]}</span>
@@ -218,30 +217,16 @@ export default function RemoteConversationView({ t, bs }) {
         </section>
       )}
 
-      <div className="mt-3 flex items-end gap-2">
-        <label className="sr-only" htmlFor="remote-composer">{copy.composerPlaceholder}</label>
-        <textarea
-          id="remote-composer"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder={copy.composerPlaceholder}
-          rows={2}
-          className="w-full rounded-lg border border-black/10 px-2 py-1 text-[13px] dark:border-white/15 dark:bg-transparent"
-        />
-        <button type="button" onClick={send} disabled={busy || !draft.trim()}>
-          {busy ? copy.sending : copy.send}
+      {activeTask && (
+        <button
+          type="button"
+          onClick={() => remote && sessionRef && remote
+            .controllerTaskCancelSend(sessionRef, activeTask.taskId)
+            .catch(function () {})}
+        >
+          {copy.cancel}
         </button>
-        {activeTask && (
-          <button
-            type="button"
-            onClick={() => remote && sessionRef && remote
-              .controllerTaskCancelSend(sessionRef, activeTask.taskId)
-              .catch(function () {})}
-          >
-            {copy.cancel}
-          </button>
-        )}
-      </div>
+      )}
       {error && <p role="alert" className="mt-1 text-[12px] text-[#EA4335]">{copy.errorGeneric}</p>}
     </div>
   );

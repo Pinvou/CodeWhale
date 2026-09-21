@@ -4039,6 +4039,7 @@ const NAV_PREFETCH = {
                 browserDockAvailable={browserDockAvailable}
                 rightDockActivePanelId={browserDockSelectedPanelId}
                 onRightDockPanelSelectionChange={selectRightDockPanel}
+                remoteConnection={remoteShellOpen ? bs?.controllerConnection : null}
               />
             )}
             {codexAcpSupported && currentView === 'codex' && (
