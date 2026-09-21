@@ -15,8 +15,11 @@ import { staticRuntimeScripts } from '../vite.config.mjs';
 // (WKWebView = Safari 14.0). scripts/audit-compat.mjs parses every
 // verbatim-copied runtime script and HTML inline script at the Safari 14
 // syntax ceiling and flags post-14 runtime APIs (guarded calls may carry a
-// `safari14-ok` line marker). The dist layer is audited by `npm run
-// audit:compat` after a build; this test pins the always-available layers.
+// `safari14-ok` line marker), and scans built dist assets: JS chunks for the
+// same parse/API violations, CSS for the `inset:` shorthand that only the
+// build's target-aware lightningcss pass expands to physical properties.
+// `npm run audit:compat` runs the full audit after a build; the tests below
+// pin both the always-available layers and the dist-CSS scan via fixtures.
 const testRoot = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(testRoot, '..');
 const readSrc = (...parts) => fs.readFileSync(path.join(appRoot, 'src', ...parts), 'utf8');
@@ -118,4 +121,33 @@ test('build-time tailwind emits inset utilities as physical properties for Safar
   }).code.toString();
   assert.match(compiled, /\.inset-0\{top:0;bottom:0;left:0;right:0\}/);
   assert.doesNotMatch(compiled, /\binset:0/);
+});
+
+test('the auditor flags inset shorthand that survives into dist CSS (Safari 14.0 contract)', () => {
+  // The compiled-CSS layer guards the other half of the contract above: the
+  // physical-property output depends on vite's `target/cssTarget: 'safari14'`
+  // reaching the lightningcss minify pass, and a config change there is
+  // silent. The audit therefore fails on the shorthand in the built artifact
+  // itself. Fixtures cover the shapes that must and must not be reported:
+  // Tailwind's raw JIT output (`inset:0px`), the expanded physical form, the
+  // unrelated clip-path `inset()` function, and the real minified output of
+  // Tailwind's `--tw-ring-inset` custom property / `.ring-inset` class name,
+  // which must not phantom-match as shorthand declarations.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-css-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '.overlay{position:fixed;inset:0px;z-index:50}',
+      '.ok{position:fixed;top:0;bottom:0;left:0;right:0}',
+      '.shape{clip-path:inset(50%)}',
+      '*{--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px}',
+      '.ring-inset{--tw-ring-inset:inset}',
+    ].join('\n'));
+    const violations = runAudit({ distDir });
+    assert.equal(violations.length, 1, `exactly the surviving shorthand must be reported; got: ${JSON.stringify(violations)}`);
+    assert.match(violations[0], /^dist:main\.css:1: inset shorthand survives the build/);
+    assert.match(violations[0], /inset:0px/);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
 });
