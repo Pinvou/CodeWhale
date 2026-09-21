@@ -31,3 +31,19 @@ test('completed tails and non-virtualized timelines preserve the original array'
   assert.equal(splitConversationLiveTail(completed, true).historyTurns, completed);
   assert.equal(splitConversationLiveTail(completed, false).historyTurns, completed);
 });
+
+test('a busy tail without a terminal stays live before its running status arrives', () => {
+  const turns = [
+    { id: 'completed', status: 'completed', completedAt: 1 },
+    { id: 'accepted', status: 'idle', completedAt: null },
+  ];
+  const split = splitConversationLiveTail(turns, true, true);
+  assert.deepEqual(split.historyTurns, [turns[0]]);
+  assert.equal(split.liveTurn, turns[1]);
+  assert.equal(split.liveTurnIndex, 1);
+});
+
+test('busy does not revive a tail that already has a terminal timestamp', () => {
+  const completed = [{ id: 'completed', status: 'completed', completedAt: 1 }];
+  assert.equal(splitConversationLiveTail(completed, true, true).historyTurns, completed);
+});

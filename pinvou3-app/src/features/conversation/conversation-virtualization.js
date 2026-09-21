@@ -10,12 +10,16 @@ export function shouldVirtualizeConversationTurns(turnCount, scrollElementRef, t
 }
 
 /**
- * @template T extends { status?: string }
+ * @template T extends { status?: string, completedAt?: number | null }
  * @param {T[]} turns
  * @param {boolean} virtualized
+ * @param {boolean} busy
  */
-export function splitConversationLiveTail(turns, virtualized) {
-  if (!virtualized || !turns.length || turns[turns.length - 1]?.status !== 'running') {
+export function splitConversationLiveTail(turns, virtualized, busy = false) {
+  const tail = turns[turns.length - 1];
+  const tailIsLive = tail?.status === 'running'
+    || (busy && !tail?.completedAt);
+  if (!virtualized || !turns.length || !tailIsLive) {
     return { historyTurns: turns, liveTurn: null, liveTurnIndex: null };
   }
   return {

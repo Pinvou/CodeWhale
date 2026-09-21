@@ -3537,6 +3537,9 @@ export function CodexAcpView({
                     turns={visibleTurns}
                     sessionId={activeId}
                     scrollElementRef={scroller}
+                    busy={busy}
+                    turnGapPx={28}
+                    followOutputRef={autoScrollRef}
                     renderBeforeTurn={turn => isNativeAgent && rewindEntries.has(turn.id) ? (
                       // 原生车道 turn 边界回退入口：turn N+1 前的 chip =「回退到第 N 轮」；
                       // 无快照的边界为「仅回退对话」变体（rewindEntriesByTurnId 判定）。

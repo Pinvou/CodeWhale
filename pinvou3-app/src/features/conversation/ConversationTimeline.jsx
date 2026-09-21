@@ -70,7 +70,7 @@ const STREAMING_MARKDOWN_THROTTLE_MS = 200;
 // height growth never waits for ResizeObserver before reaching the bottom.
 const CONVERSATION_ROW_ESTIMATE_PX = 240;
 const CONVERSATION_ROW_OVERSCAN = 5;
-const CONVERSATION_ROW_GAP_PX = 16;
+const DEFAULT_CONVERSATION_ROW_GAP_PX = 16;
 
 // The 1s clock is scoped to the smallest display subtree: the per-second tick used to live on
 // ChatView top-level state, re-rendering the whole transcript every second while busy; now only
@@ -1003,6 +1003,9 @@ export function ConversationTimeline({
   turns = EMPTY_TURNS,
   scrollElementRef,
   virtualizationThreshold = CONVERSATION_VIRTUALIZATION_THRESHOLD,
+  busy = false,
+  turnGapPx = DEFAULT_CONVERSATION_ROW_GAP_PX,
+  followOutputRef,
   renderBeforeTurn,
   ...props
 }) {
@@ -1012,11 +1015,18 @@ export function ConversationTimeline({
     virtualizationThreshold,
   );
   const { historyTurns, liveTurn, liveTurnIndex } = useMemo(
-    () => splitConversationLiveTail(turns, virtualized),
-    [turns, virtualized],
+    () => splitConversationLiveTail(turns, virtualized, busy),
+    [busy, turns, virtualized],
   );
   const historyTurnsRef = useRef(historyTurns);
   historyTurnsRef.current = historyTurns;
+  const liveTailElementRef = useRef(null);
+  const measuredLiveTailSizesRef = useRef(new Map());
+  const measuredLiveTailSessionRef = useRef(props.sessionId);
+  if (measuredLiveTailSessionRef.current !== props.sessionId) {
+    measuredLiveTailSizesRef.current.clear();
+    measuredLiveTailSessionRef.current = props.sessionId;
+  }
   const timelineRef = useRef(null);
   const [scrollMargin, setScrollMargin] = useState(0);
   const getScrollElement = useCallback(
@@ -1028,21 +1038,39 @@ export function ConversationTimeline({
     index => `${props.sessionId || 'conversation'}:${historyTurnsRef.current[index]?.id || index}`,
     [props.sessionId],
   );
+  const estimateRowSize = useCallback(
+    /** @param {number} index */
+    index => measuredLiveTailSizesRef.current.get(getItemKey(index)) || CONVERSATION_ROW_ESTIMATE_PX,
+    [getItemKey],
+  );
   // oxlint-disable-next-line react/incompatible-library -- TanStack Virtual owns row memoization and measurement; React Compiler must leave this timeline uncompiled.
   const virtualizer = useVirtualizer({
     enabled: virtualized,
     count: virtualized ? historyTurns.length : 0,
     getScrollElement,
     getItemKey,
-    estimateSize: () => CONVERSATION_ROW_ESTIMATE_PX,
+    estimateSize: estimateRowSize,
     overscan: CONVERSATION_ROW_OVERSCAN,
     scrollMargin,
+    gap: turnGapPx,
   });
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = item => {
-    const scrollElement = getScrollElement();
-    if (!scrollElement || virtualizer.isScrolling) return false;
-    return item.end <= scrollElement.scrollTop + scrollMargin;
-  };
+
+  useLayoutEffect(() => {
+    if (!virtualized || !liveTurn) return undefined;
+    const element = liveTailElementRef.current;
+    if (!element) return undefined;
+    const key = `${props.sessionId || 'conversation'}:${liveTurn.id || liveTurnIndex}`;
+    const rememberSize = () => {
+      const height = element.getBoundingClientRect().height;
+      if (height > 0) measuredLiveTailSizesRef.current.set(key, height);
+    };
+    rememberSize();
+    const observer = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(rememberSize)
+      : null;
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [liveTurn, liveTurnIndex, props.sessionId, virtualized]);
 
   useLayoutEffect(() => {
     if (!virtualized) return undefined;
@@ -1053,26 +1081,49 @@ export function ConversationTimeline({
       const nextMargin = conversationTimelineScrollMargin(timelineElement, scrollElement);
       setScrollMargin(current => Math.abs(current - nextMargin) < 0.5 ? current : nextMargin);
     };
-    const refreshViewport = () => {
-      refreshScrollMargin();
-      virtualizer.measure();
-    };
-    refreshViewport();
+    refreshScrollMargin();
     const viewportObserver = typeof ResizeObserver === 'function'
-      ? new ResizeObserver(refreshViewport)
+      ? new ResizeObserver(refreshScrollMargin)
       : null;
     const layoutObserver = typeof ResizeObserver === 'function'
       ? new ResizeObserver(refreshScrollMargin)
       : null;
     viewportObserver?.observe(scrollElement);
     if (timelineElement.parentElement) layoutObserver?.observe(timelineElement.parentElement);
-    window.addEventListener('resize', refreshViewport);
+    window.addEventListener('resize', refreshScrollMargin);
     return () => {
       viewportObserver?.disconnect();
       layoutObserver?.disconnect();
-      window.removeEventListener('resize', refreshViewport);
+      window.removeEventListener('resize', refreshScrollMargin);
     };
   }, [getScrollElement, props.sessionId, virtualized, virtualizer]);
+
+  useLayoutEffect(() => {
+    if (!virtualized) return undefined;
+    const scrollElement = getScrollElement();
+    if (!scrollElement || followOutputRef?.current === false) return undefined;
+    // A long session initially has estimated rows only. Re-stick during the first two layout
+    // frames while the bottom range mounts and is measured; otherwise the first estimated
+    // scrollHeight can expose the middle of the transcript before the caller's follower runs.
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const stickToBottom = () => {
+      if (followOutputRef?.current === false) return false;
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+      return true;
+    };
+    stickToBottom();
+    firstFrame = window.requestAnimationFrame(() => {
+      if (!stickToBottom()) return;
+      secondFrame = window.requestAnimationFrame(() => {
+        stickToBottom();
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [followOutputRef, getScrollElement, historyTurns.length, props.sessionId, virtualized]);
 
   if (!virtualized) {
     return (
@@ -1092,6 +1143,48 @@ export function ConversationTimeline({
   }
 
   const virtualRows = virtualizer.getVirtualItems();
+  const renderedRows = virtualRows.map(virtualRow => {
+    const turn = historyTurns[virtualRow.index];
+    if (!turn) return null;
+    const beforeTurn = renderBeforeTurn?.(turn, virtualRow.index);
+    return (
+      <div
+        key={virtualRow.key}
+        ref={virtualizer.measureElement}
+        data-index={virtualRow.index}
+        data-conversation-virtual-row=""
+        data-conversation-virtual-start={virtualRow.start}
+        data-conversation-virtual-size={virtualRow.size}
+        className={`absolute left-0 top-0 w-full ${beforeTurn ? 'flex flex-col gap-7' : ''}`}
+        style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
+      >
+        {beforeTurn}
+        <ConversationTurn
+          turn={turn}
+          {...props}
+          onRetry={virtualRow.index === turns.length - 1 ? props.onRetry : undefined}
+        />
+      </div>
+    );
+  });
+  if (liveTurn) {
+    renderedRows.push(
+      <div
+        key={`${props.sessionId || 'conversation'}:${liveTurn.id || liveTurnIndex}`}
+        ref={liveTailElementRef}
+        data-conversation-live-tail=""
+        className={renderBeforeTurn ? 'flex flex-col gap-7' : ''}
+        style={{ marginTop: historyTurns.length ? `${turnGapPx}px` : undefined }}
+      >
+        {renderBeforeTurn?.(liveTurn, liveTurnIndex)}
+        <ConversationTurn
+          turn={liveTurn}
+          {...props}
+          onRetry={liveTurnIndex === turns.length - 1 ? props.onRetry : undefined}
+        />
+      </div>,
+    );
+  }
   return (
     <div
       ref={timelineRef}
@@ -1102,49 +1195,11 @@ export function ConversationTimeline({
     >
       <div
         data-conversation-virtual-history=""
-        className="relative w-full"
+        aria-hidden="true"
+        className="w-full"
         style={{ height: `${virtualizer.getTotalSize()}px` }}
-      >
-        {virtualRows.map(virtualRow => {
-          const turn = historyTurns[virtualRow.index];
-          if (!turn) return null;
-          const beforeTurn = renderBeforeTurn?.(turn, virtualRow.index);
-          return (
-            <div
-              key={virtualRow.key}
-              ref={virtualizer.measureElement}
-              data-index={virtualRow.index}
-              data-conversation-virtual-row=""
-              className={`absolute left-0 top-0 w-full ${beforeTurn ? 'flex flex-col gap-7' : ''}`}
-              style={{
-                paddingBottom: `${CONVERSATION_ROW_GAP_PX}px`,
-                transform: `translateY(${virtualRow.start - scrollMargin}px)`,
-              }}
-            >
-              {beforeTurn}
-              <ConversationTurn
-                turn={turn}
-                {...props}
-                onRetry={virtualRow.index === turns.length - 1 ? props.onRetry : undefined}
-              />
-            </div>
-          );
-        })}
-      </div>
-      {liveTurn && (
-        <div
-          key={liveTurn.id}
-          data-conversation-live-tail=""
-          className={renderBeforeTurn ? 'flex flex-col gap-7' : ''}
-        >
-          {renderBeforeTurn?.(liveTurn, liveTurnIndex)}
-          <ConversationTurn
-            turn={liveTurn}
-            {...props}
-            onRetry={liveTurnIndex === turns.length - 1 ? props.onRetry : undefined}
-          />
-        </div>
-      )}
+      />
+      {renderedRows}
     </div>
   );
 }

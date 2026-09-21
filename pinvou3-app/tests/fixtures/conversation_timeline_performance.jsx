@@ -6,11 +6,38 @@ import { ConversationTimeline } from '../../src/features/conversation/Conversati
 const host = document.getElementById('root');
 const root = createRoot(host);
 let updateTurns = null;
+let updateBusy = null;
 const scrollElementRef = { current: null };
+const followOutputRef = { current: true };
+
+let statefulMountSequence = 0;
+function StatefulProbe({ id }) {
+  const [expanded, setExpanded] = useState(false);
+  const [mountId] = useState(() => ++statefulMountSequence);
+  return (
+    <button
+      type="button"
+      data-stateful-probe={id}
+      data-mount-id={mountId}
+      aria-pressed={expanded}
+      onClick={() => setExpanded(value => !value)}
+      style={{ minHeight: 620 }}
+    >
+      {expanded ? 'expanded' : 'collapsed'}
+    </button>
+  );
+}
+
+function renderPerformanceItem(item) {
+  if (!item.stateful) return undefined;
+  return <StatefulProbe id={item.id} />;
+}
 
 function PerformanceTimeline() {
   const [visibleTurns, setVisibleTurns] = useState([]);
+  const [busy, setBusy] = useState(false);
   updateTurns = setVisibleTurns;
+  updateBusy = setBusy;
   return (
     <div
       ref={scrollElementRef}
@@ -20,6 +47,10 @@ function PerformanceTimeline() {
         turns={visibleTurns}
         sessionId="performance-session"
         scrollElementRef={scrollElementRef}
+        followOutputRef={followOutputRef}
+        busy={busy}
+        turnGapPx={28}
+        renderItem={renderPerformanceItem}
       />
     </div>
   );
@@ -47,6 +78,15 @@ function commit(nextTurns) {
   return performance.now() - startedAt;
 }
 
+function commitConversation(nextTurns, nextBusy) {
+  const startedAt = performance.now();
+  flushSync(() => {
+    updateBusy(nextBusy);
+    updateTurns(nextTurns);
+  });
+  return performance.now() - startedAt;
+}
+
 function nextPaint() {
   return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
@@ -65,6 +105,9 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
     const mountMs = commit(baseTurns);
     scrollElementRef.current.scrollTop = scrollElementRef.current.scrollHeight;
     await nextPaint();
+    const bottomDistanceAfterMount = scrollElementRef.current.scrollHeight
+      - scrollElementRef.current.clientHeight
+      - scrollElementRef.current.scrollTop;
     const nodes = host.querySelectorAll('*').length;
     const updatedTurns = baseTurns.slice();
     const tail = updatedTurns[updatedTurns.length - 1];
@@ -77,6 +120,12 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
     const tailUpdated = [...host.querySelectorAll('[data-conversation-turn]')]
       .some(element => element.dataset.conversationTurn === `turn-${count - 1}` && element.textContent.includes('tail-update'));
     const bottomIndexes = renderedTurnIndexes();
+    const bottomRows = [...host.querySelectorAll('[data-conversation-virtual-row]')];
+    const measuredGap = bottomRows.length > 1
+      ? Number(bottomRows.at(-1).dataset.conversationVirtualStart)
+        - Number(bottomRows.at(-2).dataset.conversationVirtualStart)
+        - Number(bottomRows.at(-2).dataset.conversationVirtualSize)
+      : null;
     let maxResidentNodes = host.querySelectorAll('*').length;
     scrollElementRef.current.scrollTop = 0;
     await nextPaint();
@@ -102,6 +151,51 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
       middleIndexes,
       middleScrollTop,
       bottomIndexes,
+      bottomDistanceAfterMount,
+      measuredGap,
+    };
+  },
+  async runCompletionMigration() {
+    const baseTurns = turns(100);
+    baseTurns[baseTurns.length - 1] = {
+      ...baseTurns[baseTurns.length - 1],
+      status: 'running',
+      completedAt: null,
+      items: [{ id: 'stateful-tail', type: 'custom', status: 'running', stateful: true }],
+    };
+    commitConversation(baseTurns, true);
+    scrollElementRef.current.scrollTop = scrollElementRef.current.scrollHeight;
+    await nextPaint();
+    const beforeButton = host.querySelector('[data-stateful-probe="stateful-tail"]');
+    beforeButton.click();
+    await nextPaint();
+    const before = {
+      button: beforeButton,
+      mountId: beforeButton.dataset.mountId,
+    };
+    const completedTurns = baseTurns.slice();
+    completedTurns[completedTurns.length - 1] = {
+      ...baseTurns[baseTurns.length - 1],
+      status: 'completed',
+      completedAt: Date.now(),
+      items: [{ ...baseTurns[baseTurns.length - 1].items[0], status: 'completed' }],
+    };
+    commitConversation(completedTurns, false);
+    const immediateButton = host.querySelector('[data-stateful-probe="stateful-tail"]');
+    const immediateScrollHeight = scrollElementRef.current.scrollHeight;
+    const immediateBottomDistance = immediateScrollHeight
+      - scrollElementRef.current.clientHeight
+      - scrollElementRef.current.scrollTop;
+    await nextPaint();
+    const afterButton = host.querySelector('[data-stateful-probe="stateful-tail"]');
+    return {
+      sameElement: before.button === immediateButton && immediateButton === afterButton,
+      statePreserved: afterButton?.getAttribute('aria-pressed') === 'true',
+      mountPreserved: afterButton?.dataset.mountId === before.mountId,
+      immediateBottomDistance,
+      bottomDistance: scrollElementRef.current.scrollHeight
+        - scrollElementRef.current.clientHeight
+        - scrollElementRef.current.scrollTop,
     };
   },
 };

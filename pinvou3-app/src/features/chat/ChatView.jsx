@@ -2604,6 +2604,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     turns={conversationProjection.turns}
                     sessionId={activeSessionId}
                     scrollElementRef={scrollRef}
+                    busy={busy}
+                    followOutputRef={autoScrollRef}
                     onRetry={(turn) => {
                       if (!busy && turn.userText && bridge.available) {
                         bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });

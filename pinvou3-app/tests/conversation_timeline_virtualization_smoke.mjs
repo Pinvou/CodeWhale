@@ -20,7 +20,10 @@ const chrome = process.env.CHROME || [
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
 ].find(candidate => fs.existsSync(candidate));
 
-assert.ok(chrome, 'Chrome/Chromium is required; set CHROME to its executable');
+if (!chrome) {
+  console.error('SKIP: 未找到 chromium/chrome，可用 env CHROME=/path/to/chromium 指定');
+  process.exit(2);
+}
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-timeline-virtualization-'));
 let browser;
@@ -63,8 +66,19 @@ try {
   assert.ok(longTimeline.topIndexes.includes(0), 'scrolling to the top must mount the first turn');
   assert.ok(longTimeline.middleIndexes.some(index => index > 200 && index < 800), 'middle scrolling must mount middle turns');
   assert.ok(longTimeline.bottomIndexes.includes(999), 'scrolling to the bottom must mount the final turn');
+  assert.ok(Math.abs(longTimeline.bottomDistanceAfterMount) <= 1, `initial bottom drifted by ${longTimeline.bottomDistanceAfterMount}px`);
+  assert.ok(Math.abs(longTimeline.measuredGap - 28) <= 1, `virtual row gap was ${longTimeline.measuredGap}px instead of 28px`);
 
-  console.log('conversation timeline virtualization smoke passed', JSON.stringify(longTimeline));
+  const completionMigration = await page.evaluate(
+    () => window.__PINVOU_TIMELINE_PERFORMANCE__.runCompletionMigration(),
+  );
+  assert.equal(completionMigration.sameElement, true, 'live tail DOM identity must survive completion');
+  assert.equal(completionMigration.statePreserved, true, 'live tail local UI state must survive completion');
+  assert.equal(completionMigration.mountPreserved, true, 'live tail React subtree must not remount');
+  assert.ok(Math.abs(completionMigration.immediateBottomDistance) <= 1, `live tail completion drifted immediately by ${completionMigration.immediateBottomDistance}px`);
+  assert.ok(Math.abs(completionMigration.bottomDistance) <= 1, `completed live tail drifted by ${completionMigration.bottomDistance}px`);
+
+  console.log('conversation timeline virtualization smoke passed', JSON.stringify({ longTimeline, completionMigration }));
 } finally {
   await browser?.close().catch(() => {});
   await server?.close().catch(() => {});
