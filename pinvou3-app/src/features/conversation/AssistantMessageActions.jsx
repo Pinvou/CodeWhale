@@ -25,7 +25,8 @@ import {
   assistantExportFilename,
   buildAssistantResponseExport,
 } from './assistant-response-export.js';
-import { copyClipboardText, normalizeAssistantMessageText } from './message-clipboard.js';
+import { copyClipboardText } from '../../shared/clipboard.js';
+import { normalizeAssistantMessageText } from './message-clipboard.js';
 
 const SHARE_TARGETS = Object.freeze(['wechat', 'wecom', 'feishu', 'dingtalk', 'qq']);
 const responseRatings = new Map();
@@ -151,7 +152,7 @@ export function AssistantMessageActions({ text, resolveText, copy, sessionId, tu
   // resolveText 可能返回 Promise(旧 HTML 会话的 turndown 懒加载转换);
   // 消费方都在 async 处理器里,统一 await。
   const responseText = async () => normalizeAssistantMessageText(
-    typeof resolveText === 'function' ? await resolveText() : text,
+    await resolveText(),
   );
 
   const showFeedback = (message, failed = false) => {

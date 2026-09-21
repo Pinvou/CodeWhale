@@ -11,10 +11,9 @@
 //! 用户层面看不到这一层；这层只服务 GUI 与 deepseek-tui engine 之间的
 //! 转译。GUI 永远不直接操纵 EngineConfig；engine.rs 永远从这层取配置。
 
-pub use crate::features::marketplace;
-pub use crate::features::marketplace::skill_marketplace;
+use crate::features::marketplace;
 pub(crate) use crate::features::runtime_bundle::platform as bundle;
-pub use crate::features::sessions;
+use crate::features::sessions;
 pub use crate::platform::paths;
 pub use crate::platform::prefs;
 
@@ -458,7 +457,7 @@ impl Pinvou3Bridge {
     /// a bound workspace path (code-lane project root / bound chat working
     /// directory) is stable per session and is rendered into the static prompt
     /// by the respective instruction layer.
-    pub fn build_session_system_prompt(&self, session_id: &str) -> String {
+    fn build_session_system_prompt(&self, session_id: &str) -> String {
         // [pinvou3] date/workspace 已移出静态 system → per-turn <turn_meta>:每 session
         // 变的 workspace 路径(及每天变的 date)若进 cached system prefix, vLLM prefix-cache
         // MISS 时工具调用会退化成裸文本(实测 single subagent 25%→稳态~100%)。仅保留 model
@@ -569,7 +568,7 @@ impl Pinvou3Bridge {
     /// 本入口不感知 scheduled 会话（bridge 拿不到 SessionStore）；scheduled 的
     /// 两个根由调用方经 [`crate::features::sessions::SessionStore::session_roots`]
     /// 解析。与 SessionStore 入口共用 [`sessions::session_roots_for`] 同一实现。
-    pub fn session_roots(&self, session_id: &str) -> SessionRoots {
+    pub(crate) fn session_roots(&self, session_id: &str) -> SessionRoots {
         let bound_project_root = self
             .execution_root_resolver
             .as_ref()
@@ -582,7 +581,7 @@ impl Pinvou3Bridge {
     /// bound user working directory) return the bound directory (engine cwd and the
     /// shell execution directory both derive from it); other sessions return the
     /// session-private directory.
-    /// 等价于 [`Self::session_roots`] 的 `execution` 字段。
+    /// 等价于 `Self::session_roots` 的 `execution` 字段。
     pub fn session_workspace(&self, session_id: &str) -> std::path::PathBuf {
         self.session_roots(session_id).execution
     }
@@ -634,7 +633,7 @@ impl Pinvou3Bridge {
     /// Returns whether this session exposes Browser MCP tools. Plain Work mode is necessary
     /// but not sufficient: external ACP sessions are also Plain, yet do not execute through
     /// the Pinvou Engine and must be excluded on the runtime axis.
-    pub fn exposes_browser_mcp(&self, session_id: &str) -> bool {
+    fn exposes_browser_mcp(&self, session_id: &str) -> bool {
         !self.is_external_acp_session(session_id)
             && self.session_policy(session_id).exposes_browser_mcp()
     }
@@ -654,11 +653,12 @@ impl Pinvou3Bridge {
     /// 会话级工具整形:按会话策略（[`SessionPolicy`]）并入模式差量——
     /// 无差量时原样返回。spawn 初值与全局热刷都经此整形。
     ///
-    /// 传入的 `tools` 是全局(plain scope)的禁用工具名。差量项（均由编译期
+    /// 传入的 `tools` 是全局(plain scope)的不可用工具名（开关关闭∪隐藏）。
+    /// 差量项（均由编译期
     /// 静态表 `MODE_TABLE` 驱动，见 session_policy）：
     /// - 模式缺席工具（表字段 `unavailable_tools`；code: 产物卡）
     ///   ——"该模式架构上无此能力"，非用户偏好;
-    /// - 连接器禁用集：非 plain 模式改用其 scope 的禁用集
+    /// - 连接器不可用集（开关关闭∪隐藏）：非 plain 模式改用其 scope 的同名集合
     ///   ——scope 键即模式，各 scope 各自持久化(见 marketplace),互不影响;
     ///   非连接器禁用(kb_search 等)仍保留;
     /// - `load_skill` 按**该会话组合目录是否为空**动态决定（表字段
@@ -669,16 +669,17 @@ impl Pinvou3Bridge {
         let policy = self.session_policy(session_id);
         // 模式缺席工具（编译期常量表）：并入 disallowed（所有模式）。
         // ⚠️ 顺序约束：先于下方 connector retain——缺席名单应避开连接器全名
-        // （当前 code 的 mcp_pinvou3_present_artifact 与连接器禁用集无交集），
+        // （当前 code 的 mcp_pinvou3_present_artifact 与连接器不可用集无交集），
         // 否则会被 retain 误删；新增条目时同样注意（或先做 retain 再追加）。
         for name in policy.unavailable_tools() {
             if !tools.iter().any(|tool| tool == name) {
                 tools.push((*name).to_string());
             }
         }
-        // 连接器禁用集：非 plain 模式用其 scope 的禁用集替换传入的 plain scope
-        // disabled set (the plain disabled set is the incoming value itself, no
-        // replacement needed). Scope follows mode — a plain session with a bound
+        // 连接器不可用集（开关关闭∪隐藏）：非 plain 模式用其 scope 的不可用集
+        // 替换传入的 plain scope unavailable set (the plain unavailable set is
+        // the incoming value itself, no replacement needed). Scope follows
+        // mode — a plain session with a bound
         // working directory still belongs to the plain scope and never borrows the
         // code scope. Note that on this fork an uninitialized plain scope = AllowAll
         // (connectors/bundles on by default): bound sessions compensate with
@@ -686,8 +687,8 @@ impl Pinvou3Bridge {
         // tracked separately.
         let scope = policy.mode();
         if scope != SessionMode::Plain {
-            let plain_connector = crate::features::marketplace::disabled_tool_names();
-            let scoped_connector = crate::features::marketplace::disabled_tool_names_for(scope);
+            let plain_connector = crate::features::marketplace::unavailable_tool_names();
+            let scoped_connector = crate::features::marketplace::unavailable_tool_names_for(scope);
             tools.retain(|tool| !plain_connector.iter().any(|blocked| blocked == tool));
             for blocked in scoped_connector {
                 if !tools.iter().any(|tool| tool == &blocked) {
@@ -720,7 +721,7 @@ impl Pinvou3Bridge {
     /// directory, so behavior is byte-for-byte unchanged.
     ///
     /// `execution_workspace` 必须来自 [`Self::session_workspace`]（或
-    /// [`Self::session_roots`] 的 `execution` 字段）。对 ledger 与 execution 相同的
+    /// `Self::session_roots` 的 `execution` 字段）。对 ledger 与 execution 相同的
     /// sessions (unbound plain / scratch code / scheduled), return the incoming
     /// execution root as-is,
     /// scheduled 会话写其项目目录的既有行为。
@@ -753,7 +754,7 @@ impl Pinvou3Bridge {
     ///  • 多引擎并发不再依赖 per-session 文件避免 race(内存对象天然隔离)
     ///  • rehydrate 不再从 disk 重读,内容跟 EngineConfig 一起在内存里活
     ///  • Inline name 保持稳定,避免纯展示标签中的 session_id 破坏跨会话前缀缓存
-    pub fn session_instructions(&self, session_id: &str) -> Vec<InstructionSource> {
+    fn session_instructions(&self, session_id: &str) -> Vec<InstructionSource> {
         let mut out: Vec<InstructionSource> = Vec::new();
         let rendered = self.build_session_system_prompt(session_id);
         out.push(InstructionSource::Inline {
@@ -1287,13 +1288,6 @@ impl Pinvou3Bridge {
         )
     }
 
-    /// 是否配置了**可用**的独立视觉模型(或 Supported 主模型可自复用)。
-    /// 与 `image_input_mode` 内部的 `has_vision_model` 同一口径
-    /// (`resolve_vision_model_config`),供能力查询命令回传前端展示。
-    pub fn has_vision_model(&self) -> bool {
-        self.resolve_vision_model_config().is_some()
-    }
-
     /// 当前有效模型 endpoint 是否指向本机(设计 §11.8/§11.9):前端据此决定是否在
     /// 附件区提示"图片将发送给模型服务商"——本机 loopback 场景图片字节不离开本机,
     /// 不得显示云上传字样。判定与 `api_key_for_saved_model` 同一口径:preset 为
@@ -1308,7 +1302,7 @@ impl Pinvou3Bridge {
     }
 
     /// Current search API key from env or encrypted credential store.
-    pub fn search_api_key(&self) -> Option<String> {
+    fn search_api_key(&self) -> Option<String> {
         let provider = self.prefs.search.provider;
         for name in provider.env_key_names() {
             if let Ok(value) = std::env::var(name) {
@@ -1356,7 +1350,7 @@ impl Pinvou3Bridge {
     /// user's explicit `SavedModel.max_output_tokens` (the operator can
     /// raise the cap via this env / prefs) and the compaction threshold
     /// derivation fallback.
-    pub fn max_output_tokens(&self) -> u32 {
+    fn max_output_tokens(&self) -> u32 {
         if let Ok(v) = std::env::var("PINVOU3_MAX_OUTPUT_TOKENS") {
             if let Ok(n) = v.parse() {
                 return n;
@@ -1528,7 +1522,7 @@ impl Pinvou3Bridge {
     /// legacy 单引擎路径(headless harness 用):走 instructions inline + 用户自定义。
     /// 跟 [`Self::session_instructions`] 区别仅在不带 session_id —— 直接用 work 渲染原文
     /// (不替换 `{{PINVOU3_WORKSPACE}}`)。
-    pub fn instructions(&self) -> Vec<InstructionSource> {
+    fn instructions(&self) -> Vec<InstructionSource> {
         let mut out: Vec<InstructionSource> = vec![InstructionSource::Inline {
             name: "pinvou3:bundle/instructions".to_string(),
             content: instructions_md().replace(
@@ -1834,13 +1828,14 @@ impl Pinvou3Bridge {
             launch_concurrency,
             goal_token_budget,
             goal_status,
-            // pinvou3 工具开关:从全局持久的"被禁用连接器"算出禁用工具全名作为初值,
-            // 让新对话/新窗口的引擎都继承用户的开关状态(持久语义)。
+            // pinvou3 工具开关:从全局持久的"不可用集"(开关关闭∪隐藏)算出不可用
+            // 工具全名作为初值,让新对话/新窗口的引擎都继承用户的开关与可见性
+            // 治理状态(持久语义)。
             // [多智能体] 不追加 `workflow` 禁令：主线上底座在 subagents_enabled 时
             // 注册的 WorkflowTool 对所有会话可用，本分支保持能力持平。委派提醒只教
             // agent 集群、不教 workflow；已知底座限制记录在 ADR-0006。
             disallowed_tools: {
-                let n = crate::features::marketplace::disabled_tool_names();
+                let n = crate::features::marketplace::unavailable_tool_names();
                 if n.is_empty() { None } else { Some(n) }
             },
             max_tool_calls: {
@@ -1975,11 +1970,8 @@ impl Pinvou3Bridge {
         cfg
     }
 
-    /// 该会话 scope 被禁 CLI 连接器的 execpolicy deny 规则集（硬拦截）。
-    ///
-    /// 技能组合目录是软门控（模型看不见技能），本规则集是硬兜底：模型即使知道
-    /// 命令，`lark-cli` 等被禁 CLI 二进制也在 spawn 前被底座硬拒（deny 全模式
-    /// 生效，含 YOLO；错误直返模型）。从 scope 禁用集派生，自身无状态。
+    /// 会话 scope 被禁 CLI 连接器的 deny 规则（硬拦截，经
+    /// [`scope_deny_ruleset_with`] 并入 execpolicy 规则集）。
     ///
     /// 覆盖面边界（四轮评审登记，仅注释、不改行为）：规则按 CLI **二进制名**做
     /// word-boundary 前缀匹配（同 `skill_script_deny_rules` 的 DSL 现状），只拦
@@ -2174,94 +2166,28 @@ impl Pinvou3Bridge {
         let reasoning_stream_style = self.reasoning_stream_style(&provider);
         let providers = cfg.providers.get_or_insert_with(ProvidersConfig::default);
         // 按 provider 写对应 provider 配置的 base_url + api_key
-        match provider.as_str() {
-            "vllm" => configure_provider(
-                &mut providers.vllm,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "ollama" => configure_provider(
-                &mut providers.ollama,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "openai" => configure_provider(
-                &mut providers.openai,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "deepseek" => configure_provider(
-                &mut providers.deepseek,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "moonshot" => configure_provider(
-                &mut providers.moonshot,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "volcengine" => configure_provider(
-                &mut providers.volcengine,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "zai" => configure_provider(
-                &mut providers.zai,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "minimax" => configure_provider(
-                &mut providers.minimax,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "xiaomi-mimo" => configure_provider(
-                &mut providers.xiaomi_mimo,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "anthropic" => configure_provider(
-                &mut providers.anthropic,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            "xai" => configure_provider(
-                &mut providers.xai,
-                &base_url,
-                &api_key,
-                &model,
-                reasoning_stream_style,
-            ),
-            _ => {
-                configure_provider(
-                    &mut providers.vllm,
-                    &base_url,
-                    &api_key,
-                    &model,
-                    reasoning_stream_style,
-                );
-            }
-        }
+        let provider_config = match provider.as_str() {
+            "vllm" => &mut providers.vllm,
+            "ollama" => &mut providers.ollama,
+            "openai" => &mut providers.openai,
+            "deepseek" => &mut providers.deepseek,
+            "moonshot" => &mut providers.moonshot,
+            "volcengine" => &mut providers.volcengine,
+            "zai" => &mut providers.zai,
+            "minimax" => &mut providers.minimax,
+            "xiaomi-mimo" => &mut providers.xiaomi_mimo,
+            "anthropic" => &mut providers.anthropic,
+            "xai" => &mut providers.xai,
+            // 未知 provider 统一落到 vllm（与既有 catch-all 行为一致）。
+            _ => &mut providers.vllm,
+        };
+        configure_provider(
+            provider_config,
+            &base_url,
+            &api_key,
+            &model,
+            reasoning_stream_style,
+        );
         cfg.default_text_model = Some(model);
         // 本地模型（vLLM / 探测出的 Ollama）默认关 thinking（防 SSE timeout）；其余默认 high。
         cfg.reasoning_effort = self.request_reasoning_effort();
@@ -3444,8 +3370,9 @@ mod tests {
             "inventory interpretation belongs in the static session prompt"
         );
         use crate::features::marketplace::{ConnectorScope, save_disabled_connectors_for};
-        save_disabled_connectors_for(ConnectorScope::Plain, &["weather".into(), "qcc".into()]);
-        save_disabled_connectors_for(ConnectorScope::Code, &[]);
+        save_disabled_connectors_for(ConnectorScope::Plain, &["weather".into(), "qcc".into()])
+            .unwrap();
+        save_disabled_connectors_for(ConnectorScope::Code, &[]).unwrap();
 
         let inventory = |sid: &str| -> serde_json::Value {
             let Op::SendMessage { content, .. } = bridge
@@ -3496,10 +3423,11 @@ mod tests {
                 .iter()
                 .all(|entry| entry["enabled"] == true)
         );
-        let denied = crate::features::marketplace::disabled_tool_names_for(ConnectorScope::Plain);
+        let denied =
+            crate::features::marketplace::unavailable_tool_names_for(ConnectorScope::Plain);
         assert!(denied.contains(&"mcp_weather_get_weather".to_string()));
         assert!(denied.contains(&"mcp_qcc-company_*".to_string()));
-        save_disabled_connectors_for(ConnectorScope::Plain, &[]);
+        save_disabled_connectors_for(ConnectorScope::Plain, &[]).unwrap();
         assert!(
             inventory("plain")
                 .as_array()
@@ -3524,6 +3452,60 @@ mod tests {
             panic!("expected SendMessage")
         };
         assert!(content.contains("市场 MCP 应用（当前会话模式）: []"));
+    }
+
+    /// PPT 场景回归（隐藏集口径）：开关全开、仅「不可见」隐藏的包必须同时被
+    /// 两个通道排除——turn 快照报 enabled=false，工具全名进 disallowed 口径。
+    /// 快照（mcp_inventory::turn_reminder）与工具白名单
+    /// （unavailable_tool_names_for）都吃 unavailable = disabled ∪ hidden 并集，
+    /// 模型不会再被两个互相矛盾的真相源喂养。
+    #[test]
+    fn hidden_bundle_gates_snapshot_and_tool_allowlist_alike() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("PINVOU3_HOME", dir.path()) };
+        let installed = dir.path().join("marketplace/installed.json");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, r#"["weather"]"#).unwrap();
+        let mut bridge = fixture_bridge();
+        bridge.set_code_session_predicate(Arc::new(|sid| sid == "code"));
+        use crate::features::marketplace::{ConnectorScope, save_hidden_bundles_for};
+        // 只写隐藏集、不碰开关集：旧口径（只读开关集）下快照会报 enabled=true
+        // 且工具留在目录里，本测试对两条通道都钉住并集口径。
+        save_hidden_bundles_for(ConnectorScope::Plain, &["weather".into()]).unwrap();
+
+        let Op::SendMessage { content, .. } = bridge
+            .build_send_message_op(
+                "plain",
+                "List my MCP applications".into(),
+                AppMode::Agent,
+                None,
+                false,
+            )
+            .unwrap()
+        else {
+            panic!("expected SendMessage")
+        };
+        let line = content
+            .lines()
+            .find_map(|line| line.strip_prefix("市场 MCP 应用（当前会话模式）: "))
+            .expect("inventory must reach the model input");
+        let entries: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(
+            entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == "weather" && entry["enabled"] == false),
+            "仅隐藏（开关开）的包必须在快照里报 enabled=false: {line}"
+        );
+        let denied =
+            crate::features::marketplace::unavailable_tool_names_for(ConnectorScope::Plain);
+        assert!(
+            denied.contains(&"mcp_weather_get_weather".to_string()),
+            "仅隐藏的包的工具必须进 disallowed 口径: {denied:?}"
+        );
     }
 
     /// 代码会话的连接器禁用集来自 code scope(独立于 plain scope):
@@ -3577,7 +3559,8 @@ mod tests {
         crate::features::marketplace::save_disabled_connectors_for(
             ConnectorScope::Plain,
             &["weather".to_string()],
-        );
+        )
+        .unwrap();
         // code scope 未初始化 → 默认全禁已装连接器。
         let tools = vec!["kb_search".to_string()];
         let shaped = bridge.shape_disallowed_tools("sess-code", tools.clone());
@@ -3591,7 +3574,8 @@ mod tests {
         crate::features::marketplace::save_disabled_connectors_for(
             ConnectorScope::Code,
             &["pptx".to_string()],
-        );
+        )
+        .unwrap();
         let shaped = bridge.shape_disallowed_tools("sess-code", tools.clone());
         assert!(!shaped.contains(&weather[0]));
         assert!(shaped.contains(&pptx[0]));
@@ -3635,7 +3619,8 @@ mod tests {
         crate::features::marketplace::save_disabled_connectors_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
-        );
+        )
+        .unwrap();
         let rs = bridge.scope_deny_ruleset_with("sess-plain", Vec::new());
         let mut cmds: Vec<&str> = rs
             .ask_rules
@@ -3686,7 +3671,8 @@ mod tests {
         crate::features::marketplace::save_disabled_connectors_for(
             ConnectorScope::Code,
             &["dingtalk".to_string()],
-        );
+        )
+        .unwrap();
         let rs = bridge.scope_deny_ruleset_with("sess-code", Vec::new());
         let mut cmds: Vec<&str> = rs
             .ask_rules
@@ -3745,7 +3731,8 @@ mod tests {
         crate::features::marketplace::save_disabled_connectors_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
-        );
+        )
+        .unwrap();
         let rs = bridge.scope_deny_ruleset_with("sess-plain", Vec::new());
 
         let engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![rs]);
@@ -3924,7 +3911,8 @@ mod tests {
         crate::features::marketplace::skill_scope::save_disabled_skills_for(
             ConnectorScope::Plain,
             &["my-skill".to_string()],
-        );
+        )
+        .unwrap();
         let rs = bridge.scope_deny_ruleset("sess-plain");
         assert!(
             rs.ask_rules.iter().any(|r| r
@@ -3941,7 +3929,8 @@ mod tests {
         crate::features::marketplace::skill_scope::save_disabled_skills_for(
             ConnectorScope::Plain,
             &[],
-        );
+        )
+        .unwrap();
         assert!(
             bridge
                 .scope_deny_ruleset("sess-plain")
@@ -7991,7 +7980,7 @@ mod tests {
     /// 一致（workflow 也同样可用——不教不荐，但不禁用）。
     #[test]
     fn multi_agent_engine_config_adds_roles_and_resource_guards() {
-        // 引擎配置会读取 PINVOU3_HOME 下的市场禁用注册表（disabled_tool_names），
+        // 引擎配置会读取 PINVOU3_HOME 下的市场禁用注册表（unavailable_tool_names），
         // 本测试本身不写 env，过去一直裸读；#1127 的市场 MCP 清单测试会翻
         // PINVOU3_HOME 并写入非空禁用条目，并行调度下两次相邻的 build_engine_config*
         // 可能读到不同快照，"多智能体 == 普通对话"断言随机打红（2026-09-16 本地

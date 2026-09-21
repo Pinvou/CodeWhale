@@ -1,3 +1,19 @@
+/// 连接器 / 包可见性 / 项目级 skills 开关共用的热刷收尾：重写在线会话组合目录
+/// + 热刷工具白名单 + 热刷 execpolicy 规则集，并向远控端广播
+/// `remote_control:tools_changed`（其它窗口/实例借此刷新开关状态）。
+async fn refresh_tools_and_broadcast(app: &AppHandle, pool: &EnginePool) {
+    pool.refresh_live_sessions_skills().await;
+    pool.refresh_disallowed_tools().await;
+    pool.refresh_permission_rulesets().await;
+    let payload = serde_json::json!({});
+    let _ = app.emit("remote_control:tools_changed", payload.clone());
+    crate::features::remote_control::forward_app_event(
+        app,
+        "remote_control:tools_changed",
+        payload,
+    );
+}
+
 /// pinvou3 工具开关(按会话类型 scope 持久):设置当前被关掉的连接器
 /// (connector_ids = 市场工具 id)。落盘 → 推算成模型可见工具全名广播给所有在跑
 /// 引擎 → 隐藏这些工具。空 = 全开。
@@ -14,16 +30,7 @@ pub async fn set_disabled_connectors(
     crate::features::marketplace::apply_disabled_connectors_for(scope, connector_ids).await?;
     // 连接器禁用影响其 companion skills 的可见性（组合目录排除集变化）：
     // 重写在线会话组合目录 + 热刷工具白名单 + 热刷 CLI 硬拦截规则集（execpolicy）。
-    pool.refresh_live_sessions_skills().await;
-    pool.refresh_disallowed_tools().await;
-    pool.refresh_permission_rulesets().await;
-    let payload = serde_json::json!({});
-    let _ = app.emit("remote_control:tools_changed", payload.clone());
-    crate::features::remote_control::forward_app_event(
-        &app,
-        "remote_control:tools_changed",
-        payload,
-    );
+    refresh_tools_and_broadcast(&app, pool.inner()).await;
     Ok(())
 }
 
@@ -49,20 +56,11 @@ pub async fn set_bundle_visibility(
     let scope = parse_connector_scope(scope.as_deref())?;
     let ids = bundle_ids.clone();
     tokio::task::spawn_blocking(move || {
-        crate::features::marketplace::save_hidden_bundles_for(scope, &ids);
+        crate::features::marketplace::save_hidden_bundles_for(scope, &ids)
     })
     .await
-    .map_err(|e| format!("set_bundle_visibility join: {e}"))?;
-    pool.refresh_live_sessions_skills().await;
-    pool.refresh_disallowed_tools().await;
-    pool.refresh_permission_rulesets().await;
-    let payload = serde_json::json!({});
-    let _ = app.emit("remote_control:tools_changed", payload.clone());
-    crate::features::remote_control::forward_app_event(
-        &app,
-        "remote_control:tools_changed",
-        payload,
-    );
+    .map_err(|e| format!("set_bundle_visibility join: {e}"))??;
+    refresh_tools_and_broadcast(&app, pool.inner()).await;
     Ok(())
 }
 
@@ -88,21 +86,10 @@ pub async fn set_project_skills_enabled(
     pool: State<'_, EnginePool>,
 ) -> Result<(), String> {
     crate::features::marketplace::skill_scope::set_project_skills_enabled(enabled);
-    // 开关影响 code 会话组合目录：重写在线会话 + 热刷 load_skill 隐藏判定。
-    pool.refresh_live_sessions_skills().await;
-    pool.refresh_disallowed_tools().await;
-    // 同步 execpolicy 规则集：项目级 skills 重新纳入 deny/allow 集合。
-    pool.refresh_permission_rulesets().await;
-    // Broadcast the tool change: project-level skills toggles affect the
-    // code-session bundle list, so other windows/instances refresh their
-    // toggle state via this event (same pattern as set_disabled_connectors).
-    let payload = serde_json::json!({});
-    let _ = app.emit("remote_control:tools_changed", payload.clone());
-    crate::features::remote_control::forward_app_event(
-        &app,
-        "remote_control:tools_changed",
-        payload,
-    );
+    // 开关影响 code 会话组合目录：重写在线会话组合目录 + 热刷 load_skill 隐藏
+    // 判定 + execpolicy 规则集（项目级 skills 重新纳入 deny/allow 集合），并广播
+    // 工具变更（其它窗口/实例借此刷新开关状态）。
+    refresh_tools_and_broadcast(&app, pool.inner()).await;
     Ok(())
 }
 
@@ -243,6 +230,9 @@ async_command_passthrough!(tmeet_domain, tmeet_skills_state() -> Result<Value, S
 /// ima 连接成功会安装配套技能 ima-skills（domain 层落盘）→ 重写在线会话组合目录
 /// （skill 双 scope 治理事件驱动时机）+ 热刷 execpolicy 规则集（技能脚本 deny 规则
 /// 随目录变化，四轮评审 M-6a）。失败时技能未装上，不重写。
+// The disallowed hot-refresh is required since the native-tool ownership gate:
+// the freshly installed package flips `ima_openapi` from denied to admitted
+// for DenyAll scopes' explicit-enable path, and online engines must see it.
 #[tauri::command]
 pub async fn ima_connect(
     client_id: String,
@@ -251,16 +241,21 @@ pub async fn ima_connect(
 ) -> Result<Value, String> {
     let result = ima_domain::ima_connect(client_id, api_key).await?;
     pool.refresh_live_sessions_skills().await;
+    pool.refresh_disallowed_tools().await;
     pool.refresh_permission_rulesets().await;
     Ok(result)
 }
 
 /// ima 退出会卸载配套技能 ima-skills（domain 层落盘）→ 重写在线会话组合目录 +
 /// 热刷 execpolicy 规则集（同上，M-6a）。
+// Uninstall must also revoke the native tool in live engines: after logout the
+// package no longer backs `ima_openapi`, so the ownership gate denies it and
+// the refresh pushes the reshaped deny list before the next turn.
 #[tauri::command]
 pub async fn ima_logout(pool: State<'_, EnginePool>) -> Result<Value, String> {
     let result = ima_domain::ima_logout().await?;
     pool.refresh_live_sessions_skills().await;
+    pool.refresh_disallowed_tools().await;
     pool.refresh_permission_rulesets().await;
     Ok(result)
 }

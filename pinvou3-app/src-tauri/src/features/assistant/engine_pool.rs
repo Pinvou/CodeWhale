@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use deepseek_tui::AppMode;
@@ -80,6 +81,16 @@ fn should_reap_idle_engine(
         && !scheduled_running
         && !is_active_session
         && idle_for_secs >= IDLE_EVICT_AFTER_SECS
+}
+
+/// Rebind eviction recheck (pure function, unit-testable; review #463
+/// eviction-tail TOCTOU): only genuine turn activity blocks the reclaim — an
+/// in-flight/reserved turn (reserve occupies the lifecycle before the gate is
+/// taken) or a running scheduled round. Unlike the idle reaper there is no
+/// idle-duration or active-session gate: a rebound session must be reclaimed
+/// even when recently active, so the next turn respawns in the new directory.
+fn rebind_evictable(turn_active: bool, scheduled_running: bool) -> bool {
+    !turn_active && !scheduled_running
 }
 
 /// `evict_if_idle` 的锁内复核（纯函数，便于单测）：快照后活动时钟必须未前进
@@ -273,6 +284,8 @@ where
     store.delete_scheduled_run(session_id, expected_task_id)
 }
 
+/// 共享删除路径:普通聊天删除与契约测试都经由它,持有与懒加载/发送完全
+/// 相同的 turn gate,防止排队发送在引擎回收与磁盘删除之间复活会话。
 async fn delete_chat_session_with_gate<F, Fut, G>(
     turn_locks: &SessionTurnLocks,
     store: &SessionStore,
@@ -357,6 +370,83 @@ where
         return false;
     };
     reclaim(entry).await;
+    true
+}
+
+/// How long the rebind eviction tail waits for a session's turn gate before
+/// giving up and leaving the session alone (review #463 round-8 minor 4).
+/// A scheduled round holds that gate for its WHOLE duration, so delegating to
+/// the unbounded [`evict_if_idle_with_gates`] would stall the rebind command —
+/// and the process-wide rebind gate behind it — for minutes, and the round
+/// would still not be reported afterwards. The eviction is best-effort by
+/// design, so a gate that is still held after this bound is treated as "not
+/// idle": nothing is touched and the command reports the session as post-busy.
+/// Comfortably longer than any normal send's gate hold, so ordinary turns are
+/// still observed rather than skipped.
+const REBIND_EVICT_GATE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Rebind eviction tail skeleton (review #463 M1 + eviction-tail TOCTOU,
+/// extended in round 8 by M2 and minor 4): the idle-gated take runs under the
+/// turn gate + runtime lock, and a successful take ALSO drops the per-session
+/// shell state under the same gates.
+///
+/// Unlike [`evict_if_idle_with_gates`] BOTH gates — the turn gate and the
+/// runtime lock — are acquired under a timeout (see
+/// [`REBIND_EVICT_GATE_TIMEOUT`]) and a timeout counts as "not evicted",
+/// keeping the command responsive. The runtime lock needs its own timeout
+/// because a cold spawn holds it for many seconds, far beyond any turn gate
+/// wait (round-8 should-fix 4).
+///
+/// Both registries have to go. `SessionShellManagers::for_session` is
+/// `entry().or_insert_with` and the manager's cwd is pinned at construction,
+/// so a surviving manager would keep executing bare shell commands in the old
+/// directory while the rebuilt engine runs in the new one — split-brain
+/// inside one turn (M1). `SessionTurnShellTasks::for_session` is
+/// `entry().or_insert_with` too and its registry pins that same shell
+/// manager, so a surviving entry would resolve the next turn's scope against
+/// the OLD manager: the baseline diff and the end-of-turn cleanup kills would
+/// miss the jobs the turn actually started, leaving detached/background jobs
+/// running (round-8 M2). This mirrors `forget_session`, which removes both;
+/// the lifecycle is deliberately NOT touched here (an unsubmitted reservation
+/// must survive and submit to the rebuilt engine), which is why
+/// `forget_session` itself is not reused.
+///
+/// The reset happens inside the gated section so a new turn cannot slip in
+/// between and rebuild either registry against the new workspace only to have
+/// it dropped afterwards.
+async fn rebind_evict_with_gates<T, Take, TakeFut, Reclaim, ReclaimFut>(
+    turn_locks: &SessionTurnLocks,
+    runtime_locks: &SessionTurnLocks,
+    shell_managers: &SessionShellManagers,
+    turn_shell_tasks: &SessionTurnShellTasks,
+    session_id: &str,
+    take_entry: Take,
+    reclaim: Reclaim,
+) -> bool
+where
+    Take: FnOnce() -> TakeFut,
+    TakeFut: Future<Output = Option<T>>,
+    Reclaim: FnOnce(T) -> ReclaimFut,
+    ReclaimFut: Future<Output = ()>,
+{
+    let turn_lock = turn_locks.for_session(session_id).await;
+    let Ok(_turn) = tokio::time::timeout(REBIND_EVICT_GATE_TIMEOUT, turn_lock.lock()).await else {
+        return false;
+    };
+    let runtime_lock = runtime_locks.for_session(session_id).await;
+    let Ok(_runtime) = tokio::time::timeout(REBIND_EVICT_GATE_TIMEOUT, runtime_lock.lock()).await
+    else {
+        // A spawn in flight holds this lock far longer than a turn gate wait;
+        // skipping this round is the honest answer, same as a turn-gate
+        // timeout.
+        return false;
+    };
+    let Some(entry) = take_entry().await else {
+        return false;
+    };
+    reclaim(entry).await;
+    turn_shell_tasks.remove(session_id);
+    shell_managers.remove(session_id);
     true
 }
 
@@ -654,6 +744,17 @@ where
     (target, claimed_unsubmitted)
 }
 
+/// get_or_spawn 的陈旧判定：运行时模型变更（`requires_rebuild_from`）或 mcp
+/// 配置修订递增（`mark_mcp_config_updated`）任一命中，下一轮都要安全重建。
+/// 独立成纯函数：无真实引擎即可与 `requires_rebuild_from` 同层钉住行为。
+fn entry_is_fresh(
+    requires_model_rebuild: bool,
+    entry_mcp_config_revision: u64,
+    current_mcp_config_revision: u64,
+) -> bool {
+    !requires_model_rebuild && entry_mcp_config_revision == current_mcp_config_revision
+}
+
 /// 池里一个 session 的常驻条目:engine + 它专属的 event forwarder task。
 struct EngineEntry {
     engine: AppEngine,
@@ -728,25 +829,15 @@ pub type EngineToolFactory =
     Arc<dyn Fn(&AppHandle, &str) -> Vec<Arc<dyn ToolSpec>> + Send + Sync + 'static>;
 pub type ToolPolicy = Arc<dyn Fn(&AppHandle) -> Vec<String> + Send + Sync + 'static>;
 
-fn should_sync_session(_is_scheduled: bool, _has_messages: bool) -> bool {
-    // SyncSession carries both transcript history and the authoritative Session
-    // identity. An empty ordinary Session still needs it: otherwise the freshly
-    // spawned Engine keeps its generated internal id, and every SessionUpdated
-    // snapshot is rejected by the outer forwarder as belonging to another
-    // Session. That leaves only the admitted user fallback durable while the
-    // streamed assistant reply exists in memory alone.
-    true
-}
-
 /// 多 session engine 池。Tauri State 持有,`Clone` 廉价(内部全是 Arc)。
 #[derive(Clone)]
 pub struct EnginePool {
     entries: Arc<Mutex<HashMap<String, EngineEntry>>>,
     runtime_model_locks: SessionTurnLocks,
     model_update_revisions: ModelUpdateRevisions,
+    mcp_config_revision: Arc<AtomicU64>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     eval_model_snapshots: EvalModelSnapshots,
-    mcp_config_revision: Arc<AtomicU64>,
     turn_locks: SessionTurnLocks,
     turn_lifecycles: SessionTurnLifecycles,
     shell_managers: SessionShellManagers,
@@ -894,9 +985,9 @@ impl EnginePool {
             entries: Arc::new(Mutex::new(HashMap::new())),
             runtime_model_locks: SessionTurnLocks::default(),
             model_update_revisions: ModelUpdateRevisions::default(),
+            mcp_config_revision: Arc::new(AtomicU64::new(0)),
             #[cfg(any(feature = "benchmark-hooks", test))]
             eval_model_snapshots: EvalModelSnapshots::default(),
-            mcp_config_revision: Arc::new(AtomicU64::new(0)),
             turn_locks: SessionTurnLocks::default(),
             turn_lifecycles: SessionTurnLifecycles::default(),
             shell_managers: SessionShellManagers::default(),
@@ -1074,25 +1165,6 @@ impl EnginePool {
                 );
             })
             .await;
-        }
-    }
-
-    /// 同步版在线会话组合目录重写（**仅供不在 tokio runtime 上的同步调用方**：
-    /// `blocking_lock` 在 runtime 线程上会 panic，async 命令必须改用
-    /// [`Self::refresh_live_sessions_skills`]）。组合目录体量小、diff 重写极快。
-    pub fn refresh_live_sessions_skills_blocking(&self) {
-        let sids: Vec<String> = {
-            let entries = self.entries.blocking_lock();
-            entries.keys().cloned().collect()
-        };
-        for sid in sids {
-            let scope = self.bridge.session_policy(&sid).mode();
-            let project_workspace = self.project_workspace_for(&sid);
-            crate::features::assistant::skill_materialization::rewrite_session_skills(
-                &sid,
-                scope,
-                project_workspace.as_deref(),
-            );
         }
     }
 
@@ -1328,9 +1400,11 @@ impl EnginePool {
         let stale = {
             let mut entries = self.entries.lock().await;
             if let Some(entry) = entries.get(session_id) {
-                if !prepared.requires_rebuild_from(&entry.runtime_model)
-                    && entry.mcp_config_revision == mcp_config_revision
-                {
+                if entry_is_fresh(
+                    prepared.requires_rebuild_from(&entry.runtime_model),
+                    entry.mcp_config_revision,
+                    mcp_config_revision,
+                ) {
                     return Ok(entry.engine.clone());
                 }
             }
@@ -1409,7 +1483,7 @@ impl EnginePool {
         // 的内部 session id 对齐到预创建的持久化会话。跳过会让首轮 SessionUpdated
         // 因 id mismatch 被拒绝，最终只落盘 user 而丢失 assistant。
         match self.store.load(session_id) {
-            Ok(saved) if should_sync_session(is_scheduled, !saved.messages.is_empty()) => {
+            Ok(saved) => {
                 if let Err(error) = engine
                     .sync_session(session_id.to_string(), saved.messages)
                     .await
@@ -1432,7 +1506,6 @@ impl EnginePool {
                     turn_lifecycle.prune_stale_transcript_rules();
                 }
             }
-            Ok(_) => {}
             Err(error) => {
                 let _ = engine.handle.send(Op::Shutdown).await;
                 forwarder.abort();
@@ -1529,6 +1602,52 @@ impl EnginePool {
                 }
             },
             |entry| self.reclaim_engine_entry(session_id, entry),
+        )
+        .await
+    }
+
+    /// Rebind eviction (review #463 M1 + eviction-tail TOCTOU, round-8 M2):
+    /// same turn gate + runtime lock as [`evict`](Self::evict), but the entry
+    /// is taken only when the session is still idle at recheck time — a turn
+    /// that started after the command layer's post-migration recheck keeps its
+    /// engine instead of being cancelled into an Interrupted terminal.
+    /// A successful take also resets the per-session shell state (via
+    /// [`rebind_evict_with_gates`]): the shell manager's cwd is pinned at
+    /// construction, so a surviving manager would keep running bare shell
+    /// commands in the old directory while the rebuilt engine runs in the new
+    /// one, and the turn-scope registry pins that same manager, so it would
+    /// diff the next turn's baseline and clean up its jobs against the old
+    /// one. The lifecycle is deliberately NOT forgotten — an unsubmitted
+    /// reservation must survive and submit to the rebuilt engine (same
+    /// semantics as reclaim).
+    ///
+    /// The take yields `Some(None)` for an idle session with no resident
+    /// engine: there is nothing to reclaim, but the shell state may still
+    /// exist from an earlier turn and must be reset. Returns false when the
+    /// session was busy at recheck OR when its turn gate could not be
+    /// acquired within [`REBIND_EVICT_GATE_TIMEOUT`] — in both cases nothing
+    /// was touched and the command reports the session as post-busy.
+    pub async fn evict_if_idle_for_rebind(&self, session_id: &str) -> bool {
+        rebind_evict_with_gates(
+            &self.turn_locks,
+            &self.runtime_model_locks,
+            &self.shell_managers,
+            &self.turn_shell_tasks,
+            session_id,
+            || async {
+                if !rebind_evictable(
+                    self.is_turn_active(session_id),
+                    self.scheduled_running_sessions.lock().contains(session_id),
+                ) {
+                    return None;
+                }
+                Some(self.entries.lock().await.remove(session_id))
+            },
+            |entry| async move {
+                if let Some(entry) = entry {
+                    self.reclaim_engine_entry(session_id, entry).await;
+                }
+            },
         )
         .await
     }
@@ -1752,12 +1871,6 @@ impl EnginePool {
     }
 
     #[cfg(any(feature = "benchmark-hooks", test))]
-    pub(crate) fn tested_eval_identity(&self) -> ModelIdentity {
-        let prefs = UserPrefs::load();
-        identity_for_active_model(&self.bridge, &prefs)
-    }
-
-    #[cfg(any(feature = "benchmark-hooks", test))]
     pub(crate) fn pin_active_eval_suite_model(&self) -> Result<EvalSuiteModelSnapshot> {
         let prefs = UserPrefs::load();
         let saved_model = prefs
@@ -1779,25 +1892,6 @@ impl EnginePool {
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub(crate) fn discard_eval_suite_model(&self, suite: &EvalSuiteModelSnapshot) {
         self.eval_model_snapshots.discard_suite(suite);
-    }
-
-    /// Resolve and privately pin the complete SavedModel while returning only a
-    /// non-sensitive opaque selection to the evaluation layer. Callers that do
-    /// not pass the selection to `prepare_eval_session` must explicitly discard it.
-    #[cfg(any(feature = "benchmark-hooks", test))]
-    pub(crate) fn pin_eval_model_selection(&self, model_id: &str) -> Result<EvalModelSelection> {
-        let prefs = UserPrefs::load();
-        let (saved, identity) = resolve_eval_model_selection_from(
-            &self.bridge,
-            &prefs.advanced.saved_models,
-            model_id,
-        )?;
-        Ok(self.eval_model_snapshots.pin(saved, identity))
-    }
-
-    #[cfg(any(feature = "benchmark-hooks", test))]
-    pub(crate) fn discard_eval_model_selection(&self, selection: &EvalModelSelection) {
-        self.eval_model_snapshots.discard(selection);
     }
 
     /// 创建并加载一次性评测会话。评测 runner 预先决定 session ID，以便报告和
@@ -2015,7 +2109,7 @@ impl EnginePool {
     }
 
     /// 发用户消息给指定 session 的 engine(没起则 lazy spawn)。
-    #[allow(dead_code)]
+    #[cfg(any(feature = "benchmark-hooks", test))]
     pub async fn send_user_message(
         &self,
         session_id: &str,
@@ -2200,6 +2294,23 @@ impl EnginePool {
                     .insert(session_id.to_string());
             }
         }
+        // Round-8 should-fix 5: the slot used to be removed only after the
+        // round future resolved; a panic inside a round skipped the removal
+        // and permanently wedged the new rebind fences for this session until
+        // restart. A drop guard removes it on every exit path.
+        struct ScheduledRunningSlotGuard<'a> {
+            slots: &'a SyncMutex<HashSet<String>>,
+            session_id: &'a str,
+        }
+        impl Drop for ScheduledRunningSlotGuard<'_> {
+            fn drop(&mut self) {
+                self.slots.lock().remove(self.session_id);
+            }
+        }
+        let _running_slot = ScheduledRunningSlotGuard {
+            slots: &self.scheduled_running_sessions,
+            session_id,
+        };
         let result = async {
             self.touch_engine_activity(session_id).await;
             let profile = self
@@ -2265,7 +2376,7 @@ impl EnginePool {
         }
         .await;
 
-        self.scheduled_running_sessions.lock().remove(session_id);
+        drop(_running_slot);
         self.evict_locked(session_id).await;
         result
     }
@@ -2478,10 +2589,11 @@ impl EnginePool {
         }
     }
 
-    /// pinvou3 工具开关(全局持久):把"被禁用的工具全名"(模型可见全名,小写)广播给
-    /// **所有在跑的 session engine** → 写入各自 config.disallowed_tools,下一轮即隐藏。
-    /// 没起的会话下次 spawn 时从持久列表读初值(build_engine_config),所以新窗口/新对话
-    /// 都继承同一份禁用状态。
+    /// pinvou3 工具开关(全局持久):把"不可用的工具全名"(开关关闭∪隐藏;模型可见
+    /// 全名,小写)广播给 **所有在跑的 session engine** → 写入各自
+    /// config.disallowed_tools,下一轮即隐藏。没起的会话下次 spawn
+    /// 时从持久列表读初值(build_engine_config),所以新窗口/新对话都继承同一份
+    /// 治理状态。
     pub async fn set_disallowed_all(&self, tools: Vec<String>) {
         let targets = self
             .entries
@@ -3034,16 +3146,16 @@ mod scheduled_model_tests {
     const TEST_SUBMISSION: &str = "sub-test";
     use super::{
         EvalModelSnapshots, ModelIdentity, ModelUpdateRevisions, Pinvou3Bridge,
-        PreparedRuntimeState, SESSION_MODEL_BINDING_STALE_ERROR, ScheduledUnattendedGuard,
-        SessionShellManagers, SessionTurnLifecycles, SessionTurnLocks, SessionTurnShellTasks,
-        TranscriptOperation, TurnIdentity, cancel_turn_with_gates,
+        PreparedRuntimeState, REBIND_EVICT_GATE_TIMEOUT, SESSION_MODEL_BINDING_STALE_ERROR,
+        ScheduledUnattendedGuard, SessionShellManagers, SessionTurnLifecycles, SessionTurnLocks,
+        SessionTurnShellTasks, TranscriptOperation, TurnIdentity, cancel_turn_with_gates,
         default_model_for_new_session_from, delete_chat_session_with_gate,
         delete_scheduled_run_with_gate, delete_then_forget, dispatch_turn_bound_cancel,
-        evict_if_idle_with_gates, generation_matches, identity_for_active_model,
-        identity_for_saved_model, quiesce_engine_before_reclaim, resolve_eval_model_selection_from,
-        resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
-        scheduled_profile_after_turn_gate, should_still_reap_after_snapshot, should_sync_session,
-        user_display_message,
+        entry_is_fresh, evict_if_idle_with_gates, generation_matches, identity_for_active_model,
+        identity_for_saved_model, quiesce_engine_before_reclaim, rebind_evict_with_gates,
+        rebind_evictable, resolve_eval_model_selection_from, resolve_runtime_model_override,
+        resolve_scheduled_model, resolve_spawn_model, scheduled_profile_after_turn_gate,
+        should_still_reap_after_snapshot, user_display_message,
     };
     use crate::features::assistant::engine::TurnBoundCancelOps;
     use crate::features::assistant::runtime_model::PreparedRuntimeModel;
@@ -3324,6 +3436,240 @@ mod scheduled_model_tests {
         assert!(evicted, "快照后无活动的空闲会话必须照常回收");
         assert!(!entry_present.load(Ordering::Acquire));
         assert!(reclaimed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn rebind_evictable_blocks_only_real_activity() {
+        // review #463: rebind eviction has no idle-duration or active-session
+        // gate — only an in-flight/reserved turn or a running scheduled round
+        // blocks the reclaim.
+        assert!(rebind_evictable(false, false));
+        assert!(!rebind_evictable(true, false));
+        assert!(!rebind_evictable(false, true));
+        assert!(!rebind_evictable(true, true));
+    }
+
+    #[tokio::test]
+    async fn rebind_eviction_resets_shell_state_for_idle_session() {
+        // review #463 M1/M2 regression: the per-session ShellManager pins its
+        // cwd at construction and `for_session` is entry().or_insert_with, so a
+        // manager surviving the rebind eviction would keep executing bare
+        // shell commands in the OLD directory while the rebuilt engine runs in
+        // the new one. The turn-scope registry pins that same manager, so it
+        // must go too — a surviving registry would diff the next turn's
+        // baseline and clean up its jobs against the old manager. The eviction
+        // tail must drop both under the gates.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let sid = "session-rebind-evict-idle";
+        let _lifecycle = lifecycles.for_session(sid);
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // Same take sequence as EnginePool::evict_if_idle_for_rebind: idle
+        // recheck via rebind_evictable, then the entry removal. A resident
+        // engine entry is reclaimed…
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let probe_reclaim = reclaimed.clone();
+        let probe_lifecycles = lifecycles.clone();
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            move || {
+                let probe_lifecycles = probe_lifecycles.clone();
+                async move {
+                    let turn_active = probe_lifecycles.get(sid).is_some_and(|lc| lc.is_active());
+                    rebind_evictable(turn_active, false).then_some(Some(()))
+                }
+            },
+            move |_| {
+                probe_reclaim.store(true, Ordering::Release);
+                async {}
+            },
+        )
+        .await;
+
+        assert!(evicted, "idle session must be evicted");
+        assert!(reclaimed.load(Ordering::Acquire));
+        assert!(
+            shell_managers.get(sid).is_none(),
+            "shell manager must be reset so the next turn rebuilds it against the rebound workspace"
+        );
+        assert!(
+            !turn_shell_tasks.has_registry(sid),
+            "turn-scope registry must be reset alongside the shell manager (round-8 M2)"
+        );
+
+        // …and an idle session WITHOUT a resident engine still gets both reset
+        // (take yields Some(None)): they may exist from an earlier turn even
+        // though the engine was already reclaimed.
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            || async { Some(None::<()>) },
+            |_| async {},
+        )
+        .await;
+        assert!(evicted);
+        assert!(
+            shell_managers.get(sid).is_none(),
+            "shell manager reset must not depend on a resident engine entry"
+        );
+        assert!(
+            !turn_shell_tasks.has_registry(sid),
+            "turn-scope registry reset must not depend on a resident engine entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_eviction_skips_turn_started_after_recheck() {
+        // review #463 eviction-tail TOCTOU regression: a turn that starts
+        // between the command layer's post-migration recheck and the eviction
+        // must NOT be killed — the idle recheck under the turn gate observes
+        // the reservation and skips the session entirely (no reclaim, no
+        // shell manager reset), leaving it for the post-busy report.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let sid = "session-rebind-evict-busy";
+        let lifecycle = lifecycles.for_session(sid);
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // A new turn wins the turn gate before the eviction (send path holds
+        // the gate while submitting); the eviction queues outside.
+        let gate = turn_locks.for_session(sid).await;
+        let blocker = gate.lock().await;
+
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let evict_locks = turn_locks.clone();
+        let evict_runtime_locks = runtime_locks.clone();
+        let evict_shell_managers = shell_managers.clone();
+        let evict_turn_shell_tasks = turn_shell_tasks.clone();
+        let evict_lifecycles = lifecycles.clone();
+        let probe_reclaim = reclaimed.clone();
+        let eviction = tokio::spawn(async move {
+            rebind_evict_with_gates(
+                &evict_locks,
+                &evict_runtime_locks,
+                &evict_shell_managers,
+                &evict_turn_shell_tasks,
+                sid,
+                move || {
+                    let evict_lifecycles = evict_lifecycles.clone();
+                    async move {
+                        let turn_active =
+                            evict_lifecycles.get(sid).is_some_and(|lc| lc.is_active());
+                        rebind_evictable(turn_active, false).then_some(())
+                    }
+                },
+                move |_| {
+                    probe_reclaim.store(true, Ordering::Release);
+                    async {}
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        // The turn starts after the command layer's recheck: reserve (does
+        // not take the gate) flips the lifecycle to active.
+        let reservation = lifecycle.reserve().expect("new turn reserve");
+        drop(blocker);
+        drop(gate);
+
+        let evicted = eviction.await.expect("eviction task joins");
+        assert!(!evicted, "a session with a fresh turn must be skipped");
+        assert!(
+            !reclaimed.load(Ordering::Acquire),
+            "no reclaim for a session that became busy"
+        );
+        assert!(
+            shell_managers.get(sid).is_some(),
+            "shell manager survives a skipped eviction"
+        );
+        assert!(
+            turn_shell_tasks.has_registry(sid),
+            "turn-scope registry survives a skipped eviction"
+        );
+        assert!(
+            reservation.ensure_active().is_ok(),
+            "the in-flight reservation must stay valid"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebind_eviction_gate_timeout_leaves_session_untouched() {
+        // review #463 round-8 minor 4 (the previously untested arm): a turn
+        // gate held longer than REBIND_EVICT_GATE_TIMEOUT — a scheduled round
+        // holds it for its WHOLE duration — must not stall the rebind command
+        // (and the process-wide rebind gate behind it). The eviction gives
+        // up, counts as not-idle so the command reports the session as
+        // post-busy, and touches nothing: no take, no reclaim, no shell-state
+        // reset.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-rebind-evict-gate-timeout";
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // The scheduled round holds the gate for its whole duration; the
+        // eviction queues outside until the bounded timeout fires.
+        let gate = turn_locks.for_session(sid).await;
+        let _blocker = gate.lock().await;
+
+        let take_ran = Arc::new(AtomicBool::new(false));
+        let probe_take = take_ran.clone();
+        let started = tokio::time::Instant::now();
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            move || {
+                probe_take.store(true, Ordering::Release);
+                async { Some(()) }
+            },
+            |_| async {},
+        )
+        .await;
+
+        assert!(
+            !evicted,
+            "a gate held past the timeout counts as not idle (reported post-busy)"
+        );
+        assert!(
+            started.elapsed() >= REBIND_EVICT_GATE_TIMEOUT,
+            "the eviction waited the bounded timeout rather than the whole turn"
+        );
+        assert!(
+            !take_ran.load(Ordering::Acquire),
+            "the take closure must not run without the gate"
+        );
+        assert!(
+            shell_managers.get(sid).is_some(),
+            "shell state survives a timed-out eviction"
+        );
+        assert!(
+            turn_shell_tasks.has_registry(sid),
+            "turn-scope registry survives a timed-out eviction"
+        );
     }
 
     fn model(id: &str, wire_name: &str) -> SavedModel {
@@ -3649,14 +3995,6 @@ mod scheduled_model_tests {
     }
 
     #[test]
-    fn every_empty_session_is_synchronized_before_its_first_turn() {
-        assert!(should_sync_session(true, false));
-        assert!(should_sync_session(true, true));
-        assert!(should_sync_session(false, true));
-        assert!(should_sync_session(false, false));
-    }
-
-    #[test]
     fn unattended_policy_is_scoped_to_the_executor_turn() {
         let flag = Arc::new(AtomicBool::new(false));
         {
@@ -3679,6 +4017,17 @@ mod scheduled_model_tests {
         );
         managers.remove("session-1");
         assert!(managers.get("session-1").is_none());
+    }
+
+    #[test]
+    fn mcp_config_revision_bump_forces_next_turn_rebuild() {
+        // mark_mcp_config_updated 契约的钉子（对偶模型路径 requires_rebuild_from
+        // 的判定）：模型未变、仅 mcp 配置修订递增时，旧 entry 对下一轮必须判
+        // 陈旧——plain 会话的引擎读仅 spawn 时重写的按会话派生 mcp 配置，
+        // 不重建则中途安装的 server 永不可见。
+        assert!(entry_is_fresh(false, 7, 7));
+        assert!(!entry_is_fresh(false, 7, 8), "mcp 配置修订递增必须触发重建");
+        assert!(!entry_is_fresh(true, 7, 7), "模型变更路径保持原有判定");
     }
 
     #[test]
@@ -4122,7 +4471,7 @@ mod scheduled_model_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
-    /// Regression: the eval teardown paths (`ProductChatRuntime::close` /
+    /// Regression: the eval teardown paths (`EnginePoolRuntime::close` /
     /// `delete_eval_session`) reuse delete_chat_session, but submit already
     /// ran `timing::start_turn`; deletion must clear the session's unpaired
     /// queue key in ACTIVE_TURNS, or a single GAIA pass's ~165 create/delete

@@ -20,6 +20,7 @@ import {
   normalizedPetReply,
   petCardUiReducer,
 } from './pet-card-state.js';
+import { useSpriteFramePlayer } from './use-sprite-frame-player.js';
 import {
   attachPetDragGeometry,
   clampPetDragToBounds,
@@ -110,21 +111,7 @@ function PetSprite({ pet, animation }) {
     () => buildAnimationSequence(animation, { reducedMotion }),
     [animation, reducedMotion],
   );
-  const [frameIndex, setFrameIndex] = useState(0);
-
-  useEffect(() => setFrameIndex(0), [sequence]);
-  useEffect(() => {
-    if (reducedMotion || sequence.frames.length <= 1) return undefined;
-    const frame = sequence.frames[frameIndex] || sequence.frames[0];
-    const timer = window.setTimeout(() => {
-      setFrameIndex((current) => (
-        current + 1 < sequence.frames.length ? current + 1 : sequence.loopStartIndex
-      ));
-    }, frame.durationMs);
-    return () => window.clearTimeout(timer);
-  }, [frameIndex, reducedMotion, sequence]);
-
-  const frame = sequence.frames[frameIndex] || sequence.frames[0];
+  const frame = useSpriteFramePlayer(sequence, { reducedMotion });
   return (
     <div
       className="pet-sprite"

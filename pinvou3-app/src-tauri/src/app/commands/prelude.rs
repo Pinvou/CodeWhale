@@ -61,6 +61,31 @@ pub(super) fn require_active_sid(
         .ok_or_else(|| "no active session".to_string())
 }
 
+/// 到调用方拼好的完整 fallback 文件名。扩展名的剥离与拼接（含 `.tar.xz` 多段
+/// 扩展）由调用方经 `extension` 传入，返回值恒带该扩展名。
+pub(super) fn safe_export_stem(name: &str, extension: &str, fallback: &str) -> String {
+    let Some(name) = std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return fallback.to_string();
+    };
+    let stem = name
+        .trim()
+        .trim_end_matches(&format!(".{extension}"))
+        .trim_end_matches(['.', ' ']);
+    if stem.is_empty()
+        || stem.len() > 120
+        || stem
+            .chars()
+            .any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
+    {
+        fallback.to_string()
+    } else {
+        format!("{stem}.{extension}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

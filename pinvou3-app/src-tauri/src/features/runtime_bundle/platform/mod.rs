@@ -61,20 +61,6 @@ static EIP_PLATFORM_BIN_DIR: Dir<'_> =
 static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/x86_64/bundle/zhidao/bin");
 
-/// 9 个 lark 域技能目录名(门控写/删共用)。skills_dir 下这些目录在不在
-/// = 飞书技能对模型可见与否(引擎 `SkillRegistry` 扫目录)。
-const LARK_SKILL_DIRS: [&str; 9] = [
-    "lark-shared",
-    "lark-calendar",
-    "lark-doc",
-    "lark-drive",
-    "lark-sheets",
-    "lark-im",
-    "lark-task",
-    "lark-wiki",
-    "lark-base",
-];
-
 /// 企微官方域技能(wecomcli-*,MIT,来自 github.com/WecomTeam/wecom-cli `skills/`):
 /// 编译期内嵌整个 wecom-skills 目录树。**单独放 `wecom-skills/`**(不进 `skills/`)——
 /// `skills/` 整目录被 `LARK_SKILLS_DIR` 内嵌、随飞书门控解包,企微若混进去会被飞书
@@ -93,16 +79,16 @@ static DINGTALK_SKILLS_DIR: Dir<'_> =
 static TMEET_SKILLS_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/common/bundle/tmeet-skills");
 
-// 企微技能目录表（14 新名 + 0.1.9 legacy 名）已下沉到
-// `crate::platform::connector_skills` 作为单一真相源：marketplace 注册表
-// （wecom 卡 skills 列表）、扁平布局迁移、`cli_bundle_of_skill` 反查与
-// `legacy_cli_records` 首启登记与本模块的门控写/删共用（五轮评审必修 3：
+// 连接器技能目录表（飞书 lark 9 + 企微 14 新名 + 0.1.9 legacy 名 + 钉钉/腾讯会议
+// mono skill）已下沉到 `crate::platform::connector_skills` 作为单一真相源：
+// marketplace 注册表（wecom 卡 skills 列表）、扁平布局迁移、`cli_bundle_of_skill`
+// 反查与 `legacy_cli_records` 首启登记与本模块的门控写/删共用（五轮评审必修 3：
 // marketplace 侧曾按 0.1.9 旧表写死 7 技能，与本表分叉）。
 // 此处 re-export 保持本模块及 extraction 的既有引用不变。
-pub(crate) use crate::platform::connector_skills::{WECOM_LEGACY_SKILL_DIRS, WECOM_SKILL_DIRS};
-
-const DINGTALK_SKILL_DIRS: [&str; 1] = ["dws"];
-const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
+pub(crate) use crate::platform::connector_skills::{
+    DINGTALK_SKILL_DIRS, LARK_SKILL_DIRS, TMEET_SKILL_DIRS, WECOM_LEGACY_SKILL_DIRS,
+    WECOM_SKILL_DIRS,
+};
 
 /// Bundle 版本号：手动 base + 自动 instructions.md 内容 hash（build.rs 注入）。
 /// 改 INSTRUCTIONS_MD 时不需要 bump base —— hash 自动变，ensure_extracted 自动覆写。
@@ -427,10 +413,6 @@ pub fn compose_static_layers(_ctx: &deepseek_tui::prompts::StaticPromptCtx<'_>) 
     MODE_EXECUTE_MD.to_string()
 }
 
-/// Authority Recap（Final Reminder）清空——其内容(裁决顺序/防编造)已折叠进
-/// instructions.md §底线,instructions 是唯一来源,不再单列末尾 recap。
-pub const AUTHORITY_RECAP: &str = "";
-
 /// 把 pinvou3 版 prompt 文案注入底座的 prompt 合成层。底座用 `OnceLock`,首次
 /// set 生效、后续返回 Err(rejected) —— 幂等,可在每个 `Bridge::boot` 入口重复调用
 /// (忽略后续 Err)。必须在任何 engine spawn 前调用(boot 早于 EnginePool 装配)。
@@ -606,6 +588,7 @@ fn install_work_mode_browser_server(
 mod tests {
     use super::*;
     use crate::bridge::paths::tests::ENV_LOCK;
+    use crate::features::marketplace::ENGINE_OWNED_MCP_SERVER_KEYS;
     use crate::platform::credential_store::{
         CredentialError, CredentialReference, CredentialStore,
     };
@@ -702,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn work_instructions_use_canonical_tools_with_narrow_preview_compatibility() {
+    fn work_instructions_use_canonical_tools_without_hidden_bash_surface() {
         let rendered = instructions_md();
         for retired in [
             "read_file",
@@ -710,6 +693,7 @@ mod tests {
             "exec_shell",
             "checklist_write",
             "File(action=",
+            "Bash(action=",
         ] {
             assert!(
                 !rendered.contains(retired),
@@ -722,8 +706,6 @@ mod tests {
             "file_search(query=",
             "bash(command=",
             "terminal/run",
-            "Bash(action=\"run\", command=\"...\", background=true)",
-            "Bash(action=\"cancel\", task_id=\"...\")",
             "todo_write",
         ] {
             assert!(
@@ -731,10 +713,20 @@ mod tests {
                 "canonical guidance missing: {canonical}"
             );
         }
-        assert_eq!(
-            rendered.matches("Bash(action=").count(),
-            2,
-            "legacy Bash must remain limited to run/cancel for Windows preview compatibility"
+        // The artifact-card rule must teach two-stage activation:
+        // `mcp_pinvou3_present_artifact` is a deferred builtin MCP tool, so it
+        // is absent from the first-turn tool list even when the server is
+        // healthy — only a failed `tool_search` means the backend is
+        // unavailable. The same two-stage pattern must cover the deferred
+        // browser tools (their "unavailable" branch is reachable only through
+        // a failed `tool_search`, never through plain list absence).
+        assert!(
+            rendered.contains("先 `tool_search` 激活") && rendered.contains("产物卡后端本轮不可用"),
+            "the artifact-card rule must teach tool_search activation before declaring the backend unavailable"
+        );
+        assert!(
+            rendered.contains("If `tool_search` cannot surface any `mcp_browser_*` tools"),
+            "the browser unavailability branch must be gated on a failed tool_search, not on first-turn list absence"
         );
     }
 
@@ -1993,6 +1985,102 @@ mod tests {
             servers.keys().collect::<Vec<_>>()
         );
         assert!(!servers.contains_key("pinvou"), "旧 pinvou 不残留");
+        cleanup(&tmp);
+    }
+
+    /// The write footprint of ensure_builtin_mcp_servers is pinned to the three
+    /// engine keys pinvou3/pinvou/browser. The observed footprint is cross-checked
+    /// against the marketplace-side `ENGINE_OWNED_MCP_SERVER_KEYS` constant (the
+    /// startup reconcile relies on it to avoid engine keys): adding or renaming a
+    /// builtin server key without updating the constant turns this test red, and
+    /// the marketplace-side exact-set test keeps the constant itself honest, so
+    /// the two sides can no longer drift apart silently.
+    #[test]
+    fn ensure_builtin_mcp_servers_touches_only_engine_owned_keys() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempdir();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        paths::ensure_dirs().unwrap();
+        let bundle = Pinvou3Bundle::paths();
+        std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+        // One entry per engine-key form (pinvou migration / pinvou3 upsert /
+        // browser-wrapper residue cleanup) plus two user-entry sentinels. The
+        // sentinels deliberately use node commands to dodge the stale-python
+        // rewrite path of refresh_mcp_python_commands — this test pins the
+        // key-set footprint, not the python self-heal semantics.
+        std::fs::write(
+            &bundle.mcp_json,
+            r#"{"servers":{
+                "pinvou":{"command":"python3","args":["/old/present.py"]},
+                "pinvou3":{"command":"/usr/bin/obsolete-python","args":["/old/present.py"]},
+                "browser":{"command":"node","args":["/old/browser-wrapper.mjs"]},
+                "user-node":{"command":"node","args":["/opt/user-tool/run.js"],"enabled":false,"custom_hint":"keep"},
+                "user-node2":{"command":"node","args":["/opt/user-tool/run2.js"]}
+            }}"#,
+        )
+        .unwrap();
+        let before: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        let before_servers = before["servers"].as_object().unwrap();
+
+        bundle.ensure_builtin_mcp_servers().unwrap();
+
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        let servers = mcp["servers"].as_object().unwrap();
+        let mut keys: Vec<&str> = servers.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["pinvou3", "user-node", "user-node2"],
+            "write footprint must be exactly the three engine keys: pinvou migrated away, pinvou3 upserted, browser residue deleted"
+        );
+        // Real cross-check against the marketplace-side constant: the keys the
+        // upsert actually manages — the engine keys surviving the pass plus the
+        // constant's keys it removed (pinvou migration, browser residue) — must
+        // equal ENGINE_OWNED_MCP_SERVER_KEYS exactly. An engine-side key added
+        // without the constant turns red, and a constant entry the boot path
+        // never touches turns red too; the marketplace-side exact-set test pins
+        // the constant against its literal.
+        let mut managed_keys: Vec<String> = servers
+            .keys()
+            .map(String::clone)
+            .filter(|key| !key.starts_with("user-node"))
+            .collect();
+        for key in before_servers.keys() {
+            if ENGINE_OWNED_MCP_SERVER_KEYS.contains(&key.as_str()) && !servers.contains_key(key) {
+                managed_keys.push(key.clone());
+            }
+        }
+        managed_keys.sort_unstable();
+        managed_keys.dedup();
+        let mut expected: Vec<&str> = ENGINE_OWNED_MCP_SERVER_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            managed_keys, expected,
+            "ensure_builtin_mcp_servers' managed key set drifted from \
+             ENGINE_OWNED_MCP_SERVER_KEYS — update the marketplace constant in the same PR"
+        );
+        assert_eq!(
+            servers["pinvou3"]["command"],
+            serde_json::Value::String(paths::python_command())
+        );
+        assert_eq!(
+            servers["user-node"],
+            serde_json::json!({
+                "command":"node","args":["/opt/user-tool/run.js"],
+                "enabled":false,"custom_hint":"keep"
+            }),
+            "user entries outside the footprint must be preserved verbatim"
+        );
+        assert_eq!(
+            servers["user-node2"],
+            serde_json::json!({
+                "command":"node","args":["/opt/user-tool/run2.js"]
+            }),
+            "user entries outside the footprint must be preserved verbatim"
+        );
         cleanup(&tmp);
     }
 

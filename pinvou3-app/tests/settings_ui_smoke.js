@@ -86,10 +86,25 @@ for (const settingsI18nSource of settingsI18nSources) {
     'local model port validation message must be provided in every UI language',
   );
 }
-// Memory delete / feedback close confirm-dialog wiring (no native
-// window.confirm, testid pins) is asserted by tests/settings_window_confirm.test.mjs,
-// which runs on every `npm test`; the runtime click flows below (①e/①f/①g/⑰.5)
-// still exercise the dialogs end to end in this smoke.
+// Memory delete / feedback close must route through in-app confirm dialogs
+// (the native window.confirm does not render in Tauri WebView2; see
+// tests/settings_window_confirm.test.mjs).
+assert.doesNotMatch(
+  settingsViewSource,
+  /window\.confirm\s*\(/,
+  'settings page must not call window.confirm (does not render in Tauri WebView2; use in-app confirm dialogs)',
+);
+for (const confirmTestId of [
+  'memory-delete-confirm',
+  'memory-delete-confirm-ok',
+  'feedback-close-confirm',
+  'feedback-close-confirm-ok',
+]) {
+  assert.ok(
+    settingsViewSource.includes(`data-testid="${confirmTestId}"`),
+    `missing in-app confirm dialog testid: ${confirmTestId}`,
+  );
+}
 
 function loadPuppeteer() {
   try { return require('puppeteer-core'); } catch (_) { /* fall through */ }

@@ -314,11 +314,6 @@ pub fn update_user_persona(mut card: PersonaCard) -> Result<PersonaSummary, Stri
     Ok(card.summary())
 }
 
-/// 删除用户卡(只能删 user- 前缀的自制卡)。
-pub fn delete_user_persona(id: &str) -> Result<(), String> {
-    delete_user_persona_with(id, || ())
-}
-
 /// Delete a card and run cross-feature cleanup before another operation can
 /// publish a snapshot of that card.
 pub(crate) fn delete_user_persona_with<T>(
@@ -433,7 +428,7 @@ const CARD_CREATOR_BODY: &str = r##"# 卡牌制造专家
 - 一条消息最多一个 `card-question` 块;开放式问题不用这个块,直接文字问。
 
 ## 硬规则
-- **绝不调用任何文件或命令工具**(`write` / `bash` 等)。卡牌不是文件,**直接在回复正文里输出代码块**就行,不要写盘、不要产出 .txt/.md 文件。
+- **绝不调用任何文件或命令工具**(`read` / `write` / `bash` 等)。卡牌不是文件,加持期间工具表已清空,**直接在回复正文里输出代码块**就行,不要写盘、不要产出 .txt/.md 文件,也不要尝试读取文件。
 - 代码块**必须以 ```persona-card 这个字面标签起头**(不是 ```json,不是无标签)。前端靠这个识别成可保存的卡。
 - **body 要详实**(至少几百字),是真能指导 AI 干活的方法论,不能是空话套话。
 - **一次只产一张卡**的 `persona-card` 块。块以外可以正常跟 Boss 对话/确认。
@@ -560,18 +555,19 @@ mod tests {
 
         // 内置卡不能被 update/delete
         assert!(update_user_persona(mk("pinvou-card-creator", "x")).is_err());
-        assert!(delete_user_persona("pinvou-card-creator").is_err());
+        assert!(delete_user_persona_with("pinvou-card-creator", || ()).is_err());
 
         // delete
-        delete_user_persona(&sum.id).expect("delete");
+        delete_user_persona_with(&sum.id, || ()).expect("delete");
         assert!(get(&sum.id).is_none(), "删后查不到");
 
         // Missing files are idempotent; other filesystem failures must reach the UI.
-        delete_user_persona(&sum.id).expect("delete already missing card");
+        delete_user_persona_with(&sum.id, || ()).expect("delete already missing card");
         let blocked_path =
             crate::platform::paths::user_personas_dir().join(format!("{}.json", sum.id));
         std::fs::create_dir(&blocked_path).expect("create non-file deletion target");
-        let error = delete_user_persona(&sum.id).expect_err("directory is not a card file");
+        let error =
+            delete_user_persona_with(&sum.id, || ()).expect_err("directory is not a card file");
         assert!(error.starts_with("Failed to delete persona:"));
         assert!(
             blocked_path.is_dir(),

@@ -432,4 +432,4 @@ import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColo
     // Shared Components
     // ==========================================
 
-export { PersonaEditorModal, AICardBanner, CardPoolView };
+export { PersonaEditorModal, CardPoolView };

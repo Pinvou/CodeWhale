@@ -29,7 +29,7 @@
 //! - `validators` —— id / workspace / 路径校验与小型 helper
 //! - `workspace_bindings` —— per-session sidecar of plain chat sessions' user
 //!   working-directory bindings (`workspace-binding.json` in the session
-//!   directory) and legacy global-table migration
+//!   directory)
 //!
 //! 子模块通过 `impl SessionStore` 续写方法（Rust 允许同一 struct 的 impl 块
 //! 散布在子模块里），并直接读 `&self` 的私有字段——struct 字段对后代模块
@@ -53,7 +53,7 @@ mod tests;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 pub use crate::core::mode_state::{ModeLane, SerializableMode};
 use crate::platform::paths;
@@ -69,8 +69,6 @@ use parking_lot::{Mutex, RwLock};
 pub use self::mode_state::{
     MountedCollection, MountedCollectionsSnapshot, MountedRemoteCollection, SessionModeState,
 };
-/// Re-export the turn-rewind outcome (consumed by the rewind command surface).
-pub use self::rewind::{RewoundTurnsRecord, TruncateToTurnOutcome};
 /// Re-export scheduled-run types so the historical
 /// `crate::features::sessions::X` paths stay stable.
 pub use self::scheduled::{
@@ -82,6 +80,9 @@ pub use self::transcript::transcript_revision;
 /// Re-export the crate-visible session-id validator (used by commands). It is
 /// `pub(crate)` so it stays out of the crate's public API surface.
 pub(crate) use self::validators::{validate_session_id, validate_user_workspace_path};
+/// Re-export the rebind outcome (public rebind docs link into it; the module
+/// itself stays private).
+pub use self::workspace_bindings::RebindBindingsOutcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -161,6 +162,11 @@ pub struct SessionStore {
     /// execution = bound directory and ledger = session-private directory (the
     /// same dual-root semantics as native code session bindings).
     pub(crate) session_workspaces: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// Boot parse of the legacy `_session_workspaces.json` failed (corrupt but
+    /// potentially repairable file kept on disk). While set, the rebind
+    /// degraded-path rewrite must not delete or overwrite the file — only a
+    /// file this process successfully parsed may be rewritten/removed.
+    pub(crate) legacy_session_workspaces_parse_failed: Arc<AtomicBool>,
     /// 品悟原生 code 会话判定（ACP 会话恒为 plain，见 codex_acp store）。
     /// 与 Engine bridge / 远程端共用同一份 `SessionAgentStore` 闭包，由 app 组合根
     /// (lib.rs) 注入；None = 无 code 会话判定（测试/启动早期），全部按 plain 语义。

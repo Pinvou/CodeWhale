@@ -247,12 +247,19 @@ pub fn browser_session_mcp_json(session_id: &str) -> PathBuf {
 /// and initial-page markers, not authentication. Requests retain the complete session_id,
 /// which the main application recomputes and validates.
 pub fn browser_session_token(session_id: &str) -> String {
+    format!("{:016x}", fnv1a64(session_id.as_bytes()))
+}
+
+/// Raw FNV-1a 64-bit hash. Used for stable local identifiers (local filenames,
+/// WebView labels); callers format the returned value for their own needs. Not
+/// authentication.
+pub(crate) fn fnv1a64(data: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in session_id.as_bytes() {
+    for byte in data {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 /// Browser MCP wrapper embedded at compile time and extracted to
 /// `~/.pinvou3/bundle/mcp-servers/`.
