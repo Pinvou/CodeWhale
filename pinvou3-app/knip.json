@@ -44,5 +44,8 @@
     "^/features/team-relay/TeamRelayView.jsx$",
     "^/shared/i18n.js$"
   ],
+  "ignoreDependencies": [
+    "lightningcss"
+  ],
   "ignoreExportsUsedInFile": true
 }

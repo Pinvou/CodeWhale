@@ -19,6 +19,8 @@ pub(crate) mod startup;
 pub(crate) mod strings;
 pub mod super_permission;
 pub(crate) mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod ui_cache;
 pub(crate) mod window_startup;
 

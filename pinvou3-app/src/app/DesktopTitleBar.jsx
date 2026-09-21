@@ -7,7 +7,11 @@ export const TitleBar = ({ theme, t, sidebarOpen = true }) => {
   const hoverBg = 'hover:bg-black/10 dark:hover:bg-white/10';
   // 明暗同形:明态固定 #F0F4F9;暗态视侧栏开合在 #1E1F20 / #131314 间切,
   // 二者均为暗态专属,以 dark: 前缀静态挂载,sidebarOpen 仅决定暗态取哪一组。
-  const titleBarBg = `bg-[#F0F4F9] dark:${sidebarOpen ? 'bg-[#1E1F20]' : 'bg-[#131314]'}`;
+  // 每个 dark: utility 都必须是完整字面量:构建期 Tailwind 按连续 token 扫描,
+  // `dark:${...}` 这类拆分写法不会生成对应样式。
+  const titleBarBg = sidebarOpen
+    ? 'bg-[#F0F4F9] dark:bg-[#1E1F20]'
+    : 'bg-[#F0F4F9] dark:bg-[#131314]';
   // macOS 顶栏走系统原生实现:窗口带 decorations + titleBarStyle=Overlay
   // (见 src-tauri/config/platforms/macos/tauri.conf.json),系统红绿灯悬浮在内容区左上角,
   // 此时不再渲染 Windows 风格三键,并为红绿灯留出左侧空间。
