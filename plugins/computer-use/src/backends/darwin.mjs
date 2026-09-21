@@ -11,7 +11,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
-import { clampRegion } from "../raster.mjs";
+import { clampRegion, screenshotRaster } from "../raster.mjs";
 
 const KEY_CODES = {
   return: 36, enter: 36, tab: 48, space: 49, escape: 53, esc: 53, delete: 51,
@@ -331,16 +331,26 @@ export function create({ exec }) {
     const stat = fs.statSync(file);
     const displays = await displayInfo();
     const d = displays.find((x) => x.index === (disp === "all" ? 1 : disp)) ?? displays[0];
-    state.lastRaster = {
-      file,
-      bytes: stat.size,
-      display: disp ?? 1,
-      points: d?.points ?? null,
-      pixels: d?.pixels ?? null,
-      scale: d?.scale ?? 1,
-      capturedAt: new Date().toISOString(),
-    };
-    return { ...state.lastRaster, path: file };
+    // Bind the geometry of the crop actually taken: a region shot crops at the
+    // display origin + region offset (-R is display-space with -D), so its
+    // raster origin is that point at region size — not the display's full
+    // bounds. This is the zoom raster contract (ce783728c) applied to the
+    // screenshot path. When the display origin is unknown (non-main displays
+    // get no precise point geometry), keep the previous binding and say so —
+    // never a silently guessed origin.
+    const surface = d ? { ...d.points, scale: d.scale, pixels: d.pixels } : null;
+    const geom = screenshotRaster(surface, region ?? undefined);
+    const capturedAt = new Date().toISOString();
+    let note;
+    if (geom) {
+      state.lastRaster = { file, bytes: stat.size, display: disp ?? 1, ...geom, capturedAt };
+    } else {
+      note = state.lastRaster?.points
+        ? "display origin unknown for this capture; coordinate targets still resolve against the previous raster — take a full-display screenshot to rebind"
+        : "display origin unknown for this capture; coordinate targets resolve from screen origin (0,0)";
+      state.lastRaster = { ...state.lastRaster, file, bytes: stat.size, display: disp ?? 1, capturedAt };
+    }
+    return { ...state.lastRaster, path: file, ...(note ? { note } : {}) };
   }
 
   async function zoom({ source, region, path: outPath }) {

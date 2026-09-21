@@ -198,24 +198,53 @@ Write-Output ($result | ConvertTo-Json -Depth 6 -Compress);`, { timeoutMs: 60_00
       return j;
     },
     screenshot: async ({ display, region, path: outPath } = {}) => {
+      // Validated before PowerShell is touched: junk never becomes script.
+      if (region !== undefined && (!Array.isArray(region) || region.length !== 4 || !region.every((n) => Number.isFinite(n) && n >= 0) || region[2] < 1 || region[3] < 1)) {
+        throw new ExecError("region must be [x, y, w, h] in virtual-screen points");
+      }
       await bootstrapped;
       const dir = recordingsDir();
       fs.mkdirSync(dir, { recursive: true });
       const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
-      const winPath = file.replace(/\\/g, "\\\\");
+      // The capture surface is the VirtualScreen, whose origin is not (0,0) on
+      // multi-monitor layouts: region = [x, y, w, h] relative to the virtual
+      // screen rect, cropped at $bounds.X/$bounds.Y + offset. The script clips
+      // the rect against the virtual screen itself (GDI would otherwise copy
+      // out of bounds unpredictably) and echoes the bounds; node recomputes
+      // the same clip with clampRegion, so the bound points are the crop
+      // actually taken — the same pattern the zoom path uses.
+      const [rx, ry, rw, rh] = region ? region.map(Math.round) : [];
       const script = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
 $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen;
+${region ? `
+$rw = [Math]::Min(${rw}, $bounds.Width); $rh = [Math]::Min(${rh}, $bounds.Height);
+$rx = [Math]::Max(0, [Math]::Min(${rx}, $bounds.Width - $rw));
+$ry = [Math]::Max(0, [Math]::Min(${ry}, $bounds.Height - $rh));
+$bmp = New-Object System.Drawing.Bitmap($rw, $rh);
+$g = [System.Drawing.Graphics]::FromImage($bmp);
+$g.CopyFromScreen($bounds.X + $rx, $bounds.Y + $ry, 0, 0, (New-Object System.Drawing.Size($rw, $rh)));` : `
 $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height);
 $g = [System.Drawing.Graphics]::FromImage($bmp);
-$g.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bounds.Size);
+$g.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bounds.Size);`}
 $g.Dispose();
 $bmp.Save('${file.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png);
 $bmp.Dispose();
-Write-Output '{"ok": true, "w": ' + $bounds.Width + ', "h": ' + $bounds.Height + '}';`;
+Write-Output ('{"ok": true, "x": ' + $bounds.X + ', "y": ' + $bounds.Y + ', "w": ' + $bounds.Width + ', "h": ' + $bounds.Height + '}');`;
       const r = await ps(script, { timeoutMs: 30_000 });
       if (r.code !== 0 || !fs.existsSync(file)) throw new ExecError(`screenshot failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}`, r);
       const meta = tryJson(r.stdout.trim().split("\n").pop(), {});
-      lastRaster = { file, bytes: fs.statSync(file).size, points: { x: 0, y: 0, w: meta.w, h: meta.h }, pixels: { w: meta.w, h: meta.h }, scale: 1, capturedAt: new Date().toISOString() };
+      if (!Number.isFinite(meta?.x) || !Number.isFinite(meta?.y) || !Number.isFinite(meta?.w) || !Number.isFinite(meta?.h)) {
+        throw new ExecError("screenshot did not report the virtual-screen bounds — cannot bind the raster origin");
+      }
+      const eff = region ? clampRegion(region, meta.w, meta.h) : null;
+      if (region && !eff) throw new ExecError("region must be [x, y, w, h] in virtual-screen points");
+      // Bind the geometry of the crop actually taken: a region shot's raster
+      // origin is the virtual screen origin + the clipped region offset, a
+      // full shot's is the virtual screen min corner — never a guessed (0,0).
+      const points = eff
+        ? { x: meta.x + eff[0], y: meta.y + eff[1], w: eff[2], h: eff[3] }
+        : { x: meta.x, y: meta.y, w: meta.w, h: meta.h };
+      lastRaster = { file, bytes: fs.statSync(file).size, points, pixels: { w: points.w, h: points.h }, scale: 1, capturedAt: new Date().toISOString() };
       return { ...lastRaster };
     },
     zoom: async ({ source, region, path: outPath }) => {
