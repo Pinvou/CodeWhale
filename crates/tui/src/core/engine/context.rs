@@ -655,6 +655,20 @@ pub(crate) fn compact_tool_result_for_route(
         return raw.to_string();
     }
 
+    // A `read` result that already fit its byte budget carries a resume
+    // footer instead of mid-line truncation; compacting it again would
+    // discard content the budget deliberately kept. Honor the ordinary
+    // limits below.
+    if output
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("read_budget_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|budget| raw.len() as u64 <= budget)
+    {
+        return raw.to_string();
+    }
+
     if let Some(summary) = compact_subagent_tool_result_for_context(tool_name, raw) {
         return summary;
     }

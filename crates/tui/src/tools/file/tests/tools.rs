@@ -397,6 +397,51 @@ async fn read_file_byte_truncation_keeps_head_and_tail() {
     );
 }
 
+/// The legacy `read_file` reader self-bounds its rendered window to an
+/// explicit byte budget and ends budget-limited results with a re-read
+/// contract. The context compactor's 12K hard limit used to re-truncate those
+/// already-bounded results, destroying that contract; the declared
+/// `read_budget_bytes` metadata is what exempts them. The model-facing `read`
+/// primitive carries the same exemption (see
+/// `contract_read_result_declares_its_budget_and_survives_the_compactor` in
+/// `file/tests.rs`).
+#[tokio::test]
+async fn read_file_budget_truncated_result_declares_its_budget_and_survives_the_compactor() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let file = tmp.path().join("legacy-big.txt");
+    // ~80KiB of long lines: the rendered numbered window blows past the 16KiB
+    // byte budget and comes back head+tail truncated with its re-read note.
+    let body: String = (1..=200)
+        .map(|_| format!("{}\n", "z".repeat(400)))
+        .collect();
+    fs::write(&file, &body).expect("write");
+
+    let result = ReadFileTool
+        .execute(json!({ "path": "legacy-big.txt" }), &ctx)
+        .await
+        .expect("execute");
+    assert!(result.content.contains("[CONTENT TRUNCATED]"));
+    assert!(result.content.contains("[TRUNCATED]"));
+    assert!(result.content.len() > 12_000);
+    let budget = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("read_budget_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("read_budget_bytes metadata on a budget-truncated read");
+    assert!(result.content.len() as u64 <= budget);
+
+    // End to end: the compactor passes the budgeted read through untouched.
+    let compacted = crate::core::engine::compact_tool_result_for_context(
+        "deepseek-v3.2-128k",
+        "read_file",
+        &result,
+    );
+    assert_eq!(compacted, result.content);
+    assert!(compacted.contains("[TRUNCATED]"));
+}
+
 #[tokio::test]
 async fn read_file_clamps_max_lines_to_hard_cap() {
     let tmp = tempdir().expect("tempdir");

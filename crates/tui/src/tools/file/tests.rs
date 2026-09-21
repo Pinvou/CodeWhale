@@ -94,6 +94,49 @@ async fn contract_read_reports_huge_first_line_with_exact_bash_fallback() {
     );
 }
 
+/// The `read` primitive self-bounds its output to an explicit byte budget and
+/// ends budget-limited results with a resume footer. The context compactor's
+/// 12K hard limit used to re-truncate those already-bounded results,
+/// destroying the continuation contract; the declared `read_budget_bytes`
+/// metadata is what exempts them. The legacy `read_file` reader carries the
+/// same exemption (see `read_file_budget_truncated_result_declares_its_budget_
+/// and_survives_the_compactor` in `file/tests/tools.rs`).
+#[tokio::test]
+async fn contract_read_result_declares_its_budget_and_survives_the_compactor() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    // 999-byte lines: 51 of them plus their separators fit the 50KiB budget
+    // (50,999 bytes), line 52 would not. The footer rides on top of the
+    // budget-bounded window.
+    let line = "z".repeat(999);
+    let content = std::iter::repeat_n(line.as_str(), 200)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temporary.path().join("big.txt"), &content).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+
+    let result = ReadFileTool::execute_contract_read(json!({"path": "big.txt"}), &context)
+        .await
+        .expect("budgeted read");
+    assert!(
+        result.content.contains("Use offset=52 to continue"),
+        "{}",
+        result.content
+    );
+    assert!(result.content.len() > 12_000);
+    let budget = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("read_budget_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("read_budget_bytes metadata on a budget-limited read");
+    assert!(result.content.len() as u64 <= budget);
+
+    // End to end: the compactor passes the budgeted read through untouched.
+    let compacted =
+        crate::core::engine::compact_tool_result_for_context("deepseek-v3.2-128k", "read", &result);
+    assert_eq!(compacted, result.content);
+}
+
 #[tokio::test]
 async fn contract_read_offset_oob_and_limit_continuation_match_contract() {
     let temporary = tempfile::tempdir().expect("tempdir");
