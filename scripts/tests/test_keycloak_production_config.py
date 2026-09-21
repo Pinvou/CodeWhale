@@ -18,7 +18,8 @@ class KeycloakProductionConfigTests(unittest.TestCase):
         self.assertEqual(compose.count('create_host_path: false'), 4)
         self.assertEqual(compose.count('read_only: true'), 5)
         for required in ('user: "1000:0"', 'cap_drop: [ALL]', 'mem_limit: 1536m', 'pids_limit: 256',
-                         'no-new-privileges:true', 'soft: 0, hard: 0', 'https://keycloak:9000/health/ready'):
+                         'no-new-privileges:true', 'soft: 0, hard: 0', 'https://keycloak:9000/health/ready',
+                         'KC_SPI_CACHE_EMBEDDED_DEFAULT_NODE_NAME: "pinvou-keycloak-production"'):
             self.assertIn(required, compose)
 
     def test_fixed_private_tls_hostname_and_distinct_rendered_secrets(self):

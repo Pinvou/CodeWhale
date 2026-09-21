@@ -20,6 +20,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
     environment:
       JAVA_OPTS_KC_HEAP: "-Xms128m -Xmx512m"
+      KC_SPI_CACHE_EMBEDDED_DEFAULT_NODE_NAME: "pinvou-keycloak-production"
       HEALTHCHECK_URL: https://keycloak:9000/health/ready
       SSL_CERT_FILE: /run/pinvou/keycloak-trust/ca.crt
     tmpfs:
