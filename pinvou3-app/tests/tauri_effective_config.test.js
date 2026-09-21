@@ -506,7 +506,9 @@ assert.match(
 );
 assert.match(
   buildSource,
-  /if \(hasTauriBuildCommand\) \{\s*prepareLinuxAsrRuntime\(\);/u,
+  // 交叉构建要能显式跳过 ASR（SenseVoice 只能在目标架构上原生构建），所以这里
+  // 允许 PINVOU3_SKIP_LINUX_ASR 这道门，但「备料必须在清单生成之前」的顺序不变。
+  /if \(hasTauriBuildCommand\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(process\.env\.PINVOU3_SKIP_LINUX_ASR !== "1"\) prepareLinuxAsrRuntime\(\);/u,
   "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
 );
 const preparedBrowserPlatforms = [];
