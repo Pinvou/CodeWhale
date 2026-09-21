@@ -3140,6 +3140,15 @@ impl Engine {
                 return (TurnOutcomeStatus::Interrupted, None);
             }
 
+            // While the spawn-time MCP boot is still settling, fold every
+            // server that became ready since the last batch into this turn's
+            // catalog, so a tool_search retry inside the same turn sees it
+            // instead of re-deriving "capability unavailable" from the
+            // turn-start snapshot (#588).
+            if self.mcp_boot_in_flight {
+                self.refresh_booting_mcp_tools(&mut tool_catalog).await;
+            }
+
             let tool_exec_lock = self.tool_exec_lock.clone();
             let mcp_pool = if self.active_turn_tool_security.is_none()
                 && tool_uses
@@ -4469,12 +4478,18 @@ impl Engine {
                         // next request re-pins under `change:tool_surface`
                         // instead of tripping the C5 drift guard.
                         let active_before_search = active_tool_names.clone();
+                        // Boot-window status (#588): an empty search during
+                        // the connect window must read as "not yet", not
+                        // "absent", so the model retries instead of declaring
+                        // the capability missing.
+                        let connecting_mcp_servers = self.mcp_boot_search_status().await;
                         let result = super::tool_catalog::execute_tool_search_with_cache(
                             &tool_name,
                             &tool_input,
                             tool_catalog,
                             active_tool_names,
                             &mut self.session.tool_activation_cache,
+                            connecting_mcp_servers.as_deref(),
                         );
                         if *active_tool_names != active_before_search {
                             self.session.pending_prefix_change_reason =

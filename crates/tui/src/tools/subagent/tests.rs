@@ -21460,6 +21460,7 @@ fn tool_search_cannot_return_a_retired_agents_tool() {
             &catalog,
             &mut active,
             &mut cache,
+            None,
         )
         .expect("tool_search runs")
         .content;

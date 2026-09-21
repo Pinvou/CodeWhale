@@ -3206,21 +3206,25 @@ impl McpPool {
         }
     }
 
-    /// Handshake the pending servers concurrently without holding the pool
-    /// lock. Callers insert results under a short lock so a live turn can
-    /// snapshot ready tools while optional servers are still connecting.
-    pub(crate) async fn connect_pending_concurrently(
+    /// Spawn one bounded-concurrency connect task per pending server and
+    /// return the set unfinished. Streaming callers loop `join_next()` and
+    /// insert each result under a short pool lock the moment it settles, so
+    /// the first-settled server — typically a local command server — becomes
+    /// snapshot-able while slower network-bound remotes are still connecting.
+    /// [`Self::connect_pending_concurrently`] wraps this with the drained
+    /// batch return for callers that apply every result at once anyway.
+    pub(crate) fn spawn_pending_connects(
         pending: Vec<McpPendingConnect>,
         timeouts: McpTimeouts,
         network_policy: Option<NetworkPolicyDecider>,
         catalog_generation: u64,
-    ) -> Vec<(String, Result<McpConnection, anyhow::Error>)> {
-        if pending.is_empty() {
-            return Vec::new();
-        }
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(Self::CONNECT_CONCURRENCY));
+    ) -> tokio::task::JoinSet<(String, Result<McpConnection, anyhow::Error>)> {
         let mut joins: tokio::task::JoinSet<(String, Result<McpConnection, anyhow::Error>)> =
             tokio::task::JoinSet::new();
+        if pending.is_empty() {
+            return joins;
+        }
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(Self::CONNECT_CONCURRENCY));
         for (name, config) in pending {
             let permit = semaphore.clone();
             let network_policy = network_policy.clone();
@@ -3240,7 +3244,20 @@ impl McpPool {
                 (name, connection)
             });
         }
+        joins
+    }
 
+    /// Handshake the pending servers concurrently without holding the pool
+    /// lock. Callers insert results under a short lock so a live turn can
+    /// snapshot ready tools while optional servers are still connecting.
+    pub(crate) async fn connect_pending_concurrently(
+        pending: Vec<McpPendingConnect>,
+        timeouts: McpTimeouts,
+        network_policy: Option<NetworkPolicyDecider>,
+        catalog_generation: u64,
+    ) -> Vec<(String, Result<McpConnection, anyhow::Error>)> {
+        let mut joins =
+            Self::spawn_pending_connects(pending, timeouts, network_policy, catalog_generation);
         let mut results = Vec::new();
         while let Some(joined) = joins.join_next().await {
             match joined {

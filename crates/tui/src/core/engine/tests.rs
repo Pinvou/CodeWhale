@@ -25058,3 +25058,278 @@ fn forkguard_agent_fleet_listing_with_handles_names_the_hint_with_visible_values
     assert!(context.contains("transcript: agent_aaaa1111/full_transcript"));
     assert!(context.contains("transcript: agent_bbbb2222/full_transcript"));
 }
+
+// === MCP session-boot window (#588) ===
+
+/// A minimal MCP stdio server: answers `initialize` and `tools/list`
+/// immediately, advertising exactly one tool. The JSON-RPC responses are
+/// assembled in Rust and embedded single-quoted, so the fixture never needs
+/// shell-side quoting tricks. Unix-only: the fixture is a `sh` script.
+#[cfg(unix)]
+fn write_boot_fixture_server(dir: &std::path::Path, tool: &str) -> PathBuf {
+    let init_response = json!({
+        "jsonrpc": "2.0",
+        "id": "1",
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "boot-fixture", "version": "1.0.0"},
+            "capabilities": {"tools": {}}
+        }
+    })
+    .to_string();
+    let tools_response = json!({
+        "jsonrpc": "2.0",
+        "id": "2",
+        "result": {"tools": [
+            {"name": tool, "description": "boot fixture tool", "inputSchema": {"type": "object"}}
+        ]}
+    })
+    .to_string();
+    let script = format!(
+        "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"method\":\"initialize\"'*)\n      printf '%s\\n' '{init_response}'\n      ;;\n    *'\"method\":\"tools/list\"'*)\n      printf '%s\\n' '{tools_response}'\n      ;;\n  esac\ndone\n"
+    );
+    let path = dir.join("boot-fixture.sh");
+    fs::write(&path, script).expect("fixture server script");
+    path
+}
+
+/// A server that consumes requests and never answers, so its connect runs
+/// out the whole connect-timeout budget.
+#[cfg(unix)]
+fn write_hanging_boot_fixture_server(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("hanging-boot-fixture.sh");
+    fs::write(
+        &path,
+        "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile IFS= read -r line; do :; done\n",
+    )
+    .expect("hanging fixture server script");
+    path
+}
+
+/// The incident contract (#588): a fast local server's tools must become
+/// snapshot-able while a slow remote is still inside its connect window. The
+/// batch-return boot used to hold every local tool off the shelf until the
+/// last server settled, so a first-turn tool_search saw an empty catalog.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_boot_exposes_fast_server_tools_while_a_slow_server_is_still_connecting() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace,
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+
+    engine.start_mcp_session_boot().await;
+    assert!(
+        engine.mcp_boot_in_flight,
+        "two pending servers keep boot in flight"
+    );
+
+    // First-settled-first-available: the fast server's tool must become
+    // snapshot-able long before the hung server's 6s connect timeout lets the
+    // join set drain. The 3s visibility deadline is the discriminator: the
+    // drained batch-return boot (the #588 defect) stores nothing until every
+    // join settles, so under it this deadline always expires.
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let fast_visible = loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        fast_visible,
+        "the fast server's tools must settle while the hung server is still connecting"
+    );
+    assert!(
+        engine.mcp_boot_in_flight,
+        "the hung server must still be holding the boot open when the fast tool appears"
+    );
+
+    // The drained finish stays exactly where it was: once the hung server
+    // times out, the idle seam clears the boot and records the diagnosis.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while engine.mcp_boot_in_flight && Instant::now() < deadline {
+        engine.drain_mcp_boot_updates().await;
+        if !engine.mcp_boot_in_flight {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !engine.mcp_boot_in_flight,
+        "boot settles after the hung server times out"
+    );
+    assert!(
+        engine.mcp_connection_errors.contains_key("hung"),
+        "the hung server's failure must be diagnosed: {:?}",
+        engine.mcp_connection_errors
+    );
+    assert!(
+        !engine.mcp_connection_errors.contains_key("fast"),
+        "the fast server must not inherit its sibling's failure: {:?}",
+        engine.mcp_connection_errors
+    );
+}
+
+/// The live-turn catalog refresh (#588): tools from servers that became ready
+/// after the turn's catalog was built are appended with the same deferral
+/// treatment a fresh turn build would give them, without reordering anything
+/// already in the catalog, and without duplicating on a second pass.
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_turn_refresh_appends_newly_ready_server_tools_deferred() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({"servers": {"fast": {"command": "sh", "args": [fast_script]}}}).to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.connect_all().await;
+    }
+
+    engine.mcp_boot_in_flight = true;
+    let mut catalog = vec![crate::models::Tool {
+        tool_type: None,
+        name: "read".to_string(),
+        description: "native read".to_string(),
+        input_schema: json!({"type": "object"}),
+        allowed_callers: None,
+        defer_loading: Some(false),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }];
+
+    engine.refresh_booting_mcp_tools(&mut catalog).await;
+
+    assert_eq!(
+        catalog.len(),
+        2,
+        "the ready server's tool joins the catalog"
+    );
+    assert_eq!(catalog[0].name, "read", "existing entries never move");
+    assert_eq!(catalog[1].name, "mcp_fast_ping");
+    assert_eq!(
+        catalog[1].defer_loading,
+        Some(true),
+        "MCP tools are deferred exactly like a fresh turn build defers them"
+    );
+
+    engine.refresh_booting_mcp_tools(&mut catalog).await;
+    assert_eq!(catalog.len(), 2, "a second pass must not duplicate entries");
+
+    engine.mcp_boot_in_flight = false;
+    catalog.clear();
+    engine.refresh_booting_mcp_tools(&mut catalog).await;
+    assert!(
+        catalog.is_empty(),
+        "a settled boot never appends through the boot-window refresh"
+    );
+}
+
+/// The booting search status (#588) names only servers the engine still
+/// awaits: enabled, not connected, and not yet diagnosed. A diagnosed failure
+/// drops out (the boot briefing owns it), and a settled boot reports nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_search_status_lists_only_undiagnosed_unsetled_servers() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "ghost": {"command": "codewhale-mcp-missing-ghost-9f8e7d6c"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    // Only the fast server settles; ghost stays pending (never connected,
+    // never diagnosed) — the mid-boot shape.
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.get_or_connect("fast")
+            .await
+            .expect("the fixture server connects");
+    }
+
+    engine.mcp_boot_in_flight = true;
+    let status = engine
+        .mcp_boot_search_status()
+        .await
+        .expect("boot in flight");
+    assert_eq!(status, vec!["ghost".to_string()]);
+
+    // Once the engine carries ghost's diagnosis (a drained boot update owns
+    // it), the pending list drops the server: a diagnosed failure belongs to
+    // the boot briefing, not to a "still connecting" note.
+    engine.mcp_connection_errors = HashMap::from([(
+        "ghost".to_string(),
+        "connect failed: spawn failure".to_string(),
+    )]);
+    assert!(
+        engine.mcp_boot_search_status().await.is_none(),
+        "an empty pending list must suppress the booting note entirely"
+    );
+
+    engine.mcp_boot_in_flight = false;
+    assert!(
+        engine.mcp_boot_search_status().await.is_none(),
+        "a settled boot must not advertise a booting window"
+    );
+}

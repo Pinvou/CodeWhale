@@ -14128,12 +14128,16 @@ impl SubAgentToolSurface {
     }
 
     fn search(&mut self, name: &str, input: &Value) -> Result<String> {
+        // No boot-window status: a child's catalog is the spawn-time filtered
+        // snapshot by contract, and the child engine's boot state is not part
+        // of that surface.
         execute_tool_search_with_cache(
             name,
             input,
             &self.catalog,
             &mut self.active_names,
             &mut self.cache,
+            None,
         )
         .map(|result| result.content)
         .map_err(|error| anyhow!(error))
