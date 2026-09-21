@@ -2618,8 +2618,22 @@ mod tests {
     /// nothing else, so ACP clients that offer session history could not
     /// enumerate or resume anything. ACP sessions are in-memory and capped;
     /// the durable Codewhale sessions are what "resume" means.
-    #[tokio::test]
-    async fn session_list_and_load_reach_the_durable_codewhale_sessions() {
+    // session/load's first tr() initializes the i18n backend; that serde
+    // load is deeper than the default 2 MiB libtest thread stack. The
+    // product path runs on the 8 MiB main thread, so run the body on an
+    // equivalently sized stack (same pattern as
+    // setup_confirm_toast_names_secret_store_and_global_scope).
+    #[test]
+    fn session_list_and_load_reach_the_durable_codewhale_sessions() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_list_and_load_reach_the_durable_codewhale_sessions_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_list_and_load_reach_the_durable_codewhale_sessions_body() {
         let _guard = crate::test_support::lock_test_env();
         let home = tempfile::TempDir::new().expect("isolated codewhale home");
         let _home_guard =
@@ -2692,8 +2706,20 @@ mod tests {
         assert_eq!(no_id.expect_err("missing sessionId").code, -32602);
     }
 
-    #[tokio::test]
-    async fn session_load_carries_the_persisted_workspace_roots() {
+    // Same big-stack wrapper as
+    // session_list_and_load_reach_the_durable_codewhale_sessions: this load
+    // also reaches session_configuration's first tr().
+    #[test]
+    fn session_load_carries_the_persisted_workspace_roots() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_load_carries_the_persisted_workspace_roots_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_load_carries_the_persisted_workspace_roots_body() {
         let _guard = crate::test_support::lock_test_env();
         let home = tempfile::TempDir::new().expect("isolated codewhale home");
         let _home_guard =
