@@ -2603,6 +2603,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 <ConversationTimeline
                     turns={conversationProjection.turns}
                     sessionId={activeSessionId}
+                    scrollElementRef={scrollRef}
                     onRetry={(turn) => {
                       if (!busy && turn.userText && bridge.available) {
                         bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });

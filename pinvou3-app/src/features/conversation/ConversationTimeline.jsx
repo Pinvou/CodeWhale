@@ -1,4 +1,5 @@
-import React, { useEffect, useId, useMemo, useState, useSyncExternalStore } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { StatusDot } from '../../components/StatusDot.jsx';
 import { dict } from '../../shared/i18n.js';
@@ -29,6 +30,11 @@ import {
 } from './conversation-model.js';
 import { AssistantMessageActions, AssistantMessageFooter } from './AssistantMessageActions.jsx';
 import { assistantResponseAvailable, assistantResponseText } from './message-clipboard.js';
+import {
+  CONVERSATION_VIRTUALIZATION_THRESHOLD,
+  shouldVirtualizeConversationTurns,
+  splitConversationLiveTail,
+} from './conversation-virtualization.js';
 
 // Fallback copy derives from the zh dictionary instead of duplicating its strings here:
 // dictionary tweaks in shared/i18n propagate automatically, and a caller that forgets to
@@ -57,6 +63,14 @@ function conversationCopy(copy) {
 // a full rerun for every streaming delta (O(n²)). When streaming ends, useThrottledValue
 // guarantees a verbatim replay of the final full text.
 const STREAMING_MARKDOWN_THROTTLE_MS = 200;
+
+// Short conversations stay in normal document flow. The virtualizer only pays
+// for itself once history is large enough to create a material DOM and mount
+// cost; the running final turn remains outside the virtual history so streamed
+// height growth never waits for ResizeObserver before reaching the bottom.
+const CONVERSATION_ROW_ESTIMATE_PX = 240;
+const CONVERSATION_ROW_OVERSCAN = 5;
+const CONVERSATION_ROW_GAP_PX = 16;
 
 // The 1s clock is scoped to the smallest display subtree: the per-second tick used to live on
 // ChatView top-level state, re-rendering the whole transcript every second while busy; now only
@@ -974,17 +988,162 @@ function ConversationTurnView({
 // pollute the inference in reverse.
 export const ConversationTurn = React.memo(ConversationTurnView, areConversationTurnPropsEqual);
 
-export function ConversationTimeline({ turns = EMPTY_TURNS, ...props }) {
+/**
+ * @param {HTMLElement | null} timelineElement
+ * @param {HTMLElement | null} scrollElement
+ */
+function conversationTimelineScrollMargin(timelineElement, scrollElement) {
+  if (!timelineElement || !scrollElement) return 0;
+  const timelineRect = timelineElement.getBoundingClientRect();
+  const scrollRect = scrollElement.getBoundingClientRect();
+  return Math.max(0, timelineRect.top - scrollRect.top + scrollElement.scrollTop);
+}
+
+export function ConversationTimeline({
+  turns = EMPTY_TURNS,
+  scrollElementRef,
+  virtualizationThreshold = CONVERSATION_VIRTUALIZATION_THRESHOLD,
+  renderBeforeTurn,
+  ...props
+}) {
+  const virtualized = shouldVirtualizeConversationTurns(
+    turns.length,
+    scrollElementRef,
+    virtualizationThreshold,
+  );
+  const { historyTurns, liveTurn, liveTurnIndex } = useMemo(
+    () => splitConversationLiveTail(turns, virtualized),
+    [turns, virtualized],
+  );
+  const historyTurnsRef = useRef(historyTurns);
+  historyTurnsRef.current = historyTurns;
+  const timelineRef = useRef(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const getScrollElement = useCallback(
+    () => scrollElementRef?.current || null,
+    [scrollElementRef],
+  );
+  const getItemKey = useCallback(
+    /** @param {number} index */
+    index => `${props.sessionId || 'conversation'}:${historyTurnsRef.current[index]?.id || index}`,
+    [props.sessionId],
+  );
+  const virtualizer = useVirtualizer({
+    enabled: virtualized,
+    count: virtualized ? historyTurns.length : 0,
+    getScrollElement,
+    getItemKey,
+    estimateSize: () => CONVERSATION_ROW_ESTIMATE_PX,
+    overscan: CONVERSATION_ROW_OVERSCAN,
+    scrollMargin,
+  });
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = item => {
+    const scrollElement = getScrollElement();
+    if (!scrollElement || virtualizer.isScrolling) return false;
+    return item.end <= scrollElement.scrollTop + scrollMargin;
+  };
+
+  useLayoutEffect(() => {
+    if (!virtualized) return undefined;
+    const scrollElement = getScrollElement();
+    const timelineElement = timelineRef.current;
+    if (!scrollElement || !timelineElement) return undefined;
+    const refreshScrollMargin = () => {
+      const nextMargin = conversationTimelineScrollMargin(timelineElement, scrollElement);
+      setScrollMargin(current => Math.abs(current - nextMargin) < 0.5 ? current : nextMargin);
+    };
+    const refreshViewport = () => {
+      refreshScrollMargin();
+      virtualizer.measure();
+    };
+    refreshViewport();
+    const viewportObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(refreshViewport)
+      : null;
+    const layoutObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(refreshScrollMargin)
+      : null;
+    viewportObserver?.observe(scrollElement);
+    if (timelineElement.parentElement) layoutObserver?.observe(timelineElement.parentElement);
+    window.addEventListener('resize', refreshViewport);
+    return () => {
+      viewportObserver?.disconnect();
+      layoutObserver?.disconnect();
+      window.removeEventListener('resize', refreshViewport);
+    };
+  }, [getScrollElement, props.sessionId, virtualized, virtualizer]);
+
+  if (!virtualized) {
+    return (
+      <>
+        {turns.map((turn, index) => (
+          <React.Fragment key={turn.id}>
+            {renderBeforeTurn?.(turn, index)}
+            <ConversationTurn
+              turn={turn}
+              {...props}
+              onRetry={index === turns.length - 1 ? props.onRetry : undefined}
+            />
+          </React.Fragment>
+        ))}
+      </>
+    );
+  }
+
+  const virtualRows = virtualizer.getVirtualItems();
   return (
-    <>
-      {turns.map((turn, index) => (
-        <ConversationTurn
-          key={turn.id}
-          turn={turn}
-          {...props}
-          onRetry={index === turns.length - 1 ? props.onRetry : undefined}
-        />
-      ))}
-    </>
+    <div
+      ref={timelineRef}
+      data-conversation-virtual-timeline=""
+      data-conversation-virtual-row-count={virtualRows.length}
+      className="relative w-full"
+      style={{ overflowAnchor: 'none' }}
+    >
+      <div
+        data-conversation-virtual-history=""
+        className="relative w-full"
+        style={{ height: `${virtualizer.getTotalSize()}px` }}
+      >
+        {virtualRows.map(virtualRow => {
+          const turn = historyTurns[virtualRow.index];
+          if (!turn) return null;
+          const beforeTurn = renderBeforeTurn?.(turn, virtualRow.index);
+          return (
+            <div
+              key={virtualRow.key}
+              ref={virtualizer.measureElement}
+              data-index={virtualRow.index}
+              data-conversation-virtual-row=""
+              className={`absolute left-0 top-0 w-full ${beforeTurn ? 'flex flex-col gap-7' : ''}`}
+              style={{
+                paddingBottom: `${CONVERSATION_ROW_GAP_PX}px`,
+                transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+              }}
+            >
+              {beforeTurn}
+              <ConversationTurn
+                turn={turn}
+                {...props}
+                onRetry={virtualRow.index === turns.length - 1 ? props.onRetry : undefined}
+              />
+            </div>
+          );
+        })}
+      </div>
+      {liveTurn && (
+        <div
+          key={liveTurn.id}
+          data-conversation-live-tail=""
+          className={renderBeforeTurn ? 'flex flex-col gap-7' : ''}
+        >
+          {renderBeforeTurn?.(liveTurn, liveTurnIndex)}
+          <ConversationTurn
+            turn={liveTurn}
+            {...props}
+            onRetry={liveTurnIndex === turns.length - 1 ? props.onRetry : undefined}
+          />
+        </div>
+      )}
+    </div>
   );
 }

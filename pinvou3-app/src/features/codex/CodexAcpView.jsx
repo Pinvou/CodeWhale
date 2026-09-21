@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import {
@@ -88,7 +88,7 @@ import {
   ConversationActivityIndicator,
   ConversationMarkdown,
   ConversationStatusBadge,
-  ConversationTurn,
+  ConversationTimeline,
   useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
 import {
@@ -3532,9 +3532,12 @@ export function CodexAcpView({
                 </div>
               </div>
             )}
-            {visibleTurns.map(turn => (
-                  <Fragment key={turn.id}>
-                    {isNativeAgent && rewindEntries.has(turn.id) && (
+            {visibleTurns.length > 0 && (
+                  <ConversationTimeline
+                    turns={visibleTurns}
+                    sessionId={activeId}
+                    scrollElementRef={scroller}
+                    renderBeforeTurn={turn => isNativeAgent && rewindEntries.has(turn.id) ? (
                       // 原生车道 turn 边界回退入口：turn N+1 前的 chip =「回退到第 N 轮」；
                       // 无快照的边界为「仅回退对话」变体（rewindEntriesByTurnId 判定）。
                       <RewindChip
@@ -3543,10 +3546,7 @@ export function CodexAcpView({
                         copy={codexCopy}
                         onOpen={openRewindDialog}
                       />
-                    )}
-                    <ConversationTurn
-                      turn={turn}
-                      sessionId={activeId}
+                    ) : null}
                       copy={t.uiConversation}
                       pendingByTool={pendingByTool}
                       onRespond={respond}
@@ -3596,9 +3596,8 @@ export function CodexAcpView({
                       agentLabel={activeAgentName}
                       onOpenExternal={(url) => openAcpExternalUrl(url).catch(showError)}
                       onOpenResource={isWeb ? undefined : openWorkspaceResource}
-                    />
-                  </Fragment>
-                ))}
+                  />
+                )}
             {isNativeAgent && rewindUndoAvailable(rewindUndoState) && (
               // 「撤销回退」入口：渲染在时间线末尾（回退成功的内联提示其后），
               // 与 RewindChip 同门控（仅原生代码车道）；undoState 为 null 即消失。
