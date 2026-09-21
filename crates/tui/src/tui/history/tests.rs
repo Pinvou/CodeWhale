@@ -2674,3 +2674,55 @@ fn forkguard_mcp_boot_handoffs_render_as_system_cells_not_user_turns() {
     assert_eq!(cells.len(), 1);
     assert!(matches!(cells[0], super::HistoryCell::System { .. }));
 }
+
+/// A restored background-shell completion is runtime control traffic: the
+/// live tool/status receipts tell its story, so replayed history must not
+/// project it as a user turn. The filter is display-only — the persisted and
+/// model-facing message is untouched (the resume regression in
+/// `tui::ui::tests` pins that byte-for-byte). Covers both the current
+/// condensed and the legacy two-line provenance shapes, and contrasts with
+/// ordinary composer text, which must survive the handoff filter.
+#[test]
+fn restored_background_shell_completions_yield_no_cells_but_user_text_survives() {
+    let envelope = concat!(
+        "<codewhale:runtime_event kind=\"background_shell_completion\" ",
+        "visibility=\"internal\">\n",
+        "{\"task_id\":\"shell_1\",\"status\":\"Completed\",\"exit_code\":0}\n",
+        "</codewhale:runtime_event>",
+    );
+    let turn_metas = [
+        "<turn_meta>\nInput provenance: shell_completion (non-authoritative)\n</turn_meta>",
+        "<turn_meta>\nInput provenance: shell_completion\nInput authority: non_authoritative\n</turn_meta>",
+    ];
+    for turn_meta in turn_metas {
+        let handoff = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: envelope.to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: turn_meta.to_string(),
+                    cache_control: None,
+                },
+            ],
+        };
+        assert!(
+            super::history_cells_from_message(&handoff).is_empty(),
+            "a raw shell-completion handoff must not replay as any cell ({turn_meta})"
+        );
+    }
+
+    let prompt = super::history_cells_from_message(&Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "please continue".to_string(),
+            cache_control: None,
+        }],
+    });
+    assert!(matches!(
+        prompt.as_slice(),
+        [HistoryCell::User { content }] if content == "please continue"
+    ));
+}
