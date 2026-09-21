@@ -804,9 +804,17 @@ impl ReadFileTool {
         // but no hash or read-before-edit ceremony reaches the lowercase
         // schema or result.
         context.note_file_read(&file_path);
+        // The exact byte size this result was self-bounded to: the read
+        // budget bounds the window content, and the continuation footer (or
+        // the single-line fallback) rides on top of it. Declaring the final
+        // payload size lets the context compactor honor `read_budget_bytes`
+        // (raw bytes <= budget) so an already-bounded read is never truncated
+        // a second time on its way into the conversation.
+        let budgeted_bytes = output.len();
         Ok(RichToolResult::plain(
             ToolResult::success(output).with_metadata(json!({
-                "evidence_routing": "inline"
+                "evidence_routing": "inline",
+                "read_budget_bytes": budgeted_bytes
             })),
         ))
     }
@@ -1221,9 +1229,15 @@ fn render_line_window(
     // The file tool self-bounds at 50 KiB and carries its own continuation
     // contract (`next_start_line`), so the large-output spillover envelope
     // must never re-wrap a read result with a second, weaker truncation.
+    // `read_budget_bytes` names the byte size this rendered result was
+    // self-bounded to (the visible-bytes budget bounds the window; the
+    // `<file>` wrapper and resume footer ride on top of it) so the context
+    // compactor passes it through instead of truncating it again.
+    let budgeted_bytes = output.len();
     ToolResult::success(output).with_metadata(json!({
         "evidence_routing": "inline",
-        "content_hash": content_hash
+        "content_hash": content_hash,
+        "read_budget_bytes": budgeted_bytes
     }))
 }
 

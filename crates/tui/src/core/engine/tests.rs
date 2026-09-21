@@ -17031,6 +17031,39 @@ fn evidence_bounded_preview_is_not_recompacted() {
 }
 
 #[test]
+fn budgeted_read_result_is_not_truncated_a_second_time_by_the_context_compactor() {
+    // `read` bounds itself to a per-call byte budget and ends a
+    // budget-limited result with a footer naming the exact offset to
+    // continue from. The 12K context hard limit used to re-truncate that
+    // bounded result into a ~900-char snippet, discarding both the content
+    // and the continuation contract.
+    let content = format!(
+        "{}\n\n[Showing lines 1-51 of 200 (50KB limit). Use offset=52 to continue.]",
+        "r".repeat(40_000)
+    );
+    let budgeted = ToolResult::success(content.clone()).with_metadata(json!({
+        "evidence_routing": "inline",
+        "read_budget_bytes": content.len()
+    }));
+    let passed_through = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &budgeted);
+    assert_eq!(passed_through, content);
+    assert!(passed_through.contains("Use offset=52 to continue"));
+
+    // The same bytes without a declared budget still take the ordinary path,
+    // which is what proves the metadata (not the tool name) did the work.
+    let unbudgeted = ToolResult::success(content.clone());
+    let compacted = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &unbudgeted);
+    assert!(compacted.contains("output compacted to protect context"));
+
+    // A result that overran its own declared budget is not exempt.
+    let overrun = ToolResult::success(content).with_metadata(json!({
+        "read_budget_bytes": 1_000
+    }));
+    let compacted_overrun = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &overrun);
+    assert!(compacted_overrun.contains("output compacted to protect context"));
+}
+
+#[test]
 fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window() {
     let content = "route-effective context\n".repeat(900);
     let output = ToolResult::success(content.clone());
