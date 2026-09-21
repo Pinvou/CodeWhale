@@ -257,7 +257,7 @@ test('admin finance capabilities use independent permission-gated routes without
   assert.match(authorization, /billing: \['platform\.billing\.wallets\.read', 'platform\.usage\.read'\]/);
   assert.match(authorization, /payments: \['platform\.billing\.wallets\.read', 'platform\.usage\.read'\]/);
   assert.match(authorization, /products: \['platform\.products\.read', 'platform\.pricing\.read'\]/);
-  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read', 'platform\.billing\.repairs\.request', 'platform\.billing\.repairs\.approve', 'platform\.billing\.payment-controls\.resume\.request', 'platform\.billing\.payment-controls\.resume\.approve'\]/);
+  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read', 'platform\.billing\.repairs\.request', 'platform\.billing\.repairs\.approve', 'platform\.billing\.payment-controls\.resume\.request', 'platform\.billing\.payment-controls\.resume\.approve',/);
   assert.match(styles, /\.admin-portal-body > #approval-requests-root[\s\S]*display:none/);
   assert.match(main, /pinvou-admin-language-change/);
   assert.doesNotMatch(approvals, /approval-control-snapshot|createControlResume|resume_draft/);
@@ -269,6 +269,7 @@ test('admin finance capabilities use independent permission-gated routes without
 test('manual adjustments create and recover approval requests only from accounts and billing', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');
+  const finance = await readFile(new URL('../src/features/account-platform/admin-finance.js', import.meta.url), 'utf8');
   const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
   const approvals = await readFile(new URL('../../account-platform/internal/portal/static/assets/approval-requests.js', import.meta.url), 'utf8');
 
@@ -278,12 +279,12 @@ test('manual adjustments create and recover approval requests only from accounts
   assert.doesNotMatch(client, /decideAdjustment\(/);
   assert.match(view, /await client\.createAdjustment[\s\S]*?await ensureAdjustmentApproval/);
   assert.match(view, /command_type: 'WALLET_ADJUSTMENT'/);
-  assert.match(view, /idempotency_key: `approval:\$\{requestKey\}`/);
+  assert.match(finance, /idempotency_key: `approval:\$\{requestKey\}`/);
   assert.match(view, /created \? copy\.billing\.adjustmentApprovalPending/);
   assert.match(view, /recoverAdjustmentApproval/);
   assert.match(view, /approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item\.adjustment_id/);
   assert.doesNotMatch(view, /client\.decideAdjustment/);
-  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read', 'platform\.billing\.repairs\.request', 'platform\.billing\.repairs\.approve', 'platform\.billing\.payment-controls\.resume\.request', 'platform\.billing\.payment-controls\.resume\.approve'\]/);
+  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read', 'platform\.billing\.repairs\.request', 'platform\.billing\.repairs\.approve', 'platform\.billing\.payment-controls\.resume\.request', 'platform\.billing\.payment-controls\.resume\.approve',/);
   const pending = { status: 'PENDING_APPROVAL', request_idempotency_key: 'adjustment-key' };
   assert.equal(adjustmentApprovalAction(pending, { status: 'DRAFT' }, { canRequest: true }), 'resume');
   assert.equal(adjustmentApprovalAction(pending, { status: 'SUBMITTED' }, { canRequest: true }), 'view');
@@ -302,12 +303,12 @@ test('payment controls preserve server recovery drafts and keep provider and pro
   const control = {
     provider_id: 'provider-a',
     provider_control_version: 7,
-    resume_draft: { command_type: 'PAYMENT_PROVIDER_RESUME', normalized_command: { provider_control_version: 7 } },
+    resume_draft: { command_type: 'PAYMENT_PROVIDER_RESUME', target_resource_type: 'PAYMENT_PROVIDER_CONTROL', target_resource_id: 'provider-a', normalized_command: { provider_control_version: 7 } },
   };
   const product = {
     product_id: 'product-a',
     version: 11,
-    resume_draft: { command_type: 'PAYMENT_PRODUCT_RESUME', normalized_command: { product_control_version: 11 } },
+    resume_draft: { command_type: 'PAYMENT_PRODUCT_RESUME', target_resource_type: 'PAYMENT_PRODUCT_CONTROL', target_resource_id: 'product-a', normalized_command: { product_control_version: 11 } },
   };
   const providerDraft = buildPaymentControlApprovalDraft(control, null, 'provider recovery reason', 'provider-key');
   const productDraft = buildPaymentControlApprovalDraft(control, product, 'product recovery reason', 'product-key');
@@ -326,57 +327,58 @@ test('payment controls preserve server recovery drafts and keep provider and pro
   assert.equal(paymentControlApprovalAction(null, { canRequest: true }), 'create');
   assert.equal(paymentControlApprovalAction(null, { canRequest: false }), 'none');
   assert.equal(paymentControlApprovalAction(resumableDraft, { canRequest: true }), 'submit');
-  assert.equal(paymentControlApprovalAction({ ...resumableDraft, allowed_actions: [] }, { canRequest: true }), 'view');
+  assert.equal(paymentControlApprovalAction({ ...resumableDraft, allowed_actions: [] }, { canRequest: true }), 'submit');
   assert.equal(paymentControlApprovalAction({ ...resumableDraft, status: 'SUBMITTED' }, { canRequest: true }), 'view');
-  for (const status of ['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTION_FAILED', 'EXECUTED']) {
+  for (const status of ['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTED']) {
     assert.equal(paymentControlApprovalAction({ ...resumableDraft, status }, { canRequest: true }), 'create');
     assert.equal(paymentControlApprovalAction({ ...resumableDraft, status }, { canRequest: false }), 'view');
   }
+  assert.equal(paymentControlApprovalAction({ ...resumableDraft, status: 'EXECUTION_FAILED' }, { canRequest: true }), 'view');
   for (const status of ['UNKNOWN', '', undefined]) {
     assert.equal(paymentControlApprovalAction({ ...resumableDraft, status }, { canRequest: true }), 'view');
   }
 
+  const detailFor = (requestID, draftInput, status, version, allowedActions = status === 'DRAFT' ? ['SUBMIT'] : []) => ({
+    approval_request_id: requestID,
+    command_type: draftInput.command_type,
+    target: { resource_type: draftInput.target_resource_type, resource_id: draftInput.target_resource_id },
+    status,
+    version,
+    action_control_version: 1,
+    detail_availability: 'AVAILABLE',
+    allowed_actions: allowedActions,
+  });
   const recoveredCalls = [];
-  let recoveredCreateCalls = 0;
+  let recoveredReads = 0;
   const recovered = await submitPaymentControlApproval({
-    createApprovalDraft: async () => {
-      recoveredCreateCalls += 1;
-      if (recoveredCreateCalls === 1) throw new Error('create response lost');
-      return { approval_request_id: 'approval-provider', status: 'DRAFT', version: 3 };
+    createGovernedApprovalDraft: async () => 'approval-provider',
+    governedApprovalRequest: async () => {
+      recoveredReads += 1;
+      return detailFor('approval-provider', providerDraft, recoveredReads === 1 ? 'DRAFT' : 'SUBMITTED', recoveredReads === 1 ? 1 : 2);
     },
-    approvalRequest: async (requestID) => ({ ...resumableDraft, approval_request_id: requestID }),
-    submitApprovalRequest: async (requestID, version) => {
-      recoveredCalls.push(['submit', requestID, version]);
-      return { ...resumableDraft, status: 'SUBMITTED', version: 4 };
-    },
+    submitGovernedApprovalRequest: async (requestID, detail) => recoveredCalls.push(['submit', requestID, detail.version]),
   }, providerDraft);
   assert.equal(recovered.status, 'SUBMITTED');
-  assert.equal(recoveredCreateCalls, 2);
-  assert.deepEqual(recoveredCalls, [['submit', 'approval-provider', 3]]);
+  assert.equal(recoveredReads, 2);
+  assert.deepEqual(recoveredCalls, [['submit', 'approval-provider', 1]]);
 
-  let createCalls = 0;
-  let detailCalls = 0;
-  const refreshed = await submitPaymentControlApproval({
-    createApprovalDraft: async () => { createCalls += 1; return { approval_request_id: 'approval-provider', status: 'DRAFT', version: 3 }; },
-    approvalRequest: async () => {
-      detailCalls += 1;
-      return detailCalls === 1 ? resumableDraft : { ...resumableDraft, status: 'SUBMITTED', version: 4 };
-    },
-    submitApprovalRequest: async () => { throw new Error('submit response lost'); },
-  }, providerDraft);
-  assert.equal(refreshed.status, 'SUBMITTED');
-  assert.equal(createCalls, 1);
-  assert.equal(detailCalls, 2);
+  let submitCalls = 0;
+  await assert.rejects(() => submitPaymentControlApproval({
+    createGovernedApprovalDraft: async () => 'approval-provider',
+    governedApprovalRequest: async () => detailFor('approval-provider', providerDraft, 'DRAFT', 1),
+    submitGovernedApprovalRequest: async () => { submitCalls += 1; throw new Error('submit response lost'); },
+  }, providerDraft), { commandReference: 'approval-provider' });
+  assert.equal(submitCalls, 1);
 
   const createdInputs = [];
   for (const input of [providerDraft, productDraft]) {
     await submitPaymentControlApproval({
-      createApprovalDraft: async (draftInput) => {
+      createGovernedApprovalDraft: async (draftInput) => {
         createdInputs.push(draftInput);
-        return { approval_request_id: `approval-${draftInput.command_type}`, status: 'DRAFT', version: 1, allowed_actions: ['SUBMIT'] };
+        return `approval-${draftInput.command_type}`;
       },
-      approvalRequest: async () => { throw new Error('detail is not needed for a complete draft'); },
-      submitApprovalRequest: async (requestID) => ({ approval_request_id: requestID, status: 'SUBMITTED' }),
+      governedApprovalRequest: async (requestID) => detailFor(requestID, input, 'SUBMITTED', 2),
+      submitGovernedApprovalRequest: async () => assert.fail('already submitted details must not be submitted again'),
     }, input);
   }
   assert.strictEqual(createdInputs[0], providerDraft);
@@ -384,22 +386,28 @@ test('payment controls preserve server recovery drafts and keep provider and pro
   assert.deepEqual(createdInputs.map((item) => item.command_type), ['PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME']);
 
   const crossRefreshCalls = [];
+  const existingProviderApproval = {
+    ...resumableDraft,
+    command_type: providerDraft.command_type,
+    target_resource_type: providerDraft.target_resource_type,
+    target_resource_id: providerDraft.target_resource_id,
+    action_control_version: 1,
+    detail_availability: 'AVAILABLE',
+  };
   const crossRefresh = await submitPaymentControlApproval({
-    createApprovalDraft: async () => { throw new Error('must not create a duplicate draft'); },
-    approvalRequest: async () => { throw new Error('detail is not needed for a listed draft'); },
-    submitApprovalRequest: async (requestID, version) => {
-      crossRefreshCalls.push([requestID, version]);
-      return { ...resumableDraft, status: 'SUBMITTED' };
+    governedApprovalRequest: async (requestID) => detailFor(requestID, providerDraft, crossRefreshCalls.length ? 'SUBMITTED' : 'DRAFT', crossRefreshCalls.length ? 4 : 3),
+    submitGovernedApprovalRequest: async (requestID, detail) => {
+      crossRefreshCalls.push([requestID, detail.version]);
     },
-  }, null, resumableDraft);
+  }, null, existingProviderApproval);
   assert.equal(crossRefresh.status, 'SUBMITTED');
   assert.deepEqual(crossRefreshCalls, [['approval-provider', 3]]);
 
   await assert.rejects(() => submitPaymentControlApproval({
-    createApprovalDraft: async () => ({ approval_request_id: 'approval-product', status: 'DRAFT', version: 1 }),
-    approvalRequest: async () => ({ approval_request_id: 'approval-product', status: 'DRAFT', version: 1, allowed_actions: [] }),
-    submitApprovalRequest: async () => { throw new Error('must not submit without allowed action'); },
-  }, productDraft), /APPROVAL_SUBMIT_NOT_ALLOWED/);
+    createGovernedApprovalDraft: async () => 'approval-product',
+    governedApprovalRequest: async () => detailFor('approval-product', productDraft, 'DRAFT', 1, []),
+    submitGovernedApprovalRequest: async () => { throw new Error('must not submit without allowed action'); },
+  }, productDraft), { code: 'COMMAND_RESULT_UNKNOWN', commandReference: 'approval-product' });
 });
 
 test('finance tab state isolates cached data, errors, and stale requests', () => {
@@ -1333,7 +1341,7 @@ test('Web personal center consolidates navigation while preserving context-sensi
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(view, /organizations\.length > 0 && canReadOrganization \? \['organization'\] : \[\]/);
-  assert.match(view, /access\.profileRead \|\| access\.billingRead \? \['overview'\]/);
+  assert.match(view, /access\.profileRead \|\| access\.billingRead \|\| access\.invitationsRead \? \['overview'\]/);
   assert.match(view, /access\.billingRead \? \['credits', 'entitlements'\]/);
   assert.match(view, /access\.usageRead \? \['usage'\]/);
   assert.match(view, /personalContext && access\.billingRead \? \['orders', 'invoice'\] : \[\]/);
