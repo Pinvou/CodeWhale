@@ -2333,6 +2333,10 @@
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
+    // Live suppression probe for scheduleStreamNotify: inside a background
+    // working set the immediate first-delta notify is suppressed, so the
+    // stream scheduler must fall through to its bounded frame instead.
+    isNotifySuppressed: function () { return suppressNotify; },
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
     // 与历史重载路径共用同一信封判定（userMessageDisplayText 的 isInternalRuntimeEnvelopeText），

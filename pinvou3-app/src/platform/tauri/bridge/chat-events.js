@@ -8,6 +8,7 @@
     var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
     var listen = context.listen;
     var immediateNotify = context.notify;
+    var isNotifySuppressed = context.isNotifySuppressed || function () { return false; };
     var invoke = context.invoke;
     var turnUsageDirty = context.turnUsageDirty;
     var sessionStates = context.sessionStates;
@@ -79,7 +80,13 @@
     }
 
     function scheduleStreamNotify(sid, firstDelta) {
-      if (!sid || firstDelta || typeof setTimeout !== "function") {
+      // A first delta publishes immediately so the visible bubble paints
+      // without waiting for a frame. Inside a background working set the
+      // immediate notify is suppressed and schedules no frame at all, so the
+      // session's first delta would never publish — a suppressed first delta
+      // must fall through to the coalesced frame below, whose publish() runs
+      // after the working set is restored and carries the accumulated text.
+      if (!sid || (firstDelta && !isNotifySuppressed()) || typeof setTimeout !== "function") {
         notify();
         return;
       }

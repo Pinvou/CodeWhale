@@ -1541,12 +1541,97 @@ async function streamNotificationTimerFallback(bridgeKind) {
   harness.emit("chat:delta", { session_id: sessionId, text: "first" });
   harness.emit("chat:delta", { session_id: sessionId, text: "-second" });
   assert.strictEqual(snapshots.length, 2, bridgeKind + ": second delta should wait for the fallback timer");
-  await new Promise(function (resolve) { setTimeout(resolve, 50); });
+  await new Promise(function (resolve) { setTimeout(resolve, 100); });
   assert.strictEqual(snapshots.length, 3, bridgeKind + ": hidden/throttled fallback must publish once within 32ms");
   assert.strictEqual(snapshots.at(-1).chatItems.filter(function (item) {
     return item.type === "assistant" && item.streaming;
   }).pop().text, "first-second", bridgeKind + ": timer fallback must publish the complete text");
   unsubscribe();
+}
+
+// Regression anchor (PR #1215 review): a background session's first stream
+// delta hit scheduleStreamNotify's immediate branch while the background
+// working set was still suppressing notifications — the delta was swallowed
+// and no fallback frame was scheduled, so a single-delta background stream
+// (worst case: reasoning_delta, which has no 180ms render trailing edge)
+// never published at all. The fix routes a suppressed first delta into the
+// coalesced frame, whose publish runs after the working set is restored.
+async function backgroundSessionFirstDeltaPublishesViaFrame(bridgeKind) {
+  var frameClock = createAnimationFrameClock();
+  var harness = createBridgeHarness(null, {
+    bridgeKind: bridgeKind,
+    requestAnimationFrame: frameClock.request,
+    cancelAnimationFrame: frameClock.cancel,
+  });
+  var bridge = harness.bridge;
+  var activeId = "chat-bg-active-" + bridgeKind;
+  var backgroundId = "chat-bg-stream-" + bridgeKind;
+  harness.handlers.load_session = function (args) {
+    return { metadata: { id: args.id, title: "BG " + args.id }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(activeId), true);
+  var snapshots = [];
+  var unsubscribe = bridge.state.subscribe("chat", function (snapshot) { snapshots.push(snapshot); });
+
+  // A turn starts in a background session while another session stays visible.
+  harness.emit("chat:turn_started", { session_id: backgroundId });
+  assert.strictEqual(snapshots.length, 1,
+    bridgeKind + ": the background turn start should publish its session-list round");
+
+  // The first background delta must not publish synchronously (suppressed
+  // working set), but it must schedule the bounded frame.
+  harness.emit("chat:delta", { session_id: backgroundId, text: "bg-first-delta" });
+  assert.strictEqual(snapshots.length, 1,
+    bridgeKind + ": the first background delta must stay inside its coalescing frame");
+  await new Promise(function (resolve) { setTimeout(resolve, 100); });
+  assert.strictEqual(snapshots.length, 2,
+    bridgeKind + ": the first background delta must publish exactly once within the 32ms frame budget");
+  unsubscribe();
+
+  // The delayed publication must not lose the text: switching to the
+  // background session reveals the accumulated streaming bubble.
+  assert.strictEqual(await bridge.sessions.switchToSession(backgroundId), true);
+  var chatItems = (bridgeKind === "tauri" ? bridge.state.get("chat") : bridge.state.get()).chatItems;
+  var streamedItem = chatItems.filter(function (item) {
+    return item.type === "assistant" && item.streaming;
+  }).pop();
+  assert.ok(streamedItem, bridgeKind + ": the background stream bubble must exist after switching");
+  assert.strictEqual(streamedItem.text, "bg-first-delta",
+    bridgeKind + ": the background first delta text must survive the coalesced publication");
+}
+
+// Regression anchor (PR #1215 review): the web bridge's chat:tool_end reset
+// branches cleared currentStreamText/currentStreamId without the desktop
+// invariant "the flush must precede the stream state reset", so item.html
+// stayed at the first-delta markdown while item.text already held the whole
+// turn until (or unless) the 180ms trailing-edge render fired.
+async function webToolEndFlushesStreamHtmlBeforeReset() {
+  var harness = createBridgeHarness(null, { bridgeKind: "web" });
+  var bridge = harness.bridge;
+  var sessionId = "chat-web-tool-end-flush";
+  harness.handlers.load_session = function () {
+    return { metadata: { id: sessionId, title: "Tool end flush" }, messages: [], artifacts: [] };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  harness.emit("chat:delta", { session_id: sessionId, text: "before " });
+  harness.emit("chat:delta", { session_id: sessionId, text: "tool-end-tail" });
+  // Deliberately synchronous: no awaited timer between the deltas and
+  // tool_end, so the 180ms trailing-edge render cannot preempt the flush.
+  harness.emit("chat:tool_end", {
+    session_id: sessionId,
+    id: "web-flush-tool",
+    name: "read_file",
+    output: "ok",
+    success: true,
+  });
+
+  var streamedItem = bridge.state.get().chatItems.filter(function (item) {
+    return item.type === "assistant" && item.text === "before tool-end-tail";
+  }).pop();
+  assert.ok(streamedItem, "web: the accumulated stream bubble must survive tool_end");
+  assert.ok(String(streamedItem.html || "").includes("before tool-end-tail"),
+    "web: tool_end must synchronously flush the full markdown html before the stream state reset");
 }
 
 async function olderDesktopUsesServerGeneratedSessionDownloadId() {
@@ -8980,6 +9065,9 @@ Promise.resolve()
   .then(function () { return longSessionStreamingCoalescesNotifications("web"); })
   .then(function () { return streamNotificationTimerFallback("tauri"); })
   .then(function () { return streamNotificationTimerFallback("web"); })
+  .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("tauri"); })
+  .then(function () { return backgroundSessionFirstDeltaPublishesViaFrame("web"); })
+  .then(function () { return webToolEndFlushesStreamHtmlBeforeReset(); })
   .then(multipleKnowledgeMountBehavior)
   .then(queuedKnowledgeMountKeepsOriginalSession)
   .then(staleKnowledgeSnapshotDoesNotCrossSessions)

@@ -2130,11 +2130,18 @@
   var notificationQueue = [];
   var notificationDispatching = false;
   function notify() {
-    if (suppressNotify) return;
     // Any ordinary publication is a semantic stream boundary. Its snapshot
     // already contains all accumulated text, so cancel the pending frame to
-    // avoid a duplicate callback after done/error/tool/session events.
+    // avoid a duplicate callback after done/error/tool/session events. The
+    // cancel runs before the suppression check on purpose — the desktop
+    // bridge also cancels the pending frame while a background working set
+    // has suppressed callbacks, because the semantic publication that
+    // follows the restore carries the accumulated content.
     cancelPendingStreamNotify(state.activeSessionId);
+    immediateNotify();
+  }
+  function immediateNotify() {
+    if (suppressNotify) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -6013,12 +6020,18 @@
               break;
             }
           }
+          // Stream throttle invariant: the flush must precede the stream
+          // state reset. The old streaming bubble was already removed by the
+          // splice above, so the flush has no render target and only cancels
+          // the session's trailing-edge timer.
+          flushPendingStreamRender();
           resetPendingAssistant();
         }
         addChatItem({ type: "user", text: content, time: timeStr() });
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();
+      flushPendingStreamRender(); // the old streaming bubble gets its final html before the new turn resets stream state
       currentStreamText = "";
       currentStreamId = 0;
     });
@@ -6192,7 +6205,13 @@
     delete pendingStreamNotifications[sid];
   }
   function scheduleStreamNotify(sid, firstDelta) {
-    if (!sid || firstDelta || typeof setTimeout !== "function") {
+    // A first delta publishes immediately so the visible bubble paints
+    // without waiting for a frame. Inside a background working set the
+    // immediate notify is suppressed and schedules no frame at all, so the
+    // session's first delta would never publish — a suppressed first delta
+    // must fall through to the coalesced frame below, whose publish() runs
+    // after the working set is restored and carries the accumulated text.
+    if (!sid || (firstDelta && !suppressNotify) || typeof setTimeout !== "function") {
       notify();
       return;
     }
@@ -6206,9 +6225,9 @@
       var wasBackground = sid !== state.activeSessionId;
       runSyncOnSession(sid, function () {
         didRun = true;
-        notify();
+        immediateNotify();
       });
-      if (didRun && wasBackground) notify();
+      if (didRun && wasBackground) immediateNotify();
     }
     if (typeof window.requestAnimationFrame === "function") {
       pending.frame = window.requestAnimationFrame(publish);
@@ -6495,6 +6514,7 @@
         { resolved: true, cardState: p.success ? "submitted" : "cancelled" }
       );
       delete toolMeta[p.id];
+      flushPendingStreamRender(); // terminal path: emit final html before the reset
       currentStreamText = ""; currentStreamId = 0;
       notify();
       return;
@@ -6523,6 +6543,7 @@
         // 不走 write_file 的工具(如 make_pptx)→ 卡有、面板无」。trackArtifact 已去重。
         if (presentedPath) trackArtifact(presentedPath);
         delete toolMeta[p.id];
+        flushPendingStreamRender(); // terminal path: emit final html before the reset
         currentStreamText = ""; currentStreamId = 0;
         notify();
         // Keep the web adapter aligned with desktop: an in-place card update does
@@ -6542,6 +6563,7 @@
         output: p.output, success: false, state: "done",
       });
       delete toolMeta[p.id];
+      flushPendingStreamRender(); // terminal path: emit final html before the reset
       currentStreamText = ""; currentStreamId = 0;
       notify();
       return;
@@ -6631,6 +6653,7 @@
     }
 
     delete toolMeta[p.id];
+    flushPendingStreamRender(); // terminal path: emit final html before the reset
     currentStreamText = "";
     currentStreamId = 0;
     notify();
