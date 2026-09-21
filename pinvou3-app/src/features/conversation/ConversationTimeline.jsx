@@ -1028,6 +1028,7 @@ export function ConversationTimeline({
     index => `${props.sessionId || 'conversation'}:${historyTurnsRef.current[index]?.id || index}`,
     [props.sessionId],
   );
+  // oxlint-disable-next-line react/incompatible-library -- TanStack Virtual owns row memoization and measurement; React Compiler must leave this timeline uncompiled.
   const virtualizer = useVirtualizer({
     enabled: virtualized,
     count: virtualized ? historyTurns.length : 0,
