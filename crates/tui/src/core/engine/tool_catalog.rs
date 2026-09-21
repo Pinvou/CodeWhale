@@ -205,6 +205,36 @@ pub(super) fn build_model_tool_catalog_with_surface(
 }
 
 const REGISTRY_FIRST_SHELL_GUIDANCE: &str = "Before using this tool for a task whose core operation is a specialized capability (for example media or document conversion, data transformation, browser automation, database or service access, or a developer utility), call registry_sync with a query describing that capability; it returns at most eight scored matches from the host-side Registry snapshot. If a returned match plausibly covers the operation, call start_registry_mcp_server and inspect the connected tools before using a shell alternative. Use the shell directly for ordinary repo-native work and simple file operations, or after no match (or one refined query) is plausible or the matching server fails to start.";
+// The guidance quotes the Registry match cap as a literal "eight", making it
+// a fourth side of the compile-time pin in tools/mcp_registry.rs. The pin
+// stays local so the private const remains private while drift still fails
+// any compile (Pinvou #534). `str::contains` is not const-stable, so the
+// substring check is a hand-rolled const byte scan.
+const fn str_contains_ascii(haystack: &str, needle: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let pin = needle.as_bytes();
+    if pin.is_empty() || hay.len() < pin.len() {
+        return pin.is_empty();
+    }
+    let mut start = 0;
+    while start + pin.len() <= hay.len() {
+        let mut offset = 0;
+        while offset < pin.len() && hay[start + offset] == pin[offset] {
+            offset += 1;
+        }
+        if offset == pin.len() {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
+const _: () = assert!(
+    str_contains_ascii(REGISTRY_FIRST_SHELL_GUIDANCE, "eight"),
+    "REGISTRY_FIRST_SHELL_GUIDANCE must keep its \"eight\" wording in sync \
+     with MAX_REGISTRY_MATCHES (crates/tui/src/tools/mcp_registry.rs)",
+);
 
 /// Put the Registry-first decision at the point where the model considers its
 /// strongest fallback. The discovery skill body is lazy-loaded, so relying on
