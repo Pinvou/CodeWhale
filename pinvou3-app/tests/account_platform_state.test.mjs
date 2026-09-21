@@ -1170,6 +1170,19 @@ test('slider verification overlays the login form without changing its layout he
   assert.equal(accountPlatformCopy.zh.captchaClose, '关闭验证');
 });
 
+test('releasing a mobile captcha slider verifies immediately and requests the SMS code', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const webView = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  for (const source of [popover, webView]) {
+    assert.match(source, /onPointerDown=\{\(\) => setDragging\(true\)\}/);
+    assert.match(source, /onPointerUp=\{releaseSlider\}/);
+    assert.match(source, /if \(!dragging \|\| busy\) return;/);
+    assert.match(source, /onConfirm\(shownOffset\)/);
+  }
+  assert.match(popover, /onConfirm=\{\(\) => void sendSms\(\)\}/);
+  assert.match(webView, /onConfirm=\{sendMobileCode\}/);
+});
+
 test('desktop account popover does not expose the internal user id', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   assert.doesNotMatch(popover, /me\?\.user_id/);

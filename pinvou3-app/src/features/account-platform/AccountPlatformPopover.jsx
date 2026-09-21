@@ -49,11 +49,32 @@ function registrationInputError(copy, username, mobile, password, passwordConfir
 }
 
 function SliderCaptcha({ challenge, offset, busy, copy, cardTheme, mutedText, onOffset, onConfirm, onRefresh, onClose }) {
+  const [dragOffset, setDragOffset] = useState(null);
+  const [dragging, setDragging] = useState(false);
   const width = Number(challenge?.width || 280);
   const height = Number(challenge?.height || 120);
   const pieceWidth = Number(challenge?.piece_width || 44);
   const pieceHeight = Number(challenge?.piece_height || 44);
   const maximum = Math.max(1, width - pieceWidth);
+  const challengeID = challenge?.captcha_id || challenge?.id || '';
+  const shownOffset = dragOffset ?? Number(offset || 0);
+
+  useEffect(() => {
+    setDragOffset(null);
+    setDragging(false);
+  }, [challengeID]);
+
+  const updateOffset = (value) => {
+    setDragOffset(value);
+    onOffset(value);
+  };
+
+  const releaseSlider = () => {
+    if (!dragging || busy) return;
+    setDragging(false);
+    onConfirm(shownOffset);
+  };
+
   return (
     <div className={`w-full space-y-2 rounded-xl border p-2 shadow-xl ${cardTheme}`}>
       <div className="flex items-center justify-between gap-2">
@@ -75,14 +96,27 @@ function SliderCaptcha({ challenge, offset, busy, copy, cardTheme, mutedText, on
           draggable="false"
           className="pointer-events-none absolute select-none drop-shadow-md"
           style={{
-            left: `${(Number(offset || 0) / width) * 100}%`,
+            left: `${(shownOffset / width) * 100}%`,
             top: `${(Number(challenge.piece_y || 0) / height) * 100}%`,
             width: `${(pieceWidth / width) * 100}%`,
             height: `${(pieceHeight / height) * 100}%`,
           }}
         />
       </div>
-      <input type="range" min="0" max={maximum} step="1" value={offset} disabled={busy} onChange={(event) => onOffset(Number(event.target.value))} aria-label={copy.captchaSlider} className="h-6 w-full cursor-grab accent-[#10B981] disabled:cursor-not-allowed" />
+      <input
+        type="range"
+        min="0"
+        max={maximum}
+        step="1"
+        value={shownOffset}
+        disabled={busy}
+        onChange={(event) => updateOffset(Number(event.target.value))}
+        onPointerDown={() => setDragging(true)}
+        onPointerUp={releaseSlider}
+        onPointerCancel={() => setDragging(false)}
+        aria-label={copy.captchaSlider}
+        className="h-6 w-full cursor-grab accent-[#10B981] disabled:cursor-not-allowed"
+      />
       <button type="button" disabled={busy} onClick={onConfirm} className="h-8 w-full rounded-lg bg-[#10B981] text-[12px] font-semibold text-white disabled:opacity-40">
         {busy ? copy.sendingCode : copy.captchaConfirm}
       </button>
