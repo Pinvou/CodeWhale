@@ -74,18 +74,29 @@ test('settings keeps the Web share card and the desktop panel separate', () => {
   assert.ok(settings.includes('WebAccessModal'));
 });
 
-test('the desktop panel owns a dedicated settings sub-page', () => {
-  assert.ok(settings.includes('id="remote"'), 'nav registers a remote-control section');
-  assert.ok(settings.includes("activeSection === 'remote'"), 'content routes the remote-control section');
-  assert.ok(settings.includes('const renderRemote'), 'the section has its own renderer');
-  assert.ok(settings.includes('const canDesktopRemoteControl = can(\'desktopRemoteControl\')'), 'the section is capability gated');
+test('the desktop panel is a second-level page under General, not a top-level tab', () => {
+  assert.ok(
+    !settings.includes('settings-section-remote') && !/<SectionButton id="remote"/.test(settings),
+    'the panel must not occupy a top-level sidebar tab',
+  );
+  assert.ok(settings.includes('testId="desktop-remote-control-entry"'), 'General exposes a sub-menu entry');
+  assert.ok(settings.includes("setActiveSection('remote')"), 'the entry opens the second-level page');
+  assert.ok(settings.includes('desktop-remote-control-back'), 'the second-level page offers a way back');
+  assert.ok(settings.includes("setActiveSection('general')"), 'the back action returns to General');
+  assert.ok(settings.includes("activeSection === 'remote'"), 'content routes the second-level page');
+  assert.ok(settings.includes('const renderRemote'), 'the second-level page has its own renderer');
+  assert.ok(settings.includes('const canDesktopRemoteControl = can(\'desktopRemoteControl\')'), 'the entry is capability gated');
   const generalBody = settings.slice(
     settings.indexOf('const renderGeneral'),
     settings.indexOf('const renderRemote'),
   );
-  assert.ok(generalBody.length > 0, 'general section must stay ahead of the remote section');
+  assert.ok(generalBody.length > 0, 'general section must stay ahead of the remote page');
   assert.ok(
     !generalBody.includes('ControlledDevicePanel'),
-    'the desktop panel must not be rendered inside the general section anymore',
+    'the panel itself must render on the second-level page, not inline in General',
+  );
+  assert.ok(
+    generalBody.includes('desktop-remote-control-entry'),
+    'the General body holds only the entry row, not the panel',
   );
 });

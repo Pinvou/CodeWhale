@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Monitor, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
@@ -2273,13 +2273,40 @@ const formatMemoryTime = (item, copy) => {
               onDisable={onDisableTeamRelay}
             />
           )}
+          {/* 桌面远程控制是「通用」下的二级菜单（口径同「帮助 → 行为分析」）：
+              入口行只负责跳转，真正的业务面板在 renderRemote 的子页里。 */}
+          {canDesktopRemoteControl && (
+          <IOSSection>
+            <IOSRow
+              label={t.uiSettings.remoteControl}
+              desc={settingsCopy.desktopRemoteControlEntryDesc}
+              onClick={() => setActiveSection('remote')}
+              testId="desktop-remote-control-entry"
+            >
+              <ChevronRight size={17} className="shrink-0 text-[#C7C7CC] dark:text-[#636366]" />
+            </IOSRow>
+          </IOSSection>
+          )}
         </>
         );
       };
 
-      // Windows 双端远程控制（DEV-21）：整块业务自「通用」迁到独立的二级页面，
+      // Windows 双端远程控制（DEV-21）：自「通用」以二级菜单进入，业务面板独占该子页，
       // 不再与外观/通知/语音等常规偏好混排（E2E-08 后续 UX 调整）。
-      const renderRemote = () => <ControlledDevicePanel t={t} bs={bs} supported />;
+      const renderRemote = () => (
+        <>
+          <button
+            type="button"
+            data-testid="desktop-remote-control-back"
+            onClick={() => setActiveSection('general')}
+            className="mb-4 inline-flex items-center gap-1 text-[13px] text-[#6E6E73] hover:text-[#1C1C1E] dark:text-[#98989D] dark:hover:text-[#F2F2F7]"
+          >
+            <ChevronLeft size={15} />
+            {settingsCopy.desktopRemoteControlBack}
+          </button>
+          <ControlledDevicePanel t={t} bs={bs} supported />
+        </>
+      );
       const renderModels = () => (
         <>
           {acpProvidersTabVisible && (
@@ -2687,7 +2714,6 @@ const formatMemoryTime = (item, copy) => {
               </div>
               <div className={`mt-7 mb-4 px-1 text-[12px] font-semibold max-sm:hidden text-[#8A8A8E] dark:text-[#8E8E93]`}>{t.uiSettings.system}</div>
               <div className="space-y-2 max-sm:flex max-sm:space-y-0 max-sm:gap-2">
-                {canDesktopRemoteControl && <SectionButton id="remote" icon={<Monitor size={17} />} label={t.uiSettings.remoteControl} active={activeSection === 'remote'} onSelect={setActiveSection} />}
                 {canUseSuperPermission && <SectionButton id="permissions" icon={<Wrench size={17} />} label={t.uiSettings.permissions} active={activeSection === 'permissions'} onSelect={setActiveSection} />}
                 {canUpdateApp && <SectionButton id="update" icon={<RefreshCw size={17} />} label={t.uiSettings.update} dot={hasUpdate} active={activeSection === 'update'} onSelect={setActiveSection} />}
                 <SectionButton id="help" icon={<MessageSquare size={17} />} label={t.uiSettings.help} active={activeSection === 'help'} onSelect={setActiveSection} />

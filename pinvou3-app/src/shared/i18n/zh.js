@@ -2065,3 +2065,6 @@ dictZh["remoteConversation"] = {
 
 // 「桌面远程控制」独立二级页面的侧栏标签（设置页分区调整）。
 dictZh.uiSettings.remoteControl = '桌面远程控制';
+// 「通用 → 桌面远程控制」二级菜单的入口说明与返回文案（口径同「帮助 → 行为分析」）。
+dictZh.uiSettingsDetail.desktopRemoteControlEntryDesc = '允许他人输入连接码连接本机，使用本机模型执行任务；可随时查看并断开。';
+dictZh.uiSettingsDetail.desktopRemoteControlBack = '返回通用';

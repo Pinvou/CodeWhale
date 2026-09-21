@@ -2097,3 +2097,7 @@ dictEn["remoteConversation"] = {
 
 // Sidebar label of the dedicated "Desktop Remote Control" settings sub-page.
 dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
+// Entry copy and back label of the "General → Desktop Remote Control" sub-menu
+// (same pattern as "Help & Feedback → Behavior analytics").
+dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
+dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
