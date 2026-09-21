@@ -1376,9 +1376,12 @@ impl ModelManager {
             let Ok(pkg) = mgr.fetch_and_store_scripts(&detail) else {
                 continue;
             };
-            match db::refresh_builtin_card_scripts(&card.summary.id, &pkg.scripts, &pkg.assets) {
-                Ok(true) => refreshed.push(card.summary.name.clone()),
-                _ => {}
+            // 只在"确实刷新了"时记一笔；Ok(false)（没变化）和 Err（这张卡刷不动）
+            // 都不该打断其余卡片。
+            if let Ok(true) =
+                db::refresh_builtin_card_scripts(&card.summary.id, &pkg.scripts, &pkg.assets)
+            {
+                refreshed.push(card.summary.name.clone());
             }
         }
         refreshed

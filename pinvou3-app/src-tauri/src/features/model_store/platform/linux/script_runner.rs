@@ -389,7 +389,9 @@ fn drain_lines(
         let idx_r = rest.find('\r');
         let (idx, skip) = match (idx_n, idx_r) {
             (None, None) => return rest,
-            (idx_n, Some(idx_r)) if idx_n.is_none() || idx_r < idx_n.unwrap() => {
+            // 回车在换行之前（或者压根没有换行）就按回车切。用 is_none_or 而不是
+            // `is_none() || … unwrap()`：后者要读的人自己去确认两个分支互斥。
+            (idx_n, Some(idx_r)) if idx_n.is_none_or(|n| idx_r < n) => {
                 let skip = if rest[idx_r..].starts_with("\r\n") {
                     2
                 } else {
@@ -578,11 +580,15 @@ pub fn run_script(
 
         // 脚本请求了输入：等界面把答案送回来，期间不判 idle 超时。
         if let Some(until) = prompt_deadline {
-            let slot = opts
-                .control
-                .prompt
-                .as_ref()
-                .expect("有待答提示就一定注册过应答槽");
+            // 有待答提示就一定注册过应答槽——prompt_deadline 只在解析到提示行时
+            // 设置，而那一步要求 control.prompt 存在。这里仍然不用 expect：
+            // 脚本执行线程 panic 的后果是卡片被锁死到超时（spawn_op 的
+            // catch_unwind 兜得住线程，兜不住用户那张卡）。槽真没了就当没人能
+            // 回答，撤掉待答状态让 idle 超时按正常路径收场。
+            let Some(slot) = opts.control.prompt.as_ref() else {
+                prompt_deadline = None;
+                continue;
+            };
             if slot.is_aborted() {
                 cancel_requested = true;
                 cancel_deadline = Instant::now() + cancel_grace;

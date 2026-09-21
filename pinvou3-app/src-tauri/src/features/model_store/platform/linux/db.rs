@@ -1060,23 +1060,9 @@ mod tests {
         );
 
         let builtin = get_store_model("builtin-card").unwrap().unwrap();
-        assert!(
-            builtin
-                .scripts_content
-                .get("deploy")
-                .unwrap()
-                .content
-                .contains("新脚本")
-        );
+        assert!(builtin.scripts_content["deploy"].content.contains("新脚本"));
         let store = get_store_model("store-card").unwrap().unwrap();
-        assert!(
-            store
-                .scripts_content
-                .get("deploy")
-                .unwrap()
-                .content
-                .contains("旧脚本")
-        );
+        assert!(store.scripts_content["deploy"].content.contains("旧脚本"));
 
         // 内容没变时不该白写一遍（会把 scripts_fetched_at 刷掉、界面上凭空出现"更新过"）
         assert!(
@@ -1148,7 +1134,7 @@ mod tests {
         .unwrap();
         assert_eq!(rec.status, "downloaded");
         assert_eq!(
-            rec.scripts.get("deploy").unwrap().as_deref(),
+            rec.scripts["deploy"].as_deref(),
             Some("https://example.com/deploy.sh")
         );
 

@@ -171,7 +171,13 @@ impl DownloadQueue {
         if st.waiting.front().map(|(t, _)| *t) != Some(ticket) {
             return false;
         }
-        let (_, run_id) = st.waiting.pop_front().expect("刚判断过队首存在");
+        // 上面刚比过队首就是这张票，pop 理应有值。仍然不用 expect：这是下载队列
+        // 的心脏，panic 一次就会让整个队列再也排不动（spawn_op 的 catch_unwind
+        // 兜得住线程，兜不住这把锁背后的状态）。真拿不到就当这次没排上，
+        // 调用方下一轮自然重试。
+        let Some((_, run_id)) = st.waiting.pop_front() else {
+            return false;
+        };
         st.running.insert(run_id);
         true
     }
