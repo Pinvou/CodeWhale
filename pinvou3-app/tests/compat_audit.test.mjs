@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import postcss from 'postcss';
+import tailwindcss from 'tailwindcss';
 
 import { runAudit } from '../scripts/audit-compat.mjs';
 import { staticRuntimeScripts } from '../vite.config.mjs';
@@ -17,6 +20,7 @@ import { staticRuntimeScripts } from '../vite.config.mjs';
 const testRoot = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(testRoot, '..');
 const readSrc = (...parts) => fs.readFileSync(path.join(appRoot, 'src', ...parts), 'utf8');
+const { browserslistToTargets, transform: transformCss } = createRequire(import.meta.url)('lightningcss');
 
 test('static runtime scripts and HTML inline scripts stay within the Safari 14 baseline', () => {
   // A non-existent dist dir keeps the test hermetic: it must pass in CI
@@ -25,10 +29,10 @@ test('static runtime scripts and HTML inline scripts stay within the Safari 14 b
   assert.deepEqual(violations, []);
 });
 
-test('legacy polyfills load before tailwind runtime and app modules in every entry', () => {
+test('legacy polyfills load before app modules in every entry', () => {
   const entries = [
-    ['index.html', /%BASE_URL%vendor\/tailwind\.js/, /app\/main\.jsx/],
-    ['reader.html', /vendor\/tailwind\.js/, /app\/reader-main\.jsx/],
+    ['index.html', /app\/main\.jsx/],
+    ['reader.html', /app\/reader-main\.jsx/],
     ['pet.html', /app\/pet-main\.jsx/],
   ];
   for (const [entry, ...anchors] of entries) {
@@ -42,16 +46,22 @@ test('legacy polyfills load before tailwind runtime and app modules in every ent
   }
 });
 
-test('vendored markdown/purify scripts stay retired and the polyfill ships as a static script', () => {
+test('vendored browser runtimes stay retired and the polyfill ships as a static script', () => {
   assert.ok(staticRuntimeScripts.has('shared/legacy-polyfills.js'));
+  assert.ok(!staticRuntimeScripts.has('vendor/tailwind.js'));
   assert.ok(!staticRuntimeScripts.has('vendor/marked.min.js'));
   assert.ok(!staticRuntimeScripts.has('vendor/purify.min.js'));
   assert.ok(!fs.existsSync(path.join(appRoot, 'src/vendor/marked.min.js')));
   assert.ok(!fs.existsSync(path.join(appRoot, 'src/vendor/purify.min.js')));
+  assert.ok(!fs.existsSync(path.join(appRoot, 'src/vendor/tailwind.js')));
   // The retired vendor scripts must not be reintroduced through index.html
   // either — a stray tag would 404 on every startup.
   assert.ok(!/vendor\/marked\.min\.js/.test(readSrc('index.html')));
   assert.ok(!/vendor\/purify\.min\.js/.test(readSrc('index.html')));
+  for (const entry of ['index.html', 'reader.html']) {
+    assert.ok(!/vendor\/tailwind\.js/.test(readSrc(entry)));
+    assert.ok(!/tailwind\.config/.test(readSrc(entry)));
+  }
 });
 
 test('the auditor flags violations under minifier-shaped syntax (complete walker contract)', () => {
@@ -93,15 +103,19 @@ test('the auditor flags violations under minifier-shaped syntax (complete walker
   }
 });
 
-test('vendored tailwind emits inset utilities as physical properties (Safari 14.0 lacks the inset shorthand)', () => {
-  const tailwind = readSrc('vendor', 'tailwind.js');
-  assert.ok(
-    tailwind.includes('["inset",["top","right","bottom","left"]]'),
-    'inset emission table must stay expanded to top/right/bottom/left; '
-      + 'refreshing vendor/tailwind.js from cdn.tailwindcss.com drops this patch',
-  );
-  assert.ok(
-    !tailwind.includes('["inset",["inset"]]'),
-    'the shorthand-only inset mapping must not come back',
-  );
+test('build-time tailwind emits inset utilities as physical properties for Safari 14.0', async () => {
+  const result = await postcss([
+    tailwindcss({
+      content: [{ raw: '<div class="fixed inset-0"></div>', extension: 'html' }],
+      corePlugins: { preflight: false },
+    }),
+  ]).process('@tailwind utilities;', { from: undefined });
+  const compiled = transformCss({
+    filename: 'tailwind.css',
+    code: Buffer.from(result.css),
+    targets: browserslistToTargets(['safari 14']),
+    minify: true,
+  }).code.toString();
+  assert.match(compiled, /\.inset-0\{top:0;bottom:0;left:0;right:0\}/);
+  assert.doesNotMatch(compiled, /\binset:0/);
 });
