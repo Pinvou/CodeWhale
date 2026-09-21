@@ -2,11 +2,11 @@
 //
 // 与 Web 分享卡片完全独立：这里只展示本机被控状态、5 分钟短期连接码、
 // 已授权工作区、模型来源和只读的审批请求。B 端没有 Allow/Approve 入口，
-// 只能查看、停止任务或立即断开；所有文案走三语词条，倒计时通过
+// 只能查看或停止任务；所有文案走三语词条，倒计时通过
 // aria-live 节流播报，键盘可达。
 
 import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Wrench, X } from '../../components/icons.jsx';
+import { RefreshCw, Wrench } from '../../components/icons.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge } from '../../hooks/useBridge.js';
 
@@ -164,9 +164,6 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         <div className="settings-actions">
           <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || busy === 'refresh'}>
             <RefreshCw aria-hidden="true" /> {busy === 'refresh' ? copy.refreshing : copy.refresh}
-          </button>
-          <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('disconnect', (remote) => remote.controlledDisconnectNow())} disabled={!active || busy === 'disconnect'}>
-            <X aria-hidden="true" /> {copy.disconnectNow}
           </button>
         </div>
       </div>

@@ -14,7 +14,7 @@ const settings = source('features/settings/SettingsView.jsx');
 const CONTROLLED_KEYS = [
   'section', 'title', 'desc', 'enable', 'disable', 'statusIdle', 'statusWaiting', 'statusConnected',
   'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'modelSource', 'workspacesTitle',
-  'readOnlyNotice', 'disconnectNow', 'stopTasks', 'pendingPermissions', 'noAllowControl', 'unsupported',
+  'readOnlyNotice', 'stopTasks', 'pendingPermissions', 'noAllowControl', 'unsupported',
   // E2E-08 后的零配置体验：服务端点（生产/测试）内置在应用中，用户不需要环境变量。
   'endpointLabel', 'endpointProduction', 'endpointTest', 'endpointHint',
 ];
@@ -49,6 +49,12 @@ test('the panel never exposes an approval control', () => {
   assert.ok(!/\bAllow\b|\bApprove\b|allowButton|approveButton/.test(panelCode));
   assert.ok(panelCode.includes('noAllowControl'));
   assert.ok(panelCode.includes('readOnlyNotice'));
+});
+
+test('the panel uses the remote-control toggle as its only disconnect action', () => {
+  assert.ok(panel.includes('remote.controlledStop()'));
+  assert.ok(!panel.includes('controlledDisconnectNow'));
+  assert.ok(!panel.includes('disconnectNow'));
 });
 
 test('the panel is keyboard reachable and screen-reader friendly', () => {
