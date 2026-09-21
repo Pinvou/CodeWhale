@@ -385,8 +385,9 @@ const LONG_RUNNING_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// 某类脚本允许静默多久。`None` = 用 script_runner 的默认值（300 秒）。
 ///
-/// 只有 `stop` 走默认值：`docker compose down` 本身就会一路打印容器停止的进度，
-/// 五分钟不出声确实是卡住了。其余四类全部放宽，各有各的理由：
+/// 走默认值的是 `stop` 和 `download_model`——它们都**一路有输出**，五分钟不出声
+/// 确实就是卡住了：`docker compose down` 会逐个打印容器停止的进度，下载则按
+/// `LMM_PROGRESS_BYTES=` 持续汇报字节数。其余四类全部放宽，各有各的理由：
 ///
 /// - `install_engine`：几 GB 的 `docker pull`；
 /// - `deploy`：可能要 docker build；
@@ -1302,9 +1303,14 @@ impl ModelManager {
             // 94 秒打出十几轮——既刷屏，也会把下游（远端服务、系统授权代理这类
             // 一次只服务一个请求的东西）打得更惨。
             //
-            // 指数退避但封顶 30 秒：真正的网络抖动几秒就恢复，封顶是为了别让一次
-            // 长下载在末尾干等几分钟。取消信号在退避期间要能立刻生效，所以分片睡。
-            let backoff = Duration::from_secs(2u64.saturating_pow(attempt.min(4)).min(30));
+            // 指数退避，实际封顶 16 秒（2^4）：真正的网络抖动几秒就恢复，封顶是为了
+            // 别让一次长下载在末尾干等几分钟。取消信号在退避期间要能立刻生效，
+            // 所以分片睡。
+            //
+            // 这里原来写的是「封顶 30 秒」并跟着一个 `.min(30)`——而指数部分已经被
+            // `attempt.min(4)` 钳在 2^4=16，那个 `.min(30)` 永远不生效。注释说 30、
+            // 代码给 16，两边对不上；以代码的实际行为为准，把死代码去掉。
+            let backoff = Duration::from_secs(2u64.saturating_pow(attempt.min(4)));
             let deadline = Instant::now() + backoff;
             while Instant::now() < deadline {
                 if control.cancelled() {
