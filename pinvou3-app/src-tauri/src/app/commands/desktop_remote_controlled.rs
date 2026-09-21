@@ -174,7 +174,7 @@ pub async fn desktop_remote_controlled_start(
 }
 
 #[tauri::command]
-pub fn desktop_remote_controlled_refresh(
+pub async fn desktop_remote_controlled_refresh(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
@@ -183,10 +183,30 @@ pub fn desktop_remote_controlled_refresh(
     if let Some(generation) = manager.current_generation() {
         relay.stop_controller_relay(&generation);
     }
-    manager.begin_refresh().map_err(controlled_error)?;
-    let status = manager.status();
-    emit_status(&app, &status);
-    Ok(status)
+    let refresh = manager.begin_refresh().map_err(controlled_error)?;
+    let operation = manager
+        .complete_refresh_revoked(refresh)
+        .map_err(controlled_error)?;
+    let done = ControlledRelayWorker::start(
+        app.clone(),
+        relay.inner().clone(),
+        operation,
+        std::sync::Arc::new(
+            super::desktop_remote_controller_business::DesktopControlledBusiness {
+                app: app.clone(),
+            },
+        ),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    match done.await {
+        Ok(Ok(status)) => {
+            emit_status(&app, &status);
+            Ok(status)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("pairing_registration_failed".to_owned()),
+    }
 }
 
 #[tauri::command]
