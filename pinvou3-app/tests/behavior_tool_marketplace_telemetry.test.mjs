@@ -51,8 +51,9 @@ test('tool identity is reduced to a controlled backend registry', () => {
   ]) {
     assert.match(command, new RegExp(`"${event}" => "${event}"`));
   }
-  assert.match(command, /tool_registry_key\(raw_tool\)/);
-  assert.match(command, /event\.tool\([^]*?"",[^]*?tool_type/);
+  assert.match(command, /tool_registry_key\(raw_tool_key\)/);
+  assert.match(command, /let raw_tool_name = request\.tool_name\.as_deref\(\)\.unwrap_or\(raw_tool_key\)/);
+  assert.match(command, /event = event\.tool\([^]*?tool_registry_key\(raw_tool_key\)[^]*?raw_tool_name[^]*?tool_type/);
   assert.match(telemetry, /"canva-mcp" => "canva"/);
   assert.match(telemetry, /_ => "custom"/);
   assert.doesNotMatch(view, /trackToolBehavior\([^]*?toolName:/);

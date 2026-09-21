@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use deepseek_tui::AppMode;
@@ -42,7 +43,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine::{
-    AppEngine, EngineTurnSignal, TranscriptOperation, TurnLifecycle, TurnReservation,
+    AppEngine, EngineTurnSignal, TranscriptOperation, TurnIdentity, TurnLifecycle, TurnReservation,
+    dispatch_turn_bound_cancel,
 };
 #[cfg(any(feature = "benchmark-hooks", test))]
 use crate::features::assistant::eval::{EvalModelSelection, EvalSuiteModelSnapshot, ModelIdentity};
@@ -79,6 +81,16 @@ fn should_reap_idle_engine(
         && !scheduled_running
         && !is_active_session
         && idle_for_secs >= IDLE_EVICT_AFTER_SECS
+}
+
+/// Rebind eviction recheck (pure function, unit-testable; review #463
+/// eviction-tail TOCTOU): only genuine turn activity blocks the reclaim — an
+/// in-flight/reserved turn (reserve occupies the lifecycle before the gate is
+/// taken) or a running scheduled round. Unlike the idle reaper there is no
+/// idle-duration or active-session gate: a rebound session must be reclaimed
+/// even when recently active, so the next turn respawns in the new directory.
+fn rebind_evictable(turn_active: bool, scheduled_running: bool) -> bool {
+    !turn_active && !scheduled_running
 }
 
 /// `evict_if_idle` 的锁内复核（纯函数，便于单测）：快照后活动时钟必须未前进
@@ -272,6 +284,8 @@ where
     store.delete_scheduled_run(session_id, expected_task_id)
 }
 
+/// 共享删除路径:普通聊天删除与契约测试都经由它,持有与懒加载/发送完全
+/// 相同的 turn gate,防止排队发送在引擎回收与磁盘删除之间复活会话。
 async fn delete_chat_session_with_gate<F, Fut, G>(
     turn_locks: &SessionTurnLocks,
     store: &SessionStore,
@@ -359,6 +373,83 @@ where
     true
 }
 
+/// How long the rebind eviction tail waits for a session's turn gate before
+/// giving up and leaving the session alone (review #463 round-8 minor 4).
+/// A scheduled round holds that gate for its WHOLE duration, so delegating to
+/// the unbounded [`evict_if_idle_with_gates`] would stall the rebind command —
+/// and the process-wide rebind gate behind it — for minutes, and the round
+/// would still not be reported afterwards. The eviction is best-effort by
+/// design, so a gate that is still held after this bound is treated as "not
+/// idle": nothing is touched and the command reports the session as post-busy.
+/// Comfortably longer than any normal send's gate hold, so ordinary turns are
+/// still observed rather than skipped.
+const REBIND_EVICT_GATE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Rebind eviction tail skeleton (review #463 M1 + eviction-tail TOCTOU,
+/// extended in round 8 by M2 and minor 4): the idle-gated take runs under the
+/// turn gate + runtime lock, and a successful take ALSO drops the per-session
+/// shell state under the same gates.
+///
+/// Unlike [`evict_if_idle_with_gates`] BOTH gates — the turn gate and the
+/// runtime lock — are acquired under a timeout (see
+/// [`REBIND_EVICT_GATE_TIMEOUT`]) and a timeout counts as "not evicted",
+/// keeping the command responsive. The runtime lock needs its own timeout
+/// because a cold spawn holds it for many seconds, far beyond any turn gate
+/// wait (round-8 should-fix 4).
+///
+/// Both registries have to go. `SessionShellManagers::for_session` is
+/// `entry().or_insert_with` and the manager's cwd is pinned at construction,
+/// so a surviving manager would keep executing bare shell commands in the old
+/// directory while the rebuilt engine runs in the new one — split-brain
+/// inside one turn (M1). `SessionTurnShellTasks::for_session` is
+/// `entry().or_insert_with` too and its registry pins that same shell
+/// manager, so a surviving entry would resolve the next turn's scope against
+/// the OLD manager: the baseline diff and the end-of-turn cleanup kills would
+/// miss the jobs the turn actually started, leaving detached/background jobs
+/// running (round-8 M2). This mirrors `forget_session`, which removes both;
+/// the lifecycle is deliberately NOT touched here (an unsubmitted reservation
+/// must survive and submit to the rebuilt engine), which is why
+/// `forget_session` itself is not reused.
+///
+/// The reset happens inside the gated section so a new turn cannot slip in
+/// between and rebuild either registry against the new workspace only to have
+/// it dropped afterwards.
+async fn rebind_evict_with_gates<T, Take, TakeFut, Reclaim, ReclaimFut>(
+    turn_locks: &SessionTurnLocks,
+    runtime_locks: &SessionTurnLocks,
+    shell_managers: &SessionShellManagers,
+    turn_shell_tasks: &SessionTurnShellTasks,
+    session_id: &str,
+    take_entry: Take,
+    reclaim: Reclaim,
+) -> bool
+where
+    Take: FnOnce() -> TakeFut,
+    TakeFut: Future<Output = Option<T>>,
+    Reclaim: FnOnce(T) -> ReclaimFut,
+    ReclaimFut: Future<Output = ()>,
+{
+    let turn_lock = turn_locks.for_session(session_id).await;
+    let Ok(_turn) = tokio::time::timeout(REBIND_EVICT_GATE_TIMEOUT, turn_lock.lock()).await else {
+        return false;
+    };
+    let runtime_lock = runtime_locks.for_session(session_id).await;
+    let Ok(_runtime) = tokio::time::timeout(REBIND_EVICT_GATE_TIMEOUT, runtime_lock.lock()).await
+    else {
+        // A spawn in flight holds this lock far longer than a turn gate wait;
+        // skipping this round is the honest answer, same as a turn-gate
+        // timeout.
+        return false;
+    };
+    let Some(entry) = take_entry().await else {
+        return false;
+    };
+    reclaim(entry).await;
+    turn_shell_tasks.remove(session_id);
+    shell_managers.remove(session_id);
+    true
+}
+
 /// 两个 epoch 快照是否仍指向同一轮次，供 cancel 跨 turn_lock 边界守护使用。
 ///
 /// `(None, None)`（空闲→空闲）视为匹配：空闲会话的 cancel 本就是 no-op，
@@ -426,9 +517,17 @@ fn should_retry_cascade(lifecycle: Option<&TurnLifecycle>) -> bool {
 /// 跳过 `cancel_current` / `cascade_cancel`，否则会命中新轮已
 /// `reset_cancel_token` 的活跃 token（reviewer 点 6）。
 ///
-/// `cancel_current` 同步取消 engine 的当前 token（幂等，阶段一、二都执行；
-/// 实现方可顺带 try_send 级联取消，尽力而为）。`cascade_cancel` 异步发送
-/// 级联取消（CancelSubAgents），**只在阶段二持 `turn_lock` 时 await 调用**：
+/// `cancel_current` synchronously cancels the engine's current token
+/// (idempotent; runs in both phase one and phase two; implementations may
+/// best-effort `try_send` a cascade cancel alongside). It receives the
+/// same-source turn identity that `arm_pending_cancel_and_cancel` captured
+/// under the **same lifecycle state lock** (`Some`): the closure runs inside
+/// that critical section and arbitrates turn-bound on that identity, never
+/// on a stale view taken outside the lock. The defensive branches without a
+/// lifecycle receive `None` and converge with the terminal-closing verdict:
+/// disposition only, never fire (issue #254). `cascade_cancel` asynchronously
+/// sends the cascade cancel (CancelSubAgents) and is **only awaited in phase
+/// two while holding the `turn_lock`**:
 /// 保证级联取消在释放 turn gate 前完成入队——下一轮 `SendMessage` 必须等
 /// 同一把 `turn_lock`（`send_reserved_user_message`），因此级联取消必先于
 /// 新轮消息入队，FIFO 保证 engine 先取消旧轮子智能体、后启动新轮，迟到的
@@ -498,7 +597,7 @@ async fn cancel_turn_with_gates<G, E, EFut, X, F, FFut, C>(
 where
     E: FnMut() -> EFut,
     EFut: Future<Output = Option<G>>,
-    X: FnMut(&G),
+    X: FnMut(&G, Option<TurnIdentity>),
     F: FnMut(&G) -> FFut,
     FFut: Future<Output = ()>,
     C: Fn(&Arc<TurnLifecycle>, u64) -> bool,
@@ -528,11 +627,13 @@ where
             // （reviewer 点 8）。epoch 不匹配时返回 false 且不执行取消闭包，
             // 阶段二持锁复查 generation 会整体 no-op（reviewer 点 6）。
             if let Some(lifecycle) = turn_lifecycles.get(session_id) {
-                lifecycle.arm_pending_cancel_and_cancel(target.unwrap_or(0), steer_mode, || {
-                    cancel_current(&engine)
-                });
+                lifecycle.arm_pending_cancel_and_cancel(
+                    target.unwrap_or(0),
+                    steer_mode,
+                    |identity| cancel_current(&engine, identity),
+                );
             } else {
-                cancel_current(&engine);
+                cancel_current(&engine, None);
             }
         }
     }
@@ -588,17 +689,25 @@ where
                     .and_then(|lc| lc.current_turn_generation()),
             ) {
                 if let Some(lifecycle) = lifecycle.as_ref() {
-                    // arm 用发起时快照 target（已校验仍是 target 轮），转发器在
-                    // TurnStarted 后 take_pending_cancel 时再次校验 epoch，
-                    // 跨轮 stale pending 被丢弃。arm + cancel_current 在 state
-                    // 锁内原子完成（与阶段一同理，reviewer 点 8）：reserve_turn
-                    // 需要同一把 state 锁，无法在「校验/arm」与「取消」之间插入
-                    // 轮次切换。返回 false = 复查通过后轮次已切换：跳过 cancel
-                    // 及级联副作用，避免命中新轮活跃 token（reviewer 点 6）。
+                    // Arm with the target snapshotted at initiation
+                    // (already re-checked to still be the target turn).
+                    // Forwarder-side consumption is gated solely by the
+                    // submission token echo (no epoch gate: an autonomous
+                    // lifecycle inside the submit→TurnStarted window may
+                    // legitimately advance the epoch before the target's own
+                    // echo arrives — see `take_pending_cancel`), so a stale
+                    // pending never leaks across turns. arm + cancel_current
+                    // complete atomically under the state lock (same as
+                    // phase one, reviewer point 8): reserve_turn needs the
+                    // same state lock and cannot interleave a turn switch
+                    // between "verify/arm" and "cancel". Returning false =
+                    // the turn already switched after the re-check passed:
+                    // skip cancel and the cascade side effects to avoid
+                    // hitting the new turn's live token (reviewer point 6).
                     let armed = lifecycle.arm_pending_cancel_and_cancel(
                         target.unwrap_or(0),
                         steer_mode,
-                        || cancel_current(&engine),
+                        |identity| cancel_current(&engine, identity),
                     );
                     if armed {
                         // 级联取消必须在释放 turn gate 前完成入队（reviewer 点 4）：
@@ -615,7 +724,7 @@ where
                     }
                     // 被拒：轮次已切换，不得取消新轮 engine / 子智能体。
                 } else {
-                    cancel_current(&engine);
+                    cancel_current(&engine, None);
                     // lifecycle 缺失（无活跃轮）时 cascade 无意义：级联取消
                     // CancelSubAgents 针对的是 engine 当前子智能体，空闲 engine
                     // 上没有活跃子智能体，不发也无损（保持原行为）。
@@ -633,6 +742,17 @@ where
         cancellation.cleanup().await;
     }
     (target, claimed_unsubmitted)
+}
+
+/// get_or_spawn 的陈旧判定：运行时模型变更（`requires_rebuild_from`）或 mcp
+/// 配置修订递增（`mark_mcp_config_updated`）任一命中，下一轮都要安全重建。
+/// 独立成纯函数：无真实引擎即可与 `requires_rebuild_from` 同层钉住行为。
+fn entry_is_fresh(
+    requires_model_rebuild: bool,
+    entry_mcp_config_revision: u64,
+    current_mcp_config_revision: u64,
+) -> bool {
+    !requires_model_rebuild && entry_mcp_config_revision == current_mcp_config_revision
 }
 
 /// 池里一个 session 的常驻条目:engine + 它专属的 event forwarder task。
@@ -709,25 +829,15 @@ pub type EngineToolFactory =
     Arc<dyn Fn(&AppHandle, &str) -> Vec<Arc<dyn ToolSpec>> + Send + Sync + 'static>;
 pub type ToolPolicy = Arc<dyn Fn(&AppHandle) -> Vec<String> + Send + Sync + 'static>;
 
-fn should_sync_session(_is_scheduled: bool, _has_messages: bool) -> bool {
-    // SyncSession carries both transcript history and the authoritative Session
-    // identity. An empty ordinary Session still needs it: otherwise the freshly
-    // spawned Engine keeps its generated internal id, and every SessionUpdated
-    // snapshot is rejected by the outer forwarder as belonging to another
-    // Session. That leaves only the admitted user fallback durable while the
-    // streamed assistant reply exists in memory alone.
-    true
-}
-
 /// 多 session engine 池。Tauri State 持有,`Clone` 廉价(内部全是 Arc)。
 #[derive(Clone)]
 pub struct EnginePool {
     entries: Arc<Mutex<HashMap<String, EngineEntry>>>,
     runtime_model_locks: SessionTurnLocks,
     model_update_revisions: ModelUpdateRevisions,
+    mcp_config_revision: Arc<AtomicU64>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     eval_model_snapshots: EvalModelSnapshots,
-    mcp_config_revision: Arc<AtomicU64>,
     turn_locks: SessionTurnLocks,
     turn_lifecycles: SessionTurnLifecycles,
     shell_managers: SessionShellManagers,
@@ -875,9 +985,9 @@ impl EnginePool {
             entries: Arc::new(Mutex::new(HashMap::new())),
             runtime_model_locks: SessionTurnLocks::default(),
             model_update_revisions: ModelUpdateRevisions::default(),
+            mcp_config_revision: Arc::new(AtomicU64::new(0)),
             #[cfg(any(feature = "benchmark-hooks", test))]
             eval_model_snapshots: EvalModelSnapshots::default(),
-            mcp_config_revision: Arc::new(AtomicU64::new(0)),
             turn_locks: SessionTurnLocks::default(),
             turn_lifecycles: SessionTurnLifecycles::default(),
             shell_managers: SessionShellManagers::default(),
@@ -1023,13 +1133,16 @@ impl EnginePool {
         tools
     }
 
-    /// 该会话的项目执行根（绑项目 code 会话 = 项目目录）。解析失败 → None
-    /// （项目级技能不参与组合目录，行为与未绑定一致）。
+    /// Project-skills source root for the session: returns the bound real
+    /// directory only when the session is actually bound (a native code
+    /// session's project directory, or a plain chat session's user workspace
+    /// binding — the explicit `SessionRoots::bound` signal); unbound or
+    /// resolution failure -> None (project-level skills stay out of play).
     fn project_workspace_for(&self, session_id: &str) -> Option<std::path::PathBuf> {
         self.store
             .session_roots(session_id)
             .ok()
-            .map(|roots| roots.execution)
+            .and_then(|roots| roots.bound.then_some(roots.execution))
     }
 
     /// skill 双 scope 治理：事件驱动**增量重写**所有在线会话的组合目录
@@ -1052,25 +1165,6 @@ impl EnginePool {
                 );
             })
             .await;
-        }
-    }
-
-    /// 同步版在线会话组合目录重写（**仅供不在 tokio runtime 上的同步调用方**：
-    /// `blocking_lock` 在 runtime 线程上会 panic，async 命令必须改用
-    /// [`Self::refresh_live_sessions_skills`]）。组合目录体量小、diff 重写极快。
-    pub fn refresh_live_sessions_skills_blocking(&self) {
-        let sids: Vec<String> = {
-            let entries = self.entries.blocking_lock();
-            entries.keys().cloned().collect()
-        };
-        for sid in sids {
-            let scope = self.bridge.session_policy(&sid).mode();
-            let project_workspace = self.project_workspace_for(&sid);
-            crate::features::assistant::skill_materialization::rewrite_session_skills(
-                &sid,
-                scope,
-                project_workspace.as_deref(),
-            );
         }
     }
 
@@ -1105,7 +1199,7 @@ impl EnginePool {
         };
         let prepared =
             prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model).await?;
-        Ok(self.finalize_runtime_bridge(bridge, &prepared, false).await)
+        Ok(Self::finalize_runtime_bridge(bridge, &prepared, false).await)
     }
 
     async fn prepare_runtime_model(
@@ -1163,8 +1257,12 @@ impl EnginePool {
         Ok((bridge, prepared, pins_scheduled_model))
     }
 
+    /// No `&self`: this function does not read pool state, it only
+    /// orchestrates the spawn finish. Making it an associated function lets
+    /// unit tests drive the real injection block directly (a real EnginePool
+    /// cannot be constructed in unit tests; wiring coverage lives in
+    /// `probed_facts_wiring_tests`).
     async fn finalize_runtime_bridge(
-        &self,
         mut bridge: Pinvou3Bridge,
         prepared: &PreparedRuntimeModel,
         pins_scheduled_model: bool,
@@ -1190,37 +1288,77 @@ impl EnginePool {
                 .await,
             );
         }
-        // Local vLLM: correct the request model name against the server's
-        // actual served list (resolve_served_model). A configured name the
-        // server lists must be kept verbatim — LM Studio/Ollama list every
-        // downloaded model in /v1/models, so the first entry is unrelated to
-        // the user's pick, and substituting it is exactly the reported
-        // "conversation names A, engine loads B" chain break. Only follow the
-        // served name on a single-model server that does not expose the
-        // configured name. On probe failure (vLLM down) keep the configured
-        // value; cloud providers are not probed. OpenAI-compatible endpoints
-        // detected as vLLM take the same path (provider() maps them to
-        // "vllm").
-        if bridge.provider() == "vllm" {
-            // The served-name probe carries the same inference-same-origin
-            // credential (authenticated vLLM 401s on /v1/models; on probe
-            // failure the configured model name is kept).
-            let api_key = bridge.api_key();
-            if let Some(mut model) = bridge.effective_model_owned() {
-                let (served, max_len) = crate::features::monitor::resolve_served_model(
-                    &bridge.base_url(),
-                    Some(api_key.as_str()),
-                    &model.model,
-                )
-                .await;
-                if served != model.model && !pins_scheduled_model {
-                    model.model = served;
-                    bridge.session_model = Some(model);
-                }
-                bridge.probed_context_tokens = max_len;
-            }
+        // Operator-owned routes (local vLLM + custom OpenAI-compatible /
+        // custom, see `SavedModel::is_operator_owned_endpoint`) probe
+        // `/v1/models` once at spawn, bringing back the matched entry's own
+        // context window and self-reported output limit for
+        // `route_limits_for_model` to min-tighten (on probe failure both are
+        // None, falling back to configured values / window tiers). vLLM
+        // routes additionally correct the served name
+        // (resolve_served_model): a configured name that the server lists
+        // must be kept verbatim — LM Studio/Ollama list every downloaded
+        // model, the first entry is unrelated to the user's pick, and
+        // substituting it is exactly the reported "conversation names A,
+        // engine loads B" chain break; only follow the served name on a
+        // single-model server that does not expose the configured name.
+        // Non-vLLM operator-owned routes do no name correction and adopt
+        // facts only when the configured name exactly hits the list
+        // (`adopts_probed_facts`) — a single-entry "borrowed name" returns
+        // facts belonging to another model and must not be misattributed.
+        // Cloud presets and coding_plan are not operator-owned and are not
+        // probed.
+        let is_vllm_route = bridge.provider() == "vllm";
+        if let Some(model) = bridge.effective_model_owned() {
+            Self::adopt_probed_endpoint_facts(
+                &mut bridge,
+                model,
+                is_vllm_route,
+                pins_scheduled_model,
+            )
+            .await;
         }
         bridge
+    }
+
+    /// Spawn-time probe and fact adoption (the testable core of
+    /// `finalize_runtime_bridge`; wiring unit tests live in
+    /// `probed_facts_wiring_tests` at the end of this file): operator-owned
+    /// routes (or vLLM routes) probe `/v1/models`, and vLLM additionally
+    /// corrects the served name (keeping the configured name when
+    /// `pins_scheduled_model`); whether facts are adopted is decided by
+    /// `adopts_probed_facts`, and on adoption both `probed_context_tokens`
+    /// and `probed_output_tokens` are written. On probe failure (endpoint
+    /// unreachable / name not matched) both facts are None and the route
+    /// falls back to configured values / window tiers.
+    async fn adopt_probed_endpoint_facts(
+        bridge: &mut Pinvou3Bridge,
+        mut model: SavedModel,
+        is_vllm_route: bool,
+        pins_scheduled_model: bool,
+    ) {
+        if !(is_vllm_route || model.is_operator_owned_endpoint()) {
+            return;
+        }
+        // The probe carries the same credential as real inference
+        // (authenticated endpoints 401 on `/v1/models` without credentials;
+        // on probe failure the configured values are kept).
+        let api_key = bridge.api_key();
+        let (served, max_len, max_output) = crate::features::monitor::resolve_served_model(
+            &bridge.base_url(),
+            Some(api_key.as_str()),
+            &model.model,
+        )
+        .await;
+        let adopts =
+            crate::features::monitor::adopts_probed_facts(is_vllm_route, &model.model, &served);
+        if is_vllm_route && served != model.model && !pins_scheduled_model {
+            model.model = served;
+            bridge.session_model = Some(model);
+        }
+        if adopts {
+            bridge.probed_context_tokens = max_len;
+            bridge.probed_output_tokens = max_output;
+        }
     }
 
     async fn fresh_bridge_for_policy(
@@ -1235,9 +1373,7 @@ impl EnginePool {
         let (bridge, prepared, pins_scheduled_model) = self
             .prepare_runtime_model(session_id, scheduled_unattended, eval_model)
             .await?;
-        Ok(self
-            .finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model)
-            .await)
+        Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
     /// 取该 session 的 engine,没有就 spawn 一个。spawn 后若该 session 有磁盘历史
@@ -1273,9 +1409,11 @@ impl EnginePool {
         let stale = {
             let mut entries = self.entries.lock().await;
             if let Some(entry) = entries.get(session_id) {
-                if !prepared.requires_rebuild_from(&entry.runtime_model)
-                    && entry.mcp_config_revision == mcp_config_revision
-                {
+                if entry_is_fresh(
+                    prepared.requires_rebuild_from(&entry.runtime_model),
+                    entry.mcp_config_revision,
+                    mcp_config_revision,
+                ) {
                     return Ok(entry.engine.clone());
                 }
             }
@@ -1286,9 +1424,8 @@ impl EnginePool {
         }
 
         let is_scheduled = self.store.scheduled_profile(session_id).is_some();
-        let bridge = self
-            .finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model)
-            .await;
+        let bridge =
+            Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
         // shell 执行目录与 engine cwd 同源：统一走 SessionStore::session_roots
         // （scheduled = automation workspace，原生代码绑项目会话 = 项目目录）。
         // 解析失败（如 scheduled 会话缺 profile）时维持原回退：bridge 侧解析。
@@ -1355,7 +1492,7 @@ impl EnginePool {
         // 的内部 session id 对齐到预创建的持久化会话。跳过会让首轮 SessionUpdated
         // 因 id mismatch 被拒绝，最终只落盘 user 而丢失 assistant。
         match self.store.load(session_id) {
-            Ok(saved) if should_sync_session(is_scheduled, !saved.messages.is_empty()) => {
+            Ok(saved) => {
                 if let Err(error) = engine
                     .sync_session(session_id.to_string(), saved.messages)
                     .await
@@ -1378,7 +1515,6 @@ impl EnginePool {
                     turn_lifecycle.prune_stale_transcript_rules();
                 }
             }
-            Ok(_) => {}
             Err(error) => {
                 let _ = engine.handle.send(Op::Shutdown).await;
                 forwarder.abort();
@@ -1475,6 +1611,52 @@ impl EnginePool {
                 }
             },
             |entry| self.reclaim_engine_entry(session_id, entry),
+        )
+        .await
+    }
+
+    /// Rebind eviction (review #463 M1 + eviction-tail TOCTOU, round-8 M2):
+    /// same turn gate + runtime lock as [`evict`](Self::evict), but the entry
+    /// is taken only when the session is still idle at recheck time — a turn
+    /// that started after the command layer's post-migration recheck keeps its
+    /// engine instead of being cancelled into an Interrupted terminal.
+    /// A successful take also resets the per-session shell state (via
+    /// [`rebind_evict_with_gates`]): the shell manager's cwd is pinned at
+    /// construction, so a surviving manager would keep running bare shell
+    /// commands in the old directory while the rebuilt engine runs in the new
+    /// one, and the turn-scope registry pins that same manager, so it would
+    /// diff the next turn's baseline and clean up its jobs against the old
+    /// one. The lifecycle is deliberately NOT forgotten — an unsubmitted
+    /// reservation must survive and submit to the rebuilt engine (same
+    /// semantics as reclaim).
+    ///
+    /// The take yields `Some(None)` for an idle session with no resident
+    /// engine: there is nothing to reclaim, but the shell state may still
+    /// exist from an earlier turn and must be reset. Returns false when the
+    /// session was busy at recheck OR when its turn gate could not be
+    /// acquired within [`REBIND_EVICT_GATE_TIMEOUT`] — in both cases nothing
+    /// was touched and the command reports the session as post-busy.
+    pub async fn evict_if_idle_for_rebind(&self, session_id: &str) -> bool {
+        rebind_evict_with_gates(
+            &self.turn_locks,
+            &self.runtime_model_locks,
+            &self.shell_managers,
+            &self.turn_shell_tasks,
+            session_id,
+            || async {
+                if !rebind_evictable(
+                    self.is_turn_active(session_id),
+                    self.scheduled_running_sessions.lock().contains(session_id),
+                ) {
+                    return None;
+                }
+                Some(self.entries.lock().await.remove(session_id))
+            },
+            |entry| async move {
+                if let Some(entry) = entry {
+                    self.reclaim_engine_entry(session_id, entry).await;
+                }
+            },
         )
         .await
     }
@@ -1698,12 +1880,6 @@ impl EnginePool {
     }
 
     #[cfg(any(feature = "benchmark-hooks", test))]
-    pub(crate) fn tested_eval_identity(&self) -> ModelIdentity {
-        let prefs = UserPrefs::load();
-        identity_for_active_model(&self.bridge, &prefs)
-    }
-
-    #[cfg(any(feature = "benchmark-hooks", test))]
     pub(crate) fn pin_active_eval_suite_model(&self) -> Result<EvalSuiteModelSnapshot> {
         let prefs = UserPrefs::load();
         let saved_model = prefs
@@ -1725,25 +1901,6 @@ impl EnginePool {
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub(crate) fn discard_eval_suite_model(&self, suite: &EvalSuiteModelSnapshot) {
         self.eval_model_snapshots.discard_suite(suite);
-    }
-
-    /// Resolve and privately pin the complete SavedModel while returning only a
-    /// non-sensitive opaque selection to the evaluation layer. Callers that do
-    /// not pass the selection to `prepare_eval_session` must explicitly discard it.
-    #[cfg(any(feature = "benchmark-hooks", test))]
-    pub(crate) fn pin_eval_model_selection(&self, model_id: &str) -> Result<EvalModelSelection> {
-        let prefs = UserPrefs::load();
-        let (saved, identity) = resolve_eval_model_selection_from(
-            &self.bridge,
-            &prefs.advanced.saved_models,
-            model_id,
-        )?;
-        Ok(self.eval_model_snapshots.pin(saved, identity))
-    }
-
-    #[cfg(any(feature = "benchmark-hooks", test))]
-    pub(crate) fn discard_eval_model_selection(&self, selection: &EvalModelSelection) {
-        self.eval_model_snapshots.discard(selection);
     }
 
     /// 创建并加载一次性评测会话。评测 runner 预先决定 session ID，以便报告和
@@ -1836,8 +1993,8 @@ impl EnginePool {
         session_id: &str,
         enabled: bool,
     ) -> Result<()> {
-        if enabled && !self.multi_agent_mode_available(session_id) {
-            anyhow::bail!("当前会话不支持 Pinvou 多智能体模式");
+        if enabled && !self.swarm_mode_available(session_id) {
+            anyhow::bail!("当前会话不支持 Pinvou 蜂群模式");
         }
         let _reservation = self.turn_lifecycles.for_session(session_id).reserve()?;
         let turn_lock = self.turn_locks.for_session(session_id).await;
@@ -1937,6 +2094,27 @@ impl EnginePool {
         self.bridge.multi_agent_mode_available(session_id)
     }
 
+    /// Whether the swarm regime (lifted delegation caps, expert roster, swarm
+    /// prompt) may apply to this session. Scheduled sessions always assemble
+    /// plain engine config (engine.rs's `scheduled_profile` gate), so the
+    /// swarm regime must follow the same exclusion: turn assembly must not
+    /// inject swarm copy the engine would not honor, and the toggle must not
+    /// be offered. Kept separate from [`Self::multi_agent_mode_available`],
+    /// which intentionally stays the sole gate for transcript listing —
+    /// scheduled runs can still delegate through the bare `agent` tool and
+    /// their records stay readable.
+    pub(crate) fn swarm_mode_available(&self, session_id: &str) -> bool {
+        Self::swarm_mode_available_for(
+            self.multi_agent_mode_available(session_id),
+            self.store.scheduled_profile(session_id).is_some(),
+        )
+    }
+
+    /// Testable body of [`Self::swarm_mode_available`].
+    fn swarm_mode_available_for(multi_agent_available: bool, scheduled: bool) -> bool {
+        multi_agent_available && !scheduled
+    }
+
     /// Resolve the session-owned delegated-agent runtime-state root.
     /// For project-bound Code sessions this is distinct from the execution root.
     pub(crate) fn session_state_root(
@@ -1950,7 +2128,7 @@ impl EnginePool {
     }
 
     /// 发用户消息给指定 session 的 engine(没起则 lazy spawn)。
-    #[allow(dead_code)]
+    #[cfg(any(feature = "benchmark-hooks", test))]
     pub async fn send_user_message(
         &self,
         session_id: &str,
@@ -1961,7 +2139,7 @@ impl EnginePool {
         let reservation = self.reserve_turn(session_id)?;
         let display_message = user_display_message(content.clone());
         let expert_snapshot = (self.store.mode_state(session_id).multi_agent
-            && self.multi_agent_mode_available(session_id))
+            && self.swarm_mode_available(session_id))
         .then(ExpertRosterSnapshot::capture);
         self.send_reserved_user_message(
             session_id,
@@ -2141,6 +2319,23 @@ impl EnginePool {
                     .insert(session_id.to_string());
             }
         }
+        // Round-8 should-fix 5: the slot used to be removed only after the
+        // round future resolved; a panic inside a round skipped the removal
+        // and permanently wedged the new rebind fences for this session until
+        // restart. A drop guard removes it on every exit path.
+        struct ScheduledRunningSlotGuard<'a> {
+            slots: &'a SyncMutex<HashSet<String>>,
+            session_id: &'a str,
+        }
+        impl Drop for ScheduledRunningSlotGuard<'_> {
+            fn drop(&mut self) {
+                self.slots.lock().remove(self.session_id);
+            }
+        }
+        let _running_slot = ScheduledRunningSlotGuard {
+            slots: &self.scheduled_running_sessions,
+            session_id,
+        };
         let result = async {
             self.touch_engine_activity(session_id).await;
             let profile = self
@@ -2209,7 +2404,7 @@ impl EnginePool {
         }
         .await;
 
-        self.scheduled_running_sessions.lock().remove(session_id);
+        drop(_running_slot);
         self.evict_locked(session_id).await;
         result
     }
@@ -2251,6 +2446,17 @@ impl EnginePool {
         // 时刻的轮次 epoch，并发请求中排队较晚的 C2 在 turn_lock 释放后若发现
         // 目标轮已结束（新轮已 reserve），整体 no-op，不误取消新轮。
         let app = &self.app;
+        // The turn-bound arbitration runs inside the cancel closure on the
+        // identity that `arm_pending_cancel_and_cancel` snapshots under the
+        // lifecycle state lock at dispatch time — not on a view taken here.
+        // A snapshot at this point would be two lock acquisitions away from
+        // the closure (the `get_engine` await sits in between): an engine
+        // self-started follow-up turn (idle sub-agent completion /
+        // background shell wake / goal continuation) swaps the shared token
+        // before the forwarder observes `TurnStarted`, and a `TurnStarted`
+        // for the target turn can land inside the await — only the
+        // same-lock identity is fresh enough to arbitrate on (issue #254
+        // review round).
         let (target, claimed_unsubmitted) = cancel_turn_with_gates(
             &self.turn_locks,
             &self.turn_lifecycles,
@@ -2274,8 +2480,25 @@ impl EnginePool {
             // 烧钱的后台子智能体。try_send 不阻塞、通道有空位时立即入队
             // （早于下一轮 SendMessage）；通道满（容量 32）时放弃，由阶段二
             // 及 mismatch 补发路径持锁 await 保证送达（reviewer 点 9 + G1）。
-            |engine| {
-                engine.cancel_current_with_mode(steer_mode);
+            |engine, identity| {
+                // Turn-bound arbitration on the engine slot (issue #254),
+                // shared with the wiring tests via `dispatch_turn_bound_cancel`.
+                // The epoch re-checks alone still admit a stale view: a
+                // delayed forwarder can leave the lifecycle looking like the
+                // target turn while the slot already holds a self-started
+                // follow-up turn's live token. The dispatch therefore fires
+                // only when the identity names the slot's turn; unobserved
+                // (submit→TurnStarted) and terminal-closing identities
+                // converge on disposition-only, and the genuinely pending
+                // target is delivered by the forwarder's turn-bound
+                // pending_cancel replay.
+                // Known boundary: the cascade cancel (try_send below) is not
+                // converged with the arbitration — a bound skip still cancels
+                // every subagent the engine currently hosts. Clearing turn
+                // N's leftover subagents is the stop contract and N+1's
+                // just-spawned subagents are indistinguishable app-side; see
+                // the fork registration docs.
+                dispatch_turn_bound_cancel(engine, identity.as_ref(), steer_mode);
                 let _ = engine.handle.try_send(Op::CancelSubAgents);
             },
             // cascade_cancel：阶段二持 turn_lock 时 await 发送级联取消，保证在
@@ -2316,6 +2539,18 @@ impl EnginePool {
         // `idle_recheck` deliberately skips the re-issue — cancelling a
         // just-reserved turn here would break its admission contract, and
         // that turn's own step boundaries settle parked steers normally.
+        //
+        // Semantics boundary (registered for issue #254): this backstop only
+        // triggers on a stop issued while the lifecycle is already idle at
+        // entry — an intentional stop=clear (the user pressed ⏹ on a session
+        // the frontend still shows as busy). If the engine has self-started a
+        // follow-up turn the forwarder has not yet observed, this unbound
+        // fire hits that turn's live token on purpose: no target turn exists
+        // here, so there is no turn-bound arbitration to make. That is a
+        // different contract from the #254 misfire shape (a stop aimed at a
+        // turn that already ended), which the turn-bound dispatch intercepts:
+        // aimed stops always snapshot a Some target and never reach this
+        // branch.
         if !keep_inbox && target.is_none() {
             let still_idle = self
                 .turn_lifecycles
@@ -2382,10 +2617,11 @@ impl EnginePool {
         }
     }
 
-    /// pinvou3 工具开关(全局持久):把"被禁用的工具全名"(模型可见全名,小写)广播给
-    /// **所有在跑的 session engine** → 写入各自 config.disallowed_tools,下一轮即隐藏。
-    /// 没起的会话下次 spawn 时从持久列表读初值(build_engine_config),所以新窗口/新对话
-    /// 都继承同一份禁用状态。
+    /// pinvou3 工具开关(全局持久):把"不可用的工具全名"(开关关闭∪隐藏;模型可见
+    /// 全名,小写)广播给 **所有在跑的 session engine** → 写入各自
+    /// config.disallowed_tools,下一轮即隐藏。没起的会话下次 spawn
+    /// 时从持久列表读初值(build_engine_config),所以新窗口/新对话都继承同一份
+    /// 治理状态。
     pub async fn set_disallowed_all(&self, tools: Vec<String>) {
         let targets = self
             .entries
@@ -2950,18 +3186,21 @@ mod scheduled_model_tests {
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         }
     }
+    const TEST_SUBMISSION: &str = "sub-test";
     use super::{
         EvalModelSnapshots, ModelIdentity, ModelUpdateRevisions, Pinvou3Bridge,
-        PreparedRuntimeState, SESSION_MODEL_BINDING_STALE_ERROR, ScheduledUnattendedGuard,
-        SessionShellManagers, SessionTurnLifecycles, SessionTurnLocks, SessionTurnShellTasks,
-        TranscriptOperation, cancel_turn_with_gates, default_model_for_new_session_from,
-        delete_chat_session_with_gate, delete_scheduled_run_with_gate, delete_then_forget,
-        evict_if_idle_with_gates, generation_matches, identity_for_active_model,
-        identity_for_saved_model, quiesce_engine_before_reclaim, resolve_eval_model_selection_from,
-        resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
-        scheduled_profile_after_turn_gate, should_still_reap_after_snapshot, should_sync_session,
-        user_display_message,
+        PreparedRuntimeState, REBIND_EVICT_GATE_TIMEOUT, SESSION_MODEL_BINDING_STALE_ERROR,
+        ScheduledUnattendedGuard, SessionShellManagers, SessionTurnLifecycles, SessionTurnLocks,
+        SessionTurnShellTasks, TranscriptOperation, TurnIdentity, cancel_turn_with_gates,
+        default_model_for_new_session_from, delete_chat_session_with_gate,
+        delete_scheduled_run_with_gate, delete_then_forget, dispatch_turn_bound_cancel,
+        entry_is_fresh, evict_if_idle_with_gates, generation_matches, identity_for_active_model,
+        identity_for_saved_model, quiesce_engine_before_reclaim, rebind_evict_with_gates,
+        rebind_evictable, resolve_eval_model_selection_from, resolve_runtime_model_override,
+        resolve_scheduled_model, resolve_spawn_model, scheduled_profile_after_turn_gate,
+        should_still_reap_after_snapshot, user_display_message,
     };
+    use crate::features::assistant::engine::TurnBoundCancelOps;
     use crate::features::assistant::runtime_model::PreparedRuntimeModel;
     use crate::features::sessions::{ScheduledRunMode, ScheduledRunProfile, SessionStore};
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
@@ -3240,6 +3479,240 @@ mod scheduled_model_tests {
         assert!(evicted, "快照后无活动的空闲会话必须照常回收");
         assert!(!entry_present.load(Ordering::Acquire));
         assert!(reclaimed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn rebind_evictable_blocks_only_real_activity() {
+        // review #463: rebind eviction has no idle-duration or active-session
+        // gate — only an in-flight/reserved turn or a running scheduled round
+        // blocks the reclaim.
+        assert!(rebind_evictable(false, false));
+        assert!(!rebind_evictable(true, false));
+        assert!(!rebind_evictable(false, true));
+        assert!(!rebind_evictable(true, true));
+    }
+
+    #[tokio::test]
+    async fn rebind_eviction_resets_shell_state_for_idle_session() {
+        // review #463 M1/M2 regression: the per-session ShellManager pins its
+        // cwd at construction and `for_session` is entry().or_insert_with, so a
+        // manager surviving the rebind eviction would keep executing bare
+        // shell commands in the OLD directory while the rebuilt engine runs in
+        // the new one. The turn-scope registry pins that same manager, so it
+        // must go too — a surviving registry would diff the next turn's
+        // baseline and clean up its jobs against the old manager. The eviction
+        // tail must drop both under the gates.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let sid = "session-rebind-evict-idle";
+        let _lifecycle = lifecycles.for_session(sid);
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // Same take sequence as EnginePool::evict_if_idle_for_rebind: idle
+        // recheck via rebind_evictable, then the entry removal. A resident
+        // engine entry is reclaimed…
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let probe_reclaim = reclaimed.clone();
+        let probe_lifecycles = lifecycles.clone();
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            move || {
+                let probe_lifecycles = probe_lifecycles.clone();
+                async move {
+                    let turn_active = probe_lifecycles.get(sid).is_some_and(|lc| lc.is_active());
+                    rebind_evictable(turn_active, false).then_some(Some(()))
+                }
+            },
+            move |_| {
+                probe_reclaim.store(true, Ordering::Release);
+                async {}
+            },
+        )
+        .await;
+
+        assert!(evicted, "idle session must be evicted");
+        assert!(reclaimed.load(Ordering::Acquire));
+        assert!(
+            shell_managers.get(sid).is_none(),
+            "shell manager must be reset so the next turn rebuilds it against the rebound workspace"
+        );
+        assert!(
+            !turn_shell_tasks.has_registry(sid),
+            "turn-scope registry must be reset alongside the shell manager (round-8 M2)"
+        );
+
+        // …and an idle session WITHOUT a resident engine still gets both reset
+        // (take yields Some(None)): they may exist from an earlier turn even
+        // though the engine was already reclaimed.
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            || async { Some(None::<()>) },
+            |_| async {},
+        )
+        .await;
+        assert!(evicted);
+        assert!(
+            shell_managers.get(sid).is_none(),
+            "shell manager reset must not depend on a resident engine entry"
+        );
+        assert!(
+            !turn_shell_tasks.has_registry(sid),
+            "turn-scope registry reset must not depend on a resident engine entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_eviction_skips_turn_started_after_recheck() {
+        // review #463 eviction-tail TOCTOU regression: a turn that starts
+        // between the command layer's post-migration recheck and the eviction
+        // must NOT be killed — the idle recheck under the turn gate observes
+        // the reservation and skips the session entirely (no reclaim, no
+        // shell manager reset), leaving it for the post-busy report.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let sid = "session-rebind-evict-busy";
+        let lifecycle = lifecycles.for_session(sid);
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // A new turn wins the turn gate before the eviction (send path holds
+        // the gate while submitting); the eviction queues outside.
+        let gate = turn_locks.for_session(sid).await;
+        let blocker = gate.lock().await;
+
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let evict_locks = turn_locks.clone();
+        let evict_runtime_locks = runtime_locks.clone();
+        let evict_shell_managers = shell_managers.clone();
+        let evict_turn_shell_tasks = turn_shell_tasks.clone();
+        let evict_lifecycles = lifecycles.clone();
+        let probe_reclaim = reclaimed.clone();
+        let eviction = tokio::spawn(async move {
+            rebind_evict_with_gates(
+                &evict_locks,
+                &evict_runtime_locks,
+                &evict_shell_managers,
+                &evict_turn_shell_tasks,
+                sid,
+                move || {
+                    let evict_lifecycles = evict_lifecycles.clone();
+                    async move {
+                        let turn_active =
+                            evict_lifecycles.get(sid).is_some_and(|lc| lc.is_active());
+                        rebind_evictable(turn_active, false).then_some(())
+                    }
+                },
+                move |_| {
+                    probe_reclaim.store(true, Ordering::Release);
+                    async {}
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        // The turn starts after the command layer's recheck: reserve (does
+        // not take the gate) flips the lifecycle to active.
+        let reservation = lifecycle.reserve().expect("new turn reserve");
+        drop(blocker);
+        drop(gate);
+
+        let evicted = eviction.await.expect("eviction task joins");
+        assert!(!evicted, "a session with a fresh turn must be skipped");
+        assert!(
+            !reclaimed.load(Ordering::Acquire),
+            "no reclaim for a session that became busy"
+        );
+        assert!(
+            shell_managers.get(sid).is_some(),
+            "shell manager survives a skipped eviction"
+        );
+        assert!(
+            turn_shell_tasks.has_registry(sid),
+            "turn-scope registry survives a skipped eviction"
+        );
+        assert!(
+            reservation.ensure_active().is_ok(),
+            "the in-flight reservation must stay valid"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebind_eviction_gate_timeout_leaves_session_untouched() {
+        // review #463 round-8 minor 4 (the previously untested arm): a turn
+        // gate held longer than REBIND_EVICT_GATE_TIMEOUT — a scheduled round
+        // holds it for its WHOLE duration — must not stall the rebind command
+        // (and the process-wide rebind gate behind it). The eviction gives
+        // up, counts as not-idle so the command reports the session as
+        // post-busy, and touches nothing: no take, no reclaim, no shell-state
+        // reset.
+        let turn_locks = SessionTurnLocks::default();
+        let runtime_locks = SessionTurnLocks::default();
+        let shell_managers = SessionShellManagers::default();
+        let turn_shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-rebind-evict-gate-timeout";
+        let manager = shell_managers.for_session(sid, PathBuf::from("D:/old-root"));
+        turn_shell_tasks.for_session(sid, manager);
+
+        // The scheduled round holds the gate for its whole duration; the
+        // eviction queues outside until the bounded timeout fires.
+        let gate = turn_locks.for_session(sid).await;
+        let _blocker = gate.lock().await;
+
+        let take_ran = Arc::new(AtomicBool::new(false));
+        let probe_take = take_ran.clone();
+        let started = tokio::time::Instant::now();
+        let evicted = rebind_evict_with_gates(
+            &turn_locks,
+            &runtime_locks,
+            &shell_managers,
+            &turn_shell_tasks,
+            sid,
+            move || {
+                probe_take.store(true, Ordering::Release);
+                async { Some(()) }
+            },
+            |_| async {},
+        )
+        .await;
+
+        assert!(
+            !evicted,
+            "a gate held past the timeout counts as not idle (reported post-busy)"
+        );
+        assert!(
+            started.elapsed() >= REBIND_EVICT_GATE_TIMEOUT,
+            "the eviction waited the bounded timeout rather than the whole turn"
+        );
+        assert!(
+            !take_ran.load(Ordering::Acquire),
+            "the take closure must not run without the gate"
+        );
+        assert!(
+            shell_managers.get(sid).is_some(),
+            "shell state survives a timed-out eviction"
+        );
+        assert!(
+            turn_shell_tasks.has_registry(sid),
+            "turn-scope registry survives a timed-out eviction"
+        );
     }
 
     fn model(id: &str, wire_name: &str) -> SavedModel {
@@ -3565,14 +4038,6 @@ mod scheduled_model_tests {
     }
 
     #[test]
-    fn every_empty_session_is_synchronized_before_its_first_turn() {
-        assert!(should_sync_session(true, false));
-        assert!(should_sync_session(true, true));
-        assert!(should_sync_session(false, true));
-        assert!(should_sync_session(false, false));
-    }
-
-    #[test]
     fn unattended_policy_is_scoped_to_the_executor_turn() {
         let flag = Arc::new(AtomicBool::new(false));
         {
@@ -3598,15 +4063,14 @@ mod scheduled_model_tests {
     }
 
     #[test]
-    fn saved_model_update_revision_forces_next_turn_rebuild() {
-        let revisions = ModelUpdateRevisions::default();
-        let prepared = PreparedRuntimeModel::unchanged(model("model-1", "wire-model"));
-        let previous = PreparedRuntimeState::new(prepared.clone(), revisions.current("model-1"));
-
-        revisions.bump("model-1");
-        let after_save = PreparedRuntimeState::new(prepared, revisions.current("model-1"));
-
-        assert!(after_save.requires_rebuild_from(&previous));
+    fn mcp_config_revision_bump_forces_next_turn_rebuild() {
+        // mark_mcp_config_updated 契约的钉子（对偶模型路径 requires_rebuild_from
+        // 的判定）：模型未变、仅 mcp 配置修订递增时，旧 entry 对下一轮必须判
+        // 陈旧——plain 会话的引擎读仅 spawn 时重写的按会话派生 mcp 配置，
+        // 不重建则中途安装的 server 永不可见。
+        assert!(entry_is_fresh(false, 7, 7));
+        assert!(!entry_is_fresh(false, 7, 8), "mcp 配置修订递增必须触发重建");
+        assert!(!entry_is_fresh(true, 7, 7), "模型变更路径保持原有判定");
     }
 
     #[test]
@@ -3684,7 +4148,7 @@ mod scheduled_model_tests {
     fn turn_lifecycle_survives_engine_entry_removal_without_faking_idle_cancel() {
         let lifecycles = SessionTurnLifecycles::default();
         let engine_lifecycle = lifecycles.for_session("session-1");
-        engine_lifecycle.on_submitted();
+        engine_lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         drop(engine_lifecycle);
 
         let pool_lifecycle = lifecycles.get("session-1").expect("session lifecycle");
@@ -3706,6 +4170,21 @@ mod scheduled_model_tests {
             .err()
             .expect("steer without a live engine must fail");
         assert!(format!("{err:#}").contains("no live engine"));
+    }
+
+    #[test]
+    fn swarm_mode_availability_excludes_scheduled_sessions() {
+        // The swarm regime must track the engine-side scheduled_profile gate:
+        // a scheduled session assembles plain engine config, so its switch —
+        // even if still on — must not inject swarm copy, must refuse to
+        // enable, and must report unavailable to the frontend. Availability
+        // alone stays true for a plain session and false for an unsupported
+        // lane; transcript listing keeps using multi_agent_mode_available
+        // (scheduled runs delegate via bare `agent` and stay readable).
+        assert!(super::EnginePool::swarm_mode_available_for(true, false));
+        assert!(!super::EnginePool::swarm_mode_available_for(true, true));
+        assert!(!super::EnginePool::swarm_mode_available_for(false, true));
+        assert!(!super::EnginePool::swarm_mode_available_for(false, false));
     }
 
     #[test]
@@ -4035,7 +4514,7 @@ mod scheduled_model_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
-    /// Regression: the eval teardown paths (`ProductChatRuntime::close` /
+    /// Regression: the eval teardown paths (`EnginePoolRuntime::close` /
     /// `delete_eval_session`) reuse delete_chat_session, but submit already
     /// ran `timing::start_turn`; deletion must clear the session's unpaired
     /// queue key in ACTIVE_TURNS, or a single GAIA pass's ~165 create/delete
@@ -4140,7 +4619,7 @@ mod scheduled_model_tests {
         let lifecycle = lifecycles.for_session(sid);
         // turn1：on_submitted 激活（active+submitted+epoch 自增），使阶段一 cancel_engine
         // 能匹配 generation，且 finish_once 可 claim（需 submitted）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
 
         let gate = locks.for_session(sid).await;
         let blocker = gate.lock().await;
@@ -4171,7 +4650,7 @@ mod scheduled_model_tests {
                 || async { Some(()) },
                 // cancel_current：阶段一与阶段二复查都走这里：用计数区分。
                 // 阶段一（turn1）probe1 0→1；阶段二若误执行 probe2 置位。
-                move |_engine: &()| {
+                move |_engine: &(), _identity: Option<TurnIdentity>| {
                     let prev = probe1.fetch_add(1, Ordering::AcqRel);
                     if prev >= 1 {
                         probe2.store(true, Ordering::Release);
@@ -4254,7 +4733,7 @@ mod scheduled_model_tests {
             // get_engine：engine 在场。
             || async { Some(()) },
             // cancel_current：记录触发。
-            move |_engine: &()| {
+            move |_engine: &(), _identity: Option<TurnIdentity>| {
                 probe.store(true, Ordering::Release);
             },
             // cascade_cancel：fresh cancel 在阶段二 generation 匹配后必须被
@@ -4295,7 +4774,7 @@ mod scheduled_model_tests {
 
         let lifecycle = lifecycles.for_session(sid);
         // turn1：on_submitted 激活（active+submitted+epoch=1）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
 
         let gate = locks.for_session(sid).await;
         let blocker = gate.lock().await;
@@ -4317,7 +4796,7 @@ mod scheduled_model_tests {
                 // get_engine：engine 在场（阶段一与补发复查都返回 Some）。
                 || async { Some(()) },
                 // cancel_current：阶段一执行一次（取消旧轮）。
-                move |_engine: &()| {
+                move |_engine: &(), _identity: Option<TurnIdentity>| {
                     probe_cancel.store(true, Ordering::Release);
                 },
                 // cascade_cancel：新轮未提交 → mismatch 分支必须补发，不能因
@@ -4372,7 +4851,7 @@ mod scheduled_model_tests {
 
         let lifecycle = lifecycles.for_session(sid);
         // turn1：on_submitted 激活（epoch=1）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
 
         let gate = locks.for_session(sid).await;
         let blocker = gate.lock().await;
@@ -4390,7 +4869,7 @@ mod scheduled_model_tests {
                 sid,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 || async { Some(()) },
-                move |_engine: &()| {
+                move |_engine: &(), _identity: Option<TurnIdentity>| {
                     probe_cancel.store(true, Ordering::Release);
                 },
                 move |_engine: &()| {
@@ -4407,7 +4886,7 @@ mod scheduled_model_tests {
         // turn1 终态 → turn2 on_submitted 激活（epoch=2，submitted=true——
         // SendMessage 已入 engine，可能已启动新轮子代理）。
         assert!(lifecycle.finish_once(|| {}).is_some());
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
 
         // 释放 turn_lock：阶段二 current=Some(2) ≠ target=Some(1) → mismatch；
         // 新轮已提交 → 不得补发级联取消。
@@ -4445,7 +4924,7 @@ mod scheduled_model_tests {
 
         let lifecycle = lifecycles.for_session(sid);
         // turn1：on_submitted 激活（active+submitted+epoch=1）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
         let target = lifecycle.current_turn_generation().expect("turn1 epoch");
         assert_eq!(target, 1_u64);
 
@@ -4486,7 +4965,7 @@ mod scheduled_model_tests {
                 },
                 // cancel_current：阶段一触发一次（取消 T1），阶段二应因后置
                 // mismatch 跳过。
-                move |_engine: &()| {
+                move |_engine: &(), _identity: Option<TurnIdentity>| {
                     probe_cancel.fetch_add(1, Ordering::SeqCst);
                 },
                 // cascade_cancel：后置复查 mismatch + 新轮未提交 → 必须补发。
@@ -4561,7 +5040,7 @@ mod scheduled_model_tests {
                 // engine 不在场 → get_engine 返回 None → 不取消，走 claim_unsubmitted 分支。
                 || async { None::<()> },
                 // cancel_current：engine 不在场时不应被调用。
-                |_engine: &()| {},
+                |_engine: &(), _identity: Option<TurnIdentity>| {},
                 // cascade_cancel：engine 不在场，阶段二不调用。
                 |_engine: &()| async {},
                 move |lc, _target| {
@@ -4623,7 +5102,7 @@ mod scheduled_model_tests {
             // engine 不在场 → get_engine 返回 None → 不 cancel，走 claim_unsubmitted。
             || async { None::<()> },
             // cancel_current：engine 不在场，不应被调用。
-            |_engine: &()| {},
+            |_engine: &(), _identity: Option<TurnIdentity>| {},
             // cascade_cancel：engine 不在场，阶段二不调用。
             |_engine: &()| async {},
             // claim 闭包：模拟「generation 检查通过后、认领前」切轮，再用发起
@@ -4671,7 +5150,7 @@ mod scheduled_model_tests {
 
         let lifecycle = lifecycles.for_session(sid);
         // turn1：on_submitted 激活（active+submitted+epoch=1）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
 
         // 用 Notify 协调：探针先通知「已进入 get_engine 的 await」，挂起等待
         // release；主线程收到 entered 后推进轮次，再放行探针。
@@ -4719,7 +5198,7 @@ mod scheduled_model_tests {
                     }
                 },
                 // cancel_current：不应被调用（阶段一 await 后 epoch 不匹配）。
-                move |_engine: &()| {
+                move |_engine: &(), _identity: Option<TurnIdentity>| {
                     probe.store(true, Ordering::Release);
                 },
                 // cascade_cancel：generation 不匹配，不应被调用。
@@ -4752,6 +5231,544 @@ mod scheduled_model_tests {
     }
 
     #[tokio::test]
+    async fn terminal_closing_cancel_reaches_the_closure_for_disposition_only() {
+        // Guard face of the issue #254 terminal-closing residual window: when
+        // the lifecycle is inside terminal_closing (claimed, not yet
+        // finished), the arm's idle guard (`!active && !terminal_closing`)
+        // must NOT skip the closure — the production closure publishes the
+        // stop disposition in that window (foundation disposition-only: drop
+        // parked steers, latch the cancel reason). If the guard skipped it
+        // here, a ⏹ the user already pressed would lose its steer-loss
+        // contract. The token fire itself is blocked by the closure's
+        // DispositionOnly verdict (pure-function exhaustion in engine.rs);
+        // this test pins "the closure must be reached".
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-closing-cancel";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        // Terminal claim: active=false, submitted=false,
+        // terminal_closing=true, turn_id taken into the EmittedTerminal.
+        assert!(lifecycle.claim_terminal().is_some());
+
+        let closure_calls = Arc::new(AtomicU64::new(0));
+        let probe = closure_calls.clone();
+        let (target, claimed_unsubmitted) = cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(()) },
+            move |_engine: &(), _identity: Option<TurnIdentity>| {
+                probe.fetch_add(1, Ordering::AcqRel);
+            },
+            |_engine: &()| async {},
+            |_lc, _target| false,
+        )
+        .await;
+
+        // The closing window keeps the target epoch visible to the gates
+        // (same epoch accounting as current_turn_generation); the closure
+        // must run at least in phase one (phase two may run it again when no
+        // turn switch interleaves).
+        assert_eq!(
+            target,
+            Some(1),
+            "terminal closing must keep the target epoch visible to the gates"
+        );
+        assert!(
+            !claimed_unsubmitted,
+            "a submitted turn never takes the unsubmitted-claim path"
+        );
+        assert!(
+            closure_calls.load(Ordering::Acquire) >= 1,
+            "the cancel closure must run during terminal closing so the stop disposition is published"
+        );
+    }
+
+    /// Fake of the foundation r13+ turn-bound cancel contract: a shared slot
+    /// `{ turn_id, token }` swapped atomically at every turn start; a
+    /// turn-bound cancel fires only the named turn's token and publishes the
+    /// disposition only on match; the disposition-only entry never fires.
+    struct FakeTurnSlotEngine {
+        slot_turn_id: StdMutex<Option<String>>,
+        fired: StdMutex<Vec<String>>,
+        dispositions: AtomicU64,
+    }
+
+    impl FakeTurnSlotEngine {
+        fn installed_on(turn_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                slot_turn_id: StdMutex::new(Some(turn_id.to_string())),
+                fired: StdMutex::new(Vec::new()),
+                dispositions: AtomicU64::new(0),
+            })
+        }
+
+        fn fired_turns(&self) -> Vec<String> {
+            self.fired.lock().expect("fired").clone()
+        }
+
+        fn disposition_count(&self) -> u64 {
+            self.dispositions.load(Ordering::Acquire)
+        }
+    }
+
+    impl TurnBoundCancelOps for FakeTurnSlotEngine {
+        fn cancel_bound_turn(
+            &self,
+            turn_id: &str,
+            _mode: deepseek_tui::core::engine::CancelMode,
+        ) -> bool {
+            // Identity check and token resolution happen under the same slot
+            // lock (mirrors EngineHandle::cancel_turn).
+            let slot = self.slot_turn_id.lock().expect("slot");
+            if slot.as_deref() != Some(turn_id) {
+                return false;
+            }
+            drop(slot);
+            self.fired.lock().expect("fired").push(turn_id.to_string());
+            self.dispositions.fetch_add(1, Ordering::AcqRel);
+            true
+        }
+
+        fn publish_stop_disposition_only(&self, _mode: deepseek_tui::core::engine::CancelMode) {
+            self.dispositions.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Drive `cancel_turn_with_gates` with the production dispatch closure
+    /// (`dispatch_turn_bound_cancel`) against the fake slot engine, the same
+    /// wiring `EnginePool::cancel` uses.
+    async fn run_production_cancel_wiring(
+        locks: &SessionTurnLocks,
+        lifecycles: &SessionTurnLifecycles,
+        shell_tasks: &SessionTurnShellTasks,
+        sid: &str,
+        engine: &Arc<FakeTurnSlotEngine>,
+    ) -> (Option<u64>, bool) {
+        cancel_turn_with_gates(
+            locks,
+            lifecycles,
+            shell_tasks,
+            sid,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(engine.clone()) },
+            |engine, identity| {
+                dispatch_turn_bound_cancel(
+                    engine.as_ref(),
+                    identity.as_ref(),
+                    deepseek_tui::core::engine::CancelMode::StopDropInbox,
+                );
+            },
+            |_engine: &Arc<FakeTurnSlotEngine>| async {},
+            |_lc, _target| false,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn delayed_forwarder_stop_spares_the_self_started_followup_token() {
+        // The review-round regression for issue #254's submitted-but-
+        // unobserved window: the lifecycle still shows turn N as reserved and
+        // submitted (a delayed forwarder has not processed its
+        // `TurnStarted`), while the engine has already completed N and
+        // self-started the autonomous follow-up whose live token now occupies
+        // the slot. Issuing the stop here used to fall back to the unbound
+        // cancel and killed that follow-up. It must not: the closure takes
+        // the disposition-only verdict, the pending replay is armed, and the
+        // replay itself is dropped by the foundation identity check.
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-delayed-forwarder";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let epoch = lifecycle.current_turn_generation().expect("reserved epoch");
+        // The engine self-started N+1 before the forwarder observed anything.
+        let engine = FakeTurnSlotEngine::installed_on("turn-n-plus-1");
+
+        let (target, claimed_unsubmitted) =
+            run_production_cancel_wiring(&locks, &lifecycles, &shell_tasks, sid, &engine).await;
+
+        assert_eq!(target, Some(epoch), "the reserved turn stays the target");
+        assert!(
+            !claimed_unsubmitted,
+            "a submitted turn never takes the unsubmitted-claim path"
+        );
+        assert!(
+            engine.fired_turns().is_empty(),
+            "the follow-up turn's live token must stay uncancelled"
+        );
+        assert!(
+            engine.disposition_count() >= 1,
+            "the stop disposition (steer loss, cancel reason) must still be published"
+        );
+        // The forwarder's turn-bound replay is armed under the same lock the
+        // verdict was made in.
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
+            "the pending replay must be armed so the genuinely pending target is still deliverable"
+        );
+        // Simulate the replay once the delayed `TurnStarted(N)` is finally
+        // processed: the slot no longer names N, so the foundation drops it
+        // wholesale — no fire, no disposition.
+        let dispositions_before_replay = engine.disposition_count();
+        assert!(
+            !engine.cancel_bound_turn(
+                "turn-n",
+                deepseek_tui::core::engine::CancelMode::StopDropInbox
+            ),
+            "the replay for the already-finished turn must be dropped by the identity check"
+        );
+        assert!(
+            engine.fired_turns().is_empty(),
+            "the dropped replay must not fire any token"
+        );
+        assert_eq!(
+            engine.disposition_count(),
+            dispositions_before_replay,
+            "a dropped replay publishes no disposition"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_stop_replay_cancels_the_genuinely_pending_turn() {
+        // The other half of the submit→TurnStarted window (review round:
+        // "keep coverage that a genuinely pending target is eventually
+        // cancelled"): the engine has just admitted the pending turn N (its
+        // token is installed, `TurnStarted` still queued). The stop must not
+        // fire blind — but the armed pending replay delivers the cancel the
+        // moment the forwarder processes that `TurnStarted`.
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-genuine-pending";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let epoch = lifecycle.current_turn_generation().expect("reserved epoch");
+        // The engine admitted N; its `TurnStarted` is still queued.
+        let engine = FakeTurnSlotEngine::installed_on("turn-n");
+
+        let (target, _) =
+            run_production_cancel_wiring(&locks, &lifecycles, &shell_tasks, sid, &engine).await;
+
+        assert_eq!(target, Some(epoch));
+        assert!(
+            engine.fired_turns().is_empty(),
+            "no unscoped fire may happen while the identity is unobserved"
+        );
+        assert!(
+            engine.disposition_count() >= 1,
+            "the stop disposition must still be published"
+        );
+        // The forwarder processes the queued `TurnStarted(N)`: it takes the
+        // armed cancel and replays it bound to that turn id — the slot names
+        // N, so it fires.
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
+            "the armed pending cancel must be consumable by the forwarder"
+        );
+        assert!(
+            engine.cancel_bound_turn(
+                "turn-n",
+                deepseek_tui::core::engine::CancelMode::StopDropInbox
+            ),
+            "the turn-bound replay must hit the genuinely pending turn"
+        );
+        assert_eq!(
+            engine.fired_turns(),
+            vec!["turn-n".to_string()],
+            "the replay must fire exactly the pending turn's token"
+        );
+    }
+
+    #[tokio::test]
+    async fn overtaking_self_started_turn_started_cannot_consume_the_replay() {
+        // The remaining #254 window (P1 review round, submission
+        // correlation): the stop was armed inside the submit→TurnStarted
+        // window, and a runtime self-started follow-up's `TurnStarted`
+        // overtook the submitted turn's in the forwarder stream. Epoch alone
+        // cannot tell the two events apart, so the first arrival used to
+        // consume the pending replay and — the slot naming the overtaking
+        // turn — cancelled N+1 while the stop intended for N was lost. The
+        // foundation now echoes a host-supplied submission id on every
+        // host-submitted turn's `TurnStarted` and never tags a self-started
+        // one: the forwarder's consumption gate refuses the overtaking
+        // arrival, the replay stays armed, and the submitted turn's own
+        // echo delivers the cancel to exactly that turn.
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-overtaking-start";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let epoch = lifecycle.current_turn_generation().expect("reserved epoch");
+        // The engine admitted the submitted turn N; a self-started N+1's
+        // `TurnStarted` overtakes N's in the event stream.
+        let engine = FakeTurnSlotEngine::installed_on("turn-n");
+
+        let (target, _) =
+            run_production_cancel_wiring(&locks, &lifecycles, &shell_tasks, sid, &engine).await;
+        assert_eq!(target, Some(epoch));
+        assert!(
+            engine.fired_turns().is_empty(),
+            "arming must not fire any token"
+        );
+
+        // The overtaking self-started `TurnStarted` carries no submission
+        // id: the forwarder gate must refuse it — the replay is neither
+        // consumed nor redirected onto the overtaking turn.
+        assert!(
+            lifecycle.take_pending_cancel(None).is_none(),
+            "an overtaking self-started TurnStarted must not consume the replay"
+        );
+        assert!(
+            engine.fired_turns().is_empty(),
+            "no cancel may reach the overtaking turn through the replay"
+        );
+        // A foreign submitted id must not consume it either.
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some("sub-other-turn"))
+                .is_none(),
+            "a foreign submission echo must not consume the replay"
+        );
+        // The submitted turn's own `TurnStarted` arrives: the gate accepts
+        // the matching echo and the forwarder replays bound to that turn —
+        // the slot names N, so it fires exactly there.
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
+            "the replay must stay armed for the submitted turn's own echo"
+        );
+        assert!(
+            engine.cancel_bound_turn(
+                "turn-n",
+                deepseek_tui::core::engine::CancelMode::StopDropInbox
+            ),
+            "the replay must land on the submitted turn, not the overtake"
+        );
+        assert_eq!(
+            engine.fired_turns(),
+            vec!["turn-n".to_string()],
+            "the user's stop for N must be delivered to N"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_stop_replay_survives_an_autonomous_lifecycle_before_the_target_starts() {
+        // The full production sequence behind the #254 replay gate (review
+        // round: "keep the pending submission's identity valid across
+        // unrelated autonomous lifecycle events"): the stop is armed inside
+        // the submit→TurnStarted window of the submitted turn N, and an
+        // untagged autonomous turn not only starts before N (its
+        // `TurnStarted` must not consume the replay) but also runs to
+        // completion. Its terminal reopens the gate, so N's own
+        // `TurnStarted` arrives at an idle lifecycle and advances the epoch
+        // as newly-active. The consumption gate is the submission token, not
+        // the epoch: N's echo must still deliver the user's stop even though
+        // the arming-time epoch no longer equals the current one. Driving
+        // the lifecycle methods in forwarder order (started → terminal →
+        // target start) is what moves the epoch; handing `take_pending_cancel`
+        // a hand-held arming epoch can never see it.
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-overtaking-full-lifecycle";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let armed_epoch = lifecycle.current_turn_generation().expect("armed epoch");
+        // The engine admitted N; a self-started N+1's `TurnStarted` overtakes
+        // N's in the event stream.
+        let engine = FakeTurnSlotEngine::installed_on("turn-n");
+
+        let (target, _) =
+            run_production_cancel_wiring(&locks, &lifecycles, &shell_tasks, sid, &engine).await;
+        assert_eq!(target, Some(armed_epoch));
+
+        // Forwarder order 1: the overtaking self-started `TurnStarted`
+        // (untagged) merges into the still-active submitted lifecycle and
+        // must leave the replay armed.
+        lifecycle.on_started("turn-n-plus-1".to_string());
+        assert_eq!(
+            lifecycle.current_turn_generation(),
+            Some(armed_epoch),
+            "merging the overtake into the active lifecycle must not advance the epoch"
+        );
+        assert!(
+            lifecycle.take_pending_cancel(None).is_none(),
+            "the untagged overtake must not consume the replay"
+        );
+
+        // Forwarder order 2: the autonomous turn runs to completion; its
+        // terminal closes the merged lifecycle and reopens the reserve gate.
+        assert!(
+            lifecycle.finish_once(|| {}).is_some(),
+            "the autonomous turn's terminal must close the lifecycle"
+        );
+
+        // Forwarder order 3: N's own `TurnStarted` arrives with the matching
+        // echo. The lifecycle is idle again, so the start is newly-active and
+        // bumps the epoch past the arming value — the token still delivers.
+        lifecycle.on_started("turn-n".to_string());
+        let replay_epoch = lifecycle.current_turn_generation().unwrap_or(0);
+        assert_ne!(
+            replay_epoch, armed_epoch,
+            "the target's own start must be newly-active after the autonomous terminal"
+        );
+        let (replay_armed_epoch, mode) = lifecycle
+            .take_pending_cancel(Some(TEST_SUBMISSION))
+            .expect("the matching echo must deliver the armed stop across the epoch bump");
+        assert_eq!(replay_armed_epoch, armed_epoch);
+        assert_eq!(
+            mode,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            "the replay must carry the arming-time disposition mode"
+        );
+        assert!(
+            engine.cancel_bound_turn(
+                "turn-n",
+                deepseek_tui::core::engine::CancelMode::StopDropInbox
+            ),
+            "the replay must land on the submitted turn N"
+        );
+        assert_eq!(
+            engine.fired_turns(),
+            vec!["turn-n".to_string()],
+            "the user's stop must reach N, not the completed autonomous turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn bound_stop_hits_the_observed_turn_and_skips_a_moved_on_slot() {
+        // Bound-verdict wiring: with the turn id observed, the dispatch fires
+        // exactly that turn through the foundation entry; when the slot has
+        // already moved on, the identity check skips wholesale — no fire and
+        // no disposition, because the newer turn belongs to a generation this
+        // stop never aimed at.
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-bound-hit";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        lifecycle.on_started("turn-n".to_string());
+
+        // Hit: the slot still names the observed turn.
+        let engine = FakeTurnSlotEngine::installed_on("turn-n");
+        let (target, _) =
+            run_production_cancel_wiring(&locks, &lifecycles, &shell_tasks, sid, &engine).await;
+        assert_eq!(target, Some(1));
+        // The gates run the cancel closure in both phases — idempotent on the
+        // foundation (an already-cancelled token stays cancelled).
+        let fired = engine.fired_turns();
+        assert!(
+            !fired.is_empty() && fired.iter().all(|id| id == "turn-n"),
+            "the bound cancel must fire only the observed turn's token"
+        );
+        assert!(
+            engine.disposition_count() >= 1,
+            "a delivered bound cancel publishes the stop disposition"
+        );
+
+        // Skip: the engine already moved on to a self-started follow-up; the
+        // stale bound cancel must be dropped wholesale. End the observed turn
+        // through the authoritative terminal path first, then reserve and
+        // start the next user turn.
+        assert!(lifecycle.claim_terminal().is_some());
+        lifecycle.finish_terminal_emission();
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        lifecycle.on_started("turn-n-plus-1".to_string());
+        let engine = FakeTurnSlotEngine::installed_on("turn-n-plus-2-auto");
+        let dispositions_before = engine.disposition_count();
+        run_production_cancel_wiring(&locks, &lifecycles, &shell_tasks, sid, &engine).await;
+        // The observed turn N+1 is the target but the slot names the
+        // self-started N+2: the foundation identity check skips it.
+        assert!(
+            engine.fired_turns().is_empty(),
+            "the follow-up turn's token must not be fired by a stale bound cancel"
+        );
+        assert_eq!(
+            engine.disposition_count(),
+            dispositions_before,
+            "a skipped bound cancel publishes no disposition"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_closing_stop_spares_the_followup_token_but_publishes_disposition() {
+        // Terminal closing x engine at N+1 (the review-found P2 window): the
+        // target turn already ended, the slot holds a self-started follow-up
+        // turn's live token. The stop must publish its disposition (steer
+        // loss contract) and never fire that token.
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "session-closing-vs-followup";
+
+        let lifecycle = lifecycles.for_session(sid);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        assert!(lifecycle.claim_terminal().is_some());
+        let engine = FakeTurnSlotEngine::installed_on("turn-n-plus-1-auto");
+
+        let identities_seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen = identities_seen.clone();
+        cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || async { Some(engine.clone()) },
+            move |engine: &Arc<FakeTurnSlotEngine>, identity: Option<TurnIdentity>| {
+                if let Some(seen_identity) = &identity {
+                    seen.lock().expect("seen").push(seen_identity.clone());
+                }
+                dispatch_turn_bound_cancel(
+                    engine.as_ref(),
+                    identity.as_ref(),
+                    deepseek_tui::core::engine::CancelMode::StopDropInbox,
+                );
+            },
+            |_engine: &Arc<FakeTurnSlotEngine>| async {},
+            |_lc, _target| false,
+        )
+        .await;
+
+        let seen = identities_seen.lock().expect("seen");
+        assert!(
+            !seen.is_empty(),
+            "the closure must run during terminal closing"
+        );
+        assert!(
+            seen.iter().all(|identity| identity.closing),
+            "the dispatch must see the closing discriminator"
+        );
+        assert!(
+            engine.fired_turns().is_empty(),
+            "no token may fire while the target turn has already ended"
+        );
+        assert!(
+            engine.disposition_count() >= 1,
+            "the stop disposition must be published during terminal closing"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_cancel_is_armed_before_cancel_current_in_phase_two() {
         // reviewer 点 2 的确定性回归：阶段二必须先 `arm_pending_cancel` 再
         // `cancel_current`。若顺序颠倒（先 cancel 后 arm）：
@@ -4772,7 +5789,7 @@ mod scheduled_model_tests {
         let lifecycle = lifecycles.for_session(sid);
         // turn：on_submitted 激活（submitted 未 started，turn_id 仍为 None，
         // epoch=1）——arm_pending_cancel 的前置条件满足。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
 
         let cancel_calls = Arc::new(AtomicU64::new(0));
         let probe_calls = cancel_calls.clone();
@@ -4789,7 +5806,7 @@ mod scheduled_model_tests {
             // cancel_current 探针：仅计数。cancel 在 state 锁内执行，探针不能
             // 再取 lifecycle 锁（std Mutex 非重入，会死锁），改为在调用结束后
             // 验证 pending 仍可被 forwarder 消费。
-            move |_engine: &()| {
+            move |_engine: &(), _identity: Option<TurnIdentity>| {
                 probe_calls.fetch_add(1, Ordering::SeqCst);
             },
             // cascade_cancel：正常取消路径，阶段二会调用；此处 no-op 探针。
@@ -4805,9 +5822,10 @@ mod scheduled_model_tests {
         );
         // arm 先于 cancel：cancel 执行后 pending 仍可被 forwarder 消费
         // （模拟 TurnStarted 到达时 take 并重放）。
-        let epoch = lifecycle.current_turn_generation().unwrap_or(0);
         assert!(
-            lifecycle.take_pending_cancel(epoch).is_some(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
             "pending_cancel must be armed before cancel_current so a TurnStarted can be replayed"
         );
     }
@@ -4840,7 +5858,7 @@ mod scheduled_model_tests {
                 sid,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 || async { None::<()> },
-                |_engine: &()| {},
+                |_engine: &(), _identity: Option<TurnIdentity>| {},
                 |_engine: &()| async {},
                 |_lc, _target| false,
             )
@@ -4874,7 +5892,7 @@ mod scheduled_model_tests {
                 sid,
                 deepseek_tui::core::engine::CancelMode::InterruptKeepInbox,
                 || async { None::<()> },
-                |_engine: &()| {},
+                |_engine: &(), _identity: Option<TurnIdentity>| {},
                 |_engine: &()| async {},
                 |_lc, _target| true,
             )
@@ -4906,7 +5924,7 @@ mod scheduled_model_tests {
             let shell_tasks = SessionTurnShellTasks::default();
             let sid = "session-outcome-gate";
             let lifecycle = lifecycles.for_session(sid);
-            assert!(lifecycle.on_submitted());
+            assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
             let (target, claimed_unsubmitted) = cancel_turn_with_gates(
                 &locks,
                 &lifecycles,
@@ -4914,7 +5932,7 @@ mod scheduled_model_tests {
                 sid,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 || async { Some(()) },
-                |_engine: &()| {},
+                |_engine: &(), _identity: Option<TurnIdentity>| {},
                 |_engine: &()| async {},
                 |_lc, _target| false,
             )
@@ -4973,7 +5991,7 @@ mod scheduled_model_tests {
             let lifecycle = lifecycles.for_session(sid);
             // Submitted but TurnStarted not yet arrived (turn_id=None) → the
             // arm preconditions hold.
-            assert!(lifecycle.on_submitted());
+            assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
             let epoch = lifecycle.current_turn_generation().expect("active epoch");
             cancel_turn_with_gates(
                 &locks,
@@ -4982,17 +6000,274 @@ mod scheduled_model_tests {
                 sid,
                 mode,
                 || async { Some(()) },
-                |_engine: &()| {},
+                |_engine: &(), _identity: Option<TurnIdentity>| {},
                 |_engine: &()| async {},
                 |_lc, _target| false,
             )
             .await;
             assert_eq!(
-                lifecycle.take_pending_cancel(epoch),
+                lifecycle.take_pending_cancel(Some(TEST_SUBMISSION)),
                 Some((epoch, mode)),
                 "armed pending_cancel must carry the CancelMode passed to cancel_turn_with_gates"
             );
             assert!(lifecycle.finish_once(|| {}).is_some());
         }
+    }
+}
+
+/// Wiring tests for spawn-time probe adoption, in two layers:
+/// `finalize_runtime_bridge` (the real production injection block, drivable
+/// directly as an associated function) pins the provider() derivation, the
+/// effective_model_owned gating, and the adopt call itself;
+/// `adopt_probed_endpoint_facts` (the testable core) pins four paths through
+/// a real HTTP mock (127.0.0.1:0) — non-vLLM single-entry "borrowed name" is
+/// not adopted, exact match is adopted, vLLM renames + adopts, vLLM pinned
+/// name still adopts (an intentional trade-off, see the
+/// `adopts_probed_facts` docs), plus cloud presets are not probed. Review
+/// round-2 found the production injection point had zero tests (pure-function
+/// guarantees cannot cover the spawn wiring); round-3 added the finalize
+/// layer — previously only the core had tests, so deleting the injection
+/// block in finalize would not fail any test.
+#[cfg(test)]
+#[allow(clippy::await_holding_lock)]
+mod probed_facts_wiring_tests {
+    use super::{EnginePool, Pinvou3Bridge, PreparedRuntimeModel};
+    use crate::core::model_endpoint::{LocalServerKind, models_mock};
+    use crate::features::runtime_bundle::platform::Pinvou3Bundle;
+    use crate::platform::credential_store::CredentialState;
+    use crate::platform::paths::tests::ENV_LOCK;
+    use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel, UserPrefs};
+
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(
+                names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    /// Isolates env vars related to base_url/api_key (`Pinvou3Bridge::
+    /// base_url`/`api_key` prioritize env over session model); the returned
+    /// guard restores them when the test ends.
+    fn isolate_model_env() -> EnvRestore {
+        let restore = EnvRestore::capture(&["DEEPSEEK_BASE_URL", "DEEPSEEK_API_KEY"]);
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("DEEPSEEK_BASE_URL") };
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        restore
+    }
+
+    fn saved_model(preset: ModelPreset, model: &str, provider_kind: Option<&str>) -> SavedModel {
+        SavedModel {
+            id: "wiring-model".into(),
+            name: "Wiring".into(),
+            alias: None,
+            preset,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: model.into(),
+            base_url: String::new(),
+            provider_kind: provider_kind.map(Into::into),
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        }
+    }
+
+    fn wiring_bridge(model: SavedModel) -> Pinvou3Bridge {
+        Pinvou3Bridge {
+            prefs: UserPrefs::default(),
+            bundle: Pinvou3Bundle::paths(),
+            workspace: std::env::temp_dir(),
+            session_model: Some(model),
+            runtime_model_credential: None,
+            probed_context_tokens: None,
+            probed_output_tokens: None,
+            probed_local_kind: None,
+            execution_root_resolver: None,
+            code_session_predicate: None,
+            external_acp_session_predicate: None,
+            image_analyze_always: false,
+        }
+    }
+
+    fn single_entry_json(id: &str) -> String {
+        format!(
+            r#"{{"data":[{{"id":"{id}","max_model_len":262144,"max_completion_tokens":4096}}]}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn non_vllm_operator_route_does_not_adopt_borrowed_single_entry() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("served-only"))]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            bridge.probed_context_tokens, None,
+            "window facts from a single-entry borrowed name belong to another model and must not be adopted"
+        );
+        assert_eq!(
+            bridge.probed_output_tokens, None,
+            "the self-reported output limit is likewise not adopted"
+        );
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "my-model",
+            "non-vLLM routes do no served-name correction"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_vllm_operator_route_adopts_on_exact_name_match() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("my-model"))]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(bridge.probed_context_tokens, Some(262_144));
+        assert_eq!(bridge.probed_output_tokens, Some(4_096));
+        assert_eq!(bridge.session_model.as_ref().unwrap().model, "my-model");
+    }
+
+    #[tokio::test]
+    async fn vllm_route_renames_to_served_name_and_adopts_facts() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("served-actual"))]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, true, false).await;
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "served-actual",
+            "a vLLM single entry follows the served name"
+        );
+        assert_eq!(bridge.probed_context_tokens, Some(262_144));
+        assert_eq!(bridge.probed_output_tokens, Some(4_096));
+    }
+
+    #[tokio::test]
+    async fn vllm_route_pins_scheduled_model_keeps_name_but_adopts_facts() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("served-actual"))]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, true, true).await;
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "my-model",
+            "name correction is suppressed while a scheduled model is pinned; the configured name goes live verbatim"
+        );
+        assert_eq!(
+            bridge.probed_context_tokens,
+            Some(262_144),
+            "pinned name + single-entry borrow still adopts facts under vLLM semantics (intentional trade-off, see the adopts_probed_facts docs)"
+        );
+        assert_eq!(bridge.probed_output_tokens, Some(4_096));
+    }
+
+    #[tokio::test]
+    async fn cloud_route_is_not_probed_at_all() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("my-model"))]);
+        let mut model = saved_model(ModelPreset::Deepseek, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let mut bridge = wiring_bridge(model.clone());
+        EnginePool::adopt_probed_endpoint_facts(&mut bridge, model, false, false).await;
+        assert_eq!(
+            mock.hits_for("/v1/models"),
+            0,
+            "cloud presets are not operator-owned; no probe request may be issued"
+        );
+        assert_eq!(bridge.probed_context_tokens, None);
+        assert_eq!(bridge.probed_output_tokens, None);
+    }
+
+    /// The real finalize_runtime_bridge injection block (non-vLLM side):
+    /// an OpenaiCompatible + custom route goes through the provider()
+    /// derivation (local mock URL → kind probe completes as Generic →
+    /// "openai") and the effective_model_owned gate to reach adopt; exact
+    /// match adopts facts without renaming; the kind probe coexists (TTL
+    /// cache is isolated per base_url).
+    #[tokio::test]
+    async fn finalize_runtime_bridge_injects_probed_facts_into_custom_route() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("my-model"))]);
+        let mut model = saved_model(ModelPreset::OpenaiCompatible, "my-model", Some("custom"));
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.probed_local_kind,
+            Some(LocalServerKind::Generic),
+            "the openai route's coexisting kind probe lands on Generic (mock has no kind signature)"
+        );
+        assert_eq!(bridge.probed_context_tokens, Some(262_144));
+        assert_eq!(bridge.probed_output_tokens, Some(4_096));
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "my-model",
+            "non-vLLM routes do no served-name correction"
+        );
+    }
+
+    /// The real finalize_runtime_bridge injection block (vLLM side):
+    /// provider() derives "vllm" (skipping the kind probe) and a single
+    /// entry renames to the served name and adopts facts.
+    #[tokio::test]
+    async fn finalize_runtime_bridge_renames_and_injects_vllm_route() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _env = isolate_model_env();
+        let mock = models_mock::spawn(&[("/v1/models", 200, single_entry_json("served-actual"))]);
+        let mut model = saved_model(ModelPreset::LocalVllm, "my-model", None);
+        model.base_url = mock.base_url.clone();
+        let bridge = wiring_bridge(model.clone());
+        let prepared = PreparedRuntimeModel::unchanged(model);
+        let bridge = EnginePool::finalize_runtime_bridge(bridge, &prepared, false).await;
+        assert_eq!(
+            bridge.session_model.as_ref().unwrap().model,
+            "served-actual",
+            "a vLLM single entry follows the served name"
+        );
+        assert_eq!(bridge.probed_context_tokens, Some(262_144));
+        assert_eq!(bridge.probed_output_tokens, Some(4_096));
     }
 }

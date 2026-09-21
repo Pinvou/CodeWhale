@@ -33,7 +33,9 @@ function date(value, language) {
   return Number.isNaN(parsed.getTime()) ? '—' : parsed.toLocaleString(language === 'ja' ? 'ja-JP' : language === 'en' ? 'en-US' : 'zh-CN');
 }
 
-export function AdminApprovalWorkspace({ client, copy, language, currentUserID, routeVersion, onNavigate, visibleSections = [], modelDetailsEnabled = false, tokenDetailsEnabled = false }) {
+const EMPTY_VISIBLE_SECTIONS = [];
+
+export function AdminApprovalWorkspace({ client, copy, language, currentUserID, routeVersion, onNavigate, visibleSections = EMPTY_VISIBLE_SECTIONS, modelDetailsEnabled = false, tokenDetailsEnabled = false }) {
   const c = copy.approvalCenter;
   const [route, setRoute] = useState(readRoute);
   const [commandInput, setCommandInput] = useState(route.commandType);

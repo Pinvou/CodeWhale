@@ -20,6 +20,22 @@ const RECONNECT_BASE_DELAY_MS: u64 = 500;
 const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const REVOKE_ACK_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// True when nothing inbound has arrived for two full heartbeat windows: a
+/// half-open socket (sleep/resume, NAT rebind) keeps absorbing outbound
+/// pings into kernel buffers, so only inbound activity is proof of life.
+/// Pure function so the boundary (exactly two windows must reconnect, one
+/// window must not) stays pinned by a test.
+///
+/// The 50s window assumes the relay pings at least every ~25s (the bundled
+/// relay defaults to 15s, floor 5s). A deployment raising the relay's ping
+/// interval above this window makes every idle connection cycle
+/// connect→register→force-reconnect forever — raise `HEARTBEAT_INTERVAL`
+/// together with the relay side, don't just retune the server.
+fn inbound_silence_exceeded(silence: Duration) -> bool {
+    silence >= HEARTBEAT_INTERVAL * 2
+}
+
 const MAX_PENDING_MESSAGES: usize = 2_048;
 const OUTBOUND_CHANNEL_CAPACITY: usize = 2_048;
 // RelayInbound queues raw JSON text, so 32 slots at the 2 MiB frame ceiling
@@ -96,11 +112,6 @@ struct SerializedFrame {
 struct CoalescedControlState {
     worker_running: bool,
     latest: Option<SerializedFrame>,
-    worker_starts: u64,
-}
-
-enum QueuedOutbound {
-    Message(OutboundFrame),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +143,7 @@ impl std::error::Error for RelayTrySendError {}
 
 #[derive(Clone)]
 pub struct RelaySender {
-    tx: mpsc::Sender<QueuedOutbound>,
+    tx: mpsc::Sender<OutboundFrame>,
     byte_budget: Arc<Semaphore>,
     max_frame_bytes: usize,
     shutdown: CancellationToken,
@@ -168,10 +179,10 @@ impl RelaySender {
             .clone()
             .try_acquire_many_owned(frame.permits)
             .map_err(|_| RelayTrySendError::ByteBudgetExhausted)?;
-        let queued = QueuedOutbound::Message(OutboundFrame {
+        let queued = OutboundFrame {
             text: frame.text,
             _byte_permit: byte_permit,
-        });
+        };
         self.tx.try_send(queued).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => RelayTrySendError::ChannelFull,
             mpsc::error::TrySendError::Closed(_) => RelayTrySendError::ChannelClosed,
@@ -186,10 +197,10 @@ impl RelaySender {
                 result.map_err(|_| RelayTrySendError::ByteBudgetExhausted)?
             }
         };
-        let queued = QueuedOutbound::Message(OutboundFrame {
+        let queued = OutboundFrame {
             text: frame.text,
             _byte_permit: byte_permit,
-        });
+        };
         tokio::select! {
             biased;
             _ = self.shutdown.cancelled() => Err(RelayTrySendError::ChannelClosed),
@@ -202,17 +213,17 @@ impl RelaySender {
     /// Serialize exactly once before enqueueing, then account the retained
     /// bytes across both the mpsc channel and the reconnect FIFO.
     pub fn try_send(&self, outbound: RelayOutbound) -> Result<(), RelayTrySendError> {
-        if matches!(&outbound, RelayOutbound::Shutdown) {
-            // Control-plane shutdown must remain deliverable even when every
-            // data slot and byte permit is occupied.
-            self.cancel();
-            return Ok(());
+        match outbound {
+            RelayOutbound::Shutdown => {
+                // Control-plane shutdown must remain deliverable even when
+                // every data slot and byte permit is occupied.
+                self.cancel();
+                Ok(())
+            }
+            RelayOutbound::Message(value) => {
+                self.try_send_serialized(self.serialize_message(value)?)
+            }
         }
-        let frame = match outbound {
-            RelayOutbound::Message(value) => self.serialize_message(value)?,
-            RelayOutbound::Shutdown => unreachable!("shutdown returned above"),
-        };
-        self.try_send_serialized(frame)
     }
 
     /// Queue a stream-reset barrier without spawning one waiter per failure.
@@ -240,7 +251,6 @@ impl RelaySender {
                 false
             } else {
                 state.worker_running = true;
-                state.worker_starts = state.worker_starts.saturating_add(1);
                 true
             }
         };
@@ -285,7 +295,7 @@ fn outbound_channel(
     channel_capacity: usize,
     byte_budget: usize,
     max_frame_bytes: usize,
-) -> (RelaySender, mpsc::Receiver<QueuedOutbound>) {
+) -> (RelaySender, mpsc::Receiver<OutboundFrame>) {
     let (tx, rx) = mpsc::channel(channel_capacity);
     (
         RelaySender {
@@ -502,7 +512,7 @@ async fn wait_reconnect_delay(
 async fn run_loop(
     config: WebAccessConfig,
     tx_in: mpsc::Sender<RelayInbound>,
-    mut rx_out: mpsc::Receiver<QueuedOutbound>,
+    mut rx_out: mpsc::Receiver<OutboundFrame>,
     shutdown: CancellationToken,
 ) {
     let mut pending = VecDeque::<OutboundFrame>::new();
@@ -523,7 +533,7 @@ async fn run_loop(
                 result = &mut connection => break result,
                 outbound = rx_out.recv(), if pending_has_capacity(&pending) => {
                     match outbound {
-                        Some(QueuedOutbound::Message(frame)) => {
+                        Some(frame) => {
                             push_pending(&mut pending, frame);
                         }
                         None => return,
@@ -630,6 +640,22 @@ async fn run_loop(
         // Consume interval's immediate first tick; the registration message is
         // already proof of life.
         heartbeat.tick().await;
+        // Inbound-activity tracking: sending Pings into a half-open socket
+        // keeps succeeding (kernel buffers absorb them), so without this the
+        // client would report "connected" for tens of minutes on a dead path
+        // (sleep/resume, NAT rebind) while every phone request queues.
+        // Any inbound frame counts as proof of life; 2 missed heartbeat
+        // windows with nothing inbound forces the reconnect path.
+        //
+        // Scope notes: (1) the check rides the heartbeat tick, so it is only
+        // evaluated while no write/read is parked — a send blocked on a full
+        // kernel buffer (active session when the path died) is still bounded
+        // only by TCP retransmission timeouts, not by this check. (2)
+        // `Instant` excludes suspend time, so after system resume detection
+        // lands within one or two awake windows, not instantly. A healthy
+        // relay answers every ping within one window (RFC 6455 auto-pong),
+        // which is what keeps steady state from tripping this path.
+        let mut last_inbound = std::time::Instant::now();
         loop {
             tokio::select! {
                 biased;
@@ -638,7 +664,7 @@ async fn run_loop(
                 }
                 outbound = rx_out.recv() => {
                     match outbound {
-                        Some(QueuedOutbound::Message(frame)) => {
+                        Some(frame) => {
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
@@ -658,6 +684,8 @@ async fn run_loop(
                 }
                 message = read.next() => {
                     let Some(message) = message else { break; };
+                    // Any inbound frame (text, ping, pong) is proof of life.
+                    last_inbound = std::time::Instant::now();
                     match message {
                         Ok(Message::Text(text)) => {
                             if inbound_text_too_large(text.len()) {
@@ -707,6 +735,13 @@ async fn run_loop(
                     }
                 }
                 _ = heartbeat.tick() => {
+                    if inbound_silence_exceeded(last_inbound.elapsed()) {
+                        // Nothing inbound for two heartbeat windows: treat
+                        // the connection as dead and take the normal
+                        // reconnect path (pending frames are preserved).
+                        eprintln!("[web-access] relay connection silent, forcing reconnect");
+                        break;
+                    }
                     let ping_result = tokio::select! {
                         biased;
                         _ = shutdown.cancelled() => return,
@@ -823,6 +858,18 @@ mod tests {
         }
     }
 
+    /// Two silent heartbeat windows mean dead path (forced reconnect); one
+    /// window of silence must NOT disconnect a healthy-but-quiet socket.
+    #[test]
+    fn inbound_silence_boundary_matches_two_heartbeat_windows() {
+        assert!(!inbound_silence_exceeded(HEARTBEAT_INTERVAL));
+        assert!(!inbound_silence_exceeded(
+            HEARTBEAT_INTERVAL * 2 - Duration::from_millis(1)
+        ));
+        assert!(inbound_silence_exceeded(HEARTBEAT_INTERVAL * 2));
+        assert!(inbound_silence_exceeded(HEARTBEAT_INTERVAL * 3));
+    }
+
     #[test]
     fn registration_matches_the_v2_wire_contract() {
         assert_eq!(
@@ -890,9 +937,7 @@ mod tests {
             sender
                 .try_send(RelayOutbound::Message(json!(index)))
                 .unwrap();
-            let frame = match receiver.try_recv().unwrap() {
-                QueuedOutbound::Message(frame) => frame,
-            };
+            let frame = receiver.try_recv().unwrap();
             pending_bytes += frame.text.len();
             push_pending(&mut pending, frame);
         }
@@ -921,9 +966,7 @@ mod tests {
         );
 
         for expected in MAX_PENDING_MESSAGES..(MAX_PENDING_MESSAGES + OUTBOUND_CHANNEL_CAPACITY) {
-            let frame = match receiver.try_recv().unwrap() {
-                QueuedOutbound::Message(frame) => frame,
-            };
+            let frame = receiver.try_recv().unwrap();
             assert_eq!(frame.text, expected.to_string());
         }
         assert!(matches!(
@@ -971,9 +1014,7 @@ mod tests {
         sender
             .try_send(RelayOutbound::Message(value.clone()))
             .unwrap();
-        let frame = match receiver.try_recv().unwrap() {
-            QueuedOutbound::Message(frame) => frame,
-        };
+        let frame = receiver.try_recv().unwrap();
         let mut pending = VecDeque::new();
         push_pending(&mut pending, frame);
         assert_eq!(sender.byte_budget.available_permits(), budget - bytes);
@@ -1055,7 +1096,6 @@ mod tests {
         {
             let state = sender.coalesced_control.lock();
             assert!(state.worker_running);
-            assert_eq!(state.worker_starts, 1);
             let latest = state
                 .latest
                 .as_ref()
@@ -1064,26 +1104,20 @@ mod tests {
             assert_eq!(latest["lease_id"], "C");
         }
 
-        let blocker = match receiver.recv().await.unwrap() {
-            QueuedOutbound::Message(frame) => frame,
-        };
+        let blocker = receiver.recv().await.unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&blocker.text).unwrap()["kind"],
             "blocker"
         );
         drop(blocker);
 
-        let first = match receiver.recv().await.unwrap() {
-            QueuedOutbound::Message(frame) => frame,
-        };
+        let first = receiver.recv().await.unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&first.text).unwrap()["lease_id"],
             "A"
         );
         drop(first);
-        let latest = match receiver.recv().await.unwrap() {
-            QueuedOutbound::Message(frame) => frame,
-        };
+        let latest = receiver.recv().await.unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&latest.text).unwrap()["lease_id"],
             "C"
@@ -1104,7 +1138,6 @@ mod tests {
         })
         .await
         .expect("control worker should stop after draining the latest reset");
-        assert_eq!(sender.coalesced_control.lock().worker_starts, 1);
         assert_eq!(sender.byte_budget.available_permits(), budget);
         assert!(matches!(
             receiver.try_recv(),

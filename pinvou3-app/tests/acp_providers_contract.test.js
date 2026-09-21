@@ -79,10 +79,9 @@ assert.ok(
 // 模式，且只锚定持久化结构（ProviderRecord 定义段 + 会话 store 文件；
 // ProviderTarget 含明文 key 是 CLI 配置语义，不在此范围）。
 {
-  const record_def = PROVIDERS_MOD.slice(
-    PROVIDERS_MOD.indexOf('pub struct ProviderRecord'),
-    PROVIDERS_MOD.indexOf('pub struct ProviderRecord') + 800
-  );
+  const recordDefStart = PROVIDERS_MOD.indexOf('pub struct ProviderRecord');
+  assert.ok(recordDefStart > 0, 'providers/mod.rs 必须声明 ProviderRecord');
+  const record_def = PROVIDERS_MOD.slice(recordDefStart, recordDefStart + 800);
   assert.doesNotMatch(record_def, /api_key/, 'ProviderRecord 不得有明文 api_key 字段');
   assert.doesNotMatch(STORE, /api_key/, '会话 store 不得有明文 api_key 字段');
 }
@@ -583,6 +582,51 @@ assert.doesNotMatch(
   /<datalist/,
   '不得使用原生 datalist（字符过滤会隐藏候选，造成「只有几个模型可选」的误解）'
 );
+
+// Content pin for the model-list "append-only" policy: if any vendor's
+// current flagship/active id is silently deleted,
+// relay-station users lose the official model suggestions. Removing any entry
+// counts as an intentional shrink and must explicitly update this list.
+const ACP_REQUIRED_MODELS = {
+  anthropic: ['claude-fable-5-1', 'claude-haiku-4-5'],
+  openai: ['gpt-6-astra', 'gpt-5.6-terra'],
+  moonshot: ['kimi-k3', 'kimi-k2.7-code'],
+  'kimi-code': ['k3', 'k3-256k'],
+  deepseek: ['deepseek-flash', 'deepseek-v4-flash'],
+  zhipu: ['glm-5.3', 'glm-5.3-flash'],
+  qwen: ['qwen3.8-max', 'qwen3.8-flash'],
+  minimax: ['MiniMax-M3'],
+  xai: ['grok-4.6', 'grok-4.20-reasoning', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning'],
+};
+for (const [presetKey, required] of Object.entries(ACP_REQUIRED_MODELS)) {
+  const presetRe = new RegExp(`\\{ key: '${presetKey}',[\\s\\S]*?models: \\[([^\\]]*)\\]`);
+  const m = CATALOG.match(presetRe);
+  assert.ok(m, `ACP catalog is missing preset ${presetKey} (sync this list's extractor if the structure changes)`);
+  const listed = [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
+  for (const id of required) {
+    assert.ok(
+      listed.includes(id),
+      `ACP preset ${presetKey} is missing active model ${id} (the list is append-only; intentional shrinks must update this list)`
+    );
+  }
+}
+
+// Content pin for the flat suggestions table ACP_MODEL_PRESETS (the form's
+// datalist fallback, bound by the same "append-only" policy as the per-preset
+// lists): no test previously read this list, and its xAI section once lagged
+// behind the per-preset list silently (missing the -0309- wire ids).
+assert.ok(CATALOG.includes('export const ACP_MODEL_PRESETS'), 'the ACP catalog should contain the flat suggestions table ACP_MODEL_PRESETS');
+const FLAT_MODELS_SECTION = CATALOG.slice(CATALOG.indexOf('export const ACP_MODEL_PRESETS'));
+for (const id of [
+  'claude-fable-5-1', 'gpt-6-astra', 'deepseek-flash', 'kimi-k3', 'glm-5.3',
+  'qwen3.8-max', 'MiniMax-M3', 'grok-4.6', 'grok-4.20-reasoning',
+  'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1',
+]) {
+  assert.ok(
+    FLAT_MODELS_SECTION.includes(`'${id}'`),
+    `ACP_MODEL_PRESETS flat suggestions are missing active model ${id} (append-only; intentional shrinks must update this list)`
+  );
+}
 
 // 切换/删除 Provider 后必须重写草稿配置快照（否则对话页模型显示旧 Provider；
 // 直接删除快照会让选择器整排消失——必须 reseed 而非仅失效）

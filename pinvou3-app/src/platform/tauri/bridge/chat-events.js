@@ -7,7 +7,8 @@
     var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
     var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
     var listen = context.listen;
-    var notify = context.notify;
+    var immediateNotify = context.notify;
+    var isNotifySuppressed = context.isNotifySuppressed || function () { return false; };
     var invoke = context.invoke;
     var turnUsageDirty = context.turnUsageDirty;
     var sessionStates = context.sessionStates;
@@ -31,7 +32,6 @@
     var resetPendingAssistant = context.resetPendingAssistant;
     var flushQueued = context.flushQueued;
     var isBusyFor = context.isBusyFor;
-    var doSendFor = context.doSendFor;
     var ensureSessionBufferLoaded = context.ensureSessionBufferLoaded;
     var getBuffer = context.getBuffer;
     var markRemoteTurn = context.markRemoteTurn;
@@ -52,6 +52,65 @@
     var extractArtifactPaths = context.extractArtifactPaths;
     var fileMutationAction = context.fileMutationAction;
     var normalizedPath = context.normalizedPath;
+
+    // Stream text can arrive much faster than a WebView can paint. Publish at
+    // most once per animation frame, with a bounded timer fallback for hidden
+    // or throttled windows. Entries are isolated per session because active
+    // and background sessions may stream concurrently.
+    var STREAM_NOTIFY_MAX_WAIT_MS = 32;
+    var pendingStreamNotifications = Object.create(null);
+
+    function cancelPendingStreamNotify(sid) {
+      var pending = sid && pendingStreamNotifications[sid];
+      if (!pending) return;
+      if (pending.frame !== null && typeof window.cancelAnimationFrame === "function") {
+        window.cancelAnimationFrame(pending.frame);
+      }
+      if (pending.timer !== null && typeof clearTimeout === "function") clearTimeout(pending.timer);
+      delete pendingStreamNotifications[sid];
+    }
+
+    // Every semantic notification is a synchronous flush boundary. Its
+    // snapshot already contains all accumulated deltas, so the pending frame
+    // must be cancelled to avoid a duplicate callback after done/error/tool/
+    // permission/session events.
+    function notify() {
+      cancelPendingStreamNotify(state.activeSessionId);
+      immediateNotify();
+    }
+
+    function scheduleStreamNotify(sid, firstDelta) {
+      // A first delta publishes immediately so the visible bubble paints
+      // without waiting for a frame. Inside a background working set the
+      // immediate notify is suppressed and schedules no frame at all, so the
+      // session's first delta would never publish — a suppressed first delta
+      // must fall through to the coalesced frame below, whose publish() runs
+      // after the working set is restored and carries the accumulated text.
+      if (!sid || (firstDelta && !isNotifySuppressed()) || typeof setTimeout !== "function") {
+        notify();
+        return;
+      }
+      if (pendingStreamNotifications[sid]) return;
+      var pending = { frame: null, timer: null };
+      pendingStreamNotifications[sid] = pending;
+      function publish() {
+        if (pendingStreamNotifications[sid] !== pending) return;
+        cancelPendingStreamNotify(sid);
+        var didRun = false;
+        var wasBackground = sid !== state.activeSessionId;
+        runSyncOnSession(sid, function () {
+          didRun = true;
+          immediateNotify();
+        });
+        // runSyncOnSession suppresses callbacks while a background working set
+        // is installed. Refresh the visible session list after it restores.
+        if (didRun && wasBackground) immediateNotify();
+      }
+      if (typeof window.requestAnimationFrame === "function") {
+        pending.frame = window.requestAnimationFrame(publish);
+      }
+      pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+    }
 
     function refreshEffectiveModelConfigAfterAuthError(error) {
       if (!error || !/\b401\b|unauthorized|authentication/i.test(String(error))) return;
@@ -247,7 +306,6 @@
     function sweepUnpairedToolMeta() {
       const meta = context.toolMeta;
       const ids = Object.keys(meta || {});
-      if (!ids.length) return;
       const paired = Object.create(null);
       for (let i = 0; i < state.messages.length; i++) {
         const blocks = state.messages[i] && state.messages[i].content;
@@ -262,6 +320,25 @@
       ids.forEach(function (id) {
         if (!paired[id]) delete meta[id];
       });
+      // Live-path terminal ratchet (parity with the replay-time sweep in
+      // rerenderFromMessages and the codex native lane): a tool card still
+      // pending/running at turn end whose tool_use never got a tool_result is
+      // an interrupted in-flight call — no tool_end is coming, so settle it as
+      // failed instead of leaving an eternal "running" card (a live spawn row
+      // would then pulse forever). Background shells keep running across turns
+      // and are excluded; so are synthetic shell-snapshot cards (built by the
+      // terminal poll for jobs without a tool card of their own — e.g. a
+      // subagent's detached shell): their "shell-task:" ids never pair with a
+      // tool_use id, yet the job may still be running.
+      for (let i = 0; i < state.chatItems.length; i++) {
+        const item = state.chatItems[i];
+        if (item && item.type === "tool" && item.toolId && item.background !== true
+          && item.shellSnapshot !== true
+          && (item.state === "pending" || item.state === "running") && !paired[item.toolId]) {
+          item.success = false;
+          item.state = "failed";
+        }
+      }
     }
     var markTurnDirtyArtifact = context.markTurnDirtyArtifact;
     var trackArtifact = context.trackArtifact;
@@ -668,9 +745,11 @@
   }
 
   function cancelStreamRenderTimers(purgedSid) {
-    if (!purgedSid || !streamRenderTimers[purgedSid]) return;
-    clearTimeout(streamRenderTimers[purgedSid]);
-    delete streamRenderTimers[purgedSid];
+    cancelPendingStreamNotify(purgedSid);
+    if (purgedSid && streamRenderTimers[purgedSid]) {
+      clearTimeout(streamRenderTimers[purgedSid]);
+      delete streamRenderTimers[purgedSid];
+    }
   }
 
   function finalizeAssistantStreamBeforeReasoning() {
@@ -726,10 +805,11 @@
     if (!item) {
       item = startReasoningBlock(index);
     }
+    var firstDelta = !item.text;
     item.text += text;
     appendReasoningBlock(text);
-    notify();
-  }); });
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("chat:reasoning_done", function (e) { onSessionEvent(e, function () {
     var index = reasoningEventIndex(e);
@@ -750,6 +830,7 @@
     context.currentStreamText += text;
     // Update the streaming chat item
     var item = state.chatItems.find(function (it) { return it.id === context.currentStreamId; });
+    var firstDelta = !item;
     if (item) {
       item.text = context.currentStreamText;
       // The bubble's first delta (html still empty) renders immediately;
@@ -770,8 +851,8 @@
       });
     }
     scheduleStreamRender(e.payload && e.payload.session_id || state.activeSessionId);
-    notify();
-  }); });
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("scheduled_task:run_updated", function (e) {
     scheduleScheduledRunRefresh();
@@ -1339,42 +1420,6 @@
       // (file_watcher 递归会推 tmp/ _state/ 等子目录与 infra 文件 → 此处兜住)。
       if (isDeliverable(p.path) || findPresentedArtifact(p.path)) trackArtifact(p.path);
     });
-  });
-
-  listen("remote_control:mobile_user_message", async function (e) {
-    var p = e.payload || {};
-    var sid = p.session_id;
-    var content = (p.content || "").trim();
-    var attachments = p.attachments || [];
-    // 允许纯附件消息(content 为空但 attachments 非空),对齐 Group E user_message 改造。
-    if (!sid || (!content && !attachments.length)) return;
-    try { await ensureSessionBufferLoaded(sid); }
-    catch (err) {
-      console.warn("remote session hydrate failed", err);
-      return;
-    }
-    var attachmentNames = attachments.map(function (attachment) {
-      return attachment && attachment.basename;
-    }).filter(Boolean);
-    var displayText = attachmentNames.length
-      ? content + (content ? "\n\n" : "") + "📎 " + JSON.stringify(attachmentNames)
-      : content;
-    var remoteBuffer = getBuffer(sid);
-    if (isBusyFor(sid) || (remoteBuffer && remoteBuffer.queued && remoteBuffer.queued.length > 0)) {
-      runSyncOnSession(sid, function () {
-        state.queued.push({
-          id: ++context.itemIdSeq,
-          text: content,
-          displayText: displayText,
-          attachments: attachments,
-          meta: { remoteClientMessageId: p.client_message_id || null },
-        });
-      });
-      notify();
-      if (!isBusyFor(sid)) flushQueued(sid);
-      return;
-    }
-    doSendFor(sid, content, displayText, attachments, { remoteClientMessageId: p.client_message_id || null });
   });
 
   // 远程 mobile 改工具开关 → Rust emit remote_control:tools_changed → 这里桥接到

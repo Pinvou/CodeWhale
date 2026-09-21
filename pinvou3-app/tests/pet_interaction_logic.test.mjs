@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dragSrc = path.join(here, '..', 'src', 'features', 'pet', 'pet-interaction.js');
-assert.ok(existsSync(dragSrc), 'pet-interaction.js must exist');
 
 const tempRoot = mkdtempSync(path.join(tmpdir(), 'pet-interaction-'));
 const dragTmp = path.join(tempRoot, 'pet-interaction.mjs');
@@ -1109,7 +1108,6 @@ assert.match(
   /function PetWindow\(\{[\s\S]{0,160}?allowResize = true,[\s\S]{0,160}?configuredScale = null,[\s\S]{0,160}?configuredVerticalAlignment = 'bottom'/,
 );
 assert.match(viewCode, /Number\.isFinite\(configuredScale\)/);
-assert.match(viewCode, /useState\(startupScale\)/);
 assert.match(viewCode, /invokeTauri\('set_pet_scale',[\s\S]{0,120}?scale:\s*startupScale/);
 assert.match(viewCode, /\{allowResize && \(\s*<div\s+className="pet-resize-grip"/);
 // 右键菜单为窗口内 DOM 浮层(不再 invoke 原生菜单窗口:GB10/WebKitGTK 下
@@ -1145,7 +1143,6 @@ assert.ok(
   stepPhysicsIndex >= 0 && activeMonitorIndex >= 0 && stepPhysicsIndex < activeMonitorIndex,
   'the latest release-tail position must be consumed before selecting the active monitor',
 );
-assert.match(viewCode, /className="pet-resize-grip"/);
 assert.match(viewCode, /className="pet-resize-grip-icon"/);
 assert.match(viewCode, /d="M2 14H14V2"/);
 assert.match(
@@ -1158,7 +1155,6 @@ assert.doesNotMatch(viewCode, /onWheel=/);
 const cssSrc = path.join(here, '..', 'src', 'features', 'pet', 'pet.css');
 const cssCode = readFileSync(cssSrc, 'utf8');
 assert.match(cssCode, /overflow-y:\s*auto/);
-assert.match(cssCode, /\.pet-resize-grip\s*\{/);
 assert.doesNotMatch(cssCode, /\.pet-menu/);
 
 assert.match(

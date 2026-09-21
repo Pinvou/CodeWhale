@@ -331,9 +331,7 @@ pub async fn web_access_list_sessions(
         WebSessionOperation::ListSessions,
         super::sessions::list_sessions(store, acp_pool).await,
     )?;
-    for session in &mut sessions {
-        session.metadata = super::codex::redact_session_metadata_for_web(session.metadata.clone());
-    }
+    super::sessions::project_session_list_for_web(&mut sessions);
     Ok(sessions)
 }
 
@@ -362,7 +360,7 @@ pub async fn web_access_create_session(
 ) -> Result<WebSessionMetadata, String> {
     let metadata = web_session_result(
         WebSessionOperation::CreateSession,
-        super::sessions::create_session(Some(false), app, store, pool).await,
+        super::sessions::create_session(Some(false), None, app, store, pool).await,
     )?;
     let transcript_revision = crate::features::sessions::transcript_revision(&[])
         .map_err(|error| format!("create empty transcript revision: {error:#}"))?;
@@ -815,7 +813,7 @@ pub async fn web_access_create_session_and_chat(
 ) -> Result<WebSessionMetadata, String> {
     let transcript_revision = crate::features::sessions::transcript_revision(&[])
         .map_err(|error| format!("create empty transcript revision: {error:#}"))?;
-    let metadata = super::sessions::create_session_record(false, &store, &pool)?;
+    let metadata = super::sessions::create_session_record(false, &store, &pool, None)?;
     let session_id = metadata.id.clone();
 
     if let Err(error) = web_access_chat_for_session(
@@ -1479,54 +1477,6 @@ fn cleanup_staged_attachment_sources(paths: &[std::path::PathBuf]) {
             }
         }
     }
-}
-
-/// Persist a potentially large Web transcript through bounded upload chunks.
-/// The final chunk is decoded into the native Message schema and committed by
-/// the SessionStore's content-revision CAS.
-#[tauri::command]
-pub async fn web_access_save_session_messages_chunk(
-    id: String,
-    upload_id: String,
-    expected_revision: String,
-    offset: usize,
-    total: usize,
-    data_base64: String,
-    commit: bool,
-    manager: State<'_, RemoteControlManager>,
-    store: State<'_, SessionStore>,
-) -> Result<Option<String>, String> {
-    crate::features::sessions::validate_session_id(&id)
-        .map_err(|error| format!("invalid Session id: {error:#}"))?;
-    if offset == 0 {
-        store
-            .load(&id)
-            .map_err(|error| format!("load Session {id}: {error:#}"))?;
-    }
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(data_base64)
-        .map_err(|error| format!("decode Session upload chunk: {error}"))?;
-    if data.len() > MAX_TRANSFER_CHUNK_BYTES {
-        return Err("Session upload chunk exceeds 256 KiB".into());
-    }
-    let completed = manager.append_web_session_upload(
-        &upload_id,
-        &id,
-        &expected_revision,
-        offset,
-        total,
-        &data,
-        commit,
-    )?;
-    if let Some(payload) = completed {
-        let messages = serde_json::from_slice(&payload)
-            .map_err(|error| format!("parse uploaded Session messages: {error}"))?;
-        let revision = store
-            .compare_and_swap_messages(&id, &expected_revision, messages)
-            .map_err(|error| format!("save Session {id} transcript: {error:#}"))?;
-        return Ok(Some(revision));
-    }
-    Ok(None)
 }
 
 /// Base64 keeps the 20-second web-lane WAV (~853 KB) comfortably below the

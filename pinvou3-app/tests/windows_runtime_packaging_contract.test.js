@@ -585,7 +585,8 @@ assert.match(
 assert.match(installerHook, /IntCmp \$5 3010/);
 assert.match(installerHook, /IntCmp \$5 1641/);
 for (const [label, nextLabel] of [
-  ["pinvou_vc_redist_exec_failed", "pinvou_vc_redist_exit_failed"],
+  ["pinvou_vc_redist_exec_failed", "pinvou_vc_redist_temp_failed"],
+  ["pinvou_vc_redist_temp_failed", "pinvou_vc_redist_exit_failed"],
   ["pinvou_vc_redist_exit_failed", "pinvou_vc_redist_reboot"],
 ]) {
   const start = installerHook.indexOf(`${label}:`);

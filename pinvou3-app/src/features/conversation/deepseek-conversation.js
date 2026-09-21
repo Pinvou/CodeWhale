@@ -107,6 +107,7 @@ function emptyTurn(id) {
     startedAt: null,
     completedAt: null,
     lifecycleKnown: false,
+    behaviorTurnId: null,
     operationCount: 0,
     failedOperationCount: 0,
   };
@@ -192,6 +193,7 @@ export function pairDeepSeekTimeline(events = [], options = {}) {
         error: null,
         userError: null,
         usage: null,
+        behaviorTurnId: null,
       };
       byId.set(id, record);
       records.push(record);
@@ -200,6 +202,9 @@ export function pairDeepSeekTimeline(events = [], options = {}) {
       record.startedAt = Number(event.timestamp || 0) || event.ts || null;
       if (Number.isInteger(event.ui_turn_index)) record.turnIndex = event.ui_turn_index;
     } else {
+      if (event.behavior_turn_id) {
+        record.behaviorTurnId = String(event.behavior_turn_id);
+      }
       record.completedAt = Number(event.timestamp || 0) || event.ts || null;
       record.rawStatus = String(event.status || '');
       record.status = normalizeTurnStatus(event.status, true);
@@ -243,6 +248,7 @@ function assignDeepSeekTimelines(userTurns, timelineEvents, busy, options) {
       startedAt: record.startedAt,
       completedAt: record.completedAt,
       usage: record.usage,
+      behaviorTurnId: record.behaviorTurnId,
       lifecycleKnown: true,
     });
     assigned.add(record.id);
@@ -265,6 +271,7 @@ function assignDeepSeekTimelines(userTurns, timelineEvents, busy, options) {
       startedAt: record.startedAt,
       completedAt: record.completedAt,
       usage: record.usage,
+      behaviorTurnId: record.behaviorTurnId,
       lifecycleKnown: true,
     });
   });
@@ -295,6 +302,7 @@ function transferSteeredRunTerminals(turns) {
         tail.startedAt = head.startedAt;
         tail.completedAt = head.completedAt;
         tail.usage = head.usage;
+        tail.behaviorTurnId = head.behaviorTurnId;
         tail.lifecycleKnown = true;
         for (let clear = start; clear < end; clear += 1) {
           turns[clear].status = 'completed';
@@ -302,6 +310,7 @@ function transferSteeredRunTerminals(turns) {
           turns[clear].userError = null;
           turns[clear].completedAt = null;
           turns[clear].usage = null;
+          turns[clear].behaviorTurnId = null;
           turns[clear].lifecycleKnown = false;
         }
       }

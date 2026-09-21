@@ -240,22 +240,23 @@ pub fn track_behavior_event(
         event = event.stage(value);
     }
     if request.tool_key.is_some() || request.tool_name.is_some() || request.tool_type.is_some() {
-        let raw_tool = request
+        let raw_tool_key = request
             .tool_key
             .as_deref()
             .or(request.tool_name.as_deref())
             .unwrap_or_default();
+        let raw_tool_name = request.tool_name.as_deref().unwrap_or(raw_tool_key);
         let tool_type = match request.tool_type.as_deref() {
             Some("mcp") => "mcp",
             Some("cli") => "cli",
             Some("skill") => "skill",
             Some("builtin") => "builtin",
             Some("custom") => "custom",
-            _ => crate::features::behavior_telemetry::classify_tool(raw_tool),
+            _ => crate::features::behavior_telemetry::classify_tool(raw_tool_name),
         };
         event = event.tool(
-            crate::features::behavior_telemetry::tool_registry_key(raw_tool),
-            "",
+            crate::features::behavior_telemetry::tool_registry_key(raw_tool_key),
+            raw_tool_name,
             tool_type,
         );
     }

@@ -83,13 +83,6 @@ pub fn probe_codex_runtime(
     }
 }
 
-pub fn resolve_codex_path(
-    system_codex: Option<PathBuf>,
-    legacy_bundled: Option<PathBuf>,
-) -> Option<ResolvedCodex> {
-    probe_codex_runtime(system_codex, legacy_bundled).resolved
-}
-
 fn probe_codex(path: PathBuf, source: CodexRuntimeSource) -> Option<ResolvedCodex> {
     if !path.is_file() {
         return None;
@@ -221,8 +214,9 @@ pub fn version_at_least(version: &str, minimum: &str) -> bool {
     compare_versions(version, minimum).is_ge()
 }
 
-/// 探测系统 PATH 或官方安装目录中的 codex 存在但版本低于 MIN_CODEX_VERSION 的情况，
-/// 供 status 上报 system_codex_incompatible（区分「未安装」与「版本过低」）。
+/// Detects a codex on the system PATH or in the official install directory
+/// whose version is below MIN_CODEX_VERSION; consumed by install-source
+/// resolution to tell "not installed" apart from "installed but too old".
 pub fn system_codex_incompatible(system_codex: Option<PathBuf>) -> bool {
     system_codex
         .and_then(|path| probe_codex(path, CodexRuntimeSource::System))
@@ -428,7 +422,7 @@ mod tests {
             return;
         }
         let outdated = fake_codex("0.100.0");
-        let resolved = resolve_codex_path(Some(outdated.clone()), None);
+        let resolved = probe_codex_runtime(Some(outdated.clone()), None).resolved;
         assert!(
             resolved
                 .as_ref()
@@ -445,7 +439,7 @@ mod tests {
             return;
         }
         let current = fake_codex(MIN_CODEX_VERSION);
-        let resolved = resolve_codex_path(Some(current.clone()), None);
+        let resolved = probe_codex_runtime(Some(current.clone()), None).resolved;
         assert_eq!(
             resolved.map(|resolved| resolved.source),
             Some(CodexRuntimeSource::System)

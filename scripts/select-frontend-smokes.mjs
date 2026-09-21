@@ -15,6 +15,8 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:team-relay-ui"),
   command("npm", "test:markdown-artifact-ui"),
   command("node", "tests/admin_roles_ui_smoke.mjs"),
+  command("node", "tests/admin_approval_workspace_ui_smoke.mjs"),
+  command("node", "tests/admin_financial_repair_ui_smoke.mjs"),
   command("npm", "test:admin-finance-overview-ui"),
   command("npm", "test:admin-token-resources-ui"),
   command("npm", "test:admin-model-actions-ui"),
@@ -41,6 +43,8 @@ const CORE_SMOKE = command("npm", "test:ui-smoke");
 const FEATURE_COMMANDS = new Map([
   ["account-platform", [
     command("node", "tests/admin_roles_ui_smoke.mjs"),
+    command("node", "tests/admin_approval_workspace_ui_smoke.mjs"),
+    command("node", "tests/admin_financial_repair_ui_smoke.mjs"),
     command("npm", "test:admin-finance-overview-ui"),
     command("npm", "test:admin-token-resources-ui"),
     command("npm", "test:admin-model-actions-ui"),

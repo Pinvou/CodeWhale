@@ -44,6 +44,8 @@ test('artifact creation is bound to an authoritative turn and export reuses its 
     assert.match(source, /eventName: ["']artifact_exported["']/);
     assert.match(source, /exportFormat:/);
   }
+  assert.match(desktopAttachments, /openArtifactExternal[\s\S]*?trackArtifactExport\(path, sessionId\)/);
+  assert.match(desktopAttachments, /function downloadArtifact\(path, sessionId\) \{\s*return openArtifactExternal\(path, sessionId\);/);
   assert.match(command, /"artifact_created" => \{[^]*?track_artifact_created/);
   assert.match(command, /"artifact_exported" => \{[^]*?track_artifact_exported/);
   assert.match(telemetry, /track_artifact_created[^]*?attempt\.turn_id\.clone\(\)/);

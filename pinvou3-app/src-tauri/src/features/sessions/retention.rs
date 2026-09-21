@@ -110,11 +110,7 @@ impl SessionStore {
         session: &SavedSession,
         event: &'static str,
     ) -> Result<PathBuf> {
-        let path = self.save_session_atomic(session)?;
-        if let Err(error) = self.enforce_session_retention_locked() {
-            eprintln!("[sessions] retention reconciliation failed after {event}: {error:#}");
-        }
-        Ok(path)
+        self.persist_then_reconcile_with(session, || event.to_string(), event)
     }
 
     pub(crate) fn persist_then_reconcile_with(
@@ -215,6 +211,18 @@ impl SessionStore {
         };
         if removed_code_modes {
             self.save_session_mode_states();
+        }
+
+        // Working-directory binding: clear the in-memory cache and best-effort
+        // delete the per-session sidecar file. The normal session-deletion path
+        // already removes it; this covers leftovers of a partially failed
+        // deletion. For unbound ids it is a pure NotFound probe with negligible
+        // cost.
+        for id in ids {
+            self.session_workspaces.write().remove(id.as_str());
+            if validate_session_id(id).is_ok() {
+                self.remove_workspace_sidecar_file(id);
+            }
         }
 
         let removed_models = {
@@ -431,18 +439,6 @@ impl SessionStore {
 
     pub fn scheduled_profile(&self, id: &str) -> Option<ScheduledRunProfile> {
         self.scheduled_profiles.read().get(id).cloned()
-    }
-
-    pub fn scheduled_session_ids_for_task(&self, task_id: &str) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .scheduled_profiles
-            .read()
-            .iter()
-            .filter(|(_, profile)| profile.task_id == task_id)
-            .map(|(session_id, _)| session_id.clone())
-            .collect();
-        ids.sort();
-        ids
     }
 
     pub fn scheduled_session_exists(&self, id: &str) -> bool {

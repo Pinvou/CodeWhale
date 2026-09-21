@@ -1,7 +1,11 @@
 //! H3C EIP 员工门户接入 —— 连接生命周期 + 鉴权编排。
 //!
-//! 路线:A(CLI 连接器)。复用 iClaw 的 `eip-cli` 预编译二进制(多平台:
-//! `eip-cli` / `eip-cli-aarch64` / `eip-cli.exe`),内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`。
+//! 路线:A(CLI 连接器)。CLI 二进制内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`,
+//! **五端(Windows / Linux x64 / Linux ARM64 / macOS arm64 / macOS x64)统一由仓库内
+//! 源码 `linux-src/main.go` 交叉编译**,见同目录 `build.sh`。官方 iClaw 只发
+//! Windows/Linux x86_64 且已不可用:SSO 服务端把登录响应 `pollInterval` 从 string
+//! 改为 number 后,其 Go struct 反序列化必失败(auth login / AIT 重登录全挂,报文
+//! 误导读检查网络);自研实现按 `json.RawMessage` 宽容解析,对字段类型变化天然兼容。
 //! 业务命令(考勤/假期/待办…)由模型经 shell 跑 `eip <域> ...`,技能文档教用法
 //! (同飞书 lark-cli)。本模块只负责**连接态**:状态查询、SSO 登录(轮询自动收)、
 //! 取消、登出。
@@ -11,12 +15,13 @@
 //! 凭证由 CLI 用 `AGENT_DEVICE_ID` 派生密钥加密存到 `AGENT_CREDENTIALS_DIR`。
 //! 见《EIP员工门户接入-开发方案》§3。
 //!
-//! ⚠️ 二进制是 H3C IT 内部产物,当前先用 iClaw 这份打包;合规事后补内部知会。
+//! ⚠️ 协议与路由源自 H3C IT 的 iClaw eip-cli(内部产物);合规事后补内部知会。
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use super::flow_gate::{Begin, CANCEL_WAIT_LIMIT, FlowGuard, SsoFlow};
 
 use qrcode::{QrCode, render::svg};
 use serde_json::{Value, json};
@@ -144,16 +149,14 @@ fn eip(args: &[&str]) -> Result<Command, String> {
 }
 
 /// 跑命令,收 (success, exit_code, stdout, stderr)。`exit_code==3` = 需登录。
-fn run(mut cmd: Command) -> Result<(bool, i32, String, String), String> {
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动 eip-cli 失败: {e}"))?;
-    Ok((
-        out.status.success(),
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
+/// 带超时兜底:CLI 真挂死时 kill 并收尸,而不是无限阻塞 spawn_blocking 线程
+/// (issue #1097:僵尸流程资源不回收)。
+fn run(cmd: Command) -> Result<(bool, i32, String, String), String> {
+    super::connector_cli::run_captured_with_timeout(
+        cmd,
+        "eip-cli",
+        super::connector_cli::CLI_RUN_TIMEOUT,
+    )
 }
 
 /// 从一段输出里抓第一个 JSON 对象(CLI 可能夹带提示行)。
@@ -226,28 +229,33 @@ fn set_connected(v: bool) -> bool {
 
 // ──────────────────────────── 连接编排状态 ────────────────────────────
 
-/// 连接编排共享状态:登录轮询的取消标志。`lib.rs` 用 `.manage(EipConn::default())` 注册。
+/// 连接编排共享状态:SSO 登录流程的单飞门闩(见 flow_gate 模块注释——快速重开
+/// 连接界面时复用进行中流程,避免第二次 `auth login` 撞服务端 429 限流)。
+/// `lib.rs` 用 `.manage(EipConn::default())` 注册。
 #[derive(Default)]
 pub struct EipConn {
-    cancelled: AtomicBool,
+    flow: super::flow_gate::SsoFlow,
 }
 
 fn emit(app: &AppHandle, event: &str, payload: Value) {
     let _ = app.emit(event, payload);
 }
 
-fn is_cancelled(app: &AppHandle) -> bool {
-    app.state::<EipConn>().cancelled.load(Ordering::SeqCst)
-}
-
 // ───────────────────────────── Tauri commands ─────────────────────────────
 
 /// 查询 EIP 连接状态:`auth status --output json`。connected = 有有效 token。
-/// 纯查询：不写连接标记、不改技能目录、不回收 Engine。
+/// 只读 CLI 凭证态,但会把结果对账进持久连接标记(自愈后端标记漂移;技能目录
+/// 与 Engine 回收不动——可见性变更经 connector_visibility 应用:空闲时立即,
+/// 有活跃 turn 时延至回合边界)。
 pub async fn eip_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let cmd = eip(&["auth", "status", "--output", "json"])?;
-        let (_ok, _code, so, se) = run(cmd)?;
+        // run 的超时/捕获上限错误内嵌子进程输出,而 status 的输出可能含
+        // token 材料——只记日志,给 webview 固定文案,不让捕获输出跨 IPC。
+        let (_ok, _code, so, se) = run(cmd).map_err(|e| {
+            log::warn!("[eip] auth status 执行失败: {e}");
+            "eip: auth status 执行失败".to_string()
+        })?;
         let p = parse_json(&so).or_else(|| parse_json(&se));
         let connected = p
             .as_ref()
@@ -267,20 +275,90 @@ pub async fn eip_status() -> Result<Value, String> {
 /// 开始连接 EIP(SSO 轮询自动收):
 /// ① `auth login --no-poll --output json` 拿 SSO URL → emit `eip:sso`(前端引导浏览器登录)。
 /// ② 循环 `auth poll` 直到认证成功 / 超时(5min)/ 取消 → emit `eip:connected` / `eip:error`。
-/// 立即返回 `{started:true}`,前端 listen 事件驱动 UI。
+/// 单飞:已有未取消的流程在跑时重放缓存的 SSO 载荷(不二次 `auth login`,防 429);
+/// 旧流程取消中尚未退出时等它归还门闩。返回 `{started:true}`,前端 listen 事件驱动 UI。
 pub async fn eip_connect_begin(app: AppHandle) -> Result<Value, String> {
-    app.state::<EipConn>()
-        .cancelled
-        .store(false, Ordering::SeqCst);
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || run_login_flow(&app2));
-    Ok(json!({ "started": true }))
+    let flow = &app.state::<EipConn>().flow;
+    // 旧流程取消中:等它归还门闩再起步,避免并发双流程。等待上限按最坏取消节拍
+    // 推导(见 flow_gate::CANCEL_WAIT_LIMIT);真卡死的流程由 begin() 的超时抢占自愈。
+    //
+    // 等待期间用户仍可能点"取消",而那时旧流程已是 Cancelling(再取消是 no-op)、
+    // 新流程又还没起步(无人可取消)——只有取消监票能记下这个意图。不查它的话,
+    // 旧流程一归还门闩,等待循环就会照常起步,把用户刚取消的弹窗重新弹出来。
+    let wait_start = Instant::now();
+    let ticket = flow.cancel_ticket();
+    let mut announced = false;
+    let decision = loop {
+        if flow.cancelled_since(ticket) {
+            return Ok(json!({ "started": false, "cancelled": true }));
+        }
+        match flow.begin() {
+            Begin::Busy => {
+                if wait_start.elapsed() > CANCEL_WAIT_LIMIT {
+                    // **不是连接失败**:旧流程可能只是这一拍特别慢(`auth poll` 最坏
+                    // 90s),稍后大概率自己连上。回结构化 busy 让前端提示"稍后重试",
+                    // 别报连接失败。
+                    return Ok(json!({ "started": false, "busy": true }));
+                }
+                // 真等起来了才提示(旧流程通常一拍内退出,避免闪一下)。
+                if !announced && wait_start.elapsed() > Duration::from_secs(1) {
+                    announced = true;
+                    emit(
+                        &app,
+                        "eip:sso_wait",
+                        json!({ "seconds": 0, "previous_flow": true }),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            d => break d,
+        }
+    };
+    match decision {
+        Begin::Start { epoch } => {
+            let app2 = app.clone();
+            tokio::task::spawn_blocking(move || run_login_flow(&app2, epoch));
+            Ok(json!({ "started": true }))
+        }
+        Begin::Reuse { payload } => {
+            match payload {
+                Some((url, qr)) => emit(&app, "eip:sso", json!({ "url": url, "qr_data_url": qr })),
+                // 流程在跑但 URL 还没拿到(可能正卡在 65s 节流窗口里):在途的 eip:sso
+                // 随后会送达,**但**这次重连若晚于那个事件发出,用户会面对一个毫无
+                // 反馈的忙碌按钮。给一个"生成中"的等待态(seconds=0 → 前端显示
+                // generating),让弹窗(连同取消按钮)先出来。
+                None => emit(&app, "eip:sso_wait", json!({ "seconds": 0 })),
+            }
+            Ok(json!({ "started": true, "reused": true }))
+        }
+        Begin::Busy => unreachable!("Busy 已在上面的等待循环处理"),
+    }
 }
 
-fn run_login_flow(app: &AppHandle) {
-    let url = match get_sso_url() {
-        Ok(u) => u,
+/// 登录轮询总预算:用户扫码的时间窗。
+const FLOW_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 轮询节拍间隔。
+const POLL_TICK: Duration = Duration::from_secs(3);
+
+/// 登录流程体。`epoch` 是 [`eip_connect_begin`] 从门闩拿到的持有权凭证。
+fn run_login_flow(app: &AppHandle, epoch: u64) {
+    let state = app.state::<EipConn>();
+    let flow = &state.flow;
+    // 门闩守卫:正常退出、提前 return、panic 都会归还门闩。流程体的 JoinHandle
+    // 在上面的 spawn_blocking 里被丢弃,没有别的收尾者——靠流程自己逐条 return
+    // 前 `finish()` 迟早会漏,漏一次门闩就永久压在 Running。
+    let _guard = FlowGuard::new(flow, epoch);
+
+    let url = match get_sso_url(flow, epoch, app) {
+        Ok(Some(url)) => url,
+        Ok(None) => return, // 节流等待中被取消/抢占:静默退出
         Err(e) => {
+            // 已被取消/抢占就静默退场:僵尸流程给新流程的 UI 发 error 会误导用户
+            // (见 flow_gate 模块注释"僵尸不再发任何事件")。
+            if !flow.is_active(epoch) {
+                return;
+            }
             emit(
                 app,
                 "eip:error",
@@ -290,14 +368,26 @@ fn run_login_flow(app: &AppHandle) {
         }
     };
     let qr = make_qr(&url);
+    // 取消/抢占可能正落在 begin 与出码之间(节流窗口把这段从 ~2s 拉到 ~65s),
+    // 那时不能再把用户刚收起的弹窗重新打开。
+    if !flow.is_active(epoch) {
+        return;
+    }
+    flow.arm_payload(epoch, url.clone(), qr.clone());
     emit(app, "eip:sso", json!({ "url": url, "qr_data_url": qr }));
 
     let start = Instant::now();
     loop {
-        if is_cancelled(app) {
-            return; // 取消:静默
+        // 每拍自检 + 心跳:取消、被抢占(epoch 过期 = 门闩已被转交新流程)都从这里
+        // 静默退场,不再发任何事件。
+        if !flow.is_active(epoch) {
+            return;
         }
-        if start.elapsed() > Duration::from_secs(300) {
+        if start.elapsed() > FLOW_TIMEOUT {
+            // 同源守卫:检查与 emit 之间若被取消/抢占,同样静默退场。
+            if !flow.is_active(epoch) {
+                return;
+            }
             emit(
                 app,
                 "eip:error",
@@ -308,10 +398,19 @@ fn run_login_flow(app: &AppHandle) {
             );
             return;
         }
-        std::thread::sleep(Duration::from_secs(3));
-        // auth poll 一轮(自带 --timeout);成功与否统一靠 auth status 判定。
+        std::thread::sleep(POLL_TICK);
+        // 心跳贴着阻塞调用放:这样"卡死"只需由**单次**调用的最坏耗时界定
+        // (HTTP 客户端 60s),而不是整拍。
+        if !flow.is_active(epoch) {
+            return;
+        }
+        // auth poll 一轮(CLI 本地轮询窗口默认 30s,Go 源 cmdPoll 缺省值);
+        // 成功与否统一靠 auth status 判定。
         if let Ok(cmd) = eip(&["auth", "poll", "--output", "json"]) {
             let _ = run(cmd);
+        }
+        if !flow.is_active(epoch) {
+            return;
         }
         if is_authed() {
             if set_connected(true) {
@@ -326,9 +425,36 @@ fn run_login_flow(app: &AppHandle) {
 }
 
 /// `auth login --no-poll --output json` → 取 SSO 登录地址(只出 URL 不阻塞)。
-fn get_sso_url() -> Result<String, String> {
+/// 返回 `Ok(None)` = 节流等待期间被取消/抢占,本次登录作废。
+fn get_sso_url(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<String>, String> {
     let cmd = eip(&["auth", "login", "--no-poll", "--output", "json"])?;
-    let (_ok, _code, so, se) = run(cmd)?;
+    // 同源网关限流:与知道的 login 至少间隔 65s。等待期间给前端出**可递减**的
+    // 倒计时(整秒续报),可被取消。
+    let permit = super::flow_gate::throttle_sso_login(
+        |wait| {
+            emit(
+                app,
+                "eip:sso_wait",
+                json!({ "seconds": wait.as_secs() + 1 }),
+            )
+        },
+        || !flow.is_active(epoch),
+    );
+    let Some(permit) = permit else {
+        return Ok(None);
+    };
+    // 放行 ≠ 请求已发出:Err(spawn 失败或 120s 兜底击杀)丢弃凭证自动回滚,
+    // 不白占 65s 窗口;Ok(含 CLI 非零退出码——此时无法区分请求是否已到达
+    // 网关)按「可能已发出」保守 confirm 保留窗口(issue #1097:throttle
+    // 放行后 run(cmd) spawn 失败无法回滚预约)。超时击杀的请求理论上可能
+    // 已到达网关,回滚后立刻重试存在撞 429 的窄窗口;但 CLI 自带 60s HTTP
+    // 超时,能拖到 120s 的基本是进程级挂死(请求未完成),回滚不给失败重试
+    // 强加 65s 等待。
+    let out = run(cmd);
+    if out.is_ok() {
+        permit.confirm();
+    }
+    let (_ok, _code, so, se) = out?;
     let p = parse_json(&so)
         .or_else(|| parse_json(&se))
         .unwrap_or(Value::Null);
@@ -336,6 +462,7 @@ fn get_sso_url() -> Result<String, String> {
         .iter()
         .find_map(|k| p.get(*k).and_then(|v| v.as_str()))
         .map(String::from)
+        .map(Some)
         .ok_or_else(|| {
             let message = p
                 .get("message")
@@ -346,11 +473,9 @@ fn get_sso_url() -> Result<String, String> {
         })
 }
 
-/// 取消连接:置取消标志(登录轮询下一拍自停)。
+/// 取消连接:请求门闩取消(登录轮询下一拍自停并归还门闩)。
 pub async fn eip_cancel(app: AppHandle) -> Result<Value, String> {
-    app.state::<EipConn>()
-        .cancelled
-        .store(true, Ordering::SeqCst);
+    app.state::<EipConn>().flow.request_cancel();
     Ok(json!({ "ok": true }))
 }
 
@@ -370,6 +495,9 @@ pub async fn eip_logout() -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
     use super::make_qr;
 
     #[test]
@@ -377,5 +505,140 @@ mod tests {
         let qr = make_qr("https://sso.h3c.com/login?sessionId=test-session").unwrap();
         assert!(qr.starts_with("data:image/svg+xml;base64,"));
         assert!(qr.len() > 512);
+    }
+
+    /// 从 SKILL.md 命令速查表提取公开命令键（与 linux-src routes 同一口径：
+    /// `eip attendance get-summary` → "attendance get-summary"，`eip news` → "news"；
+    /// 同格续写命令如 `get-sick-balance` 继承本行首个 eip 命令的域）。
+    fn collect_skill_commands(skill: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for line in skill.lines() {
+            if !line.trim_start().starts_with('|') {
+                continue;
+            }
+            let mut domain = String::new();
+            for span in extract_code_spans(line) {
+                if let Some(rest) = span.strip_prefix("eip ") {
+                    let tokens: Vec<&str> = rest.split_whitespace().collect();
+                    if tokens.is_empty() {
+                        continue;
+                    }
+                    let key = if tokens.len() > 1
+                        && tokens[1].starts_with(|c: char| c.is_ascii_lowercase())
+                    {
+                        format!("{} {}", tokens[0], tokens[1])
+                    } else {
+                        tokens[0].trim_end_matches('[').to_string()
+                    };
+                    domain = key.split(' ').next().unwrap_or("").to_string();
+                    out.insert(key);
+                } else if !domain.is_empty()
+                    && !span.is_empty()
+                    // flag 说明段不是命令:以 `-` 开头(如行内 `--type`)或内含
+                    // `--`(如裸前括号 `[--keyword`)的段拼成「域 + flag」都会
+                    // 得到路由表必然不存在的伪命令,契约测试误报缺失。
+                    && !span.starts_with('-')
+                    && !span.contains("--")
+                    && span
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-' || c == '[')
+                {
+                    out.insert(format!("{domain} {}", span.trim_end_matches('[')));
+                }
+            }
+        }
+        out
+    }
+
+    /// 提取一行内所有反引号代码段。
+    fn extract_code_spans(line: &str) -> Vec<String> {
+        let mut spans = Vec::new();
+        let mut rest = line;
+        while let Some(start) = rest.find('`') {
+            let after = &rest[start + 1..];
+            if let Some(end) = after.find('`') {
+                spans.push(after[..end].to_string());
+                rest = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+        spans
+    }
+
+    /// 从 linux-src/main.go 的 routes 表提取命令键（形如 `"key": {"METHOD", ...}`）。
+    fn collect_fallback_routes(source: &str) -> BTreeSet<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let t = line.trim_start();
+                let rest = t.strip_prefix('"')?;
+                let end = rest.find('"')?;
+                let key = &rest[..end];
+                let after = rest[end + 1..].trim_start().strip_prefix(':')?.trim_start();
+                if after.starts_with("{\"")
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == ' ' || c == '-')
+                {
+                    Some(key.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skill_command_collector_ignores_flag_spans() {
+        // 速查表行内的 flag 说明段（如 `--type`）不得被「同格续写命令」语法糖
+        // 拼成「域 + flag」伪命令——cc16d7fa 增补 todo-count 说明时踩坑，产生
+        // 路由表必然不存在的 "todo-count --type"，契约测试误报缺失。
+        let skill = "| 有没有待办 | `eip todo` / `eip todo-count`;审批状态加 `--type`:`2` 已审批、`3` 我的申请 |";
+        let cmds = collect_skill_commands(skill);
+        assert!(
+            cmds.contains("todo") && cmds.contains("todo-count"),
+            "{cmds:?}"
+        );
+        assert!(!cmds.contains("todo-count --type"), "{cmds:?}");
+        // 裸前括号形态(`[--keyword`)同样不是命令:以 `[` 开头但内含 `--`,
+        // 六轮评审解析器推演实测的另一误捕形态。
+        let bracket = "| 资讯 | `eip news` `[--keyword` 补充说明 |";
+        let cmds = collect_skill_commands(bracket);
+        assert!(!cmds.contains("news [--keyword"), "{cmds:?}");
+        // 续写命令语法糖本身不受影响：不带 eip 前缀的裸命令段仍继承本行域。
+        let legacy = "| 各类假期余额 | `eip leave get-balance` / `get-sick-balance` |";
+        let cmds = collect_skill_commands(legacy);
+        assert!(
+            cmds.contains("leave get-balance") && cmds.contains("leave get-sick-balance"),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn skill_documented_commands_exist_in_fallback_routes() {
+        // SKILL.md 命令速查表是模型在全部平台调用 eip 的契约，darwin/linux-arm64
+        // 实际执行 linux-src fallback 构建：路由缺命令时公开命令稳定失败
+        // （#1057 评审发现 news/announcement/course/meeting/community-hot 缺失）。
+        // 契约：文档公开命令必须存在于 fallback 路由，防文档与能力再漂移。
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/common/bundle/eip");
+        let skill = std::fs::read_to_string(base.join("SKILL.md")).unwrap();
+        let source = std::fs::read_to_string(base.join("linux-src/main.go")).unwrap();
+        let routes = collect_fallback_routes(&source);
+        assert!(
+            routes.contains("attendance get-summary") && routes.contains("news"),
+            "fallback 路由解析异常，得到 {} 条",
+            routes.len()
+        );
+        let documented = collect_skill_commands(&skill);
+        assert!(
+            documented.contains("news") && documented.contains("attendance get-summary"),
+            "SKILL.md 命令解析异常，得到 {documented:?}"
+        );
+        let missing: Vec<String> = documented.difference(&routes).cloned().collect();
+        assert!(
+            missing.is_empty(),
+            "SKILL.md 公开命令在 fallback 路由缺失: {missing:?}"
+        );
     }
 }

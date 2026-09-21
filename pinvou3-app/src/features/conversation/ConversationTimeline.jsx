@@ -131,15 +131,22 @@ export function ConversationStatusBadge({ status, copy }) {
   const done = ['Completed', 'completed', 'done', 'end_turn'].includes(status);
   const failed = ['Failed', 'failed', 'Refused'].includes(status);
   const interrupted = ['Interrupted', 'interrupted', 'incomplete'].includes(status);
-  const stopped = interrupted || status === 'LimitReached';
+  // A swarm-off cancellation is an operator-level ending, not the agent's
+  // failure: keep it out of the red bucket so the panel agrees with the
+  // running-agents overlay (agentCard.cancelled). The ledger token is
+  // lowercase; compare case-insensitively like the other consumers.
+  const cancelled = typeof status === 'string' && status.toLowerCase() === 'cancelled';
+  const stopped = interrupted || cancelled || status === 'LimitReached';
   const label = done
     ? c.completed
     : failed
       ? c.failed
-      : interrupted
-        ? c.interrupted
-        : status === 'LimitReached'
-          ? c.limitReached
+      : cancelled
+        ? (c.cancelled || c.interrupted)
+        : interrupted
+          ? c.interrupted
+          : status === 'LimitReached'
+            ? c.limitReached
           : c.processing;
   return (
     <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
@@ -203,7 +210,7 @@ export function ConversationActivityIndicator({
   return <div role="status" aria-live="polite" className={sharedClass}>{content}</div>;
 }
 
-export function TerminalBlock({ label, text }) {
+function TerminalBlock({ label, text }) {
   if (!text) return null;
   return (
     <div className="mt-3 min-w-0 max-w-full">
@@ -213,7 +220,7 @@ export function TerminalBlock({ label, text }) {
   );
 }
 
-export function StructuredValue({ label, value }) {
+function StructuredValue({ label, value }) {
   if (value == null || value === '' || (Array.isArray(value) && !value.length)) return null;
   if (typeof value !== 'object') return <TerminalBlock label={label} text={String(value)} />;
   const entries = Object.entries(value);
@@ -235,7 +242,7 @@ export function StructuredValue({ label, value }) {
   );
 }
 
-export function CompactItemRow({ icon, title, meta, status, open, onToggle, controlsId }) {
+function CompactItemRow({ icon, title, meta, status, open, onToggle, controlsId }) {
   const tone = status === 'failed'
     ? 'text-red-500 bg-red-500/10'
     : status === 'warning'
@@ -448,7 +455,7 @@ function FetchToolItem({ item, now, onOpenExternal, copy }) {
   );
 }
 
-export function WorkspaceResourceButtons({ resources, onOpenResource }) {
+function WorkspaceResourceButtons({ resources, onOpenResource }) {
   if (!resources.length) return null;
   return (
     <div className="flex flex-wrap gap-1.5 px-3 pb-2">
@@ -603,7 +610,7 @@ function ReasoningItem({ item, now, copy }) {
   );
 }
 
-export function PlanBlock({ plan, copy }) {
+function PlanBlock({ plan, copy }) {
   const c = conversationCopy(copy);
   const entries = plan && plan.entries || [];
   if (!entries.length) return null;
@@ -918,6 +925,7 @@ function ConversationTurnView({
                 copy={c}
                 sessionId={sessionId}
                 turnId={turn.lifecycleKnown ? turn.id : null}
+                telemetryTurnId={turn.lifecycleKnown ? turn.behaviorTurnId : null}
                 onRetry={onRetry ? () => onRetry(turn) : undefined}
               />
             )}

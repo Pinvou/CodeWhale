@@ -9,28 +9,12 @@
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { RotateCcw } from '../../components/icons.jsx';
+import { useDialogFocusRestore } from '../../hooks/useDialogFocusRestore.js';
 import { summarizeCheckpointChanges } from './checkpoints.js';
 
 const FILE_LIST_LIMIT = 8;
 
-// 弹窗焦点：挂载时夺取一次（父组件内联 onCancel 每渲染换新身份，若 focus 放进
-// 带依赖的 effect，弹窗打开期间任意父级重渲染都会把焦点从按钮拽回容器），卸载
-// 时归还先前焦点元素（触发元素可能已随时间线重载重建，isConnected 守卫；
-// focusing a detached element is a spec-permitted no-op). When initialFocusRef is provided it is
-// focused first (e.g. a text box needing immediate input) — this runs after React commits autoFocus
-// and overrides it, so initial focus must go through this path instead of the autoFocus attribute.
-// Shared by the two confirm dialogs, NativeYoloConfirmCard, and CodexAcpView's branch-switch dialog.
-export function useDialogFocusRestore(dialogRef, initialFocusRef) {
-  useEffect(() => {
-    const previous = document.activeElement;
-    (initialFocusRef?.current || dialogRef.current)?.focus();
-    return () => {
-      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
-    };
-  }, [dialogRef, initialFocusRef]);
-}
-
-// Escape to close (disabled while busy). Shared by the two confirm dialogs, NativeYoloConfirmCard,
+// Escape to close (disabled while busy). Shared by the two confirm dialogs, the shared YoloConfirmCard,
 // and CodexAcpView's branch-switch dialog.
 export function useDialogEscapeKey(busy, onCancel) {
   useEffect(() => {
@@ -142,9 +126,12 @@ export function RewindUndoChip({ state, disabled, copy, onOpen }) {
   );
 }
 
-// 确认弹窗三要素（设计 §7）：将撤销的变更摘要、对话将截断到的位置、错误如实展示
-// （跨会话忙碌/恢复失败等后端文案原样上屏）。portal 到 <body> 与 NativeYoloConfirmCard
-// 同款：避免 composer 容器的 backdrop-blur 成为 fixed 包含块。
+// The rewind confirm dialog shows three things (design §7): a summary of the
+// changes to be reverted, where the conversation will be truncated to, and
+// errors rendered truthfully (backend copy such as cross-session busy or
+// restore-failure text appears as-is). Portal to <body>, same as the shared
+// YoloConfirmCard: avoids the composer container's backdrop-blur becoming the
+// containing block for fixed descendants.
 export function RewindConfirmDialog({ entry, previewState, error, busy, theme, copy, onCancel, onConfirm }) {
   const isDark = theme === 'dark';
   const dialogRef = useRef(null);

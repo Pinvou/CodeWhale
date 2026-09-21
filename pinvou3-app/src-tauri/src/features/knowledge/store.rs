@@ -282,12 +282,14 @@ impl Store {
         })
     }
 
-    /// 内存库（单测用）。
-    #[allow(dead_code)] // 仅 #[cfg(test)] 引用；保留给日后 daemon/集成测试
+    /// In-memory store (unit tests only). Test fixtures build stores solely
+    /// through this constructor; production always goes through [`Store::open`].
+    #[cfg(test)]
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         Self::from_conn(Connection::open_in_memory()?)
     }
 
+    #[cfg(test)]
     fn from_conn(conn: Connection) -> rusqlite::Result<Self> {
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -344,15 +346,6 @@ impl Store {
             }
         }
         tx.commit()
-    }
-
-    /// 物理删除一条（watcher 的 remove 用）。FTS 由触发器同步。
-    #[allow(dead_code)] // 下一增量(实时 watcher)接线;先建好 API
-    pub fn delete_by_path(&self, path: &str) -> rusqlite::Result<()> {
-        self.conn
-            .lock()
-            .execute("DELETE FROM files WHERE path = ?1", params![path])?;
-        Ok(())
     }
 
     /// 现有索引快照 `path → (mtime, size)`，给增量扫描比对用（只取未变文件可跳过 upsert）。
@@ -615,20 +608,6 @@ mod tests {
             .unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].name, "notes.md");
-    }
-
-    #[test]
-    fn delete_removes_from_fts() {
-        let s = seed();
-        s.delete_by_path("/home/u/Desktop/notes.md").unwrap();
-        let hits = s
-            .search(&SearchQuery {
-                text: Some("notes".into()),
-                limit: 10,
-                ..Default::default()
-            })
-            .unwrap();
-        assert!(hits.is_empty());
     }
 
     #[test]

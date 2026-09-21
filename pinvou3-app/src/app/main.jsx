@@ -20,8 +20,11 @@ import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
-import { groupSessionsWithProjects } from '../features/projects/projectGrouping.js';
+import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
+import { MoveToProjectDialog } from '../features/projects/MoveToProjectDialog.jsx';
+import { RebindFolderDialog } from '../features/projects/RebindFolderDialog.jsx';
+import { classifyRebindError } from '../features/projects/rebindErrors.js';
 import { runSessionBatch } from '../shared/session-management.js';
 import { can, isWeb } from '../shared/platform.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
@@ -54,6 +57,7 @@ import { ChatView } from '../features/chat/ChatView.jsx';
 import { createPinvouModeScopeKey, savePinvouModeState } from '../features/chat/pinvou-mode-state.js';
 import { WebConnectionStatus } from '../features/web/WebConnectionStatus.jsx';
 import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRouter.jsx';
+import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import {
@@ -182,6 +186,9 @@ function cachedItemCallback(cache, item, build) {
 }
 const sidebarPickUpCallbacks = new WeakMap();
 const sidebarScheduledSelectCallbacks = new WeakMap();
+// 拖拽 payload 与 onPickUp/onSelect 同因缓存:内联对象每次渲染都是新引用,
+// 会击穿 RecentItem 的 memo(见 NavigationComponents 内注释)。
+const sidebarDndPayloads = new WeakMap();
 
 // Static icon elements for the sidebar main nav: module-level constants keep
 // the element references stable so the NavItem memo can hit.
@@ -1083,17 +1090,18 @@ const NAV_PREFETCH = {
       const savedModelConfigRef = useRef(null);
       const savedSearchConfigRef = useRef(null);
 
-      // 各厂商默认配置（前端自动填充用，与 bridge/mod.rs 对齐）
+      // Per-vendor default configs (used to backfill the legacy single-model
+      // draft): reuse settings/model-catalog.js MODEL_PRESET_DEFS directly
+      // (which is aligned with the Rust prefs
+      // `ModelPreset::default_base_url/default_model`) instead of hand-copying
+      // a second copy, avoiding the mirror drift qwen once suffered. The only
+      // override is openai_compatible: the add-model catalog deliberately has
+      // no default address/model, while this table backfills the values the
+      // Rust legacy migration fallback actually resolves
+      // (prefs default_base_url/default_model).
       const PRESET_DEFAULTS = {
-        local_vllm:  { baseUrl: 'http://127.0.0.1:8000/v1',                model: 'qwen36_35b_256k' },
-        deepseek:    { baseUrl: 'https://api.deepseek.com',                model: 'deepseek-v4-pro' },
-        kimi:        { baseUrl: 'https://api.moonshot.cn/v1',              model: 'kimi-k3' },
-        openai_compatible: { baseUrl: 'https://api.openai.com/v1',        model: 'gpt-5.6-terra' },
-        qwen:        { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3.7-plus' },
-        doubao:      { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-evolving' },
-        minimax:     { baseUrl: 'https://api.minimaxi.com/v1',            model: 'MiniMax-M3' },
-        glm:         { baseUrl: 'https://open.bigmodel.cn/api/paas/v4',   model: 'glm-5.2' },
-        mimo:        { baseUrl: 'https://api.xiaomimimo.com/v1',          model: 'mimo-v2.5-pro' },
+        ...MODEL_PRESET_DEFS,
+        openai_compatible: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-terra' },
       };
       function normalizedModelProfile(name, baseUrl, apiKey) {
         const modelName = (name || '').trim();
@@ -1569,6 +1577,15 @@ const NAV_PREFETCH = {
             pinned: !!s.pinned,
             pinnedAt: s.pinned_at || '',
             working: !!sessionBusy[s.id], // concurrent sessions: is this session generating in the background
+            // #445 binding: a bound work session carries workspacePath/Kind;
+            // project grouping follows binding (the same signal as the safety
+            // posture). Unbound sessions leave both values empty and stay in
+            // the date view.
+            workspacePath: s.workspace_binding || '',
+            // A standalone 'bound' kind: shares the three-tier grouping with
+            // the code/ACP 'project' kind, but is not a disguised
+            // project-kind (review #452 finding 5).
+            workspaceKind: s.workspace_binding ? WORKSPACE_KIND_BOUND : '',
             leadingIcon: <PinvouLogo className="h-[18px] w-[18px]" />,
             testId: 'regular-sidebar-item',
             menuTestId: 'regular-sidebar-menu',
@@ -1741,12 +1758,45 @@ const NAV_PREFETCH = {
       const [archiveToast, setArchiveToast] = useState(false);
       const [settingsToast, setSettingsToast] = useState('');
       const [projectOpsBusy, setProjectOpsBusy] = useState(false);
+      const [moveToProjectSession, setMoveToProjectSession] = useState(null);
+      const [moveToPresetProject, setMoveToPresetProject] = useState(null);
+      // 拖拽高亮的唯一所有者:源行 dragend 无条件清除,webview 丢 dragleave
+      // 事件时高亮也不会卡死(评审 #450 finding 5)。
+      const [dropTargetGroupKey, setDropTargetGroupKey] = useState(null);
+      // 稳定入口:RecentItem 的 memo 依赖 prop 引用稳定(NavigationComponents
+      // 内注释),内联箭头会让每个 App 重渲染(每个流式 token 批次)重渲染
+      // 全部 codex 侧栏行;identity 只在门控布尔翻转(项目从无到有/反之)时
+      // 变化。RecentItem 自己传 chat,无需逐行捕获。
+      // movePickerRestoreRef:移动成功的 regroup 会把出发行重新挂到新的分组
+      // 容器下,原标签节点随之销毁,被动还原会因 isConnected 失败跳过——
+      // 成功时按会话键解析新节点,交给 useDialogFocusRestore 的关闭时还原。
+      // menu 打开时一并清陈旧拖拽预置,避免上一次落点残留到本次选择
+      // (finding 7;setState 引用稳定,不影响本回调的 identity)。
+      const movePickerRestoreRef = useRef(null);
+      const openMovePicker = useCallback((target) => {
+        movePickerRestoreRef.current = null;
+        setMoveToPresetProject(null);
+        setMoveToProjectSession(target);
+      }, []);
+      // 拖拽高亮清除必须引用稳定:行内箭头让每个 App 重渲染(每个流式
+      // token 批次、tear-off 期间每次 pointermove 的 setDragAvatar)都新建
+      // 引用,击穿 RecentItem 的 memo,重渲染全部侧栏行。
+      const clearDropTarget = useCallback(() => setDropTargetGroupKey(null), []);
+      const [rebindDraft, setRebindDraft] = useState(null);
       // 桥完成首次状态同步(bs 就绪)后拉一次项目快照;后续变更由
       // projects:list_changed 事件驱动桥内刷新(bridge/projects.js)。
       const projectsBootstrapReady = !!bs;
       useEffect(() => {
         if (projectsBootstrapReady && bridge.projects) bridge.projects.loadProjects();
       }, [projectsBootstrapReady]);
+      // Set of session ids whose archive export is in flight: the handler
+      // exits early to prevent concurrent duplicate exports, and the sidebar
+      // hides the matching menu item as in-progress feedback.
+      const [exportingSessionIds, setExportingSessionIds] = useState(() => new Set());
+      // latest-ref mirror: the stable export callback reads the in-flight set
+      // here instead of changing identity whenever the set changes.
+      const exportingSessionIdsRef = useRef(exportingSessionIds);
+      exportingSessionIdsRef.current = exportingSessionIds;
 
       // Expanded sidebar width: drag the right edge to adjust (220~480px), double-click
       // the handle to reset to default; the choice is persisted.
@@ -1854,7 +1904,8 @@ const NAV_PREFETCH = {
       const sidebarTaskFilterOptions = [
         { id: 'all', label: t.sidebarTaskFilterAll },
         { id: 'pinned', label: t.sidebarTaskFilterPinned },
-        // code 形态(胶囊选中「代码」)下列表恒为代码会话:「代码会话」筛选等同
+        // In the project form (capsule set to "Projects") the list is always
+        // code/bound sessions: the "Code sessions" filter is equivalent to
         // 「全部」、「定时任务」恒为空——两个选项都是死胡同,只在标准形态提供。
         ...(sidebarCodeListActive ? [] : [
           { id: 'code', label: t.sidebarTaskFilterCodeSessions },
@@ -1926,17 +1977,23 @@ const NAV_PREFETCH = {
         return groups;
       }, [sidebarTaskHistory, sidebarPinnedHoisted]);
 
-      // Code-style sidebar: lists only code sessions. Project layer resolves
-      // each session through three deterministic tiers (explicit assignment /
-      // project-root auto-grouping / implicit folder bucketing); without any
-      // created project the result is byte-identical to the legacy folder
-      // grouping. With "pinned first", pinned code sessions hoist above groups.
-      // Note: the upstream history chain (chatHistory/codexHistory/…) rebuilds
-      // on every App render, so these memos currently re-run each render too —
-      // end-to-end memoization of that legacy chain is deferred (finding 22);
-      // tier-2 grouping is O(sessions × projects × roots) (#448 finding 8).
+      // Project view (formerly the "Code" form): every session bound to a
+      // real directory — code/ACP sessions and #445 bound work sessions — is
+      // grouped uniformly by the project layer's three tiers; unbound plain
+      // sessions stay in the date view of "All". Grouping follows binding,
+      // the same signal as the safety posture.
+      // Note (aligned with the memo comment above): bridge snapshots are
+      // persistent projections, so these memos skip recomputation when their
+      // slices keep their references; tier-2 grouping remains
+      // O(sessions × projects × roots) (#448 finding 8).
       const sidebarCodeTasks = useMemo(() => (sidebarCodeListActive
-        ? sidebarTaskHistory.filter(chat => chat.taskKind === 'codex')
+        ? sidebarTaskHistory.filter(chat => chat.taskKind === 'codex'
+            // The bound-work-session branch is desktop-only, like the projects
+            // slice it feeds: on web the backend degrades workspace_binding to
+            // its last path component, so the value is a leaf name with no
+            // project behind it and two same-named directories would collapse
+            // into one tier-3 bucket (review #464 round-6 finding 8b).
+            || (can('desktopChrome') && chat.taskKind === 'regular' && chat.workspacePath))
         : []), [sidebarCodeListActive, sidebarTaskHistory]);
       const sidebarFolderPinned = useMemo(() => (taskListSort === 'pinned_first'
         ? sidebarCodeTasks.filter(chat => !!chat.pinned)
@@ -2539,6 +2596,42 @@ const NAV_PREFETCH = {
         if (isCodexSession) await refreshCodexSessions().catch(() => {});
       }, [codexSessions, refreshCodexSessions]);
 
+      // One-click full session log export (.tar.xz, full-fidelity context).
+      // The backend opens the native save dialog: cancellation resolves to
+      // null; the success toast carries the save path and failures surface
+      // through the settings-page toast. Sessions already exporting exit
+      // early (preventing concurrent duplicate exports) and their sidebar
+      // menu items are hidden at the same time as in-progress feedback. The
+      // default file name carries the session title (truncated by code
+      // points so surrogate pairs are not split) and a short id; the final
+      // name is sanitized by the backend (against path traversal and invalid
+      // characters). The task list is read via allSidebarTasksRef and the
+      // in-flight set via exportingSessionIdsRef so the callback identity
+      // stays stable (RecentItem is memoized).
+      const handleExportSessionArchive = useCallback(async (id) => {
+        if (!bridge.available || !bridge.sessions.exportSessionArchive) return;
+        if (exportingSessionIdsRef.current.has(id)) return;
+        const chat = (allSidebarTasksRef.current || []).find(c => c.id === id);
+        const title = ((chat && chat.title) || 'session').trim() || 'session';
+        const stem = [...title].slice(0, 30).join('');
+        const defaultName = `pinvou-session-${stem}-${id.slice(0, 8)}.tar.xz`;
+        setExportingSessionIds(prev => new Set(prev).add(id));
+        try {
+          const result = await bridge.sessions.exportSessionArchive(id, defaultName);
+          if (!result) return;
+          setSettingsToast(t.exportSessionDone(result.path));
+        } catch (error) {
+          console.warn('export session archive failed', error);
+          setSettingsToast(t.exportSessionFailed);
+        } finally {
+          setExportingSessionIds(prev => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }
+      }, [t]);
+
       const handleToggleSessionPinned = useCallback(async (id, pinned) => {
         const isCodexSession = codexSessions.some(session => session.id === id);
         if (bridge.available) await bridge.sessions.toggleSessionPinned(id, pinned);
@@ -2606,6 +2699,189 @@ const NAV_PREFETCH = {
       const handleConvertFolderToProject = (path, name) => runProjectOp(p => p.createProject(name, [path]));
       const handleRenameProject = (projectId, name) => runProjectOp(p => p.renameProject(projectId, name));
       const handleDeleteProject = (projectId) => runProjectOp(p => p.deleteProject(projectId));
+      // 移动归属:纯归档操作(工作目录绑定不动)。目标 root 不覆盖会话目录时
+      // 由选择器先弹"仅移动"确认,确认后也只移动、不带 add_workspace_root。
+      // 成功 toast 只在 store 真返回 added_root 时带路径(当前移动语义下是
+      // 防御分支,见 commands 侧契约);失败走 runProjectOp 的 opFailed。
+      // 成功只关"这一笔"的弹窗:异步落地期间用户可能已把选择器换到另一个
+      // 会话上,无条件清 slot 会把别人的弹窗关掉。
+      const handleMoveSessionToProject = (sessionId, projectId, addWorkspaceRoot) => runProjectOp(async (p) => {
+        // The picker holds the snapshot it was opened with; if the session
+        // vanished meanwhile (e.g. deleted from another window), the store
+        // rejects every attempt and the confirm panel retries a doomed op
+        // forever — the dead-target loop the pendingProject derivation
+        // already prevents for projects. Retire the picker instead.
+        if ((allSidebarTasksRef.current || []).every(task => task.id !== sessionId)) {
+          setMoveToProjectSession(current => (current && current.id === sessionId) ? null : current);
+          return;
+        }
+        const outcome = await p.moveSessionToProject(sessionId, projectId, addWorkspaceRoot);
+        // The bridge notifies before this op resolves, but the sidebar
+        // regroup that notification triggers is an asynchronous React commit
+        // — querying the DOM right here would still see the pre-regroup row.
+        // Passive cleanup of the dialog unmount runs after that commit's DOM
+        // mutations, so store a resolver and look the moved row's new node up
+        // at close time (see useDialogFocusRestore). The row container is
+        // role="presentation" and cannot take focus, so resolve its label
+        // button — the same focusable element the context menu hands off to.
+        movePickerRestoreRef.current = () => {
+          const row = document.querySelector(
+            `[data-session-key="${CSS.escape(String(sessionId))}"]`,
+          );
+          return row ? row.querySelector('button[data-drag-surface]') : null;
+        };
+        setMoveToProjectSession(current => (current && current.id === sessionId) ? null : current);
+        // 提交后一并清预置目标,避免残留状态泄漏到下一次打开(finding 7)。
+        setMoveToPresetProject(null);
+        setSettingsToast(
+          outcome && outcome.added_root
+            ? t.uiProjects.movedNoticeWithFolder(outcome.added_root)
+            : t.uiProjects.movedNotice,
+        );
+      });
+      // 拖拽落点:root 已覆盖的直接移动;未覆盖的带着预置目标打开选择器,
+      // 进入"仅移动"确认(刻意 move-only:绝不带 add_workspace_root,面板
+      // 文案已说明文件夹留在项目外;menu 路径则不带预置)。判定用共享的
+      // needsAddFolderConfirm,与选择器的初始化器/选择路径保持同源。
+      const handleDropSessionOnProject = (sessionId, projectId) => {
+        // busy 在最外层统一静默忽略,两条路径一致:与侧栏其他拖拽反馈
+        // 相同不额外打断(runProjectOp 内部同样有守卫),也避免落点挂出
+        // 一个 busy 全禁用、无法关闭的预置确认面板。
+        if (projectOpsBusy) return;
+        const chat = sidebarTaskHistory.find(c => c.id === sessionId);
+        if (!chat) return;
+        const projects = sidebarProjectsData ? sidebarProjectsData.projects : [];
+        const target = (projects || []).find(p => p && p.id === projectId);
+        if (!target) return;
+        // 拖回当前所属项目 = 选择器里禁用当前项的同一语义,直接忽略。
+        if (resolveSessionProjectId(chat, projects, sidebarProjectsData ? sidebarProjectsData.assignments : {}) === projectId) return;
+        if (needsAddFolderConfirm(chat, target)) {
+          setMoveToPresetProject(projectId);
+          setMoveToProjectSession(chat);
+          return;
+        }
+        handleMoveSessionToProject(sessionId, projectId, false);
+      };
+      // Folder rebind (repairs the broken link): click "Rebind" on a project
+      // header with an unavailable root → system folder picker → confirmation
+      // dialog. Two-phase confirmation: the first call omits confirmExisting,
+      // the backend rejects when the old folder still exists, and the dialog
+      // escalates to the strong warning for the user to confirm again.
+      const startRebindWorkspace = async (fromPath) => {
+        // Do not reopen while rebindDraft is already open: with focus left on
+        // the badge, pressing Enter re-triggers onRebind (review #463 minor),
+        // and the projectOpsBusy guard does not cover that window.
+        if (!bridge.files || !bridge.files.pickRebindFolder || projectOpsBusy || rebindDraft) return;
+        try {
+          // Single folder, with a title matching the rebind semantics
+          // (review #463 Minor 6): no longer borrowing KB's multi-select
+          // import picker.
+          const to = await bridge.files.pickRebindFolder();
+          if (!to) return;
+          // No session count: the command actually rebinds every session
+          // under `from`; the sidebar group's rendered count is only a
+          // subset, so a numeric promise would not match the
+          // RebindWorkspaceReport (finding 10).
+          setRebindDraft({ from: fromPath, to, warnExisting: false });
+        } catch (error) {
+          // Picker rejection must be user-visible (review #463 minor), not
+          // console-only; the generic opFailed copy covers this failure
+          // class, and the warn keeps the detail available for diagnostics.
+          console.warn('pick rebind folder failed', error);
+          setSettingsToast(t.uiProjects.opFailed);
+        }
+      };
+      const confirmRebindWorkspace = async (confirmExisting) => {
+        if (!bridge.projects || !rebindDraft || projectOpsBusy) return;
+        setProjectOpsBusy(true);
+        // Clear the previous attempt's inline error/busy hint so it does
+        // not stack with this run's result.
+        setRebindDraft(prev => prev && { ...prev, error: null, busySessionIds: null });
+        // Feed the previous report's post-busy ids back (review #463
+        // F-Major): a session an earlier run moved and reported post-busy is
+        // routed by the backend into the same to-lane retry population as a
+        // healthy session, so without the feed-back a busy-refused carryover
+        // session would appear in NO report field and the dialog would close
+        // claiming full success while its old-cwd runtime stays resident.
+        // The backend honors only the intersection with its own retry
+        // population, so this list can never widen the eviction set.
+        const previousPostBusySessionIds = (rebindDraft.partial && rebindDraft.partial.postBusyIds) || [];
+        try {
+          const report = await bridge.projects.rebindWorkspaceRoot(
+            rebindDraft.from, rebindDraft.to, confirmExisting, previousPostBusySessionIds);
+          const rebound = (report && report.rebound_session_ids) ? report.rebound_session_ids.length : 0;
+          const failed = (report && report.failed_session_ids) ? report.failed_session_ids.length : 0;
+          const postBusy = (report && report.post_busy_session_ids) ? report.post_busy_session_ids.length : 0;
+          // The dialog stays open whenever the report still has something the
+          // user must act on — failed sessions to retry, or sessions whose
+          // runtime the idle gate refused (round-8 MAJOR-2: closing on the
+          // post-busy-only case left "retry once when idle" with no entry
+          // point, because the unavailable-root badge disappears once the root
+          // has moved). Rerunning the backend with the same from/to converges
+          // (the snapshot includes unsynced sessions; already-rebound ones are
+          // no-ops). The post-busy ids are kept for the next retry's
+          // feed-back (F-Major).
+          if (failed > 0 || postBusy > 0) {
+            setRebindDraft(prev => prev && {
+              ...prev,
+              partial: {
+                rebound,
+                failed,
+                failedIds: (report && report.failed_session_ids) || [],
+                postBusy,
+                postBusyIds: (report && report.post_busy_session_ids) || [],
+              },
+            });
+          } else {
+            setRebindDraft(null);
+            if (rebound > 0) {
+              setSettingsToast(t.uiProjects.rebindSuccess(rebound));
+            } else {
+              // A retry after everything already converged (or a root with
+              // no sessions at all) returns an empty report; "Rebound 0"
+              // would read as a failure (review #463 minor).
+              setSettingsToast(t.uiProjects.rebindUpToDate);
+            }
+          }
+          await refreshCodexSessions().catch((error) => {
+            // Failure is not swallowed: the session list self-heals via the
+            // session:list_changed event, but a silent gap after an explicit
+            // failure must stay visible for troubleshooting
+            // (review #463 minor).
+            console.warn('refresh sessions after rebind failed', error);
+          });
+        } catch (error) {
+          // Typed-marker matching (finding 11 / Minor 7 / round-8 M4): the
+          // backend prefixes every user-reachable outcome with a stable ASCII
+          // marker and we match only that prefix, never human copy. The mapping
+          // lives in a pure helper so both halves of the contract are unit
+          // tested (review #463 round-8 minor 10).
+          const classified = classifyRebindError(error, t);
+          if (classified.kind === 'old-root-exists') {
+            setRebindDraft(prev => prev && { ...prev, warnExisting: true, error: null });
+          } else if (classified.kind === 'sessions-busy') {
+            // Busy rejection is the fence's high-frequency happy path
+            // (Minor 7): map it to i18n copy; only session ids follow the
+            // marker, and they are shown verbatim for troubleshooting.
+            setRebindDraft(prev => prev && {
+              ...prev,
+              busySessionIds: classified.busySessionIds,
+              error: null,
+            });
+          } else if (classified.kind === 'copy') {
+            setRebindDraft(prev => prev && { ...prev, error: classified.message });
+          } else {
+            console.warn('rebind workspace failed', error);
+            // On failure keep the dialog open with the error inline
+            // (review #463 M7): in-place display persists and sits next to
+            // the retry; an unmapped backend error is shown verbatim as a
+            // diagnostic detail rather than guessed at.
+            setRebindDraft(prev => prev && { ...prev, error: classified.message });
+          }
+        } finally {
+          setProjectOpsBusy(false);
+        }
+      };
 
       function sessionRowsForIds(ids) {
         const byId = new Map(allSidebarTasks.map(item => [item.id, item]));
@@ -2886,7 +3162,7 @@ const NAV_PREFETCH = {
       const mobileTitle = currentView === 'chat'
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
-          ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.sidebarTaskFilterCode)
+          ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.uiCodex.untitledSession)
         : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
@@ -2921,9 +3197,18 @@ const NAV_PREFETCH = {
           });
         }
       };
-      // 日期分组/平铺两种布局共用的任务项渲染
+      // Task-item renderer shared by the date-grouped and flat layouts.
       const renderSidebarTaskItem = (chat) => {
         const detachKind = chat.taskKind === 'codex' ? 'codex-session' : 'session';
+        // One availability gate for both dragging and the "move to project"
+        // menu item: with an empty project list (bootstrap windows, users
+        // with zero projects) the row is not draggable,
+        // avoiding a dead gesture with zero reachable drop targets. #445
+        // bound work sessions (taskKind regular + workspacePath) have the
+        // same rights as code sessions — grouping follows binding, and the
+        // move entry point follows too (same signal as review #452
+        // finding 5).
+        const projectMovesAvailable = (chat.taskKind === 'codex' || !!chat.workspacePath) && bridge.projects && !!sidebarProjectsData?.projects?.length;
         return (
           <RecentItem
             key={chat.taskKind === 'scheduled' ? `${chat.scheduledRun?.automationId || ''}:${chat.scheduledRun?.id || chat.id}` : `${chat.taskKind}:${chat.id}`}
@@ -2945,7 +3230,14 @@ const NAV_PREFETCH = {
             onDelete={handleDeleteSession}
             onTogglePinned={handleToggleSessionPinned}
             onOpenFolder={can('externalSystemOpen') ? handleRevealSessionFolder : undefined}
+            onExportArchive={chat.taskKind !== 'codex' && !exportingSessionIds.has(chat.id) && bridge.sessions.exportSessionArchive ? handleExportSessionArchive : undefined}
             onArchive={handleArchiveSession}
+            onMoveToProject={projectMovesAvailable ? openMovePicker : undefined}
+            dndPayload={projectMovesAvailable && sidebarCodeListActive
+              ? cachedItemCallback(sidebarDndPayloads, chat, (c) => ({ sessionId: c.id }))
+              : undefined}
+            dndDisabled={!!dragAvatar}
+            onDragEnd={clearDropTarget}
             dragKind={detachKind}
             dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === `${detachKind}:${chat.id}`}
             onPickUp={canDetachWindows
@@ -2992,6 +3284,7 @@ const NAV_PREFETCH = {
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
+        moveToProjectSession ? 'move-picker' : '',
       ].filter(Boolean).join('|');
       const browserOverlayPublicationReady = !!browserOverlayIntent
         && publishedBrowserOverlayIntent === browserOverlayIntent;
@@ -3129,10 +3422,47 @@ const NAV_PREFETCH = {
           )}
 
           {settingsToast && createPortal(
-            <div className="fixed left-1/2 bottom-8 z-[120] -translate-x-1/2 rounded-full bg-black/80 px-4 py-2 text-[13px] font-medium text-white shadow-2xl">
+            // Layer sits above modal overlays (picker backdrop is z-[200]) so a
+            // failure raised under an open dialog stays visible; a filesystem
+            // path in the message must not push the pill past the viewport.
+            <div className="fixed left-1/2 bottom-8 z-[210] -translate-x-1/2 max-w-[80vw] truncate rounded-full bg-black/80 px-4 py-2 text-[13px] font-medium text-white shadow-2xl">
               {settingsToast}
             </div>,
             document.body
+          )}
+
+          {rebindDraft && (
+            <RebindFolderDialog
+              from={rebindDraft.from}
+              to={rebindDraft.to}
+              warnExisting={rebindDraft.warnExisting}
+              errorMessage={rebindDraft.error}
+              partial={rebindDraft.partial || null}
+              busySessionIds={rebindDraft.busySessionIds || null}
+              t={t}
+              busy={projectOpsBusy}
+              onCancel={() => setRebindDraft(null)}
+              onConfirm={confirmRebindWorkspace}
+            />
+          )}
+
+          {moveToProjectSession && browserOverlayPublicationReady && (
+            <MoveToProjectDialog
+              session={moveToProjectSession}
+              projects={sidebarProjectsData ? sidebarProjectsData.projects : []}
+              currentProjectId={resolveSessionProjectId(
+                moveToProjectSession,
+                sidebarProjectsData ? sidebarProjectsData.projects : [],
+                sidebarProjectsData ? sidebarProjectsData.assignments : {},
+              )}
+              presetProjectId={moveToPresetProject}
+              t={t}
+              busy={projectOpsBusy}
+              restoreTargetRef={movePickerRestoreRef}
+              onClose={() => { setMoveToPresetProject(null); setMoveToProjectSession(null); }}
+              onMove={(projectId, addWorkspaceRoot) => handleMoveSessionToProject(
+                moveToProjectSession.id, projectId, addWorkspaceRoot)}
+            />
           )}
 
           {searchOverlayOpen && browserOverlayPublicationReady && createPortal(
@@ -3526,6 +3856,15 @@ const NAV_PREFETCH = {
                                   onConvert={bridge.projects && group.kind === 'folder' ? (name) => handleConvertFolderToProject(group.path, name) : undefined}
                                   onRename={group.kind === 'project' ? (name) => handleRenameProject(group.projectId, name) : undefined}
                                   onDelete={group.kind === 'project' ? () => handleDeleteProject(group.projectId) : undefined}
+                                  onDropSession={bridge.projects && group.kind === 'project' ? (sessionId) => handleDropSessionOnProject(sessionId, group.projectId) : undefined}
+                                  unavailableRoots={group.kind === 'project'
+                                    ? (group.roots || [])
+                                        .filter(root => !(root && typeof root === 'object' ? root.available : root))
+                                        .map(root => String(typeof root === 'object' ? root.path : root))
+                                    : []}
+                                  onRebind={bridge.projects && group.kind === 'project' ? (rootPath) => startRebindWorkspace(rootPath) : undefined}
+                                  dropActive={dropTargetGroupKey === group.key}
+                                  onDropActive={(active) => setDropTargetGroupKey(active ? group.key : null)}
                                 />
                                 {isOpen && (
                                   <div className="mt-1 space-y-0.5">
@@ -3838,6 +4177,7 @@ const NAV_PREFETCH = {
                 onDelete={handleDeleteSession}
                 onTogglePinned={handleToggleSessionPinned}
                 onOpenFolder={can('externalSystemOpen') ? handleRevealSessionFolder : undefined}
+                onExportArchive={bridge.sessions.exportSessionArchive ? handleExportSessionArchive : undefined}
                 onArchive={handleArchiveSession}
                 onArchiveMany={handleBatchArchiveSessions}
                 onDeleteMany={handleBatchDeleteSessions}

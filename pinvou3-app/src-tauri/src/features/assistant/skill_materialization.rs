@@ -59,10 +59,13 @@ fn skill_source_dirs() -> Vec<PathBuf> {
 
 /// 项目技能来源目录（workspace 内工具约定，按底座上游 #432 优先级降序，
 /// `.pinvou/skills` 为 pinvou3 自有约定，插在 `.agents/skills` 之后）。
-/// 仅当项目级 skills 开关开启且该 scope 的 `project_skills_opt_in` 表字段为
-/// true（当前仅 code）时使用（§2.4：项目内文本是 prompt-injection 面，显式
-/// 开启才扫描；fork #41 已砍断 workspace 并集发现，这里在 app 侧按同一来源
-/// 顺序补上，经组合目录通道物化）。
+/// Used only when the project-level skills global switch is on and the session
+/// is bound to a real directory (the caller passes Some(workspace): a native
+/// code session's project directory or a plain chat session's user
+/// working-directory binding) (§2.4: text inside a project is a
+/// prompt-injection surface, scanned only when explicitly enabled; fork #41
+/// removed workspace union discovery, so the app side restores it here in the
+/// same source order, materialized through the composed directory channel).
 fn project_skill_source_dirs(project_workspace: &Path) -> Vec<PathBuf> {
     [
         ".agents/skills",
@@ -82,8 +85,9 @@ fn project_skill_source_dirs(project_workspace: &Path) -> Vec<PathBuf> {
 ///
 /// 排除两类：本 scope 禁用集中的技能（含未初始化 DenyAll 模式的默认全禁）+
 /// 被禁用连接器声明的 companion skills（保持「关 MCP → 关联技能一并隐藏」的
-/// 既有联动）。`project_workspace` 仅在该 scope 的 `project_skills_opt_in` 表
-/// 字段为 true 且项目级 skills 开关开启时被扫描（排在用户/市场来源之前，
+/// existing linkage). `project_workspace` is passed by the caller (Some) only
+/// when the session is bound to a real directory, and is scanned only when the
+/// project-level skills global switch is on (ordered before user/marketplace
 /// 项目本地覆盖语义与底座 workspace 目录优先一致）。
 pub fn enabled_skills_for(
     scope: ConnectorScope,
@@ -93,10 +97,11 @@ pub fn enabled_skills_for(
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     // 项目技能优先（workspace 目录 > 全局来源，与底座 first-wins 一致）；
-    // 项目门由模式能力表字段驱动（当前仅 code 为 true）。
-    if crate::features::assistant::session_policy::project_skills_opt_in_for(scope)
-        && project_skills_enabled()
-    {
+    // Project gate = global switch + binding: only sessions bound to a real
+    // directory (the caller passes Some(workspace)) with the project-level skills
+    // switch explicitly enabled get scanned — text inside a project is a
+    // prompt-injection surface, independent of mode and tied to the binding.
+    if project_skills_enabled() {
         if let Some(workspace) = project_workspace {
             for src in project_skill_source_dirs(workspace) {
                 collect_source_skills(&src, &disabled, &mut seen, &mut out);
@@ -503,14 +508,14 @@ mod tests {
                 .install("visualizer")
                 .unwrap();
 
-            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]);
+            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]).unwrap();
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             assert!(
                 !enabled.iter().any(|(n, _)| n == "visualizer"),
                 "禁用 skill id 后应从组合目录排除"
             );
 
-            save_disabled_skills_for(ConnectorScope::Plain, &[]);
+            save_disabled_skills_for(ConnectorScope::Plain, &[]).unwrap();
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             assert!(
                 enabled.iter().any(|(n, _)| n == "visualizer"),
@@ -594,7 +599,7 @@ mod tests {
             assert_eq!(src, &paths::user_skills_dir().join("visualizer"));
 
             // plain 关 visualizer → 组合集不含（market 版本也被 user 覆盖，整名排除）
-            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]);
+            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]).unwrap();
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             assert!(!enabled.iter().any(|(n, _)| n == "visualizer"));
             assert!(enabled.iter().any(|(n, _)| n == "government-writing"));
@@ -628,10 +633,10 @@ mod tests {
             assert_eq!(names.len(), 4, "增量重写幂等：目录数不变: {names:?}");
 
             // 增量：关一个 → 目录删除；再开 → 目录回来
-            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]);
+            save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]).unwrap();
             rewrite_session_skills(sid, ConnectorScope::Plain, None);
             assert!(!dir.join("visualizer").exists());
-            save_disabled_skills_for(ConnectorScope::Plain, &[]);
+            save_disabled_skills_for(ConnectorScope::Plain, &[]).unwrap();
             rewrite_session_skills(sid, ConnectorScope::Plain, None);
             assert!(dir.join("visualizer").exists());
         });
@@ -705,7 +710,7 @@ mod tests {
             // 本测试聚焦项目技能的门控与优先级覆盖。code scope「未初始化默认全禁」
             // 语义会把已装技能也排除掉，与测试意图无关——先显式初始化 code scope
             // （空禁用集 = 全部启用），让项目技能覆盖链路可被断言。
-            save_disabled_skills_for(ConnectorScope::Code, &[]);
+            save_disabled_skills_for(ConnectorScope::Code, &[]).unwrap();
 
             // 默认关：code 组合集不含项目技能
             let enabled = enabled_skills_for(ConnectorScope::Code, Some(&project));
@@ -742,7 +747,14 @@ mod tests {
                 ".agents/skills 优先级应高于 .pinvou/skills（同名仍取 .agents）"
             );
 
-            // plain scope 不受项目开关影响
+            // The project gate is decoupled from mode (tied to the binding, not
+            // the mode): plain scope with a bound directory passed in is scanned
+            // too; with the global switch off, no scan.
+            let enabled = enabled_skills_for(ConnectorScope::Plain, Some(&project));
+            assert!(
+                enabled.iter().any(|(n, _)| n == "project-skill"),
+                "绑定目录的普通会话同样参与项目技能扫描（开关开启时）"
+            );
             set_project_skills_enabled(false);
             let enabled = enabled_skills_for(ConnectorScope::Plain, Some(&project));
             assert!(!enabled.iter().any(|(n, _)| n == "project-skill"));
@@ -753,7 +765,12 @@ mod tests {
     #[test]
     fn session_skills_dir_uses_session_private_root() {
         // 会话技能物化(materialize_session_skills)落点即本目录(两个原测试断言同一等式)。
-        let dir = paths::session_skills_dir("abc-123");
-        assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
+        // 等式两侧都是 PINVOU3_HOME 的派生值:并行测试翻 home 时两次读取可能落进
+        // 不同快照,等式随机打红(2026-09-16 高负载下偶现)——锁 ENV_LOCK 钉干净
+        // home,两次读取串行且确定。
+        with_temp_home(|| {
+            let dir = paths::session_skills_dir("abc-123");
+            assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
+        });
     }
 }

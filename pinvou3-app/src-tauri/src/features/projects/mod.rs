@@ -19,5 +19,6 @@ mod store;
 mod tests;
 
 pub use store::{
-    DeleteProjectReport, MoveSessionOutcome, Project, ProjectStore, SessionAssignments,
+    MoveSessionOutcome, Project, ProjectStore, RebindRootsError, SessionAssignments,
+    rebind_source_display,
 };

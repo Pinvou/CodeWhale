@@ -1,21 +1,24 @@
-// Windows-native reimplementation of H3C "知道" (zhidao) knowledge-base CLI.
+// Portable clean-room reimplementation of H3C "知道" (zhidao) knowledge-base CLI.
 //
-// Background: H3C IT ships zhidao only as a Linux ELF (`zhidao-cli`); there is no
-// Windows binary, so the Tauri app's zhidao connector could never run on Windows.
-// This is a clean-room reimplementation in Go (the original is also Go) of just the
-// subcommands the app + skill use, built natively for windows/amd64.
+// Background: H3C IT ships zhidao only as a Linux ELF (`zhidao-cli`); there are no
+// Windows or macOS binaries, so the Tauri app's zhidao connector could never run
+// there. This is a clean-room reimplementation in Go (the original is also Go) of
+// just the subcommands the app + skill use. It is plain stdlib Go with no OS-specific
+// syscalls, so one source builds every target H3C IT does not cover — see build.sh
+// (windows/amd64, linux/arm64, darwin/arm64, darwin/amd64).
 //
 // Protocol was reverse-engineered from the (un-stripped, debug_info) ELF and the
 // sibling eip-cli (same SSO_NEXT auth backend, same eos-auth token):
-//   auth base   : https://api.eos.h3c.com/auth/v1.0
-//     login     : POST /api/v2/user/agent/session/login   {deviceId, metaData}
-//     poll      : GET  /api/v2/user/agent/session/poll/{sessionId}
-//     exchange  : POST /api/v2/user/agent/token/exchange   {ait, deviceId}
-//     (all auth requests carry header  Auth-Type: SSO_NEXT)
-//   search base : https://api-searchservice.h3c.com/itsearchserve/v1.0
-//     search    : POST /search/search
-//     qa         : POST /search/getAiResult   (text/event-stream)
-//     download  : GET  /search/downSearchFile
+//
+//	auth base   : https://api.eos.h3c.com/auth/v1.0
+//	  login     : POST /api/v2/user/agent/session/login   {deviceId, metaData}
+//	  poll      : GET  /api/v2/user/agent/session/poll/{sessionId}
+//	  exchange  : POST /api/v2/user/agent/token/exchange   {ait, deviceId}
+//	  (all auth requests carry header  Auth-Type: SSO_NEXT)
+//	search base : https://api-searchservice.h3c.com/itsearchserve/v1.0
+//	  search    : POST /search/search
+//	  qa         : POST /search/getAiResult   (text/event-stream)
+//	  download  : GET  /search/downSearchFile
 //
 // Credentials: AES-256-GCM, key = SHA256(deviceID | salt). Stored under
 // AGENT_CREDENTIALS_DIR as credentials_at.enc (token) and credentials_ait.enc (ait).
@@ -29,8 +32,8 @@
 package main
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -41,6 +44,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -49,8 +53,10 @@ const (
 	authBase   = "https://api.eos.h3c.com/auth/v1.0"
 	searchBase = "https://api-searchservice.h3c.com/itsearchserve/v1.0"
 	credSalt   = "zhidao-cli-cred-v1"
-	userAgent  = "zhidao-cli (windows)"
 )
+
+// os/arch 随构建目标走（windows/linux/darwin 构建共用本源码）。
+var userAgent = "zhidao-cli (" + runtime.GOOS + ")"
 
 // ──────────────────────────── env / device ────────────────────────────
 
@@ -182,7 +188,10 @@ type sessionData struct {
 	Token       string `json:"token"`
 	Ait         string `json:"ait"`
 	Expire      int64  `json:"expire"`
-	PollInterval int   `json:"pollInterval"`
+	// Keep untyped (like the sibling eip-cli): the SSO server has flipped field
+	// types before (pollInterval string ↔ number), and a typed int would be
+	// silently dropped on a flip. Not consumed today.
+	PollInterval json.RawMessage `json:"pollInterval"`
 }
 
 func postJSON(url string, body interface{}, withToken bool) (*envelope, []byte, error) {
@@ -251,7 +260,7 @@ func cmdLogin() int {
 	body := map[string]interface{}{
 		"deviceId": deviceID(),
 		// metaData.name is required by the server (设备扩展信息[metaData.name]不能为空).
-		"metaData": map[string]string{"name": name, "os": "windows", "client": "pinvou3"},
+		"metaData": map[string]string{"name": name, "os": runtime.GOOS, "client": "pinvou3"},
 	}
 	env, raw, err := postJSON(authBase+"/api/v2/user/agent/session/login", body, false)
 	if err != nil {
@@ -613,7 +622,7 @@ func cmdDownload(args map[string]string) int {
 	}
 	url := args["url"]
 	if url == "" {
-		fmt.Fprintln(os.Stderr, "需要 --url（本 Windows 版暂只支持 --url 直接下载）")
+		fmt.Fprintln(os.Stderr, "需要 --url（本构建暂只支持 --url 直接下载）")
 		return 2
 	}
 	outDir := firstNonEmpty(args["output"], "downloads")

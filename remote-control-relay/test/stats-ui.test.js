@@ -34,6 +34,64 @@ const devices = [
   { device_id: "gamma", online: true, platform: "macos", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 5, turns_today: 2 },
 ];
 
+test("usage trend exposes exact values on hover and after a range rerender", async () => {
+  const trendOverview = {
+    ...overview,
+    usage_trend: Array.from({ length: 8 }, (_, index) => ({
+      day: `2026-08-${String(index + 3).padStart(2, "0")}`,
+      active_devices: index === 7 ? 3 : index + 1,
+      turns: index === 7 ? 12 : index + 2,
+    })),
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async (url) => ({
+        ok: true,
+        status: 200,
+        json: async () => String(url).endsWith("/overview") ? trendOverview : { devices },
+      });
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+
+  try {
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
+    const { document } = dom.window;
+    const svg = document.querySelector("#trendSvg");
+    svg.getBoundingClientRect = () => ({ left: 0, width: 780 });
+    let hitArea = document.querySelector("#trendHitArea");
+    const tooltip = document.querySelector("#trendTooltip");
+    hitArea.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 770, bubbles: true }));
+    assert.equal(tooltip.hidden, false);
+    assert.match(tooltip.textContent, /2026-08-10/);
+    assert.match(tooltip.textContent, /活跃设备3 台/);
+    assert.match(tooltip.textContent, /新增设备3 台/);
+    assert.match(tooltip.textContent, /对话次数12 次/);
+    assert.equal(document.querySelector("#trendHover").getAttribute("visibility"), "visible");
+    assert.match(hitArea.getAttribute("aria-valuetext"), /活跃设备 3 台/);
+
+    hitArea.dispatchEvent(new dom.window.MouseEvent("pointerleave", { bubbles: true }));
+    assert.equal(tooltip.hidden, true);
+
+    document.querySelector('[data-days="7"]').click();
+    hitArea = document.querySelector("#trendHitArea");
+    hitArea.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 35, bubbles: true }));
+    assert.equal(tooltip.hidden, false);
+    assert.match(tooltip.textContent, /2026-08-04/);
+    assert.match(tooltip.textContent, /对话次数3 次/);
+    assert.equal(hitArea.getAttribute("aria-valuemax"), "6");
+
+    hitArea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    assert.match(tooltip.textContent, /2026-08-10/);
+    assert.match(tooltip.textContent, /对话次数12 次/);
+  } finally {
+    dom.window.close();
+  }
+});
+
 test("behavior analytics views render alongside the device dashboard", async () => {
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
@@ -85,6 +143,12 @@ test("behavior analytics views render alongside the device dashboard", async () 
     assert.match(statsHtml, /模型质量排行榜/);
     assert.match(statsHtml, /row\.success_confidence/);
     assert.match(statsHtml, /metrics\.explicit_value_confidence/);
+    assert.match(statsHtml, /metrics\.explicit_value_sample_size/);
+    assert.match(statsHtml, /metrics\.explicit_value_ineligible_installations/);
+    assert.match(statsHtml, /row\.explicit_value_confidence/);
+    assert.match(statsHtml, /metrics\.turn_mismatch_value_signal_count/);
+    assert.match(statsHtml, /explicit_value_join_key_missing/);
+    assert.match(statsHtml, /explicit_value_signal_turn_mismatch/);
     document.querySelector('[data-view="behavior"]').click();
     assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
     document.querySelector('[data-view="commercial"]').click();
@@ -111,8 +175,10 @@ test("behavior analyst role never requests or exposes device-level views", async
             generated_at: Date.now(),
             range: "30",
             data_status: "tracking_not_enabled",
-            data_quality: { confidence: "low", warnings: [] },
+            data_quality: { confidence: "low", warnings: ["explicit_value_join_key_missing", "explicit_value_signal_turn_mismatch"] },
             metrics: {
+              explicit_value_ineligible_installations: 2,
+              turn_mismatch_value_signal_count: 3,
               task_first_output_p50_ms: null,
               task_first_output_p90_ms: null,
               task_total_duration_p50_ms: null,
@@ -136,6 +202,9 @@ test("behavior analyst role never requests or exposes device-level views", async
     assert.equal(requested.some(url => url.endsWith("/overview") && !url.includes("/behavior/")), false);
     assert.match(document.querySelector("#taskLatency").textContent, /—/);
     assert.doesNotMatch(document.querySelector("#taskLatency").textContent, /0 ms/);
+    assert.match(document.querySelector("#valueSignalQuality").textContent, /疑似回合标识不一致 3 条/);
+    assert.match(document.querySelector("#behaviorQuality").textContent, /缺少会话或回合标识.*2 台/);
+    assert.match(document.querySelector("#behaviorQuality").textContent, /价值信号疑似关联了错误回合/);
   } finally {
     dom.window.close();
   }
@@ -173,6 +242,7 @@ test("behavior ranges refresh only the selected overview or table section", asyn
                 weekly_successful_task_installations: 900,
                 wevta_installations: 800,
                 wevta_rate: 0.8,
+                explicit_value_sample_size: 850,
                 explicit_value_confidence: "sufficient",
                 positive_feedback_installations: 700,
                 response_copied_installations: 600,

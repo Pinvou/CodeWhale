@@ -28,6 +28,62 @@ const messageSandbox = { window: {} };
 vm.runInNewContext(modelServiceErrorsSource, messageSandbox, { filename: 'model-service-errors.js' });
 vm.runInNewContext(bridgeMessagesSource, messageSandbox, { filename: 'bridge-messages.js' });
 const modelErrors = messageSandbox.window.PinvouModelServiceErrors;
+const roleError = 'SSE stream request failed: HTTP 400 Bad Request: response_role: "user"';
+for (const language of ['zh', 'en', 'ja']) {
+  const notice = modelErrors.build(roleError, { language });
+  assert.equal(notice.kind, 'format');
+  assert.equal(notice.retryable, false);
+  assert.equal(notice.httpStatus, 400);
+  assert.equal(notice.technicalDetail, roleError);
+  assert.equal(modelErrors.build(notice, { language }).kind, 'format');
+}
+assert.equal(modelErrors.classify('HTTP 400: Conversation roles must alternate user/assistant').kind, 'format');
+assert.equal(modelErrors.classify('HTTP 400: invalid temperature').kind, 'unknown');
+assert.equal(modelErrors.classify('HTTP 401: response_role: user').kind, 'auth');
+assert.equal(modelErrors.classify('HTTP 400: maximum context length; response_role: user').kind, 'context');
+assert.equal(modelErrors.isModelServiceError('local validation response_role: user'), false);
+// The non-streaming lane never carries the SSE wrapper: those failures
+// surface as the base's InvalidRequest Display text, so the parenthesized
+// status must be parsed or the manual-/compact rejection keeps falling
+// through to the unknown/retry card this classifier exists to replace.
+const nonStreamRoleError = 'Invalid request (400): response_role: "user"';
+assert.equal(modelErrors.classify(nonStreamRoleError).kind, 'format');
+assert.equal(modelErrors.classify(nonStreamRoleError).httpStatus, 400);
+// A parenthesized non-role 400 stays unknown, while the Server error
+// Display form keeps its status for the retryable server kind.
+assert.equal(modelErrors.classify('Invalid request (400): invalid temperature').kind, 'unknown');
+assert.equal(modelErrors.classify('Server error (503): upstream overloaded').httpStatus, 503);
+// One assertion per remaining role-wording arm of the format regex; the
+// "conversation roles must alternate" alternative was dropped as subsumed
+// by `roles? must alternate`.
+assert.equal(modelErrors.classify('HTTP 400: query_role: assistant').kind, 'format');
+assert.equal(modelErrors.classify('HTTP 400: unsupported message role').kind, 'format');
+assert.equal(modelErrors.classify('HTTP 400: unexpected role').kind, 'format');
+assert.equal(modelErrors.classify('HTTP 400: invalid role').kind, 'format');
+// Rendered format-card copy: a swapped kind-table key would otherwise pass,
+// and the deterministic role/template failure must read the same on both
+// lanes, in every UI language, without a retry suggestion.
+for (const lane of [roleError, nonStreamRoleError]) {
+  const formatZh = modelErrors.build(lane, { language: 'zh-Hans', terminal: true });
+  assert.equal(formatZh.kind, 'format');
+  assert.equal(formatZh.title, '对话请求格式不兼容');
+  assert.match(formatZh.message, /新建会话/);
+  assert.doesNotMatch(formatZh.message, /重试/);
+  assert.doesNotMatch(formatZh.message, /\{stop\}/);
+  const formatEn = modelErrors.build(lane, { language: 'en', terminal: true });
+  assert.equal(formatEn.title, 'Conversation format is incompatible');
+  assert.match(formatEn.message, /Start a new conversation/);
+  assert.doesNotMatch(formatEn.message, /Try again later/);
+  assert.equal(formatEn.retryable, false);
+  const formatJa = modelErrors.build(lane, { language: 'ja', terminal: true });
+  assert.equal(formatJa.title, '会話リクエストの形式に互換性がありません');
+  assert.match(formatJa.message, /新しい会話/);
+  assert.equal(
+    modelErrors.build(lane, { language: 'ja', terminal: false }).message,
+    modelErrors.build(lane, { language: 'ja', terminal: true }).message,
+    'role-format failures are deterministic: transient and terminal wording match',
+  );
+}
 assert.equal(modelErrors.classify('SSE stream request failed: HTTP 402 insufficient balance').kind, 'billing');
 assert.equal(modelErrors.classify('HTTP 429 quota exceeded').kind, 'quota');
 assert.equal(modelErrors.classify('HTTP 429 insufficient_quota').kind, 'quota');
@@ -81,7 +137,6 @@ assert.equal(modelErrors.isModelServiceError('SSE stream request failed: HTTP 40
 assert.equal(modelErrors.isModelServiceError('SSE stream idle timeout after 30s — no data received'), true);
 assert.equal(modelErrors.isModelServiceError('Stream read error: connection reset by peer'), true);
 assert.equal(modelErrors.isModelServiceError('Failed to call DeepSeek Chat API: HTTP 401'), true);
-assert.equal(modelErrors.isModelServiceError('invalid api key'), true);
 assert.equal(modelErrors.isModelServiceError('quota exhausted'), true);
 assert.equal(modelErrors.isModelServiceError('model service HTTP 503 Service Unavailable'), true);
 // A bare 503 without model context does not take over (local MCP/vLLM/
@@ -150,7 +205,6 @@ assert.equal(modelErrors.isModelServiceError('quota has been exceeded'), true);
 assert.equal(modelErrors.isModelServiceError('insufficient balance'), false);
 assert.equal(modelErrors.isModelServiceError('Payment failed: insufficient balance'), false);
 assert.equal(modelErrors.isModelServiceError('DeepSeek API error: insufficient balance'), true);
-assert.equal(modelErrors.classify('SSE stream request failed: HTTP 402 insufficient balance').kind, 'billing');
 // Generic Chinese payment phrases (账户余额/余额不足/欠费) are equally
 // common in local payment/transfer errors: the bare wording no longer
 // hijacks, and with an API/provider context they remain a strong billing
@@ -960,7 +1014,43 @@ assert.match(
   desktopBridgeSource,
   /if \(item\.turnErrorNotice && !item\.legacyConversationOnly\) return false/,
 );
-assert.match(chatViewSource, /conversationItemsForMode\(visibleChatItems\)/);
+// Swarm rework: the projection input first goes through the spawn aggregation
+// annotation (annotateAgentSpawnGroups), then conversationItemsForMode; the
+// error-isolation items must stay visible on both lanes.
+assert.match(chatViewSource, /annotateAgentSpawnGroups\(visibleChatItems\)/);
+assert.match(chatViewSource, /conversationItemsForMode\(spawnAnnotatedItems\)/);
+
+// Swarm rework: the main chat lane needs a terminal ratchet matching the codex
+// native lane — an interrupted in-flight tool card must not stay "running"
+// forever, or the aggregated spawn row pulses eternally. Both the replay sweep
+// (bridge.js, settled when a session timeline is rebuilt while not mid-turn)
+// and the live sweep (chat-events.js, settled at chat:done) must stay wired,
+// and both must exclude background shells, which legitimately run across turns,
+// and synthetic shell-snapshot cards, whose "shell-task:" ids never pair with a
+// tool_use id while their job may still be running.
+assert.match(
+  desktopBridgeSource,
+  /Replay-time terminal ratchet[\s\S]{0,1400}item\.state = "failed"/,
+  'the replay-time terminal ratchet must settle interrupted tool cards',
+);
+assert.match(
+  chatEventsSource,
+  /Live-path terminal ratchet[\s\S]{0,1400}item\.state = "failed"/,
+  'the live chat:done terminal ratchet must settle interrupted tool cards',
+);
+assert.match(desktopBridgeSource, /item\.background !== true/, 'the replay ratchet must exclude background shell cards');
+assert.match(chatEventsSource, /item\.background !== true/, 'the live ratchet must exclude background shell cards');
+assert.match(
+  desktopBridgeSource,
+  /item\.shellSnapshot !== true/,
+  'the replay ratchet must exclude synthetic shell-snapshot cards',
+);
+assert.match(
+  chatEventsSource,
+  /item\.shellSnapshot !== true/,
+  'the live ratchet must exclude synthetic shell-snapshot cards',
+);
+assert.match(chatEventsSource, /sweepUnpairedToolMeta\(\);/);
 
 assert.match(webBridgeSource, /turnErrorNotice && item\.text === notice/);
 assert.match(

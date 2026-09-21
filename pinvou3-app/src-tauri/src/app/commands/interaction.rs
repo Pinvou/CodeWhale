@@ -26,6 +26,8 @@ pub struct SessionModeStateView {
     state: SessionModeState,
     /// Whether the product-level multi-agent mode is available for this session.
     /// This is resolved by SessionPolicy instead of inferred by the frontend.
+    /// Swarm-regime scope (scheduled sessions excluded) so the toggle hides
+    /// where the engine would never honor the lifted caps.
     multi_agent_available: bool,
 }
 
@@ -37,7 +39,7 @@ pub async fn get_mode_state(
 ) -> Result<SessionModeStateView, String> {
     Ok(SessionModeStateView {
         state: store.mode_state(&session_id),
-        multi_agent_available: pool.multi_agent_mode_available(&session_id),
+        multi_agent_available: pool.swarm_mode_available(&session_id),
     })
 }
 
@@ -342,21 +344,48 @@ pub async fn get_super_permission_status() -> Result<bool, String> {
 }
 
 /// 切换超级权限。开启时 pkexec 弹系统密码框写 sudoers，关闭时 pkexec 删文件。
-/// 切换后同步当前 session 让新 system prompt 立即生效（注入/抹掉 sudo 引导段）。
-/// 返回真实生效状态（pkexec 失败/取消时不会变）。
+/// After toggling, rebuild and hot-refresh the execpolicy ruleset of every
+/// running engine (sudo hard-deny is added/removed with the toggle); the
+/// session's sudo guidance state is injected live by the per-turn reminder
+/// (the static prompt renders only at spawn and is not hot-refreshed).
+/// Returns the real effective state (unchanged when pkexec fails/is cancelled).
+///
+/// Holds the process-wide [`crate::platform::super_permission::TOGGLE_LOCK`]
+/// for the whole sequence: pkexec write/remove → `refresh_permission_rulesets`
+/// rebuild + broadcast (the rebuild re-reads the sudo state from disk inside
+/// `safety_deny_rules`) → the effective-state read-back for the return
+/// value. All of it runs serialized as one unit, so concurrent toggles no
+/// longer interleave and the sudo hard-deny ruleset is never rebuilt from a
+/// snapshot older than the toggle itself (the toggle-vs-toggle
+/// stale-snapshot window registered in safety_deny_rules is closed;
+/// the connector/marketplace-vs-toggle refresh windows remain registered
+/// there as transient residues — this lock does not cover them).
+/// Toggling is a low-frequency user action, so holding the lock across the
+/// slow pkexec call is acceptable; the lock is held only here, the guard is
+/// scoped to the function, and an early pkexec error return releases it
+/// automatically without blocking other Tauri commands. The pkexec wait
+/// itself runs on the blocking pool (it blocks on the polkit dialog for as
+/// long as the user takes), so it does not park an async worker thread.
 #[tauri::command]
 pub async fn set_super_permission(
     enabled: bool,
     pool: State<'_, EnginePool>,
 ) -> Result<bool, String> {
-    if enabled {
-        crate::platform::super_permission::enable()?;
+    let _toggle_guard = crate::platform::super_permission::TOGGLE_LOCK.lock().await;
+    let toggle_result = if enabled {
+        tokio::task::spawn_blocking(crate::platform::super_permission::enable)
     } else {
-        crate::platform::super_permission::disable()?;
-    }
-    // 多 session 并发:重写所有已起 engine 的 session 专属 instructions(含新 sudo 引导块),
-    // engine 下个 turn rehydrate 时从 disk 重读 → 「下次 turn 生效」。低频操作,不为即时
-    // 生效去 SyncSession 打断在跑的 turn。未起的 session 首次 spawn 时自然带上新引导。
+        tokio::task::spawn_blocking(crate::platform::super_permission::disable)
+    };
+    toggle_result
+        .await
+        .map_err(|e| format!("super-permission toggle task failed: {e}"))??;
+    // refresh_all_instructions is a deliberate no-op today (engine_pool.rs):
+    // the static prompt renders once at engine spawn and the sudo guidance
+    // state is not part of the static segment — it is injected live by the
+    // per-turn reminder (super_permission::turn_reminder), so the toggle takes
+    // effect on the next turn. Keep this call as a hook point: if instructions
+    // hot-refresh is ever restored, the toggle sequence is the right trigger.
     pool.refresh_all_instructions().await;
     // sudo hard-deny rules are added/removed with the toggle state (deny sudo
     // while off / allow while on): recompute and hot-refresh the execpolicy
@@ -364,43 +393,6 @@ pub async fn set_super_permission(
     // channel as the connector/skill toggles.
     pool.refresh_permission_rulesets().await;
     Ok(crate::platform::super_permission::is_enabled())
-}
-
-/// 读 pinvou3 内置 skill 的 body(去掉 frontmatter)。
-/// 用途:前端 autoTriggerPinvouReview 把完整 SKILL.md 内容塞进 user message,
-/// 不依赖本地 Qwen3.6 主动 read_file —— 弱模型不会主动用 progressive disclosure。
-/// 设计依据:docs/Pinvou-品悟设计.md §10.5 (即将补)
-#[tauri::command]
-pub async fn read_skill_body(name: String) -> Result<String, String> {
-    use crate::platform::paths;
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe_name != name || safe_name.is_empty() {
-        return Err(format!("invalid skill name: {name}"));
-    }
-    // 市场技能按包聚合（bundles/<pkg>/skills/）优先，旧扁平布局回退由
-    // find_skill_dir 内置（迁移过渡容错，下个版本删除回退）。
-    let path = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
-        .find_skill_dir(&safe_name)
-        .unwrap_or_else(|| paths::bundle_skills_dir().join(&safe_name))
-        .join("SKILL.md");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read SKILL.md ({}): {e}", path.display()))?;
-    // 剥 frontmatter ---\n...\n---\n
-    let body = if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            rest[end + 5..].trim_start().to_string()
-        } else if let Some(end) = rest.find("\n---") {
-            rest[end + 4..].trim_start().to_string()
-        } else {
-            content
-        }
-    } else {
-        content
-    };
-    Ok(body)
 }
 
 // 修法 D 删除了 revise_plan 命令.
@@ -485,20 +477,6 @@ pub async fn get_pending_user_inputs(
         busy: pool.is_turn_active(&session_id),
         pending: crate::features::assistant::pending_user_input::list(&session_id),
     })
-}
-
-#[tauri::command]
-pub async fn restart_engine(
-    pool: State<'_, EnginePool>,
-    store: State<'_, SessionStore>,
-) -> Result<(), String> {
-    // 多 session 并发:重启 = evict 当前 active session 的 engine(取消在跑 turn +
-    // Shutdown + abort forwarder),下次 chat 时 EnginePool 重新 spawn 干净的并从磁盘
-    // rehydrate 历史。也是 engine-busy 卡死时的恢复路径。
-    if let Some(sid) = store.active_id() {
-        pool.evict(&sid).await;
-    }
-    Ok(())
 }
 
 // ===================== Pinvou v4 召唤式检阅 =====================

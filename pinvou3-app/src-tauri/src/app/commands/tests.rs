@@ -600,7 +600,7 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
 
     // 用户关闭 visualizer（独立 disabled_skills.json，不再借道连接器文件）→
     // 组合目录计算排除该技能。
-    sm::save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]);
+    sm::save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_string()]).unwrap();
     install_marketplace_skill_sync("visualizer").unwrap();
     assert!(
         !sm::enabled_skills_for(ConnectorScope::Plain, None)
@@ -729,11 +729,13 @@ fn mcp_uninstall_removes_companion_skills_from_package_dir() {
         crate::features::marketplace::save_disabled_bundles_for(
             scope,
             &["government-writing".to_string()],
-        );
+        )
+        .unwrap();
         crate::features::marketplace::save_hidden_bundles_for(
             scope,
             &["government-writing".to_string()],
-        );
+        )
+        .unwrap();
         assert_eq!(
             crate::features::marketplace::load_disabled_bundles_for(scope),
             vec!["gongwen".to_string()]
@@ -1009,7 +1011,12 @@ fn write_artifact_text_cleans_temp_file_on_error() {
     let md = tmp.join("note.md");
     std::fs::create_dir_all(&md).unwrap();
 
-    let err = atomic_write_utf8(&md, "new").unwrap_err();
+    let err = super::artifacts::atomic_write_utf8_unlocked_with(
+        &md,
+        "new",
+        crate::platform::filesystem::replace_file_atomically,
+    )
+    .unwrap_err();
 
     assert!(!err.to_string().is_empty());
     let leftovers: Vec<_> = std::fs::read_dir(&tmp)
@@ -1186,6 +1193,9 @@ fn agentic_guide_mentions_collection_and_kb_search() {
     assert!(g.contains("《硬件资料》"));
     assert!(g.contains("kb_search"));
     assert!(g.contains("kb_open_source"));
+    // kb_search/kb_open_source are deferred by default; the guide must teach
+    // the tool_search activation step or it names a first-turn-absent tool.
+    assert!(g.contains("`tool_search` 激活"));
     assert!(g.contains("不要对 XLSX/"));
     assert!(g.contains("绝不凭记忆编造"));
     assert!(g.contains("《团队规范》"));
@@ -2047,7 +2057,6 @@ fn image_input_capability_info_serializes_stable_fields() {
     let info = super::settings::ImageInputCapabilityInfo {
         capability: "unknown".to_string(),
         image_mode: "vision_tool_fallback".to_string(),
-        has_vision_model: true,
         is_local_endpoint: false,
         vision_is_local_endpoint: Some(false),
     };
@@ -2057,7 +2066,6 @@ fn image_input_capability_info_serializes_stable_fields() {
         serde_json::json!({
             "capability": "unknown",
             "image_mode": "vision_tool_fallback",
-            "has_vision_model": true,
             "is_local_endpoint": false,
             "vision_is_local_endpoint": false,
         })
@@ -2066,7 +2074,6 @@ fn image_input_capability_info_serializes_stable_fields() {
     let no_vision = super::settings::ImageInputCapabilityInfo {
         capability: "unsupported".to_string(),
         image_mode: "unsupported".to_string(),
-        has_vision_model: false,
         is_local_endpoint: true,
         vision_is_local_endpoint: None,
     };

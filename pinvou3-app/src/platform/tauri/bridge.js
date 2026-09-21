@@ -234,8 +234,6 @@
       teamRelaySupported: true,
       accountPlatformEnabled: false,
       browserNativeDisplay: false,
-      browserAgentAutomation: false,
-      browserCdp: false,
     },
     settings: null,
     behaviorTelemetry: null,
@@ -273,6 +271,17 @@
     modeLane: "work",
     // 草稿态寄存的多智能体开关意图：不物化会话，首条消息创建会话时落后端。
     pendingDraftMultiAgent: false,
+    // Staged explicit mode of a bound-workspace draft (null = never explicitly
+    // chosen): bound drafts run in the code lane (code mode's safety posture),
+    // applied per session from the staged value at materialization; when
+    // unstaged, the backend resolves the code lane global default and the
+    // frontend no longer applies the work lane default.
+    pendingDraftMode: null,
+    // Working directory selected in draft state (plain chat, mirroring the code
+    // mode draft selector): null = default (session-private directory). Sent to
+    // create_session via the workspacePath parameter, cleared after successful
+    // materialization, reset by enterDraft.
+    draftWorkspacePath: null,
     // 最新 plan/todos 快照（用于 mode header 进度 chip，与 plan_ready 卡解耦）
     planSnapshot: { plan: null, todos: null },
     // 当前 session 产物列表 [{ path, basename }]
@@ -534,6 +543,7 @@
       pickFolderTitle: "Choose a working directory",
       fileMediaFilterName: "Images and videos",
       kbPickFolderTitle: "Choose folders to import into the knowledge base",
+      rebindPickFolderTitle: "Choose the folder to rebind this project to",
       memoryWriteFailed: "Memory write failed: ", memoryIgnoreFailed: "Failed to ignore memory: ", memoryNeverFailed: "Failed to set \"never ask\": ",
       attachNeedSession: "⚠️ Start a new chat before adding attachments", attachEmptyFile: "Empty files cannot be added", attachAddCancelled: "Attachment add canceled", attachInvalidResult: "Attachment add returned no valid result", deviceUploadFailed: "⚠️ Upload failed: ",
       planTicketInvalid: "⚠️ The plan credential is no longer valid. Regenerate the plan before executing.",
@@ -635,6 +645,7 @@
       pickFolderTitle: "作業ディレクトリを選択",
       fileMediaFilterName: "画像と動画",
       kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
+      rebindPickFolderTitle: "このプロジェクトの再バインド先フォルダーを選択",
       memoryWriteFailed: "メモリの書き込みに失敗: ", memoryIgnoreFailed: "メモリの無視に失敗: ", memoryNeverFailed: "「今後表示しない」の設定に失敗: ",
       attachNeedSession: "⚠️ 添付ファイルを追加する前に新しいチャットを開始してください", attachEmptyFile: "空のファイルは追加できません", attachAddCancelled: "添付ファイルの追加はキャンセルされました", attachInvalidResult: "添付ファイルの追加で有効な結果が返されませんでした", deviceUploadFailed: "⚠️ アップロードに失敗: ",
       planTicketInvalid: "⚠️ プランの資格情報が無効になりました。プランを再生成してから実行してください。",
@@ -736,6 +747,7 @@
       pickFolderTitle: "选择工作目录",
       fileMediaFilterName: "图片和视频",
       kbPickFolderTitle: "选择要导入知识库的文件夹",
+      rebindPickFolderTitle: "选择重绑定项目的新文件夹",
       memoryWriteFailed: "记忆写入失败：", memoryIgnoreFailed: "忽略记忆失败：", memoryNeverFailed: "设置不再提示失败：",
       attachNeedSession: "⚠️ 请先新建会话再添加附件", attachEmptyFile: "空文件无法添加", attachAddCancelled: "附件添加已取消", attachInvalidResult: "附件添加未返回有效结果", deviceUploadFailed: "⚠️ 上传失败: ",
       planTicketInvalid: "⚠️ 方案凭证已失效，请重新生成方案后再执行",
@@ -1076,6 +1088,9 @@
 
   var sessionsFeature = installBridgeFeature("sessions", {
     state: state, invoke: invoke, listen: listen, notify: notify,
+    // The draft workspace picker uses the system directory dialog through the
+    // bridge; React never touches Tauri globals directly.
+    dialogOpen: dialogOpen,
     sessionStates: sessionStates, scheduledRunSessionOwners: scheduledRunSessionOwners,
     personaPlaceholderTitles: personaPlaceholderTitles, turnUsageDirty: turnUsageDirty,
     // Clean host-side per-session side tables when a session buffer is
@@ -1185,6 +1200,9 @@
   var enterDraft = sessionsFeature.enterDraft;
   var createNewSession = sessionsFeature.createNewSession;
   var materializeSession = sessionsFeature.materializeSession;
+  var setDraftWorkspace = sessionsFeature.setDraftWorkspace;
+  var pickDraftWorkspace = sessionsFeature.pickDraftWorkspace;
+  var getSessionWorkspaceBinding = sessionsFeature.getSessionWorkspaceBinding;
   var ensureSession = sessionsFeature.ensureSession;
   var reportSessionSwitchFailure = sessionsFeature.reportSessionSwitchFailure;
   var hydratedMessageKey = sessionsFeature.hydratedMessageKey;
@@ -1204,6 +1222,7 @@
   var toggleSessionPinned = sessionsFeature.toggleSessionPinned;
   var archiveSession = sessionsFeature.archiveSession;
   var restoreArchivedSession = sessionsFeature.restoreArchivedSession;
+  var exportSessionArchive = sessionsFeature.exportSessionArchive;
   function runSyncOnSession(sid, fn) {
     if (!sid || sid === state.activeSessionId) { fn(); return; }
     var bg = sessionStates[sid]; if (!bg) return;
@@ -1246,12 +1265,20 @@
     });
   }
 
-  // 草稿态（无 active 会话）的 modeState：取当前 lane 的全局默认，缺省 yolo
-  // （与后端 plain 缺省方向一致）。两分 lane 语义：草稿显示 = 本 lane 全局默认。
+  // The draft-state (no active session) modeState: take the current lane's
+  // global default, falling back to yolo (aligned with the backend's plain
+  // default direction). Two-lane semantics (design merged into work, #428):
+  // the draft display = this lane's global default. A draft bound to a
+  // workspace aligns with the code lane's safety posture: show the code
+  // lane's global default, falling back to plan on first use (read-only is
+  // the safe side, same as the code page's draft fallback).
   function currentDraftModeState() {
-    var lane = state.modeLane === "code" ? "code" : "work";
-    var d = state.modeDefaults && state.modeDefaults[lane];
-    return { mode: d || "yolo", multiAgent: false };
+    const boundDraft = !!state.draftWorkspacePath;
+    // Bound drafts always show the code lane default; unbound drafts follow the
+    // current lane (design was merged into work, #428).
+    const lane = boundDraft || state.modeLane === "code" ? "code" : "work";
+    const d = state.modeDefaults && state.modeDefaults[lane];
+    return { mode: d || (boundDraft ? "plan" : "yolo"), multiAgent: false };
   }
 
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
@@ -1282,7 +1309,7 @@
       }, authoritySyncBufferSnapshot(sid, buf)));
     }
   }
-  function onSessionEvent(e, fn) {
+  function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
       var eventBuffer = getBuffer(sid);
@@ -1294,7 +1321,7 @@
     }
     var isBg = sid && sid !== state.activeSessionId;
     runSyncOnSession(sid, fn);
-    if (isBg) notify();
+    if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
   function isScheduledRunSession(sid) {
     return !!sid && (
@@ -1573,7 +1600,7 @@
   var subscribers = [];
   const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
+    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
@@ -1801,7 +1828,6 @@
   var parseLooseJsonObject = scheduledFeature.parseLooseJsonObject;
   var normalizeScheduledTaskDraft = scheduledFeature.normalizeScheduledTaskDraft;
   var activeScheduledTaskModelConfig = scheduledFeature.activeScheduledTaskModelConfig;
-  var activeScheduledTaskModel = scheduledFeature.activeScheduledTaskModel;
   var lockScheduledTaskDraftModel = scheduledFeature.lockScheduledTaskDraftModel;
   var parseScheduledTaskDraftFromText = scheduledFeature.parseScheduledTaskDraftFromText;
   var clearScheduledTaskDraft = scheduledFeature.clearScheduledTaskDraft;
@@ -2208,6 +2234,27 @@
         });
       }
     }
+    // Replay-time terminal ratchet (parity with the codex native lane): a
+    // tool_use that never got a matching tool_result in the persisted
+    // transcript is an interrupted in-flight call — it can never complete
+    // after reload, so settle it as failed instead of leaving an eternal
+    // "running" card (a live spawn row would then pulse forever through the
+    // swarm aggregation). Skipped while the session is mid-turn: pending
+    // cards then belong to the live turn and are settled by its own events;
+    // background shells keep running across turns and are excluded; so are
+    // synthetic shell-snapshot cards ("shell-task:" ids never pair with a
+    // tool_use id, and their job may still be running — the terminal poll
+    // settles them itself from the snapshot).
+    if (!state.busy) {
+      for (const item of state.chatItems) {
+        const unsettled = item && item.type === "tool" && item.toolId && item.background !== true
+          && item.shellSnapshot !== true
+          && (item.state === "pending" || item.state === "running") && !resultById[item.toolId];
+        if (!unsettled) continue;
+        item.success = false;
+        item.state = "failed";
+      }
+    }
     emitPersonaAt(state.messages.length, true); // 最后一条消息之后发生的卡牌事件(末尾加持/卸下)
   }
 
@@ -2278,6 +2325,10 @@
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
+    // Live suppression probe for scheduleStreamNotify: inside a background
+    // working set the immediate first-delta notify is suppressed, so the
+    // stream scheduler must fall through to its bounded frame instead.
+    isNotifySuppressed: function () { return suppressNotify; },
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
     // 与历史重载路径共用同一信封判定（userMessageDisplayText 的 isInternalRuntimeEnvelopeText），
@@ -2432,6 +2483,8 @@
   var setDraftMode = interactionFeature.setDraftMode;
   var setModeLane = interactionFeature.setModeLane;
   var refreshModeDefaults = interactionFeature.refreshModeDefaults;
+  var getCodePermissionPrefs = interactionFeature.getCodePermissionPrefs;
+  var confirmCodeYolo = interactionFeature.confirmCodeYolo;
   var setMultiAgentMode = interactionFeature.setMultiAgentMode;
   var planStuckReplan = interactionFeature.planStuckReplan;
   var planStuckGo = interactionFeature.planStuckGo;
@@ -2479,7 +2532,7 @@
   var resolveConversationAttachment = artifactsFeature.resolveConversationAttachment;
   var openConversationAttachment = artifactsFeature.openConversationAttachment;
   var revealConversationAttachment = artifactsFeature.revealConversationAttachment;
-  var personasFeature = installBridgeFeature("personas", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles });
+  var personasFeature = installBridgeFeature("personas", { state: state, sessionStates: sessionStates, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles });
   var loadPersonas = personasFeature.loadPersonas;
   var getPersonas = personasFeature.getPersonas;
   var createPersona = personasFeature.createPersona;
@@ -2536,17 +2589,17 @@
   var syncVoiceShortcutRecording = voiceFeature.syncVoiceShortcutRecording;
   var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
-  var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
-  var projectsFeature = installBridgeFeature("projects", { state: state, notify: notify, invoke: invoke, listen: listen });
-  var loadProjects = projectsFeature.loadProjects;
-  var createProject = projectsFeature.createProject;
-  var renameProject = projectsFeature.renameProject;
-  var deleteProject = projectsFeature.deleteProject;
-  var moveSessionToProject = projectsFeature.moveSessionToProject;
+  const projectsFeature = installBridgeFeature("projects", { state, notify, invoke, listen });
+  const loadProjects = projectsFeature.loadProjects;
+  const createProject = projectsFeature.createProject;
+  const renameProject = projectsFeature.renameProject;
+  const deleteProject = projectsFeature.deleteProject;
+  const moveSessionToProject = projectsFeature.moveSessionToProject;
+  const rebindWorkspaceRoot = projectsFeature.rebindWorkspaceRoot;
 
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
@@ -2557,17 +2610,34 @@
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
-  async function pickFolder() {
+  // Shared system directory-picker scaffold for pickFolder / pickFolders /
+  // sessions.pickDraftWorkspace: returns null when the dialog is unavailable
+  // or the user cancels, otherwise the normalized array of selected paths.
+  async function pickDirectory(options) {
     if (!dialogOpen) return null;
     var selected = await dialogOpen({ directory: true, multiple: false, title: bt("pickFolderTitle") });
     if (!selected) return null;
-    return Array.isArray(selected) ? (selected[0] || null) : selected;
+    return Array.isArray(selected) ? selected : [selected];
+  }
+  async function pickFolder() {
+    const selected = await pickDirectory({ directory: true, multiple: false, title: bt("pickFolderTitle") });
+    return (selected && selected[0]) || null;
   }
   async function pickFolders() {
     if (!dialogOpen) return [];
     var selected = await dialogOpen({ directory: true, multiple: true, title: bt("kbPickFolderTitle") });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
+  }
+  // Dedicated picker for directory rebind (broken-link repair): single
+  // selection with a title that matches the rebind semantics — it used to
+  // borrow the knowledge-base multi-select import picker, whose title did not
+  // match the "only picked[0] is used" behavior (review #463 Minor 6).
+  async function pickRebindFolder() {
+    if (!dialogOpen) return null;
+    const selected = await dialogOpen({ directory: true, multiple: false, title: bt("rebindPickFolderTitle") });
+    if (!selected) return null;
+    return Array.isArray(selected) ? (selected[0] || null) : selected;
   }
   async function pickFeedbackFiles() {
     if (!dialogOpen) return [];
@@ -2739,7 +2809,6 @@
       completeVoiceSubmission: voiceFeature.completeVoiceSubmission,
       dismissVoiceInput: voiceFeature.dismissVoiceInput,
       appendVoiceText: appendVoiceText,
-      runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
     knowledge: {
       loadKnowledgeEmbedderAfterFirstFrame: loadKnowledgeEmbedderAfterFirstFrame,
@@ -2787,6 +2856,16 @@
       toggleSessionPinned: toggleSessionPinned,
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
+      exportSessionArchive: exportSessionArchive,
+      // Draft-state working directory selection (desktop only: system directory
+      // dialog + the create_session workspacePath parameter; the web side has no
+      // such channel, the UI guards on method existence).
+      setDraftWorkspace: setDraftWorkspace,
+      pickDraftWorkspace: pickDraftWorkspace,
+      // Working directory binding query for materialized sessions (bound
+      // sessions share the code mode's safety posture; web/remote sessions have
+      // no binding concept, stub returns null).
+      getSessionWorkspaceBinding: getSessionWorkspaceBinding,
     },
     projects: {
       loadProjects,
@@ -2794,6 +2873,7 @@
       renameProject,
       deleteProject,
       moveSessionToProject,
+      rebindWorkspaceRoot,
     },
     monitor: {
       startMonitorPolling: startMonitorPolling,
@@ -2841,6 +2921,9 @@
     setDraftMode: setDraftMode,
     setModeLane: setModeLane,
     refreshModeDefaults: refreshModeDefaults,
+      // One-shot YOLO confirmation gate for bound-workspace sessions.
+    getCodePermissionPrefs: getCodePermissionPrefs,
+    confirmCodeYolo: confirmCodeYolo,
     setMultiAgentMode: setMultiAgentMode,
     planStuckReplan: planStuckReplan,
     planStuckGo: planStuckGo,
@@ -2899,9 +2982,10 @@
       readSubagentTranscript: readMultiAgentSubagent,
     },
     files: {
-      pickFiles: pickFiles,
-      pickFolders: pickFolders,
-      pickFeedbackFiles: pickFeedbackFiles,
+      pickFiles,
+      pickFolders,
+      pickRebindFolder,
+      pickFeedbackFiles,
     },
     personas: {
       loadPersonas: loadPersonas,

@@ -70,11 +70,6 @@ fn rollback_created_code_session(session_id: &str, store: &SessionStore, acp_poo
 }
 
 #[tauri::command]
-pub async fn get_codex_acp_status(acp_pool: State<'_, AcpPool>) -> Result<CodexAcpStatus, String> {
-    Ok(acp_pool.refresh_status().await)
-}
-
-#[tauri::command]
 pub async fn list_acp_agents(
     acp_pool: State<'_, AcpPool>,
 ) -> Result<Vec<AcpAgentDescriptor>, String> {
@@ -116,30 +111,6 @@ pub(crate) async fn get_acp_agent_status_for_pool(
         .map_err(|error| format!("读取 ACP Agent 状态失败: {error:#}"))
 }
 
-#[tauri::command]
-pub async fn prepare_codex_acp(acp_pool: State<'_, AcpPool>) -> Result<CodexAcpStatus, String> {
-    let status = acp_pool.refresh_status().await;
-    if !status.bridge_ready {
-        return Err(
-            "准备 Codex 运行环境失败: Pinvou 安装包缺少可用的 Codex ACP Bridge".to_string(),
-        );
-    }
-    acp_pool
-        .install_agent("codex", None)
-        .await
-        .map_err(|error| format!("准备 Codex 运行环境失败: {error:#}"))
-}
-
-#[tauri::command]
-pub async fn install_codex_homebrew(
-    acp_pool: State<'_, AcpPool>,
-) -> Result<CodexAcpStatus, String> {
-    acp_pool
-        .install_via_homebrew()
-        .await
-        .map_err(|error| format!("{error:#}"))
-}
-
 /// 统一的 ACP Agent 安装入口：按 status.install_action 分派（官方脚本或原来源
 /// brew/npm 升级），完成后返回最新状态。action 提供时经合法性校验后优先。
 #[tauri::command]
@@ -152,14 +123,6 @@ pub async fn install_acp_agent(
         .install_agent(&agent, action.as_deref())
         .await
         .map_err(|error| format!("安装 ACP Agent 失败: {error:#}"))
-}
-
-#[tauri::command]
-pub async fn login_codex_acp(acp_pool: State<'_, AcpPool>) -> Result<CodexAcpStatus, String> {
-    acp_pool
-        .login()
-        .await
-        .map_err(|error| format!("登录 Codex 失败: {error:#}"))
 }
 
 #[tauri::command]
@@ -182,13 +145,6 @@ pub async fn switch_acp_agent_account(
         .switch_agent_account(&agent_id)
         .await
         .map_err(|error| format!("切换 ACP Agent 账号失败: {error:#}"))
-}
-
-#[tauri::command]
-pub fn open_codex_login_url(acp_pool: State<'_, AcpPool>) -> Result<(), String> {
-    acp_pool
-        .open_login_url()
-        .map_err(|error| format!("打开 Codex 授权页面失败: {error:#}"))
 }
 
 #[tauri::command]

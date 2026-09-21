@@ -46,8 +46,6 @@ pub(crate) use turns::count_user_turns;
 
 /// 每会话保留的 checkpoint 上限（LRU，超出裁掉最老条目）。
 const MAX_CHECKPOINTS: usize = 20;
-/// diff 预览的 patch 文本上限（超出截断，changes 清单不受影响）。
-const DIFF_PATCH_LIMIT: usize = 512 * 1024;
 /// 执行根体积门（对齐底座 snapshot 的 DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT）：
 /// 超过 2GB 的目录不做快照——每轮全量 `add -A` 的 IO/CPU 与影子仓库存储都不
 /// 划算，该会话如实没有回退入口（设计 §5 降级语义）。
@@ -173,9 +171,6 @@ pub struct CheckpointDiff {
     pub checkpoint: CheckpointMeta,
     /// 从快照到当前执行根的变更清单（即「回滚将撤销的变更」）。
     pub changes: Vec<CheckpointChange>,
-    /// unified diff 文本（可能截断）。
-    pub patch: String,
-    pub patch_truncated: bool,
 }
 
 fn checkpoints_dir(ledger_root: &Path) -> PathBuf {
@@ -360,27 +355,124 @@ fn canonical_execution_root(execution_root: &Path) -> Result<PathBuf> {
 /// 与签名/钩子以外的正常行为需要）。
 fn isolated_git_command() -> std::process::Command {
     let mut command = crate::platform::process::HiddenCommand::new("git");
-    // vars_os 而非 vars：POSIX 允许环境变量取任意字节，vars 遇非 UTF-8 键/值会
-    // 直接 panic（lib.rs EnvSnapshot 同坑在先），一个这样的变量就会废掉该用户
-    // 全部快照能力；前缀按原始字节匹配，key 无需转 String。
-    for (key, _) in std::env::vars_os() {
-        if key.as_encoded_bytes().starts_with(b"GIT_") {
-            command.env_remove(&key);
-        }
-    }
+    // Strip via a fixed key list (platform::process::strip_all_git_env); do
+    // not scan the process env for GIT_*: in parallel tests, setenv from other
+    // threads concurrent with the iteration can miss keys, making the
+    // isolation fail intermittently as a whole (root cause of the 2026-09-12
+    // flaky family).
+    crate::platform::process::strip_all_git_env(&mut command);
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     command.env("GIT_CONFIG_GLOBAL", crate::platform::os::null_device());
     command
 }
 
-fn git(repo: &Path, work_tree: &Path, arguments: &[&str]) -> Result<std::process::Output> {
-    let output = isolated_git_command()
-        .arg(format!("--git-dir={}", repo.display()))
-        .arg(format!("--work-tree={}", work_tree.display()))
-        .args(arguments)
-        .output()
-        .with_context(|| format!("执行 git {} 失败（Git 不可用？）", arguments.join(" ")))?;
+// 快照 git 子进程的兜底预算：`git add -A` 在大工作区上可能确实很慢，但卡死的
+// git（NFS/FUSE 停摆、挂死的 hook）不能无限阻塞回合开始前的检查点路径——
+// create_checkpoint 的任何错误都会按既有语义降级为「跳过快照并告警」，
+// 不会阻塞发送。注意这是**单次 git 调用**的预算，create_checkpoint 一次会
+// 顺序执行多条 git 命令（add/write-tree/commit-tree/update-ref/gc），最坏
+// 情况是预算的数倍；git 子进程整体有界，但同一等待路径里的普通文件系统 IO
+// （目录大小走查、写 exclude 文件）在存储完全停摆时仍可能阻塞——该残余与
+// git 预算正交。
+const GIT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 超时 kill 的 git 来不及清理锁文件，之后每次调用都会「File exists」
+/// 快速失败——一次超时会把这个会话的检查点能力永久打没。锁龄超过
+/// GIT_COMMAND_TIMEOUT 即可断定持锁者已死（活着的 git 至多持锁一个预算周期，
+/// 影子仓库为本应用私目录），清除并让调用方重试一次；更年轻的锁可能是并发
+/// 活锁，不动。
+///
+/// 覆盖三类锁（`git()` 的重试谓词按 stderr 含 `.lock` 触发）：
+/// `index.lock`（add/write-tree）、`config.lock`（ensure_repo 每次快照都
+/// 幂等校正 `core.ignorecase`）、`refs/**/*.lock`（update-ref，每次内容
+/// 变更的回合都会写 `refs/checkpoints/head`）。
+fn clear_stale_git_locks(repo: &Path) -> bool {
+    clear_stale_git_locks_older_than(repo, GIT_COMMAND_TIMEOUT)
+}
+
+/// [`clear_stale_git_locks`] 的可注入阈值变体：`min_age` 生产路径传
+/// [`GIT_COMMAND_TIMEOUT`]，测试传更小/零值即可钉住阈值与覆盖面，
+/// 无需回拨 mtime。
+fn clear_stale_git_locks_older_than(repo: &Path, min_age: std::time::Duration) -> bool {
+    let is_stale = |path: &Path| -> bool {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= min_age)
+    };
+    let mut cleared = false;
+    for name in ["index.lock", "config.lock", "HEAD.lock", "packed-refs.lock"] {
+        let lock = repo.join(name);
+        if is_stale(&lock) && std::fs::remove_file(&lock).is_ok() {
+            eprintln!(
+                "[checkpoints] cleared stale lock left by a killed git: {}",
+                lock.display()
+            );
+            cleared = true;
+        }
+    }
+    // update-ref 的锁在 refs 子树里（refs/checkpoints/head.lock、按 id 的
+    // 逐检查点锁）。refs 层级固定很浅，定深遍历避免意外放大。
+    fn sweep_refs(dir: &Path, depth: u8, is_stale: &dyn Fn(&Path) -> bool) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let mut cleared = false;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                cleared |= sweep_refs(&path, depth - 1, is_stale);
+            } else if path.extension().is_some_and(|ext| ext == "lock")
+                && is_stale(&path)
+                && std::fs::remove_file(&path).is_ok()
+            {
+                eprintln!(
+                    "[checkpoints] cleared stale lock left by a killed git: {}",
+                    path.display()
+                );
+                cleared = true;
+            }
+        }
+        cleared
+    }
+    cleared |= sweep_refs(&repo.join("refs"), 4, &is_stale);
+    cleared
+}
+
+/// git 因发现残留锁而拒绝执行（退出码非零、stderr 指名某个 .lock 路径）时，
+/// 清掉确证为陈旧的锁重试一次。[`git`] 与 [`git_ref`] 共用：被超时 kill 的
+/// git 同样会死在 update-ref / 删 ref 的路上——若只给写路径接清扫，
+/// drop/invalidate 就会留下永远清不掉的 ref 锁，索引条目已删而 ref 仍在，
+/// gc 永远收不回对象，影子仓库随之泄漏。
+fn run_git_with_stale_lock_retry(
+    run_bounded: impl Fn() -> Result<std::process::Output>,
+    repo: &Path,
+) -> Result<std::process::Output> {
+    let output = run_bounded()?;
+    if !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains(".lock")
+        && clear_stale_git_locks(repo)
+    {
+        return run_bounded();
+    }
     Ok(output)
+}
+
+fn git(repo: &Path, work_tree: &Path, arguments: &[&str]) -> Result<std::process::Output> {
+    let run_bounded = || {
+        let mut command = isolated_git_command();
+        command
+            .arg(format!("--git-dir={}", repo.display()))
+            .arg(format!("--work-tree={}", work_tree.display()))
+            .args(arguments);
+        crate::platform::process::output_with_timeout_and_kill_tree(command, GIT_COMMAND_TIMEOUT)
+            .map_err(|error| anyhow::anyhow!("failed to run git {}: {error}", arguments.join(" ")))
+    };
+    run_git_with_stale_lock_retry(run_bounded, repo)
 }
 
 fn git_ok(repo: &Path, work_tree: &Path, arguments: &[&str]) -> Result<String> {
@@ -844,86 +936,6 @@ fn secret_path_matches(path: &str) -> bool {
     })
 }
 
-/// diff --git 段头是否指向敏感文件。常规按空白切 token、剥 a//b/ 前缀与引号；
-/// 含空格/tab 的路径（git C-quoting 输出 `diff --git "a/x y" "b/x y"`）按引号
-/// 段解析；仍解析不了时由 ---/+++ 行兜底（见 filter_secret_paths_from_patch）。
-fn diff_section_is_secret(header: &str) -> bool {
-    if let Some(rest) = header.strip_prefix("diff --git \"") {
-        // C-quoted 形式：按引号段提取 a/ 与 b/ 路径（路径可含空格）。
-        if let Some(path) = rest.strip_prefix("a/").and_then(|s| s.split('"').next()) {
-            if secret_path_matches(path) {
-                return true;
-            }
-        }
-        if let Some(path) = rest
-            .split("\" \"")
-            .nth(1)
-            .and_then(|s| s.strip_prefix("b/"))
-            .and_then(|s| s.split('"').next())
-        {
-            if secret_path_matches(path) {
-                return true;
-            }
-        }
-    }
-    header
-        .split_whitespace()
-        .map(|token| token.trim_matches('"'))
-        .filter_map(|token| {
-            token
-                .strip_prefix("a/")
-                .or_else(|| token.strip_prefix("b/"))
-        })
-        .any(|token| secret_path_matches(token))
-}
-
-/// `--- a/<path>` / `+++ b/<path>` 行的路径判定（整行剩余部分即路径，容忍空格；
-/// 删除文件的 marker 行尾部带 tab 填充，先剥掉；路径含 tab/引号时 git 用
-/// C-quoting 输出 `--- "a/x"`，剥掉外层引号再判定；/dev/null 如实不命中）。
-fn marker_line_is_secret(line: &str) -> bool {
-    let path = line
-        .strip_prefix("--- a/")
-        .or_else(|| line.strip_prefix("+++ b/"))
-        .or_else(|| line.strip_prefix("--- \"a/"))
-        .or_else(|| line.strip_prefix("+++ \"b/"));
-    match path {
-        Some(path) => secret_path_matches(path.trim_end().trim_matches('"')),
-        None => false,
-    }
-}
-
-/// 从 unified diff 文本剔除命中敏感文件模式的整段文件 diff：迁移前打的旧
-/// 快照 tree 里可能仍有秘密原文（purge 只清 index），预览不得把原文带进 UI。
-/// 按段缓冲后判定（header 或 ---/+++ 行任一命中即整段剔除）——含空格路径
-/// 无法从段头 token 解析，必须看到 ---/+++ 行才能判定（评审 M1）。
-fn filter_secret_paths_from_patch(patch: &str) -> String {
-    let mut out = String::with_capacity(patch.len());
-    let mut section: Vec<&str> = Vec::new();
-    let mut section_secret = false;
-    let flush = |out: &mut String, section: &mut Vec<&str>, secret: &mut bool| {
-        if !*secret {
-            for line in section.drain(..) {
-                out.push_str(line);
-                out.push('\n');
-            }
-        } else {
-            section.clear();
-        }
-        *secret = false;
-    };
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            flush(&mut out, &mut section, &mut section_secret);
-            section_secret = diff_section_is_secret(line);
-        } else if marker_line_is_secret(line) {
-            section_secret = true;
-        }
-        section.push(line);
-    }
-    flush(&mut out, &mut section, &mut section_secret);
-    out
-}
-
 /// 快照与当前执行根的差异预览（即「回滚将撤销的变更」），供 UI 确认前展示。
 pub fn diff_checkpoint(
     ledger_root: &Path,
@@ -952,45 +964,17 @@ pub fn diff_checkpoint(
             &meta.commit,
         ],
     )?;
-    let raw_patch = git_ok(
-        &repo,
-        &execution_root,
-        // 与 --raw 同开 -M + quotepath：changes 清单标 renamed 时 patch
-        // 也是 rename 形态，中文路径在两处都是原文。
-        &[
-            "-c",
-            "core.quotepath=false",
-            "diff",
-            "--cached",
-            "-M",
-            "--no-color",
-            "--no-ext-diff",
-            &meta.commit,
-        ],
-    )?;
-    // legacy 快照（迁移前打的）tree 里可能仍含秘密原文：清单与 patch 都剔除
-    // 命中敏感模式的条目，预览既不带原文上屏，也不谎称「回滚将删除 .env」
-    // （restore 实际保留工作区现有同名文件）。过滤恒大小写不敏感，与
-    // exclude/purge 三层同向。
+    // legacy 快照（迁移前打的）tree 里可能仍含秘密原文：清单剔除命中敏感
+    // 模式的条目，预览不谎称「回滚将删除 .env」（restore 实际保留工作区现有
+    // 同名文件）。过滤恒大小写不敏感，与 exclude/purge 三层同向。UI 只渲染
+    // changes 清单，不上屏 patch 文本（见 RewindChip），unified diff 不再生成。
     let changes: Vec<CheckpointChange> = parse_raw_status(&raw_status)
         .into_iter()
         .filter(|change| !secret_path_matches(&change.path))
         .collect();
-    let mut patch = filter_secret_paths_from_patch(&raw_patch);
-    let patch_truncated = patch.len() > DIFF_PATCH_LIMIT;
-    if patch_truncated {
-        let mut end = DIFF_PATCH_LIMIT;
-        while !patch.is_char_boundary(end) {
-            end -= 1;
-        }
-        patch.truncate(end);
-        patch.push_str("\n\n…差异过大，已截断");
-    }
     Ok(CheckpointDiff {
         checkpoint: meta,
         changes,
-        patch,
-        patch_truncated,
     })
 }
 
@@ -1034,13 +1018,18 @@ pub fn restore_checkpoint(
 }
 
 /// 只操作 refs 的 git 调用（update-ref/gc 不需要 work-tree）。
+/// 与写路径共用陈旧锁清扫重试：被超时 kill 的 git 会留下
+/// `refs/checkpoints/*.lock`，无清扫时删 ref 永久失败，ref 与其对象泄漏。
 fn git_ref(repo: &Path, arguments: &[&str]) -> Result<std::process::Output> {
-    let output = isolated_git_command()
-        .arg(format!("--git-dir={}", repo.display()))
-        .args(arguments)
-        .output()
-        .with_context(|| format!("执行 git {} 失败（Git 不可用？）", arguments.join(" ")))?;
-    Ok(output)
+    let run_bounded = || {
+        let mut command = isolated_git_command();
+        command
+            .arg(format!("--git-dir={}", repo.display()))
+            .args(arguments);
+        crate::platform::process::output_with_timeout_and_kill_tree(command, GIT_COMMAND_TIMEOUT)
+            .map_err(|error| anyhow::anyhow!("执行 git {} 失败: {error}", arguments.join(" ")))
+    };
+    run_git_with_stale_lock_retry(run_bounded, repo)
 }
 
 /// 回退后作废被截对话分支的 Turn checkpoint（设计审阅 P0 修复）。
@@ -1172,6 +1161,11 @@ mod tests {
         fn write(&self, relative: &str, content: &str) {
             let path = self.0.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // 先删后写：同一文件系统时间戳粒度内用等长内容重写文件时，stat
+            // （mtime/ctime/size/ino）与索引条目完全一致，git 会信任索引条目而
+            // 跳过内容重读——`add -A` 保留陈旧 blob，diff/restore 断言随机失败
+            // （2026-09-18 `rust-test` flake 的根因）。换新 inode 必然不匹配。
+            let _ = fs::remove_file(&path);
             fs::write(path, content).unwrap();
         }
 
@@ -1241,6 +1235,126 @@ mod tests {
         );
     }
 
+    /// 残留锁清扫必须覆盖三类锁（index/config/refs 子树），且只删 `.lock`：
+    /// config 与 refs 本体是仓库数据，绝不能被清扫误伤。零阈值变体用于钉住
+    /// 覆盖面，无需回拨 mtime。
+    #[test]
+    fn stale_lock_sweep_covers_index_config_and_refs_locks() {
+        let ledger = TestDir::new("lock-sweep-ledger");
+        let repo = ledger.path().join("checkpoints");
+        for rel in [
+            "index.lock",
+            "config.lock",
+            "refs/checkpoints/head.lock",
+            "refs/checkpoints/deadbeef.lock",
+        ] {
+            let path = repo.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"stale").unwrap();
+        }
+        // 仓库本体数据，清扫不得触碰。
+        for rel in ["config", "index", "refs/checkpoints/head"] {
+            let path = repo.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"data").unwrap();
+        }
+
+        assert!(clear_stale_git_locks_older_than(
+            &repo,
+            std::time::Duration::ZERO
+        ));
+        for rel in [
+            "index.lock",
+            "config.lock",
+            "refs/checkpoints/head.lock",
+            "refs/checkpoints/deadbeef.lock",
+        ] {
+            assert!(!repo.join(rel).exists(), "{rel} 应被清扫");
+        }
+        for rel in ["config", "index", "refs/checkpoints/head"] {
+            assert!(repo.join(rel).exists(), "{rel} 是仓库数据，不得被清扫");
+        }
+        // 再跑一遍：无可清锁，返回 false 且不误删数据。
+        assert!(!clear_stale_git_locks_older_than(
+            &repo,
+            std::time::Duration::ZERO
+        ));
+        assert!(repo.join("refs/checkpoints/head").exists());
+    }
+
+    /// 安全方向：年轻的锁（可能是并发活锁或刚启动的 git）即使让 git 调用
+    /// 失败，也绝不能被清除——`git()` 的重试只在锁被确证陈旧时发生。
+    #[test]
+    fn young_lock_is_never_cleared_and_retry_is_declined() {
+        if !git_available() {
+            return;
+        }
+        let ledger = TestDir::new("young-lock-ledger");
+        let exec = TestDir::new("young-lock-exec");
+        exec.write("a.rs", "v1\n");
+        create_checkpoint(
+            ledger.path(),
+            exec.path(),
+            Some(1),
+            CheckpointKind::Turn,
+            "t1",
+        )
+        .unwrap();
+
+        let repo = repo_dir(ledger.path());
+        let lock = repo.join("index.lock");
+        fs::write(&lock, b"held by a live git").unwrap();
+
+        let error = git_ok(&repo, exec.path(), &["add", "-A"]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("失败"),
+            "持锁时 git 调用必须失败: {error:#}"
+        );
+        assert!(lock.exists(), "年轻锁不得被清除");
+    }
+
+    /// `git_ref`（drop/invalidate 路径）与写路径同样享有陈旧锁清扫：
+    /// 被超时 kill 的 update-ref 会留下 `refs/checkpoints/<id>.lock`，
+    /// 无清扫时删 ref 永久失败而索引条目已删，ref 与对象随之泄漏。
+    /// 锁龄用 `File::set_times` 回拨，不依赖 sleep。
+    #[test]
+    fn git_ref_clears_stale_ref_lock_and_retries() {
+        if !git_available() {
+            return;
+        }
+        let ledger = TestDir::new("ref-lock-ledger");
+        let exec = TestDir::new("ref-lock-exec");
+        exec.write("a.rs", "v1\n");
+        let checkpoint = create_checkpoint(
+            ledger.path(),
+            exec.path(),
+            Some(1),
+            CheckpointKind::Turn,
+            "t1",
+        )
+        .unwrap();
+
+        let repo = repo_dir(ledger.path());
+        let ref_name = format!("refs/checkpoints/{}", checkpoint.id);
+        let lock = repo.join(format!("{ref_name}.lock"));
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        fs::write(&lock, b"left by a killed git").unwrap();
+        // 锁龄回拨到两个预算之外，跨过「确证陈旧」阈值。
+        let stale = std::time::SystemTime::now() - 2 * GIT_COMMAND_TIMEOUT;
+        let file = fs::File::options().write(true).open(&lock).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(stale))
+            .unwrap();
+        drop(file);
+
+        git_ref(&repo, &["update-ref", "-d", &ref_name]).expect("陈旧 ref 锁应被清扫并重试成功");
+        assert!(!lock.exists(), "陈旧 ref 锁应被清扫");
+        // ref 确实已删：loose ref 文件随 update-ref -d 消失。
+        assert!(
+            !repo.join(&ref_name).exists(),
+            "ref 文件应已随成功的 update-ref -d 删除"
+        );
+    }
+
     /// M3 回归：中文（非 ASCII）文件名在 diff 预览中原样上屏，不被
     /// core.quotepath 转成八进制转义。
     #[test]
@@ -1275,8 +1389,6 @@ mod tests {
                 .iter()
                 .any(|change| change.path == "新建文件.rs")
         );
-        assert!(diff.patch.contains("文档/需求.md"));
-        assert!(!diff.patch.contains("\\346"), "不得出现八进制转义");
     }
 
     /// B1 回归（评审 Blocker）：大写命名的秘密文件（`.ENV`）在大小写敏感
@@ -1528,17 +1640,6 @@ mod tests {
             "含空格的秘密路径不得出现在清单: {:?}",
             diff.changes
         );
-        assert!(
-            !diff.patch.contains("SECRET=old"),
-            "patch 不得带秘密原文:\n{}",
-            diff.patch
-        );
-        assert!(
-            !diff.patch.contains("my dir/.env"),
-            "含空格秘密段必须整段剔除:\n{}",
-            diff.patch
-        );
-        assert!(diff.patch.contains("ok.txt"));
     }
 
     /// 评审 M2 回归：restore 打 PreRestore 触发 LRU 淘汰时不得淘汰恢复目标
@@ -1731,7 +1832,7 @@ mod tests {
         .unwrap();
 
         // 当前状态：ok.txt 改了，.env 也改了（purge 后不在 index，快照→当前
-        // 的原始 diff 会显示 D .env 且 patch 带 SECRET=old 原文）。
+        // 的原始 diff 会显示 D .env）。
         exec.write("ok.txt", "v2\n");
         exec.write(".env", "SECRET=current\n");
         let diff = diff_checkpoint(ledger.path(), exec.path(), "c1-1").unwrap();
@@ -1741,9 +1842,6 @@ mod tests {
             diff.changes
         );
         assert!(diff.changes.iter().any(|change| change.path == "ok.txt"));
-        assert!(!diff.patch.contains("SECRET=old"), "patch 不得带秘密原文");
-        assert!(!diff.patch.contains("SECRET=current"));
-        assert!(diff.patch.contains("ok.txt"));
     }
 
     /// 按 id 作废「未成活」快照：条目与 ref 都移除；不存在幂等 false；
@@ -1875,7 +1973,6 @@ mod tests {
                 .iter()
                 .any(|change| change.path == "src/main.rs" && change.status == "modified")
         );
-        assert!(diff.patch.contains("src/new.rs"));
 
         // 回滚到第一轮前：文件内容还原、新建文件被删除；返回回滚点可反悔。
         let undo = restore_checkpoint(ledger.path(), exec.path(), &first.id).unwrap();
@@ -2185,49 +2282,103 @@ mod tests {
         );
     }
 
-    /// GIT_* 环境隔离（评审 nit）：宿主环境的 GIT_INDEX_FILE /
-    /// GIT_OBJECT_DIRECTORY 不得把影子仓库的内部操作重定向到无关位置。
+    /// GIT_* environment isolation (review nit + issue #492): host GIT_DIR /
+    /// GIT_WORK_TREE / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY must not redirect
+    /// the shadow repo's internal operations to unrelated locations. Asserts
+    /// the strip contract of `isolated_git_command` directly via
+    /// `Command::get_envs` instead of mutating the process-global environment:
+    /// process-level `set_var` used to race with concurrent git-subprocess
+    /// tests, causing intermittent full-suite failures (issue #492).
     #[test]
     fn git_subprocess_ignores_host_git_environment() {
         if !git_available() {
             return;
         }
-        let _lock = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let bogus = TestDir::new("bogus-gitdir");
-        // SAFETY: ENV_LOCK 序列化进程环境写（crate 级唯一约定）；影子 git 调用
-        // 自身剥离 GIT_*，并发测试的 git 子进程同样走隔离命令，不受本变量影响。
-        unsafe {
-            std::env::set_var("GIT_INDEX_FILE", bogus.path().join("index"));
-            std::env::set_var("GIT_OBJECT_DIRECTORY", bogus.path().join("objects"));
-        }
-        let result = std::panic::catch_unwind(|| {
-            let ledger = TestDir::new("env-ledger");
-            let exec = TestDir::new("env-exec");
-            exec.write("a.txt", "0\n");
-            create_checkpoint(
-                ledger.path(),
-                exec.path(),
-                Some(1),
-                CheckpointKind::Turn,
-                "t1",
-            )
-            .unwrap();
-            // 对象与索引都落在影子仓库，bogus 目录保持空。
-            let repo = repo_dir(ledger.path());
-            let tracked = git_ok(&repo, exec.path(), &["ls-files"]).unwrap();
-            assert!(tracked.lines().any(|line| line == "a.txt"));
+        let ledger = TestDir::new("env-ledger");
+        let exec = TestDir::new("env-exec");
+        exec.write("a.txt", "0\n");
+        create_checkpoint(
+            ledger.path(),
+            exec.path(),
+            Some(1),
+            CheckpointKind::Turn,
+            "t1",
+        )
+        .unwrap();
+        let repo = repo_dir(ledger.path());
+
+        // Assert the strip contract directly via `Command::get_envs` without
+        // mutating the process-global environment: process-level `set_var`
+        // races with concurrent git-subprocess tests (the intermittent
+        // full-suite failures of issue #492). Full coverage of the strip key
+        // lists is anchored by the platform::process tests.
+        let command = isolated_git_command();
+        let env: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+            // The shadow repo's commit identity is provided explicitly via -c
+            // by the caller; host identity variables must not leak either.
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
             assert!(
-                !bogus.path().join("index").exists() && !bogus.path().join("objects").exists(),
-                "GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY 必须被隔离"
+                matches!(
+                    env.iter()
+                        .find(|(name, _)| name == &std::ffi::OsStr::new(key)),
+                    Some((_, None))
+                ),
+                "{key} must be stripped via env_remove"
             );
-        });
-        // SAFETY: 同 ENV_LOCK 序列化。
-        unsafe {
-            std::env::remove_var("GIT_INDEX_FILE");
-            std::env::remove_var("GIT_OBJECT_DIRECTORY");
         }
-        result.unwrap();
+        assert_eq!(
+            env.iter()
+                .find(|(name, _)| name == &std::ffi::OsStr::new("GIT_CONFIG_GLOBAL"))
+                .and_then(|(_, value)| *value),
+            Some(std::ffi::OsStr::new(crate::platform::os::null_device())),
+            "GIT_CONFIG_GLOBAL must be redirected to the null device"
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(name, _)| name == &std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM"))
+                .and_then(|(_, value)| *value),
+            Some(std::ffi::OsStr::new("1")),
+            "GIT_CONFIG_NOSYSTEM must be pinned"
+        );
+        // `get_envs()` only contains explicitly set/removed entries (inherited
+        // variables never appear), so this actually constrains that no non-
+        // GIT_* entry is explicitly added or removed.
+        assert!(
+            env.iter()
+                .all(|(name, _)| name.as_encoded_bytes().starts_with(b"GIT_")),
+            "no non-GIT_* entry may be explicitly added or removed"
+        );
+
+        // Smoke check: with the host environment in place, shadow-repo git
+        // operations still succeed and a.txt stays tracked. Regression
+        // protection is carried by the get_envs contract assertions above;
+        // this test no longer mutates the process environment, so the old
+        // set_var-era assertion pointing at a bogus directory is dropped.
+        let output = isolated_git_command()
+            .arg(format!("--git-dir={}", repo.display()))
+            .arg(format!("--work-tree={}", exec.path().display()))
+            .arg("ls-files")
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let tracked = String::from_utf8_lossy(&output.stdout);
+        assert!(tracked.lines().any(|line| line == "a.txt"));
     }
 }

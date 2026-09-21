@@ -86,7 +86,9 @@ const protocolSources = {
 const expectedProtocolHashes = {
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
   orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
-  artifacts: 'e188b39659ef1f17996807f0effa49fdd6fb6d0b8f7d233121ad529f6579633a',
+  // Recomputed for artifact export telemetry after a successful external open;
+  // attribution is now isolated to the explicitly targeted session.
+  artifacts: 'de912dc47531a442428f1649d933c8b91d0616196a1b7ac6176bf0f59939fa12',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
@@ -113,10 +115,13 @@ const expectedProtocolHashes = {
   // again for the backflowed memory-footprint reduction (Community #442):
   // streaming-render trailing-edge timers, terminal toolMeta sweep, monitor
   // display-equality gate — listener body-internal edits only, no new invoke
-  // or listen entries (capture-text refresh).
-  chat: 'd2c249c71e5c8da65d9020d547be38fa70ae7c377a0a702a5cf9253730698842',
+  // or listen entries (capture-text refresh). Recomputed for per-frame stream
+  // notification coalescing; event names and invoke shapes remain unchanged.
+  chat: 'cad6c1cb471c97240673b9706fc6d799c81e64224f4fbaf56f5f44b3698cdc1e',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
-  interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
+  // Recomputed for #445: the YOLO gate threads an adjudicated session id
+  // through exitPlanToYolo and planStuckGo.
+  interaction: 'b62238d0404da126673ed75d74887bae4088861f46f893083c29412fa03d5636',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
   // memory recomputed for the backflowed memory-maintenance feature
   // (Community #419): organize_memory + get_memory_organize_history invokes
@@ -126,15 +131,24 @@ const expectedProtocolHashes = {
   personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
   remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
-  // Recomputed after preserving typed account-platform model binding while
-  // integrating main's session rollback, settings, updater, and voice flows.
-  sessions: '35c0c7fedacd6f2f6f5d6c829037b77aea80dbb4d01e54d06a9a55b473651e41',
+  // Recomputed for the combined session archive and #445 workspace binding
+  // surfaces while retaining Official's materialization behavior.
+  sessions: '6c87c38edd620adf44a7c57a566e9116014d8a074c0dd382c922b9f132a5fdac',
   settings: '748f16e4c90a28128bff8c27a0c21f295e94d9d33aaad7c329741fc2d49cc3d0',
-  updater: '3ed106e55a2272d3d103e5e8115f817b60cae953caf0986b591412b01fc4ba23',
+  updater: 'c099482343ad342b32c8206abf7b72a01e20c0f5321ff469ddbed0a4d4086ffb',
+  // Official's bridge/voice.js is untouched by this backflow, so the hash
+  // stays at the Official base value (the community value differs only via
+  // comment differences inside its own voice.js; no invoke/listen surface).
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
+  // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
   accountPlatform: 'b27255619e222495aaada496eda619a788e7c876607730d36f08c9188780234d',
-  projects: '4f0737d9a074629208d6a01e6b027907ad6f0676ef2ae456c95cc37350d8ca76',
+  // Recomputed for the rebind carryover feed-back (review #463 F-Major):
+  // rebind_workspace_root gains the optional previousPostBusySessionIds
+  // payload — the dialog's previous report fed back on retry, honored by the
+  // backend only as a reporting reclassification inside its own to-lane
+  // retry population. Same command surface, no new invoke or listen entries.
+  projects: '90c12ab7494aba3975ac4ece4b23594f4a4fcf309f6252b721ce15575b245979',
 };
 
 for (const [domain, files] of Object.entries(protocolSources)) {

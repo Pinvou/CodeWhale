@@ -196,7 +196,7 @@ function localDateTime(instant) {
   return value.toISOString().slice(0, 16);
 }
 
-function LifecycleTab({ detail, client, copy, permissions, actionsEnabled, query, candidateQuery, onQueryChange, cursorHistory }) {
+function LifecycleTab({ detail, client, copy, permissions, actionsEnabled, query, candidateQuery, onQueryChange, cursorHistory, onNavigate }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [planRefreshVersion, setPlanRefreshVersion] = useState(0);
   const [planAction, setPlanAction] = useState(null);
@@ -369,7 +369,7 @@ export function AdminModelDetailWorkspace({ modelID, client, copy, pricingCopy, 
         {tab === 'capabilities' && <CapabilitiesTab detail={detail} client={client} copy={copy} historyQuery={historyQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'operations' && <OperationsTab modelID={modelID} client={client} copy={copy} query={provisioningQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'pricing' && <PricingTab detail={detail} client={client} copy={copy} pricingCopy={pricingCopy} permissions={permissions} pricingEditEnabled={pricingEditEnabled} manageRequested={managePricing} onRouteChange={onRouteChange} />}
-        {tab === 'lifecycle' && <LifecycleTab detail={detail} client={client} copy={copy} permissions={permissions} actionsEnabled={actionsEnabled} query={lifecyclePlanQuery} candidateQuery={lifecycleCandidateQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
+        {tab === 'lifecycle' && <LifecycleTab detail={detail} client={client} copy={copy} permissions={permissions} actionsEnabled={actionsEnabled} query={lifecyclePlanQuery} candidateQuery={lifecycleCandidateQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onNavigate={onNavigate} />}
         {tab === 'audit' && <AuditTab modelID={modelID} client={client} copy={copy} query={auditQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
       </div>
     </>}

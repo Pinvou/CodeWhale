@@ -749,7 +749,12 @@ mod tests {
         let _g = crate::bridge::paths::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        std::env::remove_var("PINVOU_TELEMETRY_DEVICE_CLAIM");
+        // SAFETY: edition 2024 起 remove_var 为 unsafe,契约是"不得与其他线程
+        // 并发读写进程级 env";这里已持有 crate 级唯一的 ENV_LOCK,与所有 mutate
+        // env var 的测试串行,契约满足。不包裹会让 macOS 本机 `cargo test --lib`
+        // 整体编译红(issue #1097 第 9 项;Linux/Windows CI 不编译该 macos 测试
+        // 故 CI 不可见)。
+        unsafe { std::env::remove_var("PINVOU_TELEMETRY_DEVICE_CLAIM") };
         let id = detect_hardware_identity("test_fallback");
         assert!(
             id.claim.starts_with("macos:ioplatformuuid:"),

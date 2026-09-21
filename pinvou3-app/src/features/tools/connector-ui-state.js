@@ -40,6 +40,21 @@ function applyConnectorFailure(flow, value, phase) {
   };
 }
 
+/**
+ * 释放共享忙碌槽位：只释放属于自己的那次操作。
+ *
+ * 连接器的完成/失败事件是**异步**送达的，期间用户完全可能已经收起了本连接器的
+ * 登录弹窗（收起不取消后台流程）并发起了另一个工具操作，此时 busyId 已经易主。
+ * 无条件 `setBusyId(null)` 会把别人未完成的忙碌态一并抹掉：按钮只按
+ * `busyId === tool.backendId` 判断禁用，于是正在跑的安装/卸载/导入会提前放闸，
+ * 可以被重复触发。
+ *
+ * 用法：`setBusyId(current => releaseBusy(current, 'eip'))`。
+ */
+function releaseBusy(busyId, toolId) {
+  return busyId === toolId ? null : busyId;
+}
+
 function localizeConnectorAlert(alert, storeCopy, detailCopy) {
   if (!alert || !alert.connectorAlert) return alert;
   const toolId = alert.toolId;
@@ -54,6 +69,18 @@ function localizeConnectorAlert(alert, storeCopy, detailCopy) {
   if (alert.connectorAlert === 'disconnected') {
     return { ...alert, title: storeCopy.disconnectedTool(toolName), subtitle: '' };
   }
+  // 'retry' = 后端在等上一个流程归还门闩,不是连接失败,别用失败文案吓人。
+  // - subtitle 必须非空:否则 TsAlert 会落到 installHint/removeHint 的兜底文案;
+  // - 关掉"新建会话"按钮:那是给"配置成功、需新建会话才生效"用的提示,
+  //   挂在"稍后重试"上语义不符。
+  if (alert.connectorAlert === 'retry') {
+    return {
+      ...alert,
+      title: storeCopy.connectBusy(toolName),
+      subtitle: storeCopy.connectBusyHint,
+      suppressNewChat: true,
+    };
+  }
   return {
     ...alert,
     title: storeCopy.connectFailed(toolName),
@@ -65,4 +92,4 @@ function localizeConnectorAlert(alert, storeCopy, detailCopy) {
   };
 }
 
-export { applyConnectorFailure, connectorErrorCodeForStep, connectorFailure, connectorUiStep, localizeConnectorAlert };
+export { applyConnectorFailure, connectorErrorCodeForStep, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy };

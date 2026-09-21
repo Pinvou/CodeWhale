@@ -493,6 +493,7 @@
       folderPickerUnavailable: "The folder picker cannot be opened in this environment",
       pickFolderTitle: "Choose a working directory",
       kbPickFolderTitle: "Choose a folder to import into the knowledge base",
+      rebindPickFolderTitle: "Choose the folder to rebind this project to",
       gateApproveFailed: "⚠️ Approval failed: ",
       gateRejectFailed: "⚠️ Rejection failed: ",
       roleRetried: (roleId, result) => "🔄 Rerunning " + roleId + ": " + result,
@@ -625,6 +626,7 @@
       folderPickerUnavailable: "現在の環境ではフォルダー選択を開けません",
       pickFolderTitle: "作業ディレクトリを選択",
       kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
+      rebindPickFolderTitle: "このプロジェクトの再バインド先フォルダーを選択",
       gateApproveFailed: "⚠️ 承認に失敗: ",
       gateRejectFailed: "⚠️ 差し戻しに失敗: ",
       roleRetried: (roleId, result) => "🔄 再実行 " + roleId + ": " + result,
@@ -757,6 +759,7 @@
       folderPickerUnavailable: "当前环境无法打开文件夹选择器",
       pickFolderTitle: "选择工作目录",
       kbPickFolderTitle: "选择要导入知识库的文件夹",
+      rebindPickFolderTitle: "选择重绑定项目的新文件夹",
       gateApproveFailed: "⚠️ 通过失败: ",
       gateRejectFailed: "⚠️ 打回失败: ",
       roleRetried: (roleId, result) => "🔄 重跑 " + roleId + ": " + result,
@@ -848,6 +851,7 @@
   // buffer 跑同步逻辑再切回(saveWorkingSetTo/loadWorkingSetFrom),期间 suppressNotify
   // 避免把后台渲染成 active。异步收尾(落盘)按显式 session_id 路由,不依赖工作集。
   var sessionStates = {};
+  var deletedPersonaIds = new Set();
   // Web 草稿首条消息的本地提交记录。内容只留在当前页面内，用固定 RPC ID
   // 支撑断线重发与人工重试；切走草稿后不会把待发内容泄漏到其他会话。
   var firstTurnSubmissions = Object.create(null);
@@ -1156,6 +1160,7 @@
   }
   function purgeSessionBuffer(id) {
     if (typeof id !== "string" || !id) return;
+    cancelStreamTimers(id);
     delete sessionStates[id];
     // Real session deletion: any stashed draft is invalidated too and must not flow back into a rebuilt buffer with the same id.
     delete evictedSessionDrafts[id];
@@ -1648,7 +1653,7 @@
     // 手机可能在桌面仍停留草稿页/其他 session 时先唤醒这个后台 session。
     // 仅 hydrate messages 而把 chatItems 留空，会让后续 switchToSession 命中缓存快路径，
     // 不再 rerenderFromMessages，桌面便只看得到手机唤醒后的新内容，历史像是“丢了”。
-    // 在首次磁盘 hydration 后先完整重建展示层，再由 mobile_user_message 追加当前轮；
+    // 在首次磁盘 hydration 后先完整重建展示层，流式增量随后照常追加；
     // buf.busy 时上方已提前返回，不会覆盖正在流式生成的实时 chatItems。
     runSyncOnSession(sid, function () {
       resetPendingAssistant();
@@ -1740,7 +1745,7 @@
       }, authoritySyncBufferSnapshot(sid, buf)));
     }
   }
-  function onSessionEvent(e, fn) {
+  function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
       var eventBuffer = getBuffer(sid);
@@ -1752,7 +1757,7 @@
     }
     var isBg = sid && sid !== state.activeSessionId;
     runSyncOnSession(sid, fn);
-    if (isBg) notify();
+    if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
   function isScheduledRunSession(sid) {
     return !!sid && (
@@ -2129,6 +2134,17 @@
   var notificationQueue = [];
   var notificationDispatching = false;
   function notify() {
+    // Any ordinary publication is a semantic stream boundary. Its snapshot
+    // already contains all accumulated text, so cancel the pending frame to
+    // avoid a duplicate callback after done/error/tool/session events. The
+    // cancel runs before the suppression check on purpose — the desktop
+    // bridge also cancels the pending frame while a background working set
+    // has suppressed callbacks, because the semantic publication that
+    // follows the restore carries the accumulated content.
+    cancelPendingStreamNotify(state.activeSessionId);
+    immediateNotify();
+  }
+  function immediateNotify() {
     if (suppressNotify) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
@@ -3340,7 +3356,7 @@
     state.modeState = mode.ok && mode.value
       ? { mode: mode.value.mode || "yolo", multiAgent: !!mode.value.multi_agent }
       : { mode: "yolo", multiAgent: false };
-    state.activePersona = persona.ok ? (persona.value || null) : null;
+    state.activePersona = persona.ok && persona.value && !deletedPersonaIds.has(persona.value.id) ? persona.value : null;
     if (snapshot.ok && snapshot.value && Array.isArray(snapshot.value.collections)) {
       applyMountedCollections(snapshot.value);
     } else if (collections.ok && Array.isArray(collections.value)) {
@@ -5161,7 +5177,7 @@
           error_present: true,
         }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
         if (turnOwnerBuffer) turnOwnerBuffer.localTurnOwned = false;
-        emitPetEvent("pet:turn_end", sid);
+        emitPetEvent();
         runSyncOnSession(sid, function () {
           // 按引用移除本地乐观提交：buffer 权威重载后引用自然消失，无需按位置
           // 二次限定（位置过滤在"引用仍在但位置移动"时会残留本地消息，且与
@@ -5937,10 +5953,29 @@
     return invoke("save_session_pinvou_reviews", { sessionId: state.activeSessionId, reviews: snapshot }).catch(function () {});
   }
 
+  // Same transport timeout as the Tauri bridge's stop/interrupt cancels
+  // (STEER_INVOKE_TIMEOUT_MS there): a wedged engine never settles the
+  // invoke, and without the race this function never returns — ChatView's
+  // single-flight flag never clears and the stop button stays disabled
+  // forever. Cancel is idempotent, so a late settle/rejection is harmless.
+  const CANCEL_INVOKE_TIMEOUT_MS = 25_000;
+
   async function cancelGeneration() {
     if (!state.busy) return;
     try {
-      await invoke("cancel_generation", { sessionId: state.activeSessionId });
+      const cancelPromise = invoke("cancel_generation", { sessionId: state.activeSessionId });
+      let cancelTimeoutId = null;
+      const cancelTimeout = new Promise(function (_, reject) {
+        cancelTimeoutId = setTimeout(function () {
+          reject(new Error("cancel_generation timed out"));
+        }, CANCEL_INVOKE_TIMEOUT_MS);
+      });
+      cancelPromise.catch(function () { /* swallow the late rejection after a timeout */ });
+      try {
+        await Promise.race([cancelPromise, cancelTimeout]);
+      } finally {
+        clearTimeout(cancelTimeoutId);
+      }
     } catch (e) {
       console.warn("cancel failed", e);
     }
@@ -6042,12 +6077,18 @@
               break;
             }
           }
+          // Stream throttle invariant: the flush must precede the stream
+          // state reset. The old streaming bubble was already removed by the
+          // splice above, so the flush has no render target and only cancels
+          // the session's trailing-edge timer.
+          flushPendingStreamRender();
           resetPendingAssistant();
         }
         addChatItem({ type: "user", text: content, time: timeStr() });
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();
+      flushPendingStreamRender(); // the old streaming bubble gets its final html before the new turn resets stream state
       currentStreamText = "";
       currentStreamId = 0;
     });
@@ -6204,7 +6245,102 @@
     }
   }
 
+  // Keep Web and Tauri streaming cadence aligned. requestAnimationFrame gives
+  // foreground rendering one update per paint; the timer keeps hidden tabs
+  // and throttled WebViews bounded. State is isolated per session so remote
+  // background streams cannot overwrite the visible working set.
+  var STREAM_NOTIFY_MAX_WAIT_MS = 32;
+  var pendingStreamNotifications = Object.create(null);
+  function cancelPendingStreamNotify(sid) {
+    if (!pendingStreamNotifications) return;
+    var pending = sid && pendingStreamNotifications[sid];
+    if (!pending) return;
+    if (pending.frame !== null && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(pending.frame);
+    }
+    if (pending.timer !== null && typeof clearTimeout === "function") clearTimeout(pending.timer);
+    delete pendingStreamNotifications[sid];
+  }
+  function scheduleStreamNotify(sid, firstDelta) {
+    // A first delta publishes immediately so the visible bubble paints
+    // without waiting for a frame. Inside a background working set the
+    // immediate notify is suppressed and schedules no frame at all, so the
+    // session's first delta would never publish — a suppressed first delta
+    // must fall through to the coalesced frame below, whose publish() runs
+    // after the working set is restored and carries the accumulated text.
+    if (!sid || (firstDelta && !suppressNotify) || typeof setTimeout !== "function") {
+      notify();
+      return;
+    }
+    if (pendingStreamNotifications[sid]) return;
+    var pending = { frame: null, timer: null };
+    pendingStreamNotifications[sid] = pending;
+    function publish() {
+      if (pendingStreamNotifications[sid] !== pending) return;
+      cancelPendingStreamNotify(sid);
+      var didRun = false;
+      var wasBackground = sid !== state.activeSessionId;
+      runSyncOnSession(sid, function () {
+        didRun = true;
+        immediateNotify();
+      });
+      if (didRun && wasBackground) immediateNotify();
+    }
+    if (typeof window.requestAnimationFrame === "function") {
+      pending.frame = window.requestAnimationFrame(publish);
+    }
+    pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+  }
+
+  // Markdown parsing is substantially heavier than snapshot publication in a
+  // real browser. Match the desktop bridge: render the first delta immediately
+  // and accumulate subsequent text behind one trailing-edge render per
+  // session. Every stream transition flushes synchronously before resetting
+  // the bubble, so final text and terminal cards cannot observe stale HTML.
+  var STREAM_RENDER_THROTTLE_MS = 180;
+  var streamRenderTimers = Object.create(null);
+  function renderStreamItemHtml() {
+    var item = state.chatItems.find(function (candidate) { return candidate.id === currentStreamId; });
+    if (!item) return false;
+    item.text = currentStreamText;
+    item.html = renderMarkdown(currentStreamText);
+    return true;
+  }
+  function flushPendingStreamRender() {
+    var sid = state.activeSessionId;
+    if (sid && streamRenderTimers[sid]) {
+      clearTimeout(streamRenderTimers[sid]);
+      delete streamRenderTimers[sid];
+    }
+    if (!currentStreamId || !currentStreamText) return false;
+    return renderStreamItemHtml();
+  }
+  function scheduleStreamRender(sid) {
+    if (!sid || typeof setTimeout !== "function") {
+      if (currentStreamId && currentStreamText) renderStreamItemHtml();
+      return;
+    }
+    if (streamRenderTimers[sid]) return;
+    streamRenderTimers[sid] = setTimeout(function () {
+      delete streamRenderTimers[sid];
+      var rendered = false;
+      runSyncOnSession(sid, function () {
+        if (!currentStreamId || !currentStreamText) return;
+        rendered = renderStreamItemHtml();
+      });
+      if (rendered) notify();
+    }, STREAM_RENDER_THROTTLE_MS);
+  }
+  function cancelStreamTimers(sid) {
+    cancelPendingStreamNotify(sid);
+    if (sid && streamRenderTimers[sid]) {
+      clearTimeout(streamRenderTimers[sid]);
+      delete streamRenderTimers[sid];
+    }
+  }
+
   function finalizeAssistantStreamBeforeReasoning() {
+    flushPendingStreamRender();
     flushPendingTextBlock();
     var item = state.chatItems.find(function (it) { return it.id === currentStreamId; });
     if (item) {
@@ -6253,10 +6389,11 @@
     if (!item) {
       item = startReasoningBlock(index);
     }
+    var firstDelta = !item.text;
     item.text += text;
     appendReasoningBlock(text);
-    notify();
-  }); });
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("chat:reasoning_done", function (e) { onSessionEvent(e, function () {
     var index = reasoningEventIndex(e);
@@ -6277,9 +6414,10 @@
     currentStreamText += text;
     // Update the streaming chat item
     var item = state.chatItems.find(function (it) { return it.id === currentStreamId; });
+    var firstDelta = !item;
     if (item) {
       item.text = currentStreamText;
-      item.html = renderMarkdown(currentStreamText);
+      if (!item.html) item.html = renderMarkdown(currentStreamText);
       item.streaming = true;
     } else {
       // New bubble needed (after tool card)
@@ -6293,8 +6431,9 @@
         streaming: true,
       });
     }
-    notify();
-  }); });
+    scheduleStreamRender(e.payload && e.payload.session_id || state.activeSessionId);
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("scheduled_task:run_updated", function (e) {
     scheduleScheduledRunRefresh();
@@ -6375,6 +6514,7 @@
     pendingAssistantBlocks.push({ type: "tool_use", id: p.id, name: p.name, input: p.args || {} });
 
     // Finalize current streaming bubble
+    flushPendingStreamRender();
     var streamItem = state.chatItems.find(function (it) { return it.id === currentStreamId; });
     if (streamItem) {
       streamItem.streaming = false;
@@ -6431,6 +6571,7 @@
         { resolved: true, cardState: p.success ? "submitted" : "cancelled" }
       );
       delete toolMeta[p.id];
+      flushPendingStreamRender(); // terminal path: emit final html before the reset
       currentStreamText = ""; currentStreamId = 0;
       notify();
       return;
@@ -6459,6 +6600,7 @@
         // 不走 write_file 的工具(如 make_pptx)→ 卡有、面板无」。trackArtifact 已去重。
         if (presentedPath) trackArtifact(presentedPath);
         delete toolMeta[p.id];
+        flushPendingStreamRender(); // terminal path: emit final html before the reset
         currentStreamText = ""; currentStreamId = 0;
         notify();
         // Keep the web adapter aligned with desktop: an in-place card update does
@@ -6478,6 +6620,7 @@
         output: p.output, success: false, state: "done",
       });
       delete toolMeta[p.id];
+      flushPendingStreamRender(); // terminal path: emit final html before the reset
       currentStreamText = ""; currentStreamId = 0;
       notify();
       return;
@@ -6567,6 +6710,7 @@
     }
 
     delete toolMeta[p.id];
+    flushPendingStreamRender(); // terminal path: emit final html before the reset
     currentStreamText = "";
     currentStreamId = 0;
     notify();
@@ -6664,6 +6808,7 @@
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = terminalStatus === "interrupted" ||
         terminalStatus === "cancelled" || terminalStatus === "canceled";
+      flushPendingStreamRender();
       if (interrupted) preserveInterruptedAssistantPresentation();
       else flushAssistantMessageToHistory();
       // Refresh artifacts written in this turn in place when already presented.
@@ -7593,6 +7738,15 @@
       notify();
     }
   }
+  // The desktop-side companion queries for bound-workspace sessions have no
+  // web backend counterpart (web/remote sessions carry no directory binding):
+  // same-named stub methods keep the bridge API symmetric on both sides — the
+  // binding query always returns null (UI shows no binding indicator and the
+  // YOLO confirmation gate never fires), code permission prefs always read
+  // null, and the confirm write is a no-op.
+  async function getSessionWorkspaceBinding() { return null; }
+  async function getCodePermissionPrefs() { return null; }
+  async function confirmCodeYolo() { return null; }
   // 草稿态 chip 切换：写本 lane 全局默认（不物化会话——物化时由
   // ensureSession 把 lane 默认应用到新会话）。
   async function setDraftMode(target) {
@@ -8208,14 +8362,23 @@
     }
     notify();
   }
-  async function exitPlanToYolo() {
-    var sid = state.activeSessionId;
-    // 草稿态：不物化会话，改写本 lane 全局默认（两分 lane 语义）。
+  async function exitPlanToYolo(targetSessionId) {
+    // The caller may pin the target session explicitly: the YOLO confirmation
+    // gate issues the switch only after several await round-trips, by which
+    // time the user may have switched away and the live active session is no
+    // longer the ruling one (same signature as the tauri bridge). No-argument
+    // calls keep the original semantics: act on the live active session at
+    // invocation time (bulb / plan-stuck card).
+    const sid = typeof targetSessionId === 'string' && targetSessionId
+      ? targetSessionId
+      : state.activeSessionId;
+    // Draft state: do not materialize a session; rewrite this lane's global
+    // default (two-lane semantics).
     if (!sid) { await setDraftMode("yolo"); return; }
     try {
-      // invoke 形状保持 { sessionId: state.activeSessionId }（协议指纹按文本
-      // 计算）；await 返回后按发起时 sid 定向写回并 bump modeSyncSeq。
-      var st = await invoke("exit_plan_to_yolo", { sessionId: state.activeSessionId });
+      // The invoke targets sid directly at issue time; after the await, the
+      // result is written back to the same sid and modeSyncSeq is bumped.
+      const st = await invoke("exit_plan_to_yolo", { sessionId: sid });
       applyAuthoritativeModeState(sid, st);
     } catch (e) { addSystemItemFor(sid, bt("exitPlanFailed") + e); }
     notify();
@@ -8237,11 +8400,16 @@
     patchItemById(itemId, { resolved: true, statusLabel: bt("replanRequested") }); notify();
     await sendMessage(bt("planStuckReplanPrompt"));
   }
-  async function planStuckGo(itemId) {
-    var sid = state.activeSessionId;
+  async function planStuckGo(itemId, targetSessionId) {
+    // Explicit target session (same contract as the tauri bridge): the
+    // plan-stuck card's session is adjudicated in ChatView; no-arg legacy
+    // calls keep targeting live-active at invoke time.
+    const sid = typeof targetSessionId === 'string' && targetSessionId
+      ? targetSessionId
+      : state.activeSessionId;
     if (!sid) return;
     patchItemById(itemId, { resolved: true }); notify();
-    await exitPlanToYolo();
+    await exitPlanToYolo(sid);
     // 补充指令必须发往触发会话：await exitPlanToYolo 期间用户可能已切走，
     // 直接 sendMessage 会把"继续执行"发到切换后的会话（审计遗漏补修）。
     // sendMessageToSession 校验失败（会话已删/对账中）会 throw，必须接住并
@@ -8352,7 +8520,7 @@
     if (editBuffer) saveWorkingSetTo(editBuffer);
     notify();
     turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护
-    emitPetEvent("pet:turn_start", sid);
+    emitPetEvent();
     try {
       await invoke("edit_last_turn", {
         newMessage: newText,
@@ -8543,9 +8711,24 @@
     if (ext === "md") return "markdown";
     return "other";
   }
-  function trackArtifactExported(path) {
+  function artifactsForSession(sessionId) {
+    var targetSessionId = sessionId || state.activeSessionId;
+    if (!targetSessionId) return [];
+    if (targetSessionId === state.activeSessionId) return state.artifacts || [];
+    return sessionStates[targetSessionId] && sessionStates[targetSessionId].artifacts || [];
+  }
+  function trackArtifactExported(path, sessionId) {
     var bn = basename(path);
-    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    var candidates = artifactsForSession(sessionId);
+    var exactMatches = candidates.filter(function (item) {
+      return String(item.path || "") === String(path || "");
+    });
+    var basenameMatches = exactMatches.length ? [] : candidates.filter(function (item) {
+      return basename(item.path) === bn;
+    });
+    var artifact = exactMatches.length === 1
+      ? exactMatches[0]
+      : (basenameMatches.length === 1 ? basenameMatches[0] : null);
     if (!artifact || !artifact.telemetryId) return;
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
       eventName: "artifact_exported", artifactId: artifact.telemetryId,
@@ -8560,7 +8743,7 @@
     }
     try {
       var downloaded = await downloadArtifactRaw(path, sessionId);
-      if (downloaded) trackArtifactExported(path);
+      if (downloaded) trackArtifactExported(path, sessionId);
       return downloaded;
     } catch (e) {
       addSystemItem(bt("downloadFailed") + String((e && e.message) || e));
@@ -8967,18 +9150,28 @@
   // ── 用户自创卡 CRUD(写盘后刷新缓存) ──
   async function createPersona(input) {
     var sum = await invoke("create_persona", { input: input });
+    deletedPersonaIds.delete(sum.id);
     await refreshPersonas();
     return sum;
   }
   async function updatePersona(personaId, input) {
     var sum = await invoke("update_persona", { personaId: personaId, input: input });
     await refreshPersonas();
+    if (deletedPersonaIds.has(personaId)) return null;
     // 若改的正是当前 session 加持的卡, 同步挂件显示
     if (state.activePersona && state.activePersona.id === personaId) { state.activePersona = sum; notify(); }
     return sum;
   }
   async function deletePersona(personaId) {
     await invoke("delete_persona", { personaId: personaId });
+    // Invalidate live and cached selections only after deletion succeeds.
+    // Late reads/equip responses must not restore a card that no longer exists.
+    deletedPersonaIds.add(personaId);
+    if (state.activePersona && state.activePersona.id === personaId) state.activePersona = null;
+    Object.values(sessionStates).forEach(function (buffer) {
+      if (buffer.activePersona && buffer.activePersona.id === personaId) buffer.activePersona = null;
+    });
+    notify();
     await refreshPersonas();
   }
   // 给当前 session 加持一张专家面具。后端存 persona_id + 每 turn 注入人设;
@@ -9016,6 +9209,7 @@
     var sid = state.activeSessionId;
     try {
       var card = await invoke("equip_persona", { sessionId: state.activeSessionId, personaId: personaId });
+      if (deletedPersonaIds.has(personaId)) return null;
       lastEquippedSid = sid; // 成功加持的目标会话(即使已切走)：供紧随其后的引导卡定向(与 tauri 对齐，审计补充)
       if (sid !== state.activeSessionId) return card; // 已切走：不写当前显示
       // 标题仍是默认占位(三语哨兵,见 isDefaultChatTitle)→ 用卡牌名命名(无论草稿态物化还是遗留空会话;
@@ -9035,6 +9229,7 @@
       // 同 session 换了一张不同的卡 → 先弹一条"已卸下旧专家",再弹新加持。
       // 旧专家在写点复核而非入口捕获：同会话快速连续换卡时,入口值可能已被
       // 上一次 equip 的权威写覆盖,陈旧值会播报错误的"已卸下"(与 tauri 对齐,二审补充)。
+      if (deletedPersonaIds.has(personaId)) return null;
       var prev = state.activePersona;
       if (prev && prev.id !== card.id) {
         addChatItem({ type: "system", text: bt("personaUnequipped") + personaName(prev), time: timeStr() });
@@ -9086,7 +9281,7 @@
     try {
       var persona = await invoke("get_active_persona", { sessionId: state.activeSessionId }) || null;
       if (sid !== state.activeSessionId || seq !== personaSyncSeq) return; // 已切走或被权威写/新 sync 作废
-      state.activePersona = persona;
+      state.activePersona = persona && !deletedPersonaIds.has(persona.id) ? persona : null;
     } catch (e) { /* 旧 session 无加持,忽略 */ }
   }
   // 在【指定 session】追加卡牌制造者引导卡并落 sidecar(持久化,重载按 pos 插回)。
@@ -9283,8 +9478,10 @@
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
         await invoke("install_update", { installerPath: downloadResult.installer_path, info: state.updateInfo });
       } else {
-        // Linux/macOS:download_update 返回纯路径字符串(JSON untagged),走 debPath 分支。
-        // 传 info 让 macOS 后端做安装前 sha256 复验(TOCTOU 纵深防御);Linux 后端目前忽略此参数。
+        // Linux/macOS: download_update now only fetches and reports progress
+        // (resolves null); install_update's debPath argument is reserved for
+        // future platform implementations. `info` is still passed so the
+        // backend can re-verify sha256 before installing (TOCTOU defense).
         await invoke("install_update", { debPath: downloadResult, info: state.updateInfo });
       }
       state.updateReady = true;
@@ -10226,20 +10423,6 @@
     return left + (/[。！？.!?，,;；:]$/.test(left) ? " " : "\n") + right;
   }
 
-  function runVoiceInputDebugAssertions() {
-    var denied = normalizeVoiceError({ name: "NotAllowedError" });
-    var noDevice = normalizeVoiceError({ name: "NotFoundError" });
-    var unsupportedConstraint = normalizeVoiceError({ name: "OverconstrainedError", message: "Invalid constraint", constraint: "channelCount" });
-    var mismatch = normalizeVoiceError({ category: "context_mismatch" });
-    console.assert(denied.category === "permission_denied", "permission error classified");
-    console.assert(noDevice.category === "device_unavailable", "device error classified");
-    console.assert(unsupportedConstraint.category === "constraint_unsupported", "unsupported constraint classified");
-    console.assert(unsupportedConstraint.diagnostic === "unsupported media constraint: channelCount", "unsupported constraint diagnostic");
-    console.assert(mismatch.stage === "writeback", "context mismatch classified");
-    console.assert(appendVoiceText("草稿", "识别文本") === "草稿\n识别文本", "voice text appended");
-    return true;
-  }
-
   async function pickFiles() {
     if (!dialogOpen) { addSystemItem(bt("filePickUnavailable")); return []; }
     var selected = await dialogOpen({ multiple: true });
@@ -10264,6 +10447,15 @@
     if (!selected) return [];
     var p = Array.isArray(selected) ? selected[0] : selected;
     return p ? [p] : [];
+  }
+  // Dedicated picker for directory rebind (broken-link repair): single
+  // selection with a title that matches the rebind semantics; same surface as
+  // the desktop bridge (review #463 Minor 6).
+  async function pickRebindFolder() {
+    if (!dialogOpen) { addSystemItem(bt("filePickUnavailable")); return null; }
+    const selected = await dialogOpen({ directory: true, multiple: false, title: bt("rebindPickFolderTitle") });
+    if (!selected) return null;
+    return Array.isArray(selected) ? (selected[0] || null) : selected;
   }
   async function pickFeedbackFiles() {
     if (!dialogOpen) return [];
@@ -10391,7 +10583,6 @@
     completeVoiceSubmission: completeVoiceSubmission,
     dismissVoiceInput: dismissVoiceInput,
     appendVoiceText: appendVoiceText,
-    runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     loadScheduledTasks: loadScheduledTasks,
     readScheduledTask: readScheduledTask,
     loadScheduledTaskRuns: loadScheduledTaskRuns,
@@ -10468,6 +10659,10 @@
     setDraftMode: setDraftMode,
     setModeLane: setModeLane,
     refreshModeDefaults: refreshModeDefaults,
+    // Web stubs keep the API symmetric for desktop-only workspace gates.
+    getSessionWorkspaceBinding: getSessionWorkspaceBinding,
+    getCodePermissionPrefs: getCodePermissionPrefs,
+    confirmCodeYolo: confirmCodeYolo,
     planStuckReplan: planStuckReplan,
     planStuckGo: planStuckGo,
     // 用户交互
@@ -10508,9 +10703,10 @@
     revealConversationAttachment: revealConversationAttachment,
     markResolved: markResolved,
     // 通用宿主文件选择器（知识库、反馈等功能继续复用）。
-    pickFiles: pickFiles,
-    pickFolders: pickFolders,
-    pickFeedbackFiles: pickFeedbackFiles,
+    pickFiles,
+    pickFolders,
+    pickRebindFolder,
+    pickFeedbackFiles,
     // 卡片池: 专家面具
     loadPersonas: loadPersonas,
     getPersonas: function () { return personaPoolCache; }, // 返回引用(只读),不进 notify 快照

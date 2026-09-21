@@ -121,13 +121,8 @@ function injectSource() {
         case 'install_marketplace_skill': state.skills[args.skillId]=true; return Promise.resolve(null);
         case 'uninstall_marketplace_skill': state.skills[args.skillId]=false; return Promise.resolve(null);
         case 'detect_obsidian': state.obsidianChecks++; return Promise.resolve(state.obsidianChecks===1?{state:'no_vault'}:{state:'ok',vault_path:'/tmp/test-vault'});
-        case 'feishu_status': return Promise.resolve({connected:state.connected.feishu});
-        case 'wecom_status': return Promise.resolve({connected:state.connected.wecom});
-        case 'dingtalk_status': return Promise.resolve({connected:state.connected.dingtalk});
         case 'eip_status': return Promise.resolve({connected:state.connected.eip});
         case 'zhidao_status': return Promise.resolve({connected:state.connected.zhidao});
-        case 'tmeet_status': return Promise.resolve({connected:state.connected.tmeet});
-        case 'ima_status': return Promise.resolve({connected:state.connected.ima,credentials_present:state.connected.ima,skill_installed:state.connected.ima});
         case 'ima_connect': state.connected.ima=true;state.skills['ima-skills']=true;state.lastImaConnect=args; return Promise.resolve({ok:true,connected:true});
         case 'ima_logout': state.connected.ima=false;state.skills['ima-skills']=false; return Promise.resolve({ok:true,connected:false});
         // 统一 readiness（Phase 2 第八刀）：前端不再调逐连接器 status，改走
@@ -488,26 +483,31 @@ async function visibilityBox(page, cardText, modeLabel, click) {
       rec('飞书详情版本号以后端 lock 表为准',await page.evaluate(()=>document.body.innerText.includes('v9.9.9-lock')));
     }
     if(id==='wecom'){
-      // WeCom real-QR modal: the backend-emitted qr_data_url goes straight into <img> (iframe removed);
-      // an allowlist-rejected "Open in browser" must surface a visible error (previously silent);
-      // cancel must clear the flow card too — backend cancel is now silent, no wecom:error implicit cleanup.
+      // WeCom QR renders through the standalone wecomQr modal (kept — the
+      // busy-release contract on main pins this path) while the consolidated
+      // connector-flow factory keeps its own wecom:connected pipeline, so the
+      // legacy listener and the factory both still invoke wecom_apply_skills
+      // per connect, unchanged from main. Pinned behaviors are unchanged: the backend-emitted
+      // qr_data_url goes straight into <img>; an allowlist-rejected "Open in browser"
+      // must surface a visible error (previously silent); cancel must clear the flow
+      // card — backend cancel is now silent, no wecom:error implicit cleanup.
       await page.evaluate(() => window.__emitTauri('wecom:qr', {
         phase: 'authorize',
         url: 'https://work.weixin.qq.com/ai/qc/gen?source=wecom_cli_external&test=1',
         qr_data_url: 'data:image/png;base64,AAAA',
       }));
       await sleep(150);
-      rec('WeCom QR modal renders the backend-issued QR', await page.evaluate(() => {
+      rec('WeCom flow card renders the backend-issued QR', await page.evaluate(() => {
         const img = [...document.querySelectorAll('img')].find(i => (i.getAttribute('src') || '') === 'data:image/png;base64,AAAA');
-        return !!img && document.body.innerText.includes('请使用企业微信 App 扫一扫');
+        return !!img && document.body.innerText.includes('用企业微信 App 扫一扫');
       }));
       await page.evaluate(() => { window.__TOOL_STORE_TEST__.failOpenExternal = true; });
-      await clickExact(page, '在浏览器打开'); await sleep(150);
+      await clickExact(page, '在浏览器打开 ↗'); await sleep(150);
       rec('WeCom browser-open rejection shows a visible topmost alert', await page.evaluate(() => {
         if (!document.body.innerText.includes('未能打开浏览器')) return false;
         // innerText is blind to occlusion: also verify via elementFromPoint that the alert's
         // fullscreen layer is the topmost hit at its own center, guarding against a
-        // same-level body portal (e.g. the QR modal) covering it again.
+        // same-level body portal (e.g. the detail modal) covering it again.
         const title = [...document.querySelectorAll('div')].find(d => (d.textContent || '').trim().startsWith('未能打开浏览器'));
         let layer = title;
         while (layer && !(layer.classList.contains('fixed') && layer.classList.contains('inset-0'))) layer = layer.parentElement;
@@ -520,9 +520,9 @@ async function visibilityBox(page, cardText, modeLabel, click) {
       await page.evaluate(() => { window.__TOOL_STORE_TEST__.failOpenExternal = false; });
       await dismiss(page);
       await clickExact(page, '取消'); await sleep(150);
-      rec('WeCom modal cancel clears both modal and flow card', await page.evaluate(() => {
+      rec('WeCom flow-card cancel clears the flow card', await page.evaluate(() => {
         const qrImg = [...document.querySelectorAll('img')].some(i => (i.getAttribute('src') || '') === 'data:image/png;base64,AAAA');
-        return !qrImg && !document.body.innerText.includes('请使用企业微信 App 扫一扫');
+        return !qrImg && !document.body.innerText.includes('用企业微信 App 扫一扫');
       }));
     }
     if(id==='tmeet'){
@@ -555,6 +555,42 @@ async function visibilityBox(page, cardText, modeLabel, click) {
     const info=await page.evaluate(({commands})=>({calls:commands.every(c=>window.__TOOL_STORE_TEST__.calls.some(x=>x.cmd===c)),seen:window.__TOOL_STORE_TEST__.calls.map(x=>x.cmd)}),{commands});
     rec(`${query} 授权编排命令与成功事件`,info.calls,info.calls?'':JSON.stringify(info.seen.slice(-12)));
     await closeDetail(page,query);
+    if(id==='eip'){
+      // PR#1119 修复的用户可见行为:连接态是组件内 state,切走卸载重挂载后必须由
+      // 挂载回填(eip_status)恢复,不能重置成「连接」。
+      // 在搜索框上放卸载探针:切走后须等探针消失(新视图真正接管)再切回——
+      // 切得太快时 Suspense 会保住旧视图不卸载(state 保留,虽也保持连接态,
+      // 但测不到挂载回填路径)。
+      const statusCallsBefore=await page.evaluate(()=>{
+        const input=document.querySelector('[data-testid="tool-store-search"], input[placeholder="搜索连接器、skill、插件等"], input[placeholder="搜索 MCP、API 或工作流工具"]');
+        if(input) input.setAttribute('data-unmount-probe','1');
+        return window.__TOOL_STORE_TEST__.calls.filter(x=>x.cmd==='eip_status').length;
+      });
+      await page.evaluate(()=>{const el=document.querySelector('[data-nav="knowledge"]');if(!el)throw new Error('knowledge nav not found');el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));});
+      const unmounted=await page.waitForFunction(
+        ()=>!document.querySelector('[data-unmount-probe]'),
+        {timeout:8000},
+      ).then(()=>true).catch(()=>false);
+      await page.evaluate(()=>{const el=document.querySelector('[data-nav="toolstore"]');if(!el)throw new Error('toolstore nav not found');el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));});
+      // 等工具商店搜索框真正回来再搜索:固定 sleep 在慢机上可能早于重挂,
+      // search() 的兜底会命中 KnowledgeView 的搜索框、把关键词打进错误视图。
+      await page.waitForFunction(
+        (sel)=>!!document.querySelector(sel),
+        {timeout:8000},
+        TOOL_STORE_SEARCH_SELECTOR,
+      ).catch(()=>{});
+      await search(page,query);
+      const eipRestore=await page.evaluate(({before,unmounted})=>{
+        const btns=[...document.querySelectorAll('button')].filter(b=>b.getAttribute('data-tool-id')==='eip');
+        const statusCalls=window.__TOOL_STORE_TEST__.calls.filter(x=>x.cmd==='eip_status').length;
+        return {pass:btns.some(b=>(b.textContent||'').trim()==='断开')
+          &&!btns.some(b=>(b.textContent||'').trim()==='连接')
+          &&statusCalls>before,
+          labels:btns.map(b=>(b.textContent||'').trim()),
+          statusCalls,before,unmounted};
+      },{before:statusCallsBefore,unmounted});
+      rec('EIP 切走再切回连接态由挂载回填恢复',eipRestore.pass,JSON.stringify(eipRestore));
+    }
   }
 
   // 管理可见性（四轮评审）：加载成功时勾选框可用；读取失败时勾选框禁用、

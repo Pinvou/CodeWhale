@@ -173,7 +173,7 @@ test('macOS binding is host-authoritative and leaks no remote-page credential', 
   assert.match(macos, /browser\/wkwebview-binding-not-registered/);
 });
 
-test('macOS trusted input stays app-scoped and unsupported gestures fail closed', () => {
+test('macOS native input stays app-scoped with no desktop-wide injection', () => {
   const nativeDispatch = macos.slice(
     macos.indexOf('async fn with_native_webview'),
     macos.indexOf('#[derive(Clone)]'),
@@ -205,7 +205,6 @@ test('macOS trusted input stays app-scoped and unsupported gestures fail closed'
     macos,
     /CGEventPost|postEvent|mouseLocation\(|addGlobalMonitor|dispatchEvent|\.click\(\)|new MouseEvent/,
   );
-  assert.match(macos, /trusted-input-gesture-unavailable-on-wkwebview/);
   assert.match(macos, /dialog-backend-unavailable-on-wkwebview/);
   const darwinCatalog = createPinvouBrowserCoreCatalog({ includeDialog: false });
   assert.equal(
@@ -318,10 +317,11 @@ test('BrowserCore marks only dispatched evaluate_script interruptions commit-unk
     macos.indexOf('pub(super) async fn evaluate_json'),
     macos.indexOf('fn wrap_json_evaluation'),
   );
-  const linuxEvaluation = linux.slice(
-    linux.indexOf('pub(super) async fn evaluate_json'),
-    linux.indexOf('pub(super) async fn bind_webview'),
-  );
+  const linuxEvaluationStart = linux.indexOf('pub(super) async fn evaluate_json');
+  assert.ok(linuxEvaluationStart > 0, 'linux.rs evaluate_json must exist');
+  // evaluate_json is the only function in linux.rs (bind_webview moved to
+  // linux_automation.rs), so the slice intentionally runs to end of file.
+  const linuxEvaluation = linux.slice(linuxEvaluationStart);
 
   assert.match(platform, /enum BrowserCoreEvaluationMode \{[\s\S]*ReadOnly,[\s\S]*MayMutate,/);
   assert.match(
@@ -524,7 +524,7 @@ test('macOS native-input provenance refresh is strict and callback grace stays b
   );
   const end = state.slice(
     state.indexOf('pub(super) fn end_agent_operation'),
-    state.indexOf('pub(super) fn begin_agent_input'),
+    state.indexOf('pub(super) fn release_retained_agent_operation'),
   );
   assert.match(refresh, /state\.refresh_agent_operation\(lease, now\)/);
   assert.match(refreshState, /lease\.owner != NativeControlOwner::Agent/);

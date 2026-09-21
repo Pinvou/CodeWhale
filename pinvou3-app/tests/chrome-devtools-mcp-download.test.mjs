@@ -253,6 +253,74 @@ test("vendor download retry survives a locked partial tarball", async () => {
   }
 });
 
+test("vendor download exceeds its redirect cap", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-cdmcp-download-"));
+  const destination = path.join(root, "package.tgz");
+  // With maxRedirects 2 the loop issues three requests (counts 0-2); the
+  // third redirect response trips the cap, so /hop3 is never requested.
+  const get = fakeHttpsGet(
+    new Map([
+      ["https://registry.example.test/package.tgz", { statusCode: 302, headers: { location: "/objects/package.tgz" } }],
+      ["https://registry.example.test/objects/package.tgz", { statusCode: 302, headers: { location: "/hop2/package.tgz" } }],
+      ["https://registry.example.test/hop2/package.tgz", { statusCode: 302, headers: { location: "/hop3/package.tgz" } }],
+    ]),
+    [],
+  );
+  try {
+    await assert.rejects(
+      downloadHttpsOnce("https://registry.example.test/package.tgz", destination, {
+        get,
+        maxRedirects: 2,
+      }),
+      /Vendor download exceeded 2 redirects/,
+    );
+    assert.equal(fs.existsSync(destination), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("vendor download fails cleanly on a non-2xx response", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-cdmcp-download-"));
+  const destination = path.join(root, "package.tgz");
+  const requests = [];
+  const get = fakeHttpsGet(
+    new Map([
+      [
+        "https://registry.example.test/package.tgz",
+        { statusCode: 404, body: Buffer.from("not found") },
+      ],
+    ]),
+    requests,
+  );
+  try {
+    await assert.rejects(
+      downloadHttpsOnce("https://registry.example.test/package.tgz", destination, { get }),
+      /Vendor download failed with HTTP 404/,
+    );
+    assert.equal(fs.existsSync(destination), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("vendor download rejects non-HTTPS targets before any request", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-cdmcp-download-"));
+  const destination = path.join(root, "package.tgz");
+  const requests = [];
+  const get = fakeHttpsGet(new Map(), requests);
+  try {
+    await assert.rejects(
+      downloadHttpsOnce("http://registry.example.test/package.tgz", destination, { get }),
+      /Refusing non-HTTPS vendor download: http:/,
+    );
+    assert.equal(requests.length, 0, "no socket may be opened for a plain-HTTP target");
+    assert.equal(fs.existsSync(destination), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("vendor script has no external curl dependency", () => {
   const source = fs.readFileSync(SCRIPT_PATH, "utf8");
   assert.match(source, /require\("node:https"\)/);

@@ -13,7 +13,7 @@ canonical 工具族、白名单和执行安全细节继续以 `tool-governance.m
 > 统一包模型与「一个包 = 一个开关」已部分落地（`BundleStore` + `bundle_readiness`），
 > §3.3 的运行时工具名发现（现为 manifest 预测）、内置 CLI 连接器归并、统一失效入口
 > （现为各开关命令分别触发刷新）与 §6 的泛化命令面（现为 `set_disabled_connectors` /
-> `set_disabled_skills` 等）为**已定方向、未实施**，实施时以本文档为准并更新本注记。
+> `set_bundle_visibility` 等；`set_disabled_skills` 已随死代码清扫 PR #539 删除）为**已定方向、未实施**，实施时以本文档为准并更新本注记。
 
 ---
 
@@ -44,7 +44,7 @@ canonical 工具族、白名单和执行安全细节继续以 `tool-governance.m
   属安全评审事项。
 - **模式能力静态表 `MODE_TABLE`**（`features/assistant/session_policy.rs`）：
   每模式一行 `ModeCapabilities { unavailable_tools,
-  skills_empty_hides_load_skill, project_skills_opt_in }`，编译期常量、
+  skills_empty_hides_load_skill }`，编译期常量、
   查表取数（取代散落的 match 臂），新增模式漏填由穷尽性测试兜底
   （测试遍历的 `SessionMode::ALL` 由编译期穷尽哨兵绑定到枚举变体，
   漏挂即编译失败）。
@@ -102,17 +102,20 @@ scope 键即 `SessionMode` 的 kebab-case 名（当前 `plain` / `code`）；
 `hidden_scopes`（可见性）与 `scopes`（disabled，开关）是两套**正交**门控
 （`marketplace/scope.rs`）：
 
-- 对模型两者都「不可见」：供给/执行排除按并集 `unavailable = disabled ∪ hidden`
+- 两者都从模型的可调用供给/执行面排除，按并集 `unavailable = disabled ∪ hidden`
   现算（`unavailable_bundles_for`；物化侧同口径，见 `skill_materialization.rs`）；
+  已安装但禁用的市场 MCP 包会例外地向原生 Engine 会话公开 id、名称与 enabled
+  元数据，但不公开其工具 schema，也不恢复工具调用能力（见
+  `marketplace-unification.md` §5.4）；
 - hidden 只决定包是否出现在 composer 列表，不决定 on/off；disabled 只决定
   开关态，不影响列表可见性；
 - 卸载走 `remove_bundle_from_disabled_scopes`，同时清 disabled 与 hidden
   （防残留 hidden 误隐藏未来同名重装；ima 断开随技能卸载走同一入口）；
   CLI 连接器「断开」（logout，删授权不删记录）不走该入口，两个集合均不动；
 - 能力开关写路径（`save_disabled_bundles_for`）只写 `scopes`，不动 hidden；
-- 连接器开关（`sync_disabled_bundles_for_connector_switch`）：关闭只写
-  disabled、不动 hidden；**开回复用卸载清理入口，会连带清 hidden**——即
-  开关开回后该包在所有 scope 恢复可见。
+- 连接器开关（`set_disabled_connectors`）复用同一写路径：按 scope 整表重写
+  disabled 集（关闭写入、开启移除），两个方向都不动 hidden，也不经过卸载
+  清理入口——被 `set_bundle_visibility` 显式隐藏的包，开关开回后仍不可见。
 
 每个模式的默认策略显式声明为**模式身份**（`core/session_mode.rs` 的
 `SessionMode::pack_default_policy()`），不再是存储层的硬编码分支：
@@ -129,9 +132,11 @@ scope 键即 `SessionMode` 的 kebab-case 名（当前 `plain` / `code`）；
   已做过选择的用户（`initialized` 集合标记初始化）；
 - 未知条目（工具下架、上游改名残留）静默忽略，写回时清理。
 
-项目级技能（`.agents/skills` 等）保持**独立开关**、各 scope 默认关：
-项目内文本是 prompt-injection 面，信任级别与包装机技能不同，开启路径
-展示注入风险警告。
+项目级技能（`.agents/skills` 等）保持**独立开关**、默认关：项目内文本是
+prompt-injection 面，信任级别与包装机技能不同，开启路径展示注入风险警告。
+参与范围**跟绑定不跟模式**：仅绑定了真实目录的会话（原生 code 会话的项目
+目录、普通 chat 会话的用户工作目录绑定）在开关开启时扫描项目技能；未绑定
+会话（含 code 临时工作区）不扫描。
 
 ### 3.3 生效通道
 
@@ -202,7 +207,7 @@ UI 或状态层出 bug 也放不出白名单外能力。已知开放侧翼：CLI
 面是经 `bash` 调用 CLI，开关只能隐藏引导；要封死需 bash hook 拦截，
 当前作为已接受风险记录于此。
 
-## 6. 前端接线（目标形态，未实施——现状为 `set_disabled_connectors` / `set_disabled_skills` / `set_bundle_visibility` 等各开关命令 + `remote_control:tools_changed` 事件）
+## 6. 前端接线（目标形态，未实施——现状为 `set_disabled_connectors` / `set_bundle_visibility` 等各开关命令 + `remote_control:tools_changed` 事件）
 
 - 命令面：`list_capability_items(scope)` 读全量状态（默认已合并），
   `set_capability_enabled(scope, id, enabled)` 唯一写入口；前端不在 JS 侧

@@ -33,9 +33,13 @@ on:
 permissions:
   contents: read
 
+# Keep one running and one pending run per ref. With cancellation enabled,
+# push-dense periods repeatedly terminated the active verification before it
+# produced any macOS regression signal; GitHub still collapses intermediate
+# pending pushes to the latest tip when cancellation is disabled.
 concurrency:
   group: mac-build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:

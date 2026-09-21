@@ -4,8 +4,9 @@ import {
   invokeObservedPanelSelection,
   isSubagentPanelPublicationCurrent,
 } from './subagent-panel-publication.mjs';
-import { AlertTriangle, ArrowLeft, BarChart2, Brain, Briefcase, Check, ChevronDown, ChevronRight, ClipboardList, Copy, Edit2, FileText, Globe, ImageIcon, Monitor, Package, Paperclip, PinIcon, Presentation, Send, Sparkles, StopCircle, Terminal, Trash2, Upload, X, Zap } from '../../components/icons.jsx';
+import { AlertTriangle, ArrowLeft, BarChart2, Brain, Briefcase, Check, ChevronDown, ChevronRight, ClipboardList, Copy, Edit2, FileText, FolderOpen, Globe, ImageIcon, Monitor, Package, Paperclip, PinIcon, Presentation, Send, Sparkles, StopCircle, Terminal, Trash2, Upload, X, Zap } from '../../components/icons.jsx';
 import { bridge } from '../../hooks/useBridge.js';
+import { useCopyFlash } from '../../hooks/useCopyFlash.js';
 import { can, isWeb } from '../../shared/platform.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { formatCompactCount } from '../../shared/format-number.js';
@@ -19,6 +20,8 @@ import { ViewErrorBoundary } from '../../shared/ViewErrorBoundary.jsx';
 import { ArtifactCard, localizeTool, tsToolsData, tsToolWelcomeData } from '../tools/tool-common.jsx';
 import { RightDockPanel, useRightDockOcclusion } from '../../components/layout/RightDock.jsx';
 import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { annotateAgentSpawnGroups } from '../multiagent/spawn-aggregation.mjs';
+import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
 import {
   ConversationActivityIndicator,
   ConversationTimeline,
@@ -94,17 +97,12 @@ function PanelSuspense({ children }) {
   );
 }
 
+import { copyClipboardText } from '../../shared/clipboard.js';
 import {
   assistantItemCopyText,
-  copyClipboardText,
-  fallbackCopyText,
   readClipboardText,
 } from '../conversation/message-clipboard.js';
-import {
-  extractBalancedJson,
-  parseJsonChain,
-  parseLooseJson,
-} from '../conversation/structured-assistant-content.js';
+import { parseLooseJson } from '../conversation/structured-assistant-content.js';
 import {
   createPinvouModeScopeKey,
   loadPinvouModeState,
@@ -140,6 +138,11 @@ import {
   ComposerKbSelector,
   ComposerModeChip,
 } from './composer-controls.jsx';
+import { ComposerWorkspaceSelector } from './ComposerWorkspaceSelector.jsx';
+import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
+import { needsYoloConfirmation } from '../codex/code-permission-state.js';
+import { CHAT_YOLO_GATE_UNKNOWN_BINDING, chatYoloGateApplies, shouldShowWorkspaceBindingChip } from './chat-workspace-binding.js';
+import { workspaceName } from '../../shared/workspace-recents.js';
 import {
   VoiceComposerButton,
   VoiceEditPreview,
@@ -809,7 +812,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const chatItems = useMemo(() => (bs ? bs.chatItems : []), [bs]);
       const activeSessionId = bs ? bs.activeSessionId : null;
       const activeSessionIdRef = useRef(activeSessionId);
-      // eslint-disable-next-line react-hooks/refs -- latest-session mirror for non-reactive reads; legacy pattern surfaced by compiler lint after floating-ball removal
       activeSessionIdRef.current = activeSessionId;
       const busy = bs ? bs.busy : false;
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
@@ -971,9 +973,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         pinvouModeStateRef.current = restored;
         setPinvouModeState(restored);
       }, [activeSessionId, chatItems.length]);
-      // 把当前工作区 lane（work/design）同步给 bridge：草稿态 mode 的全局默认
-      // 按 lane 三分（工作/设计/代码各记各的），lane 是纯前端概念，bridge
-      // 自身不读 localStorage。
+      // 把当前工作区 lane（work/code）同步给 bridge：草稿态 mode 的全局默认
+      // 按 lane 两分（工作/代码各记各的，遗留 design 默认折叠进 work），
+      // lane 是纯前端概念，bridge 自身不读 localStorage。
       useEffect(() => {
         if (bridge.available && bridge.interaction && bridge.interaction.setModeLane) {
           bridge.interaction.setModeLane(pinvouMode);
@@ -1189,8 +1191,13 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         )).join('\u0000');
         let lastUserId = null;
         for (let i = chatItems.length - 1; i >= 0; i--) { if (chatItems[i].type === 'user') { lastUserId = chatItems[i].id; break; } }
+        // Swarm rework: consecutive spawn-type agent calls aggregate into one
+        // count row (annotated with spawnGroup / spawnGroupHidden). Annotation
+        // runs once on the projection input; the unified timeline lane reads
+        // the same result through the projected items' legacyItem.
+        const spawnAnnotatedItems = annotateAgentSpawnGroups(visibleChatItems);
         const conversationProjection = projectDeepSeekConversation({
-          chatItems: conversationItemsForMode(visibleChatItems),
+          chatItems: conversationItemsForMode(spawnAnnotatedItems),
           busy,
           thinking: chatThinking,
           tokens: ctxTokens,
@@ -1210,7 +1217,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         return { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn };
       }, [chatItems, busy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
       const { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn } = derivedConversation;
-
 
       // External entries can prefill the composer and focus its end.
       // Template/navigation entries (KnowledgeView "continue in chat",
@@ -1380,6 +1386,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // modeState.multiAgent 经 get_mode_state 双端同步（开关已持久化）。
       const isMultiAgentReadOnly = !MULTI_AGENT_ENABLED
         && !!(bs && bs.modeState && bs.modeState.multiAgent);
+      // Read-only mirror of the swarm mode switch: mood border color of the
+      // top-right running overlay (on = purple / off = blue).
+      const swarmModeOn = !!(bs && bs.modeState && bs.modeState.multiAgent);
       const artifactsVisible = Boolean(activeSessionId && artifactsOpen);
       const artifactFullscreenPublicationReady = useRightDockOcclusion(
         'artifact-fullscreen',
@@ -1407,7 +1416,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       useEffect(() => {
         if (!artifactsVisible) setArtifactsFullscreen(false);
       }, [artifactsVisible]);
-      // eslint-disable-next-line react-hooks/preserve-manual-memoization -- legacy manual memoization surfaced by compiler lint after floating-ball removal; behavior preserved verbatim
       const closeArtifactsPanel = useCallback(() => {
         setArtifactsFullscreen(false);
         setArtifactsOpen(false);
@@ -1661,7 +1669,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   : '';
                 throw new Error(missing || sceneCopy.failure);
               }
-              if (prepared.installed) {
+              // 自动安装与自动就地开启（隐藏/禁用 → 可用）都是对用户治理状态
+              // 的变更：必须给 ready 提示，不得静默改写。
+              if (prepared.installed || prepared.reEnabled) {
                 setSceneCapabilityStatus({ kind: 'ready', text: sceneCopy.ready });
                 window.setTimeout(() => setSceneCapabilityStatus((current) => (
                   current && current.kind === 'ready' ? null : current
@@ -1733,7 +1743,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // set is read through a ref at render time (the callback only runs during actual rendering, by
       // which point the ref already points at the committed projection result).
       const latestArtifactIdsRef = useRef(latestArtifactIds);
-      // eslint-disable-next-line react-hooks/refs -- timeline render-callback reads the committed projection through this ref; legacy pattern surfaced by compiler lint with the voice hooks present
       latestArtifactIdsRef.current = latestArtifactIds;
       const handleTimelineRenderUser = useCallback((item) => (
         <ChatBubble
@@ -1760,16 +1769,22 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             onPrefill={setInputText}
             onSend={sendChatMessage}
             onOpenEditor={onOpenEditor}
+            onPlanStuckGo={handlePlanStuckGo}
             isLatestArtifact={latestArtifactIdsRef.current.has(item.legacyItem.id)}
             allowScheduledTaskDraft={isScheduledTaskCreationChat} showAssistantActions={false}
           />
         );
       // eslint-disable-next-line react-hooks/exhaustive-deps -- latestArtifactIdsKey is an intentional extra dep: a content-keyed proxy for the artifact-id Set (read fresh via latestArtifactIdsRef) so the callback identity only changes when the set contents change
-      }, [activeSessionId, isScheduledTaskCreationChat, latestArtifactIdsKey, onOpenEditor, sendChatMessage, setInputText, t, theme]);
+      }, [activeSessionId, isScheduledTaskCreationChat, latestArtifactIdsKey, onOpenEditor, sendChatMessage, setInputText, t, theme, handlePlanStuckGo]);
       const handleTimelineRenderToolItem = useCallback((item) => (item.legacyItem
         && !isSearchTool(item.tool)
         && !isFetchTool(item.tool)
-        ? <ToolCard item={item.legacyItem} sessionId={activeSessionId} t={t} variant="timeline" />
+        ? <ToolCard
+            item={item.legacyItem}
+            sessionId={activeSessionId}
+            t={t}
+            variant="timeline"
+          />
         : undefined), [activeSessionId, t]);
       const timelineAssistantAvatar = useMemo(() => (
         <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center">
@@ -1796,7 +1811,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const voiceAsrBusy = !!(voiceAsrSetup.installing || voiceAsrSetup.cancelling);
       const voiceAsrProgress = voiceAsrSetup.progress || {};
       const voiceInputRef = useRef(voiceInput);
-      // eslint-disable-next-line react-hooks/refs -- latest-voice-status mirror read by the unmount cancel guard only
       voiceInputRef.current = voiceInput;
       // Mounted-state ref: after unmount/view switch, reject in-flight ASR/LLM callbacks from
       // writing back (the hook's isStillActive defense line).
@@ -1853,6 +1867,259 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // chip 显示当前会话绑定的模型:切会话/草稿时刷新 currentSessionModelId
       useEffect(() => {
         if (bridge.available) bridge.models.loadSessionModel(activeSessionId);
+      }, [activeSessionId]);
+
+      // Workspace binding indicator for the active session: bound sessions match
+      // the code mode safety posture and show a read-only chip beside the
+      // composer. Queried through the bridge's sessions domain
+      // (method-existence guard; the Web
+      // stub returns null), cached per session; query failure/unbound → hidden.
+      const [sessionWorkspaceBinding, setSessionWorkspaceBinding] = useState(null);
+      const workspaceBindingCacheRef = useRef({});
+      // Generation counter for the binding queries. Bumped on every cache wipe
+      // (rebind invalidation) so an in-flight query that was issued before the
+      // wipe cannot write its pre-rebind value back into the cache (review
+      // #464 round-5 item 6, extended to resolveBindingForGate below).
+      const workspaceBindingEpochRef = useRef(0);
+      // Which session the live `sessionWorkspaceBinding` state belongs to. The
+      // chip keeps its value across a same-session revalidation instead of
+      // flipping through null (review #464 round-6 finding 8c).
+      const bindingSidRef = useRef(null);
+      // A folder rebind moves session bindings behind the cache's back; the
+      // sessions-list refresh that follows (session:list_changed) is the
+      // signal. Drop cached bindings then, so the chip and the YOLO gate
+      // re-resolve instead of showing the pre-rebind directory (#464 r3 m9).
+      const bindingCacheSessionsRef = useRef(null);
+      const sessionsForBindingCache = bs && bs.sessions;
+      useEffect(() => {
+        if (bindingCacheSessionsRef.current !== sessionsForBindingCache) {
+          bindingCacheSessionsRef.current = sessionsForBindingCache;
+          workspaceBindingCacheRef.current = {};
+          workspaceBindingEpochRef.current += 1;
+        }
+        if (!activeSessionId || !bridge.available || !bridge.sessions
+          || typeof bridge.sessions.getSessionWorkspaceBinding !== 'function') {
+          bindingSidRef.current = null;
+          // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously clear the binding chip when leaving a bound session
+          setSessionWorkspaceBinding(null);
+          return;
+        }
+        const sid = activeSessionId;
+        if (Object.prototype.hasOwnProperty.call(workspaceBindingCacheRef.current, sid)) {
+          bindingSidRef.current = sid;
+          setSessionWorkspaceBinding(workspaceBindingCacheRef.current[sid]);
+          return;
+        }
+        // Clear synchronously only when the session actually changed: keeping
+        // the old value across a session switch would briefly show the previous
+        // session's directory and make the YOLO gate misjudge with a stale
+        // binding. A same-session revalidation (every sessions-slice change,
+        // including every chat:done) keeps the previous value until the fresh
+        // query lands instead of flickering through null (review #464 round-6
+        // finding 8c).
+        if (bindingSidRef.current !== sid) {
+          bindingSidRef.current = sid;
+          setSessionWorkspaceBinding(null);
+        }
+        let cancelled = false;
+        const epoch = workspaceBindingEpochRef.current;
+        // The generation is captured separately from `cancelled`: the cleanup
+        // runs per effect pass (a session switch), while a cache wipe can land
+        // between a query's start and its resolution within the same pass.
+        const cacheStillValid = () => workspaceBindingEpochRef.current === epoch;
+        bridge.sessions.getSessionWorkspaceBinding(sid)
+          .then(binding => {
+            const normalized = binding || null;
+            // Guard the cache write too, not just the setState: a query issued
+            // just before a rebind may resolve after the invalidation wipe and
+            // would otherwise re-cache the pre-rebind value (review #464
+            // round-5 item 6).
+            if (!cancelled && cacheStillValid()) {
+              workspaceBindingCacheRef.current[sid] = normalized;
+              setSessionWorkspaceBinding(normalized);
+            }
+          })
+          // Treat query failure (e.g. old backend without the command) as unbound; never misreport.
+          .catch(() => { if (!cancelled) setSessionWorkspaceBinding(null); });
+        return () => { cancelled = true; };
+      }, [activeSessionId, sessionsForBindingCache]);
+
+      // One-time YOLO confirmation gate for the first switch of a session/draft
+      // with a bound workspace (matching code mode): confirming writes the global
+      // flag and continues the switch (for a draft, exitPlanToYolo stages the mode
+      // choice); cancelling stays in Plan. Unbound targets keep the original path
+      // with no card.
+      const [pendingChatYoloSwitch, setPendingChatYoloSwitch] = useState(false);
+      const [chatYoloConfirmBusy, setChatYoloConfirmBusy] = useState(false);
+      const [chatYoloConfirmError, setChatYoloConfirmError] = useState('');
+      // Target session captured when the confirm card opens: if the user switches
+      // away during the confirm round-trip, exitPlanToYolo must not act on the new
+      // active session.
+      const pendingChatYoloSwitchSidRef = useRef(null);
+      // Action to continue after the confirmation: the mode-chip switch
+      // (default) or a plan-stuck card's Go. Both must pass the same
+      // one-time YOLO gate — the Go path used to call the bridge's no-arg
+      // exitPlanToYolo and flipped a bound session without any card
+      // (#445 R9 MAJOR 1).
+      const pendingChatYoloActionRef = useRef(null);
+      // Binding resolution at switch time cannot rely on async state: while a query
+      // is in flight a click would see null and skip the gate. Resolve synchronously
+      // before the verdict (cache → bridge query) so clicks made while waiting still
+      // get the authoritative binding. The sid argument is captured at click time;
+      // after every await it must be compared against activeSessionIdRef.current
+      // (latest rendered value) — the closure's activeSessionId is a render-time
+      // constant whose self-comparison is always true, leaving a fail-open bypass
+      // from unbound A to bound B.
+      async function resolveBindingForGate(sid) {
+        if (!sid) return null;
+        // Web has no binding backend (the bridge stubs the query with null =
+        // unbound), so a web session that IS bound would silently skip the
+        // one-time YOLO gate. Fail closed for the GATE decision with the
+        // unknown-binding sentinel (treated as bound); the chip state stays
+        // untouched — web has no directory to display (round-8 should-fix 11).
+        if (isWeb) return CHAT_YOLO_GATE_UNKNOWN_BINDING;
+        if (sid === activeSessionIdRef.current && sessionWorkspaceBinding !== null) return sessionWorkspaceBinding;
+        if (Object.prototype.hasOwnProperty.call(workspaceBindingCacheRef.current, sid)) {
+          return workspaceBindingCacheRef.current[sid];
+        }
+        if (bridge.available && bridge.sessions && typeof bridge.sessions.getSessionWorkspaceBinding === 'function') {
+          const epoch = workspaceBindingEpochRef.current;
+          try {
+            const binding = await bridge.sessions.getSessionWorkspaceBinding(sid);
+            const normalized = binding || null;
+            // The resolved value is what the gate adjudicates on, so it is
+            // returned as-is; the gate itself fails closed, so a query issued
+            // before a rebind can only over-protect. Both derived writes —
+            // cache AND chip state — are epoch-guarded: sid-keying alone is
+            // not enough, because a query issued just before a rebind can
+            // resolve after the invalidation wipe and would then re-poison the
+            // cache (every later reader) and overwrite the fresh chip (until
+            // the next sessions-slice change) with the pre-rebind directory
+            // (review #464 round-6 finding 8a; round-7 should-fix extends the
+            // guard to the state write, correcting this comment's earlier
+            // "always safe" claim about it).
+            if (workspaceBindingEpochRef.current === epoch) {
+              workspaceBindingCacheRef.current[sid] = normalized;
+              if (sid === activeSessionIdRef.current) {
+                bindingSidRef.current = sid;
+                setSessionWorkspaceBinding(normalized);
+              }
+            }
+            return normalized;
+          } catch {
+            // Transient query failure (the old backend's unknown-command error is already
+            // mapped to null = unbound at the bridge layer, so it never reaches here):
+            // default bound sessions to Plan and fail closed by asking once too often
+            // rather than silently skipping a bound session. Return the non-null
+            // sentinel meaning "treat unknown as bound"; skip the cache so the next
+            // click retries.
+            return CHAT_YOLO_GATE_UNKNOWN_BINDING;
+          }
+        }
+        return null;
+      }
+      // Adjudicate the one-time YOLO gate for a click on `gateSid`.
+      // Returns true when the caller may proceed with its final action now
+      // (unbound, already confirmed, or bridge without prefs support);
+      // false when the confirmation card was opened (or the click went
+      // stale mid-await and the action must be abandoned).
+      async function chatYoloGateAllows(gateSid) {
+        const sessionBinding = await resolveBindingForGate(gateSid);
+        // If the user switched away during the query round-trip, the
+        // adjudication belongs to the session captured at click time — the
+        // action must be abandoned.
+        if (gateSid !== activeSessionIdRef.current) return false;
+        const boundTarget = chatYoloGateApplies({
+          activeSessionId: gateSid,
+          sessionBinding,
+          draftWorkspacePath: bs && bs.draftWorkspacePath,
+        });
+        if (boundTarget && typeof bridge.interaction.getCodePermissionPrefs === 'function') {
+          const prefs = await bridge.interaction.getCodePermissionPrefs();
+          // Re-check after the second await as well.
+          if (gateSid !== activeSessionIdRef.current) return false;
+          if (needsYoloConfirmation(prefs)) {
+            pendingChatYoloSwitchSidRef.current = gateSid;
+            if (!pendingChatYoloActionRef.current) pendingChatYoloActionRef.current = { kind: 'modeChip' };
+            setPendingChatYoloSwitch(true);
+            return false;
+          }
+        }
+        return true;
+      }
+      async function handleModeChipSwitch(target, { isPlan }) {
+        if (!bridge.available || !bridge.interaction) return;
+        if (target === 'plan' && !isPlan) {
+          await bridge.interaction.setPlanModeNext();
+          return;
+        }
+        if (target !== 'yolo' || !isPlan) return;
+        const gateSid = activeSessionId;
+        // Post-await re-checks live inside chatYoloGateAllows: the
+        // adjudication is for the session captured at click time, and the
+        // final action must not follow a switch-away.
+        if (gateSid !== activeSessionIdRef.current) return;
+        if (!(await chatYoloGateAllows(gateSid))) return;
+        // The final action targets the adjudicated sid explicitly: the ref
+        // re-checks only cover this component's awaits, while the bridge's
+        // no-arg exitPlanToYolo reads live-active at call time — a
+        // render-phase mirror can lag the bridge store by one flush, so the
+        // adjudicated session must reach the command as a parameter.
+        await bridge.interaction.exitPlanToYolo(gateSid);
+      }
+      // The plan-stuck card's Go reaches Yolo too, so it passes the same
+      // one-time gate and threads the card's session id into the bridge
+      // (the bridge's no-arg form reads live-active, which is both a
+      // gate bypass for a bound session and the stale-active defect).
+      async function handlePlanStuckGo(itemId) {
+        if (!bridge.available || !bridge.interaction) return;
+        const gateSid = activeSessionId;
+        if (!gateSid) { await bridge.interaction.planStuckGo(itemId); return; }
+        if (gateSid !== activeSessionIdRef.current) return;
+        pendingChatYoloActionRef.current = { kind: 'planStuckGo', itemId };
+        if (!(await chatYoloGateAllows(gateSid))) return;
+        await bridge.interaction.planStuckGo(itemId, gateSid);
+      }
+      async function confirmChatYoloSwitch() {
+        if (chatYoloConfirmBusy) return;
+        setChatYoloConfirmBusy(true);
+        setChatYoloConfirmError('');
+        try {
+          await bridge.interaction.confirmCodeYolo();
+          if (pendingChatYoloSwitchSidRef.current !== activeSessionIdRef.current) {
+            // Switched away: just dismiss the card (the global flag is already written;
+            // the target session will not be prompted again after switching back).
+            setPendingChatYoloSwitch(false);
+            return;
+          }
+          setPendingChatYoloSwitch(false);
+          // Dispatch on the action captured when the card opened, targeting
+          // the captured sid — never live-active at call time.
+          const action = pendingChatYoloActionRef.current;
+          pendingChatYoloActionRef.current = null;
+          if (action && action.kind === 'planStuckGo') {
+            await bridge.interaction.planStuckGo(action.itemId, pendingChatYoloSwitchSidRef.current);
+          } else {
+            await bridge.interaction.exitPlanToYolo(pendingChatYoloSwitchSidRef.current);
+          }
+        } catch (e) {
+          // No longer fail silently: keep the card open and show the reason inline
+          // (matching the code lane; on old backends without confirmCodeYolo the user
+          // must not be left without feedback).
+          console.warn('confirm chat yolo switch failed', e);
+          setChatYoloConfirmError(String(e && e.message || e || 'error'));
+        } finally {
+          setChatYoloConfirmBusy(false);
+        }
+      }
+      // Switching sessions invalidates the old session's confirm card and error
+      // message.
+      useEffect(() => {
+        pendingChatYoloSwitchSidRef.current = null;
+        pendingChatYoloActionRef.current = null;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously close the previous session's confirm card on session switch
+        setPendingChatYoloSwitch(false);
+        setChatYoloConfirmError('');
       }, [activeSessionId]);
 
       // 普通会话选图即时警告(阶段 G):当前模型图片路由为 unsupported 时在附件区提示,
@@ -2287,6 +2554,14 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             </div>
             <div className="flex items-center gap-2">
               {activeSessionId && (
+                <RunningAgentsOverlay
+                  sessionId={activeSessionId}
+                  theme={theme}
+                  t={t}
+                  swarmOn={swarmModeOn}
+                />
+              )}
+              {activeSessionId && (
                 <ChatRightDockSwitcher
                   theme={theme}
                   artifactsLabel={t.artifacts}
@@ -2413,7 +2688,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   .slice(-2)
                   .map((item) => (
                     <div key={item.id} className="pointer-events-auto w-full flex justify-end">
-                      <ChatBubble item={item} sessionId={activeSessionId} theme={theme} t={t} onPrefill={setInputText} onSend={sendChatMessage} editable={false} onOpenEditor={onOpenEditor} isLatestArtifact={false} />
+                      <ChatBubble item={item} sessionId={activeSessionId} theme={theme} t={t} onPrefill={setInputText} onSend={sendChatMessage} editable={false} onOpenEditor={onOpenEditor} onPlanStuckGo={handlePlanStuckGo} isLatestArtifact={false} />
                     </div>
                 ))}
               </div>
@@ -2752,8 +3027,39 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               <div className="flex items-center justify-between mt-1.5 gap-2">
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <ComposerAttachButton t={t} compact={composerCompact} />
-                  <ComposerModeChip t={t} bs={bs} compact={composerCompact} />
-                  <ComposerModelSelector t={t} bs={bs} accountPlatformClient={accountPlatformClient} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} />
+                  {/* Draft-mode workspace selector (matching the code mode draft
+                      selector): desktop only + draft mode; the Web bridge lacks
+                      sessions.setDraftWorkspace/pickDraftWorkspace and the
+                      method-existence guard hides it. bs.draftWorkspacePath is
+                      absent in the Web snapshot; || null covers it. */}
+                  {!activeSessionId && can('desktopChrome') && bridge.sessions && typeof bridge.sessions.pickDraftWorkspace === 'function' && (
+                    <ComposerWorkspaceSelector
+                      copy={t.uiChatWorkspace}
+                      draftWorkspacePath={(bs && bs.draftWorkspacePath) || null}
+                      onPickWorkspace={() => bridge.sessions.pickDraftWorkspace()}
+                      onSelectWorkspace={path => bridge.sessions.setDraftWorkspace(path)}
+                    />
+                  )}
+                  {/* Workspace binding indicator for the active session (read-only
+                      chip: directory name + full path in title); bound sessions
+                      match the code mode safety posture, styled like the draft-mode
+                      selector. */}
+                  {shouldShowWorkspaceBindingChip({ activeSessionId, sessionBinding: sessionWorkspaceBinding }) && (
+                    <span
+                      data-testid="chat-workspace-binding"
+                      title={sessionWorkspaceBinding}
+                      className="h-7 max-w-[180px] rounded-lg px-2 inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400"
+                    >
+                      <FolderOpen size={13} className="shrink-0" />
+                      <span className="truncate">{workspaceName(sessionWorkspaceBinding, t.uiChatWorkspace.unknownDirectory)}</span>
+                    </span>
+                  )}
+                  <ComposerModeChip t={t} bs={bs} compact={composerCompact} onSwitch={handleModeChipSwitch} />
+                  {/* Scheduled run conversations expose no swarm toggle:
+                      the backend's swarm_mode_available excludes them (the
+                      engine always assembles plain config there), so the
+                      entry hides up front instead of erroring on click. */}
+                  <ComposerModelSelector t={t} bs={bs} accountPlatformClient={accountPlatformClient} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
                   <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
                   <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
                 </div>
@@ -2836,6 +3142,28 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             </div>
           </div>
           </div>{/* /对话列 */}
+
+          {pendingChatYoloSwitch && (
+            // One-time YOLO confirmation card (global memory) for the first switch of
+            // a bound session/draft; confirming continues the switch, cancelling
+            // stays in Plan. Mounted outside the conversation column (the card
+            // portals itself to body, escaping the composer container's fixed
+            // containing block from backdrop-blur — same as the code page).
+            <YoloConfirmCard
+              theme={theme}
+              copy={{
+                title: t.uiChatWorkspace.yoloConfirmTitle,
+                body: t.uiChatWorkspace.yoloConfirmBody,
+                hint: t.uiChatWorkspace.yoloConfirmHint,
+                ok: t.uiChatWorkspace.yoloConfirmOk,
+                cancel: t.uiChatWorkspace.yoloConfirmCancel,
+              }}
+              error={chatYoloConfirmError}
+              busy={chatYoloConfirmBusy}
+              onConfirm={confirmChatYoloSwitch}
+              onCancel={() => setPendingChatYoloSwitch(false)}
+            />
+          )}
 
           {artifactsVisible && artifactsFullscreen && artifactFullscreenPublicationReady && createPortal(
             <div
@@ -3124,15 +3452,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const SceneIcon = sceneDisplay && sceneDisplay.Icon;
       const [editing, setEditing] = useState(false);
       const [val, setVal] = useState(item.text);
-      const [copied, setCopied] = useState(false);
+      const [copied, copyToClipboard] = useCopyFlash(1200);
       function commit() { const tx = val.trim(); setEditing(false); if (tx && bridge.available) bridge.interaction.editLastTurn(tx); }
       function copyText() {
-        const tx = item.text || '';
-        copyClipboardText(tx).then(function (ok) {
-          if (!ok) return;
-          setCopied(true);
-          setTimeout(function () { setCopied(false); }, 1200);
-        });
+        copyToClipboard('user-bubble', item.text || '');
       }
       function retryDelivery() {
         if (!item.clientMessageId || !bridge.available || !bridge.chat.retryFirstTurn) return;
@@ -3369,7 +3692,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
     }
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bubble dispatches rendering by message type; split refactor tracked separately
-    const ChatBubble = React.memo(function ChatBubble({ item, sessionId, theme, onPrefill, onSend, editable, onOpenEditor, t, isLatestArtifact, allowScheduledTaskDraft, conversationVariant, showAssistantActions = true }) {
+    const ChatBubble = React.memo(function ChatBubble({ item, sessionId, theme, onPrefill, onSend, editable, onOpenEditor, t, isLatestArtifact, allowScheduledTaskDraft, conversationVariant, showAssistantActions = true, onPlanStuckGo }) {
       const chatCopy = t.uiChat;
       // 后端持久化的记忆状态值是固定中文数据，仅在 UI 边界映射为当前语言；未识别值原样透传
       const memoryStatusLabels = getMemoryStatusLabels(t);
@@ -3383,7 +3706,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
       if (item.type === 'artifact_card') return <ArtifactCard item={item} theme={theme} t={t} isLatest={isLatestArtifact} />;
       if (item.type === 'plan_card') return <PlanCard item={item} t={t} onPrefill={onPrefill} />;
-      if (item.type === 'plan_stuck') return <PlanStuckCard item={item} t={t} />;
+      if (item.type === 'plan_stuck') return <PlanStuckCard item={item} t={t} onGo={onPlanStuckGo} />;
       if (item.type === 'careful_blocked') return <CarefulBlockedCard item={item} t={t} />;
       if (item.type === 'user_input') return <UserInputCard item={item} t={t} />;
       if (item.type === 'user') {
@@ -3645,4 +3968,4 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
     // 产物类型 → { 角标/标签文字, tile 配色, lucide 内联 SVG 路径 }（零下载；仅无封面紧凑态显图标）。
     // 配色/字形照搬 产物卡图标预览.html（唯一权威）。
 
-export { ToolWelcomeCard, ComposerKbSelector, ComposerModeChip, ChatView, fallbackCopyText, copyClipboardText, readClipboardText, SelectionCopyButton, TextareaContextMenu, UserBubble, htmlUnescape, asDraft, asScheduledTaskDraft, extractBalancedJson, parseJsonChain, parseLooseJson, parsePersonaDraft, parseScheduledTaskDraft, parseCardQuestion, optionAnswer, hideStreamingDraft, ChatBubble };
+export { ChatView };

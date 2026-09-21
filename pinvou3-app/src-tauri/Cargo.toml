@@ -1,6 +1,6 @@
 [package]
 name = "pinvou3-tauri"
-version = "0.10.0"
+version = "0.10.4"
 description = "品悟智能助手桌面应用后端"
 authors = ["pinvou"]
 license = "MIT"
@@ -64,6 +64,13 @@ browser-macos-preview = []
 [build-dependencies]
 tauri-build = { version = "2.6.1", features = [] }
 cc = "1"
+
+[dev-dependencies]
+# test-util is unified onto the normal tokio build for test targets only:
+# engine_pool's rebind gate-timeout regression drives tokio::time with a
+# paused clock (#[tokio::test(start_paused = true)]) instead of sleeping the
+# real 2s REBIND_EVICT_GATE_TIMEOUT.
+tokio = { version = "1.49", features = ["test-util"] }
 
 [dependencies]
 pinvou-knowledge = { path = "../../pinvou-knowledge", default-features = false, features = ["client", "discovery"] }
@@ -385,10 +392,10 @@ redundant_feature_names = "deny"
 
 # —— Cleared in this PR, kept at warn for one observation cycle before deny ——
 # Every unsafe block requires a SAFETY comment (the edition 2024 migration
-# added many unsafe blocks; the macOS/Linux compile surface is fully
-# annotated). Legacy Windows-only unsafe blocks (~34: PDH/registry FFI etc.)
-# remain unannotated — CI compiles on Linux and never sees them, so the warn
-# guard does not apply to the Windows target; follow-up cleanup PR.
+# added many unsafe blocks). The macOS/Linux compile surface was annotated
+# first; the legacy Windows-only unsafe blocks (PDH/registry/NtDll FFI etc.)
+# are annotated since the issue #491 cleanup, so all three desktop targets
+# pass the gate.
 undocumented_unsafe_blocks = "warn"
 # unwrap/expect in a long-lived desktop process kills the session on panic
 # (baseline: unwrap 6 / expect 38; test code exempt). Production code is

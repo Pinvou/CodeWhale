@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dict } from '../src/shared/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
+import { dict } from './helpers/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
 import { errorCode, localizedErrorMessage } from '../src/shared/user-facing-error.js';
 import {
   applyConnectorFailure,
@@ -46,6 +46,8 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChat',
     'uiChatExtra',
     'uiChatScenes',
+    'uiAccount',
+    'uiChatWorkspace',
     'artifactPreview',
     'uiAccountPlatform',
     'uiToolStore',
@@ -81,6 +83,8 @@ for (const language of ['zh', 'en', 'ja']) {
     'login', 'logout', 'loginWaiting', 'openLoginUrl', 'loginCodePlaceholder', 'submitCode', 'logoutRelayDisabled',
     'cancelInstall', 'installCancelled',
     'modelSlotsTitle', 'modelSlotsHint', 'modelSlotsRequired',
+    // 注意：ProviderFormModal 用 `copy[`slot_${slot}`]` 动态取键（CLAUDE_MODEL_SLOT_IDS），
+    // 静态扫描查不到消费方，此处断言是防误删的唯一钉子。
     'slot_opus', 'slot_sonnet', 'slot_haiku', 'slot_fable', 'slot_subagent',
     'contextWindow', 'contextWindowHint', 'contextWindowInvalid',
   ]) {
@@ -159,15 +163,25 @@ for (const language of ['zh', 'en', 'ja']) {
   for (const role of ['scout', 'manager', 'builder', 'reviewer', 'general']) {
     assert.ok(multiAgent.roleCards[role], `${language}.uiMultiAgent.roleCards.${role} must exist`);
   }
-  for (const key of ['toggleLabel', 'toggleHint', 'close', 'loadingTranscript', 'emptyTranscript', 'blockedTag', 'panelResize', 'panelResizeHint', 'agentsListTitle', 'agentsEmpty', 'backToAgents']) {
+  for (const key of ['toggleLabel', 'toggleHint', 'close', 'loadingTranscript', 'emptyTranscript', 'blockedTag', 'panelResize', 'panelResizeHint', 'agentsListTitle', 'agentsEmpty', 'backToAgents', 'spawnedAgentsRowHint', 'runningAgentsTitle', 'runningAgentsCollapse', 'runningAgentsExpand']) {
     assert.ok(multiAgent[key], `${language}.uiMultiAgent.${key} must exist`);
   }
-  for (const cardKey of ['spawning', 'working', 'completed', 'failed', 'spawnFailed', 'interrupted']) {
+  for (const fnKey of ['spawnedAgentsRow', 'runningAgentsCount']) {
+    assert.equal(typeof multiAgent[fnKey], 'function', `${language}.uiMultiAgent.${fnKey} must be a function`);
+  }
+  for (const cardKey of ['working', 'completed', 'failed', 'spawnFailed', 'interrupted', 'cancelled']) {
     assert.ok(multiAgent.agentCard[cardKey], `${language}.uiMultiAgent.agentCard.${cardKey} must exist`);
   }
+  // The ConversationTimeline status badge renders uiConversation.cancelled for
+  // the ledger's lowercase cancelled token (case-insensitive match); the key
+  // must exist in all three locales.
+  assert.ok(dict[language].uiConversation.cancelled, `${language}.uiConversation.cancelled must exist`);
   for (const deadKey of ['confirmTitle', 'impactLabels', 'startDenied', 'stages', 'terminal', 'workerCount', 'advancedEdit', 'planCompileError']) {
     assert.equal(multiAgent[deadKey], undefined, `${language}.uiMultiAgent.${deadKey} is retired and must stay deleted`);
   }
+  // agentCard spawning-era keys: 'spawning' died with the inline expert card
+  // (the aggregate count row only speaks in past-tense totals).
+  assert.equal(multiAgent.agentCard.spawning, undefined, `${language}.uiMultiAgent.agentCard.spawning is retired and must stay deleted`);
   // The bottom-right code-style toggle was replaced by the All/Code pill in
   // the task list header; its tooltip copy must not come back as dead keys.
   for (const deadKey of ['sidebarCodeStyleOn', 'sidebarCodeStyleOff']) {

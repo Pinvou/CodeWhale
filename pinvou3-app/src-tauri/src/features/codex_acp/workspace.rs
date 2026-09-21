@@ -518,11 +518,11 @@ pub fn checkout_workspace_branch(
 }
 
 /// diff 内存缓存：键 = (session_id, 相对路径)，值 = 文件指纹 + diff 文本。
-/// 指纹覆盖工作区文件（size + mtime 纳秒 + 头尾采样 hash——内容变而 size/mtime
-/// 未变（同尺寸覆盖写）也能失效）、`.git/index`（git add/reset 等暂存区变化
-/// 会更新 index）与 HEAD 指向的 ref 文件（reset --soft / update-ref / commit 只
-/// 移动 HEAD、可能不更新 index 或工作区——而 git diff --cached 依赖 HEAD），
-/// 任一变化即失效；仅进程内存、不落盘，重启即清空。
+/// 指纹覆盖工作区文件（size + mtime 纳秒 + 内容采样 hash——≤8KB 全量、更大头尾
+/// 各 4KB，内容变而 size/mtime 未变（同尺寸覆盖写）也能失效）、`.git/index`
+/// （git add/reset 等暂存区变化会更新 index）与 HEAD 指向的 ref 文件（reset
+/// --soft / update-ref / commit 只移动 HEAD、可能不更新 index 或工作区——而
+/// git diff --cached 依赖 HEAD），任一变化即失效；仅进程内存、不落盘，重启即清空。
 const DIFF_CACHE_MAX_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,8 +532,10 @@ struct DiffFingerprint {
     head_tail_hash: u64,
     index_size: u64,
     index_modified: u128,
+    index_hash: u64,
     head_ref_size: u64,
     head_ref_modified: u128,
+    head_ref_hash: u64,
 }
 
 #[derive(Clone)]
@@ -555,8 +557,10 @@ fn modified_nanos(metadata: &fs::Metadata) -> u128 {
         .unwrap_or_default()
 }
 
-// 头 4KB + 尾 4KB 的 FNV-1a 采样：文件内容变化（含同尺寸覆盖写）时大概率失效，
-// 每次开销恒定 ~8KB 读取，远小于重跑 git diff。
+// FNV-1a 内容采样：≤ 8KB 全量读取，不留采样盲区——中等规模仓库的 .git/index
+// 恰落此区间，条目定长、同路径同 SHA 位数的重写尺寸不变，且可能落在同一 mtime
+// 粒度内，只采样头部会漏掉后半段条目与校验和的改写；> 8KB 读头尾各 4KB，内容
+// 变化（含同尺寸覆盖写）时大概率失效。每次开销恒定 ≤ 8KB 读取，远小于重跑 git diff。
 fn sample_head_tail_hash(path: &Path, len: u64) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     let mut visit = |bytes: &[u8]| {
@@ -566,17 +570,18 @@ fn sample_head_tail_hash(path: &Path, len: u64) -> u64 {
         }
     };
     if let Ok(mut file) = fs::File::open(path) {
-        let head_len = 4096.min(len as usize);
-        let mut head = vec![0u8; head_len];
-        if file.read_exact(&mut head).is_ok() {
-            visit(&head);
-        }
-        if len > 8192 {
-            let tail_len = 4096.min((len - head_len as u64) as usize);
-            let mut tail = vec![0u8; tail_len];
-            if file.seek(SeekFrom::End(-(tail_len as i64))).is_ok()
-                && file.read_exact(&mut tail).is_ok()
-            {
+        if len <= 8192 {
+            let mut full = vec![0u8; len as usize];
+            if file.read_exact(&mut full).is_ok() {
+                visit(&full);
+            }
+        } else {
+            let mut head = vec![0u8; 4096];
+            if file.read_exact(&mut head).is_ok() {
+                visit(&head);
+            }
+            let mut tail = vec![0u8; 4096];
+            if file.seek(SeekFrom::End(-4096)).is_ok() && file.read_exact(&mut tail).is_ok() {
                 visit(&tail);
             }
         }
@@ -591,8 +596,10 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
         head_tail_hash: 0,
         index_size: 0,
         index_modified: 0,
+        index_hash: 0,
         head_ref_size: 0,
         head_ref_modified: 0,
+        head_ref_hash: 0,
     };
     if let Ok(metadata) = root.join(relative).metadata() {
         fingerprint.file_size = metadata.len();
@@ -600,9 +607,15 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
         fingerprint.head_tail_hash = sample_head_tail_hash(&root.join(relative), metadata.len());
     }
     // git 暂存区变化会重写 .git/index；非 git 工作区无此文件，字段保持 0。
-    if let Ok(metadata) = root.join(".git/index").metadata() {
+    // index 条目定长、同路径同 SHA 位数，重写往往尺寸不变，且同样可能落在
+    // 同一 mtime 粒度内——与 HEAD ref 一样加内容哈希兜底。
+    // 路径经 git_path 解析：linked worktree 下 .git 是 gitfile，直接拼
+    // root/.git/index 会读不到真实 index。
+    let index_path = git_path(root, "index").unwrap_or_else(|| root.join(".git/index"));
+    if let Ok(metadata) = index_path.metadata() {
         fingerprint.index_size = metadata.len();
         fingerprint.index_modified = modified_nanos(&metadata);
+        fingerprint.index_hash = sample_head_tail_hash(&index_path, metadata.len());
     }
     // git diff --cached 比较 index 与 HEAD；reset --soft / update-ref / commit 只移动
     // HEAD（改写其指向的 ref 文件），可能不更新 .git/index 或工作区。解析 .git/HEAD
@@ -611,22 +624,56 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
         if let Ok(metadata) = head_ref.metadata() {
             fingerprint.head_ref_size = metadata.len();
             fingerprint.head_ref_modified = modified_nanos(&metadata);
+            // 内容哈希兜底:reset --soft / update-ref 与上次指纹落在同一时间戳
+            // 粒度内时 mtime 不变,只有内容(SHA 改写)才能正确失效缓存。
+            fingerprint.head_ref_hash = sample_head_tail_hash(&head_ref, metadata.len());
         }
     }
     fingerprint
 }
 
-// 解析 .git/HEAD：symref（`ref: refs/heads/<branch>`）→ `.git/` 下的 ref 文件路径；
-// 分离头（直接存 commit SHA）→ .git/HEAD 本身。reset --soft / update-ref 改写后者，
-// stat 它即可让指纹失效。非 git 工作区无 .git/HEAD 时返回 None。
+// 解析 HEAD 指向的 ref 文件：symref（`ref: refs/heads/<branch>`）→ 该 ref 文件路径；
+// 分离头（直接存 commit SHA）→ HEAD 文件本身。reset --soft / update-ref 改写后者，
+// stat 它即可让指纹失效。非 git 工作区返回 None。
+// 路径经 git_path 解析：linked worktree 下 .git 是 gitfile，HEAD 与分支 ref 都在
+// gitdir/commondir 下，直接拼 root/.git/... 会解析不到。
 fn head_ref_path(root: &Path) -> Option<PathBuf> {
-    let git_dir = root.join(".git");
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head_path = git_path(root, "HEAD").unwrap_or_else(|| root.join(".git/HEAD"));
+    let head = fs::read_to_string(&head_path).ok()?;
     match head.trim().strip_prefix("ref:") {
-        // symref 目标相对 .git/（如 refs/heads/main），需在 git_dir 下解析。
-        Some(target) => Some(git_dir.join(target.trim())),
-        None => Some(git_dir.join("HEAD")),
+        // symref 目标（如 refs/heads/main）同样经 git_path 解析，worktree 下
+        // commondir 重定向由 git 自己处理。
+        Some(target) => Some(
+            git_path(root, target.trim()).unwrap_or_else(|| root.join(".git").join(target.trim())),
+        ),
+        None => Some(head_path),
     }
+}
+
+// 经 `git rev-parse --git-path <name>` 解析仓库真实 git 目录内的路径。linked
+// worktree 中 `.git` 是 gitfile，朴素的 `root.join(".git/...")` 启发式读不到
+// index/HEAD/ref 文件，指纹字段会恒为 0 并返回陈旧缓存差异。主工作区的 `.git`
+// 是真实目录，从工作区根向上发现必然落在其中，路径拼接与子进程输出逐字节一致，
+// 故直接走快路径、不 spawn git——指纹在每次缓存探测都要计算，每次探测多次进程
+// 启动会拖垮它所守护的缓存。gitfile 布局（linked worktree、submodule、
+// separate-git-dir）走发现路径；git 不可用（非 git 工作区）时回退朴素启发式。
+fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git.join(name));
+    }
+    let mut command = crate::platform::process::HiddenCommand::new("git");
+    crate::platform::process::strip_git_override_env(&mut command);
+    let output = command
+        .current_dir(root)
+        .args(["rev-parse", "--git-path", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!relative.is_empty()).then(|| root.join(relative))
 }
 
 fn diff_cache_get(session_id: &str, root: &Path, relative: &str) -> Option<CachedDiff> {
@@ -1177,7 +1224,9 @@ fn filesystem_changes(
 }
 
 fn git_root(root: &Path) -> Option<PathBuf> {
-    let output = crate::platform::process::HiddenCommand::new("git")
+    let mut command = crate::platform::process::HiddenCommand::new("git");
+    crate::platform::process::strip_git_override_env(&mut command);
+    let output = command
         .current_dir(root)
         .args(["rev-parse", "--show-toplevel"])
         .output()
@@ -1239,7 +1288,9 @@ fn sanitize_git_remote_url(remote: &str) -> Option<String> {
 }
 
 fn git_status_entries(root: &Path) -> Result<Vec<WorkspaceChange>> {
-    let output = crate::platform::process::HiddenCommand::new("git")
+    let mut command = crate::platform::process::HiddenCommand::new("git");
+    crate::platform::process::strip_git_override_env(&mut command);
+    let output = command
         .current_dir(root)
         .args([
             "status",
@@ -1301,7 +1352,9 @@ fn git_status_label(x: char, y: char) -> &'static str {
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String> {
-    let output = crate::platform::process::HiddenCommand::new("git")
+    let mut command = crate::platform::process::HiddenCommand::new("git");
+    crate::platform::process::strip_git_override_env(&mut command);
+    let output = command
         .current_dir(root)
         .args(arguments)
         .output()
@@ -1428,20 +1481,126 @@ mod tests {
         assert_eq!(third.text, fourth.text);
     }
 
+    // 采样某时刻的 mtime 并可回写:同尺寸同 mtime 重写(比依赖文件系统时间
+    // 粒度更确定——没有内容哈希时这些测试在任何平台上都必然失败,而不是只在
+    // coarse-mtime 的 Linux CI 上才暴露)。
+    fn current_times(path: &Path) -> fs::FileTimes {
+        let metadata = fs::metadata(path).unwrap();
+        fs::FileTimes::new().set_modified(metadata.modified().unwrap())
+    }
+
+    fn apply_times(path: &Path, times: fs::FileTimes) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_times(times).unwrap();
+    }
+
     #[test]
     fn diff_fingerprint_covers_file_and_git_index() {
         let root = TestDir::new("diff-fingerprint");
         fs::create_dir_all(root.path().join(".git")).unwrap();
-        fs::write(root.path().join(".git/index"), b"idx1").unwrap();
+        let index = root.path().join(".git/index");
+        fs::write(&index, b"idx1").unwrap();
         fs::write(root.path().join("main.py"), "print(1)\n").unwrap();
 
         let baseline = diff_fingerprint(root.path(), "main.py");
+        // 暂存区变化(.git/index 重写)→ 指纹变化。index 条目定长、同路径同
+        // SHA 位数,重写尺寸不变;显式固定回基线 mtime 后,只有内容哈希能失效。
+        let index_stamp = current_times(&index);
+        fs::write(&index, b"idx2").unwrap();
+        apply_times(&index, index_stamp);
+        assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
+        // 内容与 mtime 全部还原 → 指纹回到基线(同内容不产生虚假失效)。
+        fs::write(&index, b"idx1").unwrap();
+        apply_times(&index, index_stamp);
+        assert_eq!(baseline, diff_fingerprint(root.path(), "main.py"));
         // 文件内容变化 → 指纹变化。
         fs::write(root.path().join("main.py"), "print(2)\n").unwrap();
         assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
-        // 暂存区变化（.git/index 重写）→ 指纹变化。
-        fs::write(root.path().join(".git/index"), b"idx2").unwrap();
-        assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
+    }
+
+    // 真实仓库的中等 index（4–8 KiB）：80 个文件恰好让 index 越过头部采样区，
+    // 又落在"小于等于 8KiB"区间——f075 的条目（偏移 >5KB）与校验和都在文件后半段，
+    // 同尺寸同 mtime 的暂存改写只能靠全量哈希失效（此前头尾采样会漏掉该区间）。
+    #[test]
+    fn diff_fingerprint_invalidates_on_medium_index_staging_change() {
+        let Some(root) = init_git_repo("diff-fingerprint-medium-index") else {
+            return;
+        };
+        for index in 1..=80 {
+            fs::write(
+                root.path().join(format!("f{index:03}")),
+                format!("content {index}\n"),
+            )
+            .unwrap();
+        }
+        git_output(root.path(), &["add", "."]).unwrap();
+        git_output(
+            root.path(),
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "-m",
+                "80 files",
+            ],
+        )
+        .unwrap();
+        // read-tree 剥去 add 留下的 TREE 扩展，基线态与篡改态随后都出自同一条
+        // update-index 重写路径，保证两次 index 尺寸完全一致。
+        git_output(root.path(), &["read-tree", "HEAD"]).unwrap();
+        let old_sha = git_output(root.path(), &["rev-parse", ":f075"]).unwrap();
+        let tampered_blob = std::env::temp_dir().join(format!(
+            "pinvou3-tampered-blob-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&tampered_blob, "tampered\n").unwrap();
+        let new_sha = git_output(
+            root.path(),
+            &["hash-object", "-w", tampered_blob.to_str().unwrap()],
+        )
+        .unwrap();
+        let _ = fs::remove_file(&tampered_blob);
+        let old_sha = old_sha.trim();
+        let new_sha = new_sha.trim();
+        let restage = |sha: &str| {
+            git_output(
+                root.path(),
+                &["update-index", "--cacheinfo", &format!("100644,{sha},f075")],
+            )
+            .unwrap();
+        };
+
+        // 先走一遍篡改→还原，让基线态同样是 update-index 的重写产物。
+        restage(new_sha);
+        restage(old_sha);
+        let index = root.path().join(".git/index");
+        let baseline = diff_fingerprint(root.path(), "f001");
+        // 前提守卫：index 必须落在头部采样之外、8KiB 之内的目标区间。
+        assert!(
+            baseline.index_size > 4096 && baseline.index_size <= 8192,
+            "index 尺寸 {} 不在 4–8KiB 目标区间",
+            baseline.index_size
+        );
+        let index_stamp = current_times(&index);
+
+        // 等价 update-index 改写暂存 blob：工作区不动，仅 index 后半段内容变化。
+        restage(new_sha);
+        apply_times(&index, index_stamp);
+        // 同尺寸守卫：尺寸若变化，失效就不来自内容哈希，本测试失去意义。
+        let after = diff_fingerprint(root.path(), "f001");
+        assert_eq!(after.index_size, baseline.index_size);
+        assert_eq!(after.index_modified, baseline.index_modified);
+        assert_ne!(after, baseline);
+        // 还原暂存内容 → 指纹回到基线（同内容不产生虚假失效）。
+        restage(old_sha);
+        apply_times(&index, index_stamp);
+        assert_eq!(diff_fingerprint(root.path(), "f001"), baseline);
     }
 
     #[test]
@@ -1449,7 +1608,8 @@ mod tests {
         // git diff --cached 比较 index 与 HEAD；reset --soft / update-ref 只改写 HEAD
         // 指向的 ref 文件、不更新 .git/index 或工作区——指纹必须覆盖此场景，否则缓存
         // 会返回陈旧差异。.git/HEAD 多为 symref（ref: refs/heads/<branch>），目标文件
-        // 是 41 字节的 SHA（不同提交同尺寸），故此处以同尺寸重写验证 mtime 失效。
+        // 是 41 字节的 SHA（不同提交同尺寸），且两次改写可能落在同一 mtime 粒度内，
+        // 故此处以同尺寸同 mtime 重写验证内容哈希失效。
         let root = TestDir::new("diff-fingerprint-head");
         fs::create_dir_all(root.path().join(".git/refs/heads")).unwrap();
         let head_ref = root.path().join(".git/refs/heads/main");
@@ -1458,13 +1618,115 @@ mod tests {
         fs::write(root.path().join("main.py"), "print(1)\n").unwrap();
 
         let baseline = diff_fingerprint(root.path(), "main.py");
+        let ref_stamp = current_times(&head_ref);
         // 等价 reset --soft <other-commit>：分支 ref 同尺寸改写（index 与工作区不变）。
         fs::write(&head_ref, format!("{}\n", "b".repeat(40))).unwrap();
+        apply_times(&head_ref, ref_stamp);
         assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
+        // 内容与 mtime 全部还原 → 指纹回到基线(同内容不产生虚假失效)。
+        fs::write(&head_ref, format!("{}\n", "a".repeat(40))).unwrap();
+        apply_times(&head_ref, ref_stamp);
+        assert_eq!(baseline, diff_fingerprint(root.path(), "main.py"));
 
         // symref 目标切换（checkout）也算 HEAD 变化：HEAD 文件内容改写即失效。
+        // dev ref 与 main 同尺寸、并固定为同一 mtime：失效只能来自内容哈希
+        // （解析路径跟随 symref 切到 dev 后，内容哈希不同）。
+        let dev_ref = root.path().join(".git/refs/heads/dev");
+        fs::write(&dev_ref, format!("{}\n", "c".repeat(40))).unwrap();
+        apply_times(&dev_ref, ref_stamp);
         fs::write(root.path().join(".git/HEAD"), "ref: refs/heads/dev\n").unwrap();
         assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
+    }
+
+    // linked worktree 中 `.git` 是 gitfile，指纹必须经 git 自身解析
+    // index/HEAD/ref 路径；朴素 `root.join(".git/...")` 启发式会全部落空、
+    // 字段恒为 0，陈旧缓存差异会被当作命中返回。依赖 git 二进制，缺失时
+    // 跳过（生产路径有 git_path 的启发式回退兜底）。
+    #[test]
+    fn diff_fingerprint_tracks_index_and_head_in_linked_worktree() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "skipping diff_fingerprint_tracks_index_and_head_in_linked_worktree: git binary not available"
+            );
+            return;
+        }
+        let root = TestDir::new("diff-fingerprint-worktree");
+        let repo = root.path().join("repo");
+        let linked = root.path().join("linked");
+        fs::create_dir_all(&repo).unwrap();
+        // 与生产 git 调用点一致剥掉进程级 GIT_* 覆盖：并行测试里持锁者可能把
+        // GIT_DIR / GIT_INDEX_FILE 指向无关位置，会把这些子进程带离临时仓库。
+        let run_git = |dir: &Path, args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            crate::platform::process::strip_all_git_env(&mut command);
+            let output = command
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .args(args)
+                .output()
+                .unwrap_or_else(|error| panic!("failed to spawn git {args:?}: {error}"));
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        };
+        run_git(&repo, &["init", "-b", "main", "."]);
+        run_git(&repo, &["config", "user.name", "test"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        fs::write(repo.join("main.py"), "print(1)\n").unwrap();
+        run_git(&repo, &["add", "main.py"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        run_git(&repo, &["worktree", "add", linked.to_str().unwrap()]);
+
+        // git-path 解析必须到达真实的 per-worktree gitdir…
+        let index_path = git_path(&linked, "index").expect("worktree index path");
+        assert!(index_path.is_file(), "{} missing", index_path.display());
+        assert_eq!(
+            fs::canonicalize(&index_path).unwrap(),
+            fs::canonicalize(repo.join(".git/worktrees/linked/index")).unwrap()
+        );
+
+        let baseline = diff_fingerprint(&linked, "main.py");
+        // …index 与 HEAD ref 才会真正进入指纹（朴素 `.git/index` 启发式读到
+        // gitfile，字段保持 0）。
+        assert_ne!(baseline.index_size, 0);
+        assert_ne!(baseline.head_ref_size, 0);
+
+        // worktree 内暂存改动会重写其 index → 指纹变化（暂存变化不得命中陈旧缓存）。
+        fs::write(linked.join("main.py"), "print(2)\n").unwrap();
+        run_git(&linked, &["add", "main.py"]);
+        assert_ne!(baseline, diff_fingerprint(&linked, "main.py"));
+
+        // 先提交暂存改动，再用真·空提交移动一次 HEAD。下面的快照恰好夹住
+        // 空提交：它只改写 commondir 里的分支 ref，不碰 worktree 文件与
+        // index，因此断言能把差异唯一归因于解析出的 HEAD ref 追踪，而不是
+        // 上面暂存步骤留下的文件/index 噪声。
+        run_git(&linked, &["commit", "-m", "second"]);
+        let after_commit = diff_fingerprint(&linked, "main.py");
+        run_git(&linked, &["commit", "--allow-empty", "-m", "third"]);
+        let moved = diff_fingerprint(&linked, "main.py");
+        // 同一 worktree 文件、同一 index 内容、ref 仍为 41 字节格式……
+        assert_eq!(after_commit.file_size, moved.file_size);
+        assert_eq!(after_commit.file_modified, moved.file_modified);
+        assert_eq!(after_commit.head_tail_hash, moved.head_tail_hash);
+        assert_eq!(after_commit.index_size, moved.index_size);
+        assert_eq!(after_commit.index_hash, moved.index_hash);
+        assert_eq!(after_commit.head_ref_size, moved.head_ref_size);
+        // ……只有解析出的 ref 内容变化，指纹必须经 HEAD-ref 字段失效。
+        // 若解析失效，head_ref_* 恒 0、两次指纹全同——与暂存前的原始
+        // baseline 比较是发现不了这种破坏的。
+        assert_ne!(after_commit.head_ref_hash, moved.head_ref_hash);
     }
 
     #[test]
@@ -1595,7 +1857,9 @@ mod tests {
     fn init_git_repo(label: &str) -> Option<TestDir> {
         let root = TestDir::new(label);
         let run = |args: &[&str]| {
-            crate::platform::process::HiddenCommand::new("git")
+            let mut command = crate::platform::process::HiddenCommand::new("git");
+            crate::platform::process::strip_git_override_env(&mut command);
+            command
                 .current_dir(root.path())
                 .args(args)
                 .output()
@@ -1860,7 +2124,9 @@ mod tests {
         // 本地子模块仓库（file 协议克隆在新版 git 默认拒绝，需显式允许）。
         let sub = TestDir::new("stash-noop-push-sub");
         let sub_run = |args: &[&str]| {
-            crate::platform::process::HiddenCommand::new("git")
+            let mut command = crate::platform::process::HiddenCommand::new("git");
+            crate::platform::process::strip_git_override_env(&mut command);
+            command
                 .current_dir(sub.path())
                 .args(args)
                 .output()
@@ -2014,5 +2280,85 @@ mod tests {
             Some("https://example.com/team/repo")
         );
         assert_eq!(sanitize_git_remote_url("/private/local/repo"), None);
+    }
+
+    /// GIT_* environment isolation: GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY
+    /// injected by the host shell (or by tests concurrently holding ENV_LOCK
+    /// to write the environment) must not redirect the workspace's branch and
+    /// stash operations to unrelated locations. Regression background: under
+    /// full parallel runs this pollution really occurred, making the git
+    /// subprocess cases fail randomly across runs (serial runs were all
+    /// green).
+    #[test]
+    fn workspace_git_operations_ignore_host_git_environment() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let bogus = TestDir::new("bogus-git-env");
+        // Capture the host's values first: restoration must put back exactly
+        // this state, not an unconditionally-absent one (the launching shell
+        // may legitimately carry these variables).
+        let prior_index = std::env::var_os("GIT_INDEX_FILE");
+        let prior_objects = std::env::var_os("GIT_OBJECT_DIRECTORY");
+        // Panic-safe restore: Drop puts back the captured values on every
+        // exit path — normal end, the early return inside catch_unwind, and
+        // caught assertion panics alike.
+        let env_guard = crate::platform::paths::tests::EnvVarGuard::capture(&[
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+        ]);
+        // SAFETY: ENV_LOCK serializes process environment writes (the
+        // crate-wide convention); the workspace git subprocess itself strips
+        // GIT_* override variables and is unaffected by this write.
+        unsafe {
+            std::env::set_var("GIT_INDEX_FILE", bogus.path().join("index"));
+            std::env::set_var("GIT_OBJECT_DIRECTORY", bogus.path().join("objects"));
+        }
+        let result = std::panic::catch_unwind(|| {
+            let Some(root) = init_git_repo("env-isolation") else {
+                return;
+            };
+            fs::write(root.path().join("file.txt"), "v1-dirty").unwrap();
+            // Commit objects must land in this repository's own object store
+            // so branch switching and stash restoration work end to end.
+            checkout_workspace_branch(root.path(), "feature", BranchSwitchMode::Stash, None)
+                .unwrap();
+            assert_eq!(git_branch(root.path()).as_deref(), Some("feature"));
+            assert_eq!(
+                fs::read_to_string(root.path().join("file.txt")).unwrap(),
+                "v1-dirty"
+            );
+            let stash_list = git_output(root.path(), &["stash", "list"]).unwrap();
+            assert!(stash_list.trim().is_empty());
+            // The pollution targets stay clean: neither the index nor the
+            // objects were redirected.
+            assert!(
+                !bogus.path().join("index").exists(),
+                "GIT_INDEX_FILE must be stripped"
+            );
+            assert!(
+                bogus
+                    .path()
+                    .read_dir()
+                    .map(|entries| entries.count() == 0)
+                    .unwrap_or(true),
+                "GIT_OBJECT_DIRECTORY must be stripped"
+            );
+        });
+        // Restore before unwrapping the result, so the original environment
+        // is back even when the unwrapped panic propagates; then assert the
+        // restoration is complete.
+        drop(env_guard);
+        assert_eq!(
+            std::env::var_os("GIT_INDEX_FILE"),
+            prior_index,
+            "GIT_INDEX_FILE must be restored to its pre-test state"
+        );
+        assert_eq!(
+            std::env::var_os("GIT_OBJECT_DIRECTORY"),
+            prior_objects,
+            "GIT_OBJECT_DIRECTORY must be restored to its pre-test state"
+        );
+        result.unwrap();
     }
 }

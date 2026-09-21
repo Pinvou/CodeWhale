@@ -48,20 +48,18 @@ static EIP_PLATFORM_BIN_DIR: Dir<'_> =
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/linux/aarch64/bundle/zhidao/bin");
-
-/// 9 个 lark 域技能目录名(门控写/删共用)。skills_dir 下这些目录在不在
-/// = 飞书技能对模型可见与否(引擎 `SkillRegistry` 扫目录)。
-const LARK_SKILL_DIRS: [&str; 9] = [
-    "lark-shared",
-    "lark-calendar",
-    "lark-doc",
-    "lark-drive",
-    "lark-sheets",
-    "lark-im",
-    "lark-task",
-    "lark-wiki",
-    "lark-base",
-];
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static EIP_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/aarch64/bundle/eip/bin");
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/aarch64/bundle/zhidao/bin");
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+static EIP_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/x86_64/bundle/eip/bin");
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/x86_64/bundle/zhidao/bin");
 
 /// 企微官方域技能(wecomcli-*,MIT,来自 github.com/WecomTeam/wecom-cli `skills/`):
 /// 编译期内嵌整个 wecom-skills 目录树。**单独放 `wecom-skills/`**(不进 `skills/`)——
@@ -81,16 +79,16 @@ static DINGTALK_SKILLS_DIR: Dir<'_> =
 static TMEET_SKILLS_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/common/bundle/tmeet-skills");
 
-// 企微技能目录表（14 新名 + 0.1.9 legacy 名）已下沉到
-// `crate::platform::connector_skills` 作为单一真相源：marketplace 注册表
-// （wecom 卡 skills 列表）、扁平布局迁移、`cli_bundle_of_skill` 反查与
-// `legacy_cli_records` 首启登记与本模块的门控写/删共用（五轮评审必修 3：
+// 连接器技能目录表（飞书 lark 9 + 企微 14 新名 + 0.1.9 legacy 名 + 钉钉/腾讯会议
+// mono skill）已下沉到 `crate::platform::connector_skills` 作为单一真相源：
+// marketplace 注册表（wecom 卡 skills 列表）、扁平布局迁移、`cli_bundle_of_skill`
+// 反查与 `legacy_cli_records` 首启登记与本模块的门控写/删共用（五轮评审必修 3：
 // marketplace 侧曾按 0.1.9 旧表写死 7 技能，与本表分叉）。
 // 此处 re-export 保持本模块及 extraction 的既有引用不变。
-pub(crate) use crate::platform::connector_skills::{WECOM_LEGACY_SKILL_DIRS, WECOM_SKILL_DIRS};
-
-const DINGTALK_SKILL_DIRS: [&str; 1] = ["dws"];
-const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
+pub(crate) use crate::platform::connector_skills::{
+    DINGTALK_SKILL_DIRS, LARK_SKILL_DIRS, TMEET_SKILL_DIRS, WECOM_LEGACY_SKILL_DIRS,
+    WECOM_SKILL_DIRS,
+};
 
 /// Bundle 版本号：手动 base + 自动 instructions.md 内容 hash（build.rs 注入）。
 /// 改 INSTRUCTIONS_MD 时不需要 bump base —— hash 自动变，ensure_extracted 自动覆写。
@@ -166,8 +164,20 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 /// 0.32: 回流 Community #439 的飞书技能文档审计修复，登记于 lark-skills/NOTICE.md。
 ///       技能树不参与内容哈希，使用新语义版本确保已连接用户启动时刷新，
 ///       并保留 Official 已占用的版本记录及 H3C CLI 内容哈希。
+/// 0.33: H3C 内部 CLI（eip/zhidao）新增 macOS darwin arm64/x86_64 二进制：
+///       eip 由 linux-src fallback 源、zhidao 由 win-src 清洁室源构建
+///       （各自 build.sh），Rust 侧新增 connectors/platform/macos.rs 并把
+///       darwin 纳入 PLATFORM_BIN_DIR/解包/测试的 cfg。内容虽受
+///       BUNDLE_H3C_CLI_HASH 覆盖，仍按登记惯例 bump 语义版本，让 macOS
+///       老装机（此前 unsupported）升级后启动即解包二进制。
+/// 0.34: 回流 Community #512 的连接器 CLI 与第三方技能树全量同步
+///       （wecom-cli 1.2.1 skills、lark-cli 1.0.95、dws 1.0.61、tmeet
+///       1.0.18，均登记于对应 NOTICE）。wecom-cli 最低可接受版本升至
+///       1.2.1，tmeet npm 锁定升至 1.0.18。Official 已占用 0.30-0.33，
+///       extracted-VERSION 门禁只做不等比较，使用新值确保已连接用户
+///       启动时刷新四棵技能树（技能树不参与内容哈希）。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.32-",
+    "0.34-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
@@ -231,6 +241,14 @@ fn work_layer_sections() -> (&'static str, &'static str, &'static str) {
     (env_section, browser_section, artifact_rule)
 }
 
+/// Environment section for plain sessions bound to a real working directory: a
+/// single `## 工作环境` section (with the `{{PINVOU3_WORKSPACE_HINT}}` workspace
+/// placeholder). Difference from the work layer's default environment section:
+/// the working target is the user-selected real directory (changes are visible
+/// live), with no artifact panel and no `tmp/` semantics.
+pub const INSTRUCTIONS_WORK_BOUND_MD: &str =
+    include_str!("../../../../resources/common/bundle/instructions-work-bound.md");
+
 /// work 模式完整 instructions（共享骨架 + work 层占位替换）。
 /// 与拆分前 instructions.md 逐字节相等。
 pub fn instructions_md() -> &'static str {
@@ -251,6 +269,28 @@ pub fn instructions_md() -> &'static str {
                 &format!("{artifact_rule}\n"),
             )
     })
+}
+
+/// Full instructions for plain sessions bound to a real working directory
+/// (shared skeleton + bound environment section + the work layer's Browser
+/// capabilities section and deliverables section): only the environment section
+/// swaps in the bound variant; browser and deliverable-card capabilities match
+/// plain sessions. `instructions_md()` keeps its byte-for-byte semantics.
+#[allow(clippy::expect_used)]
+pub fn instructions_work_bound_md(workspace_hint: &str) -> String {
+    let (_env_section, browser_section, artifact_rule) = work_layer_sections();
+    let env_section = INSTRUCTIONS_WORK_BOUND_MD
+        .trim_end()
+        .replace("{{PINVOU3_WORKSPACE_HINT}}", workspace_hint);
+    INSTRUCTIONS_SHARED_MD
+        .replace(
+            "{{PINVOU3_MODE_ENV_SECTION}}",
+            &format!("{env_section}\n\n{browser_section}\n"),
+        )
+        .replace(
+            "{{PINVOU3_MODE_ARTIFACT_RULE}}\n",
+            &format!("{artifact_rule}\n"),
+        )
 }
 
 /// 代码模式层（品悟原生代码会话）：§工作环境（代码模式身份 + `{{PINVOU3_WORKSPACE_HINT}}`
@@ -307,9 +347,14 @@ static BUILTIN_SKILLS_DIR: Dir<'_> =
 pub const BASE_PROMPT_MD: &str = include_str!("../../../../resources/common/bundle/base.md");
 
 /// pinvou3 版简体中文 locale 前导段（替换底座 `LOCALE_PREAMBLE_ZH_HANS`）。
-/// 瘦身依据:底座原文的动机是防 thinking 漂英文(上游 #1118)——pinvou3 生产
-/// `reasoning_effort=off` 无 thinking,该 failure mode 不存在;回复语言由
-/// 用户消息驱动,这里只补"判断不了时的默认语言"。closer 同理。
+/// Slimming rationale: the upstream text guards against thinking drifting to
+/// English (#1118) by mandating "think (reasoning_content) in Chinese" —
+/// dropped per product decision: mandating a thinking language hurts
+/// reasoning quality, and the thinking stream's language brings no
+/// user-perceivable benefit (production cloud routes default to
+/// `reasoning_effort=high`, thinking on — not "off" as an earlier comment
+/// claimed). Reply language follows the user's messages; this constant only
+/// adds the fallback for when the language is ambiguous. Same for the closer.
 pub const LOCALE_PREAMBLE_ZH_HANS: &str = "## 语言要求\n\n\
 pinvou3 界面语言为简体中文。跟随用户消息的语言回复;无法判断时用简体中文。\
 代码、路径、工具名、URL 保持原样。";
@@ -344,6 +389,8 @@ pub const MODE_EXECUTE_MD: &str = "\
 
 Tools run without per-call approval — the user has already authorized
 execution. Produce files and run commands now, then verify and report.
+If a gated write call is rejected, do not retry it: present the change
+in your reply and wait for the user to decide.
 Follow each message's `<system-reminder>`.";
 
 /// pinvou3 版静态层 composer：接管底座全部编译期静态文案
@@ -366,20 +413,37 @@ pub fn compose_static_layers(_ctx: &deepseek_tui::prompts::StaticPromptCtx<'_>) 
     MODE_EXECUTE_MD.to_string()
 }
 
-/// Authority Recap（Final Reminder）清空——其内容(裁决顺序/防编造)已折叠进
-/// instructions.md §底线,instructions 是唯一来源,不再单列末尾 recap。
-pub const AUTHORITY_RECAP: &str = "";
-
 /// 把 pinvou3 版 prompt 文案注入底座的 prompt 合成层。底座用 `OnceLock`,首次
 /// set 生效、后续返回 Err(rejected) —— 幂等,可在每个 `Bridge::boot` 入口重复调用
 /// (忽略后续 Err)。必须在任何 engine spawn 前调用(boot 早于 EnginePool 装配)。
 /// 上游 v0.8.49 起 `set_*_override` 返回 `Result<(), String>`(首次 Ok,重复 Err)。
 pub fn install_prompt_overrides() {
     let _ = deepseek_tui::prompts::set_base_prompt_override(BASE_PROMPT_MD.to_string());
-    // 静态层全量接管(fork patch: set_static_prompt_composer_override)。
-    // 设置后底座的 Personality/Mode/Approval/ContextMgmt/COMPACT_TEMPLATE/
-    // taxonomy 常量全部不进 prompt,由 compose_static_layers 输出替代;
-    // base override 仍保留——composer 的 ctx.default_layers 引用它。
+    // Swap in the slim locale preamble/closer (see the `LOCALE_PREAMBLE_*`
+    // constant docs): the upstream long-form teaches "think in Chinese too",
+    // which is dropped per product decision (mandating a thinking language
+    // hurts reasoning quality, and the thinking stream's language brings no
+    // user-perceivable benefit; production cloud routes default to
+    // `reasoning_effort=high`, thinking on — not "off" as an earlier comment
+    // claimed), and the long-form still carries base branding while costing
+    // context every turn. Wire one pair each for zh-Hans / ja; the base
+    // leaves en empty, and prefs fills it via `extra_language_directive`.
+    let _ = deepseek_tui::prompts::set_locale_preamble_zh_hans_override(
+        LOCALE_PREAMBLE_ZH_HANS.to_string(),
+    );
+    let _ = deepseek_tui::prompts::set_locale_closer_zh_hans_override(
+        LOCALE_CLOSER_ZH_HANS.to_string(),
+    );
+    let _ = deepseek_tui::prompts::set_locale_preamble_ja_override(LOCALE_PREAMBLE_JA.to_string());
+    let _ = deepseek_tui::prompts::set_locale_closer_ja_override(LOCALE_CLOSER_JA.to_string());
+    // Full takeover of the static layer (fork patch:
+    // set_static_prompt_composer_override). Once set, the base's
+    // Personality/Mode/Approval/ContextMgmt/COMPACT_TEMPLATE/taxonomy
+    // constants never reach the prompt; compose_static_layers emits the
+    // replacement instead. The base override's remaining effect is only to
+    // occupy the base slot and suppress the base's bundled-headless compact
+    // constitution branch; compose_static_layers ignores ctx, and the base.md
+    // body (a pure comment shell) never enters the prompt.
     let _ = deepseek_tui::prompts::set_static_prompt_composer_override(Box::new(|ctx| {
         compose_static_layers(ctx)
     }));
@@ -524,6 +588,7 @@ fn install_work_mode_browser_server(
 mod tests {
     use super::*;
     use crate::bridge::paths::tests::ENV_LOCK;
+    use crate::features::marketplace::ENGINE_OWNED_MCP_SERVER_KEYS;
     use crate::platform::credential_store::{
         CredentialError, CredentialReference, CredentialStore,
     };
@@ -620,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn work_instructions_use_canonical_tools_with_narrow_preview_compatibility() {
+    fn work_instructions_use_canonical_tools_without_hidden_bash_surface() {
         let rendered = instructions_md();
         for retired in [
             "read_file",
@@ -628,6 +693,7 @@ mod tests {
             "exec_shell",
             "checklist_write",
             "File(action=",
+            "Bash(action=",
         ] {
             assert!(
                 !rendered.contains(retired),
@@ -640,8 +706,6 @@ mod tests {
             "file_search(query=",
             "bash(command=",
             "terminal/run",
-            "Bash(action=\"run\", command=\"...\", background=true)",
-            "Bash(action=\"cancel\", task_id=\"...\")",
             "todo_write",
         ] {
             assert!(
@@ -649,10 +713,20 @@ mod tests {
                 "canonical guidance missing: {canonical}"
             );
         }
-        assert_eq!(
-            rendered.matches("Bash(action=").count(),
-            2,
-            "legacy Bash must remain limited to run/cancel for Windows preview compatibility"
+        // The artifact-card rule must teach two-stage activation:
+        // `mcp_pinvou3_present_artifact` is a deferred builtin MCP tool, so it
+        // is absent from the first-turn tool list even when the server is
+        // healthy — only a failed `tool_search` means the backend is
+        // unavailable. The same two-stage pattern must cover the deferred
+        // browser tools (their "unavailable" branch is reachable only through
+        // a failed `tool_search`, never through plain list absence).
+        assert!(
+            rendered.contains("先 `tool_search` 激活") && rendered.contains("产物卡后端本轮不可用"),
+            "the artifact-card rule must teach tool_search activation before declaring the backend unavailable"
+        );
+        assert!(
+            rendered.contains("If `tool_search` cannot surface any `mcp_browser_*` tools"),
+            "the browser unavailability branch must be gated on a failed tool_search, not on first-turn list absence"
         );
     }
 
@@ -886,6 +960,45 @@ mod tests {
         assert!(!rendered.contains("项目目录"));
     }
 
+    #[test]
+    fn work_bound_instructions_render_workspace_hint_without_panel_tmp_semantics() {
+        let rendered = instructions_work_bound_md(
+            "你正在用户选择的工作目录 `/repo/demo` 中工作,相对路径即相对该目录;",
+        );
+        // The workspace placeholder renders correctly.
+        assert!(rendered.contains("你正在用户选择的工作目录 `/repo/demo` 中工作"));
+        assert!(!rendered.contains("{{PINVOU3_WORKSPACE_HINT}}"));
+        // Artifact-panel/tmp discipline must not appear (the environment section's
+        // negative mention of "没有产出物面板与 tmp/ 语义" is a deliberately kept
+        // behavioral hint).
+        assert!(!rendered.contains("自动落到本会话专属工作目录"));
+        assert!(!rendered.contains("只有**最终成品**"));
+        assert!(!rendered.contains("产出用**相对路径**写"));
+        // Browser section and deliverables section kept (plain-session capabilities
+        // unchanged).
+        assert!(rendered.contains("## Browser capabilities"));
+        assert!(rendered.contains("mcp_pinvou3_present_artifact"));
+        // No leftover placeholder lines; skeleton structure preserved: the bound
+        // environment section sits between the §底线 and §工具与事实 sections,
+        // and the Browser capabilities section follows the environment section.
+        assert!(!rendered.contains("{{PINVOU3_MODE_ENV_SECTION}}"));
+        assert!(!rendered.contains("{{PINVOU3_MODE_ARTIFACT_RULE}}"));
+        let bottom = rendered.find("## 底线").unwrap();
+        let env = rendered.find("## 工作环境").unwrap();
+        let browser = rendered.find("## Browser capabilities").unwrap();
+        let tools = rendered.find("## 工具与事实").unwrap();
+        assert!(bottom < env && env < browser && browser < tools);
+    }
+
+    #[test]
+    fn work_instructions_unbound_unaffected_by_bound_variant() {
+        // The bound variant's existence does not affect unbound rendering: the
+        // default work instructions keep their original semantics.
+        let rendered = instructions_md();
+        assert!(rendered.contains("自动落到本会话专属工作目录"));
+        assert!(!rendered.contains("用户选择的工作目录"));
+    }
+
     /// Prompt-composition regression for the auto-approval override: only code
     /// sessions compose the base core_execution loop, so only their rendered
     /// instructions may carry the reconciling note (current production posture
@@ -949,6 +1062,34 @@ mod tests {
             .env("DEEPSEEK_TOOL_ARGS", args)
             .output()
             .expect("run multi-agent depth guard")
+    }
+
+    fn run_connector_introspection_guard(
+        bundle: &Pinvou3Bundle,
+        args: &str,
+    ) -> std::process::Output {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("powershell.exe");
+            command
+                .arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(&bundle.deny_sensitive_ps1);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("bash");
+            command.arg(&bundle.deny_sensitive_sh);
+            command
+        };
+        command
+            .env("DEEPSEEK_TOOL_NAME", "list_mcp_resources")
+            .env("DEEPSEEK_TOOL_ARGS", args)
+            .output()
+            .expect("run connector introspection guard")
     }
 
     /// 测试 bundle 解包的两个场景：首次解包成功 + VERSION 匹配时不覆写。
@@ -1218,6 +1359,38 @@ mod tests {
                 .join("government-writing")
                 .exists()
         );
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn connector_introspection_guard_matches_complete_names_only() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempdir();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let bundle = Pinvou3Bundle::paths();
+        bundle.ensure_extracted().unwrap();
+
+        for args in [r#"{"server":"wecom"}"#, r#"{"server":"企微"}"#] {
+            let output = run_connector_introspection_guard(&bundle, args);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "exact skill-connector names must be redirected: {output:?}"
+            );
+        }
+        for args in [
+            r#"{"server":"wecom-bot"}"#,
+            r#"{"server":"mcp_wecom-bot_send_text"}"#,
+            r#"{"server":"企微群机器人"}"#,
+        ] {
+            let output = run_connector_introspection_guard(&bundle, args);
+            assert!(
+                output.status.success(),
+                "marketplace MCP names containing connector aliases must remain introspectable: {output:?}"
+            );
+        }
 
         cleanup(&tmp);
     }
@@ -1815,6 +1988,102 @@ mod tests {
         cleanup(&tmp);
     }
 
+    /// The write footprint of ensure_builtin_mcp_servers is pinned to the three
+    /// engine keys pinvou3/pinvou/browser. The observed footprint is cross-checked
+    /// against the marketplace-side `ENGINE_OWNED_MCP_SERVER_KEYS` constant (the
+    /// startup reconcile relies on it to avoid engine keys): adding or renaming a
+    /// builtin server key without updating the constant turns this test red, and
+    /// the marketplace-side exact-set test keeps the constant itself honest, so
+    /// the two sides can no longer drift apart silently.
+    #[test]
+    fn ensure_builtin_mcp_servers_touches_only_engine_owned_keys() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempdir();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        paths::ensure_dirs().unwrap();
+        let bundle = Pinvou3Bundle::paths();
+        std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+        // One entry per engine-key form (pinvou migration / pinvou3 upsert /
+        // browser-wrapper residue cleanup) plus two user-entry sentinels. The
+        // sentinels deliberately use node commands to dodge the stale-python
+        // rewrite path of refresh_mcp_python_commands — this test pins the
+        // key-set footprint, not the python self-heal semantics.
+        std::fs::write(
+            &bundle.mcp_json,
+            r#"{"servers":{
+                "pinvou":{"command":"python3","args":["/old/present.py"]},
+                "pinvou3":{"command":"/usr/bin/obsolete-python","args":["/old/present.py"]},
+                "browser":{"command":"node","args":["/old/browser-wrapper.mjs"]},
+                "user-node":{"command":"node","args":["/opt/user-tool/run.js"],"enabled":false,"custom_hint":"keep"},
+                "user-node2":{"command":"node","args":["/opt/user-tool/run2.js"]}
+            }}"#,
+        )
+        .unwrap();
+        let before: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        let before_servers = before["servers"].as_object().unwrap();
+
+        bundle.ensure_builtin_mcp_servers().unwrap();
+
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        let servers = mcp["servers"].as_object().unwrap();
+        let mut keys: Vec<&str> = servers.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["pinvou3", "user-node", "user-node2"],
+            "write footprint must be exactly the three engine keys: pinvou migrated away, pinvou3 upserted, browser residue deleted"
+        );
+        // Real cross-check against the marketplace-side constant: the keys the
+        // upsert actually manages — the engine keys surviving the pass plus the
+        // constant's keys it removed (pinvou migration, browser residue) — must
+        // equal ENGINE_OWNED_MCP_SERVER_KEYS exactly. An engine-side key added
+        // without the constant turns red, and a constant entry the boot path
+        // never touches turns red too; the marketplace-side exact-set test pins
+        // the constant against its literal.
+        let mut managed_keys: Vec<String> = servers
+            .keys()
+            .map(String::clone)
+            .filter(|key| !key.starts_with("user-node"))
+            .collect();
+        for key in before_servers.keys() {
+            if ENGINE_OWNED_MCP_SERVER_KEYS.contains(&key.as_str()) && !servers.contains_key(key) {
+                managed_keys.push(key.clone());
+            }
+        }
+        managed_keys.sort_unstable();
+        managed_keys.dedup();
+        let mut expected: Vec<&str> = ENGINE_OWNED_MCP_SERVER_KEYS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            managed_keys, expected,
+            "ensure_builtin_mcp_servers' managed key set drifted from \
+             ENGINE_OWNED_MCP_SERVER_KEYS — update the marketplace constant in the same PR"
+        );
+        assert_eq!(
+            servers["pinvou3"]["command"],
+            serde_json::Value::String(paths::python_command())
+        );
+        assert_eq!(
+            servers["user-node"],
+            serde_json::json!({
+                "command":"node","args":["/opt/user-tool/run.js"],
+                "enabled":false,"custom_hint":"keep"
+            }),
+            "user entries outside the footprint must be preserved verbatim"
+        );
+        assert_eq!(
+            servers["user-node2"],
+            serde_json::json!({
+                "command":"node","args":["/opt/user-tool/run2.js"]
+            }),
+            "user entries outside the footprint must be preserved verbatim"
+        );
+        cleanup(&tmp);
+    }
+
     /// write_if_changed:内容逐字节一致时跳过写盘(返回 false 且不动文件);
     /// 内容不同才实际写入(返回 true)。
     #[test]
@@ -1902,7 +2171,7 @@ mod tests {
     /// 失败 = set_static_prompt_composer_override fork patch 被合丢。
     #[test]
     fn forkguard_static_composer_takes_over_static_layers() {
-        install_prompt_overrides(); // OnceLock 幂等,谁先调都一样
+        install_prompt_overrides(); // idempotent: OnceLock slots, first setter wins
 
         // v0.8.57:上游删了 `system_prompt_for_mode(AppMode)`(prompt 改 mode-independent)。
         // 改用 mode-independent 入口;pinvou3 composer 以常量 Yolo 构造 ctx → 静态层 = base.md
@@ -1951,6 +2220,74 @@ mod tests {
         }
     }
 
+    /// forkguard(locale): the slim locale preamble/closer must be wired into
+    /// the base alongside the composer (the four set_locale_*_override calls
+    /// in install_prompt_overrides). After an upstream sync this test failing
+    /// means the four override calls were merge-dropped and zh/ja sessions
+    /// would eat the upstream long-form again (base branding plus the "think
+    /// in Chinese" teaching, which is dropped per product decision).
+    /// Mechanism: the base stores overrides in OnceLocks — first set wins,
+    /// later sets are rejected — so after install the slots must already be
+    /// occupied by the slim text (setting a different value returns Err).
+    /// forkguard(composer): per-turn `<runtime_prompt>` tag 也受 composer gate
+    /// (v0.8.57 上游新增,turn_loop 每请求注入 transient user 消息)。pinvou3 单
+    /// Yolo-Auto 下 tag 恒定零信息,且其解释文档(Runtime Policy Reference)已被
+    /// composer 抑制——无解释 internal tag 会诱发模型复述。
+    ///
+    /// (historical note) The standalone `forkguard_static_composer_gates_runtime_prompt_tag`
+    /// test only re-asserted the `static_prompt_composer_installed()` first check
+    /// below; it was merged into this test as the strict superset.
+    #[test]
+    fn forkguard_locale_bookend_overrides_are_wired() {
+        install_prompt_overrides(); // OnceLock 幂等,谁先调都一样
+
+        assert!(deepseek_tui::prompts::static_prompt_composer_installed());
+        let reject = |r: Result<(), String>| r.is_err();
+        assert!(reject(
+            deepseek_tui::prompts::set_locale_preamble_zh_hans_override("probe".into())
+        ));
+        assert!(reject(
+            deepseek_tui::prompts::set_locale_closer_zh_hans_override("probe".into())
+        ));
+        assert!(reject(
+            deepseek_tui::prompts::set_locale_preamble_ja_override("probe".into())
+        ));
+        assert!(reject(
+            deepseek_tui::prompts::set_locale_closer_ja_override("probe".into())
+        ));
+    }
+
+    /// forkguard(locale): product decision — locale bookends constrain the
+    /// reply language only and must never mandate a thinking language
+    /// (forcing a model to think in a given language hurts reasoning
+    /// quality, and the thinking stream's language brings no user-perceivable
+    /// benefit). Assert that the four wired constants carry no thinking-
+    /// language teaching; an upstream sync pointing the overrides back at the
+    /// base long-form (its `reasoning_content` teaching, see the base
+    /// `LOCALE_PREAMBLE_ZH_HANS`/`LOCALE_CLOSER_ZH_HANS`) turns this red.
+    #[test]
+    fn forkguard_locale_bookends_never_mandate_thinking_language() {
+        for text in [
+            LOCALE_PREAMBLE_ZH_HANS,
+            LOCALE_CLOSER_ZH_HANS,
+            LOCALE_PREAMBLE_JA,
+            LOCALE_CLOSER_JA,
+        ] {
+            assert!(
+                !text.contains("reasoning_content"),
+                "locale bookend must not mandate a thinking language: {text}"
+            );
+            assert!(
+                !text.contains("思考"),
+                "locale bookend must not mandate a thinking language: {text}"
+            );
+            assert!(
+                !text.to_lowercase().contains("think"),
+                "locale bookend must not mandate a thinking language: {text}"
+            );
+        }
+    }
+
     /// forkguard(composer): 完整合成路径上,底座在 compose 之外追加的
     /// Context Management(含 prompt-cache 教学)与 COMPACT_TEMPLATE 也要被
     /// composer 抑制(prompts.rs 的 static_prompt_composer().is_none() gate)。
@@ -1988,21 +2325,6 @@ mod tests {
             "Compaction 模板不应出现(pinvou3 已删,底座版也不许回流)"
         );
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// forkguard(composer): per-turn `<runtime_prompt>` tag 也受 composer gate
-    /// (v0.8.57 上游新增,turn_loop 每请求注入 transient user 消息)。pinvou3 单
-    /// Yolo-Auto 下 tag 恒定零信息,且其解释文档(Runtime Policy Reference)已被
-    /// composer 抑制——无解释 internal tag 会诱发模型复述。本测试断言 composer
-    /// 安装后 `static_prompt_composer_installed()` 为真(turn_loop gate 的读数);
-    /// gate 行本身由 fork-guard 指纹守。
-    #[test]
-    fn forkguard_static_composer_gates_runtime_prompt_tag() {
-        install_prompt_overrides();
-        assert!(
-            deepseek_tui::prompts::static_prompt_composer_installed(),
-            "composer 安装后 installed() 应为 true → turn_loop 不再注入 <runtime_prompt> tag"
-        );
     }
 
     #[test]

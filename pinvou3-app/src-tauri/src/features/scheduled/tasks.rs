@@ -140,7 +140,6 @@ pub struct ScheduledTaskDto {
 pub struct DeletedScheduledTaskDto {
     #[serde(flatten)]
     pub task: ScheduledTaskDto,
-    pub deleted_session_ids: Vec<String>,
 }
 
 pub type ScheduledTaskDetailDto = ScheduledTaskDto;
@@ -239,7 +238,7 @@ const SCHEDULED_TASK_CHAT_PROMPT: &str = r#"我想创建一个 Pinvou 定时任�
 
 请一次只问我一个问题，并依次确认这些信息：
 1. 任务要做什么。
-2. 什么时候运行。支持每 N 小时（可指定起始时间）、每天指定时间、每周指定星期和时间。不支持分钟级规则；如果用户要求“每 5 分钟”等分钟级频率，必须询问用户改成每 N 小时、每天指定时间或每周指定时间，不要输出草稿。
+2. 什么时候运行。支持每 N 小时（可指定起始时间）、每天指定时间、每周指定星期和时间，以及一次性定时（在指定时刻运行一次后自动结束，适合“明天 9 点提醒我一次”这类需求）。一次性定时的 AT 只用本地时刻 YYYY-MM-DDTHH:MM，不要带 Z 或时区偏移后缀。如果用户指定的一次性时刻已经过去，必须先和用户确认改成未来的时刻，不要输出草稿。不支持分钟级规则；如果用户要求“每 5 分钟”等分钟级频率，必须询问用户改成每 N 小时、每天指定时间或每周指定时间，不要输出草稿。
 
 每次运行创建独立对话；同一个定时任务的所有运行对话共享该任务的专属工作间，不同任务互不共享。产物仍归属各次运行对话。不需要询问工作目录或权限设置。
 
@@ -247,6 +246,7 @@ const SCHEDULED_TASK_CHAT_PROMPT: &str = r#"我想创建一个 Pinvou 定时任�
 - 每 6 小时一次，从 08:30 起算：FREQ=HOURLY;INTERVAL=6;BYHOUR=8;BYMINUTE=30
 - 每天 08:30：FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=8;BYMINUTE=30
 - 每周一、三 09:30：FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=30
+- 2027-06-01 09:30 运行一次：FREQ=ONCE;AT=2027-06-01T09:30
 
 当信息足够时，请直接给出最终任务参数，并使用下面这种完整代码块格式：
 ```scheduled-task-draft
@@ -283,7 +283,6 @@ fn open_scheduled_automation_manager(root: PathBuf) -> Result<AutomationManager>
     AutomationManager::open(root)
 }
 
-#[allow(dead_code)]
 pub fn scheduled_task_data_root() -> std::path::PathBuf {
     crate::platform::paths::pinvou3_home().join("tasks")
 }
@@ -834,7 +833,6 @@ impl ScheduledTaskState {
                     Some(&self.task_kinds),
                     Some(&self.ui_metadata),
                 ),
-                deleted_session_ids: Vec::new(),
             };
             if let Err(error) = self.task_kinds.remove(id) {
                 log::warn!(
@@ -987,61 +985,6 @@ fn ensure_scheduled_run_can_be_marked_viewed(
         );
     }
     ensure_scheduled_run_is_viewable(record, sessions)
-}
-
-fn owned_scheduled_sessions(
-    automation_id: &str,
-    runs: &[AutomationRunRecord],
-    sessions: &SessionStore,
-) -> Result<Vec<(String, String)>> {
-    let mut seen = HashSet::new();
-    let mut owned = Vec::new();
-    for run in runs {
-        if run.automation_id != automation_id {
-            bail!(
-                "scheduled run {} belongs to automation {}, not {automation_id}",
-                run.id,
-                run.automation_id
-            );
-        }
-        let Some(thread_id) = run.thread_id.as_deref() else {
-            continue;
-        };
-        let Some(profile) = sessions.scheduled_profile(thread_id) else {
-            continue;
-        };
-        if profile.task_id != automation_id {
-            bail!(
-                "scheduled session {thread_id} belongs to automation {}, not {automation_id}",
-                profile.task_id
-            );
-        }
-        if seen.insert(thread_id.to_string()) {
-            owned.push((thread_id.to_string(), profile.task_id));
-        }
-    }
-    // A crash can create the scheduled session and persist its profile before
-    // the base run record receives ThreadLinked. Recover those sessions via
-    // stable automation ownership rather than relying only on run links.
-    for session_id in sessions.scheduled_session_ids_for_task(automation_id) {
-        if seen.insert(session_id.clone()) {
-            owned.push((session_id, automation_id.to_string()));
-        }
-    }
-    owned.sort();
-    Ok(owned)
-}
-
-#[cfg(test)]
-fn delete_owned_scheduled_session(
-    sessions: &SessionStore,
-    session_id: &str,
-    task_id: &str,
-) -> Result<String> {
-    sessions
-        .delete_scheduled_run(session_id, task_id)
-        .with_context(|| format!("delete scheduled session {session_id}"))?;
-    Ok(session_id.to_string())
 }
 
 async fn wait_for_task_terminal(
@@ -1431,7 +1374,7 @@ fn build_create_request(
         .model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(default_model);
-    canonical_scheduled_mode(input.mode, None)?;
+    canonical_scheduled_mode(input.mode)?;
     // Kind is allow-listed at creation time (create_task owns the normalized result and
     // persists it to the sidecar).
     canonical_scheduled_kind(input.kind)?;
@@ -1473,7 +1416,7 @@ fn build_update_request(
     // The kind is a one-time property decided at creation: the update contract has no
     // kind (UpdateScheduledTaskInput lacks the field, and serde silently drops an extra
     // "kind" in the JSON), so the sidecar is never rewritten.
-    canonical_scheduled_mode(input.mode, None)?;
+    canonical_scheduled_mode(input.mode)?;
     let status = input.paused.map(paused_to_status);
     Ok(UpdateAutomationRequest {
         name: input.name,
@@ -1497,18 +1440,15 @@ fn build_update_request(
     })
 }
 
-fn canonical_scheduled_mode(
-    mode: Option<String>,
-    default: Option<&str>,
-) -> Result<Option<String>, String> {
-    let Some(mode) = mode.or_else(|| default.map(str::to_string)) else {
-        return Ok(None);
-    };
-    let mode = mode.trim();
-    match mode {
-        "agent" | "plan" | "yolo" => Ok(Some(mode.to_string())),
-        _ => Err(format!(
-            "Scheduled task mode must be exactly one of agent|plan|yolo, got '{mode}'"
+/// 定时任务恒以 YOLO 运行（见 `SCHEDULED_EXECUTION_MODE`，创建/更新请求里的
+/// `mode` 一律被下游覆盖为该值），本函数只做输入校验：空/缺省或显式 `"yolo"`
+/// 放行，其余拒绝。历史上的 `agent`/`plan` 接受臂没有意义——下游无差别覆盖
+/// 成 yolo，用户输入被静默丢弃，不如显式报错。
+fn canonical_scheduled_mode(mode: Option<String>) -> Result<(), String> {
+    match mode.as_deref().map(str::trim) {
+        None | Some("") | Some(SCHEDULED_EXECUTION_MODE) => Ok(()),
+        Some(other) => Err(format!(
+            "Scheduled tasks always run in '{SCHEDULED_EXECUTION_MODE}' mode, got '{other}'"
         )),
     }
 }
@@ -1644,7 +1584,11 @@ pub fn humanize_rrule(rrule: &str) -> String {
                 .join("、");
             format!("{days} {byhour:02}:{byminute:02}")
         }
-        Ok(AutomationSchedule::Once { .. } | AutomationSchedule::Cron { .. }) => rrule.to_string(),
+        Ok(AutomationSchedule::Once { at }) => format!(
+            "一次性 {}",
+            at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+        ),
+        Ok(AutomationSchedule::Cron { .. }) => rrule.to_string(),
         Err(_) => rrule.to_string(),
     }
 }
@@ -2304,6 +2248,12 @@ mod tests {
         for (rrule, expected) in cases {
             assert_eq!(humanize_rrule(rrule), expected, "rrule: {rrule}");
         }
+        // One-shot tasks must not surface the raw rrule string; show the
+        // target moment in the local timezone instead.
+        assert_eq!(
+            humanize_rrule("FREQ=ONCE;AT=2100-01-01T09:30"),
+            "一次性 2100-01-01 09:30"
+        );
     }
 
     // ── 删除一次定时运行的级联 ────────────────────────────────────────
@@ -2665,7 +2615,6 @@ mod tests {
             .delete_for_test(fixture.automation_id.clone())
             .await
             .expect("delete task while retaining history");
-        assert!(deleted.deleted_session_ids.is_empty());
         {
             let manager = fixture.state.automations.lock().await;
             assert!(
@@ -2978,7 +2927,12 @@ mod tests {
         assert!(prompt.contains("请一次只问我一个问题，并依次确认这些信息："));
         assert!(prompt.contains("1. 任务要做什么。"));
         assert!(prompt.contains(
-            "2. 什么时候运行。支持每 N 小时（可指定起始时间）、每天指定时间、每周指定星期和时间。"
+            "2. 什么时候运行。支持每 N 小时（可指定起始时间）、每天指定时间、每周指定星期和时间，以及一次性定时（在指定时刻运行一次后自动结束"
+        ));
+        // One-shot moments in the past are rejected outright by the creation
+        // chain, so the prompt must teach the model to confirm a new time.
+        assert!(prompt.contains(
+            "如果用户指定的一次性时刻已经过去，必须先和用户确认改成未来的时刻，不要输出草稿。"
         ));
         assert!(!prompt.contains("3."));
         assert!(prompt.contains("不需要询问工作目录或权限设置"));
@@ -2988,6 +2942,14 @@ mod tests {
         assert!(prompt.contains("整理草稿时，请把时间转换成 rrule："));
         assert!(prompt.contains("FREQ=HOURLY;INTERVAL=6;BYHOUR=8;BYMINUTE=30"));
         assert!(prompt.contains("FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=30"));
+        // One-shot (ONCE) scheduling: the base parser (automation_manager)
+        // supports it and the creation chain (AutomationSchedule::Once) and
+        // display pass it through, so the prompt must teach it; otherwise
+        // "remind me once at 9 tomorrow" gets forced into a recurrence rule.
+        assert!(prompt.contains("FREQ=ONCE;AT=2027-06-01T09:30"));
+        // Offset-suffixed AT (RFC3339) persists a foreign wall clock that the
+        // editor cannot safely rewrite; pin the local-time-only format.
+        assert!(prompt.contains("不要带 Z 或时区偏移后缀"));
         assert!(prompt.contains("create_scheduled_task"));
         assert!(prompt.contains("schtasks"));
         assert!(prompt.contains("Windows Task Scheduler"));
@@ -3054,7 +3016,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3072,18 +3034,10 @@ mod tests {
 
         let deleted = state.delete_for_test(created.id).await.expect("delete");
         assert_eq!(deleted.task.name, "测试计划");
-        assert!(deleted.deleted_session_ids.is_empty());
         let serialized = serde_json::to_value(&deleted).expect("delete response json");
         assert_eq!(
             serialized.get("name").and_then(serde_json::Value::as_str),
             Some("测试计划")
-        );
-        assert_eq!(
-            serialized
-                .get("deletedSessionIds")
-                .and_then(serde_json::Value::as_array)
-                .map(Vec::len),
-            Some(0)
         );
         match previous {
             // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
@@ -3591,56 +3545,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn owned_session_delete_reports_id_only_after_successful_removal() {
-        let _guard = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = temp_home();
-        let previous = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        let sessions = SessionStore::boot().expect("sessions");
-        let create_session = |task_id: &str| {
-            sessions
-                .create_scheduled_run(crate::features::sessions::ScheduledRunProfile {
-                    task_id: task_id.to_string(),
-                    model: "model-1".to_string(),
-                    model_id: None,
-                    workspace: dir.join("workspace"),
-                    mode: crate::features::sessions::ScheduledRunMode::Agent,
-                    allow_shell: false,
-                    trust_mode: false,
-                    auto_approve: false,
-                })
-                .expect("scheduled session")
-                .metadata
-                .id
-        };
-        let deleted_id = create_session("task-delete-success");
-
-        let reported =
-            delete_owned_scheduled_session(&sessions, &deleted_id, "task-delete-success")
-                .expect("successful deletion");
-
-        assert_eq!(reported, deleted_id);
-        assert!(!sessions.scheduled_session_exists(&reported));
-
-        let retained_id = create_session("task-delete-retained");
-        assert!(
-            delete_owned_scheduled_session(&sessions, &retained_id, "wrong-task-owner").is_err()
-        );
-        assert!(sessions.scheduled_session_exists(&retained_id));
-
-        match previous {
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[tokio::test]
     async fn update_and_resume_round_trip() {
         let _guard = crate::platform::paths::tests::ENV_LOCK
@@ -3693,7 +3597,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3713,7 +3617,7 @@ mod tests {
                     cwds: Some(vec!["/tmp/workspace-b".to_string()]),
                     model: None,
                     model_id: None,
-                    mode: Some("plan".to_string()),
+                    mode: Some("yolo".to_string()),
                     allow_shell: Some(!expected_allow_shell),
                     trust_mode: Some(false),
                     auto_approve: Some(false),
@@ -3764,7 +3668,7 @@ mod tests {
                 model: Some("model-1".to_string()),
                 model_provider: None,
                 model_provider_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3839,7 +3743,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("plan".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3921,7 +3825,7 @@ mod tests {
             })
             .await
             .expect_err("planner is not a canonical scheduled mode");
-        assert!(error.contains("agent|plan|yolo"), "{error}");
+        assert!(error.contains("'yolo'"), "{error}");
         assert!(
             state
                 .automations
@@ -3991,7 +3895,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: None,
                 trust_mode: None,
                 auto_approve: None,
@@ -4019,7 +3923,10 @@ mod tests {
             )
             .await
             .expect_err("planner is not a canonical scheduled mode");
-        assert!(error.contains("agent|plan|yolo"), "{error}");
+        assert!(
+            error.contains("Scheduled tasks always run in 'yolo' mode"),
+            "{error}"
+        );
         assert_eq!(
             state
                 .automations
@@ -4113,17 +4020,6 @@ mod tests {
             mismatched
                 .get("sessionId")
                 .is_some_and(serde_json::Value::is_null)
-        );
-
-        let unlinked_run = AutomationRunRecord {
-            thread_id: None,
-            ..owned_run.clone()
-        };
-        let recovered = owned_scheduled_sessions("automation-1", &[unlinked_run], &store)
-            .expect("recover session from durable task ownership");
-        assert_eq!(
-            recovered,
-            vec![(saved.metadata.id.clone(), "automation-1".to_string())]
         );
 
         std::fs::remove_file(
@@ -4592,7 +4488,7 @@ mod tests {
             kind,
             model: None,
             model_id: None,
-            mode: Some("agent".to_string()),
+            mode: Some("yolo".to_string()),
             allow_shell: Some(false),
             trust_mode: Some(false),
             auto_approve: Some(false),

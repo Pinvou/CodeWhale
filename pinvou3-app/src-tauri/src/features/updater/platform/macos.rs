@@ -189,7 +189,7 @@ pub async fn download_update_package(
     if !is_valid_sha256_hex(&expected) {
         return Err(format!(
             "清单 sha256 格式非法(期望 64 位十六进制,实际 \"{}\")",
-            &info.sha256
+            info.sha256
         ));
     }
     // 已存在 + sha256 匹配 → 直接复用(断点续传场景或重复检查)。

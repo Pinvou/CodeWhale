@@ -299,6 +299,32 @@ fn client_event_fields_reject_payload_paths_arguments_and_raw_errors() {
 }
 
 #[test]
+fn normalized_tool_name_passes_client_gateway_and_enters_outbox() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("https://example.test");
+    let mut state = PersistedState::fresh(&runtime);
+    state.control.enabled = true;
+    state.control.generation = 1;
+    state.control.collection_period_id = Some("tool_name_period".to_string());
+    let telemetry = test_telemetry(runtime, state);
+    let lease = telemetry.current_lease().unwrap();
+
+    assert!(telemetry.try_track_for_lease(
+        BehaviorEvent::new("tool_call_completed")
+            .tool("mcp_custom", "MCP__Private_CRM__Lookup", "mcp")
+            .success(true),
+        &lease,
+    ));
+
+    let outbox = telemetry.outbox.lock().unwrap();
+    assert_eq!(outbox.records.len(), 1);
+    assert_eq!(
+        outbox.records[0].event["tool_name"],
+        "mcp__private_crm__lookup"
+    );
+}
+
+#[test]
 fn model_registry_never_returns_user_supplied_identifiers() {
     assert_eq!(provider_registry_key("openai_compatible"), "custom");
     assert_eq!(
@@ -2470,4 +2496,17 @@ fn stale_producer_cannot_write_after_delete_and_reauthorization_aba() {
             collection_period_id: "period_new".to_string(),
         },
     ));
+}
+#[test]
+fn tool_names_are_normalized_at_the_event_boundary() {
+    for (raw_name, expected_name) in [
+        ("MCP__Private_CRM__Lookup", "mcp__private_crm__lookup"),
+        ("https://private.example/tool", "mcp_custom"),
+        (r"C:\private\tool", "mcp_custom"),
+        ("tool --secret=value", "mcp_custom"),
+    ] {
+        let event = BehaviorEvent::new("tool_call_started")
+            .tool("mcp_custom", raw_name, "mcp");
+        assert_eq!(event.fields.get("tool_name"), Some(&json!(expected_name)));
+    }
 }

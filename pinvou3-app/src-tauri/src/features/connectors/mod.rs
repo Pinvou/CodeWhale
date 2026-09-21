@@ -2,6 +2,7 @@ pub(crate) mod connector_cli;
 pub(crate) mod dingtalk;
 pub(crate) mod eip;
 pub(crate) mod feishu;
+pub(crate) mod flow_gate;
 pub(crate) mod ima;
 // pub(crate)：bridge 启动路径调用 migrate_legacy_cli_binaries（旧布局迁移接线）
 pub(crate) mod native_installer;

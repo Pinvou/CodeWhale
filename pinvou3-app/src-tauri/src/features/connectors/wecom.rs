@@ -4,12 +4,16 @@
 //! **纯扫码**接入(不需管理员建自建应用、不需手填 CorpID/Secret)。
 //! 公共管道见 [`crate::features::connectors::connector_cli`];本文件只有企微特有的薄声明 + 单段连接编排。
 //!
-//! 连接(wecom-cli ≥1.1.0):`wecom-cli auth init --noninteractive --no-browser` 长驻 →
-//! 抓二维码 URL → 用户扫码 → 进程退出后 `auth show --status` 判 ready。
-//! 进度走事件 `wecom:qr` / `wecom:connected` / `wecom:error`。
-//! 凭证落 `~/.config/wecom`(Win:`%USERPROFILE%\.config\wecom`),断开即删该目录。
-//! 1.1.0 起命令模型重构(`msg`→`message`、`schedule`→`calendar`、入参改 flags),
-//! 技能与判定都以 1.1.0 为基线,故 [`WECOM_MIN_VERSION`] 以下的旧安装会被替换升级。
+//! Connection flow (wecom-cli ≥1.2.1): `wecom-cli auth init --noninteractive
+//! --no-browser` runs persistently → grab the QR-code URL → the user scans →
+//! once the process exits, `auth show --status` decides readiness.
+//! Progress is reported via the `wecom:qr` / `wecom:connected` / `wecom:error`
+//! events. Credentials live under `~/.config/wecom`
+//! (Windows: `%USERPROFILE%\.config\wecom`) and are removed on disconnect.
+//! Since 1.1.0 the command model was reshaped (`msg`→`message`,
+//! `schedule`→`calendar`, arguments became flags); the current skill baseline
+//! is the wecom-cli 1.2.1 domain skills and every platform lock pins 1.2.1,
+//! so installs below [`WECOM_MIN_VERSION`] are replaced/upgraded.
 
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -33,9 +37,13 @@ const WECOM_CTX: CliCtx = CliCtx {
     auth_domains: &["work.weixin.qq.com", "weixin.qq.com"],
 };
 
-/// 技能与鉴权命令面基线:1.1.0 重构了命令模型(`init`→`auth init`、
-/// `msg`→`message`、`schedule`→`calendar`、入参 JSON→flags),旧安装必须替换。
-const WECOM_MIN_VERSION: (u64, u64, u64) = (1, 1, 0);
+/// Minimum acceptable version for the skill and auth command surface: 1.1.0
+/// reshaped the command model (`init`→`auth init`, `msg`→`message`,
+/// `schedule`→`calendar`, JSON arguments→flags); the skill baseline is now
+/// 1.2.1 and every platform lock pins 1.2.1, so the minimum is 1.2.1 —
+/// installs below it must be replaced, while a minimum above a platform's
+/// lowest pinned version would cause a replace/upgrade loop on that platform.
+const WECOM_MIN_VERSION: (u64, u64, u64) = (1, 2, 1);
 
 fn wecom(args: &[&str]) -> std::process::Command {
     WECOM_CTX.cli(args)
@@ -61,7 +69,8 @@ fn wecom_cli_version() -> Option<(u64, u64, u64)> {
     parse_wecom_version(&so).or_else(|| parse_wecom_version(&se))
 }
 
-/// wecom-cli 是否已装且 ≥ 1.1.0(命令模型基线);旧版视为未装,触发在线替换升级。
+/// Whether a wecom-cli is installed and ≥ 1.2.1 (minimum acceptable version);
+/// older versions count as not installed and trigger the online replacement.
 fn wecom_cli_present() -> bool {
     wecom_cli_version()
         .map(|v| v >= WECOM_MIN_VERSION)
@@ -83,8 +92,10 @@ fn is_ready() -> bool {
 
 // ───────────────────────────── Tauri commands ─────────────────────────────
 
-/// 引导:首次使用(或安装低于 1.1.0 命令模型基线)时下载并校验锁定版本的 wecom-cli,
-/// 已装且达标则秒返回;托管目录中的旧版按 lock 哈希不一致直接替换升级。
+/// Bootstrap: on first use (or when the installed CLI is below the 1.2.1
+/// minimum acceptable version), download and verify the locked wecom-cli
+/// version; returns immediately when a sufficient CLI is present, and an
+/// old CLI in the managed directory is replaced outright on lock-hash mismatch.
 pub async fn wecom_ensure_cli() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         if wecom_cli_present() {
@@ -101,8 +112,8 @@ pub async fn wecom_ensure_cli() -> Result<Value, String> {
 }
 
 /// 查询当前企微连接状态:`wecom-cli auth show --status`。
-/// 装了但低于 [`WECOM_MIN_VERSION`] 时回 `upgrade_required:true`(tmeet 同款三态;
-/// 前端 ToolStoreView 暂只读 connected,该字段待 tmeet/wecom 统一做「待升级」UI 后消费)。
+/// Installed but below [`WECOM_MIN_VERSION`] reports `upgrade_required:true` (same three-state shape as tmeet).
+/// (Only called internally by the command layer's `bundle_readiness` CLI dispatch; there is no standalone Tauri command anymore.)
 pub async fn wecom_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         // 没装就别 spawn auth show —— 省掉没装连接器的用户每次白等一次子进程;
@@ -176,7 +187,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
     // directory, so the real auth QR PNG is written into a temp dir. The stdout
     // URL is the /ai/qc/gen landing page (which would ask the user to scan
     // again) and cannot be encoded as the QR directly; only the PNG QR reaches
-    // authorization in one scan. Any CLI that reaches this point is ≥1.1.0
+    // authorization in one scan. Any CLI that reaches this point is ≥1.2.1
     // (wecom_ensure_cli's version gate force-replaces older ones), so the
     // self-drawn fallback only covers PNG write failure / poll timeout.
     let qr_dir = std::env::temp_dir().join(format!(
@@ -233,6 +244,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
         Ok(u) => u,
         Err(_) => {
             let _ = child.kill();
+            cc::reap_after_kill(&mut child);
             conn.set_pid(ID, None);
             let _ = std::fs::remove_dir_all(&qr_dir);
             // Cancel tree-kills the child → pipe EOF lands here: the user stopped
@@ -255,6 +267,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
     // here covers the race.)
     if conn.is_cancelled(ID) {
         let _ = child.kill();
+        cc::reap_after_kill(&mut child);
         conn.set_pid(ID, None);
         return Ok(());
     }
@@ -268,6 +281,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
     loop {
         if conn.is_cancelled(ID) {
             let _ = child.kill();
+            cc::reap_after_kill(&mut child);
             conn.set_pid(ID, None);
             return Ok(()); // 取消:静默
         }
@@ -344,12 +358,8 @@ impl ConnectorSkillGate for WecomGate {
 }
 const GATE: WecomGate = WecomGate;
 
-pub fn is_wecom_disabled() -> bool {
+fn is_wecom_disabled() -> bool {
     GATE.is_disabled()
-}
-
-fn set_wecom_disabled_flag(disabled: bool) -> Result<(), String> {
-    GATE.set_disabled_flag(disabled)
 }
 
 /// 企微技能此刻该不该出现在 skills_dir:**未手动停用 且 已连接**。
@@ -374,24 +384,6 @@ pub async fn wecom_apply_skills() -> Result<Value, String> {
     Ok(json!({ "visible": show }))
 }
 
-/// composer 企微开关:写停用标志 → 按规则增删技能。
-///
-/// 注:停用标志写盘此前用 `let _ =` 静默忽略失败,现统一为 `Result` 传播
-/// (Wave 1 批准的契约面变更)。
-pub async fn set_wecom_enabled(enabled: bool) -> Result<Value, String> {
-    let show = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        set_wecom_disabled_flag(!enabled)?;
-        // 停用标志 ↔ 统一禁用集桥接（见 set_feishu_enabled 同名注释）。
-        crate::features::marketplace::sync_disabled_bundles_for_connector_switch("wecom", enabled);
-        let show = wecom_skills_should_show();
-        GATE.apply_skills(show)?;
-        Ok(show)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))??;
-    Ok(json!({ "ok": true, "visible": show }))
-}
-
 /// 给前端渲染开关态:`{connected, enabled(=未停用), visible}`。
 pub async fn wecom_skills_state() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
@@ -410,7 +402,6 @@ pub async fn wecom_skills_state() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::paths::tests::ENV_LOCK;
 
     /// `--version` 输出 → 三段版本号。1.1.0 起输出带构建信息尾巴。
     /// 两段式按共享口径补 0(不因假想的「2.0」误判未装触发降级重装)。
@@ -466,36 +457,5 @@ mod tests {
             Some(&png[..])
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 手动停用标志:文件存在=停用,与连接状态正交。写/删一轮。
-    #[test]
-    fn wecom_disabled_flag_roundtrip() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = format!(
-            "{}/pinvou3-wecom-test-{}",
-            std::env::temp_dir().display(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
-        let _ = std::fs::create_dir_all(crate::platform::paths::pinvou3_home());
-
-        // 默认(无文件)= 未停用
-        set_wecom_disabled_flag(false).unwrap();
-        assert!(!is_wecom_disabled());
-        // 置停用 → 文件在 → 停用
-        set_wecom_disabled_flag(true).unwrap();
-        assert!(is_wecom_disabled());
-        // 复位 → 文件删 → 未停用
-        set_wecom_disabled_flag(false).unwrap();
-        assert!(!is_wecom_disabled());
-
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::remove_var("PINVOU3_HOME") };
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
