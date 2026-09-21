@@ -301,12 +301,29 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// its position relative to later turns, and repair a pre-placement-fix
 /// Agent-topology sidecar. Both steps exist so the first request after a
 /// restore is wire-legal for strict paired chat templates.
+///
+/// The anchor and the deletion prefer the provenance-stamped carrier: its
+/// second text block is engine-written, so a pasted user turn that merely
+/// starts with the summary header can neither steal the insertion position
+/// nor be deleted as the carrier. Only sessions saved before the provenance
+/// block existed carry the bare single-block form; there the loose predicate
+/// is the only recognition available (a pasted header is indistinguishable
+/// from it), so the historical replace-in-place applies. The same loose
+/// predicate also backs the keep/recompaction filters in `compaction/
+/// last_round.rs` — same recognition family, explicitly out of scope here.
 pub(crate) fn restore_compaction_checkpoint(
     mut messages: Vec<Message>,
     checkpoint: Option<&SystemPrompt>,
 ) -> Vec<Message> {
-    let checkpoint_index = messages.iter().position(is_compaction_checkpoint_message);
-    messages.retain(|message| !is_compaction_checkpoint_message(message));
+    let provenance_anchor = messages.iter().position(is_generated_compaction_checkpoint);
+    let carrier: fn(&Message) -> bool = if provenance_anchor.is_some() {
+        is_generated_compaction_checkpoint
+    } else {
+        is_compaction_checkpoint_message
+    };
+    let checkpoint_index =
+        provenance_anchor.or_else(|| messages.iter().position(is_compaction_checkpoint_message));
+    messages.retain(|message| !carrier(message));
     if let Some(checkpoint) = checkpoint {
         let index = checkpoint_index.unwrap_or(messages.len());
         messages.insert(index, compaction_checkpoint_message(checkpoint));
