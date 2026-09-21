@@ -104,6 +104,23 @@ try {
   await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
   await page.goto(`http://127.0.0.1:${port}/admin.html?section=approvals&approval_view=repair`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('.adm-financial-repair');
+  assert.deepEqual(await page.evaluate(() => {
+    const section = document.querySelector('.adm-financial-repair');
+    const target = document.querySelector('.adm-financial-repair-target');
+    const input = target.querySelector('input');
+    const sectionStyle = getComputedStyle(section);
+    const inputStyle = getComputedStyle(input);
+    return {
+      sectionDisplay: sectionStyle.display,
+      sectionRadius: sectionStyle.borderRadius,
+      targetDisplay: getComputedStyle(target).display,
+      inputMinHeight: Number.parseInt(inputStyle.minHeight, 10),
+      inputRadius: inputStyle.borderRadius,
+    };
+  }), {
+    sectionDisplay: 'grid', sectionRadius: '14px', targetDisplay: 'grid',
+    inputMinHeight: 40, inputRadius: '8px',
+  });
   const inputs = await page.$$('.adm-financial-repair-target input');
   assert.equal(inputs.length, 5);
   for (const [index, value] of [...ids, '30'].entries()) await inputs[index].type(value);

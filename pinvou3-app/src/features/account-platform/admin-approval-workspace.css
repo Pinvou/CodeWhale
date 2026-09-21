@@ -30,5 +30,25 @@
 .adm-approval-dialog form>div:last-child{display:flex;justify-content:flex-end;gap:8px}
 .adm-approval-dialog button{min-height:40px;border:1px solid var(--adm-line);border-radius:8px;padding:8px 12px;background:var(--adm-surface);color:var(--adm-text)}
 .adm-approval-dialog button[type="submit"]{color:#fff;border-color:var(--adm-primary);background:var(--adm-primary)}
+.adm-financial-repair{display:grid;gap:16px;background:var(--adm-surface);border:1px solid var(--adm-line);border-radius:14px;padding:18px;min-width:0}
+.adm-financial-repair h3,.adm-financial-repair h4,.adm-financial-repair p{margin:0}
+.adm-financial-repair>p{color:var(--adm-muted);font-size:13px}
+.adm-financial-repair form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));align-items:end;gap:12px;background:var(--adm-surface);border:1px solid var(--adm-line);border-radius:12px;padding:14px}
+.adm-financial-repair label{display:grid;gap:6px;min-width:0;color:var(--adm-muted);font-size:12px}
+.adm-financial-repair input,.adm-financial-repair select,.adm-financial-repair textarea{width:100%;min-height:40px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-surface);color:var(--adm-text);padding:8px}
+.adm-financial-repair textarea{min-height:88px;resize:vertical}
+.adm-financial-repair form small{grid-column:1/-1;color:var(--adm-muted);line-height:1.35}
+.adm-financial-repair button{justify-self:start;min-height:40px;border:1px solid var(--adm-line);border-radius:8px;padding:8px 13px;background:var(--adm-surface);color:var(--adm-text);cursor:pointer}
+.adm-financial-repair button:disabled{opacity:.5;cursor:not-allowed}
+.adm-financial-repair-facts,.adm-financial-repair-draft{display:grid;gap:12px;border:1px solid var(--adm-line);border-radius:12px;padding:14px}
+.adm-financial-repair-facts dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:0}
+.adm-financial-repair-facts dl>div{min-width:0}
+.adm-financial-repair-facts dt{color:var(--adm-muted);font-size:11px}
+.adm-financial-repair-facts dd{margin:4px 0 0;overflow-wrap:anywhere}
+.adm-financial-repair-facts details,.adm-financial-repair-draft small{color:var(--adm-muted)}
+.adm-financial-repair-facts pre{margin:8px 0 0;padding:10px;overflow:auto;border:1px solid var(--adm-line);border-radius:8px;background:transparent;font-size:11px}
+.adm-financial-repair [role="alert"]{margin:0;color:#b3261e}
+.adm-financial-repair [role="status"]{margin:0;overflow-wrap:anywhere}
 @media(max-width:768px){.adm-approval-detail dl{grid-template-columns:1fr}}
+@media(max-width:768px){.adm-financial-repair{padding:16px}.adm-financial-repair form{grid-template-columns:1fr}}
 @media(max-width:360px){.adm-approval-toolbar label{min-width:100%}.adm-approval-tabs button{flex:1}}
