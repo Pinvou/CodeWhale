@@ -3177,6 +3177,12 @@ impl McpPool {
                 errors.push((name, anyhow::anyhow!(backoff.last_error.clone())));
                 continue;
             }
+            // The cooldown has expired, so the recorded diagnosis stops being
+            // replayed; the backoff entry must go with it. A pended server has
+            // no attempt in flight yet, and boot-window consumers read a
+            // backoff entry as "already diagnosed, not connecting" — keeping
+            // the entry here would hide a genuinely connecting server.
+            self.connect_backoff.remove(&name);
             self.drop_connection(&name, "reconnect");
             pending.push((name, server_config));
         }
@@ -3247,6 +3253,41 @@ impl McpPool {
         joins
     }
 
+    /// A panicked connect task loses its server name in the JoinError;
+    /// attribute generically. The sequential loop would have propagated the
+    /// panic and taken the whole pool down with it, so this is strictly
+    /// better. Shared by every `join_next()` consumer so the pseudo-name and
+    /// its rationale live in exactly one place.
+    pub(crate) fn join_error_result(
+        join_error: tokio::task::JoinError,
+    ) -> (String, Result<McpConnection, anyhow::Error>) {
+        ("connection task".to_string(), Err(join_error.into()))
+    }
+
+    /// Servers whose most recent connect attempt settled with a failure and
+    /// whose retry cooldown still stands. Boot-window consumers read this as
+    /// "already diagnosed, not connecting": the entry exists exactly while no
+    /// attempt is in flight — a fresh connect pass removes it when it
+    /// re-pends the server, and [`Self::store_ready_connection`] removes it
+    /// on success.
+    pub(crate) fn settled_failure_names(&self) -> Vec<String> {
+        self.connect_backoff.keys().cloned().collect()
+    }
+
+    /// Servers whose tools are exposed to the model catalog right now — the
+    /// [`Self::all_tools`] filter: a connection that has delivered an
+    /// authorized catalog. Deliberately wider than [`Self::connected_servers`]
+    /// (`is_ready`): a connection that dropped back to `Disconnected` keeps
+    /// its discovered tools listed, so boot-window consumers must not report
+    /// those tools as "not searchable yet".
+    pub(crate) fn catalog_authorized_server_names(&self) -> Vec<String> {
+        self.connections
+            .iter()
+            .filter(|(_, connection)| connection.catalog_authorized())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Handshake the pending servers concurrently without holding the pool
     /// lock. Callers insert results under a short lock so a live turn can
     /// snapshot ready tools while optional servers are still connecting.
@@ -3262,13 +3303,7 @@ impl McpPool {
         while let Some(joined) = joins.join_next().await {
             match joined {
                 Ok(result) => results.push(result),
-                // A panicked connect task loses its server name in the
-                // JoinError; attribute generically. The sequential loop
-                // would have propagated the panic and taken the whole
-                // pool down with it, so this is strictly better.
-                Err(join_error) => {
-                    results.push(("connection task".to_string(), Err(join_error.into())));
-                }
+                Err(join_error) => results.push(Self::join_error_result(join_error)),
             }
         }
         results

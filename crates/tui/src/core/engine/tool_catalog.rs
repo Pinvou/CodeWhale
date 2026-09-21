@@ -37,7 +37,7 @@ const TOOL_SEARCH_DEFAULT_MAX_RESULTS: usize = 8;
 const TOOL_SEARCH_MAX_RESULTS_LIMIT: usize = 8;
 /// Model-facing contract for the boot-window `mcp_boot` status (#588): a
 /// missing capability during the connect window is "not yet", not "absent".
-const TOOL_SEARCH_BOOT_NOTE: &str = "These MCP servers are still connecting; the tools they expose are not searchable yet. Other matching tools are unaffected. Wait briefly and run tool_search again before deciding a capability is unavailable.";
+const TOOL_SEARCH_BOOT_NOTE: &str = "These MCP servers are still connecting; the tools they expose are not searchable yet. Other matching tools are unaffected. Wait briefly and run the search again before deciding a capability is unavailable.";
 
 pub(crate) fn is_tool_search_tool(name: &str) -> bool {
     matches!(

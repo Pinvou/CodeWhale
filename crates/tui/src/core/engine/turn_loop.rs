@@ -1298,6 +1298,15 @@ impl Engine {
             .expect("model client should be configured");
 
         let mut turn_error: Option<String> = None;
+        // While the spawn-time MCP boot is still settling, the pool fills
+        // incrementally and a new turn's snapshot can differ from the pinned
+        // prefix the moment any server stores its tools (#588). Declare the
+        // boot re-pin up front so that growth reads as declared; when the
+        // surface is unchanged the stamp is inert — the prefix check returns
+        // `Stable` before consulting the declared reason.
+        if self.mcp_boot_in_flight {
+            self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
+        }
         // Cleared when the loop continues only for optional runtime work
         // (a goal continuation) after the model already delivered an answer.
         let mut step_budget_exhaustion_is_terminal = true;
@@ -3142,11 +3151,24 @@ impl Engine {
 
             // While the spawn-time MCP boot is still settling, fold every
             // server that became ready since the last batch into this turn's
-            // catalog, so a tool_search retry inside the same turn sees it
-            // instead of re-deriving "capability unavailable" from the
-            // turn-start snapshot (#588).
+            // catalog — under the same policy gates and deferral treatment a
+            // fresh build would apply — so a tool_search retry inside the
+            // same turn sees it instead of re-deriving "capability
+            // unavailable" from the turn-start snapshot (#588). An
+            // `always_load` append joins the active set; that grows the next
+            // request's tools array, so declare the surface change exactly
+            // like a tool_search activation would.
             if self.mcp_boot_in_flight {
-                self.refresh_booting_mcp_tools(&mut tool_catalog).await;
+                let active_before_refresh = active_tool_names.clone();
+                self.refresh_booting_mcp_tools(
+                    &mut tool_catalog,
+                    &mut active_tool_names,
+                    &tool_policy,
+                )
+                .await;
+                if active_tool_names != active_before_refresh {
+                    self.session.pending_prefix_change_reason = Some("tool_surface".to_string());
+                }
             }
 
             let tool_exec_lock = self.tool_exec_lock.clone();
@@ -4478,10 +4500,11 @@ impl Engine {
                         // next request re-pins under `change:tool_surface`
                         // instead of tripping the C5 drift guard.
                         let active_before_search = active_tool_names.clone();
-                        // Boot-window status (#588): an empty search during
-                        // the connect window must read as "not yet", not
-                        // "absent", so the model retries instead of declaring
-                        // the capability missing.
+                        // Boot-window status (#588): while the connect
+                        // window lasts, every search result names the
+                        // servers still pending, so a miss reads as "not
+                        // yet", not "absent", and the model retries instead
+                        // of declaring the capability missing.
                         let connecting_mcp_servers = self.mcp_boot_search_status().await;
                         let result = super::tool_catalog::execute_tool_search_with_cache(
                             &tool_name,
