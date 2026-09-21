@@ -1965,6 +1965,7 @@ Object.assign(dictEn.uiChat, {
 
 // Windows desktop remote control: controlled-device panel (DEV-21).
 dictEn["controlledDevice"] = {
+  connectionTitle: "Connection status",
   section: "Desktop remote control",
   title: "Let someone connect to this device",
   desc: "Turning this on shows a short-lived 5-minute connection code. The other side types it to run tasks with this device's models; you can always watch and disconnect immediately.",

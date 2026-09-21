@@ -1965,6 +1965,7 @@ Object.assign(dictJa.uiChat, {
 
 // Windows デスクトップ遠隔操作：被制御側パネル（DEV-21）。
 dictJa["controlledDevice"] = {
+  connectionTitle: "接続状態",
   section: "デスクトップ遠隔操作",
   title: "この端末への接続を許可する",
   desc: "オンにすると 5 分間有効な接続コードを表示します。相手が入力すると、この端末のモデルでタスクを実行できます。いつでも確認し、すぐ切断できます。",

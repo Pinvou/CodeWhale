@@ -1935,6 +1935,7 @@ Object.assign(dictZh.uiChat, {
 dictZh["controlledDevice"] = {
   section: "桌面远程控制",
   title: "允许他人连接本机",
+  connectionTitle: "连接状态",
   desc: "开启后生成 5 分钟短期连接码，对方输入即可使用本机模型执行任务；你可随时查看并立即断开。",
   enable: "开启远程控制",
   disable: "关闭远程控制",
