@@ -25770,3 +25770,320 @@ async fn a_turn_starting_during_boot_declares_the_boot_surface_change() {
         last
     );
 }
+
+/// The in-batch half of the boot window (#588): a server can settle while
+/// earlier tools of a batch are still executing, so the batch-start fold is
+/// stale by exactly that duration. The search seam must re-fold the live
+/// pool before searching, or a capability that just became searchable reads
+/// as a bare miss with no note at all — the exact "absent" verdict #588
+/// started from.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_batchs_tool_search_sees_a_server_that_settled_after_the_batch_started() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let mock = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(vec![]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace,
+            mcp_config_path: config_path,
+            ..Default::default()
+        },
+        &Config::default(),
+        client,
+    );
+
+    engine.start_mcp_session_boot().await;
+    assert!(engine.mcp_boot_in_flight, "the hung server keeps boot open");
+
+    // The stale-catalog shape of the in-batch window: the turn's catalog was
+    // captured before the fast server settled.
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut catalog = vec![catalog_tool("read_file")];
+    let mut active = policy.active_names.clone();
+    assert!(
+        !catalog.iter().any(|tool| tool.name == "mcp_fast_ping"),
+        "precondition: the captured catalog predates the settle"
+    );
+
+    // Determinism: the settle lands before the batch's tool_search executes.
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fast server must settle while the boot is still in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let plans = vec![ToolExecutionPlan {
+        index: 0,
+        id: "search-1".to_string(),
+        name: TOOL_SEARCH_NAME.to_string(),
+        input: json!({"query": "ping"}),
+        caller: None,
+        interactive: false,
+        approval_required: false,
+        approval_description: String::new(),
+        approval_force_prompt: false,
+        // tool_search mutates the turn catalog, so real plans keep it out of
+        // parallel chunks — the sequential arm is the one under test.
+        supports_parallel: false,
+        read_only: true,
+        detached_start: false,
+        resources: vec![],
+        blocked_error: None,
+        guard_result: None,
+    }];
+    let mut mode = AppMode::Agent;
+    let mut questions_allowed = true;
+    let outcomes = engine
+        .execute_planned_tools(
+            plans,
+            "turn-in-batch-fold",
+            "",
+            &mut catalog,
+            &policy,
+            &mut active,
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(())),
+            Some(std::sync::Arc::clone(pool)),
+            &crate::sandbox::SandboxPolicy::default(),
+            &mut mode,
+            &mut questions_allowed,
+        )
+        .await;
+    assert!(
+        outcomes[0].is_some(),
+        "the batch must execute the tool_search"
+    );
+    assert!(
+        catalog.iter().any(|tool| tool.name == "mcp_fast_ping"),
+        "the search-time re-fold must append the settled server's tool"
+    );
+
+    let mut events = handle.rx_event.write().await;
+    let search = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("the batch must emit the tool_search completion");
+    let result = search.expect("the search must succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("payload is JSON");
+    let references: Vec<&str> = payload["tool_references"]
+        .as_array()
+        .expect("references array")
+        .iter()
+        .filter_map(|entry| entry["tool_name"].as_str())
+        .collect();
+    assert!(
+        references.contains(&"mcp_fast_ping"),
+        "the search must see the tool that settled mid-batch: {payload}"
+    );
+    assert_eq!(
+        payload["mcp_boot"]["servers_pending"],
+        json!(["hung"]),
+        "the still-connecting server must be named, the settled one not: {payload}"
+    );
+}
+
+/// The status half of the tool-security gate: a turn that runs under turn
+/// tool security produces no MCP surface at all, so its tool_search must not
+/// carry the boot note either — the note would advertise servers this turn
+/// can never reach and prescribe a retry that cannot work in-turn (#588).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tool_security_turns_search_carries_no_boot_note() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "secured-search-during-boot",
+            TOOL_SEARCH_NAME,
+            r#"{"query":"ping"}"#,
+        ),
+        canned::simple_text_turn("Nothing to find."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace,
+            mcp_config_path: config_path,
+            ..Default::default()
+        },
+        &Config::default(),
+        client,
+    );
+
+    engine.start_mcp_session_boot().await;
+    assert!(engine.mcp_boot_in_flight, "the hung server keeps boot open");
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fast server must settle while the boot is still in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The gate under test: this turn runs with turn tool security, so its
+    // build has no MCP surface and the boot status must stay silent too.
+    engine.active_turn_tool_security = Some(std::sync::Arc::new(
+        crate::core::ops::TurnToolSecurityPolicy::new(None, None),
+    ));
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let search = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("the turn must execute the secured tool_search");
+    let result = search.expect("the search must succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("payload is JSON");
+    assert!(
+        payload.get("mcp_boot").is_none(),
+        "a tool-security turn must get no boot note at all: {payload}"
+    );
+    assert_eq!(
+        payload["tool_references"],
+        json!([]),
+        "the secured turn must not see MCP tools either: {payload}"
+    );
+}
+
+/// The boot stamp is first-set-wins: a re-pin reason that is already pending
+/// when a booting turn starts (`resume`, `tool_surface`) stays the declared
+/// cause — the boot stamp must not overwrite it, because both name the same
+/// surface change and the earlier one is the more precise attribution.
+#[tokio::test]
+async fn a_booting_turn_keeps_an_already_declared_surface_reason() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("First turn."),
+        canned::simple_text_turn("Second turn."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+
+    // Turn 1 pins the prefix without the tool.
+    let first = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, first, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    // Turn 2 starts with a reason already declared (as `SyncSession` leaves
+    // `resume`) while the boot window is open, and its surface grows.
+    engine.mcp_boot_in_flight = true;
+    engine.session.pending_prefix_change_reason = Some("resume".to_string());
+    let mut settled = catalog_tool("mcp_fast_ping");
+    settled.defer_loading = Some(false);
+    let second = policy_for_catalog(
+        vec![catalog_tool("read_file"), settled],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, second, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let stability = engine
+        .session
+        .prefix_stability
+        .as_ref()
+        .expect("prefix stability monitor exists");
+    let last = stability
+        .history()
+        .last()
+        .expect("the surface change must be recorded in the history");
+    assert!(
+        last.repinned,
+        "the boot-window surface growth must re-pin, not drift: {:?}",
+        last
+    );
+    assert_eq!(
+        last.reason, "change:resume",
+        "the already-declared reason must survive the booting turn start: {:?}",
+        last
+    );
+}

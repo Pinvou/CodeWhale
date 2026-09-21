@@ -1305,7 +1305,10 @@ impl Engine {
         // surface is unchanged the stamp is inert — the prefix check returns
         // `Stable` before consulting the declared reason.
         if self.mcp_boot_in_flight {
-            self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
+            // First-set wins: an already-pending reason (`resume`,
+            // `tool_surface`) names the same re-pin more precisely than the
+            // boot stamp.
+            self.declare_prefix_change_if_unset("mcp-session-boot");
         }
         // Cleared when the loop continues only for optional runtime work
         // (a goal continuation) after the model already delivered an answer.
@@ -3244,7 +3247,8 @@ impl Engine {
                     plans,
                     &turn.id,
                     &current_text_visible,
-                    &tool_catalog,
+                    &mut tool_catalog,
+                    &tool_policy,
                     &mut active_tool_names,
                     tool_registry,
                     tool_exec_lock,
@@ -4057,12 +4061,13 @@ impl Engine {
     /// model-visible tool-result messages; those are handled by the result phase.
     /// The optional outcome slots retain the existing index-based collector shape.
     #[allow(clippy::too_many_arguments)] // phase fns mirror the turn pipeline shape
-    async fn execute_planned_tools(
+    pub(super) async fn execute_planned_tools(
         &mut self,
         plans: Vec<ToolExecutionPlan>,
         origin_turn_id: &str,
         current_text_visible: &str,
-        tool_catalog: &[crate::models::Tool],
+        tool_catalog: &mut Vec<crate::models::Tool>,
+        tool_policy: &ToolSurfacePolicy,
         active_tool_names: &mut std::collections::HashSet<String>,
         tool_registry: Option<&crate::tools::ToolRegistry>,
         tool_exec_lock: Arc<RwLock<()>>,
@@ -4500,6 +4505,19 @@ impl Engine {
                         // next request re-pins under `change:tool_surface`
                         // instead of tripping the C5 drift guard.
                         let active_before_search = active_tool_names.clone();
+                        // A server can settle while earlier tools of this
+                        // batch are still executing — the batch-start fold
+                        // above is stale by exactly that duration. Re-fold
+                        // here so this search sees what the pool already
+                        // holds, instead of a bare miss reading as "absent"
+                        // for a capability that just became searchable
+                        // (#588).
+                        self.refresh_booting_mcp_tools(
+                            &mut *tool_catalog,
+                            active_tool_names,
+                            tool_policy,
+                        )
+                        .await;
                         // Boot-window status (#588): while the connect
                         // window lasts, every search result names the
                         // servers still pending, so a miss reads as "not

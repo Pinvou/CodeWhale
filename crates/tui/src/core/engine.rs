@@ -7246,7 +7246,7 @@ impl Engine {
                 self.mcp_event_generation = generation;
                 self.replace_mcp_boot_errors(&authority_errors, connection_errors);
                 self.finish_mcp_boot_generation(generation);
-                self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
+                self.declare_prefix_change_if_unset("mcp-session-boot");
                 self.emit_mcp_session_boot(generation, true).await;
                 self.maybe_inject_mcp_boot_briefing(generation).await;
             }
@@ -7292,8 +7292,7 @@ impl Engine {
                     self.mcp_event_generation = generation;
                     self.replace_mcp_boot_errors(&authority_errors, connection_errors);
                     self.finish_mcp_boot_generation(generation);
-                    self.session.pending_prefix_change_reason =
-                        Some("mcp-session-boot".to_string());
+                    self.declare_prefix_change_if_unset("mcp-session-boot");
                     self.maybe_inject_mcp_boot_briefing(generation).await;
                     break;
                 }
@@ -7582,7 +7581,9 @@ impl Engine {
         }
         // Mirror the turn build's MCP gates: under turn tool security the
         // build produces no MCP surface at all, and a disabled feature does
-        // not build a pool in the first place (kept defensive).
+        // not build a pool in the first place (kept defensive). `mcp_access`
+        // is not mirrored: it parameterizes the passive preview snapshot,
+        // which never runs a turn loop, so a live refresh can never see it.
         if self.active_turn_tool_security.is_some() || !self.config.features.enabled(Feature::Mcp) {
             return;
         }
@@ -7601,10 +7602,7 @@ impl Engine {
                 // a `tool_search` hit would defeat the denied-name
                 // concealment and a declared activation would serialize an
                 // operator-excluded schema into the request.
-                .filter(|tool| {
-                    !tool_policy.denies_tool(&tool.name)
-                        && tool_policy.passes_allow_list(&tool.name)
-                })
+                .filter(|tool| tool_policy.allows_tool(&tool.name))
                 .collect()
         };
         if missing.is_empty() {
@@ -7622,6 +7620,16 @@ impl Engine {
         catalog.extend(missing);
     }
 
+    /// First-set wins for the declared re-pin reason: an already-pending
+    /// reason (`resume`, `tool_surface`) names the same surface change more
+    /// precisely than a later boot stamp, and one declared reason is all
+    /// the C5 guard consults.
+    fn declare_prefix_change_if_unset(&mut self, reason: &str) {
+        if self.session.pending_prefix_change_reason.is_none() {
+            self.session.pending_prefix_change_reason = Some(reason.to_string());
+        }
+    }
+
     /// Boot-window status for a `tool_search` result: the enabled servers
     /// that have delivered no searchable tools yet, while the spawn-time boot
     /// is still settling. Diagnosis is read from the pool's live state, so a
@@ -7630,8 +7638,17 @@ impl Engine {
     /// belongs to the boot briefing and `authenticate` tools, and the pool
     /// knows that even before the engine drains the queued boot update
     /// (#588). `None` once boot has finished.
+    ///
+    /// The same MCP gates as the refresh apply: under turn tool security the
+    /// turn build produces no MCP surface at all, so a connecting note would
+    /// advertise servers this turn can never reach. Dynamic runtime servers
+    /// never join the boot pass (they connect inline on first use), so they
+    /// are not expected in this list.
     async fn mcp_boot_search_status(&self) -> Option<Vec<String>> {
         if !self.mcp_boot_in_flight {
+            return None;
+        }
+        if self.active_turn_tool_security.is_some() || !self.config.features.enabled(Feature::Mcp) {
             return None;
         }
         let pool = self.mcp_pool.as_ref()?;

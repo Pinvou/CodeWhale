@@ -2604,6 +2604,13 @@ pub struct McpPool {
     /// healthy. Explicit intent (`retry_connection`, `get_or_connect`, a
     /// config reload) ignores the cooldown.
     connect_backoff: HashMap<String, ConnectBackoff>,
+    /// Servers with a spawned connect attempt that has not settled yet.
+    /// Orthogonal to [`Self::connect_backoff`]: the cooldown entry records
+    /// the last diagnosis and carries the failure ladder across re-pends,
+    /// while this set marks the window where a boot-pass attempt is
+    /// genuinely connecting, so `settled_failure_names` can tell "diagnosed,
+    /// waiting out its cooldown" apart from "connecting right now".
+    connects_in_flight: std::collections::HashSet<String>,
 }
 
 /// One server's cooldown: when to try again, and what to say until then.
@@ -2645,6 +2652,7 @@ impl McpPool {
             config_hash,
             catalog_generation: AtomicU64::new(1),
             connect_backoff: HashMap::new(),
+            connects_in_flight: std::collections::HashSet::new(),
             last_mtimes: Vec::new(),
             dynamic_servers: Arc::new(RwLock::new(HashMap::new())),
             needs_auth_servers: BTreeSet::new(),
@@ -2777,8 +2785,10 @@ impl McpPool {
         // Auth state is only known from a live connect attempt; once every
         // connection is dropped (config reload, source switch, shutdown) the
         // next attempt re-derives it. A reload is explicit intent, so every
-        // cooldown lifts with it.
+        // cooldown lifts with it — and the in-flight marks with it, since
+        // whatever still needs connecting is re-pended by the next pass.
         self.connect_backoff.clear();
+        self.connects_in_flight.clear();
         self.needs_auth_servers.clear();
         self.needs_auth_generation = self.needs_auth_generation.wrapping_add(1);
         if self.connections.is_empty() {
@@ -3051,8 +3061,9 @@ impl McpPool {
     pub(crate) fn store_ready_connection(&mut self, name: String, mut connection: McpConnection) {
         connection.catalog_generation = self.catalog_generation.load(Ordering::SeqCst);
         // A successful connect settles the auth question for this server,
-        // and the cooldown with it.
+        // the cooldown with it, and the in-flight mark with both.
         self.connect_backoff.remove(&name);
+        self.connects_in_flight.remove(&name);
         if self.needs_auth_servers.remove(&name) {
             self.needs_auth_generation = self.needs_auth_generation.wrapping_add(1);
         }
@@ -3066,6 +3077,9 @@ impl McpPool {
     /// failure replaces the verdict — the state is "the most recent connect
     /// failed auth-required", not "some connect once did".
     pub(crate) fn note_connect_failure(&mut self, name: &str, error: &anyhow::Error) {
+        // Whatever attempt was in flight has settled; from here the recorded
+        // diagnosis is the live truth again.
+        self.connects_in_flight.remove(name);
         let entry = self
             .connect_backoff
             .entry(name.to_string())
@@ -3178,11 +3192,14 @@ impl McpPool {
                 continue;
             }
             // The cooldown has expired, so the recorded diagnosis stops being
-            // replayed; the backoff entry must go with it. A pended server has
-            // no attempt in flight yet, and boot-window consumers read a
-            // backoff entry as "already diagnosed, not connecting" — keeping
-            // the entry here would hide a genuinely connecting server.
-            self.connect_backoff.remove(&name);
+            // replayed and a boot-pass attempt starts for this server. Mark
+            // the attempt in flight instead of dropping the entry:
+            // boot-window consumers read "entry with nothing in flight" as
+            // "already diagnosed, not connecting", and keeping the entry is
+            // what lets the failure ladder climb across automatic reconnect
+            // cycles — dropping it here used to reset every dead server back
+            // to the 30s base on each pass.
+            self.connects_in_flight.insert(name.clone());
             self.drop_connection(&name, "reconnect");
             pending.push((name, server_config));
         }
@@ -3265,13 +3282,18 @@ impl McpPool {
     }
 
     /// Servers whose most recent connect attempt settled with a failure and
-    /// whose retry cooldown still stands. Boot-window consumers read this as
-    /// "already diagnosed, not connecting": the entry exists exactly while no
-    /// attempt is in flight — a fresh connect pass removes it when it
-    /// re-pends the server, and [`Self::store_ready_connection`] removes it
-    /// on success.
+    /// which have no boot-pass attempt in flight. Boot-window consumers read
+    /// this as "already diagnosed, not connecting". An entry lingers through
+    /// its cooldown — the diagnosis keeps replaying — and across re-pends, so
+    /// the failure ladder survives automatic reconnect cycles;
+    /// [`Self::connects_in_flight`] carries the window where the server is
+    /// genuinely connecting again and therefore not diagnosed.
     pub(crate) fn settled_failure_names(&self) -> Vec<String> {
-        self.connect_backoff.keys().cloned().collect()
+        self.connect_backoff
+            .keys()
+            .filter(|name| !self.connects_in_flight.contains(*name))
+            .cloned()
+            .collect()
     }
 
     /// Servers whose tools are exposed to the model catalog right now — the
@@ -3289,8 +3311,10 @@ impl McpPool {
     }
 
     /// Handshake the pending servers concurrently without holding the pool
-    /// lock. Callers insert results under a short lock so a live turn can
-    /// snapshot ready tools while optional servers are still connecting.
+    /// lock and return every result at once, for callers that apply the
+    /// whole batch in one place anyway. The streaming boot path uses
+    /// [`Self::spawn_pending_connects`] directly instead, applying each
+    /// result under a short lock the moment it settles (#588).
     pub(crate) async fn connect_pending_concurrently(
         pending: Vec<McpPendingConnect>,
         timeouts: McpTimeouts,

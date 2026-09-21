@@ -541,7 +541,10 @@ impl ToolSurfacePolicy {
         }
     }
 
-    #[cfg(test)]
+    /// One spelling of the build's allow/deny narrowing, shared by the
+    /// boot-window refresh; both delegate to the same [`tool_denied`] and
+    /// [`tool_allowed`] pair the build's retain runs, so the two surfaces
+    /// cannot drift apart.
     pub(super) fn allows_tool(&self, name: &str) -> bool {
         !self.denies_tool(name) && self.passes_allow_list(name)
     }
