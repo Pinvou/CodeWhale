@@ -559,6 +559,26 @@ impl ModelManager {
                 continue;
             }
 
+            // ollama 既不是容器、也没有镜像，上面两条路都不适用。不单独处理的话
+            // 它会一路 continue 到底，running 标记**永远不会被纠正**：服务停了、
+            // 机器重启过，库里仍写着 true，界面一直显示「停用」按钮。
+            //
+            // **不能按「查 /api/ps 看这个模型在不在」来纠正**：ollama 默认空闲
+            // 5 分钟就把模型卸出显存，但服务照常提供接口、下次请求会自动加载
+            // 回来。按那个判的话，用户启用一个模型、五分钟不碰，界面就自己变回
+            // 「未启用」了——把正常的省显存行为报成了故障。
+            //
+            // 可靠的判据只有一个：**ollama 服务本身在不在**。不在 = 这台机器上
+            // 任何 ollama 模型都不可能在服务，置 false 一定对；在 = 不动。
+            // 跟本函数另外两处一样，只做「说在跑其实没跑」这一个方向。
+            if rec.engine_name == "ollama" {
+                if rec.running && !ollama_alive(&self.settings.ollama_host) {
+                    let _ = db::set_running(&rec.card_id, false);
+                    corrected.push(rec.card_name);
+                }
+                continue;
+            }
+
             // 没有容器名（这一版之前启用的老记录）：退回按镜像判断，但**只做
             // 「说在跑其实没跑」这一个方向**。反向认领在这里是危险的：别人用
             // 同款镜像起的容器会让我们把自己的卡误标成运行中——真机上就撞见过
@@ -2153,6 +2173,29 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
         }
     }
     found
+}
+
+/// ollama 服务在不在。
+///
+/// 只问「服务活着吗」，不问「哪个模型加载着」——后者会随空闲卸载来回变，
+/// 拿它纠正 running 会把正常的省显存行为报成故障（见 reconcile_running_status
+/// 里那段注释）。
+///
+/// 超时跟同文件其余查询一致（5 秒）：拿不到就当**活着**，不是当死了。
+/// 这个函数的唯一用途是把 running 置成 false，而置错的代价是用户明明启用着
+/// 却被告知没启用；「问不出来」离「确定没在跑」还差得远，不该据此下结论。
+fn ollama_alive(host: &str) -> bool {
+    let url = format!("{}/api/tags", host.trim_end_matches('/'));
+    let ok = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .and_then(|c| c.get(&url).send())
+        .map(|r| r.status().is_success());
+    match ok {
+        Ok(alive) => alive,
+        // 建不出客户端、连不上、超时：一律当活着，不动 running。
+        Err(_) => true,
+    }
 }
 
 fn docker_image_size(image: &str) -> u64 {

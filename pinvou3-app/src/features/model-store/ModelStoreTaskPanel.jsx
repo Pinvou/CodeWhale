@@ -293,10 +293,24 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
  */
 function ModelStoreTaskPanel({ tasks, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove }) {
   if (tasks.length === 0) return null;
+  // 有任务在等用户输入时，把面板抬到弹窗遮罩（z-[200]）之上。
+  //
+  // 平时面板是 z-[120]，低于遮罩——这是对的，任务卡不该盖住用户正在看的弹窗。
+  // 但脚本请求输入时（双机部署要填从机 IP/账号密码），那个输入框**就在这个面板
+  // 里**：此刻用户随手打开任意弹窗，输入框会被遮罩盖死，而脚本那头还在等，
+  // 一直等到 PROMPT_TIMEOUT 把整次运行判死。用户看不到任何提示，只会觉得
+  // 「部署莫名其妙失败了」。
+  //
+  // 只在等待输入时抬升，不是一直抬：那样任务卡会常驻在所有弹窗之上，挡住的
+  // 面积比解决的问题还大。
+  const waitingInput = tasks.some((task) => task.prompt);
   return (
     <div
       data-testid="model-store-task-panel"
-      className="pointer-events-auto fixed bottom-4 right-4 z-[120] flex max-h-[calc(100vh-120px)] flex-col items-end gap-2 overflow-y-auto overscroll-contain pl-1"
+      data-waiting-input={waitingInput ? 'true' : undefined}
+      className={`pointer-events-auto fixed bottom-4 right-4 ${
+        waitingInput ? 'z-[210]' : 'z-[120]'
+      } flex max-h-[calc(100vh-120px)] flex-col items-end gap-2 overflow-y-auto overscroll-contain pl-1`}
     >
       {tasks.map((task) => (
         <ModelStoreTaskCard
