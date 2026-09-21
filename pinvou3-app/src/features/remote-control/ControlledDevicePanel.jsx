@@ -162,10 +162,10 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
           />
         </div>
         <div className="settings-actions">
-          <button type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || busy === 'refresh'}>
+          <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || busy === 'refresh'}>
             <RefreshCw aria-hidden="true" /> {busy === 'refresh' ? copy.refreshing : copy.refresh}
           </button>
-          <button type="button" onClick={() => run('disconnect', (remote) => remote.controlledDisconnectNow())} disabled={!active || busy === 'disconnect'}>
+          <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('disconnect', (remote) => remote.controlledDisconnectNow())} disabled={!active || busy === 'disconnect'}>
             <X aria-hidden="true" /> {copy.disconnectNow}
           </button>
         </div>
