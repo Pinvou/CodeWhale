@@ -52,6 +52,13 @@ use crate::network_policy::{Decision, NetworkPolicy, host_from_url};
 
 fn reqwest_client() -> reqwest::Client {
     codewhale_release::platform_http_client_builder()
+        // The shared platform builder sets no timeouts; without a bound, a
+        // connection that opens but stalls (dead proxy, black-holed route)
+        // hangs installs and registry sync forever. Connect is bounded
+        // tightly; the total budget is generous for 5 MiB tarballs on slow
+        // links (registry sync fans out 8 of these in parallel).
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .expect("build platform HTTP client")
 }

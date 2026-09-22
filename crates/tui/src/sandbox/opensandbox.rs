@@ -55,6 +55,10 @@ impl OpenSandboxBackend {
     /// HTTP request timeout.
     pub fn new(base_url: String, api_key: Option<String>, timeout_secs: u64) -> Result<Self> {
         let client = crate::tls::reqwest_client_builder()
+            // A black-holed host must fail on the connect family like every
+            // other bounded client, not eat the whole exec total stalling in
+            // TCP connect.
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(timeout_secs))
             .build()
             .context("failed to construct HTTP client for OpenSandbox backend")?;

@@ -140,23 +140,84 @@ fn summarize_subagent_status(status: &serde_json::Value) -> String {
     status.to_string()
 }
 
+/// The per-row `route:` line prints the child's effective provider/model
+/// routing from the optional typed `child_route` receipt (upstream
+/// 0c03b5a81 carries it on every compact status row; `resolved_profile_id`
+/// is the receipt's connection identity). The emitter bounds the receipt
+/// itself, but this renderer must not depend on that: one unbounded route
+/// value would eat the per-row budget that keeps the eight-row fleet
+/// summary bounded. Every string field is previewed and the assembled line
+/// is hard-guarded, so the row stays short whatever a producer sent.
+const SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS: usize = 64;
+const SUBAGENT_ROUTE_LINE_MAX_CHARS: usize = 200;
+
+/// `None` when the receipt carries nothing printable (missing/empty fields,
+/// a non-object non-string value) — the row then shows no route line rather
+/// than a placeholder.
+fn subagent_route_line(route: &serde_json::Value) -> Option<String> {
+    if let Some(object) = route.as_object() {
+        let field = |key: &str| -> Option<String> {
+            object
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| summarize_text(s, SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS))
+        };
+        let provider = field("provider_id")?;
+        let model = field("model_id")?;
+        let mut line = format!("  route: {provider}/{model}");
+        let source = field("route_source");
+        let profile = field("resolved_profile_id");
+        match (source, profile) {
+            (Some(source), Some(profile)) => {
+                line.push_str(&format!(" (source={source}, profile={profile})"));
+            }
+            (Some(source), None) => line.push_str(&format!(" (source={source})")),
+            (None, Some(profile)) => line.push_str(&format!(" (profile={profile})")),
+            (None, None) => {}
+        }
+        // Hard guard: field previews alone do not bound the assembled line.
+        return Some(summarize_text(&line, SUBAGENT_ROUTE_LINE_MAX_CHARS));
+    }
+    // Defensive: a producer may serialize the receipt as a bare
+    // "provider/model" label; anything else shapeless is skipped.
+    let raw = route.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(summarize_text(
+        &format!(
+            "  route: {}",
+            summarize_text(raw, SUBAGENT_ROUTE_FIELD_PREVIEW_CHARS)
+        ),
+        SUBAGENT_ROUTE_LINE_MAX_CHARS,
+    ))
+}
+
 fn summarize_subagent_snapshot(
     snapshot: &serde_json::Value,
     index: usize,
     transcript_handle_fallback: Option<&str>,
+    child_route_fallback: Option<&serde_json::Value>,
 ) -> String {
     // Session projections (`SubAgentSessionProjection`) keep `transcript_handle`
     // on the outer envelope while the wrapped result row carries none, so the
     // handle is captured before unwrapping and handed down as a fallback: the
     // visible row prints the value the hint gate saw instead of a phantom.
+    // `child_route` mirrors that rule in reverse: compact fleet rows and the
+    // compact spawn receipt strip the `snapshot` wrapper and keep the receipt
+    // on the envelope, and a legacy projection can predate the wrapped row's
+    // own field — the wrapped value wins when both exist.
     let outer_transcript_handle = snapshot
         .get("transcript_handle")
         .and_then(transcript_handle_row_value);
+    let outer_child_route = snapshot.get("child_route");
     if let Some(inner) = snapshot.get("snapshot") {
         let fallback = outer_transcript_handle
             .as_deref()
             .or(transcript_handle_fallback);
-        return summarize_subagent_snapshot(inner, index, fallback);
+        return summarize_subagent_snapshot(inner, index, fallback, outer_child_route);
     }
 
     let Some(obj) = snapshot.as_object() else {
@@ -203,8 +264,17 @@ fn summarize_subagent_snapshot(
         .map(|s| summarize_text(s, 1_600));
     let steps = obj.get("steps_taken").and_then(serde_json::Value::as_u64);
     let duration_ms = obj.get("duration_ms").and_then(serde_json::Value::as_u64);
+    // The wrapped row's receipt outranks the envelope fallback; absent or
+    // unprintable values render no line at all (route is optional).
+    let route_line = obj
+        .get("child_route")
+        .or(child_route_fallback)
+        .and_then(subagent_route_line);
 
     let mut lines = vec![format!("- {agent_id} ({agent_type}) status={status}")];
+    if let Some(route_line) = route_line {
+        lines.push(route_line);
+    }
     if let Some(transcript_handle) = transcript_handle {
         lines.push(format!("  transcript: {transcript_handle}"));
     }
@@ -407,7 +477,7 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
             ));
             break;
         }
-        out.push_str(&summarize_subagent_snapshot(snapshot, idx + 1, None));
+        out.push_str(&summarize_subagent_snapshot(snapshot, idx + 1, None, None));
         out.push('\n');
     }
     Some(out.trim_end().to_string())
@@ -651,6 +721,21 @@ pub(crate) fn compact_tool_result_for_route(
         .and_then(|metadata| metadata.get("evidence_available"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+    {
+        return raw.to_string();
+    }
+
+    // A `read` result that already fit its byte budget carries a resume
+    // footer instead of mid-line truncation; compacting it again would
+    // discard content the budget deliberately kept. A result that somehow
+    // exceeded its declared budget still falls through to the ordinary
+    // limits below.
+    if output
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("read_budget_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|budget| raw.len() as u64 <= budget)
     {
         return raw.to_string();
     }

@@ -2216,7 +2216,7 @@ pub struct App {
     >,
     /// Shared cell for async MCP OAuth login delivery.
     ///
-    /// The browser callback wait is up to five minutes. Awaiting it inside the
+    /// The browser callback wait is up to fifteen minutes. Awaiting it inside the
     /// action handler parked the whole event loop: no input, no redraw, and no
     /// way to back out of a login started by a misclick. The login runs on the
     /// background pattern instead, and `mcp_login_cancel` is what Esc trips.

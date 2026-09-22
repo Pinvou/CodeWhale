@@ -214,10 +214,15 @@ impl DeepSeekClient {
     async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
         let url = self.messages_transport_url(url);
         self.wait_for_rate_limit().await;
+        // This request is consumed non-streaming (the body is decoded as one
+        // JSON document), so it gets the same total budget as every other
+        // non-streaming completion; without it a provider that accepts and
+        // stalls - or trickles the body - wedged the caller indefinitely.
         let response = self
             .http_client
             .post(&url)
             .header("Accept", "text/event-stream")
+            .timeout(crate::client::NON_STREAMING_REQUEST_ENVELOPE)
             .json(body)
             .send()
             .await

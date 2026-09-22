@@ -699,6 +699,13 @@ pub fn history_cells_from_message(msg: &Message) -> Vec<HistoryCell> {
             content: display.to_string(),
         }];
     }
+    // Raw runtime handoffs have live tool/status receipts, not user cells.
+    // Keep their model-facing payload intact and filter only the display.
+    // (Fork exception: the MCP briefing/recovery handoffs above have already
+    // returned as system cells by decision, so they never reach this filter.)
+    if crate::runtime_handoff::is_internal_runtime_handoff(msg) {
+        return Vec::new();
+    }
 
     let mut cells = Vec::new();
 

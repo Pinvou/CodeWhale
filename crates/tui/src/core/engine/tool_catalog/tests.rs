@@ -193,6 +193,7 @@ fn searching_for_an_eager_tool_is_not_reported_as_cache_rejected() {
         &catalog,
         &mut active,
         &mut cache,
+        None,
     )
     .expect("tool search should succeed");
 
@@ -280,4 +281,73 @@ fn registry_first_guidance_does_not_expand_contract_bash_schema_text() {
     apply_registry_first_shell_guidance(&mut catalog);
 
     assert_eq!(catalog[0].description, description);
+}
+
+/// Boot-window status (#588): while MCP servers are still connecting, a miss
+/// must read as "not yet", not "absent". The result therefore carries the
+/// connecting server names and the retry contract.
+#[test]
+fn booting_search_result_names_the_still_connecting_servers() {
+    let catalog = vec![tool("read")];
+    let mut active = initial_active_tools(&catalog);
+    let mut cache = ToolActivationCache::default();
+    let connecting = vec!["canva_mcp".to_string(), "qcc-company".to_string()];
+
+    let result = execute_tool_search_with_cache(
+        super::TOOL_SEARCH_NAME,
+        &json!({"query": "make pptx"}),
+        &catalog,
+        &mut active,
+        &mut cache,
+        Some(&connecting),
+    )
+    .expect("tool search should succeed");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("payload is JSON");
+    assert_eq!(payload["mcp_boot"]["status"], "connecting");
+    assert_eq!(
+        payload["mcp_boot"]["servers_pending"],
+        json!(["canva_mcp", "qcc-company"])
+    );
+    let note = payload["mcp_boot"]["note"].as_str().expect("retry note");
+    assert!(
+        note.contains("still connecting") && note.contains("again"),
+        "the note must state the boot window and the retry contract: {note}"
+    );
+    let metadata = result.metadata.expect("search metadata");
+    assert_eq!(
+        metadata["mcp_boot"]["servers_pending"],
+        payload["mcp_boot"]["servers_pending"]
+    );
+}
+
+/// A settled boot must keep the exact legacy result shape: no booting block
+/// when no status is passed, and none for an empty connecting list either —
+/// an empty list means everything settled, so "still connecting" would be a
+/// lie.
+#[test]
+fn settled_search_result_carries_no_booting_block() {
+    let catalog = vec![tool("read")];
+    for status in [None, Some(&[] as &[String])] {
+        let mut active = initial_active_tools(&catalog);
+        let mut cache = ToolActivationCache::default();
+
+        let result = execute_tool_search_with_cache(
+            super::TOOL_SEARCH_NAME,
+            &json!({"query": "read"}),
+            &catalog,
+            &mut active,
+            &mut cache,
+            status,
+        )
+        .expect("tool search should succeed");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content).expect("payload is JSON");
+        assert!(
+            payload.get("mcp_boot").is_none(),
+            "a settled boot must not attach a booting block: {payload}"
+        );
+    }
 }

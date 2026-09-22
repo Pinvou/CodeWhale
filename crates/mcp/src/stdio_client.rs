@@ -30,8 +30,15 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// because a first `npx`/`uvx` launch may download the server package.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Budget for a single request once the server is up.
+/// Budget for a single request once the server is up. `tools/call` gets a
+/// separate, much longer budget (`CALL_TOOL_TIMEOUT`): a tool legitimately
+/// runs minutes (scrapes, remote jobs, builds), and killing it at 2 minutes
+/// returned "timed out" to the model for healthy work.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Budget for `tools/call` specifically. Matches the TUI pool's default
+/// execute timeout; still bounded so a wedged server cannot hang a consumer
+/// forever, but far past any legitimate tool run.
+const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// How long a dropped client waits for a graceful exit after closing stdin
 /// before it kills the child.
@@ -709,12 +716,13 @@ impl McpManagedClient for ChildProcessMcpClient {
         // The server's result is returned verbatim, including an `isError`
         // content payload: reinterpreting it here would replace what the
         // server actually said with our guess about it.
-        self.request(
+        self.request_with_timeout(
             "tools/call",
             json!({
                 "name": tool_name,
                 "arguments": arguments
             }),
+            CALL_TOOL_TIMEOUT,
         )
     }
 

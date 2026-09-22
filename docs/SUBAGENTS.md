@@ -384,11 +384,12 @@ provider's resolved fanout, depth, and timeout profile.
 
 ## Advertised agent-tool fields (v0.9.9)
 
-The model-facing `agent` tool schema advertises exactly **12 fields**
-(#5324, #5123):
+The model-facing `agent` tool schema advertises exactly **13 fields**
+(#5324, #5123; T7 later added `profile_query`, the roster host-profile
+keyword filter):
 
-`action`, `prompt`, `type`, `profile`, `name`, `agent_id`, `message`,
-`until`, `detached`, `worktree`, `write_roots`, `resume_from`
+`action`, `prompt`, `type`, `profile`, `profile_query`, `name`, `agent_id`,
+`message`, `until`, `detached`, `worktree`, `write_roots`, `resume_from`
 
 plus the action-discriminated `dependentSchemas` tree (`start` requires
 `prompt`; `message`/`followup` require a target and `message`; `peek`/
@@ -575,18 +576,23 @@ second default.
 Running agents also track manager-visible progress. If a child stops emitting
 progress for the heartbeat window, the manager auto-cancels it, releases its
 sub-agent slot, and keeps the cancelled record inspectable through the returned
-transcript handle and persisted worker record. The default is 5 minutes
-(resolved to at least 30 seconds above `api_timeout_secs`, so 630 seconds
-with the 600-second default API timeout):
+transcript handle and persisted worker record. The default is 5 minutes,
+resolved to the highest of itself, 30 seconds above the resolved
+`api_timeout_secs`, and 30 seconds above the built-in sub-agent tool
+timeout (so 1830 seconds with the 600-second default API timeout and the
+1800-second default tool timeout; the tool timeout is a compile-time
+constant — only `api_timeout_secs` is a config key):
 
 ```toml
 [subagents]
 heartbeat_timeout_secs = 300  # clamped to 30..=3600
 ```
 
-The effective heartbeat is kept at least 30 seconds above
-`api_timeout_secs`, so a configured long model request is not cancelled before
-its own request timeout can fire.
+The effective heartbeat is kept at least 30 seconds above both the resolved
+`api_timeout_secs` and the built-in sub-agent tool timeout (the child records
+progress at step boundaries, not mid-tool, so a silent build or MCP call must
+not be cleaned up mid-run), so neither a configured long model request nor a
+long in-flight tool is cancelled before its own timeout can fire.
 
 ## Lifecycle
 

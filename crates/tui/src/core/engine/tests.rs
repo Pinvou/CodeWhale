@@ -17289,6 +17289,39 @@ fn evidence_bounded_preview_is_not_recompacted() {
 }
 
 #[test]
+fn budgeted_read_result_is_not_truncated_a_second_time_by_the_context_compactor() {
+    // `read` bounds itself to a per-call byte budget and ends a
+    // budget-limited result with a footer naming the exact offset to
+    // continue from. The 12K context hard limit used to re-truncate that
+    // bounded result into a ~900-char snippet, discarding both the content
+    // and the continuation contract.
+    let content = format!(
+        "{}\n\n[Showing lines 1-51 of 200 (50KB limit). Use offset=52 to continue.]",
+        "r".repeat(40_000)
+    );
+    let budgeted = ToolResult::success(content.clone()).with_metadata(json!({
+        "evidence_routing": "inline",
+        "read_budget_bytes": content.len()
+    }));
+    let passed_through = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &budgeted);
+    assert_eq!(passed_through, content);
+    assert!(passed_through.contains("Use offset=52 to continue"));
+
+    // The same bytes without a declared budget still take the ordinary path,
+    // which is what proves the metadata (not the tool name) did the work.
+    let unbudgeted = ToolResult::success(content.clone());
+    let compacted = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &unbudgeted);
+    assert!(compacted.contains("output compacted to protect context"));
+
+    // A result that overran its own declared budget is not exempt.
+    let overrun = ToolResult::success(content).with_metadata(json!({
+        "read_budget_bytes": 1_000
+    }));
+    let compacted_overrun = compact_tool_result_for_context("deepseek-v3.2-128k", "read", &overrun);
+    assert!(compacted_overrun.contains("output compacted to protect context"));
+}
+
+#[test]
 fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window() {
     let content = "route-effective context\n".repeat(900);
     let output = ToolResult::success(content.clone());
@@ -17762,6 +17795,150 @@ fn forkguard_subagent_projection_outer_handle_reaches_summary_row() {
     assert!(
         !context.contains("transcript: agent_aaaa1111/full_transcript"),
         "the envelope fallback must not shadow the inner value:\n{context}"
+    );
+}
+
+// Upstream 0c03b5a81 lets every compact status row carry the typed
+// `child_route` receipt, but the fork row summarizer dropped the field: the
+// unscoped fleet surface never told the model which provider/model each
+// child actually ran on. The row renderer must print a short `route:` line
+// when the receipt is present and stay silent when it is not — and stay
+// bounded even when a producer hands it an oversized receipt.
+#[test]
+fn forkguard_fleet_summary_rows_carry_bounded_child_route() {
+    let long_label = "p".repeat(400);
+    let fleet = json!({
+        "action": "status",
+        "count": 3,
+        "agents": [
+            {"agent_id": "agent_aaaa1111", "agent_type": "explore", "status": "Running",
+             "assignment": {"objective": "Map the rendering path"},
+             "child_route": {
+                 "requested_type": "explore",
+                 "resolved_profile_id": "conn-main",
+                 "canonical_role": "general",
+                 "provider_id": "atlas-main",
+                 "model_id": "gpt-5",
+                 "route_source": "requested_model",
+                 "requested_reasoning": "medium",
+                 "runtime_version": "1.0.0",
+                 "runtime_build_sha": "abc123"
+             }},
+            {"agent_id": "agent_bbbb2222", "agent_type": "test", "status": "Completed",
+             "result": "12 tests green",
+             "child_route": {
+                 "provider_id": long_label,
+                 "model_id": long_label,
+                 "route_source": long_label,
+                 "resolved_profile_id": long_label
+             }},
+            {"agent_id": "agent_cccc3333", "agent_type": "general", "status": "Completed",
+             "result": "done"}
+        ]
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(fleet));
+
+    assert!(
+        context.contains("  route: atlas-main/gpt-5 (source=requested_model, profile=conn-main)"),
+        "a row with a child_route receipt must print its provider/model routing:\n{context}"
+    );
+    let route_lines: Vec<&str> = context
+        .lines()
+        .filter(|line| line.trim_start().starts_with("route:"))
+        .collect();
+    assert_eq!(
+        route_lines.len(),
+        2,
+        "exactly the two rows that carry a receipt print a route line; a row \
+         without one must not get an empty placeholder:\n{context}"
+    );
+    for line in &route_lines {
+        assert!(
+            line.chars().count() <= 200,
+            "every route line must stay bounded:\n{line}"
+        );
+    }
+    assert!(
+        route_lines[1].contains("..."),
+        "oversized route fields must be preview-truncated:\n{}",
+        route_lines[1]
+    );
+}
+
+// The addressed projection wraps the result row in a `snapshot` envelope;
+// the route read must survive that unwrap (the wrapped `SubAgentResult`
+// carries its own receipt), fall through to the envelope when the wrapped
+// row predates the field, and tolerate a bare string label.
+#[test]
+fn forkguard_subagent_projection_child_route_reaches_summary_row() {
+    let envelope_route = json!({
+        "provider_id": "atlas-main",
+        "model_id": "gpt-5",
+        "route_source": "requested_model"
+    });
+    let wrapped = json!({
+        "name": "scout",
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "child_route": envelope_route,
+        "snapshot": {
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": "mapped the rendering path",
+            "child_route": {
+                "provider_id": "inner-provider",
+                "model_id": "inner-model",
+                "route_source": "fallback"
+            }
+        }
+    })
+    .to_string();
+    let context =
+        compact_tool_result_for_context("deepseek-v4-pro", "agent", &ToolResult::success(wrapped));
+    assert!(
+        context.contains("  route: inner-provider/inner-model (source=fallback)"),
+        "the wrapped row's route must reach the visible summary:\n{context}"
+    );
+
+    let envelope_only = json!({
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "child_route": envelope_route,
+        "snapshot": {
+            "agent_id": "agent_aaaa1111",
+            "agent_type": "explore",
+            "status": "Completed",
+            "result": "done"
+        }
+    })
+    .to_string();
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(envelope_only),
+    );
+    assert!(
+        context.contains("  route: atlas-main/gpt-5"),
+        "the envelope route must fall through when the wrapped row lacks one:\n{context}"
+    );
+
+    let string_route = json!({
+        "agent_id": "agent_aaaa1111",
+        "status": "Completed",
+        "child_route": "atlas-main/gpt-5"
+    })
+    .to_string();
+    let context = compact_tool_result_for_context(
+        "deepseek-v4-pro",
+        "agent",
+        &ToolResult::success(string_route),
+    );
+    assert!(
+        context.contains("  route: atlas-main/gpt-5"),
+        "a bare string route label must still print, bounded:\n{context}"
     );
 }
 
@@ -19951,6 +20128,49 @@ async fn code_execution_scenario() {
 
         assert!(result.result.content.contains("common executor code exec"));
         assert!(result.result.content.contains("return_code"));
+    }
+}
+
+// The pid-liveness assertion polls the process via libc, which is only a
+// dependency on unix targets — same gate as the js/plugin kill tests.
+#[cfg(unix)]
+#[tokio::test]
+async fn code_execution_timeout_kills_the_interpreter_instead_of_orphaning_it() {
+    // The kill path needs a real interpreter; skip where python is absent.
+    if crate::dependencies::resolve_python_interpreter().is_none() {
+        eprintln!("skipping: python not present");
+        return;
+    }
+    let tmp = tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("child_pid");
+    let code = format!(
+        "import os, time\nopen({}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n",
+        serde_json::json!(pid_file.to_string_lossy())
+    );
+
+    let err = execute_code_execution_tool(&json!({ "code": code }), tmp.path())
+        .await
+        .expect_err("a 60s sleep must hit the execution timeout");
+    assert!(
+        matches!(err, ToolError::Timeout { .. }),
+        "expected a timeout error; got {err:?}"
+    );
+
+    // The interpreter reported its pid before sleeping; the timeout must
+    // have killed it (explicit kill), not left it running.
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("interpreter must have written its pid")
+        .trim()
+        .parse()
+        .expect("pid file must contain an integer");
+    let mut attempts = 0;
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            attempts < 50,
+            "interpreter {pid} is still alive after the timeout kill"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        attempts += 1;
     }
 }
 
@@ -24107,6 +24327,103 @@ async fn turn_wall_clock_budget_is_overridable() {
     assert_eq!(mock.call_count(), 1);
 }
 
+/// R1: the request_user_input wait is human-paced, so like the approval wait
+/// it must be excluded from the turn wall-clock budget. An answer submitted
+/// past the budget must still drive the turn to completion — not be
+/// collected and then discarded with a budget-exhausted failure at the next
+/// provider boundary.
+#[tokio::test]
+async fn user_input_human_wait_is_excluded_from_the_turn_wall_clock() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let questions = json!({
+        "questions": [{
+            "header": "Confirm",
+            "id": "q1",
+            "question": "Proceed?",
+            "options": [
+                {"label": "Yes", "description": "continue the work"},
+                {"label": "No", "description": "stop here"}
+            ]
+        }]
+    });
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call_1", "request_user_input", &questions.to_string()),
+        canned::simple_text_turn("The user confirmed; the work is complete."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let engine_config = EngineConfig {
+        // A 2s budget: the 3s answer delay below exceeds it, so without
+        // the human-wait exclusion the turn would fail right after the
+        // answer finally lands. The margin above the pre-pause work stays
+        // generous so a loaded CI host cannot trip the budget before the
+        // wait even begins.
+        turn_wall_clock: std::time::Duration::from_secs(2),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let registry = crate::tools::ToolRegistry::new(context);
+    // The question tool must be present AND active, or the model's call is
+    // rejected as an unknown/inactive tool and the turn never waits on a
+    // human. request_user_input is deferred by default, so activate it the
+    // way tool_search would.
+    let registry = {
+        let mut registry = registry;
+        registry.register(std::sync::Arc::new(
+            crate::tools::user_input::RequestUserInputTool,
+        ));
+        registry
+    };
+    let surface = ToolSurfacePolicy::new(
+        registry,
+        Some(vec![api_tool(REQUEST_USER_INPUT_NAME)]),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[REQUEST_USER_INPUT_NAME],
+        engine.config.strict_tool_mode,
+        engine.config.allowed_tools.clone(),
+        engine.config.disallowed_tools.clone(),
+        engine.config.max_tool_calls,
+        engine.session.approval_mode,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(engine.config.max_steps);
+
+    // Answer after 3s — past the 2s budget, well inside the test timeout.
+    let submit_task = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        handle
+            .submit_user_input(
+                "call_1",
+                crate::tools::user_input::UserInputResponse {
+                    answers: vec![crate::tools::user_input::UserInputAnswer {
+                        id: "q1".to_string(),
+                        label: "Yes".to_string(),
+                        value: "Yes".to_string(),
+                    }],
+                },
+            )
+            .await
+            .expect("submit user input");
+    });
+
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    submit_task.await.expect("submit task joins");
+
+    assert_eq!(
+        status,
+        TurnOutcomeStatus::Completed,
+        "a human-paced answer must complete the turn, not be dropped: {error:?}"
+    );
+    assert_eq!(
+        mock.call_count(),
+        2,
+        "the submitted answer must reach the next model request"
+    );
+}
+
 /// R1: a turn that keeps calling tools past its model-step ceiling ends as a
 /// reported failure naming the limit — never as a silent completion.
 #[tokio::test]
@@ -24998,4 +25315,1033 @@ fn forkguard_agent_fleet_listing_with_handles_names_the_hint_with_visible_values
     );
     assert!(context.contains("transcript: agent_aaaa1111/full_transcript"));
     assert!(context.contains("transcript: agent_bbbb2222/full_transcript"));
+}
+
+// === MCP session-boot window (#588) ===
+
+/// A minimal MCP stdio server: answers `initialize` and `tools/list`
+/// immediately, advertising exactly one tool. The JSON-RPC responses are
+/// assembled in Rust and embedded single-quoted, so the fixture never needs
+/// shell-side quoting tricks. Unix-only: the fixture is a `sh` script.
+#[cfg(unix)]
+fn write_boot_fixture_server(dir: &std::path::Path, tool: &str) -> PathBuf {
+    let init_response = json!({
+        "jsonrpc": "2.0",
+        "id": "1",
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "boot-fixture", "version": "1.0.0"},
+            "capabilities": {"tools": {}}
+        }
+    })
+    .to_string();
+    let tools_response = json!({
+        "jsonrpc": "2.0",
+        "id": "2",
+        "result": {"tools": [
+            {"name": tool, "description": "boot fixture tool", "inputSchema": {"type": "object"}}
+        ]}
+    })
+    .to_string();
+    let script = format!(
+        "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"method\":\"initialize\"'*)\n      printf '%s\\n' '{init_response}'\n      ;;\n    *'\"method\":\"tools/list\"'*)\n      printf '%s\\n' '{tools_response}'\n      ;;\n  esac\ndone\n"
+    );
+    let path = dir.join("boot-fixture.sh");
+    fs::write(&path, script).expect("fixture server script");
+    path
+}
+
+/// A server that consumes requests and never answers, so its connect runs
+/// out the whole connect-timeout budget.
+#[cfg(unix)]
+fn write_hanging_boot_fixture_server(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("hanging-boot-fixture.sh");
+    fs::write(
+        &path,
+        "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile IFS= read -r line; do :; done\n",
+    )
+    .expect("hanging fixture server script");
+    path
+}
+
+/// The incident contract (#588): a fast local server's tools must become
+/// snapshot-able while a slow remote is still inside its connect window. The
+/// batch-return boot used to hold every local tool off the shelf until the
+/// last server settled, so a first-turn tool_search saw an empty catalog.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_boot_exposes_fast_server_tools_while_a_slow_server_is_still_connecting() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace,
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+
+    engine.start_mcp_session_boot().await;
+    assert!(
+        engine.mcp_boot_in_flight,
+        "two pending servers keep boot in flight"
+    );
+
+    // First-settled-first-available: the fast server's tool must become
+    // snapshot-able long before the hung server's 6s connect timeout lets the
+    // join set drain. The 3s visibility deadline is the discriminator: the
+    // drained batch-return boot (the #588 defect) stores nothing until every
+    // join settles, so under it this deadline always expires.
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let fast_visible = loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        fast_visible,
+        "the fast server's tools must settle while the hung server is still connecting"
+    );
+    assert!(
+        engine.mcp_boot_in_flight,
+        "the hung server must still be holding the boot open when the fast tool appears"
+    );
+
+    // The drained finish stays exactly where it was: once the hung server
+    // times out, the idle seam clears the boot and records the diagnosis.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while engine.mcp_boot_in_flight && Instant::now() < deadline {
+        engine.drain_mcp_boot_updates().await;
+        if !engine.mcp_boot_in_flight {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !engine.mcp_boot_in_flight,
+        "boot settles after the hung server times out"
+    );
+    assert!(
+        engine.mcp_connection_errors.contains_key("hung"),
+        "the hung server's failure must be diagnosed: {:?}",
+        engine.mcp_connection_errors
+    );
+    assert!(
+        !engine.mcp_connection_errors.contains_key("fast"),
+        "the fast server must not inherit its sibling's failure: {:?}",
+        engine.mcp_connection_errors
+    );
+}
+
+/// The live-turn catalog refresh (#588): tools from servers that became ready
+/// after the turn's catalog was built are appended with the same deferral
+/// treatment a fresh turn build would give them, without reordering anything
+/// already in the catalog, and without duplicating on a second pass.
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_turn_refresh_appends_newly_ready_server_tools_deferred() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({"servers": {"fast": {"command": "sh", "args": [fast_script]}}}).to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.connect_all().await;
+    }
+
+    engine.mcp_boot_in_flight = true;
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut active_tool_names = policy.active_names.clone();
+    let mut catalog = vec![crate::models::Tool {
+        tool_type: None,
+        name: "read".to_string(),
+        description: "native read".to_string(),
+        input_schema: json!({"type": "object"}),
+        allowed_callers: None,
+        defer_loading: Some(false),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }];
+
+    engine
+        .refresh_booting_mcp_tools(&mut catalog, &mut active_tool_names, &policy)
+        .await;
+
+    assert_eq!(
+        catalog.len(),
+        2,
+        "the ready server's tool joins the catalog"
+    );
+    assert_eq!(catalog[0].name, "read", "existing entries never move");
+    assert_eq!(catalog[1].name, "mcp_fast_ping");
+    assert_eq!(
+        catalog[1].defer_loading,
+        Some(true),
+        "MCP tools are deferred exactly like a fresh turn build defers them"
+    );
+    assert!(
+        !active_tool_names.contains("mcp_fast_ping"),
+        "a deferred append must not join the active set"
+    );
+
+    engine
+        .refresh_booting_mcp_tools(&mut catalog, &mut active_tool_names, &policy)
+        .await;
+    assert_eq!(catalog.len(), 2, "a second pass must not duplicate entries");
+
+    engine.mcp_boot_in_flight = false;
+    catalog.clear();
+    engine
+        .refresh_booting_mcp_tools(&mut catalog, &mut active_tool_names, &policy)
+        .await;
+    assert!(
+        catalog.is_empty(),
+        "a settled boot never appends through the boot-window refresh"
+    );
+}
+
+/// An `always_load` append resolves eager exactly like the turn build's
+/// `apply_mcp_tool_deferral` would, and joins the active set so the caller's
+/// `tool_surface` declaration serializes it into the next request (#588).
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_refresh_gives_an_always_load_append_the_eager_treatment() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({"servers": {"fast": {"command": "sh", "args": [fast_script]}}}).to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        tools_always_load: HashSet::from(["mcp_fast_ping".to_string()]),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.connect_all().await;
+    }
+
+    engine.mcp_boot_in_flight = true;
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut active_tool_names = policy.active_names.clone();
+    let mut catalog = vec![catalog_tool("read")];
+
+    engine
+        .refresh_booting_mcp_tools(&mut catalog, &mut active_tool_names, &policy)
+        .await;
+
+    assert_eq!(
+        catalog.len(),
+        2,
+        "the ready server's tool joins the catalog"
+    );
+    assert_eq!(catalog[1].name, "mcp_fast_ping");
+    assert_eq!(
+        catalog[1].defer_loading,
+        Some(false),
+        "an always_load append must resolve eager, matching the fresh build"
+    );
+    assert!(
+        active_tool_names.contains("mcp_fast_ping"),
+        "the eager append must join the active set so the caller's tool_surface \
+         declaration serializes it into the next request"
+    );
+}
+
+/// The refresh applies the turn build's own narrowing: a tool the build's
+/// policy stripped (deny rule, or missing from a strict allow-list) must not
+/// re-enter mid-turn, and a turn running under tool security — whose build
+/// carries no MCP surface at all — gets no boot-window appends either (#588).
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_refresh_honors_the_turn_policy_and_tool_security() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({"servers": {"fast": {"command": "sh", "args": [fast_script]}}}).to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.connect_all().await;
+    }
+    engine.mcp_boot_in_flight = true;
+
+    async fn refreshed_names(
+        engine: &mut Engine,
+        policy: &ToolSurfacePolicy,
+    ) -> Vec<crate::models::Tool> {
+        let mut catalog = vec![catalog_tool("read")];
+        let mut active = policy.active_names.clone();
+        engine
+            .refresh_booting_mcp_tools(&mut catalog, &mut active, policy)
+            .await;
+        catalog
+    }
+    let names = |catalog: &[crate::models::Tool]| -> Vec<String> {
+        catalog.iter().map(|tool| tool.name.clone()).collect()
+    };
+
+    // Control: an unrestricted turn build gets the append.
+    let plain = policy_for_catalog(
+        vec![catalog_tool("read")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let catalog = refreshed_names(&mut engine, &plain).await;
+    assert!(
+        names(&catalog).contains(&"mcp_fast_ping".to_string()),
+        "the control append must land: {:?}",
+        names(&catalog)
+    );
+
+    // A deny rule that the build's retain would have applied keeps the tool
+    // out mid-turn: tool_search must never surface a denied name.
+    let denied = policy_for_catalog(
+        vec![catalog_tool("read")],
+        None,
+        Some(vec!["mcp_fast_*".to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let catalog = refreshed_names(&mut engine, &denied).await;
+    assert_eq!(
+        names(&catalog),
+        vec!["read".to_string()],
+        "a denied MCP tool must not re-enter the catalog mid-turn"
+    );
+
+    // A strict allow-list behaves the same way.
+    let allow_listed = policy_for_catalog(
+        vec![catalog_tool("read")],
+        Some(vec!["read".to_string()]),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let catalog = refreshed_names(&mut engine, &allow_listed).await;
+    assert_eq!(
+        names(&catalog),
+        vec!["read".to_string()],
+        "a tool outside the turn's allow-list must not re-enter mid-turn"
+    );
+
+    // Under turn tool security the fresh build produces no MCP surface at
+    // all, so the boot-window refresh must not either.
+    engine.active_turn_tool_security = Some(std::sync::Arc::new(
+        crate::core::ops::TurnToolSecurityPolicy::new(None, None),
+    ));
+    let catalog = refreshed_names(&mut engine, &plain).await;
+    assert_eq!(
+        names(&catalog),
+        vec!["read".to_string()],
+        "a tool-security turn must get no boot-window MCP appends"
+    );
+}
+
+/// The booting search status must read the pool's live diagnosis: a server
+/// that already settled with a failure is excluded even though the queued
+/// boot update has not been drained — the engine-side error map alone would
+/// keep it listed as "still connecting" for the rest of an in-flight turn
+/// (#588).
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_search_status_excludes_a_pool_side_failure_before_any_drain() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "ghost": {"command": "codewhale-mcp-missing-ghost-9f8e7d6c"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.get_or_connect("fast")
+            .await
+            .expect("the fixture server connects");
+    }
+
+    engine.mcp_boot_in_flight = true;
+    // Mid-boot shape before any diagnosis: ghost is enabled, has no
+    // connection, and no failure record, so it is genuinely still pending.
+    let status = engine
+        .mcp_boot_search_status()
+        .await
+        .expect("boot in flight");
+    assert_eq!(status, vec!["ghost".to_string()]);
+
+    // The boot task records each failure pool-side the moment it settles —
+    // without any drain. The status must honor that evidence instead of
+    // steering the model into futile retries against a dead server.
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.note_connect_failure("ghost", &anyhow::anyhow!("connect failed: spawn failure"));
+    }
+    assert!(
+        engine.mcp_connection_errors.is_empty(),
+        "the pre-condition: no boot update has been drained"
+    );
+    assert!(
+        engine.mcp_boot_search_status().await.is_none(),
+        "a pool-side settled failure must suppress the connecting note before any drain"
+    );
+}
+
+/// The booting search status (#588) names only servers the engine still
+/// awaits: enabled, not connected, and not yet diagnosed. A diagnosed failure
+/// drops out (the boot briefing owns it), and a settled boot reports nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn booting_search_status_lists_only_undiagnosed_unsettled_servers() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    std::fs::write(
+        &config_path,
+        json!({
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "ghost": {"command": "codewhale-mcp-missing-ghost-9f8e7d6c"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine
+        .ensure_mcp_pool()
+        .await
+        .expect("pool builds without connecting");
+    // Only the fast server settles; ghost stays pending (never connected,
+    // never diagnosed) — the mid-boot shape.
+    {
+        let mut pool = engine.mcp_pool.as_ref().expect("pool").lock().await;
+        pool.get_or_connect("fast")
+            .await
+            .expect("the fixture server connects");
+    }
+
+    engine.mcp_boot_in_flight = true;
+    let status = engine
+        .mcp_boot_search_status()
+        .await
+        .expect("boot in flight");
+    assert_eq!(status, vec!["ghost".to_string()]);
+
+    // Once the engine carries ghost's diagnosis (a drained boot update owns
+    // it), the pending list drops the server: a diagnosed failure belongs to
+    // the boot briefing, not to a "still connecting" note.
+    engine.mcp_connection_errors = HashMap::from([(
+        "ghost".to_string(),
+        "connect failed: spawn failure".to_string(),
+    )]);
+    assert!(
+        engine.mcp_boot_search_status().await.is_none(),
+        "an empty pending list must suppress the booting note entirely"
+    );
+
+    engine.mcp_boot_in_flight = false;
+    assert!(
+        engine.mcp_boot_search_status().await.is_none(),
+        "a settled boot must not advertise a booting window"
+    );
+}
+
+/// The turn-loop wiring (#588), end to end through a live turn: a
+/// `tool_search` executed mid-boot must (a) see the fast server's tool that
+/// the per-batch refresh folded into the catalog, and (b) carry the
+/// `mcp_boot` block naming the server still connecting. Deleting either
+/// turn-loop call site — the refresh or the status argument — fails this
+/// test; the helper-level tests alone cannot.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_booting_turns_tool_search_finds_the_refreshed_tool_and_carries_the_boot_note() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let config_path = tmp.path().join("mcp.json");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let engine_config = EngineConfig {
+        workspace,
+        mcp_config_path: config_path,
+        ..Default::default()
+    };
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "search-during-boot",
+            TOOL_SEARCH_NAME,
+            r#"{"query":"ping"}"#,
+        ),
+        canned::simple_text_turn("Found it."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+
+    engine.start_mcp_session_boot().await;
+    assert!(
+        engine.mcp_boot_in_flight,
+        "two pending servers keep boot open"
+    );
+    // Determinism: settle the fast server before the turn so the refresh has
+    // something to fold in at the first batch seam, while the hung server
+    // keeps the boot in flight.
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fast server must settle while the boot is still in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // No allow/deny gates: the boot-window refresh must surface the settled
+    // server's tool to the search, and tool_search joins the catalog (and
+    // stays active) through the standard synthetic injection.
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert!(
+        engine.mcp_boot_in_flight,
+        "the hung server must still hold the boot open after the turn"
+    );
+
+    let mut events = handle.rx_event.write().await;
+    let search = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("the turn must execute the booting tool_search");
+    let result = search.expect("the search must succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("payload is JSON");
+    let references: Vec<&str> = payload["tool_references"]
+        .as_array()
+        .expect("references array")
+        .iter()
+        .filter_map(|entry| entry["tool_name"].as_str())
+        .collect();
+    assert!(
+        references.contains(&"mcp_fast_ping"),
+        "the mid-turn refresh must make the settled server's tool searchable: {payload}"
+    );
+    assert_eq!(
+        payload["mcp_boot"]["status"],
+        json!("connecting"),
+        "the turn loop must thread the boot status into the search result: {payload}"
+    );
+    assert_eq!(
+        payload["mcp_boot"]["servers_pending"],
+        json!(["hung"]),
+        "the still-connecting server must be named: {payload}"
+    );
+}
+
+/// The cross-turn half of the boot window (#588): when a turn starts while
+/// the boot is in flight, the turn declares the `mcp-session-boot` re-pin up
+/// front, so the next turn's snapshot picking up a newly settled eager tool
+/// is a declared surface change rather than undeclared drift tripping the C5
+/// guard.
+#[tokio::test]
+async fn a_turn_starting_during_boot_declares_the_boot_surface_change() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("First turn."),
+        canned::simple_text_turn("Second turn."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.mcp_boot_in_flight = true;
+
+    // Turn 1 pins the prefix without the tool.
+    let first = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, first, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    // Turn 2's surface picks up a newly settled eager tool — the shape the
+    // boot-window snapshot produces once `tools_always_load` names it.
+    let mut settled = catalog_tool("mcp_fast_ping");
+    settled.defer_loading = Some(false);
+    let second = policy_for_catalog(
+        vec![catalog_tool("read_file"), settled],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, second, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let stability = engine
+        .session
+        .prefix_stability
+        .as_ref()
+        .expect("prefix stability monitor exists");
+    let last = stability
+        .history()
+        .last()
+        .expect("the surface change must be recorded in the history");
+    assert!(
+        last.repinned,
+        "the boot-window surface growth must re-pin, not drift: {:?}",
+        last
+    );
+    assert_eq!(
+        last.reason, "change:mcp-session-boot",
+        "the declared boot reason must own the re-pin: {:?}",
+        last
+    );
+}
+
+/// The in-batch half of the boot window (#588): a server can settle while
+/// earlier tools of a batch are still executing, so the batch-start fold is
+/// stale by exactly that duration. The search seam must re-fold the live
+/// pool before searching, or a capability that just became searchable reads
+/// as a bare miss with no note at all — the exact "absent" verdict #588
+/// started from.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_batchs_tool_search_sees_a_server_that_settled_after_the_batch_started() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let mock = std::sync::Arc::new(crate::llm_client::mock::MockLlmClient::new(vec![]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace,
+            mcp_config_path: config_path,
+            ..Default::default()
+        },
+        &Config::default(),
+        client,
+    );
+
+    engine.start_mcp_session_boot().await;
+    assert!(engine.mcp_boot_in_flight, "the hung server keeps boot open");
+
+    // The stale-catalog shape of the in-batch window: the turn's catalog was
+    // captured before the fast server settled.
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut catalog = vec![catalog_tool("read_file")];
+    let mut active = policy.active_names.clone();
+    assert!(
+        !catalog.iter().any(|tool| tool.name == "mcp_fast_ping"),
+        "precondition: the captured catalog predates the settle"
+    );
+
+    // Determinism: the settle lands before the batch's tool_search executes.
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fast server must settle while the boot is still in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let plans = vec![ToolExecutionPlan {
+        index: 0,
+        id: "search-1".to_string(),
+        name: TOOL_SEARCH_NAME.to_string(),
+        input: json!({"query": "ping"}),
+        caller: None,
+        interactive: false,
+        approval_required: false,
+        approval_description: String::new(),
+        approval_force_prompt: false,
+        // tool_search mutates the turn catalog, so real plans keep it out of
+        // parallel chunks — the sequential arm is the one under test.
+        supports_parallel: false,
+        read_only: true,
+        detached_start: false,
+        resources: vec![],
+        blocked_error: None,
+        guard_result: None,
+    }];
+    let mut mode = AppMode::Agent;
+    let mut questions_allowed = true;
+    let outcomes = engine
+        .execute_planned_tools(
+            plans,
+            "turn-in-batch-fold",
+            "",
+            &mut catalog,
+            &policy,
+            &mut active,
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(())),
+            Some(std::sync::Arc::clone(pool)),
+            &crate::sandbox::SandboxPolicy::default(),
+            &mut mode,
+            &mut questions_allowed,
+        )
+        .await;
+    assert!(
+        outcomes[0].is_some(),
+        "the batch must execute the tool_search"
+    );
+    assert!(
+        catalog.iter().any(|tool| tool.name == "mcp_fast_ping"),
+        "the search-time re-fold must append the settled server's tool"
+    );
+
+    let mut events = handle.rx_event.write().await;
+    let search = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("the batch must emit the tool_search completion");
+    let result = search.expect("the search must succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("payload is JSON");
+    let references: Vec<&str> = payload["tool_references"]
+        .as_array()
+        .expect("references array")
+        .iter()
+        .filter_map(|entry| entry["tool_name"].as_str())
+        .collect();
+    assert!(
+        references.contains(&"mcp_fast_ping"),
+        "the search must see the tool that settled mid-batch: {payload}"
+    );
+    assert_eq!(
+        payload["mcp_boot"]["servers_pending"],
+        json!(["hung"]),
+        "the still-connecting server must be named, the settled one not: {payload}"
+    );
+}
+
+/// The status half of the tool-security gate: a turn that runs under turn
+/// tool security produces no MCP surface at all, so its tool_search must not
+/// carry the boot note either — the note would advertise servers this turn
+/// can never reach and prescribe a retry that cannot work in-turn (#588).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tool_security_turns_search_carries_no_boot_note() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let fast_script = write_boot_fixture_server(tmp.path(), "ping");
+    let hung_script = write_hanging_boot_fixture_server(tmp.path());
+    let config_path = tmp.path().join("mcp.json");
+    std::fs::write(
+        &config_path,
+        json!({
+            "timeouts": {"connect_timeout": 6, "execute_timeout": 10, "read_timeout": 10},
+            "servers": {
+                "fast": {"command": "sh", "args": [fast_script]},
+                "hung": {"command": "sh", "args": [hung_script]}
+            }
+        })
+        .to_string(),
+    )
+    .expect("MCP config");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "secured-search-during-boot",
+            TOOL_SEARCH_NAME,
+            r#"{"query":"ping"}"#,
+        ),
+        canned::simple_text_turn("Nothing to find."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            workspace,
+            mcp_config_path: config_path,
+            ..Default::default()
+        },
+        &Config::default(),
+        client,
+    );
+
+    engine.start_mcp_session_boot().await;
+    assert!(engine.mcp_boot_in_flight, "the hung server keeps boot open");
+    let pool = engine.mcp_pool.as_ref().expect("boot built the pool");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let visible = pool.lock().await.to_api_tools();
+        if visible.iter().any(|tool| tool.name == "mcp_fast_ping") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the fast server must settle while the boot is still in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The gate under test: this turn runs with turn tool security, so its
+    // build has no MCP surface and the boot status must stay silent too.
+    engine.active_turn_tool_security = Some(std::sync::Arc::new(
+        crate::core::ops::TurnToolSecurityPolicy::new(None, None),
+    ));
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let search = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("the turn must execute the secured tool_search");
+    let result = search.expect("the search must succeed");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content).expect("payload is JSON");
+    assert!(
+        payload.get("mcp_boot").is_none(),
+        "a tool-security turn must get no boot note at all: {payload}"
+    );
+    assert_eq!(
+        payload["tool_references"],
+        json!([]),
+        "the secured turn must not see MCP tools either: {payload}"
+    );
+}
+
+/// The boot stamp is first-set-wins: a re-pin reason that is already pending
+/// when a booting turn starts (`resume`, `tool_surface`) stays the declared
+/// cause — the boot stamp must not overwrite it, because both name the same
+/// surface change and the earlier one is the more precise attribution.
+#[tokio::test]
+async fn a_booting_turn_keeps_an_already_declared_surface_reason() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("First turn."),
+        canned::simple_text_turn("Second turn."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+
+    // Turn 1 pins the prefix without the tool.
+    let first = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, first, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    // Turn 2 starts with a reason already declared (as `SyncSession` leaves
+    // `resume`) while the boot window is open, and its surface grows.
+    engine.mcp_boot_in_flight = true;
+    engine.session.pending_prefix_change_reason = Some("resume".to_string());
+    let mut settled = catalog_tool("mcp_fast_ping");
+    settled.defer_loading = Some(false);
+    let second = policy_for_catalog(
+        vec![catalog_tool("read_file"), settled],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, second, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let stability = engine
+        .session
+        .prefix_stability
+        .as_ref()
+        .expect("prefix stability monitor exists");
+    let last = stability
+        .history()
+        .last()
+        .expect("the surface change must be recorded in the history");
+    assert!(
+        last.repinned,
+        "the boot-window surface growth must re-pin, not drift: {:?}",
+        last
+    );
+    assert_eq!(
+        last.reason, "change:resume",
+        "the already-declared reason must survive the booting turn start: {:?}",
+        last
+    );
 }

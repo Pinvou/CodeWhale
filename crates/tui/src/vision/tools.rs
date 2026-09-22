@@ -21,6 +21,26 @@ pub struct ImageAnalyzeTool {
     route_client: Option<DeepSeekClient>,
 }
 
+/// Total envelope for one image_analyze call, retry attempts and response
+/// body consumption included. reqwest's `read_timeout` is *not* a per-read
+/// idle bound for the request phase: its timer starts at `send()` and is
+/// never reset until the response headers arrive, so it silently acts as a
+/// total deadline on the multi-MB upload plus the full non-streaming vision
+/// generation — precisely the healthy work a 120s cap used to kill. The
+/// client therefore bounds only the connect handshake, and this envelope
+/// (the same 30-minute budget as non-streaming model requests) is the sole
+/// total bound; a stalled connection errors out through it instead of
+/// hanging.
+const VISION_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
+
+fn vision_request_envelope() -> Duration {
+    if cfg!(test) {
+        Duration::from_secs(2)
+    } else {
+        VISION_REQUEST_ENVELOPE
+    }
+}
+
 impl ImageAnalyzeTool {
     #[cfg(test)]
     #[must_use]
@@ -34,7 +54,12 @@ impl ImageAnalyzeTool {
         route_client: Option<DeepSeekClient>,
     ) -> Self {
         let client = crate::tls::reqwest_client_builder()
-            .timeout(Duration::from_secs(120))
+            // Bound only the connect handshake. A client- or request-level
+            // `read_timeout` would start counting at `send()` and never
+            // reset before the response headers, quietly re-introducing a
+            // total deadline on the upload + long non-streaming generation;
+            // the total bound lives in VISION_REQUEST_ENVELOPE instead.
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
         Self {
@@ -268,50 +293,59 @@ impl ToolSpec for ImageAnalyzeTool {
             None => Some(crate::client::acquire_remote_control_inference_participant().await),
         };
 
-        let response = with_retry(
-            &retry_config,
-            || {
-                let client = self.client.clone();
-                let url = url.clone();
-                let api_key = api_key.clone();
-                let payload = payload.clone();
-                async move {
-                    let response = client
-                        .post(&url)
-                        .header("Content-Type", "application/json")
-                        .header("Authorization", format!("Bearer {api_key}"))
-                        .json(&payload)
-                        .send()
-                        .await
-                        .map_err(|e| LlmError::from_reqwest(&e))?;
-
-                    let status = response.status();
-                    if !status.is_success() {
-                        let error_text = response
-                            .text()
+        let response_json = tokio::time::timeout(vision_request_envelope(), async {
+            let response = with_retry(
+                &retry_config,
+                || {
+                    let client = self.client.clone();
+                    let url = url.clone();
+                    let api_key = api_key.clone();
+                    let payload = payload.clone();
+                    async move {
+                        let response = client
+                            .post(&url)
+                            .header("Content-Type", "application/json")
+                            .header("Authorization", format!("Bearer {api_key}"))
+                            .json(&payload)
+                            .send()
                             .await
-                            .unwrap_or_else(|_| "Unknown error".to_string());
-                        let error_text = sanitize_http_error_body(
-                            Some("Vision provider"),
-                            status.as_u16(),
-                            &error_text,
-                        );
-                        return Err(LlmError::from_http_response(status.as_u16(), &error_text));
+                            .map_err(|e| LlmError::from_reqwest(&e))?;
+
+                        let status = response.status();
+                        if !status.is_success() {
+                            let error_text = response
+                                .text()
+                                .await
+                                .unwrap_or_else(|_| "Unknown error".to_string());
+                            let error_text = sanitize_http_error_body(
+                                Some("Vision provider"),
+                                status.as_u16(),
+                                &error_text,
+                            );
+                            return Err(LlmError::from_http_response(status.as_u16(), &error_text));
+                        }
+                        Ok(response)
                     }
-                    Ok(response)
-                }
-            },
-            None,
-        )
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("Vision API request failed: {e}")))?;
-
-        let json: Value = response
-            .json()
+                },
+                None,
+            )
             .await
-            .map_err(|e| ToolError::execution_failed(format!("Failed to parse response: {e}")))?;
+            .map_err(|e| ToolError::execution_failed(format!("Vision API request failed: {e}")))?;
 
-        let content = json
+            let json: Value = response.json().await.map_err(|e| {
+                ToolError::execution_failed(format!("Failed to parse response: {e}"))
+            })?;
+            Ok(json)
+        })
+        .await
+        .map_err(|_| {
+            ToolError::execution_failed(format!(
+                "Vision API request timed out after {}s",
+                vision_request_envelope().as_secs()
+            ))
+        })??;
+
+        let content = response_json
             .get("choices")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("message"))
@@ -320,7 +354,7 @@ impl ToolSpec for ImageAnalyzeTool {
             .unwrap_or("")
             .to_string();
 
-        let model = json
+        let model = response_json
             .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or(&self.config.model)
@@ -600,6 +634,20 @@ mod tests {
         })
     }
 
+    fn write_workspace_image(workspace: &std::path::Path) {
+        std::fs::write(workspace.join("sample.png"), b"not a real png")
+            .expect("write sample image");
+    }
+
+    fn vision_response_body() -> Value {
+        json!({
+            "model": "test-vision-model",
+            "choices": [
+                { "message": { "content": "a red square" } }
+            ]
+        })
+    }
+
     #[tokio::test]
     async fn execute_reports_real_pixel_dimensions_and_format() {
         let server = mock_vision_endpoint().await;
@@ -698,5 +746,63 @@ mod tests {
         let path = dir.path().join("tiny.bmp");
         std::fs::write(&path, MINIMAL_BMP).expect("write fixture");
         assert_eq!(ImageAnalyzeTool::image_dimensions(&path), None);
+    }
+
+    #[tokio::test]
+    async fn envelope_bounds_a_stalled_vision_provider() {
+        let server = MockServer::start().await;
+        // The stalled provider never answers within the test envelope: the
+        // upload + non-streaming generation window must be cut off by the
+        // envelope, not by a client read timeout (which reqwest turns into
+        // a hidden total deadline from `send()`).
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(vision_response_body())
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+
+        let workspace = tempdir().expect("workspace tempdir");
+        write_workspace_image(workspace.path());
+        let ctx = ToolContext::new(workspace.path().to_path_buf());
+        let tool = tool_with_base_url(server.uri());
+
+        let err = tool
+            .execute(json!({"image_path": "sample.png"}), &ctx)
+            .await
+            .expect_err("a provider that never answers must hit the envelope");
+        assert!(
+            err.to_string().contains("timed out after"),
+            "envelope timeout must be reported as such; got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_answer_within_the_envelope_is_returned() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vision_response_body()))
+            .mount(&server)
+            .await;
+
+        let workspace = tempdir().expect("workspace tempdir");
+        write_workspace_image(workspace.path());
+        let ctx = ToolContext::new(workspace.path().to_path_buf());
+        let tool = tool_with_base_url(server.uri());
+
+        let result = tool
+            .execute(
+                json!({"image_path": "sample.png", "prompt": "what is this?"}),
+                &ctx,
+            )
+            .await
+            .expect("a prompt answer must flow through the envelope");
+        let payload: Value =
+            serde_json::from_str(&result.content).expect("tool result must carry json");
+        assert_eq!(payload["analysis"], "a red square");
     }
 }

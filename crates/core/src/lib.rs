@@ -40,13 +40,15 @@ use serde_json::{Value, json};
 use tokio::time;
 use uuid::Uuid;
 
-/// Per-tool dispatch budget for the headless runtime. Matches the generous
-/// subagent default so long-running tools are not cut off prematurely.
+/// Per-tool dispatch budget for the headless runtime. 30 minutes: tools
+/// legitimately run long (builds, test suites, MCP-backed calls), and this
+/// wrapper is a runaway backstop, not an expected duration — the previous
+/// 300s value cut off healthy in-flight tool work.
 fn tool_dispatch_timeout() -> Duration {
     if cfg!(test) {
         Duration::from_millis(50)
     } else {
-        Duration::from_secs(300)
+        Duration::from_secs(1800)
     }
 }
 

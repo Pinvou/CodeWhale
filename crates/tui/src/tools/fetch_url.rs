@@ -119,7 +119,7 @@ impl ToolSpec for FetchUrlTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Request timeout in milliseconds (default 15,000; max 60,000)."
+                    "description": "Request timeout in milliseconds (default 15,000; max 300,000)."
                 },
                 "fields": {
                     "type": "array",

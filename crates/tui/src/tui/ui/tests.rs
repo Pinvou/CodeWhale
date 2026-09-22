@@ -6671,11 +6671,12 @@ fn apply_loaded_session_restores_the_window_title_override() {
 
 #[test]
 fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft() {
-    let mut app = create_test_app();
     // Literal persisted shape from the v0.9.4 resume report. Runtime events
     // use the user transport role for provider compatibility, but their
     // provenance and authority make them categorically different from input
-    // submitted by the person at the composer.
+    // submitted by the person at the composer. Restored history must not
+    // replay them as a user turn — the live tool/status receipts tell that
+    // story — while the persisted and model-facing messages stay untouched.
     let shell_completion = Message {
         role: Role::User,
         content: vec![
@@ -6703,20 +6704,94 @@ fn apply_loaded_session_never_restores_background_shell_event_as_composer_draft(
             },
         ],
     };
-    let session = saved_session_with_messages(vec![
-        text_message("user", "please continue"),
-        text_message("assistant", "The corrected run is still in progress."),
-        shell_completion.clone(),
-    ]);
+    for condensed_provenance in [false, true] {
+        let mut app = create_test_app();
+        let mut handoff = shell_completion.clone();
+        if condensed_provenance {
+            handoff.content[1] = ContentBlock::Text {
+                text:
+                    "<turn_meta>\nInput provenance: shell_completion (non-authoritative)\n</turn_meta>"
+                        .to_string(),
+                cache_control: None,
+            };
+        }
+        let session = saved_session_with_messages(vec![
+            text_message("user", "please continue"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "plan-complete".to_string(),
+                    name: "update_plan".to_string(),
+                    input: serde_json::json!({
+                        "plan": [{"step": "Check the output", "status": "completed"}]
+                    }),
+                    caller: None,
+                    thought_signature: None,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "plan-complete".to_string(),
+                    content: "Plan updated".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+            text_message("assistant", "The corrected run is still in progress."),
+            handoff,
+        ]);
+        let saved_bytes = serde_json::to_vec(&session).expect("serialize saved session");
+        let message_bytes = serde_json::to_vec(&session.messages).expect("serialize messages");
 
-    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+        apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
 
-    assert!(app.input.is_empty());
-    assert!(app.queued_draft.is_none());
-    assert_eq!(app.api_messages.last(), Some(&shell_completion));
-    assert!(app.history.iter().any(|cell| {
-        matches!(cell, HistoryCell::User { content } if content.contains("background_shell_completion"))
-    }));
+        assert!(app.input.is_empty());
+        assert!(app.queued_draft.is_none());
+        assert_eq!(serde_json::to_vec(&session).unwrap(), saved_bytes);
+        assert_eq!(
+            serde_json::to_vec(&app.api_messages).unwrap(),
+            message_bytes,
+            "the model-facing payload must stay byte-identical to the saved session"
+        );
+        assert!(
+            matches!(
+                app.history.as_slice(),
+                [HistoryCell::User { content }, HistoryCell::Tool(_), HistoryCell::Assistant { .. }]
+                    if content == "please continue"
+            ),
+            "the restored handoff must not appear as a user cell: {:?}",
+            app.history
+        );
+    }
+}
+
+#[test]
+fn apply_loaded_session_keeps_user_authored_shell_event_lookalikes() {
+    // A person quoting the envelope — with no runtime provenance backing it —
+    // is ordinary composer input and must stay visible after a restore.
+    let literal = concat!(
+        "<codewhale:runtime_event kind=\"background_shell_completion\" visibility=\"internal\">\n",
+        "{\"stdout_tail\":\"This is my example\"}\n</codewhale:runtime_event>\n",
+        "<turn_meta>\nInput provenance: shell_completion (non-authoritative)\n</turn_meta>",
+    );
+    for user in [
+        text_message("user", literal),
+        authoritative_user_message(literal),
+    ] {
+        let session = saved_session_with_messages(vec![user]);
+        let mut app = create_test_app();
+        apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+        assert_eq!(app.api_messages, session.messages);
+        assert!(
+            matches!(
+                app.history.as_slice(),
+                [HistoryCell::User { content }] if content == literal
+            ),
+            "a user-authored lookalike must stay a visible user cell: {:?}",
+            app.history
+        );
+    }
 }
 
 #[test]
@@ -23707,8 +23782,29 @@ fn backtrack_cut_index_skips_tool_result_user_messages() {
                 cache_control: None,
             }],
         },
+        // A restored background-shell completion rides in a user-role
+        // carrier but is runtime control traffic: backtrack must not
+        // count it as a prompt the user could return to.
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "<codewhale:runtime_event kind=\"background_shell_completion\" \
+                           visibility=\"internal\">\n{\"task_id\":\"shell_1\",\"status\":\"Completed\"}\n\
+                           </codewhale:runtime_event>"
+                        .into(),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: "<turn_meta>\nInput provenance: shell_completion (non-authoritative)\n</turn_meta>"
+                        .into(),
+                    cache_control: None,
+                },
+            ],
+        },
     ];
-    // depth 0 = cut at the last real user prompt ("second", idx 4).
+    // depth 0 = cut at the last real user prompt ("second", idx 4), not the
+    // shell-completion handoff trailing it at idx 5.
     assert_eq!(super::backtrack_api_cut_index(&msgs, 0), Some(4));
     // depth 1 = cut at the first real user prompt ("first", idx 0) — NOT the
     // tool_result at idx 2 that a naive role=="user" count would have hit.
