@@ -1613,8 +1613,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (!bridge.available) return false;
         const outgoing = String(text || '').trim();
         if (remoteConnection && remoteConnection.status === 'connected') {
+          // 会话引用只表示 A/B 通道已建立；Rust 仅在能力快照已经应用后才允许
+          // 构造 task intent。发送按钮、回车、语音与欢迎卡片最终都经过这里，
+          // 因此必须在统一入口拦截，不能只依赖按钮 disabled。
+          if (!remoteLinkReady) return false;
           const sessionRef = remoteConnection.sessionRef;
-          if (!sessionRef) throw new Error('remote_session_not_ready');
           try {
             await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, remoteModelSource);
             setRemoteSendError(null);
@@ -1702,7 +1705,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // composer (first-turn materialization abort, session switch);
         // restoring again would duplicate it.
         return dispatchResult;
-      }, [activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteConnection, remoteModelSource, t, visualPosterSceneActive]);
+      }, [activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteConnection, remoteLinkReady, remoteModelSource, t, visualPosterSceneActive]);
 
       // 断开重连或窗口重载后，进入 ChatView 时也要确保远程 session 可用；
       // sessionRef 是把普通输入框路由到远端的必要条件。
@@ -1726,6 +1729,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (remoteConnection.capabilityRevision != null || remoteCapabilityBusy) return;
         setRemoteCapabilityBusy(true);
         setRemoteCapabilityError(null);
+        setRemoteSendError(null);
         bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef)
           .then(() => setRemoteCapabilityError(null))
           .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
@@ -1919,7 +1923,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
       async function handleSend() {
         // 不再因 busy 拦截:bridge.chat.sendMessage 在生成中会把这句排队(本轮跑完自动发)。
-        if (isMultiAgentReadOnly || !canSend) return;
+        // 远程能力准备不是生成中的「可排队」状态：快照到达前 Rust 无法构造
+        // task intent，必须保留草稿并等待 remoteLinkReady。
+        if (isMultiAgentReadOnly || !canSend || (remoteChatActive && !remoteLinkReady)) return;
         if (chatVoice && chatVoice.editPreview) {
           await chatVoice.applyVoiceEditPreview({ send: true });
           return;
@@ -2878,7 +2884,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   // funneled into the preview card (apply and send), so buttons based on
                   // inputText cannot send the raw text or double-send during the preview.
 
-                  const ready = canSend && !sceneCapabilityPreparing && !chatVoice.editPreview;
+                  const ready = canSend
+                    && !sceneCapabilityPreparing
+                    && !chatVoice.editPreview
+                    && (!remoteChatActive || remoteLinkReady);
                   const isQueue = busy && ready;
                   return (
                     <div className="flex items-center gap-1">

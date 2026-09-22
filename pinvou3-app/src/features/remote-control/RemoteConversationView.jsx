@@ -47,6 +47,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   // 构造任务）；两者都失败关闭，不暴露半通路。
   const sessionRef = connection.sessionRef || null;
   const connected = connection.status === 'connected';
+  const capabilityReady = !!sessionRef && connection.capabilityRevision != null;
   const [sessionBusy, setSessionBusy] = useState(false);
   const [sessionError, setSessionError] = useState(null);
 
@@ -70,7 +71,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   }, [remote, sessionRef, connection.capabilityRevision]);
 
   const send = async () => {
-    if (!remote || !draft.trim() || !sessionRef) return;
+    if (!remote || !draft.trim() || !capabilityReady) return;
     setBusy(true);
     setError(null);
     try {
@@ -186,7 +187,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
         <button
           type="submit"
           data-testid="remote-conversation-send"
-          disabled={busy || sessionBusy || !draft.trim() || !sessionRef}
+          disabled={busy || sessionBusy || !draft.trim() || !capabilityReady}
           className="shrink-0 rounded-full bg-[#1A73E8] px-4 py-2 text-[13px] text-white disabled:opacity-60"
         >
           {busy ? copy.sending : copy.send}

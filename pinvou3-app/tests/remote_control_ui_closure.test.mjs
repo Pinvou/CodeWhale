@@ -68,6 +68,13 @@ test('the main chat tolerates an absent remote connection', () => {
   );
 });
 
+test('the main chat cannot submit before the remote capability snapshot is ready', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(chat.includes('if (!remoteLinkReady) return false'));
+  assert.ok(chat.includes('(remoteChatActive && !remoteLinkReady)'));
+  assert.ok(chat.includes('(!remoteChatActive || remoteLinkReady)'));
+});
+
 test('journal events project into a deduplicated transcript', () => {
   const frame = (kind, sequence, text) => ({
     event: {

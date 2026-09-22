@@ -99,3 +99,9 @@ test('the connected conversation has an inline composer', () => {
   assert.ok(view.includes('controllerTaskSend(sessionRef, draft.trim(), modelSource)'));
   assert.ok(view.includes('composerPlaceholder'));
 });
+
+test('the composer stays disabled until the capability snapshot is applied', () => {
+  assert.ok(view.includes('const capabilityReady = !!sessionRef && connection.capabilityRevision != null'));
+  assert.ok(view.includes('!draft.trim() || !capabilityReady'));
+  assert.ok(view.includes('disabled={busy || sessionBusy || !draft.trim() || !capabilityReady}'));
+});
