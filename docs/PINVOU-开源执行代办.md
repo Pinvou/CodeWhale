@@ -159,7 +159,7 @@
 - `marked` 13.0.3 与 DOMPurify 3.4.2 首版保留当前运行行为，补齐上游、版本、许可证和 SHA-256；Tailwind 首版保留运行时机制，但改由固定 npm 版本可重复生成，不继续使用无版本 CDN 文件。
 - 上述前端依赖、tracked `node_modules` 和可复现二进制组装属于通用改进，私有官方仓与社区仓共同采用；H3C、遥测和官方服务配置只留在私有层。
 - 改造不得改变官方版基本功能和发布行为；未通过开发启动、核心 UI/Markdown/安全过滤、网页模板、连接器、Rust/前端测试、生产构建、安装/卸载、升级和 Release 组装验证，不得进入公开快照或正式发布。
-- Tailwind 静态 CSS 迁移不纳入首个开源版本；待具备视觉回归覆盖后再单独实施，避免动态 class 丢失造成界面退化。
+- Tailwind 静态 CSS 迁移不纳入首个开源版本；待具备视觉回归覆盖后再单独实施，避免动态 class 丢失造成界面退化。（更新 2026-09：已由 PR #1217 单独实施——Tailwind 3.4.17 迁至 Vite/PostCSS 构建期并删除 Play CDN runtime；动态 class 经全源码字面量核查与 browser smoke 覆盖，Safari 14 的 inset 物理属性契约由 `tests/compat_audit.test.mjs` 与 `npm run audit:compat` 的 dist CSS 审计共同看护。）
 
 ### Community 与 Official 单一应用身份（已确认）
 

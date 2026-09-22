@@ -349,8 +349,8 @@ const AcFmtIcon = FileTypeIcon;
       const T = tc(t);
 
       return (
-        // 根节点不用 overflow-hidden class:vendor/tailwind.js 运行时把生成的
-        // .overflow-hidden 注入到 base.css 之后,会盖掉 .tool-card-output 的
+        // 根节点不用 overflow-hidden class:Tailwind utilities 在 base.css 之后,
+        // 会盖掉 .tool-card-output 的
         // overflow-y:auto,导致 diff 被 200px max-height 裁剪且无法滚动(e2e 实测)。
         // 内联样式优先级最高:显式 y 滚动 + x 裁剪(保圆角),expanded 时放开 max-height。
         <div

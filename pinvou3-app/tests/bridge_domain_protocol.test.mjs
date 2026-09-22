@@ -114,8 +114,9 @@ const expectedProtocolHashes = {
   // again for the backflowed memory-footprint reduction (Community #442):
   // streaming-render trailing-edge timers, terminal toolMeta sweep, monitor
   // display-equality gate — listener body-internal edits only, no new invoke
-  // or listen entries (capture-text refresh).
-  chat: '6f40e4e0fe5a76048e8ddcf34a8c4dc15ef015fe9e0c76cf130cc1d8f7aac2e5',
+  // or listen entries (capture-text refresh). Recomputed for per-frame stream
+  // notification coalescing; event names and invoke shapes remain unchanged.
+  chat: 'cad6c1cb471c97240673b9706fc6d799c81e64224f4fbaf56f5f44b3698cdc1e',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
