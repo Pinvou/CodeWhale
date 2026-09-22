@@ -799,9 +799,10 @@ fn workspace_switch_closing_status(workspace: &Path, receipt: Option<String>) ->
 /// "New Session" orphan on every bare-prompt `/cd` (round-14 M-3), so the
 /// step is skipped entirely there.
 fn persist_workspace_switch_receipt(app: &mut App) -> Option<String> {
-    if app.current_session_id.is_none() {
-        return None;
-    }
+    // Only an existing session has a record to swap: with no current
+    // session, `build_session_snapshot` would mint AND durably save an empty
+    // "New Session" orphan on every bare-prompt `/cd` (round-14 M-3).
+    app.current_session_id.as_ref()?;
     match SessionManager::default_location() {
         Ok(manager) => match crate::tui::ui::frame::build_session_snapshot(app, &manager) {
             Ok(snapshot) => persist_workspace_switch_snapshot(app.ui_locale, &manager, snapshot),
