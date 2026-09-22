@@ -1,3 +1,7 @@
+// Up to 80 turns, normal flow keeps short sessions simple and preserves native
+// find-in-page. Above it, resident DOM grows enough in measured mixed-content
+// sessions to justify virtualization. This count-based threshold is deliberately
+// predictable; unusually tool-heavy shorter sessions remain a follow-up target.
 export const CONVERSATION_VIRTUALIZATION_THRESHOLD = 80;
 
 /**

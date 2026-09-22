@@ -819,6 +819,7 @@ function areConversationTurnPropsEqual(prev, next) {
 
 function ConversationTurnView({
   turn,
+  virtualized = false,
   sessionId,
   onRetry,
   now,
@@ -894,7 +895,11 @@ function ConversationTurnView({
       : null;
 
   return (
-    <section className="space-y-4" data-conversation-turn={turn.id} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 600px' }}>
+    <section
+      className="space-y-4"
+      data-conversation-turn={turn.id}
+      style={virtualized ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 600px' }}
+    >
       {userContent}
       {assistantRowVisible && (
       <div className="flex items-start gap-3">
@@ -1132,6 +1137,7 @@ export function ConversationTimeline({
             <ConversationTurn
               turn={turn}
               {...props}
+              virtualized={false}
               onRetry={index === turns.length - 1 ? props.onRetry : undefined}
             />
           </React.Fragment>
@@ -1163,6 +1169,7 @@ export function ConversationTimeline({
         <ConversationTurn
           turn={turn}
           {...props}
+          virtualized
           onRetry={virtualRow.index === turns.length - 1 ? props.onRetry : undefined}
         />
       </div>
@@ -1184,6 +1191,7 @@ export function ConversationTimeline({
         <ConversationTurn
           turn={liveTurn}
           {...props}
+          virtualized
           onRetry={liveTurnIndex === turns.length - 1 ? props.onRetry : undefined}
         />
       </div>,

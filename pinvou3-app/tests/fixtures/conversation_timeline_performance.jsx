@@ -124,6 +124,7 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
     return result;
   },
   async run(count) {
+    followOutputRef.current = true;
     flushSync(() => updateTurns([]));
     scrollElementRef.current.scrollTop = 0;
     const baseTurns = turns(count);
@@ -134,6 +135,9 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
       - scrollElementRef.current.clientHeight
       - scrollElementRef.current.scrollTop;
     const nodes = host.querySelectorAll('*').length;
+    const shortContentVisibility = count <= 80
+      ? getComputedStyle(host.querySelector('[data-conversation-turn]')).contentVisibility
+      : null;
     const updatedTurns = baseTurns.slice();
     const tail = updatedTurns[updatedTurns.length - 1];
     updatedTurns[updatedTurns.length - 1] = {
@@ -146,22 +150,41 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
       .some(element => element.dataset.conversationTurn === `turn-${count - 1}` && element.textContent.includes('tail-update'));
     const bottomIndexes = renderedTurnIndexes();
     const bottomRows = [...host.querySelectorAll('[data-conversation-virtual-row]')];
+    const virtualContentVisibility = count > 80
+      ? [...host.querySelectorAll('[data-conversation-turn]')].map(element => getComputedStyle(element).contentVisibility)
+      : [];
     const measuredGap = bottomRows.length > 1
       ? Number(bottomRows.at(-1).dataset.conversationVirtualStart)
         - Number(bottomRows.at(-2).dataset.conversationVirtualStart)
         - Number(bottomRows.at(-2).dataset.conversationVirtualSize)
       : null;
     let maxResidentNodes = host.querySelectorAll('*').length;
+    // Match the real Chat/Codex scroll handlers: a user-initiated upward scroll
+    // disables bottom following before the viewport moves.
+    followOutputRef.current = false;
     scrollElementRef.current.scrollTop = 0;
     await nextPaint();
     const topScrollTop = scrollElementRef.current.scrollTop;
     const topIndexes = renderedTurnIndexes();
+    const firstTurn = host.querySelector('[data-conversation-turn="turn-0"]');
+    const firstRow = firstTurn?.closest('[data-conversation-virtual-row]');
+    const firstRowTransform = firstRow ? getComputedStyle(firstRow).transform : '';
+    const topTransformOffset = firstRowTransform && firstRowTransform !== 'none'
+      ? new DOMMatrixReadOnly(firstRowTransform).m42
+      : null;
     maxResidentNodes = Math.max(maxResidentNodes, host.querySelectorAll('*').length);
+    let maxResidentVirtualRows = host.querySelectorAll('[data-conversation-virtual-row]').length;
     scrollElementRef.current.scrollTop = scrollElementRef.current.scrollHeight / 2;
     await nextPaint();
     const middleScrollTop = scrollElementRef.current.scrollTop;
     const middleIndexes = renderedTurnIndexes();
     maxResidentNodes = Math.max(maxResidentNodes, host.querySelectorAll('*').length);
+    maxResidentVirtualRows = Math.max(
+      maxResidentVirtualRows,
+      bottomRows.length,
+      host.querySelectorAll('[data-conversation-virtual-row]').length,
+    );
+    followOutputRef.current = true;
     return {
       count,
       mountMs,
@@ -169,6 +192,7 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
       tailUpdated,
       nodes,
       maxResidentNodes,
+      maxResidentVirtualRows,
       virtualRows: Number(host.querySelector('[data-conversation-virtual-timeline]')?.dataset.conversationVirtualRowCount || 0),
       scrollHeight: scrollElementRef.current.scrollHeight,
       topIndexes,
@@ -178,6 +202,9 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
       bottomIndexes,
       bottomDistanceAfterMount,
       measuredGap,
+      shortContentVisibility,
+      virtualContentVisibility,
+      topTransformOffset,
       scrollMargin: Number(host.querySelector('[data-conversation-virtual-timeline]')?.dataset.conversationScrollMargin || 0),
     };
   },

@@ -2601,11 +2601,14 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
             {hasMessages && (
               <div ref={conversationContentRef} className="max-w-[800px] w-full min-w-0 mx-auto space-y-4">
+                {/* Keep this explicit 16px value aligned with space-y-4 so
+                    crossing the virtualization threshold does not change spacing. */}
                 <ConversationTimeline
                     turns={conversationProjection.turns}
                     sessionId={activeSessionId}
                     scrollElementRef={scrollRef}
                     busy={busy}
+                    turnGapPx={16}
                     followOutputRef={autoScrollRef}
                     onRetry={(turn) => {
                       if (!busy && turn.userText && bridge.available) {

@@ -62,10 +62,12 @@ try {
   const shortTimeline = await page.evaluate(() => window.__PINVOU_TIMELINE_PERFORMANCE__.run(50));
   assert.equal(shortTimeline.virtualRows, 0, 'short conversations must keep normal document flow');
   assert.ok(shortTimeline.topIndexes.includes(0) && shortTimeline.bottomIndexes.includes(49));
+  assert.equal(shortTimeline.shortContentVisibility, 'auto', 'short conversations keep their existing content-visibility optimization');
 
   const longTimeline = await page.evaluate(() => window.__PINVOU_TIMELINE_PERFORMANCE__.run(1000));
   assert.ok(longTimeline.nodes <= 2_500, `resident DOM exceeded budget: ${longTimeline.nodes}`);
   assert.ok(longTimeline.maxResidentNodes <= 2_500, `scrolling DOM exceeded budget: ${longTimeline.maxResidentNodes}`);
+  assert.ok(longTimeline.maxResidentVirtualRows <= 40, `too many virtual rows stayed mounted: ${longTimeline.maxResidentVirtualRows}`);
   assert.equal(longTimeline.tailUpdated, true, 'the mounted final turn must receive updates');
   assert.ok(longTimeline.topIndexes.includes(0), 'scrolling to the top must mount the first turn');
   assert.ok(longTimeline.middleIndexes.some(index => index > 200 && index < 800), 'middle scrolling must mount middle turns');
@@ -73,6 +75,12 @@ try {
   assert.ok(Math.abs(longTimeline.bottomDistanceAfterMount) <= 1, `initial bottom drifted by ${longTimeline.bottomDistanceAfterMount}px`);
   assert.ok(Math.abs(longTimeline.measuredGap - 28) <= 1, `virtual row gap was ${longTimeline.measuredGap}px instead of 28px`);
   assert.ok(Math.abs(longTimeline.scrollMargin - 96) <= 1, `scroll margin was ${longTimeline.scrollMargin}px instead of 96px`);
+  assert.ok(
+    longTimeline.virtualContentVisibility.every(value => value === 'visible'),
+    `virtual rows must use measured layout instead of content-visibility placeholders: ${longTimeline.virtualContentVisibility.join(', ')}`,
+  );
+  assert.ok(Math.abs(longTimeline.topTransformOffset) <= 1, `first row transform missed the header offset by ${longTimeline.topTransformOffset}px`);
+  assert.ok(Math.abs(longTimeline.topScrollTop) <= 1, `top scroll position drifted by ${longTimeline.topScrollTop}px`);
 
   const completionMigration = await page.evaluate(
     () => window.__PINVOU_TIMELINE_PERFORMANCE__.runCompletionMigration(),
