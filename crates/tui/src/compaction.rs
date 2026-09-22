@@ -305,12 +305,15 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// The anchor and the deletion prefer the provenance-stamped carrier: its
 /// second text block is engine-written, so a pasted user turn that merely
 /// starts with the summary header can neither steal the insertion position
-/// nor be deleted as the carrier. Only sessions saved before the provenance
-/// block existed carry the bare single-block form; there the loose predicate
-/// is the only recognition available (a pasted header is indistinguishable
-/// from it), so the historical replace-in-place applies. The same loose
-/// predicate also backs the keep/recompaction filters in `compaction/
-/// last_round.rs` — same recognition family, explicitly out of scope here.
+/// nor be deleted as the carrier. The loose predicate applies only when no
+/// stamped carrier exists — a structural condition, not a session age: it
+/// covers saves from before the provenance block and equally histories that
+/// never compacted. There a pasted header is indistinguishable from a real
+/// bare carrier on content alone (or there is no carrier to anchor on at
+/// all), so the historical replace-in-place applies and a pasted header can
+/// still be dropped. The same loose predicate also backs the keep/recompaction
+/// filters in `compaction/last_round.rs` — same recognition family,
+/// explicitly out of scope here.
 pub(crate) fn restore_compaction_checkpoint(
     mut messages: Vec<Message>,
     checkpoint: Option<&SystemPrompt>,
