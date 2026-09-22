@@ -1371,6 +1371,12 @@ async fn interrupt_stdio_turn(
     let Some(turn) = state.in_flight_turns.lock().await.get(thread_id).cloned() else {
         return Ok(false);
     };
+    interrupt_in_flight_turn(&turn).await
+}
+
+/// POST the interrupt for an in-flight turn. Bounded by its own 10s client
+/// timeout so a wedged runtime child cannot park the caller.
+async fn interrupt_in_flight_turn(turn: &InFlightTurn) -> std::result::Result<bool, JsonRpcError> {
     let mut request = codewhale_release::platform_http_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -1486,13 +1492,16 @@ impl RuntimeBridge {
                 ));
             }
 
-            match self
-                .client
-                .get(format!("{}/health", self.base_url))
-                .send()
-                .await
+            match tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                self.client.get(format!("{}/health", self.base_url)).send(),
+            )
+            .await
             {
-                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(Ok(response)) if response.status().is_success() => return Ok(()),
+                // Covers elapsed timeouts (`Err`) and late non-success
+                // responses alike: a child that accepts /health but never
+                // writes headers must not hang this probe forever.
                 _ if Instant::now() >= deadline => {
                     bail!(
                         "timed out waiting for runtime API bridge at {}/health",
@@ -1627,17 +1636,18 @@ impl RuntimeBridge {
         // Publish the turn only for the streaming window, and take it back
         // before any `?` below: a turn that has already finished must never
         // look cancellable.
-        if let Some((registry, key)) = registration.as_ref() {
-            registry.lock().await.insert(
-                key.clone(),
-                InFlightTurn {
-                    base_url: self.base_url.clone(),
-                    auth_token: self.auth_token.clone(),
-                    runtime_thread_id: thread_id.to_string(),
-                    turn_id: turn_id.clone(),
-                },
-            );
-        }
+        let registered_turn = if let Some((registry, key)) = registration.as_ref() {
+            let turn = InFlightTurn {
+                base_url: self.base_url.clone(),
+                auth_token: self.auth_token.clone(),
+                runtime_thread_id: thread_id.to_string(),
+                turn_id: turn_id.clone(),
+            };
+            registry.lock().await.insert(key.clone(), turn.clone());
+            Some(turn)
+        } else {
+            None
+        };
 
         let since_seq = self.last_seq_by_thread.get(thread_id).copied().unwrap_or(0);
         let stream_result = self
@@ -1654,6 +1664,23 @@ impl RuntimeBridge {
         if let Some((registry, key)) = registration.as_ref() {
             registry.lock().await.remove(key);
         }
+
+        // The stream died mid-turn (idle/header timeout, transport error).
+        // The runtime's lifecycle task keeps the turn running, so leave a
+        // best-effort interrupt behind: without it a retried message on the
+        // same thread is rejected with "already has an active turn" until
+        // the orphan completes on its own.
+        let stream_result = match stream_result {
+            Ok(result) => Ok(result),
+            Err(stream_err) => {
+                if let Some(turn) = registered_turn.as_ref()
+                    && let Err(interrupt_err) = interrupt_in_flight_turn(turn).await
+                {
+                    tracing::warn!("best-effort interrupt after stream failure: {interrupt_err:?}");
+                }
+                Err(stream_err)
+            }
+        };
 
         let _ = emit_stdio_event(
             writer,

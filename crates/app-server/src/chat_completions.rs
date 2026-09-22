@@ -390,6 +390,13 @@ pub(crate) async fn chat_completions_handler(
     // Build upstream request. The shared platform builder sets no timeouts,
     // so the proxy would hang forever on an accept-and-stall upstream;
     // bound both the connect and the whole non-streaming round trip.
+    //
+    // `config` (the read guard) is dropped here on purpose: everything it
+    // feeds is resolved by now, and holding it across the upstream round
+    // trip (up to UPSTREAM_TOTAL_TIMEOUT) would block config writes and,
+    // through the write-preferring lock, every later resolve for that
+    // whole window.
+    drop(config);
     let upstream_req = codewhale_release::platform_http_client_builder()
         .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
         .timeout(UPSTREAM_TOTAL_TIMEOUT)
