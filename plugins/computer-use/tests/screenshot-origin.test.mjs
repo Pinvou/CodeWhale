@@ -367,28 +367,54 @@ test("win32: a full screenshot echoes the virtual screen and binds its origin", 
   });
 });
 
-test("win32: a region screenshot crops at the virtual screen origin + offset", async () => {
+test("win32: a region screenshot consumes global screen points, not offsets from the virtual screen", async () => {
   await withEnv(psEnv, async () => {
     const b = await win32Backend();
     const shot = await b.screenshot({ region: [100, 50, 800, 600], path: psShot });
-    assert.deepEqual(shot.points, { x: -1820, y: 50, w: 800, h: 600 });
+    // Global (100,50) is what list_displays and cursor_position report; on
+    // this x=-1920 layout it sits on the left display. Binding it as the
+    // virtual-screen offset (the pre-#72 win32 reading) would crop at
+    // (-1820,50) and bind the wrong frame.
+    assert.deepEqual(shot.points, { x: 100, y: 50, w: 800, h: 600 });
     const script = fs.readFileSync(psScriptLog, "utf8");
     assert.match(script, /CopyFromScreen\(\$bounds\.X \+ \$rx, \$bounds\.Y \+ \$ry, 0, 0, \(New-Object System\.Drawing\.Size\(\$rw, \$rh\)\)\)/);
-    assert.match(script, /\[Math\]::Min\(100, \$bounds\.Width - \$rw\)/);
-    assert.match(script, /\[Math\]::Min\(50, \$bounds\.Height - \$rh\)/);
+    // The script derives the VirtualScreen-relative crop offset itself:
+    // 100 - (-1920) = 2020.
+    assert.match(script, /\[Math\]::Min\(100 - \$bounds\.X, \$bounds\.Width - \$rw\)/);
+    assert.match(script, /\[Math\]::Min\(50 - \$bounds\.Y, \$bounds\.Height - \$rh\)/);
+  });
+});
+
+test("win32: a negative global region aims at the left/upper display instead of being rejected", async () => {
+  await withEnv(psEnv, async () => {
+    const b = await win32Backend();
+    const shot = await b.screenshot({ region: [-1500, 100, 400, 300], path: psShot });
+    assert.deepEqual(shot.points, { x: -1500, y: 100, w: 400, h: 300 });
+    const script = fs.readFileSync(psScriptLog, "utf8");
+    assert.match(script, /\[Math\]::Min\(-1500 - \$bounds\.X, \$bounds\.Width - \$rw\)/);
+    assert.match(script, /\[Math\]::Min\(100 - \$bounds\.Y, \$bounds\.Height - \$rh\)/);
   });
 });
 
 test("win32: a region reaching past the virtual screen is clamped and the receipt names the crop taken", async () => {
   await withEnv(psEnv, async () => {
     const b = await win32Backend();
-    // Virtual screen is 3840x1080: x 3700..4500 clamps to 3040..3840,
-    // y 900..1500 clamps to 480..1080.
-    const shot = await b.screenshot({ region: [3700, 900, 800, 600], path: psShot });
+    // Global right edge is 1920 (-1920 + 3840), bottom edge 1080: the request
+    // x 1500..2300 clamps to 1120..1920 (offset 3420 → 3040), y 900..1500 to
+    // 480..1080.
+    const shot = await b.screenshot({ region: [1500, 900, 800, 600], path: psShot });
     assert.deepEqual(shot.points, { x: 1120, y: 480, w: 800, h: 600 });
     const script = fs.readFileSync(psScriptLog, "utf8");
-    assert.match(script, /\[Math\]::Min\(3700, \$bounds\.Width - \$rw\)/);
-    assert.match(script, /\[Math\]::Min\(900, \$bounds\.Height - \$rh\)/);
+    assert.match(script, /\[Math\]::Min\(1500 - \$bounds\.X, \$bounds\.Width - \$rw\)/);
+    assert.match(script, /\[Math\]::Min\(900 - \$bounds\.Y, \$bounds\.Height - \$rh\)/);
+  });
+});
+
+test("win32: a region past the left/top edge clamps to the virtual screen min corner", async () => {
+  await withEnv(psEnv, async () => {
+    const b = await win32Backend();
+    const shot = await b.screenshot({ region: [-5000, -3000, 800, 600], path: psShot });
+    assert.deepEqual(shot.points, { x: -1920, y: 0, w: 800, h: 600 });
   });
 });
 
@@ -402,8 +428,8 @@ test("win32: a region larger than the virtual screen collapses to the full scree
     const script = fs.readFileSync(psScriptLog, "utf8");
     assert.match(script, /\[Math\]::Min\(8000, \$bounds\.Width\)/);
     assert.match(script, /\[Math\]::Min\(6000, \$bounds\.Height\)/);
-    assert.match(script, /\[Math\]::Min\(5000, \$bounds\.Width - \$rw\)/);
-    assert.match(script, /\[Math\]::Min\(5000, \$bounds\.Height - \$rh\)/);
+    assert.match(script, /\[Math\]::Min\(5000 - \$bounds\.X, \$bounds\.Width - \$rw\)/);
+    assert.match(script, /\[Math\]::Min\(5000 - \$bounds\.Y, \$bounds\.Height - \$rh\)/);
   });
 });
 
@@ -412,8 +438,10 @@ test("win32: a malformed region fails with the named error before any capture", 
     const b = await win32Backend();
     await new Promise((r) => setTimeout(r, 100)); // let create()'s Add-Type bootstrap land in the log
     const before = fs.readFileSync(psScriptLog, "utf8");
-    for (const region of [["a", 0, 10, 10], [10, 0, 10], [-1, 0, 10, 10], [0, 0, 0, 10]]) {
-      await assert.rejects(() => b.screenshot({ region }), /region must be \[x, y, w, h\] in virtual-screen points/u);
+    // Negative x/y are valid global points now — only junk, wrong arity, and
+    // degenerate sizes are rejected, before any PowerShell runs.
+    for (const region of [["a", 0, 10, 10], [10, 0, 10], [0, 0, 0, 10], [0, 0, 10, 0]]) {
+      await assert.rejects(() => b.screenshot({ region }), /region must be \[x, y, w, h\] in global screen points/u);
     }
     assert.equal(fs.readFileSync(psScriptLog, "utf8"), before, "no PowerShell ran for the malformed region");
   });
