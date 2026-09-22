@@ -2,8 +2,8 @@ use tauri::{AppHandle, State};
 
 use crate::features::account_platform::{
     AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, MobileRegistration,
-    MobileRegistrationPrecheck, PasswordReset, SMSLoginCredentials, SMSRequest, SessionStatus,
-    SliderCaptchaRequest,
+    MobileRegistrationPrecheck, PasswordReset, PortalOpenRequest, SMSLoginCredentials, SMSRequest,
+    SessionStatus, SliderCaptchaRequest,
 };
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::sessions::SessionStore;
@@ -18,9 +18,10 @@ pub async fn account_platform_session(
 
 #[tauri::command]
 pub async fn account_platform_open_portal(
+    input: PortalOpenRequest,
     state: State<'_, AccountPlatformState>,
 ) -> Result<(), String> {
-    state.open_portal().await
+    state.open_portal(input.language).await
 }
 
 #[tauri::command]

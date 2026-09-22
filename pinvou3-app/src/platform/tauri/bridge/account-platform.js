@@ -7,7 +7,7 @@
     var invoke = context.invoke;
     return {
       session: function () { return invoke("account_platform_session"); },
-      openPortal: function () { return invoke("account_platform_open_portal"); },
+      openPortal: function (input) { return invoke("account_platform_open_portal", { input: input }); },
       selectCatalogModel: function (input) { return invoke("account_platform_select_catalog_model", { input: input }); },
       selectSessionCatalogModel: function (input) { return invoke("account_platform_select_session_model", { input: input }); },
       modelCatalog: function () { return invoke("account_platform_model_catalog"); },

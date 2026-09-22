@@ -1052,7 +1052,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               </div>
             </>
           )}
-          <button type="button" onClick={() => void client.openPortal().catch((reason) => setError(localizedError(copy, reason)))} disabled={busy} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] transition-colors hover:bg-[#10B981]/20 disabled:opacity-40">
+          <button type="button" onClick={() => void client.openPortal(language).catch((reason) => setError(localizedError(copy, reason)))} disabled={busy} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] transition-colors hover:bg-[#10B981]/20 disabled:opacity-40">
             {copy.openWebAccount}
           </button>
           <button type="button" onClick={() => void logout()} disabled={busy} className={`h-9 w-full rounded-xl text-[12px] font-medium transition-colors disabled:opacity-40 ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}>

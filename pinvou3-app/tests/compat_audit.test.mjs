@@ -47,6 +47,13 @@ test('legacy polyfills load before app modules in every entry', () => {
       assert.ok(at > polyfill, `${entry}: legacy-polyfills.js must precede ${anchor}`);
     }
   }
+  for (const entry of ['account-main.jsx', 'admin-main.jsx']) {
+    assert.match(
+      readSrc('app', entry),
+      /^import ['"]\.\.\/shared\/legacy-polyfills\.js['"];?/,
+      `${entry} must import the Safari 14 runtime polyfills before application modules`,
+    );
+  }
 });
 
 test('vendored browser runtimes stay retired and the polyfill ships as a static script', () => {

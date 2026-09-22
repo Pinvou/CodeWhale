@@ -1,3 +1,4 @@
+import '../shared/legacy-polyfills.js';
 import React, { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AdminPlatformView } from '../features/account-platform/AdminPlatformView.jsx';

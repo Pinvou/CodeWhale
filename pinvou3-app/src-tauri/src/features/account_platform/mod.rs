@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
-use crate::platform::prefs::UserPrefs;
+use crate::platform::prefs::Language;
 
 #[cfg(any(debug_assertions, test))]
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
@@ -284,11 +284,9 @@ enum PortalSessionHandoffResult {
 const ACCOUNT_PORTAL_LABEL: &str = "账号平台个人中心";
 
 impl AccountPlatformState {
-    pub async fn open_portal(&self) -> Result<(), String> {
+    pub async fn open_portal(&self, language: Language) -> Result<(), String> {
         let config = AccountPlatformConfig::current()?;
-        let target = self
-            .portal_target(&config, UserPrefs::load().language.locale_tag())
-            .await?;
+        let target = self.portal_target(&config, language.locale_tag()).await?;
         crate::platform::os::open_target(target.as_str(), ACCOUNT_PORTAL_LABEL)
     }
 
@@ -473,6 +471,11 @@ pub struct SessionStatus {
 pub struct LoginCredentials {
     pub account: String,
     pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PortalOpenRequest {
+    pub language: Language,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2332,6 +2335,13 @@ mod tests {
             "https://account.pinvou.com/portal-session-handoff?locale=en#ticket=one-time-ticket"
         );
         assert_eq!(handoff.query(), Some("locale=en"));
+    }
+
+    #[test]
+    fn portal_open_request_accepts_only_supported_desktop_languages() {
+        let request: PortalOpenRequest = serde_json::from_str(r#"{"language":"ja"}"#).unwrap();
+        assert_eq!(request.language, Language::Ja);
+        assert!(serde_json::from_str::<PortalOpenRequest>(r#"{"language":"fr"}"#).is_err());
     }
 
     #[test]

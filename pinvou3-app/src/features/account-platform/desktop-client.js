@@ -1,5 +1,6 @@
 import { mergeObservedVersions } from './authorization-ui.js';
 import { invitationCreateBody } from './invitation-client.js';
+import { LANG_TO_TAG } from '../../shared/i18n.js';
 
 function abortError() {
   const error = new Error('The operation was aborted');
@@ -61,8 +62,9 @@ export class AccountPlatformDesktopClient {
   session(signal) {
     return this.call(() => this.transport.session(), signal);
   }
-  openPortal(signal) {
-    return this.call(() => this.transport.openPortal(), signal);
+  /** @param {'zh' | 'en' | 'ja'} language @param {AbortSignal} [signal] */
+  openPortal(language, signal) {
+    return this.call(() => this.transport.openPortal({ language: LANG_TO_TAG[language] || 'zh-Hans' }), signal);
   }
   selectCatalogModel(modelId, signal) {
     return this.call(() => this.transport.selectCatalogModel({ modelId }), signal);

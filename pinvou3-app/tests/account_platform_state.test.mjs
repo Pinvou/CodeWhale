@@ -43,7 +43,18 @@ test('account platform errors prefer wrapped domain codes over generic bridge fa
     }),
     copy.mobileAuthFailed,
   );
+  assert.equal(
+    localizedAccountPlatformError(copy, {
+      code: 'FUTURE_AUTH_ERROR',
+      message: 'oidc_credentials_invalid: previous nested cause',
+    }),
+    copy.requestFailed,
+  );
   assert.equal(localizedAccountPlatformError(copy, new Error('unclassified transport detail')), copy.requestFailed);
+
+  const startedAt = performance.now();
+  assert.deepEqual(accountPlatformErrorCodes('a'.repeat(20_000)), []);
+  assert.ok(performance.now() - startedAt < 500, 'long unclassified errors must be parsed in bounded time');
 });
 
 test('admin portal navigation groups and URL state remain deterministic', () => {
@@ -963,6 +974,9 @@ test('desktop client keeps OAuth tokens behind the account-platform Bridge', asy
   const calls = [];
   const transport = {
     session: async () => ({ enabled: true, configured: true, authenticated: true }),
+    openPortal: async input => {
+      calls.push({ openPortal: input });
+    },
     login: async credentials => {
       calls.push({ credentials });
       return { authenticated: true };
@@ -975,10 +989,12 @@ test('desktop client keeps OAuth tokens behind the account-platform Bridge', asy
   };
   const client = new AccountPlatformDesktopClient(transport);
   assert.equal((await client.session()).authenticated, true);
+  await client.openPortal('ja');
   await client.login('person@example.com', 'secret-password');
   await client.createRecharge('product-10', 'ALIPAY', 'recharge-id');
-  assert.deepEqual(calls[0], { credentials: { account: 'person@example.com', password: 'secret-password' } });
-  assert.deepEqual(calls[1], {
+  assert.deepEqual(calls[0], { openPortal: { language: 'ja' } });
+  assert.deepEqual(calls[1], { credentials: { account: 'person@example.com', password: 'secret-password' } });
+  assert.deepEqual(calls[2], {
     area: 'token',
     resource: '/v1/recharge/orders',
     method: 'POST',
@@ -1625,10 +1641,14 @@ test('billing order readers tolerate provider fields that are null before the fi
 
 test('desktop account popover does not own platform model selection', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
+  const command = await readFile(new URL('../src-tauri/src/app/commands/account_platform.rs', import.meta.url), 'utf8');
   assert.doesNotMatch(popover, /client\.modelCatalog|client\.selectCatalogModel/);
   assert.doesNotMatch(popover, /copy\.platformModel|copy\.selectPlatformModel/);
   assert.match(popover, /client\.balance/);
-  assert.match(popover, /client\.openPortal/);
+  assert.match(popover, /client\.openPortal\(language\)/);
+  assert.match(bridge, /openPortal: function \(input\) \{ return invoke\("account_platform_open_portal", \{ input: input \}\); \}/);
+  assert.match(command, /account_platform_open_portal\([\s\S]*?input: PortalOpenRequest,[\s\S]*?state\.open_portal\(input\.language\)\.await/);
   for (const language of ['zh', 'en', 'ja']) {
     for (const key of ['platformModel', 'selectPlatformModel', 'modelSelectionSaved', 'modelDeprecationWarning']) {
       assert.equal(accountPlatformCopy[language][key], undefined, `${language}.${key} is retired from the account popover copy`);
