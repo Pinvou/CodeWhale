@@ -277,6 +277,7 @@ struct PortalSessionHandoffResponse {
 enum PortalSessionHandoffResult {
     Ticket(String),
     Unauthorized,
+    Unsupported,
 }
 
 const ACCOUNT_PORTAL_LABEL: &str = "账号平台个人中心";
@@ -309,6 +310,9 @@ impl AccountPlatformState {
                 return Ok(portal_handoff_target(&config.portal_url, &ticket));
             }
             PortalSessionHandoffResult::Unauthorized => {}
+            PortalSessionHandoffResult::Unsupported => {
+                return Ok(portal_login_target(&config.portal_url));
+            }
         }
 
         access_token = match self.access_token(config, Some(&access_token)).await {
@@ -326,6 +330,7 @@ impl AccountPlatformState {
                 Ok(portal_handoff_target(&config.portal_url, &ticket))
             }
             PortalSessionHandoffResult::Unauthorized => Ok(portal_login_target(&config.portal_url)),
+            PortalSessionHandoffResult::Unsupported => Ok(portal_login_target(&config.portal_url)),
         }
     }
 
@@ -349,6 +354,9 @@ impl AccountPlatformState {
             .map_err(|error| format!("portal_session_handoff_unavailable: {error}"))?;
         if response.status() == StatusCode::UNAUTHORIZED {
             return Ok(PortalSessionHandoffResult::Unauthorized);
+        }
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(PortalSessionHandoffResult::Unsupported);
         }
         if !response.status().is_success() {
             return Err(format!(
@@ -2476,6 +2484,31 @@ mod tests {
         let error = state.portal_target(&config).await.unwrap_err();
         server.join().unwrap();
         assert!(error.contains("identity returned 503"));
+    }
+
+    #[tokio::test]
+    async fn old_portal_without_handoff_route_opens_browser_login() {
+        let (base, server) = spawn_portal_fixture(1, |request| {
+            assert!(request.starts_with("POST /portal-session-handoff "));
+            (404, "404 page not found")
+        });
+        let credentials = MemoryCredentialStore::with_refresh_token("saved-refresh");
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("current-access", "saved-refresh")),
+        );
+        let mut config = config();
+        config.portal_url = base;
+
+        let target = state.portal_target(&config).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(target.path(), "/auth/login");
+        assert_eq!(target.query(), Some("force_login=1&return_to=%2F"));
+        assert_eq!(
+            credentials.refresh_token().as_deref(),
+            Some("saved-refresh")
+        );
+        assert!(state.session.lock().await.is_some());
     }
 
     #[tokio::test]
