@@ -805,7 +805,7 @@ pub(crate) fn replace_agent_topology_checkpoint(
     let ends_with_tool_result = messages.last().is_some_and(carries_tool_result);
     let ends_with_compaction_summary = messages
         .last()
-        .is_some_and(crate::compaction::is_generated_compaction_checkpoint);
+        .is_some_and(crate::history_recognition::is_generated_compaction_checkpoint);
     let position = if ends_with_tool_result || ends_with_compaction_summary {
         compaction_anchor(messages, messages.len()).map_or(0, CompactionAnchor::placement_index)
     } else {
@@ -1328,7 +1328,7 @@ fn is_compaction_topology_carrier(message: &Message) -> bool {
 fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize> {
     let summary_before = messages[..index]
         .iter()
-        .rposition(crate::compaction::is_compaction_checkpoint_message);
+        .rposition(crate::history_recognition::is_compaction_checkpoint_message);
     let follows_tool_result = index > 0 && carries_tool_result(&messages[index - 1]);
     if summary_before.is_none() && !follows_tool_result {
         return None;
@@ -1337,7 +1337,7 @@ fn restored_topology_anchor(messages: &[Message], index: usize) -> Option<usize>
         .or_else(|| {
             messages[index + 1..]
                 .iter()
-                .position(crate::compaction::is_compaction_checkpoint_message)
+                .position(crate::history_recognition::is_compaction_checkpoint_message)
                 .map(|offset| index + 1 + offset)
         })
         .unwrap_or(messages.len());
@@ -1480,7 +1480,7 @@ fn is_runtime_owned_user_message(message: &Message) -> bool {
         // The compaction checkpoint is engine-written history, so `/edit` must
         // not treat it as the turn to truncate at: doing so deletes the summary
         // the session is built on. Structure decides, not the marker substring.
-        || crate::compaction::is_compaction_checkpoint_message(message)
+        || crate::history_recognition::is_compaction_checkpoint_message(message)
 }
 
 /// Return engine-owned metadata in either the current trailing shape or the
