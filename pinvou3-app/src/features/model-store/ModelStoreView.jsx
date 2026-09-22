@@ -563,8 +563,42 @@ const ModelStoreView = ({ theme, t, bs }) => {
     if (!result?.ok) return;
     // 卸载成功后清掉品悟模型列表里指向它的那些行（理由见 cleanLinkedRows 的注释）。
     // 这条路径出声：用户主动卸载了一个模型，顺带清掉了几行配置，该让他知道。
-    await cleanLinkedRows([record.endpoint_model, record.model_name], record.card_name);
-  }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle]);
+    //
+    // **返回值必须接住**。这里原先是裸 `await`，于是清理失败被整个吞掉：卸载本身
+    // 的成功提示照发，用户看到「已卸载并删除」就走了，而品悟模型列表里那一行还
+    // 指着一个已经不存在的本地服务——下一次新建会话第一句话就失败，且那个报错里
+    // 找不到任何通往模型商店的路。真机上就是这么留下一行的（2026-09-22 驭光卡）。
+    //
+    // 强制移除那条路径一直是接住的（`const linksCleaned = ...`），两条路不该有
+    // 差别：判据是「这个模型还能不能被调用」，跟用户点的是哪个按钮无关。
+    const linksCleaned = await cleanLinkedRows(
+      [record.endpoint_model, record.model_name],
+      record.card_name,
+    );
+    if (!linksCleaned) showToast(copy.uninstallLinksLeft(record.card_name));
+  }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle, showToast]);
+
+  /**
+   * 点右侧那个删除图标的入口。
+   *
+   * 运行中的模型**不直接进卸载对话框**，先让用户停用。后端也会拒（见
+   * `lifecycle.rs` 的 `uninstall`），这里只是把同一条规则提前告诉用户，并且
+   * 给出下一步——直接把按钮禁掉的话，用户只知道点不动，不知道该干什么。
+   *
+   * 挡的不是误点，是「服务没停干净就删掉权重和库记录」之后留下的无主进程：
+   * 记录一删，判断容器归属的 `container_name` 也没了，端口和显存占着而界面上
+   * 再也停不掉它。
+   *
+   * @param {object} record - 库记录。
+   * @returns {void} 无返回。
+   */
+  const requestUninstall = useCallback((record) => {
+    if (record?.running) {
+      showToast(copy.uninstallStopFirst(record.card_name));
+      return;
+    }
+    setConfirmUninstall(record);
+  }, [copy, showToast]);
 
   // 卸载失败 → 任务卡上那个「强制从列表移除」的入口点进来。
   //
@@ -692,7 +726,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               onDeploy={handleDeploy}
               onEnable={handleEnable}
               onStop={handleStop}
-              onUninstall={setConfirmUninstall}
+              onUninstall={requestUninstall}
             />
           ))}
         </div>

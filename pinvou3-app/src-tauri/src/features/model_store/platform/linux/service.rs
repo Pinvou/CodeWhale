@@ -518,6 +518,34 @@ pub fn start_lifecycle(
         "uninstall" => OP_UNINSTALL,
         other => return Err(format!("未知操作：{other}")),
     };
+
+    // 正在跑的模型不许直接卸载，先停用。
+    //
+    // 挡的不是误点，是**无主的运行实例**：卡片的 uninstall.sh 里停服务那步失败时，
+    // 有的卡会"继续清理权重"（驭光那张的原文就是
+    // `stop.sh || echo "注意：停服务那步没完全成功，继续清理权重"`）。于是权重删了、
+    // purge 那条路连库记录也删了，而进程还在跑。记录一删 `container_name` 跟着没了
+    // ——那是判断"某个容器是不是本应用起的"唯一可靠依据（见 enable 里那段注释），
+    // 此后 `reconcile_running_status` 再也认不出它：端口和显存占着，界面上停不掉。
+    //
+    // 放在这一层而不是 `ModelManager::uninstall` 里面：那是**机制**，要保持可组合
+    // （将来做"自动停用再卸载"时正需要直接调它，而且它现有的语义就包含"卸载会清掉
+    // running / container_name / endpoint_url"，有测试钉着）。"运行中该不该拦"是
+    // **策略**，属于最外层接口——本模块既有的分层就是这么定的：`purge_weights` 的
+    // 默认值也只在最外层定，方法签名里留必填参数（见 lifecycle.rs 里 uninstall 的
+    // 文档注释）。
+    if op == OP_UNINSTALL {
+        if let Ok(Some(rec)) = db::get_store_model(&card_id) {
+            if rec.running {
+                return Err(format!(
+                    "「{}」正在运行，请先停用再卸载。直接卸载会在服务还没停干净时\
+                     就删掉权重和库记录，之后那个还在跑的进程就没有任何界面能停得掉了。",
+                    rec.card_name
+                ));
+            }
+        }
+    }
+
     let card = card_id.clone();
     spawn_op(service, &card_id, op, move |log, control, _run_id| {
         let log_cb = Arc::clone(log);

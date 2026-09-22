@@ -339,6 +339,8 @@ export const dictEn = {
           statusAvailable:'Available',
           linkRowRemoved:(name,n)=>`Also removed ${n} PINVOU model entr${n===1?'y':'ies'} for "${name}"`,
           linkRowStale:(name,e)=>`"${name}" was uninstalled, but its entry in the PINVOU model list could not be removed (${e}). That entry no longer works — delete it in Settings or switch to another model.`,
+          uninstallStopFirst:n=>`"${n}" is running. Stop it first, then delete. Deleting while it runs can remove the weights before the service is fully stopped, leaving a process no screen can stop.`,
+          uninstallLinksLeft:n=>`"${n}" was uninstalled, but the entries pointing at it in the PINVOU model list could not be cleaned up automatically. They now point at a local service that no longer exists — please delete them in Settings.`,
           emptyInstalled:'No models downloaded on this device yet',
           emptyInstalledHint:'Pick one from Available below. Once downloaded you can deploy it and use it in PINVOU directly.',
           search:'Search models, providers, or engines', clearSearch:'Clear search', refresh:'Refresh', retry:'Retry', loading:'Loading…',
