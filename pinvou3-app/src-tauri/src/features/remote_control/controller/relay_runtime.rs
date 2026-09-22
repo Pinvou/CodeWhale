@@ -53,6 +53,10 @@ const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// 写失败一律忽略，绝不影响主流程。
 pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     use std::io::Write as _;
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
     let dir = crate::platform::paths::pinvou3_home().join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -66,7 +70,7 @@ pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     };
     let _ = writeln!(
         file,
-        "[{scope}] stage={} detail={}",
+        "ts_ms={timestamp_ms} [{scope}] stage={} detail={}",
         bounded_log_token(stage),
         bounded_log_token(detail)
     );
@@ -529,6 +533,13 @@ impl ControlledRelayWorker {
                             Some("encrypted_controller_liveness_a") => {
                                 self.accept_direct_liveness(&message, &mut evidence);
                             }
+                            Some("error") => {
+                                let code = message
+                                    .get("code")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("relay_error");
+                                log_controlled_event("runtime_relay_error", code);
+                            }
                             // E2E-06：A 端显式断开 → 终结租约并结束本代通道。
                             Some("controller_disconnect") => {
                                 if self.accept_remote_disconnect(&message) {
@@ -616,7 +627,7 @@ impl ControlledRelayWorker {
         match liveness_evidence_action(needs, evidence, now_b) {
             LivenessEvidenceAction::Idle => {}
             LivenessEvidenceAction::Challenge => {
-                let Ok((lease, _)) = manager.live_runtime_context() else {
+                let Ok((lease, _)) = manager.liveness_runtime_context() else {
                     return;
                 };
                 let Ok((challenge_id, challenge_b64)) = manager.begin_liveness_challenge(now_b)
@@ -630,15 +641,20 @@ impl ControlledRelayWorker {
                     &challenge_id,
                     &challenge_b64,
                 ) else {
+                    manager.cancel_liveness_challenge(&challenge_id);
                     return;
                 };
                 if self.channel.try_send(frame).is_ok() {
                     evidence.outstanding = Some((challenge_id, challenge_b64, now_b));
                     evidence.escalated = false;
+                    log_controlled_event("liveness_challenge", "sent");
+                } else {
+                    manager.cancel_liveness_challenge(&challenge_id);
+                    log_controlled_event("liveness_challenge", "send_failed");
                 }
             }
             LivenessEvidenceAction::Escalate => {
-                let Ok((lease, _)) = manager.live_runtime_context() else {
+                let Ok((lease, _)) = manager.liveness_runtime_context() else {
                     return;
                 };
                 let Some((challenge_id, challenge_b64, _)) = evidence.outstanding.clone() else {
@@ -655,11 +671,15 @@ impl ControlledRelayWorker {
                 };
                 if self.channel.try_send(frame).is_ok() {
                     evidence.escalated = true;
+                    log_controlled_event("liveness_attestation", "requested");
                 }
             }
             LivenessEvidenceAction::Reset => {
-                evidence.outstanding = None;
+                if let Some((challenge_id, _, _)) = evidence.outstanding.take() {
+                    manager.cancel_liveness_challenge(&challenge_id);
+                }
                 evidence.escalated = false;
+                log_controlled_event("liveness_challenge", "expired");
             }
         }
     }
@@ -719,12 +739,13 @@ impl ControlledRelayWorker {
             _ => return,
         }
         let now_b = controlled_monotonic_millis();
-        if manager
-            .accept_direct_liveness(&inner.to_string(), now_b)
-            .is_ok()
-        {
-            evidence.outstanding = None;
-            evidence.escalated = false;
+        match manager.accept_direct_liveness(&inner.to_string(), now_b) {
+            Ok(()) => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+                log_controlled_event("liveness_direct", "accepted");
+            }
+            Err(error) => log_controlled_event("liveness_direct", error.code),
         }
     }
 
@@ -743,12 +764,13 @@ impl ControlledRelayWorker {
         }
         let manager = self.app.state::<ControlledDeviceManager>();
         let now_b = controlled_monotonic_millis();
-        if manager
-            .accept_liveness_attestation(&message.to_string(), sent_at_b, now_b)
-            .is_ok()
-        {
-            evidence.outstanding = None;
-            evidence.escalated = false;
+        match manager.accept_liveness_attestation(&message.to_string(), sent_at_b, now_b) {
+            Ok(()) => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+                log_controlled_event("liveness_attestation", "accepted");
+            }
+            Err(error) => log_controlled_event("liveness_attestation", error.code),
         }
     }
 

@@ -242,12 +242,12 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
 
       <p className="settings-hint">{copy.readOnlyNotice}</p>
 
-      {(error || (status === 'error' && device.errorCode)) && (
+      {(error || (status === 'error' && device.lastError)) && (
         <p className="settings-error" role="alert">
           {copy.errorGeneric}
           {/* 有界错误码直接透出：面板只显示通用文案时，用户与支持两端都无法定位 */}
-          {(error || device.errorCode) && (
-            <span className="settings-error-code"> ({String(error || device.errorCode)})</span>
+          {(error || device.lastError) && (
+            <span className="settings-error-code"> ({String(error || device.lastError)})</span>
           )}
         </p>
       )}

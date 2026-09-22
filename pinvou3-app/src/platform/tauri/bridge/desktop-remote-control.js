@@ -159,7 +159,7 @@
         deviceName: payload.deviceName || null,
         controllerDeviceName: payload.controllerDeviceName || null,
         workspaces: payload.workspaces || null,
-        error: payload.lastError || null,
+        error: payload.errorCode || payload.lastError || null,
       }));
       return result;
     }

@@ -154,7 +154,13 @@ impl ControllerLivenessWatchdog {
         Ok(())
     }
 
-/// Accept AEAD-authenticated direct A liveness plaintext. The validator
+    /// 撤销一个未发出或已在本地超时的挑战。它没有成为有效证明，因此不能进入
+    /// used 集合；删除 pending 即可释放有界容量。
+    pub(crate) fn cancel_challenge(&mut self, challenge_id: &str) {
+        self.pending_challenges.remove(challenge_id);
+    }
+
+    /// Accept AEAD-authenticated direct A liveness plaintext. The validator
     /// binds the full lease context, epoch, role, sequence and challenge; this
     /// method additionally enforces the challenge's local RTT and deadline
     /// monotonicity.
@@ -631,6 +637,18 @@ mod tests {
                 .code,
             "deadline_overflow"
         );
+    }
+
+    #[test]
+    fn cancelled_challenge_releases_pending_slot_without_marking_replay() {
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        watchdog
+            .register_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 1_000)
+            .unwrap();
+        watchdog.cancel_challenge("challenge-0001");
+        watchdog
+            .register_challenge("challenge-0001", "AQEBAQEBAQEBAQEBAQEBAQ==", 2_000)
+            .unwrap();
     }
 
     #[test]

@@ -135,7 +135,7 @@
       deviceName: payload.deviceName || current.deviceName,
       controllerDeviceName: payload.controllerDeviceName || current.controllerDeviceName,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
-      lastError: payload.error || null,
+      lastError: payload.error || payload.errorCode || null,
     };
     next.revision = state.revision + 1;
     return next;
@@ -172,7 +172,7 @@
       connectionId: connectionId || current.connectionId,
       leaseEpoch: leaseEpoch || current.leaseEpoch,
       deviceName: payload.deviceName || current.deviceName,
-      lastError: payload.error || null,
+      lastError: payload.error || payload.errorCode || null,
       sessionRef: current.sessionRef,
       sessionId: current.sessionId,
       sessionMode: current.sessionMode,

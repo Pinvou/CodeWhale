@@ -246,6 +246,14 @@ pub(crate) enum ControlledResumeStep<'a> {
 /// B 端恢复失败时投影的本地错误码（有界，UI 直接显示为失败终态）。
 const RESUME_FAILED_CODE: &str = "desktop_remote_resume_invalid";
 
+/// `reconnecting` 同时承载真实传输断线和本地活性可疑两种 UI 投影，但二者的
+/// 恢复权限不同：前者必须走完整 resume，后者仍应允许当前认证通道提交存活证明。
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ReconnectReason {
+    Transport,
+    LivenessSuspect,
+}
+
 struct Inner {
     phase: ControlledStatusKind,
     intent: u64,
@@ -260,6 +268,7 @@ struct Inner {
     connected_at_b: Option<u64>,
     watchdog: Option<ControllerLivenessWatchdog>,
     resume_gate: Option<ControllerResumeGate>,
+    reconnect_reason: Option<ReconnectReason>,
     last_observed_now_b: u64,
     transport: Option<ControllerTransportSender>,
     workspaces: Vec<WorkspaceAuthorization>,
@@ -288,6 +297,7 @@ impl Default for Inner {
             connected_at_b: None,
             watchdog: None,
             resume_gate: None,
+            reconnect_reason: None,
             last_observed_now_b: 0,
             transport: None,
             workspaces: Vec::new(),
@@ -431,6 +441,7 @@ impl ControlledDeviceManager {
         inner.connected_at_b = Some(lease.connected_at_b);
         inner.watchdog = Some(watchdog);
         inner.resume_gate = Some(resume_gate);
+        inner.reconnect_reason = None;
         inner.pairing = None;
         inner.phase = ControlledStatusKind::Connected;
         Ok(status_locked(&inner))
@@ -467,7 +478,10 @@ impl ControlledDeviceManager {
     pub(crate) fn mark_transport_disconnected(&self, now_b: u64) -> ControlledStatus {
         let mut inner = self.inner.lock();
         inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
-        if inner.phase == ControlledStatusKind::Connected {
+        if inner.phase == ControlledStatusKind::Connected
+            || (inner.phase == ControlledStatusKind::Reconnecting
+                && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect))
+        {
             let deadline = inner
                 .watchdog
                 .as_ref()
@@ -476,11 +490,14 @@ impl ControlledDeviceManager {
                 if gate.disconnect(now_b, deadline).is_err() {
                     inner.phase = ControlledStatusKind::Error;
                     inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
+                    inner.reconnect_reason = None;
                 } else {
                     inner.phase = ControlledStatusKind::Reconnecting;
+                    inner.reconnect_reason = Some(ReconnectReason::Transport);
                 }
             } else {
                 inner.phase = ControlledStatusKind::Reconnecting;
+                inner.reconnect_reason = Some(ReconnectReason::Transport);
             }
         }
         status_locked(&inner)
@@ -499,6 +516,15 @@ impl ControlledDeviceManager {
         watchdog
             .register_challenge(challenge_id, challenge_b64, sent_at_b)
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))
+    }
+
+    /// 本地未成功发出或已超时的挑战必须从 watchdog 一并撤销，否则 worker 的
+    /// 轻量状态虽已 reset，watchdog 内仍会累积到容量上限。
+    pub(crate) fn cancel_liveness_challenge(&self, challenge_id: &str) {
+        let mut inner = self.inner.lock();
+        if let Some(watchdog) = inner.watchdog.as_mut() {
+            watchdog.cancel_challenge(challenge_id);
+        }
     }
 
     /// E2E-06：是否需要向对端/Relay 索取存活证据（watchdog 政策）。
@@ -541,6 +567,7 @@ impl ControlledDeviceManager {
             .accept_direct_json(json, &context, received_at_b)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         inner.last_observed_now_b = inner.last_observed_now_b.max(received_at_b);
+        recover_liveness_suspect(&mut inner);
         Ok(())
     }
 
@@ -564,6 +591,7 @@ impl ControlledDeviceManager {
             .accept_attestation_json(json, &context, request_sent_at_b, received_at_b)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         inner.last_observed_now_b = inner.last_observed_now_b.max(received_at_b);
+        recover_liveness_suspect(&mut inner);
         Ok(())
     }
 
@@ -703,6 +731,7 @@ impl ControlledDeviceManager {
         );
         inner.liveness_epoch_a = Some(epoch);
         inner.phase = ControlledStatusKind::Connected;
+        inner.reconnect_reason = None;
         Ok(status_locked(&inner))
     }
 
@@ -875,14 +904,12 @@ impl ControlledDeviceManager {
                 if inner.phase == ControlledStatusKind::Connected
                     && watchdog_state == Some(LivenessWatchdogState::Suspect)
                 {
-                    let deadline = inner
-                        .watchdog
-                        .as_ref()
-                        .and_then(|watchdog| watchdog.deadline_b());
-                    if let Some(gate) = inner.resume_gate.as_mut() {
-                        let _ = gate.disconnect(now_b, deadline);
-                    }
+                    // 仅 A 的有效存活证明暂时缺失，认证 transport 并没有断开。
+                    // 保留 resume gate 的 Active 状态，让迟到的直接证明/attestation
+                    // 可以恢复；真实 socket 断线会由 mark_transport_disconnected 将
+                    // 原因升级为 Transport 并启动完整 resume。
                     inner.phase = ControlledStatusKind::Reconnecting;
+                    inner.reconnect_reason = Some(ReconnectReason::LivenessSuspect);
                 }
             }
         }
@@ -979,6 +1006,23 @@ impl ControlledDeviceManager {
     pub(crate) fn live_runtime_context(&self) -> Result<(LeaseContext, Vec<String>)> {
         let inner = self.inner.lock();
         if inner.phase != ControlledStatusKind::Connected {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        let context = inner
+            .lease_context
+            .clone()
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
+        Ok((context, inner.negotiated_capabilities.clone()))
+    }
+
+    /// 存活证据专用上下文：活性可疑时业务仍关闭，但允许当前认证通道继续完成
+    /// challenge/attestation。真实 transport 断线绝不从这里取得可发送上下文。
+    pub(crate) fn liveness_runtime_context(&self) -> Result<(LeaseContext, Vec<String>)> {
+        let inner = self.inner.lock();
+        let allowed = inner.phase == ControlledStatusKind::Connected
+            || (inner.phase == ControlledStatusKind::Reconnecting
+                && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect));
+        if !allowed {
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
         }
         let context = inner
@@ -1104,6 +1148,7 @@ fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
         let _ = gate.terminate("desktop_remote_cleanup");
     }
     inner.resume_gate = None;
+    inner.reconnect_reason = None;
     inner.pairing = None;
     inner.lease_context = None;
     inner.negotiated_capabilities.clear();
@@ -1114,6 +1159,15 @@ fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
     inner.registration_request_id = None;
     if clear_workspaces {
         inner.workspaces.clear();
+    }
+}
+
+fn recover_liveness_suspect(inner: &mut Inner) {
+    if inner.phase == ControlledStatusKind::Reconnecting
+        && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect)
+    {
+        inner.phase = ControlledStatusKind::Connected;
+        inner.reconnect_reason = None;
     }
 }
 
@@ -1476,6 +1530,55 @@ mod tests {
         assert_eq!(status.error_code.as_deref(), Some("desktop_remote_watchdog_expired"));
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn late_valid_liveness_recovers_suspect_without_corrupting_resume_gate() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        manager
+            .register_liveness_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 1_000)
+            .unwrap();
+        manager
+            .accept_direct_liveness(&direct_liveness(&operation.generation), 2_000)
+            .unwrap();
+
+        assert_eq!(
+            manager.poll_watchdog(17_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        manager
+            .register_liveness_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 17_000)
+            .unwrap();
+        let second = serde_json::json!({
+            "v": 1,
+            "type": "controller_liveness_a",
+            "connection_id": "connection-0001",
+            "controller_lease_id": "lease-0001",
+            "lease_epoch": "1",
+            "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": operation.generation.clone(),
+            "role": "A",
+            "liveness_epoch_a": "live-a-1",
+            "heartbeat_sequence_a": "2",
+            "challenge_id": "challenge-0002",
+            "challenge_b64": "AQEBAQEBAQEBAQEBAQEBAQ=="
+        })
+        .to_string();
+        manager.accept_direct_liveness(&second, 18_000).unwrap();
+        assert_eq!(manager.status().status, ControlledStatusKind::Connected);
+
+        // 活性可疑不应提前消费 resume gate；随后发生真实断线时仍能启动完整恢复。
+        assert_eq!(
+            manager.mark_transport_disconnected(19_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        manager.begin_resume(operation, 20_000).unwrap();
     }
 
     #[test]

@@ -71,6 +71,15 @@ test('a stopped controlled device clears the pairing code', () => {
   assert.equal(state.controlledDevice.pairingCode, null);
 });
 
+test('controlled status preserves the bounded Rust error code for diagnostics', () => {
+  const state = logic.applyControlledStatus(logic.createState(), {
+    status: 'error',
+    errorCode: 'desktop_remote_watchdog_expired',
+  });
+  assert.equal(state.controlledDevice.status, 'error');
+  assert.equal(state.controlledDevice.lastError, 'desktop_remote_watchdog_expired');
+});
+
 test('controller status is gated by connection and lease epoch', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
