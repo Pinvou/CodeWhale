@@ -129,6 +129,7 @@ function validPayload(type) {
   switch (type) {
     case "capability_snapshot_request": return { ...base, request_id: "request-capability-1", known_revision: "0" };
     case "capability_snapshot": return structuredClone(fixture.capability_snapshot_vector);
+    case "capability_snapshot_error": return { ...base, request_id: "request-capability-1", session_id: "session-1", code: "capability_snapshot_unavailable" };
     case "task_submit": return structuredClone(fixture.task_submit_vectors.controlled);
     case "task_cancel": return { ...base, request_id: "request-1", task_id: "task-1", session_id: "session-1" };
     case "task_status": return { ...base, request_id: "request-1", task_id: "task-1", session_id: "session-1", task_status: "succeeded", result_digest: ZERO_HASH };

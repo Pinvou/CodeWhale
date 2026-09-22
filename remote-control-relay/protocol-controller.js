@@ -16,7 +16,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
+export const CONTROLLER_CONTRACT_SHA256 = "9038e5fceb3a18e2506697887b4e301b5e438999634e8dd52434a549ccf3f274";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -35,7 +35,7 @@ export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
 ]);
 
 export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
-  "capability_snapshot_request", "capability_snapshot", "task_submit", "task_cancel", "task_status", "permission_request", "permission_decision", "attachment_begin",
+  "capability_snapshot_request", "capability_snapshot", "capability_snapshot_error", "task_submit", "task_cancel", "task_status", "permission_request", "permission_decision", "attachment_begin",
   "attachment_chunk", "attachment_commit", "artifact_index_request", "artifact_index", "artifact_read_request",
   "artifact_chunk", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
 ]);
@@ -48,6 +48,7 @@ export const TASK_STATUSES = Object.freeze([
 export const CONTROLLER_ERROR_CODES = Object.freeze([
   "pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required",
   "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown",
+  "capability_snapshot_unavailable",
 ]);
 
 export const LEGACY_WEB_CONFLICT = Object.freeze({
@@ -113,8 +114,9 @@ const MESSAGE_SCHEMAS = Object.freeze({
 });
 
 const PAYLOAD_SCHEMAS = Object.freeze({
-  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "known_revision"], [], ["A"]),
-  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], [], ["B"]),
+  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "known_revision"], ["session_id"], ["A"]),
+  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], ["session_id", "valid_for_ms"], ["B"]),
+  capability_snapshot_error: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "code"], ["session_id"], ["B"]),
   task_submit: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "client_request_id", "session_id", "capability_revision", "model_source", "mode", "input_digest", "input"], ["temporary_model_package"], ["A"]),
   task_cancel: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id"], [], ["A"]),
   task_status: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id", "task_status"], ["result_digest"], ["B"]),
@@ -163,7 +165,7 @@ const NESTED_SCHEMAS = Object.freeze({
 });
 
 const PAYLOAD_CAPABILITIES = Object.freeze({
-  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1",
+  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1", capability_snapshot_error: "task_v1",
   task_submit: "task_v1", task_cancel: "task_v1", task_status: "task_v1",
   permission_request: "permission_v1", permission_decision: "permission_v1",
   attachment_begin: "attachment_v1", attachment_chunk: "attachment_v1", attachment_commit: "attachment_v1",

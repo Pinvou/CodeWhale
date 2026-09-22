@@ -49,6 +49,10 @@
       sessionId: null,
       sessionMode: null,
       capabilityRevision: null,
+      capabilityStatus: "idle",
+      capabilityError: null,
+      capabilityRequestId: null,
+      capabilityValidForMs: null,
     };
   }
 
@@ -177,6 +181,10 @@
       sessionId: current.sessionId,
       sessionMode: current.sessionMode,
       capabilityRevision: current.capabilityRevision,
+      capabilityStatus: current.capabilityStatus,
+      capabilityError: current.capabilityError,
+      capabilityRequestId: current.capabilityRequestId,
+      capabilityValidForMs: current.capabilityValidForMs,
     };
     if (CONTROLLER_TERMINAL[status]) {
       next.remoteCapabilities = null;
@@ -186,6 +194,10 @@
       next.controllerConnection.sessionId = null;
       next.controllerConnection.sessionMode = null;
       next.controllerConnection.capabilityRevision = null;
+      next.controllerConnection.capabilityStatus = "idle";
+      next.controllerConnection.capabilityError = null;
+      next.controllerConnection.capabilityRequestId = null;
+      next.controllerConnection.capabilityValidForMs = null;
     }
     next.revision = state.revision + 1;
     return next;
@@ -221,6 +233,46 @@
     next.controllerConnection.sessionId = sessionId;
     next.controllerConnection.sessionMode = payload.mode ? String(payload.mode) : current.sessionMode;
     next.controllerConnection.capabilityRevision = revision;
+    next.controllerConnection.capabilityError = payload.capabilityError
+      ? String(payload.capabilityError)
+      : null;
+    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId
+      ? String(payload.capabilityRequestId)
+      : null;
+    next.controllerConnection.capabilityValidForMs = payload.capabilityValidForMs == null
+      ? null
+      : Number(payload.capabilityValidForMs);
+    next.controllerConnection.capabilityStatus = next.controllerConnection.capabilityError
+      ? "error"
+      : (revision != null ? "ready" : "idle");
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyCapabilityPending(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    if (!current.sessionRef || String(payload.sessionRef || "") !== String(current.sessionRef)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.capabilityStatus = "preparing";
+    next.controllerConnection.capabilityError = null;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyCapabilityFailure(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    if (!current.sessionRef || String(payload.sessionRef || "") !== String(current.sessionRef)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.capabilityRevision = null;
+    next.controllerConnection.capabilityStatus = "error";
+    next.controllerConnection.capabilityError = String(payload.code || "capability_snapshot_unavailable");
+    next.controllerConnection.capabilityRequestId = payload.requestId ? String(payload.requestId) : null;
+    next.controllerConnection.capabilityValidForMs = null;
+    next.remoteCapabilities = null;
     next.revision = state.revision + 1;
     return next;
   }
@@ -423,6 +475,8 @@
     applyControlledStatus: applyControlledStatus,
     applyControllerStatus: applyControllerStatus,
     applyControllerSession: applyControllerSession,
+    applyCapabilityPending: applyCapabilityPending,
+    applyCapabilityFailure: applyCapabilityFailure,
     applyCapabilities: applyCapabilities,
     applyJournalEvent: applyJournalEvent,
     applyModels: applyModels,

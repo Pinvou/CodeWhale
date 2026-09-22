@@ -25,7 +25,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
+    "9038e5fceb3a18e2506697887b4e301b5e438999634e8dd52434a549ccf3f274";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -75,6 +75,7 @@ pub(crate) const LEASE_INSTALL_MESSAGE_TYPES: &[&str] = &["controller_joined"];
 pub(crate) const CONTROLLER_PAYLOAD_TYPES: &[&str] = &[
     "capability_snapshot_request",
     "capability_snapshot",
+    "capability_snapshot_error",
     "task_submit",
     "task_cancel",
     "task_status",
@@ -189,6 +190,7 @@ pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
     "permission_already_decided",
     "permission_expired",
     "result_unknown",
+    "capability_snapshot_unavailable",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,6 +294,10 @@ const PAYLOAD_CAPABILITY_BINDINGS: &[CapabilityBinding] = &[
     },
     CapabilityBinding {
         kind: "capability_snapshot",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "capability_snapshot_error",
         capabilities: &["task_v1"],
     },
     CapabilityBinding {
@@ -1092,7 +1098,7 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "request_id",
                 "known_revision",
             ],
-            optional: &[],
+            optional: &["session_id"],
             roles: &[A],
         },
         "capability_snapshot" => Schema {
@@ -1112,7 +1118,22 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "skills",
                 "workspaces",
             ],
-            optional: &[],
+            optional: &["session_id", "valid_for_ms"],
+            roles: &[B],
+        },
+        "capability_snapshot_error" => Schema {
+            required: &[
+                "v",
+                "type",
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
+                "request_id",
+                "code",
+            ],
+            optional: &["session_id"],
             roles: &[B],
         },
         "task_submit" => Schema {

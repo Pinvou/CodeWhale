@@ -143,6 +143,34 @@ test('capability snapshots are bound to connection, lease and revision', () => {
   assert.equal(newerRevision.remoteCapabilities.capabilityRevision, 5);
 });
 
+test('capability preparation exposes pending and bounded failure states', () => {
+  let state = logic.createState();
+  state = logic.applyControllerStatus(state, {
+    status: 'connected',
+    connectionId: 'connection-1',
+    leaseEpoch: '2',
+  });
+  state = logic.applyControllerSession(state, {
+    sessionRef: 'session-ref-1',
+    sessionId: 'session-1',
+    connectionId: 'connection-1',
+    leaseEpoch: '2',
+    mode: 'chat',
+  });
+  state = logic.applyCapabilityPending(state, { sessionRef: 'session-ref-1' });
+  assert.equal(state.controllerConnection.capabilityStatus, 'preparing');
+  assert.equal(state.controllerConnection.capabilityError, null);
+
+  state = logic.applyCapabilityFailure(state, {
+    sessionRef: 'session-ref-1',
+    requestId: 'request-1',
+    code: 'capability_snapshot_timeout',
+  });
+  assert.equal(state.controllerConnection.capabilityStatus, 'error');
+  assert.equal(state.controllerConnection.capabilityError, 'capability_snapshot_timeout');
+  assert.equal(state.controllerConnection.capabilityRevision, null);
+});
+
 test('model descriptors stay opaque and never carry credentials', () => {
   const models = logic.applyModels(logic.createState(), [
     {

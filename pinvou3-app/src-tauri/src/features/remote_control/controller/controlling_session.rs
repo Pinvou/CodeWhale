@@ -34,6 +34,7 @@ const MAX_TITLE_CHARS: usize = 120;
 const MAX_TRACKED_TASKS: usize = 64;
 const MAX_WORKSPACES: usize = 16;
 const MAX_MODES: usize = 2;
+const MAX_PENDING_CAPABILITY_REQUESTS: usize = 4;
 /// 输入摘要的域分离前缀：同参必须同摘要、异参必须不同摘要。
 const TASK_DIGEST_DOMAIN: &[u8] = b"pinvou-controller-task-input-v1";
 
@@ -74,6 +75,9 @@ pub(crate) struct ControllingSessionProjection {
     pub(crate) lease_epoch: String,
     pub(crate) remote_control_generation: String,
     pub(crate) capability_revision: Option<u64>,
+    pub(crate) capability_valid_for_ms: Option<u64>,
+    pub(crate) capability_error: Option<String>,
+    pub(crate) capability_request_id: Option<String>,
     pub(crate) modes: Vec<String>,
     pub(crate) workspace_count: usize,
     pub(crate) task_count: usize,
@@ -101,6 +105,10 @@ struct SessionIntent {
     lease: LeaseContext,
     negotiated_capabilities: Vec<String>,
     capability_revision: Option<u64>,
+    capability_valid_for_ms: Option<u64>,
+    capability_error: Option<String>,
+    last_capability_request_id: Option<String>,
+    pending_capability_requests: Vec<String>,
     modes: Vec<String>,
     workspace_ids: Vec<String>,
     /// task_id -> client_request_id（同参重放可复用同一 client_request_id）。
@@ -127,6 +135,9 @@ impl SessionIntent {
             lease_epoch: self.lease.lease_epoch.clone(),
             remote_control_generation: self.lease.remote_control_generation.clone(),
             capability_revision: self.capability_revision,
+            capability_valid_for_ms: self.capability_valid_for_ms,
+            capability_error: self.capability_error.clone(),
+            capability_request_id: self.last_capability_request_id.clone(),
             modes: self.modes.clone(),
             workspace_count: self.workspace_ids.len(),
             task_count: self.tasks.len(),
@@ -184,6 +195,10 @@ impl ControllingSessionManager {
             lease: lease.clone(),
             negotiated_capabilities: negotiated_capabilities.to_vec(),
             capability_revision: None,
+            capability_valid_for_ms: None,
+            capability_error: None,
+            last_capability_request_id: None,
+            pending_capability_requests: Vec::new(),
             modes: vec![SESSION_MODE_CHAT.to_owned()],
             workspace_ids: Vec::new(),
             tasks: BTreeMap::new(),
@@ -228,6 +243,11 @@ impl ControllingSessionManager {
         ensure_context(intent, lease)?;
         let request_id = intent.next_request_id();
         let payload = build_capability_snapshot_request(intent, &request_id)?;
+        intent.capability_error = None;
+        intent.pending_capability_requests.push(request_id.clone());
+        if intent.pending_capability_requests.len() > MAX_PENDING_CAPABILITY_REQUESTS {
+            intent.pending_capability_requests.remove(0);
+        }
         Ok(intent_projection(request_id, intent, None, None, payload))
     }
 
@@ -245,19 +265,60 @@ impl ControllingSessionManager {
         apply_snapshot_locked(intent, payload)
     }
 
-    /// 按 lease 定位会话意图并应用快照（wire 入站帧不携带会话引用，绑定依据是
-    /// 租约五元组）。同一租约下存在多个会话时选择唯一匹配项。
+    /// 按 lease + request_id 精确定位请求会话并应用快照；若对端额外携带
+    /// session_id，则同时校验两者，避免任何跨会话响应被接受。
     pub(crate) fn apply_capability_snapshot_for_lease(
         &self,
         lease: &LeaseContext,
         payload: &Value,
     ) -> Result<ControllingSessionProjection> {
         let mut intents = self.intents.lock();
-        let intent = intents
-            .iter_mut()
-            .find(|intent| &intent.lease == lease)
-            .ok_or_else(|| SessionError::new("session_not_found"))?;
-        apply_snapshot_locked(intent, payload)
+        let intent = find_capability_response_intent(&mut intents, lease, payload)?;
+        let request_id = response_request_id(payload)?;
+        if !intent
+            .pending_capability_requests
+            .iter()
+            .any(|pending| pending == request_id)
+        {
+            return Err(SessionError::new("capability_response_unexpected"));
+        }
+        let projection = apply_snapshot_locked(intent, payload)?;
+        intent.pending_capability_requests.clear();
+        Ok(projection)
+    }
+
+    pub(crate) fn apply_capability_error_for_lease(
+        &self,
+        lease: &LeaseContext,
+        payload: &Value,
+    ) -> Result<ControllingSessionProjection> {
+        let mut intents = self.intents.lock();
+        let intent = find_capability_response_intent(&mut intents, lease, payload)?;
+        let validated = validate_inbound_payload(intent, payload, "capability_snapshot_error")?;
+        let request_id = response_request_id(&validated)?;
+        if intent
+            .pending_capability_requests
+            .last()
+            .map(String::as_str)
+            != Some(request_id)
+        {
+            intent
+                .pending_capability_requests
+                .retain(|pending| pending != request_id);
+            return Err(SessionError::new("capability_response_stale"));
+        }
+        let code = validated
+            .get("code")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+        intent.pending_capability_requests.clear();
+        intent.capability_revision = None;
+        intent.capability_valid_for_ms = None;
+        intent.capability_error = Some(code.to_owned());
+        intent.last_capability_request_id = Some(request_id.to_owned());
+        intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
+        intent.workspace_ids.clear();
+        Ok(intent.projection())
     }
 
     /// 当前租约上的会话引用（心跳/恢复等按租约定位的场景使用）。
@@ -341,6 +402,48 @@ fn find_intent<'a>(
         .ok_or_else(|| SessionError::new("session_not_found"))
 }
 
+fn response_request_id(payload: &Value) -> Result<&str> {
+    payload
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))
+}
+
+fn find_capability_response_intent<'a>(
+    intents: &'a mut [SessionIntent],
+    lease: &LeaseContext,
+    payload: &Value,
+) -> Result<&'a mut SessionIntent> {
+    let request_id = response_request_id(payload)?;
+    if let Some(session_id) = payload.get("session_id").and_then(Value::as_str) {
+        return intents
+            .iter_mut()
+            .find(|intent| {
+                &intent.lease == lease
+                    && intent.session_id == session_id
+                    && intent
+                        .pending_capability_requests
+                        .iter()
+                        .any(|pending| pending == request_id)
+            })
+            .ok_or_else(|| SessionError::new("session_not_found"));
+    }
+    let mut matches = intents.iter_mut().filter(|intent| {
+        &intent.lease == lease
+            && intent
+                .pending_capability_requests
+                .iter()
+                .any(|pending| pending == request_id)
+    });
+    let intent = matches
+        .next()
+        .ok_or_else(|| SessionError::new("session_not_found"))?;
+    if matches.next().is_some() {
+        return Err(SessionError::new("capability_request_ambiguous"));
+    }
+    Ok(intent)
+}
+
 /// 校验并落地一份能力快照：形状/角色/租约由冻结运行时校验保证，revision 必须
 /// 单调不减，模式不能为空，工作区列表有界。
 fn apply_snapshot_locked(
@@ -379,6 +482,13 @@ fn apply_snapshot_locked(
         }
     }
     intent.capability_revision = Some(revision);
+    intent.capability_valid_for_ms = validated
+        .get("valid_for_ms")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .or(Some(30_000));
+    intent.capability_error = None;
+    intent.last_capability_request_id = Some(response_request_id(&validated)?.to_owned());
     intent.modes = modes;
     intent.workspace_ids = workspace_ids;
     Ok(intent.projection())
@@ -643,7 +753,7 @@ mod tests {
             .unwrap();
         assert_eq!(request.payload["type"], "capability_snapshot_request");
         assert_eq!(request.payload["known_revision"], "0");
-        assert_eq!(request.payload["session_id"], Value::Null);
+        assert!(request.payload.get("session_id").is_none());
 
         let applied = sessions
             .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())
@@ -683,6 +793,53 @@ mod tests {
                 .code,
             "session_context_stale"
         );
+    }
+
+    #[test]
+    fn capability_responses_are_request_and_session_bound() {
+        let sessions = ControllingSessionManager::default();
+        let first = sessions
+            .open(Some("session-ref-first"), "First", "chat", &lease(), &capabilities())
+            .unwrap();
+        let second = sessions
+            .open(Some("session-ref-second"), "Second", "chat", &lease(), &capabilities())
+            .unwrap();
+        let request = sessions
+            .capability_request(&second.session_ref, &lease())
+            .unwrap();
+        let mut response = snapshot(5);
+        response["request_id"] = json!(request.request_id);
+
+        let applied = sessions
+            .apply_capability_snapshot_for_lease(&lease(), &response)
+            .unwrap();
+        assert_eq!(applied.session_ref, second.session_ref);
+        assert_eq!(applied.capability_revision, Some(5));
+        assert_eq!(
+            sessions.state(&first.session_ref, &lease()).unwrap().capability_revision,
+            None
+        );
+
+        let retry = sessions
+            .capability_request(&first.session_ref, &lease())
+            .unwrap();
+        let failure = json!({
+            "v": 1,
+            "type": "capability_snapshot_error",
+            "connection_id": "connection-0001",
+            "controller_lease_id": "lease-0001",
+            "lease_epoch": "1",
+            "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001",
+            "request_id": retry.request_id,
+            "code": "capability_snapshot_unavailable",
+        });
+        let failed = sessions
+            .apply_capability_error_for_lease(&lease(), &failure)
+            .unwrap();
+        assert_eq!(failed.session_ref, first.session_ref);
+        assert_eq!(failed.capability_error.as_deref(), Some("capability_snapshot_unavailable"));
+        assert_eq!(failed.capability_revision, None);
     }
 
     #[test]
@@ -741,6 +898,10 @@ mod tests {
                     lease: lease(),
                     negotiated_capabilities: capabilities(),
                     capability_revision: Some(4),
+                    capability_valid_for_ms: Some(30_000),
+                    capability_error: None,
+                    last_capability_request_id: None,
+                    pending_capability_requests: Vec::new(),
                     modes: vec!["chat".into()],
                     workspace_ids: Vec::new(),
                     tasks: BTreeMap::new(),

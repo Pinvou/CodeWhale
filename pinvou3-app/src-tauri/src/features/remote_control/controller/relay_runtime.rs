@@ -862,25 +862,46 @@ impl ControlledRelayWorker {
     async fn dispatch_business_frame(&self, frame: &Value) {
         let manager = self.app.state::<ControlledDeviceManager>();
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+            log_controlled_event("business_frame_dropped", "no_live_lease");
             return;
         };
         let business = self.app.state::<ControlledLaneState>();
-        let Ok((payload_kind, payload)) = business.open(frame, &capabilities) else {
-            return;
+        let (payload_kind, payload) = match business.open(frame, &capabilities) {
+            Ok(opened) => opened,
+            Err(error) => {
+                log_controlled_event("business_frame_rejected", error.code());
+                return;
+            }
         };
-        let Ok(responses) =
-            dispatch_decrypted_payload(self.business.as_ref(), &lease, &payload_kind, &payload)
-                .await
-        else {
-            return;
+        let responses = match dispatch_decrypted_payload(
+            self.business.as_ref(),
+            &lease,
+            &payload_kind,
+            &payload,
+        )
+        .await
+        {
+            Ok(responses) => responses,
+            Err(error) => {
+                log_controlled_event("business_dispatch_failed", &error);
+                return;
+            }
         };
         // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
         for (response_kind, response) in responses {
-            let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
-                return;
+            let frame = match business.seal(response_kind, &response, &capabilities) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    log_controlled_event("business_response_seal_failed", error.code());
+                    return;
+                }
             };
             if self.channel.try_send(frame).is_err() {
+                log_controlled_event("business_response_send_failed", response_kind);
                 return;
+            }
+            if matches!(response_kind, "capability_snapshot" | "capability_snapshot_error") {
+                log_controlled_event("capability_response_sent", response_kind);
             }
         }
     }
@@ -946,6 +967,7 @@ pub(crate) trait ControlledBusinessPort: Send + Sync {
         &self,
         lease: &LeaseContext,
         request_id: &str,
+        session_id: Option<&str>,
         known_revision: u64,
     ) -> Result<Value, String>;
 
@@ -1004,10 +1026,17 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u64>().ok())
                 .ok_or_else(|| "task_request_invalid".to_owned())?;
-            let response = port
-                .capability_snapshot(lease, request_id, known_revision)
-                .await?;
-            Ok(vec![("capability_snapshot", response)])
+            let session_id = payload.get("session_id").and_then(Value::as_str);
+            match port
+                .capability_snapshot(lease, request_id, session_id, known_revision)
+                .await
+            {
+                Ok(response) => Ok(vec![("capability_snapshot", response)]),
+                Err(_) => Ok(vec![(
+                    "capability_snapshot_error",
+                    capability_snapshot_error(lease, request_id, session_id),
+                )]),
+            }
         }
         "task_submit" => {
             let session_ref = payload
@@ -1082,6 +1111,28 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
         // liveness / 审批 / 附件 / 成果等能力属后续任务：未知类型一律丢弃。
         _ => Ok(Vec::new()),
     }
+}
+
+fn capability_snapshot_error(
+    lease: &LeaseContext,
+    request_id: &str,
+    session_id: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "v": 1,
+        "type": "capability_snapshot_error",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": request_id,
+        "code": "capability_snapshot_unavailable",
+    });
+    if let Some(session_id) = session_id {
+        payload["session_id"] = Value::String(session_id.to_owned());
+    }
+    payload
 }
 
 fn rewrite_session_id(mut payload: Value, session_ref: &str) -> Result<Value, String> {
@@ -2211,8 +2262,12 @@ mod tests {
                 &self,
                 _lease: &LeaseContext,
                 request_id: &str,
+                _session_id: Option<&str>,
                 known_revision: u64,
             ) -> Result<Value, String> {
+                if known_revision == 999 {
+                    return Err("capability_source_unavailable".to_owned());
+                }
                 Ok(json!({
                     "v": 1,
                     "type": "capability_snapshot",
@@ -2293,6 +2348,24 @@ mod tests {
         assert_eq!(kind, "capability_snapshot");
         assert_eq!(response["request_id"], "request-1");
         assert_eq!(response["capability_revision"], "5");
+
+        let frames = dispatch_decrypted_payload(
+            &port,
+            &lease,
+            "capability_snapshot_request",
+            &json!({
+                "request_id": "request-failed",
+                "session_id": "session-a-ref",
+                "known_revision": "999",
+            }),
+        )
+        .await
+        .unwrap();
+        let (kind, response) = frames.into_iter().next().unwrap();
+        assert_eq!(kind, "capability_snapshot_error");
+        assert_eq!(response["request_id"], "request-failed");
+        assert_eq!(response["session_id"], "session-a-ref");
+        assert_eq!(response["code"], "capability_snapshot_unavailable");
 
         let frames = dispatch_decrypted_payload(
             &port,

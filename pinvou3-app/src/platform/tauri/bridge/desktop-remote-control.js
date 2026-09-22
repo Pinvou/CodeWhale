@@ -26,6 +26,14 @@
 
     var unlisten = [];
     var subscribed = false;
+    var capabilityWaiters = Object.create(null);
+    var capabilityOutcomes = Object.create(null);
+    var capabilityOutcomeOrder = [];
+    var capabilityFlights = Object.create(null);
+    var capabilityRenewalTimer = null;
+    var CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000;
+    var CAPABILITY_MAX_ATTEMPTS = 3;
+    var CAPABILITY_RENEWAL_LEAD_MS = 5_000;
     function isAvailable() {
       // Capabilities load after the bridge is installed, so this must stay
       // lazy instead of being captured once at install time.
@@ -101,7 +109,8 @@
       });
       listen("desktop-remote-controller-session", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyControllerSession(current(), payload));
+        applyControllerSession(payload);
+        settleCapabilityResponse(payload);
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
@@ -129,6 +138,14 @@
         } catch (_) {}
       });
       subscribed = false;
+      if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
+      capabilityRenewalTimer = null;
+      Object.keys(capabilityWaiters).forEach(function (requestId) {
+        var waiter = capabilityWaiters[requestId];
+        clearTimeout(waiter.timer);
+        waiter.reject(asBoundedError("capability_snapshot_unavailable"));
+        delete capabilityWaiters[requestId];
+      });
     }
 
     function controlledIntent() {
@@ -363,11 +380,142 @@
       return invoke("desktop_remote_controller_capability_request", { remoteRef: remoteRef });
     }
 
-    /** E2E-04：构造并加密发送能力快照请求（A 端拿到 revision 后才能发任务）。 */
+    function rememberCapabilityOutcome(requestId, outcome) {
+      capabilityOutcomes[requestId] = outcome;
+      capabilityOutcomeOrder.push(requestId);
+      while (capabilityOutcomeOrder.length > 16) {
+        delete capabilityOutcomes[capabilityOutcomeOrder.shift()];
+      }
+    }
+
+    function finishCapabilityWaiter(requestId, outcome) {
+      var waiter = capabilityWaiters[requestId];
+      if (!waiter) {
+        rememberCapabilityOutcome(requestId, outcome);
+        return;
+      }
+      clearTimeout(waiter.timer);
+      delete capabilityWaiters[requestId];
+      if (outcome.ok) waiter.resolve(outcome.payload);
+      else waiter.reject(asBoundedError(outcome.code));
+    }
+
+    function settleCapabilityResponse(payload) {
+      var requestId = payload && payload.capabilityRequestId
+        ? String(payload.capabilityRequestId)
+        : "";
+      if (!requestId) return;
+      var error = payload.capabilityError ? String(payload.capabilityError) : "";
+      var outcome = {
+        ok: !error && payload.capabilityRevision != null,
+        code: error || "capability_snapshot_unavailable",
+        payload: payload,
+      };
+      finishCapabilityWaiter(requestId, outcome);
+      // A successful snapshot satisfies every retry already in flight for the
+      // same session. Late failures from older attempts must not regress it.
+      if (outcome.ok && payload.sessionId) {
+        Object.keys(capabilityWaiters).forEach(function (pendingId) {
+          var waiter = capabilityWaiters[pendingId];
+          if (String(waiter.sessionId || "") === String(payload.sessionId)) {
+            finishCapabilityWaiter(pendingId, outcome);
+          }
+        });
+        scheduleCapabilityRenewal(payload);
+      }
+    }
+
+    function waitForCapabilityResponse(intent, remoteRef) {
+      var requestId = intent && intent.requestId ? String(intent.requestId) : "";
+      var sessionId = intent && intent.sessionId ? String(intent.sessionId) : "";
+      if (!requestId || !sessionId) return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
+      if (capabilityOutcomes[requestId]) {
+        var remembered = capabilityOutcomes[requestId];
+        delete capabilityOutcomes[requestId];
+        return remembered.ok
+          ? Promise.resolve(remembered.payload)
+          : Promise.reject(asBoundedError(remembered.code));
+      }
+      return new Promise(function (resolve, reject) {
+        var timer = setTimeout(function () {
+          delete capabilityWaiters[requestId];
+          var connection = current().controllerConnection || {};
+          if (
+            String(connection.sessionRef || "") === String(remoteRef || "") &&
+            connection.capabilityRevision != null &&
+            connection.capabilityStatus === "ready"
+          ) {
+            resolve(connection);
+            return;
+          }
+          reject(asBoundedError("capability_snapshot_timeout"));
+        }, CAPABILITY_RESPONSE_TIMEOUT_MS);
+        capabilityWaiters[requestId] = {
+          resolve: resolve,
+          reject: reject,
+          timer: timer,
+          sessionId: sessionId,
+        };
+      });
+    }
+
+    function capabilityAttempt(remoteRef, attempt) {
+      return invoke("desktop_remote_controller_capability_send", { remoteRef: remoteRef })
+        .then(function (intent) {
+          return waitForCapabilityResponse(intent, remoteRef);
+        })
+        .catch(function (failure) {
+          var error = asBoundedError(failure);
+          if (attempt >= CAPABILITY_MAX_ATTEMPTS) throw error;
+          return new Promise(function (resolve) {
+            setTimeout(resolve, attempt * 500);
+          }).then(function () {
+            publish(logic.applyCapabilityPending(current(), { sessionRef: remoteRef }));
+            return capabilityAttempt(remoteRef, attempt + 1);
+          });
+        });
+    }
+
+    function scheduleCapabilityRenewal(payload) {
+      if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
+      var validForMs = Number(payload.capabilityValidForMs || 30_000);
+      var delay = Math.max(1_000, Math.min(25_000, validForMs - CAPABILITY_RENEWAL_LEAD_MS));
+      var sessionRef = current().controllerConnection && current().controllerConnection.sessionRef;
+      if (!sessionRef) return;
+      capabilityRenewalTimer = setTimeout(function () {
+        capabilityRenewalTimer = null;
+        var connection = current().controllerConnection || {};
+        if (connection.status !== "connected" || connection.sessionRef !== sessionRef) return;
+        beginCapabilityHandshake(sessionRef, true).catch(function () {});
+      }, delay);
+    }
+
+    function beginCapabilityHandshake(remoteRef, background) {
+      var key = String(remoteRef || "");
+      if (capabilityFlights[key]) return capabilityFlights[key];
+      if (!background) publish(logic.applyCapabilityPending(current(), { sessionRef: remoteRef }));
+      var flight = capabilityAttempt(remoteRef, 1)
+        .catch(function (failure) {
+          var error = asBoundedError(failure);
+          publish(logic.applyCapabilityFailure(current(), {
+            sessionRef: remoteRef,
+            code: error.code,
+          }));
+          clientLog("capability handshake failed code=" + String(error.code || "unknown"));
+          throw error;
+        })
+        .finally(function () {
+          delete capabilityFlights[key];
+        });
+      capabilityFlights[key] = flight;
+      return flight;
+    }
+
+    /** 构造并发送请求，等待 B 的真实回包；超时或失败最多尝试三次。 */
     function controllerCapabilitySend(remoteRef) {
       ensureAvailable();
-      return invoke("desktop_remote_controller_capability_send", { remoteRef: remoteRef })
-        .catch(function (failure) { throw asBoundedError(failure); });
+      subscribe();
+      return beginCapabilityHandshake(remoteRef, false);
     }
 
     function controllerApplyCapabilitySnapshot(remoteRef, payload) {
@@ -460,6 +608,9 @@
         connectionId: payload.connectionId || null,
         leaseEpoch: payload.leaseEpoch || null,
         capabilityRevision: payload.capabilityRevision == null ? null : payload.capabilityRevision,
+        capabilityValidForMs: payload.capabilityValidForMs == null ? null : payload.capabilityValidForMs,
+        capabilityError: payload.capabilityError || null,
+        capabilityRequestId: payload.capabilityRequestId || null,
       }));
       return result;
     }

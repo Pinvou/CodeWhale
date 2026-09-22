@@ -70,25 +70,47 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         &self,
         lease: &LeaseContext,
         request_id: &str,
+        _session_id: Option<&str>,
         known_revision: u64,
     ) -> Result<Value, String> {
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
-        // 本地已持有同一 revision 且未过期时直接复用，避免每次请求都抬 revision。
         let now_b =
             crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis();
-        let current = if known_revision > 0 {
-            capabilities.validate(&known_revision.to_string(), lease, now_b)
-        } else {
-            // A may retry with revision 0 when the prior response was lost.
-            // Reuse the snapshot already bound to this exact lease instead of
-            // repeating ACP and marketplace discovery.
-            capabilities.current_for_context(lease, now_b)
-        };
-        if let Ok(current) = current {
-            return Ok(capabilities.wire_capability_snapshot(&current, request_id));
+        // 只复用刚生成、且比 A 已知 revision 更新的快照：这能吸收紧邻的重复
+        // 请求，又不会把临近过期的快照当作完整 30 秒租期返回给兼容旧报文的 A。
+        if let Ok(current) = capabilities.current_for_context(lease, now_b) {
+            let payload = capabilities.wire_capability_snapshot(&current, request_id);
+            let revision = payload["capability_revision"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let remaining_ms = payload["expires_at_ms"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .saturating_sub(now_b);
+            if revision > known_revision && remaining_ms >= 29_000 {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "capability_snapshot_ready",
+                    "cached",
+                );
+                return Ok(payload);
+            }
         }
-        let snapshot =
-            super::desktop_remote_capabilities::build_capability_snapshot(&self.app).await?;
+        let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(&self.app).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "capability_snapshot_failed",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "capability_snapshot_ready",
+            "fresh",
+        );
         Ok(capabilities.wire_capability_snapshot(&snapshot, request_id))
     }
 

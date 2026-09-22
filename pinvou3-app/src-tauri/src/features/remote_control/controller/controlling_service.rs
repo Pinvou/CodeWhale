@@ -829,10 +829,25 @@ fn dispatch_inbound_frame(
     };
     match payload_kind.as_str() {
         "capability_snapshot" => {
-            if let Ok(projection) =
-                sessions.apply_capability_snapshot_for_lease(&lease, &payload)
-            {
-                (sinks.on_session)(&projection);
+            match sessions.apply_capability_snapshot_for_lease(&lease, &payload) {
+                Ok(projection) => {
+                    log_controller_event("capability_snapshot_applied", "ready");
+                    (sinks.on_session)(&projection);
+                }
+                Err(error) => {
+                    log_controller_event("capability_snapshot_rejected", error.code);
+                }
+            }
+        }
+        "capability_snapshot_error" => {
+            match sessions.apply_capability_error_for_lease(&lease, &payload) {
+                Ok(projection) => {
+                    log_controller_event("capability_snapshot_failed", "unavailable");
+                    (sinks.on_session)(&projection);
+                }
+                Err(error) => {
+                    log_controller_event("capability_error_rejected", error.code);
+                }
             }
         }
         "task_status" => {
@@ -1869,6 +1884,10 @@ mod tests {
         assert_eq!(payload["type"], "task_submit");
         assert_eq!(payload["input"]["text"], "hello from A");
 
+        let refresh = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+
         // B → A：能力快照、终态与正文（journal_event）。
         let snapshot_frame = responder
             .seal(
@@ -1881,7 +1900,8 @@ mod tests {
                     "lease_epoch": lease.lease_epoch,
                     "relay_epoch": lease.relay_epoch,
                     "remote_control_generation": lease.remote_control_generation,
-                    "request_id": "request-snapshot-1",
+                    "request_id": refresh.request_id,
+                    "session_id": session.session_id,
                     "capability_revision": "4",
                     "expires_at_ms": "30000",
                     "modes": ["chat"],
@@ -2309,6 +2329,9 @@ mod tests {
         let session = sessions
             .open(None, "Session", "chat", &lease, &capabilities)
             .unwrap();
+        let capability_request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
 
         // B 端用同一份会话密钥封帧（角色 B）。
         let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
@@ -2320,7 +2343,8 @@ mod tests {
             "lease_epoch": lease.lease_epoch,
             "relay_epoch": lease.relay_epoch,
             "remote_control_generation": lease.remote_control_generation,
-            "request_id": "request-snapshot-1",
+            "request_id": capability_request.request_id,
+            "session_id": session.session_id,
             "capability_revision": "4",
             "expires_at_ms": "30000",
             "modes": ["chat"],
@@ -2521,6 +2545,7 @@ mod tests {
                 &self,
                 _lease: &LeaseContext,
                 request_id: &str,
+                _session_id: Option<&str>,
                 known_revision: u64,
             ) -> Result<Value, String> {
                 Ok(serde_json::json!({

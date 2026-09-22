@@ -828,7 +828,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // eslint-disable-next-line react-hooks/refs -- latest-session mirror for non-reactive reads; legacy pattern surfaced by compiler lint after floating-ball removal
       activeSessionIdRef.current = activeSessionId;
       const localBusy = bs ? bs.busy : false;
-      const remoteLinkReady = !!(remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null);
+      const remoteLinkReady = !!(remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null
+        && remoteConnection.capabilityStatus !== 'error');
       const busy = remoteChatActive
         ? (localBusy || remoteSessionBusy || remoteCapabilityBusy || !remoteLinkReady)
         : localBusy;
@@ -1755,19 +1756,43 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           enabled: remoteChatActive
             && remoteConnection?.status === 'connected'
             && !!sessionRef
-            && remoteConnection?.capabilityRevision == null,
+            && remoteConnection?.capabilityRevision == null
+            && remoteConnection?.capabilityStatus !== 'error',
           key: requestKey,
           sessionRef,
         });
       }, [
         remoteChatActive,
         remoteConnection?.capabilityRevision,
+        remoteConnection?.capabilityStatus,
         remoteConnection?.connectionId,
         remoteConnection?.leaseEpoch,
         remoteConnection?.remoteControlGeneration,
         remoteConnection?.sessionRef,
         remoteConnection?.status,
       ]);
+      const requestRemoteCapabilities = useCallback(() => {
+        const sessionRef = remoteConnection?.sessionRef;
+        if (!remoteConnection || remoteConnection.status !== 'connected' || !sessionRef) return;
+        if (remoteCapabilityBusy) return;
+        setRemoteCapabilityBusy(true);
+        setRemoteCapabilityError(null);
+        setRemoteSendError(null);
+        bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef)
+          .then(() => setRemoteCapabilityError(null))
+          .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
+          .finally(() => setRemoteCapabilityBusy(false));
+      }, [remoteCapabilityBusy, remoteConnection]);
+      useEffect(() => {
+        if (remoteConnection?.capabilityError) {
+          setRemoteCapabilityError(String(remoteConnection.capabilityError));
+        } else if (remoteConnection?.capabilityStatus === 'ready') {
+          setRemoteCapabilityError(null);
+        }
+      }, [remoteConnection?.capabilityError, remoteConnection?.capabilityStatus]);
+      const remoteCapabilityMessage = remoteCapabilityError === 'capability_snapshot_timeout'
+        ? t.controllerConnection.remoteCapabilityTimeout
+        : (remoteCapabilityError ? t.controllerConnection.remoteCapabilityFailed : null);
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');
@@ -2415,9 +2440,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     <span className="min-w-0 truncate opacity-80">· {remoteConnection.deviceName}</span>
                   )}
                   <span className={`text-[12px] ${remoteConnection.sessionRef ? 'opacity-80' : 'animate-pulse opacity-90'}`}>
-                    {remoteConnection.capabilityRevision != null
-                      ? t.controllerConnection.remoteSessionReady
-                      : (remoteConnection.sessionRef ? t.controllerConnection.remoteCapabilityPreparing : t.controllerConnection.remoteSessionPreparing)}
+                    {remoteConnection.capabilityStatus === 'error'
+                      ? t.controllerConnection.remoteCapabilityFailed
+                      : (remoteConnection.capabilityRevision != null
+                        ? t.controllerConnection.remoteSessionReady
+                        : (remoteConnection.sessionRef ? t.controllerConnection.remoteCapabilityPreparing : t.controllerConnection.remoteSessionPreparing))}
                   </span>
                   <div className="ml-auto flex min-w-0 items-center gap-2">
                     <span className="shrink-0 text-[12px] opacity-70">{t.remoteConversation.modelPickerTitle}</span>
@@ -2434,10 +2461,20 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     </select>
                   </div>
                 </div>
-                {(remoteSessionError || remoteCapabilityError || remoteSendError) && (
-                  <p role="alert" className="mt-2 px-1 text-[12px] text-[#EA4335]">
-                    {remoteSendError || remoteCapabilityError || remoteSessionError}
-                  </p>
+                {(remoteSessionError || remoteCapabilityMessage || remoteSendError) && (
+                  <div role="alert" className="mt-2 flex items-center gap-2 px-1 text-[12px] text-[#EA4335]">
+                    <span>{remoteSendError || remoteCapabilityMessage || remoteSessionError}</span>
+                    {remoteCapabilityMessage && remoteConnection.sessionRef && (
+                      <button
+                        type="button"
+                        onClick={requestRemoteCapabilities}
+                        disabled={remoteCapabilityBusy}
+                        className="rounded-full border border-[#EA4335]/40 px-2 py-0.5 disabled:opacity-60"
+                      >
+                        {t.controllerConnection.remoteCapabilityRetry}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             )}

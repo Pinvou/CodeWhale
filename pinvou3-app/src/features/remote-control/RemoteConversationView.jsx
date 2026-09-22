@@ -11,6 +11,7 @@ import { isTaskTerminal, taskStatusKey } from './remote-control-logic.mjs';
 
 export default function RemoteConversationView({ t, bs, modelSource = 'controlled_device', onModelSourceChange }) {
   const copy = (t && t.remoteConversation) || {};
+  const controllerCopy = (t && t.controllerConnection) || {};
   const connection = (bs && bs.controllerConnection) || {};
   const capabilities = (bs && bs.remoteCapabilities) || null;
   const models = (bs && bs.remoteModels) || [];
@@ -66,9 +67,19 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
     openSession();
   }, [remote, connected, sessionRef]);
   useEffect(() => {
-    if (!remote || !sessionRef || connection.capabilityRevision != null) return;
+    if (
+      !remote
+      || !sessionRef
+      || connection.capabilityRevision != null
+      || connection.capabilityStatus === 'error'
+    ) return;
     remote.controllerCapabilitySend(sessionRef).catch(function () {});
-  }, [remote, sessionRef, connection.capabilityRevision]);
+  }, [remote, sessionRef, connection.capabilityRevision, connection.capabilityStatus]);
+
+  const retryCapabilities = () => {
+    if (!remote || !sessionRef) return;
+    remote.controllerCapabilitySend(sessionRef).catch(function () {});
+  };
 
   const send = async () => {
     if (!remote || !draft.trim() || !capabilityReady) return;
@@ -208,6 +219,22 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
             className="rounded-full border border-[#EA4335]/40 px-2 py-0.5"
           >
             {copy.retry}
+          </button>
+        </p>
+      )}
+      {sessionRef && connection.capabilityStatus === 'error' && (
+        <p className="mt-2 flex items-center gap-2 text-[11px] text-[#EA4335]" role="alert">
+          <span>
+            {connection.capabilityError === 'capability_snapshot_timeout'
+              ? controllerCopy.remoteCapabilityTimeout
+              : controllerCopy.remoteCapabilityFailed}
+          </span>
+          <button
+            type="button"
+            onClick={retryCapabilities}
+            className="rounded-full border border-[#EA4335]/40 px-2 py-0.5"
+          >
+            {controllerCopy.remoteCapabilityRetry || copy.retry}
           </button>
         </p>
       )}

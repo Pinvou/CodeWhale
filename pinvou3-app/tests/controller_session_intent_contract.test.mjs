@@ -189,6 +189,16 @@ test('capability snapshots cross the bridge without leaking wire field names', (
   assert.ok(!/workspaces: Array.isArray\(wire/.test(bridge.slice(0, bridge.indexOf('function capabilitySnapshotForUi'))));
 });
 
+test('capability preparation waits for a response, retries finitely and renews before expiry', () => {
+  assert.ok(bridge.includes('CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000'));
+  assert.ok(bridge.includes('CAPABILITY_MAX_ATTEMPTS = 3'));
+  assert.ok(bridge.includes('settleCapabilityResponse(payload)'));
+  assert.ok(bridge.includes('waitForCapabilityResponse(intent, remoteRef)'));
+  assert.ok(bridge.includes('attempt >= CAPABILITY_MAX_ATTEMPTS'));
+  assert.ok(bridge.includes('validForMs - CAPABILITY_RENEWAL_LEAD_MS'));
+  assert.ok(bridge.includes('beginCapabilityHandshake(sessionRef, true)'));
+});
+
 test('reopening a session reuses the connection session reference', () => {
   const open = bridge.slice(
     bridge.indexOf('function controllerSessionOpen'),
