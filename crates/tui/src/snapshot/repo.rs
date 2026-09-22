@@ -64,9 +64,13 @@ const STALE_TMP_PACK_AGE: Duration = Duration::from_secs(60 * 60);
 /// [`GIT_COMMAND_TIMEOUT`], and a SIGKILL on timeout cannot run git's lock
 /// cleanup — without this, one wedged `git add -A` poisons every later
 /// snapshot with a fast-failing lock. The side repo is private to this
-/// module, so a lock older than the command bound cannot belong to a live
-/// writer of ours; one hour (matching [`STALE_TMP_PACK_AGE`]) leaves wide
-/// margin.
+/// module, so outside a wedged mount no lock older than the command bound
+/// can belong to a live writer of ours. One known exception: a git stuck in
+/// uninterruptible I/O can hold the lock far past any bound — removing that
+/// lock is benign (the holder's final rename fails with ENOENT, an error
+/// rather than index corruption), and the alternative is every later
+/// snapshot fast-failing for as long as the mount stays wedged. One hour
+/// (matching [`STALE_TMP_PACK_AGE`]) leaves wide margin.
 const STALE_INDEX_LOCK_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Maximum total snapshot storage in megabytes before pruning kicks in at
@@ -260,7 +264,13 @@ impl SnapshotRepo {
         let _ = ensure_snapshot_dir(&work_tree)?;
         let git_dir = snapshot_git_dir(&work_tree);
 
-        let needs_init = !git_dir.exists();
+        // A timed-out `git init` can leave the directory created without a
+        // HEAD (git creates `.git` before writing the first refs, and on a
+        // wedged mount the kill lands wherever the stall was), which would
+        // otherwise skip init forever and fail every later snapshot with
+        // "not a git repository". Use the same readiness predicate as
+        // `open_existing` and re-init — `git init` is idempotent.
+        let needs_init = !git_dir.exists() || !git_dir.join("HEAD").exists();
         if needs_init {
             // First-init size guard. Skipping this on subsequent opens
             // is intentional: paying a workspace walk on every snapshot
@@ -1248,8 +1258,11 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
     // Drain both pipes while waiting: the restore path's `ls-tree -r` emits
     // output that grows with workspace size, and a child blocked on a full
     // pipe buffer would never exit, turning every such call into a
-    // guaranteed timeout. Mirrors the sandbox exec plumbing in
-    // crate::run_sandbox_command.
+    // guaranteed timeout. This is the reference implementation of that
+    // shape; `crate::run_sandbox_command` (the standalone sandbox CLI) and
+    // the tokio-side `crate::tools::process::run_bounded_child` are the
+    // siblings, and the sandbox CLI still owes this file's cancellable
+    // readers and detached reap (tracked follow-up debt).
     // Readers stream into shared buffers so a grace expiry below can still
     // return what was captured; the completion channels carry a () once
     // each reader has seen EOF. The readers are cancellable (see
@@ -1287,28 +1300,40 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
         })
     };
 
-    let Some(status) = child.wait_timeout(GIT_COMMAND_TIMEOUT)? else {
-        let _ = child.kill();
-        // Reap off the pipeline thread (see the doc comment): the kernel may
-        // not deliver the kill until an uninterruptible syscall returns.
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        // Cancel and join the readers: killing the child closes only the
-        // child's write ends, and a grandchild that inherited the pipes
-        // would hold a plain reader open forever. A cancelled reader ends
-        // within one poll interval, so the joins are bounded — see
-        // [`drain_git_pipe`].
-        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = stdout_thread.join();
-        let _ = stderr_thread.join();
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!(
-                "git {subcommand} timed out after {}s",
-                GIT_COMMAND_TIMEOUT.as_secs()
-            ),
-        ));
+    let status = match child.wait_timeout(GIT_COMMAND_TIMEOUT) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            let _ = child.kill();
+            // Reap off the pipeline thread (see the doc comment): the kernel may
+            // not deliver the kill until an uninterruptible syscall returns.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            // Cancel and join the readers: killing the child closes only the
+            // child's write ends, and a grandchild that inherited the pipes
+            // would hold a plain reader open forever. A cancelled reader ends
+            // within one poll interval, so the joins are bounded — see
+            // [`drain_git_pipe`].
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "git {subcommand} timed out after {}s",
+                    GIT_COMMAND_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        // The wait itself failed (only `try_wait`/poll hard errors reach
+        // here). Cancel and join before propagating so this exit leaves no
+        // reader threads behind either.
+        Err(e) => {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(e);
+        }
     };
     // Wait for the readers up to the grace, then cancel and join them. A
     // clean git already closed its write ends so the readers deliver
@@ -1429,6 +1454,7 @@ mod bounded_git_tests {
         // reader detached instead of joined would only end when the
         // unrelated grandchild exited, accumulating one thread per pipe per
         // call.
+        let baseline = LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed);
         for _ in 0..2 {
             let mut sh = std::process::Command::new("sh");
             sh.arg("-c")
@@ -1447,13 +1473,15 @@ mod bounded_git_tests {
                 output.stderr
             );
         }
-        // The live-reader count must drain back to zero. Other tests in
-        // this binary drive the same core concurrently, so wait briefly for
-        // their in-flight readers to finish as well; a reverted detach
-        // would keep this test's own four readers pinned on the
-        // `sleep 300` pipes for its whole 300s and fail here.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed) != 0 {
+        // This call's own readers must be gone. Other tests in this binary
+        // drive the same core concurrently, so compare against the baseline
+        // count captured before the loop instead of demanding a global zero:
+        // a reverted detach keeps this test's own four readers pinned on the
+        // `sleep 300` pipes for its whole 300s and fails here, while
+        // unrelated concurrent git calls only add transient readers that
+        // drain within milliseconds.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed) > baseline {
             assert!(
                 std::time::Instant::now() < deadline,
                 "cancelled pipe readers must be joined, not detached; {} still running",
