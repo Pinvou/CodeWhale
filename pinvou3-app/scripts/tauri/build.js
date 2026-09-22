@@ -271,7 +271,13 @@ function usesValidatedNsisStaging(args) {
   });
 }
 
-/** `--target` 三元组的机器段 → node 的 arch 记法。 */
+/**
+ * `--target` 三元组的机器段 → node 的 arch 记法。
+ *
+ * 往这里加新架构时，`codex-bridge.js` 里反向的那张 machine 映射必须同步加——两张
+ * 表的耦合由 `tests/tauri_effective_config.test.js` 里从两处源码派生的断言钉住，
+ * 只改一边会红。
+ */
 const TARGET_MACHINE_ARCHITECTURES = {
   aarch64: "arm64",
   amd64: "x64",
@@ -318,8 +324,24 @@ function targetArchitecture(
 ) {
   let triple = null;
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--target" && i + 1 < args.length) triple = args[i + 1];
-    else if (args[i].startsWith("--target=")) triple = args[i].slice("--target=".length);
+    if (args[i] === "--target") {
+      // 值缺失、或下一个 token 又是个 flag：显式报错，别把 `--bundles` 当三元组往下
+      // 传。否则机器段会被解析成「--bundles」，报出来的是「机器段「--bundles」不在
+      // 架构映射表里」，指着一个根本不存在的架构问题，查半天才发现是少打了个值。
+      const value = args[i + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error(
+          `--target 后面必须跟目标三元组（如 aarch64-unknown-linux-gnu），实际是`
+            + `「${value ?? "（没有下一个参数）"}」。`,
+        );
+      }
+      triple = value;
+      i += 1;
+    } else if (args[i].startsWith("--target=")) {
+      const value = args[i].slice("--target=".length);
+      if (!value) throw new Error("--target= 后面必须跟目标三元组，当前是空值。");
+      triple = value;
+    }
   }
   if (!triple) return null;
   if (HOST_FALLBACK_TARGET_TRIPLES.has(triple)) return null;
@@ -332,42 +354,64 @@ function targetArchitecture(
     `无法从 --target ${triple} 判定目标架构：机器段「${machine}」不在架构映射表里。`
       + `宿主是 ${hostArch}，回落宿主架构会挑错 overlay，并让语音识别运行时和共享`
       + `知识库服务按宿主架构备料，产出「主程序是目标架构、侧车全是宿主架构」的`
-      + `静默错包，所以这里直接拒绝。要支持这个架构：把「${machine}」加进 `
-      + `scripts/tauri/build.js 的 TARGET_MACHINE_ARCHITECTURES，并在 `
-      + `scripts/tauri/platform-config.js 的 ARCHITECTURE_CONFIG_NAMES 和 `
-      + `src-tauri/config/platforms/linux/ 下补齐对应的架构 overlay；若它是通用`
-      + `二进制那类没有单一目标架构的三元组，则加进 HOST_FALLBACK_TARGET_TRIPLES。`,
+      + `静默错包，所以这里直接拒绝。要支持这个架构，下面四处都要补，缺一处就会`
+      + `重新引入静默错包：①本文件的 TARGET_MACHINE_ARCHITECTURES；`
+      + `②scripts/tauri/platform-config.js 的 ARCHITECTURE_CONFIG_NAMES；`
+      + `③src-tauri/config/platforms/linux/ 下对应的架构 overlay；`
+      + `④scripts/tauri/codex-bridge.js 里 node arch → 机器段的那张 machine 映射`
+      + `（漏了它 machine 会是 undefined，环境变量不注入，备料脚本回落 uname -m 按`
+      + `**宿主**架构备 Node，包里的 Bridge node 架构就错了，而且全程零报错）。`
+      + `若它是通用二进制那类没有单一目标架构的三元组，则加进 `
+      + `HOST_FALLBACK_TARGET_TRIPLES。`,
   );
 }
 
 /**
- * 跳过 ASR 运行时构建时，用一份摘掉了 ASR 资源声明的配置**顶替**架构 overlay。
+ * 摘掉一份 overlay 里被 marker 命中的资源声明，用摘过的那份**顶替**原 overlay。
  *
- * 跳过构建之后 `target/linux-asr-runtime/<arch>/sense-voice-main` 不存在，而架构
- * overlay 里声明了它，`writeEffectiveArtifacts` 会以「安装包资源不存在」终止。
+ * 【本 PR「摘资源声明」方案论证的唯一落点：两个包装函数和两个测试文件的头注释都
+ * 只留一行指过来，不要再抄一份——这段论证已经因为两处抄本各自漂移被逮到过。】
  *
- * 为什么是顶替而不是再叠一层：overlay 走的是 JSON Merge Patch，**null 是能删键的**
- * （见 `effective-config.js` 的 `mergeConfig`；NSIS 那条链路的 `stage-resources.ps1`
- * 就在生产里靠它摘掉已暂存的资源声明）。所以「叠一层 `{资源键: null}`」确实是条走得
- * 通的路，写起来也短得多，这里不选它的理由是它**删得不全**：
- *   - 叠 null 要求精确写出被删的键。平台层的 `knowledge-host/` 是个静态串还好说；
- *     架构层是 `target/linux-asr-runtime/<机器段>/sense-voice-main`，机器段
- *     （aarch64 / x86_64）跟 node 的 arch 记法不是一回事，得在这里再拼一次。
- *   - 更要紧的是它只删得掉**写出来的那一条**。哪天架构 overlay 里多声明一个同样
- *     备不出来的 ASR 文件，null 层会静默漏掉它，而漏掉的代价是构建跑到二十分钟后的
- *     bundle 阶段才报「安装包资源不存在」——正是这个开关要消灭的那种迟到失败。
- * 顶替则是从 overlay 文件**自己的键**里过滤，overlay 改了摘除跟着改，漏不掉。代价是
- * marker 用子串匹配、比精确键宽：这是有意的取舍，宁可多摘一条备不出来的资源，也不要
- * 漏摘一条。
+ * ## 要解决的问题
+ * 交叉构建时有两步按开关跳过了备料（ASR 运行时、共享知识库服务），但 overlay 里还
+ * 声明着它们的资源路径。`main()` 在 `runTauri` 之前先把 `configSpecs(preparedArgs)`
+ * 交给 `writeEffectiveArtifacts`，它对合并后生效配置里的每条 resources 做磁盘存在性
+ * 校验，于是以「安装包资源不存在」终止。
  *
- * 为什么不直接改那个纳入版本控制的配置文件：那样每次交叉构建都要「改了记得还原」，
- * 而且 `tests/tauri_platform_layout.test.js` 会一直是红的。构建期的临时差异就该
- * 留在构建脚本里。
+ * ## 为什么是顶替而不是叠一层 `{资源键: null}`
+ * 先说清楚：叠 null 是条**走得通、而且更短**的路。overlay 走 JSON Merge Patch，
+ * null 能删继承键（见 `effective-config.js` 的 `mergeConfig`；NSIS 那条链路的
+ * `stage-resources.ps1` 就在生产里靠它摘掉已暂存的资源声明）。要写出的键也都现成：
+ * 平台层的 `knowledge-host/` 本来就是静态串；架构层那条能直接从本文件顶上已经
+ * import 的 `linux-asr-runtime.js` 拿（`LINUX_ASR_ARCHITECTURES` 是机器段词表，
+ * `linuxAsrRuntimeOutput()` 连完整的 `binaryPath` 都拼好了），补个命名导入即可，
+ * 零新增映射。
+ *
+ * 选顶替只剩**一条**理由，这也是全部理由：摘除是从 overlay 文件**自己的键**里过滤
+ * 出来的。overlay 里以后新增一条同样备不出来的资源声明时，摘除自动跟随，不必回这里
+ * 补第二份键清单；叠 null 只删得掉显式写出来的那几条。
+ *
+ * 对称的代价一并写明，别只记着好处：
+ *   - marker 是**子串**匹配，比精确键宽。overlay 里哪天出现一条名字里含
+ *     `linux-asr-runtime` / `knowledge-host`、却本该打进包的声明，会被一起误摘。
+ *   - 顶替是整份 overlay 重写，风险从「漏摘」换成了「丢键」，只能靠测试逐层比对原
+ *     文件来兜（见 `tests/tauri_skip_knowledge_host_overlay.test.js`）。
+ * 叠 null 这两条风险都没有。取舍成立，但不是白捡的。
+ *
+ * ## 一条**不成立**的理由，记在这里免得又被写回来
+ * 「漏摘一条的代价是构建跑到二十分钟后的 bundle 阶段才报错」是假的：上面那道
+ * `writeEffectiveArtifacts` 校验在 cargo 启动之前几秒就跑完，漏键在那里就以同一条
+ * 「安装包资源不存在」失败。两种方案的失败点和报错文案完全相同，不构成取舍依据。
+ *
+ * ## 为什么不直接改那个纳入版本控制的配置文件
+ * 那样每次交叉构建都要「改了记得还原」，而且 `tests/tauri_platform_layout.test.js`
+ * 会一直是红的。构建期的临时差异就该留在构建脚本里。
  *
  * `--config` 既收路径也收内联 JSON 串（`linuxStartupWindowConfigSpec` 就是这么用的），
  * 所以这里直接返回 JSON 串，不落临时文件——落文件的话资源路径的相对基准会变。
- * @param {string} configPath 架构 overlay 的绝对路径。
- * @returns {string} 摘掉 ASR 之后的内联 JSON；没有可摘的就原样返回路径。
+ * @param {string} configPath overlay 的绝对路径。
+ * @param {string[]} markers 命中即摘除的资源源路径子串。
+ * @returns {string} 摘过之后的内联 JSON；没有可摘的就原样返回路径。
  */
 function configWithoutResources(configPath, markers) {
   let raw;
@@ -392,6 +436,9 @@ function configWithoutResources(configPath, markers) {
 
 /**
  * 跳过 ASR 运行时构建时，摘掉架构 overlay 里的 ASR 资源声明。
+ *
+ * 跳过构建之后 `target/linux-asr-runtime/<机器段>/sense-voice-main` 不存在，而架构
+ * overlay 里声明了它。为什么用顶替而不是叠 null 见 `configWithoutResources`。
  * @param {string} configPath 架构 overlay 的绝对路径。
  * @returns {string} 摘掉之后的内联 JSON；没有可摘的就原样返回路径。
  */
@@ -408,13 +455,14 @@ function architectureConfigWithoutAsr(configPath) {
  *   - 干净树：目录不存在，资源枚举出零个文件，包里静默缺 server；
  *   - 脏树：目录里躺着上次**宿主架构**构建留下的 server，它被原样打进 arm64 包。
  * 两种都要等用户在设备上用到共享知识库才暴露，比构建时直接失败难查得多。
+ *
+ * 为什么用顶替而不是叠 null 见 `configWithoutResources`。
  * @param {string} configPath 平台 overlay 的绝对路径。
  * @returns {string} 摘掉之后的内联 JSON；没有可摘的就原样返回路径。
  */
 function platformConfigWithoutKnowledgeHost(configPath) {
   return configWithoutResources(configPath, ["knowledge-host"]);
 }
-
 
 /**
  * 目标架构 ≠ 宿主架构时，检查那些「只会按宿主架构备料」的步骤有没有被妥善处理。
@@ -517,8 +565,14 @@ function prepareTauriArgs(
   }) || architecture;
   const architectureConfig = platformArchitectureConfigPath(platform, effectiveArchitecture);
   if (architectureConfig) {
+    // `platform === "linux"` 守卫与上面 knowledge-host 那条对称：ASR 顶替只针对
+    // Linux 的 `target/linux-asr-runtime/…` 声明。少了它，macOS/Windows 的架构
+    // overlay 也会被读进来重写一遍——当前 marker 在那些文件里命中不了、顶替会原样
+    // 返回路径，所以无害，但这种「靠 marker 恰好不命中」的无害是会过期的。
     automaticConfigs.push(
-      skipLinuxAsr ? architectureConfigWithoutAsr(architectureConfig) : architectureConfig,
+      skipLinuxAsr && platform === "linux"
+        ? architectureConfigWithoutAsr(architectureConfig)
+        : architectureConfig,
     );
   }
   // bundle:nsis has already validated the staging overlay. Do not inject the
@@ -795,6 +849,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  // 导出给测试：扩展新架构要同步改的几张表之间有「漏改一处就静默错包」的约束，
+  // 测试必须从这张表**派生**出断言，硬编码一份的话新增架构照样绿。
+  TARGET_MACHINE_ARCHITECTURES,
   architectureConfigWithoutAsr,
   configWithoutResources,
   configureIsolatedWindowsRustToolchain,

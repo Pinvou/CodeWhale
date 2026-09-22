@@ -12,6 +12,7 @@ const {
   mergeConfig,
 } = require("../scripts/tauri/effective-config.js");
 const {
+  TARGET_MACHINE_ARCHITECTURES,
   configureIsolatedWindowsRustToolchain,
   chromeDevtoolsMcpEnvironment,
   configSpecs,
@@ -440,6 +441,40 @@ for (const machine of injectedBridgeMachines) {
     assert.ok(
       acceptedBridgeTargets.has(`${osName}-${machine}`),
       `备料脚本的目标词表必须认得 ${osName}-${machine}，否则交叉构建会落到 *) 硬失败`,
+    );
+  }
+}
+
+// 扩展新架构时，build.js 的词表和 codex-bridge.js 的 machine 映射必须同步扩展。
+//
+// 上面那组用例把 arm64→aarch64 / x64→x86_64 逐项写死了，它钉的是**映射值对不对**；
+// 但因为对照表是硬编码的，往 TARGET_MACHINE_ARCHITECTURES 里加一个 riscv64 而不动
+// machine 映射，上面照样全绿。而那正是要防的洞：machine 落成 undefined → 环境变量
+// 不注入 → 备料脚本回落 `uname -m` 按**宿主**架构备 Node → 包里的 Bridge node 是
+// 宿主架构，全程零报错，恰是本 PR 要消灭的静默错包。
+//
+// 所以这条断言两头都**从源码派生**，不硬编码任何架构名：
+//   左边 = build.js 的 TARGET_MACHINE_ARCHITECTURES 能产出的全部 node arch；
+//   右边 = 真跑一次 prepareCodexBridge、看它到底注没注入（即 machine 映射的键）；
+//   再顺着链条查一层 = 注入的那个词必须在备料脚本的目标词表里。
+// 任何一处漏改，这里就红。
+for (const targetArch of new Set(Object.values(TARGET_MACHINE_ARCHITECTURES))) {
+  const injected = capturedBridgeSpawn({
+    platform: "linux",
+    targetArch,
+    env: bridgeEnvFixture,
+  }).options.env.PINVOU3_BRIDGE_TARGET_ARCH;
+  assert.ok(
+    injected,
+    `build.js 的 TARGET_MACHINE_ARCHITECTURES 能解析出 ${targetArch}，但 `
+      + `codex-bridge.js 的 machine 映射里没有它：交叉构建会静默按宿主架构备 Node。`
+      + "两张表必须一起改。",
+  );
+  for (const osName of ["Linux", "Darwin"]) {
+    assert.ok(
+      acceptedBridgeTargets.has(`${osName}-${injected}`),
+      `${targetArch} 注入的 ${injected} 不在备料脚本的目标词表里（${osName}），`
+        + "交叉构建会落到 *) 硬失败",
     );
   }
 }

@@ -366,6 +366,11 @@ function prepareCodexBridge({
   // 写的是 aarch64（aarch64-apple-darwin）。脚本的目标词表两个词都认
   //（`Darwin-aarch64|Darwin-arm64`，与 Linux 那条的双词表一致），这里就不再按 OS
   // 维护第二张映射表。tests/tauri_effective_config.test.js 钉住了这条对应关系。
+  //
+  // 这张表必须覆盖 build.js 的 `TARGET_MACHINE_ARCHITECTURES` 能产出的**每个** arch。
+  // 少一个不会报错：machine 落成 undefined，下面的 env 原样透传，备料脚本回落
+  // `uname -m` 按**宿主**架构备 Node，包里的 Bridge node 就是错架构的——全程零提示，
+  // 正是本条链路要消灭的静默错包。那条子集断言同样在上面那个测试文件里。
   const machine = { arm64: "aarch64", x64: "x86_64" }[targetArch];
   const result = spawn(script, [], {
     cwd: APP_ROOT,

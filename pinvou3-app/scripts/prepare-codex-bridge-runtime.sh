@@ -35,7 +35,11 @@ CLAUDE_ACP_PACKAGE="@agentclientprotocol/claude-agent-acp"
 CLAUDE_SDK_VERSION="0.3.232"
 BRIDGE_PACKAGE_DIR="$SCRIPT_DIR/codex-bridge-runtime"
 
-# 从 manifest.json 里读一个字符串字段（读不到/文件不存在时输出空串并返回 1）。
+# 从 manifest.json 里读一个字符串字段，把值打到标准输出。
+#
+# 退出码只区分「文件不存在或为空」（返回 1，输出空串）这一种；文件在、但里面没有这个
+# 键时 sed 找不到匹配，照样返回 **0** 并输出空串。所以调用方一律比对输出串，不要拿
+# 退出码当「读到了没有」用——下面几处 `[ "$(manifest_field …)" = "$X" ]` 就是这么写的。
 #
 # 两段式，不用反向引用：先砍掉 `"<key>": "` 之前的一切，再砍掉右引号之后的。
 # sed 的反向引用穿过多层引号太容易被吃掉，而且吃掉之后是**静默**取到空串——
@@ -232,7 +236,6 @@ if bridge_runtime_valid "$OUT_DIR"; then
   exit 0
 fi
 
-
 node_archive_ext() {
   case "$1" in
     linux-*) echo "tar.xz" ;;
@@ -357,12 +360,10 @@ if [ "$OS_NAME" = "Darwin" ]; then
       "$READY_DIR/node/$node_target/bin/node"
   done
   install -m 0644 "$NODE_DIST_ROOT/LICENSE" "$READY_DIR/node/LICENSE"
-  READY_NODE="$READY_DIR/node/$NODE_TARGET/bin/node"
 else
   mkdir -p "$READY_DIR/node/bin"
   install -m 0755 "$NODE_DIST_ROOT/bin/node" "$READY_DIR/node/bin/node"
   install -m 0644 "$NODE_DIST_ROOT/LICENSE" "$READY_DIR/node/LICENSE"
-  READY_NODE="$READY_DIR/node/bin/node"
 fi
 # 连接器首次使用时由随包 Node 运行 npm；保留 Node 官方发行包自带的纯 JS npm，
 # Linux/macOS 均不再依赖用户机器预装 npm。
@@ -370,8 +371,9 @@ mkdir -p "$READY_DIR/node/lib/node_modules"
 cp -R $DD "$NODE_DIST_ROOT/lib/node_modules/npm" "$READY_DIR/node/lib/node_modules/npm"
 mv $DD "$ACP_ROOT/node_modules" "$READY_DIR/acp/node_modules"
 
-# 生成 manifest 用宿主那份 node：READY_NODE 是要打进包的目标架构二进制，交叉时
-# 在这台机器上执行不了。生成 manifest 是纯 JS，跟解释器架构无关。
+# 生成 manifest 用宿主那份 node（`$NPM_NODE_ROOT`），不能用刚装进 `$READY_DIR/node`
+# 的那份：那是要打进包的**目标**架构二进制，交叉构建时在这台机器上根本执行不了。
+# 生成 manifest 是纯 JS，跟解释器架构无关，用宿主那份没有任何副作用。
 "${NPM_NODE_ROOT}/bin/node" -e '
 const fs = require("fs");
 const path = require("path");
