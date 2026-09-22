@@ -872,20 +872,29 @@ fn dispatch_inbound_frame(
         }
         "task_status" => {
             if let Some(event) = task_event_projection(&lease, &payload) {
+                log_controller_event(
+                    "task_status_received",
+                    event.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                );
                 (sinks.on_task)(event);
             }
         }
         "journal_event" => {
             let Some(event) = journal_event_from_wire(&payload) else {
+                log_controller_event("journal_event_rejected", "invalid_envelope_or_identity");
                 return;
             };
             match journal_admission(journal.expected(&event.session_id), &event) {
                 JournalAdmission::Apply => {
                     journal.mark_applied(&event);
+                    log_controller_event("journal_event_applied", &event.kind);
                     (sinks.on_journal)(&event);
                 }
-                JournalAdmission::Duplicate => {}
+                JournalAdmission::Duplicate => {
+                    log_controller_event("journal_event_ignored", "duplicate");
+                }
                 JournalAdmission::RequestReplay { epoch, after } => {
+                    log_controller_event("journal_event_gap", "replay_requested");
                     if let Some((epoch, after)) =
                         journal.begin_replay(&event.session_id, &epoch, after)
                     {

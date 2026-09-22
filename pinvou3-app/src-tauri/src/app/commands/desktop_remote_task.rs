@@ -437,19 +437,57 @@ fn admit_and_dispatch(
             let status = service
                 .status_payload(&task_id)
                 .map_err(|error| error.code.to_owned())?;
+            // The persisted ledger intentionally excludes prompt text. Project
+            // it once to B's local UI only after admission so the controlled
+            // device can visibly confirm what it is executing.
+            if let Some(text) = validated
+                .get("input")
+                .and_then(|input| input.get("text"))
+                .and_then(Value::as_str)
+            {
+                let _ = app.emit(
+                    TASK_STATUS_EVENT,
+                    serde_json::json!({
+                        "taskId": &task_id,
+                        "sessionId": session_id,
+                        "status": "admitted",
+                        "text": text,
+                    }),
+                );
+            }
             let events: Arc<dyn ControllerTaskEventSink> = Arc::new(TaskEventBridge {
                 app: app.clone(),
             });
             let dispatch_service = Arc::clone(&service);
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_execution_scheduled",
+                "admitted",
+            );
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = dispatch_service
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_execution_started",
+                    "running",
+                );
+                match dispatch_service
                     .dispatch(ticket, events, CancellationToken::new(), monotonic_millis())
                     .await
                 {
-                    eprintln!(
-                        "[remote-control] remote task dispatch rejected: {}",
-                        error.code
-                    );
+                    Ok(record) => {
+                        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "task_execution_finished",
+                            record.wire_status(),
+                        );
+                    }
+                    Err(error) => {
+                        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "task_execution_failed",
+                            error.code,
+                        );
+                        eprintln!(
+                            "[remote-control] remote task dispatch rejected: {}",
+                            error.code
+                        );
+                    }
                 }
             });
             let _ = app.emit(TASK_EVENT, &status);

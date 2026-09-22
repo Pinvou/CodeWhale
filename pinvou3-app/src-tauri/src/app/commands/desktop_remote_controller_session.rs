@@ -15,6 +15,7 @@ use crate::features::remote_control::controller::controlling_session::{
     SessionError,
 };
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
+use crate::features::remote_control::controller::relay_runtime::log_controller_event;
 use crate::features::remote_control::controller::relay_transport::ControllerSendError;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -211,16 +212,29 @@ pub fn desktop_remote_controller_task_send(
     text: String,
 ) -> Result<ControllingIntentProjection, String> {
     ensure_supported(&manager)?;
+    log_controller_event("task_submit_requested", "building");
     let (lease, capabilities) = live_context(&manager)?;
     let intent = sessions
         .task_intent(&remote_ref, &text, &lease)
-        .map_err(session_error)?;
+        .map_err(|error| {
+            log_controller_event("task_submit_rejected", error.code);
+            session_error(error)
+        })?;
+    log_controller_event("task_submit_constructed", "ready");
     let frame = business
         .seal("task_submit", &intent.payload, &capabilities)
-        .map_err(|error| error.code().to_owned())?;
+        .map_err(|error| {
+            log_controller_event("task_submit_seal_failed", error.code());
+            error.code().to_owned()
+        })?;
     manager
         .send_authenticated_business(&frame)
-        .map_err(send_error_code)?;
+        .map_err(|error| {
+            let code = send_error_code(error);
+            log_controller_event("task_submit_queue_failed", &code);
+            code
+        })?;
+    log_controller_event("task_submit_queued", "accepted");
     Ok(intent)
 }
 

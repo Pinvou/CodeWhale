@@ -434,12 +434,21 @@
       taskId: taskId,
       sessionId: payload.sessionId ? String(payload.sessionId) : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
+      text: payload.text
+        ? String(payload.text).slice(0, 8192)
+        : (index >= 0 ? tasks[index].text || null : null),
       outcomeUnknown: !!payload.outcomeUnknown,
       terminalReason: payload.terminalReason ? String(payload.terminalReason) : null,
       resultDigest: payload.resultDigest ? String(payload.resultDigest) : null,
     };
     if (index >= 0) {
-      if (tasks[index].status === status) return state;
+      if (
+        tasks[index].status === status
+        && tasks[index].text === entry.text
+        && tasks[index].outcomeUnknown === entry.outcomeUnknown
+        && tasks[index].terminalReason === entry.terminalReason
+        && tasks[index].resultDigest === entry.resultDigest
+      ) return state;
       tasks[index] = entry;
     } else {
       if (tasks.length >= 64) tasks.shift();

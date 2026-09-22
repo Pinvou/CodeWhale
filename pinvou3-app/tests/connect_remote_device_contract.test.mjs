@@ -210,3 +210,9 @@ test('controlled-side auto-open contains a rejected navigation and retries', asy
   assert.equal(attempts, 2);
   assert.equal(errors, 1);
 });
+
+test('the controlled device projects an admitted task into its main chat view', () => {
+  assert.ok(chatView.includes('data-testid="chat-controlled-task-banner"'));
+  assert.ok(chatView.includes('controlledActiveTasks[0].text'));
+  assert.ok(chatView.includes('taskStatusKey(controlledActiveTasks[0].status)'));
+});

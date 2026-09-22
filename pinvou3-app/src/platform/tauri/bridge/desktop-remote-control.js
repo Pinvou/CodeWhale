@@ -3,7 +3,7 @@
  *
  * This is a separate domain from the existing `webAccess` WebUI share:
  * `controlledDevice` (B), `controllerConnection` + `remoteCapabilities` +
- * `remoteModels` + `remoteHistories` (A) live here, and every async completion
+ * `remoteModels` + `remoteHistories` + `transcript` (A) live here, and every async completion
  * is gated by the intent sequence and generation/lease epoch held in
  * `features/remote-control/remote-control-state.js`.
  *
@@ -51,6 +51,7 @@
       "remoteModels",
       "remoteHistories",
       "tasks",
+      "transcript",
       "remotePermissions",
     ];
 

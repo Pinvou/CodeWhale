@@ -74,16 +74,28 @@ pub(crate) fn publish_authoritative_event(
     use tauri::Manager as _;
     let device = app.state::<ControlledDeviceManager>();
     let Ok((lease, capabilities)) = device.live_runtime_context() else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "lease_unavailable",
+        );
         return;
     };
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
     let Some(session_ref) = runtime.service().remote_ref_for(&event.session_id) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "session_mapping_missing",
+        );
         return;
     };
     let outbound = app.state::<
         crate::features::remote_control::controller::relay_runtime::ControlledOutboundState,
     >();
     let Some(sender) = outbound.sender() else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "outbound_unavailable",
+        );
         return;
     };
     let Some(payload) =
@@ -93,15 +105,32 @@ pub(crate) fn publish_authoritative_event(
             event,
         )
     else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "payload_not_exportable",
+        );
         return;
     };
     let lane = app.state::<
         crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
     >();
     let Ok(frame) = lane.seal("journal_event", &payload, &capabilities) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "seal_failed",
+        );
         return;
     };
-    let _ = sender.try_send(frame);
+    match sender.try_send(frame) {
+        Ok(()) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_sent",
+            &event.kind,
+        ),
+        Err(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "queue_failed",
+        ),
+    }
 }
 
 impl DesktopRemoteHistoryRuntime {

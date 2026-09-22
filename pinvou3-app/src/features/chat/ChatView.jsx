@@ -49,6 +49,7 @@ import { ConversationAttachmentBubble } from '../attachments/ConversationAttachm
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
 import { isRemoteChatActive, remoteChatItems as projectRemoteChatItems } from '../remote-control/chat-transcript-projection.mjs';
+import { isTaskTerminal, taskStatusKey } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
 import { isControlledDeviceChatActive } from '../remote-control/remote-control-logic.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
@@ -813,7 +814,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // 远程模式下 ChatView 只承担输入/正文输出；权威数据仍来自 remote journal，
       // 本地会话的普通工具/产物流程不参与远程回合。
       const remoteChatActive = isRemoteChatActive(remoteConnection);
-      const controlledDevice = bs && bs.controlledDevice;
+      const controlledDevice = (bs && bs.controlledDevice) || {};
       const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
       const [remoteSessionBusy, setRemoteSessionBusy] = useState(false);
       const [remoteSessionError, setRemoteSessionError] = useState(null);
@@ -826,6 +827,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         [remoteConnection, bs && bs.transcript],
       );
       const displayChatItems = remoteChatActive ? projectedRemoteChatItems : chatItems;
+      const controlledActiveTasks = useMemo(
+        () => ((bs && bs.tasks) || []).filter(task => task && !isTaskTerminal(task.status)),
+        [bs && bs.tasks],
+      );
+      const showControlledTask = controlledDevice.status === 'connected' && controlledActiveTasks.length > 0;
       const activeSessionId = bs ? bs.activeSessionId : null;
       const activeSessionIdRef = useRef(activeSessionId);
       // eslint-disable-next-line react-hooks/refs -- latest-session mirror for non-reactive reads; legacy pattern surfaced by compiler lint after floating-ball removal
@@ -2502,6 +2508,30 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     )}
                   </div>
                 )}
+              </div>
+            )}
+
+            {showControlledTask && (
+              <div
+                data-testid="chat-controlled-task-banner"
+                role="status"
+                aria-live="polite"
+                className={`mb-4 w-full max-w-[800px] px-4 max-sm:px-3 ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                <div className="rounded-[20px] border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-[#174EA6] shadow-sm dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-[#A8C7FA]">
+                  <div className="flex items-center gap-2 text-[13px] font-medium">
+                    <Monitor size={16} className="shrink-0" />
+                    <span>{t.controlledDevice.runningTasks(controlledActiveTasks.length)}</span>
+                    <span className="ml-auto text-[12px] opacity-75">
+                      {t.remoteConversation[taskStatusKey(controlledActiveTasks[0].status)]}
+                    </span>
+                  </div>
+                  {controlledActiveTasks[0].text && (
+                    <p className="mt-2 line-clamp-3 whitespace-pre-wrap break-words text-[13px] text-[#1F1F1F] dark:text-[#E3E3E3]">
+                      {controlledActiveTasks[0].text}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 

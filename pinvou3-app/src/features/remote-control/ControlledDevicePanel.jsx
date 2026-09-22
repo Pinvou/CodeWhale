@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Wrench } from '../../components/icons.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge } from '../../hooks/useBridge.js';
+import { taskStatusKey } from './remote-control-logic.mjs';
 
 const CODE_TICK_MS = 1000;
 const COUNTDOWN_ANNOUNCE_EVERY = 30;
@@ -140,7 +141,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   }
 
   const workspaces = Array.isArray(device.workspaces) ? device.workspaces : [];
-  const tasks = Array.isArray(bs && bs.tasks) ? bs.tasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task.status)) : [];
+  const tasks = Array.isArray(bs && bs.tasks) ? bs.tasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown'].includes(task.status)) : [];
   const permissions = Array.isArray(bs && bs.remotePermissions) ? bs.remotePermissions : [];
 
   return (
@@ -237,6 +238,14 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
               <Wrench aria-hidden="true" /> {copy.stopTasks}
             </button>
           </div>
+          <ol className="space-y-2" aria-live="polite">
+            {tasks.map((task) => (
+              <li key={task.taskId} className="rounded-lg bg-black/[0.03] px-3 py-2 text-[12px] dark:bg-white/[0.05]">
+                <div className="font-medium">{(t.remoteConversation || {})[taskStatusKey(task.status)]}</div>
+                {task.text && <div className="mt-1 whitespace-pre-wrap break-words opacity-80">{task.text}</div>}
+              </li>
+            ))}
+          </ol>
         </div>
       )}
 

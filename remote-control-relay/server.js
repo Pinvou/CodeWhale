@@ -291,6 +291,27 @@ function send(ws, value) {
   }
 }
 
+const CONTROLLER_TASK_DIAGNOSTIC_KINDS = new Set(["task_submit", "task_status"]);
+
+function controllerTaskDiagnostic(stage, message, error = null) {
+  if (message?.type !== "encrypted_frame"
+    || !CONTROLLER_TASK_DIAGNOSTIC_KINDS.has(message?.payload_kind)) return;
+  const token = (value, fallback) => {
+    const bounded = typeof value === "string"
+      ? value.replace(/[^A-Za-z0-9_.:-]/gu, "").slice(0, 80)
+      : "";
+    return bounded || fallback;
+  };
+  const payloadKind = token(message.payload_kind, "unknown");
+  const direction = token(message.direction, "unknown");
+  const reason = error
+    ? token(error?.cause?.code || error?.code, "rejected")
+    : "accepted";
+  console.info(
+    `[controller] stage=${token(stage, "unknown")} payload_kind=${payloadKind} direction=${direction} reason=${reason}`,
+  );
+}
+
 function closeSocket(ws, code = 1000, reason = "") {
   if (!ws) return;
   ws.policyClosing = true;
@@ -1184,13 +1205,16 @@ wss.on("connection", (ws, req) => {
         socketIdentity: ws.controllerSocketIdentity,
         message: msg,
       }).then(() => {
+        controllerTaskDiagnostic("business_forwarded", msg);
         if (msg.type === "controller_pairing_claim"
           || (typeof msg.type === "string" && msg.type.startsWith("controller_"))) {
           ws.controllerAuthenticated = true;
           clearTimeout(ws.authTimer);
           ws.authTimer = null;
         }
-      }).catch(() => {});
+      }).catch((error) => {
+        controllerTaskDiagnostic("business_rejected", msg, error);
+      });
       return;
     }
     if (msg.v !== 2) {

@@ -120,7 +120,26 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         payload: &Value,
     ) -> Result<Value, String> {
-        super::desktop_remote_task::submit_decrypted_task(&self.app, session_ref, payload)
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_submit_business_entered",
+            "validating",
+        );
+        let result = super::desktop_remote_task::submit_decrypted_task(
+            &self.app,
+            session_ref,
+            payload,
+        );
+        match &result {
+            Ok(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_submit_business_accepted",
+                "admitted",
+            ),
+            Err(error) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_submit_business_rejected",
+                error,
+            ),
+        }
+        result
     }
 
     async fn cancel_task(
@@ -191,8 +210,16 @@ fn build_session_snapshot_payload(
     request_id: &str,
     snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
 ) -> Result<Value, String> {
-    let raw = serde_json::to_vec(snapshot).map_err(|_| "journal_snapshot_invalid".to_owned())?;
-    let digest = snapshot.digest.clone();
+    // Keep the authenticated snapshot body on the same A-generated session
+    // identity as incremental journal events. The snapshot digest does not
+    // include session ids, so the authoritative continuity proof is unchanged.
+    let mut wire_snapshot = snapshot.clone();
+    for event in &mut wire_snapshot.events {
+        event.session_id = session_ref.to_owned();
+    }
+    let raw = serde_json::to_vec(&wire_snapshot)
+        .map_err(|_| "journal_snapshot_invalid".to_owned())?;
+    let digest = wire_snapshot.digest.clone();
     if digest.len() != 64 {
         return Err("journal_snapshot_invalid".to_owned());
     }
@@ -206,8 +233,8 @@ fn build_session_snapshot_payload(
         "remote_control_generation": lease.remote_control_generation,
         "request_id": request_id,
         "session_id": session_ref,
-        "journal_epoch": snapshot.epoch,
-        "base_sequence": snapshot.sequence.to_string(),
+        "journal_epoch": wire_snapshot.epoch,
+        "base_sequence": wire_snapshot.sequence.to_string(),
         "snapshot_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "snapshot_bytes": raw.len().to_string(),
         "sha256": digest,

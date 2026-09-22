@@ -53,6 +53,13 @@ const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// 写失败一律忽略，绝不影响主流程。
 pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     use std::io::Write as _;
+    static LOG_WRITE_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+
+    // Several transport/task callbacks can report transitions concurrently.
+    // Serialize the complete append so two records cannot be spliced together.
+    let _write_guard = LOG_WRITE_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(()))
+        .lock();
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -860,6 +867,11 @@ impl ControlledRelayWorker {
     /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
     /// `task_status` 由命令层决定（这里只负责通道语义）。
     async fn dispatch_business_frame(&self, frame: &Value) {
+        let is_task_submit = frame.get("payload_kind").and_then(Value::as_str)
+            == Some("task_submit");
+        if is_task_submit {
+            log_controlled_event("task_submit_frame_received", "opening");
+        }
         let manager = self.app.state::<ControlledDeviceManager>();
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
             log_controlled_event("business_frame_dropped", "no_live_lease");
@@ -873,6 +885,9 @@ impl ControlledRelayWorker {
                 return;
             }
         };
+        if payload_kind == "task_submit" {
+            log_controlled_event("task_submit_decrypted", "dispatching");
+        }
         let responses = match dispatch_decrypted_payload(
             self.business.as_ref(),
             &lease,
@@ -884,9 +899,15 @@ impl ControlledRelayWorker {
             Ok(responses) => responses,
             Err(error) => {
                 log_controlled_event("business_dispatch_failed", &error);
+                if is_task_submit {
+                    log_controlled_event("task_submit_dispatch_failed", &error);
+                }
                 return;
             }
         };
+        if is_task_submit {
+            log_controlled_event("task_submit_dispatched", "accepted");
+        }
         // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
         for (response_kind, response) in responses {
             let frame = match business.seal(response_kind, &response, &capabilities) {
@@ -899,6 +920,9 @@ impl ControlledRelayWorker {
             if self.channel.try_send(frame).is_err() {
                 log_controlled_event("business_response_send_failed", response_kind);
                 return;
+            }
+            if is_task_submit && response_kind == "task_status" {
+                log_controlled_event("task_submit_status_sent", "accepted");
             }
             if matches!(response_kind, "capability_snapshot" | "capability_snapshot_error") {
                 log_controlled_event("capability_response_sent", response_kind);
@@ -1160,7 +1184,11 @@ pub(crate) fn build_journal_event_payload(
     event: &super::journal::JournalEvent,
 ) -> Option<Value> {
     let wire_kind = wire_event_kind(event)?;
-    let raw = serde_json::to_vec(event).ok()?;
+    // B owns the local session id while the wire contract owns A's opaque
+    // session id. Envelope and authenticated body must use the same identity.
+    let mut wire_event = event.clone();
+    wire_event.session_id = session_ref.to_owned();
+    let raw = serde_json::to_vec(&wire_event).ok()?;
     if raw.len() > super::journal::MAX_EVENT_PAYLOAD_BYTES {
         return None;
     }
@@ -1173,8 +1201,8 @@ pub(crate) fn build_journal_event_payload(
         "relay_epoch": lease.relay_epoch,
         "remote_control_generation": lease.remote_control_generation,
         "session_id": session_ref,
-        "journal_epoch": event.epoch,
-        "event_sequence": event.sequence.to_string(),
+        "journal_epoch": wire_event.epoch,
+        "event_sequence": wire_event.sequence.to_string(),
         "event_kind": wire_kind,
         "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "event_bytes": raw.len().to_string(),
@@ -2468,7 +2496,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(decoded, event);
+        let mut expected = event.clone();
+        expected.session_id = "session-a-ref".to_owned();
+        assert_eq!(decoded, expected);
         // 进行中的任务状态与附件/快照不回传（由 task_status 帧或后续任务负责）。
         let mut running = event.clone();
         running.kind = "task_status".to_owned();

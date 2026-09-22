@@ -225,6 +225,30 @@ test('task events deduplicate and never regress a terminal state', () => {
   assert.equal(resultUnknown.tasks[1].outcomeUnknown, true);
 });
 
+test('B-side task projection keeps locally visible prompt text across status changes', () => {
+  let state = logic.createState();
+  state = logic.applyTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'admitted',
+  });
+  state = logic.applyTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'admitted',
+    text: 'inspect the repository',
+  });
+  assert.equal(state.tasks[0].text, 'inspect the repository');
+
+  state = logic.applyTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'running',
+  });
+  assert.equal(state.tasks[0].status, 'running');
+  assert.equal(state.tasks[0].text, 'inspect the repository');
+});
+
 test('live-context matching rejects foreign connections and leases', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
@@ -246,6 +270,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   );
   assert.match(feature, /desktop_remote_control_unsupported/);
   assert.match(feature, /can\("desktopRemoteControl"\)/);
+  assert.match(feature, /"transcript",/, 'authoritative remote journal must be mirrored into ChatView state');
   // The bridge must never forward raw credential fields.
   assert.ok(!/api_key|apiKey|credential_ref|credentialRef/.test(feature));
   // Every desktop command it forwards is a desktop_remote_* command.
