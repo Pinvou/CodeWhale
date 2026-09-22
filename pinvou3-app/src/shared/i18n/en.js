@@ -343,6 +343,8 @@ export const dictEn = {
           emptyInstalledHint:'Pick one from Available below. Once downloaded you can deploy it and use it in PINVOU directly.',
           search:'Search models, providers, or engines', clearSearch:'Clear search', refresh:'Refresh', retry:'Retry', loading:'Loading…',
           loadFailed:e=>`Failed to load: ${e}`,
+          storeLoadFailed:e=>`Failed to load the store listing: ${e}`,
+          libraryLoadFailed:e=>`Failed to load the local model library: ${e}`,
           guideNotInstalledTitle:'Local model management must be installed on this machine',
           guideNotInstalledHint:'Downloads and on-device deployment are handled by the Local Model Management component, which is not installed on this device yet.',
           guideStoppedTitle:'Local model management is not running',
@@ -357,6 +359,9 @@ export const dictEn = {
           taskDownload:n=>`Downloading "${n}"`, downloadDone:n=>`"${n}" downloaded; deploy it from My Models`, downloadCancelled:'Download cancelled',
           detailProvider:'Provider', detailEngine:'Inference engine', detailQuantization:'Quantization', detailSize:'Size',
           detailSizeDual:'(one copy per device)', detailClose:'Close',
+          // Fallback title for the detail dialog while loading or after a failed
+          // load: the title bar (and the close button it carries) must never vanish.
+          detailTitle:'Model details',
           topologyDual:'Dual-device', topologySingle:'Single device',
           openDetail:'View details',
           dualNotice:'This is a dual-device deployment: two machines connected by a QSFP direct cable. Whichever device downloads and deploys becomes the primary; the other is the secondary.',
@@ -428,16 +433,35 @@ export const dictEn = {
           storageButton: 'Storage',
           storageTitle: 'Storage and import',
           storageModelsDirLabel: 'Model weights directory',
-          storageModelsDirHint: 'Changing this does not move weights you already downloaded. Models in the old directory stay on this machine and are picked up automatically next time you download.',
+          // These two (storageModelsDirHint / storageScanHint) must not assert either
+          // direction: the host does not decide whether reuse happens.
+          //
+          // The split is: the host answers "where to look" (roots go out via
+          // LMM_IMPORT_DIRS, hits via LMM_IMPORT_CANDIDATES, and both land in the run
+          // log); the card script answers "is this copy good, and do I use it". So the
+          // two sets of cards behave differently:
+          //   - Official store cards: already consume LMM_IMPORT_DIRS (shipped to
+          //     production 2026-09-21; 7 of the 7 listed cards). They reuse a complete
+          //     local copy instead of downloading again.
+          //   - Built-in test store cards (data/test-store/ compiled into the binary):
+          //     not wired up, still download. That copy is stale w.r.t. production.
+          //
+          // Both earlier versions of this copy lied, in opposite directions. Describe
+          // what the host does and leave reuse to the card, and neither side lies.
+          storageModelsDirHint: 'Changing this does not move weights you already downloaded. Models in the old directory stay on this machine, but it is no longer searched automatically — add the old path under "Additional search directories" to keep reusing them.',
           storageFree: (size) => `${size} free`,
           storageImportLabel: 'Additional search directories',
           storageImportHint: 'One absolute path per line. Add the places we cannot guess, such as a second data drive.',
           storageScanLabel: 'Where downloads look first',
-          storageScanHint: 'Searched in this order. Anything found is handed to the model card to verify; if it matches, it is used as is instead of downloading. USB and external drives are included automatically.',
+          storageScanHint: 'Searched in this order. Results are written to the run log and handed to the model card to verify. Reuse is up to the card script: official store cards reuse a complete local copy, while the built-in test store cards do not support this yet and still download over the network. USB and external drives are included automatically.',
           storageRemovable: 'removable',
           storageSave: 'Save',
           storageCancel: 'Cancel',
           storageSaved: 'Saved',
+          // Shown when the settings could not be read: Save is disabled, because an
+          // empty "additional search directories" box would submit as an empty list
+          // and silently wipe the directories the user had saved.
+          storageLoadFailedHint: 'Could not read your current storage settings, so saving is disabled to avoid overwriting the search directories you already saved. Close this dialog and open it again.',
           // —— Test model store (hidden entry: tap the version line 7 times) ——
           testStoreUnlockTitle: 'Enable the test model store',
           testStoreUnlockHint: 'Test store cards and scripts ship inside the app and do not depend on the store server. They exist only to verify the scripts themselves.',

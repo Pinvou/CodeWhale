@@ -343,6 +343,10 @@ export const dictZh = {
           emptyInstalledHint:'从下面的「可下载」里挑一个，下载完成后可以部署并在品悟里直接使用。',
           search:'搜索模型、提供方或引擎', clearSearch:'清除搜索', refresh:'刷新', retry:'重试', loading:'加载中…',
           loadFailed:e=>`加载失败：${e}`,
+          // 商店和本地库现在是两条独立请求（远端挂了不该把本地已装模型的管理一起
+          // 拖下水），所以错误也要分开说，否则用户看不出该重试哪一半。
+          storeLoadFailed:e=>`商店列表加载失败：${e}`,
+          libraryLoadFailed:e=>`本地模型库加载失败：${e}`,
           guideNotInstalledTitle:'需要在本机安装本地模型管理',
           guideNotInstalledHint:'模型的下载与本机部署由「本地模型管理」组件完成，当前设备上还没有安装它。',
           guideStoppedTitle:'本地模型管理尚未启动',
@@ -360,6 +364,9 @@ export const dictZh = {
           taskDownload:n=>`下载「${n}」`, downloadDone:n=>`「${n}」下载完成，可到「我的模型」部署`, downloadCancelled:'已取消下载',
           detailProvider:'提供商', detailEngine:'推理引擎', detailQuantization:'量化', detailSize:'体积',
           detailSizeDual:'（每台设备各一份）', detailClose:'关闭',
+          // 详情弹窗标题栏的兜底标题：加载失败/还没拉到详情时用它，标题栏（连同
+          // 右上角的关闭按钮）要常驻，不能跟着卡片名一起消失。
+          detailTitle:'模型详情',
           topologyDual:'双机部署', topologySingle:'单机部署',
           openDetail:'查看详情',
           dualNotice:'这是双机部署方案，需要两台设备用 QSFP 直连线接起来。下载和部署发生在哪台设备，哪台就是主机，另一台是从机。',
@@ -437,16 +444,34 @@ export const dictZh = {
           storageButton: '存储',
           storageTitle: '存储与导入',
           storageModelsDirLabel: '模型权重目录',
-          storageModelsDirHint: '改目录不会搬运已下载的权重。旧目录里的模型仍在本机，下载时会被自动找到并复用。',
+          // 这两条（storageModelsDirHint / storageScanHint）**不要下任何一个方向的
+          // 断言**，因为复用与否根本不由宿主决定。
+          //
+          // 分工是：宿主答「去哪找」（扫描根通过 LMM_IMPORT_DIRS 下发、结果通过
+          // LMM_IMPORT_CANDIDATES 交给脚本，并写进运行日志），卡片脚本答「这份
+          // 对不对、要不要用」。于是**两套卡片行为不同**：
+          //   - 正式商店的远端卡片：已消费 LMM_IMPORT_DIRS（2026-09-21 上架生产，
+          //     在架 7 张里 7 张都接了），会复用完整的本机副本，不再重复下载。
+          //   - 内置测试商店的卡片（打进二进制的 data/test-store/）：没接，仍会
+          //     联网下载。仓库里那份是旧副本，跟正式商店不同步。
+          //
+          // 所以早先两版文案都是假话，只是方向相反：一版承诺「会被自动找到并复用」
+          // （对测试卡片是假的），一版改成「当前版本不会自动复用」（对正式商店的
+          // 用户是假的）。现在按「宿主做了什么 + 复用取决于卡片」写，两边都不撒谎，
+          // 测试卡片接上之后也不用再改。
+          storageModelsDirHint: '改目录不会搬运已下载的权重。旧目录里的模型仍在本机，但不会自动进入下面的查找范围——想继续复用，请把旧目录填到「额外的查找目录」里。',
           storageFree: (size) => `可用 ${size}`,
           storageImportLabel: '额外的查找目录',
           storageImportHint: '一行一个绝对路径。如果你把模型放在我们猜不到的地方（比如另一块数据盘），填在这里。',
           storageScanLabel: '下载前实际查找的位置',
-          storageScanHint: '按这个顺序找；找到的目录交给模型卡片核对，对得上就直接用，不再联网下载。U 盘和移动硬盘会自动加入。',
+          storageScanHint: '按这个顺序找；扫到的结果写进运行日志，并交给模型卡片核对。是否复用由卡片脚本决定：正式商店的卡片会直接复用完整的本机副本，内置测试商店的卡片尚未接入、仍会联网下载。U 盘和移动硬盘会自动加入。',
           storageRemovable: '可移动介质',
           storageSave: '保存',
           storageCancel: '取消',
           storageSaved: '已保存',
+          // 读取设置失败时，保存按钮会被禁用——空的「额外的查找目录」一旦提交
+          // 会被解析成空列表，把用户已存的几条目录静默清空。这句话解释按钮为什么灰着。
+          storageLoadFailedHint: '没能读到当前的存储设置，已暂时禁用保存，以免把已保存的查找目录覆盖掉。请关闭后重新打开。',
           // —— 测试模型商店(隐藏入口:连点页面标题 7 次,间隔不超过 1.5 秒) ——
           testStoreUnlockTitle: '开启测试模型商店',
           testStoreUnlockHint: '测试商店的卡片和脚本打包在应用内、不依赖商店服务器，仅供开发验证脚本本身。',

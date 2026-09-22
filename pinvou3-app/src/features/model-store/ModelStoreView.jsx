@@ -6,7 +6,9 @@
 //
 // 长操作(下载/部署/启用/停用/卸载)不阻塞界面:拿到 run_id 后由 useLmmTasks 用
 // 带游标的长轮询读输出,进度和脚本交互都落在右下角的任务面板里。用户可以照常
-// 翻别的模型,也可以同时下好几个(但同一张卡只能有一个)。
+// 翻别的模型,也可以同时下好几个(但同一张卡只能有一个)。任务表在模块级,所以
+// 切走视图不影响它们继续跑;进页面时还会再问一次后端有哪些运行还活着,把失联的
+// 那些接回来(见 reattachActiveRuns)。
 //
 // 依赖方向 features -> components/shared/platform,不得反向引用 app/。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -44,7 +46,19 @@ import {
 } from './model-store-logic.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { findLinkedRows } from './pinvou-model-link.js';
-import { useLmmTasks } from './useLmmTasks.js';
+// 发起/取消/应答/关闭都是模块级函数,身份恒定。直接引用而不是从 hook 的返回值上
+// 取,这样下面那些 useCallback 的依赖数组才是稳的——挂在 hook 返回对象上的话,
+// 每来一批日志行都会让它们全部重建。
+import {
+  answerTask,
+  cancelTask,
+  dismissTask,
+  reattachActiveRuns,
+  runTask,
+  subscribeTaskSettled,
+  toggleTaskExpand,
+  useLmmTasks,
+} from './useLmmTasks.js';
 import { StoreGuide } from './ModelStoreCards.jsx';
 import { ModelRow } from './ModelRow.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
@@ -89,10 +103,19 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 用户视角里它们是同一件事，见 model-store-logic.js 的 mergeModels。
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
+  // 商店卡片和本地库是**两份独立的数据、两个独立的错误态**。
+  //
+  // 它们原来绑在一个 Promise.all 上:商店端点抖一下,整个页面就换成错误占位,
+  // 本地已装模型的详情/启用/停用/卸载全部够不着,只剩一个会把同一个组合请求
+  // 再发一遍的重试按钮。而本地库查询是纯本进程的 sqlite + 容器状态查询,
+  // 它没有理由跟着远端商店一起失败。
   const [cards, setCards] = useState(null);
   const [library, setLibrary] = useState(EMPTY_LIBRARY);
-  const [dataError, setDataError] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [storeError, setStoreError] = useState(null);
+  const [libraryError, setLibraryError] = useState(null);
+  const [storeLoading, setStoreLoading] = useState(false);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const loading = storeLoading || libraryLoading;
 
   const [detailCard, setDetailCard] = useState(null);
   const [detailCardId, setDetailCardId] = useState(null);
@@ -125,10 +148,13 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
   const testMode = source === 'test';
 
-  const tasks = useLmmTasks();
+  const { tasks, runningTask } = useLmmTasks();
   const toastTimerRef = useRef(null);
-  // 当前有效的那次加载。见 loadAll —— 并发加载时用它丢掉过期响应。
-  const loadTokenRef = useRef(0);
+  // 当前有效的那次加载。见 loadCards / loadLibrary —— 并发加载时用它丢掉过期响应。
+  // 两份数据各自一个序号:它们现在是分开发的请求,共用一个序号会让快的那个把慢的
+  // 那个判成过期。
+  const cardsTokenRef = useRef(0);
+  const libraryTokenRef = useRef(0);
 
   const showToast = useCallback((text) => {
     setToast({ text });
@@ -150,36 +176,60 @@ const ModelStoreView = ({ theme, t, bs }) => {
     }
   }, []);
 
-  const loadAll = useCallback(async () => {
-    // 这一次加载的序号。慢的旧响应落地时能认出自己已经过期,直接丢掉。
-    //
-    // 没有这道闸门时:切数据源胶囊(testMode 变化 → effect 重跑)、加载中点刷新、
-    // 或者后台任务完成触发的 loadAll 跟用户操作撞在一起,都会产生并发请求;
-    // 先发的那个若后回来,就会把新数据覆盖成旧数据——界面显示的卡片跟当前
-    // 数据源对不上,而 loading 早被先落地的那个复位了,看不出还有请求在飞。
-    // 同 PR 的 ModelDetailDialog 用的是同一个套路(loadTokenRef)。
-    const token = (loadTokenRef.current += 1);
-    const stale = () => token !== loadTokenRef.current;
-    setLoading(true);
+  // 加载商店在架卡片。
+  //
+  // 序号那道闸门:慢的旧响应落地时能认出自己已经过期,直接丢掉。没有它的话,
+  // 切数据源胶囊(testMode 变化 → effect 重跑)、加载中点刷新、后台任务完成触发的
+  // 刷新跟用户操作撞在一起,都会产生并发请求;先发的那个若后回来,就会把新数据
+  // 覆盖成旧数据——界面显示的卡片跟当前数据源对不上,而转圈早被先落地的那个关掉了。
+  // 同 PR 的 ModelDetailDialog 用的是同一个套路。
+  const loadCards = useCallback(async () => {
+    const token = (cardsTokenRef.current += 1);
+    const stale = () => token !== cardsTokenRef.current;
+    setStoreLoading(true);
     try {
-      const [cardList, libraryList] = await Promise.all([fetchStoreCards(testMode), fetchLibrary()]);
+      const cardList = await fetchStoreCards(testMode);
       if (stale()) return;
       setCards(Array.isArray(cardList) ? cardList : []);
+      setStoreError(null);
+    } catch (error) {
+      // 过期请求的失败也要丢掉:否则切到测试商店之后,正式商店那次的超时
+      // 会把已经加载好的测试商店列表打成错误态。
+      if (!stale()) setStoreError(String(error?.message || error));
+    } finally {
+      if (!stale()) setStoreLoading(false);
+    }
+  }, [testMode]);
+
+  /** 加载本地模型库。纯本进程查询,不该跟着远端商店一起失败,所以单独一条路。 */
+  const loadLibrary = useCallback(async () => {
+    const token = (libraryTokenRef.current += 1);
+    const stale = () => token !== libraryTokenRef.current;
+    setLibraryLoading(true);
+    try {
+      const libraryList = await fetchLibrary();
+      if (stale()) return;
       setLibrary(libraryList || EMPTY_LIBRARY);
-      setDataError(null);
+      setLibraryError(null);
       // 启动时按实际容器状态纠正过运行标记的模型:用户上次看到的「运行中」其实
       // 已经不在了,不说一声他会以为模型还在服务。
       const corrected = libraryList?.corrected ?? [];
       if (corrected.length > 0) showToast(copy.corrected(corrected[0]));
     } catch (error) {
-      // 过期请求的失败也要丢掉:否则切到测试商店之后,正式商店那次的超时
-      // 会把已经加载好的测试商店列表打成错误态。
-      if (!stale()) setDataError(String(error?.message || error));
+      if (!stale()) setLibraryError(String(error?.message || error));
     } finally {
-      // loading 只由最后一次加载复位,否则先回来的旧请求会把转圈提前关掉。
-      if (!stale()) setLoading(false);
+      if (!stale()) setLibraryLoading(false);
     }
-  }, [copy, showToast, testMode]);
+  }, [copy, showToast]);
+
+  /**
+   * 两份数据一起刷。**刻意不是 Promise.all**:两条路各自成败、各自记错误态,
+   * 一边挂了不能把另一边的功能一起拖下水。
+   * @returns {Promise<void>} 两边都落地后 resolve(各自已经吞掉自己的错误)。
+   */
+  const loadAll = useCallback(async () => {
+    await Promise.all([loadCards(), loadLibrary()]);
+  }, [loadCards, loadLibrary]);
 
   const guide = storeGuideState(status);
 
@@ -297,6 +347,64 @@ const ModelStoreView = ({ theme, t, bs }) => {
   );
 
   /**
+   * 后端报回来的一次活跃运行,在界面上该叫什么、算哪个 key。
+   *
+   * 后端只给 `card_id` 和机器名 `kind`——它不该知道界面怎么措辞,更不该往 IPC 里
+   * 塞一句中文。模型名在合并后的列表里查;查不到就退回用 card_id 兜底,不能因此
+   * 把这次运行丢掉(库还没加载完、或者卡片刚被删,恰恰是最需要看到这张任务卡的
+   * 时刻)。
+   * @param {{card_id?:string, kind?:string}} run - 后端给的活跃运行。
+   * @returns {{title:string, key:string}|null} 标题与任务 key;认不出的操作返回 null。
+   */
+  const describeActiveRun = useCallback(
+    (run) => {
+      const cardId = run?.card_id;
+      if (!cardId) return null;
+      const model = mergedModels.find((item) => item.id === cardId) || null;
+      const name = model?.name || model?.record?.card_name || cardId;
+      switch (run.kind) {
+        case 'download':
+          return { title: copy.taskDownload(name), key: downloadTaskKey(cardId) };
+        case 'deploy':
+          return { title: copy.taskDeploy(name), key: lifecycleTaskKey(cardId) };
+        case 'enable':
+          return { title: copy.taskEnable(name), key: lifecycleTaskKey(cardId) };
+        case 'stop':
+          return { title: copy.taskStop(name), key: lifecycleTaskKey(cardId) };
+        case 'uninstall':
+          return { title: copy.taskUninstall(name), key: lifecycleTaskKey(cardId) };
+        // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了
+        // 取消的任务卡。卡片脚本和应用可以不同版本,这条兜底不能省。
+        default:
+          return null;
+      }
+    },
+    [copy, mergedModels]
+  );
+
+  // 再附着:把后端还在跑的长操作接回任务面板。
+  //
+  // 这是本视图**条件挂载**带来的必修课(main.jsx 里 `currentView === 'modelStore' &&
+  // <ModelStoreView/>`):切一下视图整棵树就卸载。任务表本身已经提到模块级、不随
+  // 卸载消失,但还有两种真的会失联——页面整个重载(开发期热更、崩溃恢复),以及
+  // 轮询连续失败后前端自己放弃而后端其实还在跑。接不回来的后果很实在:几十 GB
+  // 的下载没有进度、点不了取消、脚本请求输入也没人答(600 秒后被判死),再点一次
+  // 下载还会撞上后端的卡片互斥,被渲染成一张说不清原因的失败卡。
+  //
+  // 跟着 describeActiveRun 走(它依赖合并后的列表),所以每次刷新完列表都会顺手
+  // 再问一次。已经挂着轮询的运行会被跳过,重复问是安全的。
+  useEffect(() => {
+    if (guide === 'ready') reattachActiveRuns(describeActiveRun);
+  }, [describeActiveRun, guide]);
+
+  // 接回来的任务没有等在 await 上的调用方(它是上一次挂载、甚至上一次页面加载
+  // 发起的),跑完之后得有人去刷模型库——否则任务卡消失了,列表还停在「下载中」
+  // 的那一版。自己发起的那些由各自的 handler 收尾,这里不重复刷。
+  useEffect(() => subscribeTaskSettled((task) => {
+    if (task?.reattached) loadLibrary();
+  }), [loadLibrary]);
+
+  /**
    * 把品悟模型列表里指向某个已消失模型的行清掉。
    *
    * 正常卸载和强制移除**是同一个后果**：LMM 侧的库记录一没，网关对这个 model_name
@@ -344,7 +452,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
   const handleDownload = useCallback(
     async (card) => {
-      const result = await tasks.run({
+      const result = await runTask({
         title: copy.taskDownload(card.name),
         kind: 'download',
         key: downloadTaskKey(card.id),
@@ -356,21 +464,21 @@ const ModelStoreView = ({ theme, t, bs }) => {
       // 中断的下载可能已经改变了本地状态。
       loadAll();
     },
-    [copy, loadAll, showToast, tasks, testMode]
+    [copy, loadAll, showToast, testMode]
   );
 
   // `doneText` 可以是一句现成的话，也可以是 `(outcome) => string`：卸载要按服务端
   // 回的实际结果措辞，而那份结果在发请求时还不存在。
   const runLifecycle = useCallback(
     async ({ record, kind, title, start, doneText }) => {
-      const result = await tasks.run({ title, kind, key: lifecycleTaskKey(record.card_id), start });
+      const result = await runTask({ title, kind, key: lifecycleTaskKey(record.card_id), start });
       if (result.duplicate || result.aborted) return result;
       if (result.ok) showToast(typeof doneText === 'function' ? doneText(result.result) : doneText);
       loadAll();
       // 把结果交回调用方：卸载成功后还要顺带清理品悟模型列表里的死行。
       return result;
     },
-    [loadAll, showToast, tasks]
+    [loadAll, showToast]
   );
 
   const deployWithProfile = useCallback(
@@ -491,7 +599,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
       const result = await forceRemoveModel(target.cardId);
       // 那张失败的任务卡该走了:它指向的记录已经不存在,留着只会让用户再点一次
       // 同一个入口,然后收到一句「没有这张卡」。
-      tasks.dismiss(target.taskId);
+      dismissTask(target.taskId);
       // 不 await:列表刷新是背景动作,结果页该立刻出来。
       loadAll();
       // 品悟模型列表里指向这个模型的行也要一起清掉——**跟正常卸载是同一个后果**。
@@ -520,7 +628,11 @@ const ModelStoreView = ({ theme, t, bs }) => {
     } finally {
       setForceRemoveBusy(false);
     }
-  }, [copy, forceRemove, loadAll, showToast, tasks]);
+    // cleanLinkedRows 必须在依赖里。它依赖 bs（品悟的模型列表快照），漏掉的话
+    // bs 一变它就重建、而这里不重建，强制移除会拿着旧快照去 findLinkedRows：
+    // 要么漏清刚接入的那几行，要么对着已经不存在的 id 调 deleteModel、把一次
+    // 成功清理报成失败。残留路径结果页是用户清磁盘的唯一凭据,不能被闭包竞态吞掉。
+  }, [cleanLinkedRows, copy, forceRemove, loadAll, showToast]);
 
   const confirmProfileDeploy = useCallback(() => {
     const { record, selectedId } = profilePick;
@@ -572,8 +684,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
               copy={copy}
               busyKind={
                 model.state === 'available'
-                  ? (tasks.runningTask(downloadTaskKey(model.id))?.kind || null)
-                  : (tasks.runningTask(lifecycleTaskKey(model.id))?.kind || null)
+                  ? (runningTask(downloadTaskKey(model.id))?.kind || null)
+                  : (runningTask(lifecycleTaskKey(model.id))?.kind || null)
               }
               onOpen={openDetail}
               onDownload={handleDownload}
@@ -621,20 +733,43 @@ const ModelStoreView = ({ theme, t, bs }) => {
     );
   };
 
+  /**
+   * 一条「这半边加载失败了」的横幅。
+   *
+   * 商店挂了不能把本地库一起换成错误占位:本地已装模型的详情/启用/停用/卸载都还
+   * 好好的,把整页换掉等于连它们一起停掉。所以失败的那一半只在列表上方说一句,
+   * 并给自己那一条的重试,另一半照常可用。
+   * @param {{testId:string, text:string, onRetry:()=>void}} params - 参数。
+   * @returns {React.ReactElement} 横幅。
+   */
+  const renderLoadError = ({ testId, text, onRetry }) => (
+    <div
+      data-testid={testId}
+      className="mb-4 mx-3 flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-rose-50 px-3 py-2 dark:bg-rose-500/10"
+    >
+      <span className="flex min-w-0 items-center gap-2 text-[12px] text-rose-700 dark:text-rose-300">
+        <AlertTriangle size={14} className="shrink-0 opacity-80" />
+        <span className="min-w-0 break-words">{text}</span>
+      </span>
+      <MsButton tone="ghost" onClick={onRetry}>{copy.retry}</MsButton>
+    </div>
+  );
+
   const renderBody = () => {
     if (guide !== 'ready') {
       return (
         <StoreGuide state={guide} copy={copy} theme={theme} reason={status?.reason || null} />
       );
     }
-    if (dataError) {
+    // 两边都挂了才整页换成错误态——那时候确实一个模型都摆不出来。
+    if (storeError && libraryError) {
       return (
         <EmptyState
           testId="model-store-error"
           className="flex flex-col items-center py-24"
           icon={<AlertTriangle size={28} />}
           iconClassName="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-rose-50 text-rose-500 dark:bg-rose-500/10"
-          title={copy.loadFailed(dataError)}
+          title={copy.loadFailed(libraryError)}
           titleClassName="mb-2 max-w-[520px] text-[15px] text-slate-600 dark:text-slate-300"
           action={
             <button type="button" className={BTN_NEUTRAL} onClick={loadAll}>{copy.retry}</button>
@@ -642,7 +777,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
         />
       );
     }
-    if (loading && cards === null) {
+    if (loading && cards === null && (library.models || []).length === 0) {
       return (
         <EmptyState
           testId="model-store-loading"
@@ -654,7 +789,25 @@ const ModelStoreView = ({ theme, t, bs }) => {
         />
       );
     }
-    return renderModels();
+    return (
+      <>
+        {storeError
+          ? renderLoadError({
+            testId: 'model-store-cards-error',
+            text: copy.storeLoadFailed(storeError),
+            onRetry: loadCards,
+          })
+          : null}
+        {libraryError
+          ? renderLoadError({
+            testId: 'model-store-library-error',
+            text: copy.libraryLoadFailed(libraryError),
+            onRetry: loadLibrary,
+          })
+          : null}
+        {renderModels()}
+      </>
+    );
   };
 
   return (
@@ -788,7 +941,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
         // 合并之后已下载的模型走库详情，所以这里理论上只会拿到未下载的；
         // 仍然按合并结果实算一次，不靠"理论上"。
         downloaded={!!detailCard && mergedModels.some((m) => m.id === detailCard.id && m.record)}
-        downloading={!!detailCard && !!tasks.runningTask(downloadTaskKey(detailCard.id))}
+        downloading={!!detailCard && !!runningTask(downloadTaskKey(detailCard.id))}
         onClose={() => setDetailCard(null)}
         onDownload={(card) => {
           setDetailCard(null);
@@ -1012,12 +1165,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
       </MsDialog>
 
       <ModelStoreTaskPanel
-        tasks={tasks.tasks}
+        tasks={tasks}
         copy={copy}
-        onCancel={tasks.cancel}
-        onDismiss={tasks.dismiss}
-        onToggle={tasks.toggleExpand}
-        onAnswer={tasks.answer}
+        onCancel={cancelTask}
+        onDismiss={dismissTask}
+        onToggle={toggleTaskExpand}
+        onAnswer={answerTask}
         onForceRemove={requestForceRemove}
       />
 

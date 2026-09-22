@@ -1335,6 +1335,7 @@ pub fn run() {
             commands::model_store::model_store_run_log,
             commands::model_store::model_store_cancel_run,
             commands::model_store::model_store_answer_run,
+            commands::model_store::model_store_active_runs,
             commands::model_store::model_store_api_keys,
             commands::model_store::model_store_create_api_key,
             commands::model_store::model_store_test_store_state,

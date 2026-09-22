@@ -117,11 +117,38 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 /// 用 RAII 而不是手动配对 register/unregister，是因为 run_script 有取消、超时、
 /// 非 0 退出等一大堆返回路径，漏掉任何一条都会在登记文件里留下永远销不掉的
 /// 假记录，下次启动就会去杀一个早就退出了的 pid。
+///
+/// 唯一的例外是 [`RunGuard::keep`]：进程**确认还活着**时反过来必须保留登记，
+/// 否则孤儿就彻底失联了。
 pub struct RunGuard {
     pid: i32,
+    /// 析构时**不要**销号（进程还活着，见 [`RunGuard::keep`]）。
+    keep: bool,
 }
 
 impl RunGuard {
+    /// 保留登记，不在析构时销号。
+    ///
+    /// 用在 `need_root` 的取消/超时路径上。那里的实情是：pkexec 认证之后子进程
+    /// 已经原位 exec 成了 root 进程，非 root 的应用即使是它父进程也没权限对它
+    /// 发信号（SIGTERM 得 EPERM，SIGKILL 一样），script_runner 等完宽限期只能
+    /// "把已取消报给界面"然后返回——而那个 root 进程大概率还在后台把
+    /// install_engine 的 docker pull 跑完（几十 GB，可达小时级）。
+    ///
+    /// 而 guard 是 run_script 的栈上局部变量，函数一返回就析构。默认的
+    /// `Drop` 会无条件按 pid 把记录抹掉，于是下次启动的 `cleanup_on_startup`
+    /// 连"有这么个东西"都不知道：`skipped_root` 那条上报（root 进程本来就只能
+    /// 报、不能杀）对这类孤儿**永远**失效。用户点了取消，几十 GB 还在继续拉，
+    /// 重启应用零痕迹。
+    ///
+    /// 留着记录不会带来误杀风险：`need_root` 的记录在 `cleanup_on_startup` 里
+    /// 走的是"只上报"的分支，而且上报前还要再比一次 starttime——进程真的已经
+    /// 结束、或者那个 pid 被系统回收给了别人，这条记录会被自然丢弃（不进
+    /// `kept`），所以它也不会越攒越多。
+    pub fn keep(&mut self) {
+        self.keep = true;
+    }
+
     pub fn register(pid: i32, need_root: bool, label: &str) -> Self {
         let _lk = lock();
         if let Some((pgid, starttime)) = proc_stat(pid) {
@@ -141,12 +168,15 @@ impl RunGuard {
             });
             store_unlocked(&records);
         }
-        Self { pid }
+        Self { pid, keep: false }
     }
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
         let _lk = lock();
         let mut records = load_unlocked();
         let before = records.len();
@@ -389,6 +419,35 @@ mod tests {
             }
             // guard 析构后记录必须销掉，否则下次启动会去杀一个不存在的 pid
             assert!(load_unlocked().is_empty());
+            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            let _ = child.wait();
+        });
+    }
+
+    /// need_root 的脚本被取消/超时之后，root 进程大概率还在后台跑（非 root 的
+    /// 应用对它发信号是 EPERM）。这时 guard **必须保留登记**：销了号下次启动就
+    /// 连"有这么个东西"都不知道，连唯一做得到的那件事（在 skipped_root 里报一
+    /// 笔给用户）都做不了——用户点了取消，root 的 docker pull 继续拉几十 GB，
+    /// 重启应用零痕迹。
+    #[test]
+    fn kept_guard_survives_drop_so_the_root_orphan_still_gets_reported() {
+        with_temp_data_dir(|| {
+            let mut child = spawn_sleeper();
+            let pid = child.id() as i32;
+            {
+                let mut g = RunGuard::register(pid, true, "安装 vLLM 引擎");
+                g.keep();
+            }
+            let records = load_unlocked();
+            assert_eq!(records.len(), 1, "keep 过的 guard 析构后记录不该消失");
+            assert!(records[0].need_root);
+
+            // 下次启动：root 进程杀不掉，但必须报出来让用户自己决定怎么处理
+            let report = cleanup_on_startup();
+            assert_eq!(report.skipped_root, vec!["安装 vLLM 引擎".to_string()]);
+            assert!(report.killed.is_empty(), "root 进程只能上报，不能去杀");
+            assert!(proc_stat(pid).is_some(), "上报路径一个进程都不该动");
+
             let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
             let _ = child.wait();
         });

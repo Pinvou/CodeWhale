@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::config::{self, Settings};
@@ -207,7 +206,23 @@ enum ScriptsSource {
         assets: BTreeMap<String, String>,
         asset_sha256: Option<BTreeMap<String, String>>,
         profiles: Vec<DeployProfile>,
+        /// 这些"URL"其实是本地文件路径（内置测试商店：它没有服务器，路径是应用
+        /// 自己刚写到 data_dir 下的）。真实商店一律为 false，`fetch_script_content`
+        /// 会据此拒绝一切非 https 的地址——见 `script_runner::FetchPolicy`。
+        local_paths: bool,
     },
+}
+
+/// 这类脚本有机会以 **root** 身份执行，取它的正文时必须有登记哈希。
+///
+/// 只有 install_engine：六个入口脚本里只有它会走 pkexec。判定刻意按
+/// `script_type` 而不是按调用时那个 `need_root` 参数——同一份 install_engine
+/// 在正式执行前还会以普通用户身份跑一次只读探针，而兜底提权恰恰发生在"普通
+/// 用户那次失败之后"。只认 need_root 的话，未验签的内容会先从探针那条腿进来，
+/// 再由兜底提权原样送上 root；按 script_type 判定，三条腿取到的是同一份
+/// 被校验过的内容。
+fn may_run_as_root(script_type: &str) -> bool {
+    script_type == "install_engine"
 }
 
 /// 一张卡片抓下来的完整脚本包：六个入口脚本 + 附属文件。
@@ -226,13 +241,34 @@ struct PreparedScript {
 }
 
 impl ScriptsSource {
-    fn from_card(card: &StoreCardDetail) -> Self {
+    /// `local_paths` 来自 `ModelManager::builtin_store`：只有内置测试商店的
+    /// scripts/assets 值是本地文件路径，真实商店必须是 https 链接。
+    fn from_card(card: &StoreCardDetail, local_paths: bool) -> Self {
         Self::Remote {
             scripts: card.scripts.clone(),
             script_sha256: card.script_sha256.clone(),
             assets: card.assets.clone(),
             asset_sha256: card.asset_sha256.clone(),
             profiles: card.profiles.clone(),
+            local_paths,
+        }
+    }
+
+    /// 取这类脚本（以及跟它一起落地的附属文件）正文时的来源策略。
+    ///
+    /// 附属文件跟入口脚本共用同一份策略是有意的：多文件卡片会把整棵文件树落进
+    /// 同一个工作目录，install_engine 以 root 跑起来之后调用的就是它们——对入口
+    /// 脚本验签、却放任它下一行要执行的 controller.py 不验，等于没验。
+    fn fetch_policy(&self, script_type: &str) -> script_runner::FetchPolicy {
+        script_runner::FetchPolicy {
+            may_run_as_root: may_run_as_root(script_type),
+            allow_local_path: matches!(
+                self,
+                Self::Remote {
+                    local_paths: true,
+                    ..
+                }
+            ),
         }
     }
 
@@ -274,9 +310,10 @@ impl ScriptsSource {
         script_type: &str,
     ) -> Result<PreparedScript, ModelManagerError> {
         let entry_name = format!("{script_type}.sh");
+        let policy = self.fetch_policy(script_type);
         if !self.has_assets() {
             return Ok(PreparedScript {
-                entry: self.materialize_entry(script_type)?,
+                entry: self.materialize_entry(script_type, policy)?,
                 cwd: None,
             });
         }
@@ -288,11 +325,11 @@ impl ScriptsSource {
         std::fs::create_dir_all(&dir)
             .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
 
-        let assets = self.asset_contents()?;
+        let assets = self.asset_contents(policy)?;
         script_runner::materialize_assets(&dir, &assets)?;
 
         // 入口脚本也按固定文件名写进包里，这样包内其它脚本也能互相引用
-        let entry_content = self.entry_content(script_type)?;
+        let entry_content = self.entry_content(script_type, policy)?;
         let mut one = BTreeMap::new();
         one.insert(entry_name.clone(), entry_content);
         script_runner::materialize_assets(&dir, &one)?;
@@ -307,13 +344,19 @@ impl ScriptsSource {
     fn materialize_entry(
         &self,
         script_type: &str,
+        policy: script_runner::FetchPolicy,
     ) -> Result<std::path::PathBuf, ModelManagerError> {
-        script_runner::materialize_script(&self.entry_content(script_type)?)
+        script_runner::materialize_script(&self.entry_content(script_type, policy)?)
             .map_err(ModelManagerError::from)
     }
 
-    /// 取入口脚本正文。Local 用本地副本（不联网），Remote 才下载并校验哈希。
-    fn entry_content(&self, script_type: &str) -> Result<String, ModelManagerError> {
+    /// 取入口脚本正文。Local 用本地副本（不联网），Remote 才下载并按 `policy`
+    /// 校验来源和哈希。
+    fn entry_content(
+        &self,
+        script_type: &str,
+        policy: script_runner::FetchPolicy,
+    ) -> Result<String, ModelManagerError> {
         match self {
             Self::Local { blobs, .. } => blobs
                 .get(script_type)
@@ -335,13 +378,16 @@ impl ScriptsSource {
                     .as_ref()
                     .and_then(|h| h.get(script_type))
                     .map(|s| s.as_str());
-                Ok(script_runner::fetch_script_content(url, expected)?)
+                Ok(script_runner::fetch_script_content(url, expected, policy)?)
             }
         }
     }
 
-    /// 取全部附属文件的正文。Remote 会逐个下载并校验哈希。
-    fn asset_contents(&self) -> Result<BTreeMap<String, String>, ModelManagerError> {
+    /// 取全部附属文件的正文。Remote 会逐个下载并按 `policy` 校验来源和哈希。
+    fn asset_contents(
+        &self,
+        policy: script_runner::FetchPolicy,
+    ) -> Result<BTreeMap<String, String>, ModelManagerError> {
         match self {
             Self::Local { assets, .. } => Ok(assets
                 .iter()
@@ -360,7 +406,7 @@ impl ScriptsSource {
                         .map(|s| s.as_str());
                     out.insert(
                         path.clone(),
-                        script_runner::fetch_script_content(url, expected)?,
+                        script_runner::fetch_script_content(url, expected, policy)?,
                     );
                 }
                 Ok(out)
@@ -435,6 +481,14 @@ struct EngineProbe {
 const ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const ENGINE_PROBE_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// `docker rmi` 的时限。
+///
+/// 刻意**不用** `proc_timeout::QUERY_TIMEOUT`（5 秒）：那个值是给"拿一下状态
+/// 给界面看"的查询定的，而 rmi 是真删——删一个几十 GB 的镜像要逐层删掉成千
+/// 上万个文件，在慢盘上几分钟很正常，5 秒会把正常删除当成卡死。这里要挡的
+/// 从来不是"慢"，而是"永远不返回"，所以给得宽一些不影响它的作用。
+const DOCKER_RMI_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// 下载权重时自动续传的次数上限。
 ///
 /// 实测目标网络对几十 GB 的大文件传输不稳定，经常传几个 GB 就断一次
@@ -484,6 +538,9 @@ impl ModelManager {
         self.store.list_cards()
     }
 
+    /// **目前零调用点**：详情页走的是 `get_model_detail`（读本地库记录），
+    /// 只有"看一张还没下载的卡片的完整详情"才需要它，那个界面还没有。
+    /// 留待后续分期接线。
     pub fn get_store_card(&self, card_id: &str) -> Result<StoreCardDetail, ModelManagerError> {
         self.store.get_card(card_id)
     }
@@ -594,6 +651,8 @@ impl ModelManager {
         corrected
     }
 
+    /// **目前零调用点**：存储用量那一块界面还没接过来（设置页只露出了配额
+    /// 设置本身）。留待后续分期接线。
     pub fn disk_summary(&self) -> DiskSummary {
         let managed_total = db::total_managed_bytes().unwrap_or(0);
         let free = disk::disk_free_bytes(&self.settings.staging_path()).unwrap_or(0);
@@ -641,6 +700,9 @@ impl ModelManager {
     }
 
     /// 清理残留的下载临时块，返回释放的字节数。
+    ///
+    /// **目前零调用点**：界面上那个「清理下载缓存」按钮跟 `disk_summary` 是
+    /// 一套，还没接过来。留待后续分期接线。
     pub fn cleanup_download_cache(&self) -> u64 {
         self.scan_download_cache(true)
     }
@@ -797,7 +859,7 @@ impl ModelManager {
         // 一张卡包含 `~/models` 或用户配置的权重目录**。2026-09-20 就是这么漏掉
         // 用户已经导进来的 124GB 的：他放在 `~/models`，卡片一个都不看那儿。
         //
-        // 卡片侧读法：路径里带空格和中文是常事（`/media/sky/我的 移动硬盘`），
+        // 卡片侧读法：路径里带空格和中文是常事（`/media/user/我的 移动硬盘`），
         // 所以按行切，不能用 `for dir in $LMM_IMPORT_DIRS` 那种靠 IFS 分词的写法。
         //     echo "${LMM_IMPORT_DIRS:-}" | while IFS= read -r dir; do ... done
         env.insert(
@@ -885,7 +947,7 @@ impl ModelManager {
                 on_progress(
                     "提示：未能一次性取到完整脚本，改为按需获取（商店不稳定时下载可能中断）",
                 );
-                (ScriptsSource::from_card(&card), None)
+                (ScriptsSource::from_card(&card, self.builtin_store), None)
             }
         };
 
@@ -1000,16 +1062,24 @@ impl ModelManager {
         if candidates.is_empty() {
             on_progress("本机未找到已有的权重目录，将从网络下载");
         } else {
-            // 措辞必须停在「找到了」，**不能**说「会先尝试复用」。
+            // 措辞**两个方向的绝对断言都不能下**：既不能说「会先尝试复用」，
+            // 也不能说「暂不自动复用，仍会联网下载」。
             //
-            // 复用这件事要卡片脚本消费 LMM_IMPORT_DIRS / LMM_IMPORT_CANDIDATES，
-            // 而当前没有任何一张卡这么做（排在二期）。说「会复用」对每一张卡都是
-            // 假的——而且恰好复刻了这个功能本来要消灭的那种误导：用户以为本机副本
-            // 会被用上，结果眼睁睁看着它重下几十个小时。
+            // 宿主这一层的职责只有三件：扫描、把结果通过 LMM_IMPORT_DIRS /
+            // LMM_IMPORT_CANDIDATES 交给卡片脚本、把找到了什么写进日志。
+            // **复用与否完全取决于卡片脚本自己**，而卡片脚本不归这个仓库管：
+            // - 正式商店的远端卡片会复用（2026-09-21 起在架的 7 张全部消费
+            //   LMM_IMPORT_DIRS，拿不到才回落到脚本自带的硬编码清单）；
+            // - 内置测试商店那批卡片没接（`data/test-store/` 下零命中）。
             //
-            // 二期把卡片脚本接上之后，再把这句话改回来。
+            // 这里原来写的是"当前没有任何一张卡这么做"——那句话是**在本仓库里
+            // grep 之后得出的**，而这正是它错的原因：正式卡片的脚本源在商店
+            // 服务器的 seed 目录里，不随任何一个 git 仓库走，仓库内 grep 必然
+            // 零命中。下一个人照样 grep 一遍还会得出同一个错误结论，所以这件事
+            // 值得写在这儿。要核实卡片到底消费不消费，只能去看商店服务器上的
+            // 脚本，或者从设备上按 `scripts/verify_store_card.py` 的路子拉一份下来。
             on_progress(&format!(
-                "本机已有 {} 处权重目录（当前版本的卡片脚本暂不自动复用，仍会联网下载）：",
+                "本机已有 {} 处权重目录，已交给卡片脚本（是否复用由脚本自己决定）：",
                 candidates.len()
             ));
             // 只列前几条。扫到十几个目录是常见的（`~/models` 下每个模型一个），
@@ -1162,6 +1232,12 @@ impl ModelManager {
     /// 跑；万一失败——比如某张老卡片的脚本确实需要 root 却没实现探针约定——再
     /// 自动提权重跑一次。install_engine 本来就要求幂等（用户可能在应用外手动
     /// 删过东西），重跑一遍是安全的。
+    ///
+    /// **兜底提权只对"内容可信"的脚本开放。** 这条兜底本身是合理的产品设计，
+    /// 但它是整条 root 链的最后一段：脚本没验签也能借这条路拿到 root。所以
+    /// 两道一起上——`script_runner::FetchPolicy` 让这种内容根本取不回来
+    /// （install_engine 强制要求 sha256、强制 https），而 `is_fatal_failure`
+    /// 又把"来源不可信/完整性校验失败"全部列为致命，校验不过绝不自动提权。
     fn install_engine(
         &self,
         source: &ScriptsSource,
@@ -1254,6 +1330,12 @@ impl ModelManager {
     /// ——从那一刻起密码框根本不再弹出，每次都瞬间"认证失败"，再触发下一次重试。
     /// 用户看到的就是「一直弹密码、输对了也一直报错」。这是自我强化的，而且把桌面
     /// 的授权代理一起拖垮，重试次数越多越糟。
+    ///
+    /// 这份清单还承担第二个职责，而且是安全性质的：`install_engine` 在普通用户
+    /// 身份失败后会**自动提权重跑一次**（见 `install_engine`），凡是不在这份
+    /// 清单里的失败都会走那条路。所以"内容信不过"这一类必须在这里登记——
+    /// 否则校验没过的脚本反而借兜底提权拿到了 root。纵深防御的第二道：第一道是
+    /// `script_runner::FetchPolicy` 压根不让这种内容被取回来。
     pub(crate) fn is_fatal_failure(msg: &str) -> bool {
         const FATAL: &[&str] = &[
             "已取消",
@@ -1263,7 +1345,12 @@ impl ModelManager {
             "文件格式无效",
             "权限不足",
             "没有访问权限",
+            // 内容信不过的三类。写成引用常量而不是抄一遍字面量：这份清单靠文字
+            // 片段匹配，抄字面量的话 script_runner 那边改一个字，这里就会静默
+            // 失效——而失效的表现恰好是"未验签内容自动拿到 root"。
             "完整性校验失败",
+            script_runner::UNTRUSTED_SOURCE_PREFIX,
+            script_runner::ECHO_REOPENED_ABORT,
             // 下面这几句是 errors.rs 对 pkexec 各种结局的中文化结果，必须与那边保持
             // 一致。用中文片段而不是英文原文来匹配，是因为脚本错误在到达这里之前
             // 已经过了 humanize_script_message。
@@ -1369,6 +1456,11 @@ impl ModelManager {
     ///
     /// 老记录（本次改动之前下载的）没有固化副本，退回按 URL 去取——这是一次性
     /// 的兼容路径，用户点一次「检查卡片更新」之后就转为完全离线。
+    ///
+    /// 这条兼容路径拿不到哈希（`script_sha256: None`，记录里只存了 URL）。它
+    /// 服务的是部署/启用/停用/卸载，**没有一个走 root**，所以
+    /// `may_run_as_root` 判定不到它头上；真要按 root 那档要求哈希，用户手上那
+    /// 些老模型会连卸载都卸不掉，几百 GB 从任何界面都回收不了。
     fn local_scripts_source(&self, rec: &db::StoreModelRecord) -> ScriptsSource {
         if !rec.scripts_content.is_empty() {
             return ScriptsSource::Local {
@@ -1387,6 +1479,7 @@ impl ModelManager {
             assets: BTreeMap::new(),
             asset_sha256: None,
             profiles: rec.profiles.clone(),
+            local_paths: self.builtin_store,
         }
     }
 
@@ -1427,12 +1520,22 @@ impl ModelManager {
         &self,
         card: &StoreCardDetail,
     ) -> Result<CardPackage, ModelManagerError> {
-        let fetch =
-            |url: &str, expected: Option<&str>| -> Result<db::ScriptBlob, ModelManagerError> {
-                let content = script_runner::fetch_script_content(url, expected)?;
-                let sha256 = script_runner::sha256_hex(&content);
-                Ok(db::ScriptBlob { content, sha256 })
+        // 来源校验必须在**抓取的这一刻**做：抓完就固化成 Local 副本，之后
+        // install_engine 直接跑副本、不再有任何 fetch 可校验。副本里的 sha256
+        // 是按内容自算的，证明不了"内容是对的"，只能证明"内容没再变过"。
+        let local_paths = self.builtin_store;
+        let fetch = |url: &str,
+                     expected: Option<&str>,
+                     root_capable: bool|
+         -> Result<db::ScriptBlob, ModelManagerError> {
+            let policy = script_runner::FetchPolicy {
+                may_run_as_root: root_capable,
+                allow_local_path: local_paths,
             };
+            let content = script_runner::fetch_script_content(url, expected, policy)?;
+            let sha256 = script_runner::sha256_hex(&content);
+            Ok(db::ScriptBlob { content, sha256 })
+        };
 
         let mut scripts = BTreeMap::new();
         for (script_type, url) in &card.scripts {
@@ -1441,11 +1544,19 @@ impl ModelManager {
                 .as_ref()
                 .and_then(|h| h.get(script_type))
                 .map(|s| s.as_str());
-            scripts.insert(script_type.clone(), fetch(url, expected)?);
+            scripts.insert(
+                script_type.clone(),
+                fetch(url, expected, may_run_as_root(script_type))?,
+            );
         }
 
         // 附属文件跟入口脚本一起抓：只抓到一半的包既不是旧版也不是新版，
         // 跑出来的结果没人能解释，所以任何一个失败就整体放弃。
+        //
+        // 附属文件按"会以 root 执行"那一档要求哈希：整包卡片的文件树跟
+        // install_engine 落在同一个工作目录，它以 root 跑起来之后调的就是这些
+        // 文件（controller.py、compose.yaml…）。只对入口脚本验签，等于没验。
+        let assets_may_run_as_root = card.scripts.keys().any(|t| may_run_as_root(t));
         let mut assets = BTreeMap::new();
         for (path, url) in &card.assets {
             let expected = card
@@ -1453,7 +1564,7 @@ impl ModelManager {
                 .as_ref()
                 .and_then(|h| h.get(path))
                 .map(|s| s.as_str());
-            assets.insert(path.clone(), fetch(url, expected)?);
+            assets.insert(path.clone(), fetch(url, expected, assets_may_run_as_root)?);
         }
         Ok(CardPackage { scripts, assets })
     }
@@ -1461,11 +1572,22 @@ impl ModelManager {
     /// 跟商店同步一次目录状态：哪些卡片是新上架的、哪些已下架、以及**已下载
     /// 的模型有没有更新的脚本**。
     ///
-    /// 在"打开应用"和"打开模型商店"时自动调用。只读，不改任何本地副本——
-    /// 检测到有更新只是提醒用户，换不换由用户点「检查卡片更新」决定，
-    /// 免得他正用着的部署脚本在背后被悄悄换掉。
+    /// **目前没有任何调用点**（命令未注册、界面上也没有入口），留待后续分期
+    /// 接线。这里原来写的是"在打开应用和打开模型商店时自动调用"——那句话从来
+    /// 没有成立过，而它会让读代码的人以为这个能力已经在跑。
     ///
-    /// 只发一个请求（列表接口已带 script_sha256），不用为每张卡再查一次详情。
+    /// 因此要如实交代当前的实际后果：**远端商店卡片的固化脚本副本永远不会
+    /// 过期刷新**。内置（测试商店）卡片有 `refresh_builtin_cards` 在启动时兜底
+    /// （lib.rs 里的 `run_startup_refresh` 真的调它），远端卡片没有对应物——
+    /// 商店那边修好的脚本只有在用户重新下载这个模型时才会下来。连带地，
+    /// `OutdatedCard`、`StoreSyncResult` 以及 `refresh_card_scripts` 目前都到
+    /// 不了；`needs_redeploy`（service.rs）虽然活着，但对远端卡片实际上恒为
+    /// false，因为它比的那份 `scripts_content` 不会变。
+    ///
+    /// 设计意图保持不变：只读，不改任何本地副本——检测到有更新只是提醒用户，
+    /// 换不换由用户点「检查卡片更新」决定，免得他正用着的部署脚本在背后被悄悄
+    /// 换掉。只发一个请求（列表接口已带 script_sha256），不用为每张卡再查一次
+    /// 详情。
     pub fn sync_store_catalog(&self) -> Result<StoreSyncResult, ModelManagerError> {
         let cards = self.store.list_cards()?;
         let local = db::list_store_models().unwrap_or_default();
@@ -1518,6 +1640,11 @@ impl ModelManager {
 
     /// 用户主动点「检查卡片更新」：去商店比对脚本哈希，有变化就把新脚本固化
     /// 到本地。返回是否真的更新了。
+    ///
+    /// **目前没有任何调用点**：命令未注册，界面上也没有「检查卡片更新」这个
+    /// 按钮和对应的 i18n 文案，留待后续分期接线。本文件别处（`entry_content`
+    /// 的报错、`local_scripts_source` 的注释）已经在让用户"点一下检查卡片
+    /// 更新"，那句话现在还无处可点——接线时要一起把入口补上。
     pub fn refresh_card_scripts(&self, card_id: &str) -> Result<bool, ModelManagerError> {
         let rec = self.get_record(card_id)?;
         let card = self.store.get_card(card_id)?;
@@ -1929,6 +2056,11 @@ impl ModelManager {
     // 引擎（docker 镜像/ollama 等）可能被多张卡片共用，跟"模型"是两个独立的
     // 东西：卸载模型只删模型权重和部署配置，引擎本身默认保留。这里单独给用户
     // 一个入口去清理引擎本身占用的空间。
+    //
+    // **这一节（list_installed_engines / delete_engine）目前零调用点**：命令
+    // 未注册，界面上也没有"已安装引擎"这一块，留待后续分期接线。注意
+    // delete_engine 虽然用户够不着，它里面的超时/幂等问题仍然照修——接线那天
+    // 才发现，代价是真机上删到一半的镜像和删不掉的引擎记录。
 
     pub fn list_installed_engines(&self) -> Vec<InstalledEngineInfo> {
         let Ok(records) = db::list_installed_engines() else {
@@ -1985,17 +2117,21 @@ impl ModelManager {
 
         if let Some(image) = &rec.docker_image {
             let freed = docker_image_size(image);
-            let result = Command::new("docker")
-                .args(["rmi", image])
-                .output()
-                .map_err(|e| ModelManagerError::new(format!("删除镜像失败：{e}")))?;
-            if !result.status.success() {
-                let msg = if result.stderr.is_empty() {
-                    String::from_utf8_lossy(&result.stdout).trim().to_string()
-                } else {
-                    String::from_utf8_lossy(&result.stderr).trim().to_string()
-                };
-                return Err(ModelManagerError::new(format!("删除镜像失败：{msg}")));
+            // 带时限。这里原来是裸 `Command::output()`，而 `output()` 是无限期
+            // 阻塞的：docker daemon 卡死时 `docker rmi` 跟 `docker ps` 一样，
+            // 既不报错也不退出（proc_timeout 的模块注释复盘过）。同一个函数里
+            // ollama 那条分支早就设了超时，它的注释也已经预告过「接线的那天
+            // 就会踩」——眼下 delete_engine 还没注册成命令，正好现在补上。
+            //
+            // 代价：proc_timeout 只回 Option，拿不到 docker 的 stderr 原文，
+            // 失败时只能给一句概括。可以接受——「镜像还被容器占用」这类真实
+            // 原因用户在 docker 侧查得到，而「永远卡住」是连查的机会都没有。
+            if proc_timeout::output_within("docker", &["rmi", image], DOCKER_RMI_TIMEOUT).is_none()
+            {
+                return Err(ModelManagerError::new(format!(
+                    "删除镜像失败：{image}（docker rmi 没有成功退出，可能仍有容器在用这个\
+                     镜像，或者 docker 服务没有响应）"
+                )));
             }
             db::delete_installed_engine(engine_name, engine_version)
                 .map_err(|e| ModelManagerError::new(format!("删除引擎记录失败：{e}")))?;
@@ -2339,6 +2475,73 @@ mod tests {
                 "应带续传提示：{resumable}"
             );
         }
+    }
+
+    /// 兜底提权是 root 链的最后一段：凡是**不在**致命清单里的失败，
+    /// install_engine 都会自动提权把同一份内容以 root 重跑一次。所以
+    /// "内容信不过"这一类必须登记在案——否则校验没过的脚本反倒借这条路拿到了
+    /// root，正好是这道校验要防的事。
+    ///
+    /// 钉的是 script_runner 那两个常量本身而不是抄一遍字面量：抄字面量的话，
+    /// 那边改一个字这里照样绿，而失效的表现恰恰是"未验签内容自动拿到 root"。
+    #[test]
+    fn untrusted_content_never_escalates_to_root() {
+        for msg in [
+            format!(
+                "{}：这一步要以管理员权限执行，但商店没有下发该脚本的 sha256",
+                script_runner::UNTRUSTED_SOURCE_PREFIX
+            ),
+            format!(
+                "{}（脚本在请求输入前改动了终端设置）",
+                script_runner::ECHO_REOPENED_ABORT
+            ),
+            "脚本完整性校验失败：实际内容与商店登记的不一致".to_string(),
+        ] {
+            assert!(
+                ModelManager::is_fatal_failure(&msg),
+                "这类失败绝不能触发自动提权重跑：{msg}"
+            );
+        }
+    }
+
+    /// install_engine 是六个入口脚本里唯一会走 pkexec 的，所以只有它按
+    /// 「会以 root 执行」那一档强制要求哈希。这份判定写错的代价是不对称的：
+    /// 漏了它 = 未验签内容能拿到 root；多算一个 = 一张正常卡片突然装不动。
+    #[test]
+    fn only_install_engine_is_treated_as_root_capable() {
+        assert!(may_run_as_root("install_engine"));
+        for t in ["download_model", "deploy", "enable", "stop", "uninstall"] {
+            assert!(!may_run_as_root(t), "{t} 不该按提权那一档要求哈希");
+        }
+    }
+
+    /// 只有打包在应用里的测试商店才允许把"URL"写成本地文件路径。真实商店的
+    /// 卡片来自网络，放开这个开关就等于让卡片指定"读本机哪个文件再当脚本跑"。
+    #[test]
+    fn only_the_bundled_store_may_use_local_paths() {
+        let card = make_card("x", None);
+        let remote = ScriptsSource::from_card(&card, false);
+        let bundled = ScriptsSource::from_card(&card, true);
+
+        assert!(
+            !remote.fetch_policy("install_engine").allow_local_path,
+            "真实商店不能读本地路径"
+        );
+        assert!(
+            remote.fetch_policy("install_engine").may_run_as_root,
+            "install_engine 必须按提权那一档取（强制要求哈希）"
+        );
+        assert!(!remote.fetch_policy("deploy").may_run_as_root);
+        assert!(bundled.fetch_policy("install_engine").allow_local_path);
+
+        // Local 来源（已固化的本地副本）压根不 fetch，策略也必须是最严的一档，
+        // 免得哪天有人把它接进 fetch 路径时意外放行。
+        let local = ScriptsSource::Local {
+            blobs: Default::default(),
+            assets: Default::default(),
+            profiles: Vec::new(),
+        };
+        assert!(!local.fetch_policy("install_engine").allow_local_path);
     }
 
     /// 引擎没装时探针以非 0 退出码结束，run_script 返回的是 Err。这个测试盯的

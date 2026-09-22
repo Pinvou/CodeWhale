@@ -83,8 +83,8 @@ lmm_link_model_dir() {
             [ -e "$entry" ] || continue
             mv -- "$entry" "$CARD_STORE"/ 2>/dev/null && continue
             # 搬不动最常见的原因是容器以 root 建的目录：rename 一个目录需要对**该
-            # 目录本身**有写权限（要改它的 ..），sky 对 root 的目录没有。真机上
-            # 遇到的是 NCCL 的 nccl-fr 调试目录。
+            # 目录本身**有写权限（要改它的 ..），普通登录用户对 root 的目录没有。
+            # 真机上遇到的是 NCCL 的 nccl-fr 调试目录。
             # 但删掉一个空目录只需要**父目录**的写权限，跟属主无关——所以空的就直接
             # 删掉（本来就是可重建的运行期产物），非空的才需要人来处理。
             rmdir -- "$entry" 2>/dev/null && continue

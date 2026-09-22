@@ -64,6 +64,10 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // 重试单独一个忙态,不借用 busy:busy 是「建 Key / 接入品悟」那两个动作的,
+  // 借用会让重试转圈时把那两个按钮也一起禁掉(虽然此刻它们并不在屏幕上,
+  // 但重试成功后 busy 若未归位就会留下一排灰按钮)。
+  const [retrying, setRetrying] = useState(false);
 
   // 当前有效的那张卡。换卡时自增，让上一张卡在途的响应落地时能认出自己已经过期。
   //
@@ -105,6 +109,17 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
     setError(null);
     load();
   }, [load]);
+
+  // 错误态的重试入口。就是再跑一次 load()——失败原因基本都是瞬时的
+  // (后端刚重启、请求超时、Key 接口抖了一下),重来一次往往就好了。
+  const retry = async () => {
+    setRetrying(true);
+    try {
+      await load();
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const copyText = async (text) => {
     try {
@@ -192,7 +207,34 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
 
   return (
     <MsDialog open={!!cardId} onClose={onClose} theme={theme} labelledBy={TITLE_ID} wide testId="model-store-detail-dialog">
-      {error ? <div className={`text-[13px] ${TEXT_DANGER}`}>{copy.loadFailed(error)}</div> : null}
+      {/* 标题栏**常驻**,在错误/加载/正常三个分支之上。
+          原先它只长在成功分支里,于是 load() 一失败,整个弹窗就只剩一行红字:
+          没有标题、没有关闭按钮(右上角那个 X 也在标题栏里)、没有重试。而
+          load() 不只在打开时跑——建 Key、接入品悟之后都会重拉一次,任何一次
+          瞬时失败都会把用户手里这个弹窗打成一行红字,只能靠 Esc 或点背板离开。
+          card_name 在错误态下通常仍然拿得到(catch 分支不清 detail),拿不到时
+          用通用标题兜底,总之标题栏本身不会消失。 */}
+      <MsDialogTitle id={TITLE_ID} onClose={onClose} closeLabel={copy.detailClose}>
+        {record?.card_name || copy.detailTitle}
+      </MsDialogTitle>
+
+      {error ? (
+        <div data-testid="model-store-detail-error">
+          <div className={`text-[13px] ${TEXT_DANGER}`}>{copy.loadFailed(error)}</div>
+          <div className="mt-4 flex items-center gap-2">
+            <MsButton
+              tone="primary"
+              busy={retrying}
+              onClick={retry}
+              data-testid="model-store-detail-retry"
+            >
+              {copy.retry}
+            </MsButton>
+            <MsButton tone="ghost" onClick={onClose}>{copy.detailClose}</MsButton>
+          </div>
+        </div>
+      ) : null}
+
       {!error && !detail ? (
         <div className="flex items-center justify-center gap-2 py-10">
           <Spinner size={16} tone="brand" />
@@ -202,10 +244,6 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
 
       {!error && detail ? (
         <>
-          <MsDialogTitle id={TITLE_ID} onClose={onClose} closeLabel={copy.detailClose}>
-            {record.card_name}
-          </MsDialogTitle>
-
           <div className="space-y-1">
             <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStatusOf(record)]]}</MsRow>
             <MsRow label={copy.detailEngine}>

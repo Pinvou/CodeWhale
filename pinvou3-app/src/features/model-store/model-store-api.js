@@ -208,6 +208,20 @@ function answerRun(runId, answer) {
 }
 
 /**
+ * 还在跑的长操作。给了 `cardId` 就只问那一张卡。
+ *
+ * 进入模型商店时用它把任务卡接回去。任务态在前端随视图销毁（模型商店是条件挂载
+ * 的），而一次下载要跑几十分钟到十几小时——没有这条路，切走再回来就等于把这次
+ * 运行丢了：看不到进度、点不了取消、脚本请求输入也没人答（600 秒后被判死），
+ * 再点一次下载还会撞上后端的卡片互斥，被渲染成一张说不清原因的失败卡。
+ * @param {string|null} [cardId] - 只看这张卡；不给就是全部。
+ * @returns {Promise<{runs:Array<{card_id:string, run_id:string, kind:string, label:string}>}>} 活跃运行。
+ */
+function fetchActiveRuns(cardId = null) {
+  return invokeTauri('model_store_active_runs', { cardId });
+}
+
+/**
  * 取走启动清理的报告（**取一次就没了**）。
  *
  * 应用启动时会收掉上次没收干净的脚本进程。不取的话这份报告永远烂在内存里——
@@ -265,4 +279,5 @@ export {
   pollRunLog,
   cancelRun,
   answerRun,
+  fetchActiveRuns,
 };

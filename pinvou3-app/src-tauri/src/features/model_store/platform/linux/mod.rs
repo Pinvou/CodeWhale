@@ -44,10 +44,10 @@ pub mod test_store_data;
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。
 pub use service::{
-    ModelStoreService, answer_run, api_keys, cancel_run, create_api_key, disable_test_store,
-    force_remove, library, list_cards, model_detail, run_log, run_startup_cleanup,
-    run_startup_refresh, set_storage_settings, start_deploy, start_download, start_lifecycle,
-    storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
+    ModelStoreService, active_runs, answer_run, api_keys, cancel_run, create_api_key,
+    disable_test_store, force_remove, library, list_cards, model_detail, run_log,
+    run_startup_cleanup, run_startup_refresh, set_storage_settings, start_deploy, start_download,
+    start_lifecycle, storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
 };
 
 /// Linux 上模型商店总是可用的。

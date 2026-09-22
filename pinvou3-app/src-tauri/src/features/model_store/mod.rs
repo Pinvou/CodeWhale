@@ -77,8 +77,8 @@ pub type ModelStoreService = platform::backend::ModelStoreService;
 // 操作一律透传到平台后端。这一层不加逻辑，只是把「Linux 真做 / 其他平台回一句
 // 解释」这件事收在 platform 里，命令层不必分支。
 pub use platform::backend::{
-    answer_run, api_keys, cancel_run, create_api_key, disable_test_store, force_remove, library,
-    list_cards, model_detail, run_log, run_startup_cleanup, run_startup_refresh,
-    set_storage_settings, start_deploy, start_download, start_lifecycle, storage_settings,
-    take_startup_cleanup, test_store_state, unlock_test_store,
+    active_runs, answer_run, api_keys, cancel_run, create_api_key, disable_test_store,
+    force_remove, library, list_cards, model_detail, run_log, run_startup_cleanup,
+    run_startup_refresh, set_storage_settings, start_deploy, start_download, start_lifecycle,
+    storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
 };

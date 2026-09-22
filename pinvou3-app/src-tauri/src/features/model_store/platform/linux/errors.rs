@@ -207,8 +207,8 @@ mod tests {
     #[test]
     fn a_keyword_inside_another_word_must_not_hijack_the_message() {
         let real = "失败: Worker: Command ['ssh', '-o', 'ConnectTimeout=10', '-o', \
-                    'ServerAliveInterval=15', '-o', 'BatchMode=yes', 'sky@192.168.240.2', \
-                    'python3 /home/sky/megacube-deepseek/controller.py _node uninstall e30='] \
+                    'ServerAliveInterval=15', '-o', 'BatchMode=yes', 'user@192.0.2.20', \
+                    'python3 /home/user/megacube-deepseek/controller.py _node uninstall e30='] \
                     returned non-zero exit status 255.";
         let got = humanize_script_message(real);
         assert_ne!(got, "操作超时，请稍后重试", "ConnectTimeout 不是 timeout");

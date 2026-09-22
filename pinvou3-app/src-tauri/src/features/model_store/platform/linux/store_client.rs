@@ -126,6 +126,20 @@ impl StoreClient {
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, StoreError> {
+        // 商店 API 必须是 https。这条不是为了"接口安全"这种泛泛的理由：卡片 JSON
+        // **就是脚本哈希的载体**，script_runner 拿到的 `expected_sha256` 全部来自
+        // 这个响应。这条信道一旦是明文，中间人可以把脚本和哈希一起替换掉，
+        // 下游那套"取回后逐字节校验"就只剩防传输损坏的作用，防不了伪造——而
+        // install_engine 是经 pkexec 以 root 执行的。
+        //
+        // 代价说清楚：内网自建的 http 商店会被这条拒掉，用户得给自己的商店配上
+        // https。放行 http 等于让哈希校验变成摆设，不值得。
+        if !self.base_url.starts_with("https://") {
+            return Err(StoreError::new(
+                "模型商店地址必须是 https——卡片里的脚本哈希要靠这条链路本身保真，\
+                 明文传输时校验挡不住伪造。请在设置里把商店地址改成 https。",
+            ));
+        }
         let url = format!("{}{}", self.base_url, path);
         let client = reqwest::blocking::Client::builder()
             .timeout(API_TIMEOUT)
@@ -184,7 +198,16 @@ impl StoreSource for StoreClient {
     }
 
     fn get_card(&self, card_id: &str) -> Result<StoreCardDetail, StoreError> {
-        self.get_json(&format!("/api/v1/cards/{card_id}"))
+        // card_id 直接拼进 URL 路径，所以先过一遍 `safe_path_component`——它只放
+        // 行 [A-Za-z0-9._-] 并挡掉 `.` / `..`，这个字符集在 URL 路径段里本来就
+        // 不需要转义，于是"校验"同时也就是"编码"。
+        //
+        // 刻意复用落盘那条路径的同一个谓词，而不是在这儿单写一套百分号编码：
+        // card_id 既要进 URL 又要进 `cards/<id>` 目录（lifecycle.rs 用的就是这个
+        // 函数），两处判据一旦分家，就会出现"能下载但落不了盘"或者反过来的错位。
+        let safe = super::config::safe_path_component(card_id)
+            .map_err(|e| StoreError::new(format!("卡片 id 不合法：{e}")))?;
+        self.get_json(&format!("/api/v1/cards/{safe}"))
     }
 }
 

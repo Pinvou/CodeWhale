@@ -166,7 +166,7 @@ pub fn roots(extra: &[String], models_dir: &Path, staging_dir: &Path) -> Vec<Pat
 /// 下发给脚本的形式：一行一个路径。
 ///
 /// 用换行而不是 `:` 或空格分隔，因为 U 盘卷标里带空格和中文是常事
-/// （`/media/sky/我的 移动硬盘`）。脚本侧配 `while IFS= read -r dir` 读。
+/// （`/media/user/我的 移动硬盘`）。脚本侧配 `while IFS= read -r dir` 读。
 pub fn encode_dirs(dirs: &[PathBuf]) -> String {
     dirs.iter()
         .map(|p| p.to_string_lossy().to_string())
@@ -283,16 +283,21 @@ mod tests {
 
     #[test]
     fn removable_paths_are_recognised() {
-        assert!(is_removable(Path::new("/media/sky/usb/Model")));
-        assert!(is_removable(Path::new("/run/media/sky/usb/Model")));
+        assert!(is_removable(Path::new("/media/user/usb/Model")));
+        assert!(is_removable(Path::new("/run/media/user/usb/Model")));
         assert!(is_removable(Path::new("/mnt/disk/Model")));
-        assert!(!is_removable(Path::new("/home/sky/models/Model")));
+        assert!(!is_removable(Path::new("/home/user/models/Model")));
     }
 
     /// 这条是 2026-09-20 那个坑的回归：用户把权重放在 `~/models`，而配置的权重
     /// 目录是别处。`~/models` 必须在搜索根里，否则那 124GB 谁也看不见。
     #[test]
     fn legacy_models_dir_is_always_searched() {
+        // 必须握着 TempHome：这条要把 `roots()` 的结果和 `home()` 的结果对起来，而
+        // 同进程里别的测试会改 HOME（TempHome 在 Drop 时还原）。两次读 HOME 之间
+        // 正好撞上别人还原，断言就随机红一次——全量并行跑时实测复现过，串行和单独
+        // 跑都是绿的。偶发红比一直红更费人，所以这里把 HOME 锁在自己手里。
+        let _home = super::super::config::TempHome::new();
         let found = roots(&[], Path::new("/tmp/configured"), Path::new("/tmp/staging"));
         assert!(
             found.contains(&home().join("models")),
@@ -321,12 +326,12 @@ mod tests {
     #[test]
     fn dirs_are_encoded_one_per_line() {
         let dirs = vec![
-            PathBuf::from("/media/sky/我的 移动硬盘"),
-            PathBuf::from("/home/sky/models"),
+            PathBuf::from("/media/user/我的 移动硬盘"),
+            PathBuf::from("/home/user/models"),
         ];
         let encoded = encode_dirs(&dirs);
         assert_eq!(encoded.lines().count(), 2);
-        assert_eq!(encoded.lines().next().unwrap(), "/media/sky/我的 移动硬盘");
+        assert_eq!(encoded.lines().next().unwrap(), "/media/user/我的 移动硬盘");
     }
 
     #[test]
@@ -389,7 +394,7 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
     }
 
-    /// 同一个目录被两个根扫到（`/media/sky` 和 `/media/sky/盘` 都在根列表里）
+    /// 同一个目录被两个根扫到（`/media/user` 和 `/media/user/盘` 都在根列表里）
     /// 时只能出现一次。
     #[test]
     fn a_directory_reachable_from_two_roots_is_reported_once() {

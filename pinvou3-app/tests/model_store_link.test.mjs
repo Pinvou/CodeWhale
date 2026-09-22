@@ -151,7 +151,7 @@ test('卸载后只清指向本机 LMM 的那些行，不许误伤', () => {
     { id: 'c', model: 'qwen3.8-27b-nvfp4', base_url: 'http://127.0.0.1:9999/v1' },
     // 同名但指向别处：用户自己配的，绝不能动
     { id: 'keep-1', model: 'qwen3.8-27b-nvfp4', base_url: 'https://api.example.com/v1' },
-    { id: 'keep-2', model: 'qwen3.8-27b-nvfp4', base_url: 'http://10.214.74.210:8090/v1' },
+    { id: 'keep-2', model: 'qwen3.8-27b-nvfp4', base_url: 'http://192.0.2.10:8090/v1' },
     // 名字不同：不相干
     { id: 'keep-3', model: '别的模型', base_url: 'http://127.0.0.1:8090/v1' },
   ];
@@ -170,12 +170,12 @@ test('findLinkedRows：入参脏了就返回空，不许抛', () => {
 });
 
 test('isLocalGatewayUrl：认回环地址，不认局域网地址', () => {
-  // 详情页展示给外部 Agent 的是局域网地址（10.214.74.210:8090），
-  // 那种行可能是用户手动加的，不在清理范围内。
+  // 详情页展示给外部 Agent 的是非回环地址（这里用文档保留地址 192.0.2.10:8090
+  // 代替真实局域网地址），那种行可能是用户手动加的，不在清理范围内。
   for (const ok of ['http://127.0.0.1:8090/v1', 'http://localhost:8090/v1', 'http://[::1]:8090/v1']) {
     assert.equal(isLocalGatewayUrl(ok), true, ok);
   }
-  for (const no of ['http://10.214.74.210:8090/v1', 'https://api.example.com/v1', '不是URL', '', null, 42]) {
+  for (const no of ['http://192.0.2.10:8090/v1', 'https://api.example.com/v1', '不是URL', '', null, 42]) {
     assert.equal(isLocalGatewayUrl(no), false, String(no));
   }
 });

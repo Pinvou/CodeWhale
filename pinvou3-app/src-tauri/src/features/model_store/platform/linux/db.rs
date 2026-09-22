@@ -133,10 +133,30 @@ pub fn db_path() -> PathBuf {
 /// sqlite 默认的 0 意味着**只要撞上一次并发写就立刻 SQLITE_BUSY**。真出事的样子
 /// 很难看——几个小时的下载跑到最后一步 `add_store_model` 撞上一个毫秒级的并发写，
 /// 整个任务被报成失败，而权重其实已经下完了。5 秒足够任何一次本地写让路。
+///
+/// `journal_mode=WAL` 是上面那句的配套，不是锦上添花。默认的回滚日志模式下
+/// **写阻塞读、读阻塞写**：三个下载任务在写进度，界面每秒轮询在读列表，两边互相
+/// 挡。只设 busy_timeout 并没有解决争用，只是把"立刻报 SQLITE_BUSY"换成"最长卡
+/// 5 秒"——用户看到的是列表隔一会儿顿一下。WAL 下读不再被写挡住，这才是"本地
+/// 单文件库 + 进程内多连接"这个并发形态该配的模式。
+///
+/// 三个注意点：
+/// - WAL 是**写进库文件头的持久属性**，设一次就一直生效；每个连接再设一遍是
+///   无害的空操作，写在这里只是保证任何一条打开路径都不会漏掉。
+/// - 必须走 `execute_batch`：`PRAGMA journal_mode` 会**返回一行**（生效后的模式名），
+///   用 `execute()` 会直接报 "Execute returned results"。
+/// - 切不过去（库落在不支持共享内存的网络盘上等）时 sqlite 不报错，只是留在
+///   delete 模式——那正好是今天的行为，不会比现在更糟，所以这里不额外校验。
+///
+/// WAL 会在库文件旁多出 `models.db-wal` / `models.db-shm` 两个文件。已确认全仓
+/// 没有任何地方按 `models.db` 这个确切文件名去删除、备份或导出（`db_path()`
+/// 只有本文件在用），所以不存在"删掉主库、留下两个残片"的清理漏网。
 fn connect() -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path())?;
+    // 顺序有讲究：busy_timeout 要先设。切 journal_mode 需要短暂拿排他锁，
+    // 万一此刻另一个连接正在写，没有 busy_timeout 兜着就会当场失败。
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     Ok(conn)
 }
 
@@ -910,6 +930,18 @@ mod tests {
         home
     }
 
+    /// 连接必须是 WAL 模式。回滚日志模式下写阻塞读，而这个库的常态就是
+    /// "几个下载在写 + 界面轮询在读"（见 connect 的说明）。
+    #[test]
+    fn connections_are_opened_in_wal_mode() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal", "库没有跑在 WAL 模式上");
+    }
+
     #[test]
     fn engine_lifecycle() {
         let _ctx = setup_temp_db();
@@ -1098,7 +1130,7 @@ mod tests {
                  (card_id, model_name, card_name, engine_name, status, downloaded_at, script_deploy)
              VALUES
                  ('same-id-from-test', 'm', 'M', 'e', 'downloaded', '2026-01-01',
-                  '/home/sky/.local/share/local-model-manager/test_store_scripts/x/deploy.sh'),
+                  '/home/user/.local/share/local-model-manager/test_store_scripts/x/deploy.sh'),
                  ('same-id-from-store', 'm', 'M', 'e', 'downloaded', '2026-01-01',
                   'http://47.120.8.237/model-store/api/v1/cards/x/deploy.sh');",
         )

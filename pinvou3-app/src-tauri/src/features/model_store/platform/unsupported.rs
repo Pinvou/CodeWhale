@@ -80,6 +80,13 @@ pub fn cancel_run(_service: &Arc<ModelStoreService>, _run_id: String) -> Result<
     nope()
 }
 
+pub fn active_runs(
+    _service: &Arc<ModelStoreService>,
+    _card_id: Option<String>,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub fn answer_run(
     _service: &Arc<ModelStoreService>,
     _run_id: String,

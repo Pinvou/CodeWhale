@@ -449,7 +449,7 @@ pub fn test_cards() -> Vec<TestCard> {
                      音频的视频，权重约 40.34GiB，面向单台 MegaCube GB10（aarch64）。\
                      对外是 ComfyUI 的 HTTP 服务（提交任务走 POST /prompt + 工作流 JSON），\
                      没有 /v1/chat/completions，接不进品悟等 Agent 应用的对话模型列表。\
-                     ⚠️ 交付包 README 里的「验证通过」是厂商在自己的 4 号机上的自证，\
+                     ⚠️ 交付包 README 里的「验证通过」是厂商在自己的设备上的自证，\
                      我们还没有在真机上端到端验收过，所以只在测试商店。另外装引擎时需要\
                      设备上有那份交付包（两个源码归档是二进制，商店只能下发文本）。"
                         .into(),

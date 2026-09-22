@@ -24,7 +24,10 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::lifecycle::ModelManager;
-use super::run_state::{ActiveCardOps, CancelRegistry, DownloadQueue, StartupCleanup};
+use super::run_state::{
+    ActiveCardOps, CancelRegistry, CardOp, DownloadQueue, OP_DEPLOY, OP_DOWNLOAD, OP_ENABLE,
+    OP_FORCE_REMOVE, OP_STOP, OP_UNINSTALL, StartupCleanup,
+};
 use super::{config, db, disk, import_scan, script_runner};
 
 /// 运行记录保留多久。一次下载的日志能有几万行，不清会一直涨。
@@ -32,11 +35,15 @@ const RUN_RETENTION: Duration = Duration::from_secs(600);
 /// 长轮询最多挂多久。跟前端的 `LOG_WAIT_SECONDS` 对齐。
 const LOG_WAIT: Duration = Duration::from_secs(25);
 
-const OP_DOWNLOAD: &str = "下载";
-const OP_DEPLOY: &str = "部署";
-const OP_ENABLE: &str = "启用";
-const OP_STOP: &str = "停用";
-const OP_UNINSTALL: &str = "卸载";
+/// 这一行是不是脚本在请求用户输入。
+///
+/// 判据跟 `script_runner` 里那份一致——它的 `is_prompt_line` 是私有的，对外的
+/// 约定是那两个前缀常量。这里只为一件事要它：记住「现在是不是有一条提示在等人
+/// 答」，见 [`RunLog::push`]。
+fn is_prompt_line(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with(script_runner::PROMPT_MARKER) || t.starts_with(script_runner::PROMPT_FORM_MARKER)
+}
 
 // ---------------------------------------------------------------- 运行记录
 
@@ -51,6 +58,14 @@ struct RunLog {
     /// 用户主动取消。取消在底层也是一个 Err，但对用户是两回事——"你点了取消"
     /// 和"它炸了"不该长得一样，调用方要能分别给出提示。
     cancelled: Mutex<bool>,
+    /// 现在是不是有一条脚本提示在等人作答。
+    ///
+    /// 界面把「要不要弹输入框」从日志行里解析出来，而日志是可回放的——切走再
+    /// 回来会从头读一遍。答过的提示被回放时必须**不能**再弹：用户填的答案会写进
+    /// 一个没人来取的应答槽，下一次真正的提问一出现就被这份陈答案直接顶掉，
+    /// 脚本于是拿着错误的输入继续往下跑（双机部署里那就是拿旧 IP 去连从机）。
+    /// 所以"还在不在等"得由后端说了算，它是唯一知道真相的一方。
+    awaiting_prompt: Mutex<bool>,
     finished_at: Mutex<Option<Instant>>,
     /// 有新行或结束时唤醒正在长轮询的调用
     notify: Arc<tokio::sync::Notify>,
@@ -62,18 +77,29 @@ impl RunLog {
             lines: Mutex::new(Vec::new()),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            awaiting_prompt: Mutex::new(false),
             finished_at: Mutex::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     fn push(&self, line: &str) {
+        // 提示行之后脚本就阻塞在 read 上，再出现任何一行输出就说明它已经拿到
+        // 答案往下走了——这是日志流里唯一能看出"还在不在等"的地方。
+        *self.awaiting_prompt.lock() = is_prompt_line(line);
         self.lines.lock().push(line.to_string());
         self.notify.notify_waiters();
     }
 
+    /// 界面答完了。不等脚本打出下一行就落下标志：用户完全可能答完立刻切走，
+    /// 那一瞬间再回来的话，回放会把同一条提示又弹一次。
+    fn answered(&self) {
+        *self.awaiting_prompt.lock() = false;
+    }
+
     fn finish(&self, outcome: Result<Value, String>, cancelled: bool) {
         *self.cancelled.lock() = cancelled;
+        *self.awaiting_prompt.lock() = false;
         *self.outcome.lock() = Some(outcome);
         *self.finished_at.lock() = Some(Instant::now());
         self.notify.notify_waiters();
@@ -302,7 +328,7 @@ impl Drop for OpCleanup {
 fn spawn_op<F>(
     service: &Arc<ModelStoreService>,
     card_id: &str,
-    op: &'static str,
+    op: CardOp,
     job: F,
 ) -> Result<Value, String>
 where
@@ -310,10 +336,14 @@ where
         + Send
         + 'static,
 {
-    // 卡片级互斥：同一张卡不许被两处同时操作。
-    service.active.try_begin(card_id, op)?;
-
+    // run_id 要在占坑之前先发出来：互斥登记里存着它，界面切走再回来时正是按
+    // 卡片把它要回去接着读日志的（见 `ActiveCardOps::run_for_card`）。
+    // 但登记表之外的东西一律等占坑成功再建——占不到坑就直接返回，不能留下一条
+    // 没人会去读、也没人会去收的运行记录。
     let run_id = new_run_id();
+    // 卡片级互斥：同一张卡不许被两处同时操作。
+    service.active.try_begin(card_id, op, Some(&run_id))?;
+
     let log = service.new_run(&run_id);
     let control = service.registry.register(&run_id);
 
@@ -344,7 +374,7 @@ where
             Ok(outcome) => outcome,
             Err(payload) => {
                 let detail = panic_text(payload.as_ref());
-                let line = format!("内部错误：{op}任务线程崩溃（{detail}）");
+                let line = format!("内部错误：{}任务线程崩溃（{detail}）", op.label);
                 // 崩溃原因也塞进日志正文：调用方长轮询到的是日志，让它跟 error
                 // 字段对得上，用户不用去翻应用的 stderr。
                 log_for_thread.push(&line);
@@ -545,6 +575,11 @@ pub async fn run_log(
                 "done": done,
                 "ok": ok,
                 "cancelled": *log.cancelled.lock(),
+                // 「现在还有没有提示在等人答」。调用方从日志行里解析提示，而日志
+                // 是可回放的——没有这个标志，界面切走再回来就会把早已答过的提示
+                // 再弹一次，用户填的答案落进一个没人来取的槽，下一次真正的提问
+                // 会被这份陈答案顶掉。
+                "awaiting_input": *log.awaiting_prompt.lock(),
                 "result": result,
                 "error": error,
             }));
@@ -560,6 +595,27 @@ pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Va
     Ok(json!({ "ok": true }))
 }
 
+/// 这张卡（不给 `card_id` 就是全部卡）上还在跑的长操作。
+///
+/// **界面靠它把任务卡接回去。** 模型商店的视图是条件挂载的，切一下视图整棵树
+/// 就卸载，任务态和 run_id 索引跟着一起没；而一次下载要跑几十分钟到十几小时。
+/// 没有这条查询，用户切走再回来就等于把这次运行丢了：看不到进度、点不了取消、
+/// 脚本请求输入也没人答（600 秒后被 `PROMPT_TIMEOUT` 判死），再点一次下载还会
+/// 撞上卡片互斥，被界面渲染成一张说不清原因的失败卡。
+///
+/// 回的是登记表的快照，不含日志——拿到 run_id 之后照常走 `run_log`，游标在调用
+/// 方手里，前半段一行都不会丢。
+pub fn active_runs(
+    service: &Arc<ModelStoreService>,
+    card_id: Option<String>,
+) -> Result<Value, String> {
+    let runs = match card_id {
+        Some(id) => service.active.run_for_card(&id).into_iter().collect(),
+        None => service.active.active_runs(),
+    };
+    Ok(json!({ "runs": runs }))
+}
+
 /// 回答脚本请求的那次输入。
 ///
 /// `answer` 传 `None` 表示用户点了取消——会把这次运行整个中断，而不是拿一个空串
@@ -570,6 +626,11 @@ pub fn answer_run(
     answer: Option<String>,
 ) -> Result<Value, String> {
     service.registry.answer_prompt(&run_id, answer);
+    // 立刻落下"没人在等了"。等脚本打出下一行再落的话，用户答完马上切走、再切
+    // 回来的那一瞬间，回放会把这条已经答过的提示又弹一次。
+    if let Some(log) = service.run(&run_id) {
+        log.answered();
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -783,11 +844,69 @@ pub fn force_remove(
     }
     // 还是要过卡片互斥：真有一个卸载正在删文件时把记录抽走，脚本删到一半就会
     // 对着一个不存在的记录继续跑。
-    service.active.try_begin(&card_id, "强制移除")?;
+    service.active.try_begin(&card_id, OP_FORCE_REMOVE, None)?;
     let result = ModelManager::new(None, None)
         .force_remove_record(&card_id)
         .map_err(|e| e.to_string())
         .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()));
     service.active.finish(&card_id);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「现在还有没有提示在等人答」只有后端知道，而这件事必须由后端说了算。
+    ///
+    /// 界面是从日志行里解析提示的，而日志可以回放（切走再回来会从头读一遍）。
+    /// 答过的提示被回放时再弹一次的后果不是多点一下：用户填的答案会写进一个没人
+    /// 来取的应答槽，等脚本下一次真的提问时被这份陈答案直接顶掉——双机部署里
+    /// 那就是拿着上一轮的 IP 去连从机。
+    #[test]
+    fn a_prompt_stops_awaiting_once_anything_else_comes_out() {
+        let log = RunLog::new();
+        assert!(!*log.awaiting_prompt.lock(), "还没问就不该在等");
+
+        log.push("LMM_PROMPT=text|请输入从机 IP");
+        assert!(*log.awaiting_prompt.lock(), "提示行一出现就是在等作答");
+
+        // 脚本再打出任何一行，就说明它已经读到答案往下走了
+        log.push("正在连接从机 …");
+        assert!(!*log.awaiting_prompt.lock());
+
+        // 表单式提问同样算
+        log.push("LMM_PROMPT_FORM={\"fields\":[{\"id\":\"ip\"}]}");
+        assert!(*log.awaiting_prompt.lock());
+    }
+
+    /// 答完立刻落标志，不等脚本打下一行。
+    ///
+    /// 用户完全可能答完就切走，而脚本这时候还在闷头干活一声不吭；那一瞬间切回来
+    /// 的话，回放会把这条已经答过的提示又弹一次。
+    #[test]
+    fn answering_clears_awaiting_before_the_script_says_anything() {
+        let log = RunLog::new();
+        log.push("LMM_PROMPT=password|输入本机密码");
+        log.answered();
+        assert!(!*log.awaiting_prompt.lock());
+    }
+
+    /// 跑完了就没有什么可答的了。留着这个标志，界面接回一条已结束的运行时会弹出
+    /// 一个永远送不出去的输入框。
+    #[test]
+    fn finishing_clears_awaiting() {
+        let log = RunLog::new();
+        log.push("LMM_PROMPT=confirm|继续吗");
+        log.finish(Err("脚本非零退出".to_string()), false);
+        assert!(!*log.awaiting_prompt.lock());
+    }
+
+    #[test]
+    fn prompt_markers_do_not_shadow_each_other() {
+        assert!(is_prompt_line("LMM_PROMPT=text|要点什么"));
+        assert!(is_prompt_line("  LMM_PROMPT_FORM={}  "));
+        assert!(!is_prompt_line("LMM_PROMPTX=1"));
+        assert!(!is_prompt_line("正在下载 …"));
+    }
 }

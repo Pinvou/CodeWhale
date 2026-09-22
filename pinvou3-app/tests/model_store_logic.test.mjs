@@ -217,7 +217,7 @@ test('uninstallDoneText：说要删却留下残留时必须改口，不能承诺
   const text = uninstallDoneText(COPY, 'Qwen', {
     purged_weights: true,
     freed_bytes: 0,
-    remaining_paths: ['/home/sky/models/Qwen3.8-27B-NVFP4'],
+    remaining_paths: ['/home/user/models/Qwen3.8-27B-NVFP4'],
   });
   assert.equal(text, 'residual:Qwen:1');
 });
@@ -226,7 +226,7 @@ test('uninstallDoneText：仅卸载保留权重时，权重还在不算残留', 
   const text = uninstallDoneText(COPY, 'Qwen', {
     purged_weights: false,
     freed_bytes: 0,
-    remaining_paths: ['/home/sky/models/Qwen3.8-27B-NVFP4'],
+    remaining_paths: ['/home/user/models/Qwen3.8-27B-NVFP4'],
   });
   assert.equal(text, 'kept:Qwen');
 });

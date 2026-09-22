@@ -44,6 +44,12 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
   const [importText, setImportText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // 这一次打开有没有成功读到设置。**保存的前提**，见下面 `canSave`。
+  //
+  // 不能用 `settings !== null` 代替：这个组件不随弹窗卸载（MsDialog 只是在
+  // `open` 为假时返回 null，组件自己的 state 全都留着）。于是第二次打开时
+  // `settings` 还挂着上一次的值，读取失败也依旧非空——判据会失效。
+  const [loaded, setLoaded] = useState(false);
 
   // 每次打开都重读一次，而不是只在挂载时读一次：权重目录也可能被别处改掉
   // （手改 config.json 是排查时的常规动作），拿着一份旧值保存会把它覆盖回去。
@@ -51,12 +57,14 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
     if (!open) return undefined;
     let alive = true;
     setError('');
+    setLoaded(false);
     fetchStorageSettings()
       .then((data) => {
         if (!alive) return;
         setSettings(data);
         setModelsDir(data.models_dir || '');
         setImportText((data.import_scan_dirs || []).join('\n'));
+        setLoaded(true);
       })
       .catch((e) => {
         if (alive) setError(String(e));
@@ -90,6 +98,21 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
 
   const scanDirs = settings?.scan_dirs || [];
   const freeBytes = settings?.free_bytes;
+
+  // 读取没成功过就不让保存。
+  //
+  // 读失败时两个输入框都还是空串，而**空的 `importText` 会被解析成 `[]`**——
+  // 用户看见报错、随手把权重目录填回去点保存，已经存着的那几条「额外的查找
+  // 目录」就被这个 `[]` 静默清空了，没有任何确认，也看不出发生过。
+  // 查找目录正是「几十 GB 本地副本还找不找得到」的那份配置，丢了要人命。
+  //
+  // 判据必须把 `importText` 的加载态一起算进去：它跟 `modelsDir` 是在同一次
+  // 请求里填的，只看 `modelsDir` 非空等于默许了"空 importText 也能提交"。
+  // `loaded` 同时覆盖这两个框——请求还在飞、或者飞失败了，都不给存。
+  //
+  // 保存失败不影响 `loaded`：那时表单里是用户自己填的内容，本来就该让他改完
+  // 再存一次（路径填错是最常见的失败）。
+  const canSave = loaded && !busy && !!modelsDir.trim();
 
   return (
     <MsDialog
@@ -158,6 +181,14 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
       {error ? (
         <p className="mt-3 text-[12px] leading-5 text-red-600 dark:text-red-400" data-testid="model-store-storage-error">
           {error}
+          {/* 读取失败时补一句「保存已禁用」。只把按钮灰掉不解释的话，用户面对
+              一个点不动的保存键只能猜——而这里真正要传达的是"现在框里显示的
+              不是你的设置"，不说清楚他会以为设置本身被清空了。 */}
+          {loaded ? null : (
+            <span className="mt-1 block" data-testid="model-store-storage-load-failed">
+              {copy.storageLoadFailedHint}
+            </span>
+          )}
         </p>
       ) : null}
 
@@ -167,7 +198,7 @@ function StorageSettingsDialog({ open, onClose, copy, theme, onSaved }) {
         </MsButton>
         <MsButton
           busy={busy}
-          disabled={busy || !modelsDir.trim()}
+          disabled={!canSave}
           onClick={submit}
           data-testid="model-store-storage-save"
         >

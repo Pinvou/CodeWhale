@@ -19,10 +19,21 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
+use codewhale_secrets::{DefaultKeyringStore, KeyringStore as _};
 use serde::{Deserialize, Serialize};
 
-/// 密钥环里的服务名。沿用 LMM 的取值——它认的是 HF Token 这件事本身，跟数据目录
-/// 换没换没有关系；改了只会让已经存过 token 的用户重填一次。
+/// 密钥环里的服务名。
+///
+/// # 不要"顺手统一成 pinvou3- 前缀"
+///
+/// 这个取值是从 LMM 时期沿用下来的，**用户真机上已经按这个名字存着 token**。
+/// 密钥环条目是 `(service, username)` 定位的，改掉 service 名不是重命名，是
+/// **换了一条新条目**：老条目还躺在 Secret Service 里没人读，新条目是空的。
+/// 用户看到的症状是私有模型权重突然下不动，而他从来没动过设置——最难查的那种。
+///
+/// 全仓其余凭证的 service 名都是 `pinvou3-*` 前缀（见 platform/credential_store.rs），
+/// 这里是唯一的例外，是历史数据决定的，不是疏漏。真要统一得连迁移一起写：
+/// 先按老名字读出来、按新名字写回去、确认成功再删老条目。
 const KEYRING_SERVICE: &str = "local-model-manager";
 const KEYRING_USERNAME: &str = "hf_token";
 
@@ -241,61 +252,136 @@ pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
 
 // ---- HF Token：优先使用系统密钥环（GNOME Keyring / Secret Service），
 // ---- 不可用时退化为受限权限的本地文件。 ----
+//
+// # 走底座 codewhale-secrets，但不走 `platform/credential_store.rs`
+//
+// 密钥环访问经 `codewhale_secrets::DefaultKeyringStore`，**不直接依赖 `keyring`**
+// ——这跟 Cargo.toml 里「凭证走底座 codewhale-secrets」那条决策是一致的，
+// app 层不再有第二处 keyring 直接依赖。
+//
+// `DefaultKeyringStore::{get,set,delete}` 底下就是 `keyring::Entry::new(service, key)`
+// 加 `get_password` / `set_password` / `delete_credential`，跟这里原来手写的两行
+// 逐字等价，所以真机上已经存着的那条 `(local-model-manager, hf_token)` 读写行为不变。
+// 一处细微差别：条目不存在时，原来的 `delete_credential()` 返回 `Err(NoEntry)`，
+// 底座把它归一成 `Ok(())`（"目标状态已达成"算成功）。净效果相同——两条路最后都会
+// 去清一次回退文件，只是少绕一圈。
+//
+// 那为什么不干脆用 `SystemCredentialStore` + `CredentialReference::for_*`
+// （全仓其余十余种凭证都走那条）？三条理由，都不是偷懒：
+//
+// 1. **service 名换不得。** 条目是 LMM 时期沿用的 `(local-model-manager, hf_token)`，
+//    真机上已经存着。`SystemCredentialStore` 按 `(reference.service, reference.account)`
+//    定位，要读到老值就得把 service 定成 `local-model-manager`——而那张注册表里
+//    十余个作用域清一色 `pinvou3-*` 前缀，塞个外来名字进去比分开放更难解释；
+//    改用 `pinvou3-hf-token` 之类的新名字则让已存 token 一夜失踪。详见
+//    `KEYRING_SERVICE` 的说明。
+//
+// 2. **回退落盘位置不一样，而且这里的位置是刻意选的。** `SystemCredentialStore`
+//    在 keyring probe 失败时回退到 `Secrets::file_backed()`，也就是底座共享的
+//    `~/.codewhale/secrets/secrets.json`。模型商店的回退文件在
+//    `~/.pinvou3/model-store/hf_token`，跟它的库、配置、权重同根——「卸载品悟时
+//    要清哪些」这件事在本文件开头就定过只能有一处答案。换过去意味着已经落在
+//    老位置的 token 读不出来，还得再写一段迁移，为了分层反而多欠一笔债。
+//
+// 3. **没有测试接缝。** `credential_store` 给自己留的假后端注入口
+//    （`inject_fake_secrets`）是它 `mod tests` 里的私有函数，外部模块用不到。
+//    模型商店这边一旦改走过去，凡是碰 token 的测试都会打到开发机/CI 上真实的
+//    Secret Service——这正是本模块刚花力气用 `TempHome` 消灭的那类污染。
+//
+// # musl 构建下会降级到文件回退
+//
+// 底座给 `keyring` 的 Linux 依赖声明带着
+// `cfg(all(target_os = "linux", not(target_env = "ohos"), not(target_env = "musl")))`，
+// `DefaultKeyringStore` 的实现也按同一组 cfg 分支——**musl 目标下 get/set/delete
+// 一律返回 Err(unsupported)**，于是这里每次都会落到 0600 回退文件那条路。
+// 当前出包是 glibc aarch64，不受影响；将来真要出 musl 包，得先想清楚 token
+// 只能落明文文件这件事可不可接受（至少是 0600，但不再有密钥环加持）。
+// 原先直接依赖 `keyring` 时 musl 下也能编出 secret-service 后端，这是这次改动
+// 唯一一处行为面的收窄，如实记在这里。
 
 fn token_fallback_file() -> PathBuf {
     config_dir().join("hf_token")
 }
 
-pub fn get_hf_token() -> Option<String> {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME) {
-        if let Ok(token) = entry.get_password() {
-            if !token.is_empty() {
-                return Some(token);
-            }
-        }
-    }
+/// 密钥环后端。每次现构造——它只存一个 service 名字符串，没有连接或句柄，
+/// 构造是纯内存操作，没必要缓存。
+fn keyring_store() -> DefaultKeyringStore {
+    DefaultKeyringStore::new(KEYRING_SERVICE)
+}
+
+/// 读回退文件里的 token。空文件和只有空白的文件都按「没有」处理。
+fn read_token_fallback() -> Option<String> {
     fs::read_to_string(token_fallback_file())
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-pub fn set_hf_token(token: Option<&str>) {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME) {
-        let ok = match token {
-            Some(t) => entry.set_password(t).is_ok(),
-            None => entry.delete_credential().is_ok(),
-        };
-        if ok {
-            return;
+/// 把 token 写进回退文件。
+///
+/// 用 `OpenOptions::mode(0o600)` 直接按 0600 创建，而不是「先 write 再 chmod」。
+/// 后者按 umask 先落成 0644，中间有一个同机其他用户读得到的窗口，而这个文件里
+/// 装的是 HF token。同文件的 `save_settings` 已经是这么写的——那里存的只是商店
+/// 地址，token 比它敏感得多，没有理由反而更松。
+fn write_token_fallback(token: &str) {
+    use std::io::Write as _;
+
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(token_fallback_file())
+        .and_then(|mut file| file.write_all(token.as_bytes()));
+    if let Err(e) = written {
+        // 不能静默：写不进去意味着下次下载私有权重会以"没有 token"失败，
+        // 而用户明明刚填过。至少让排查的人在日志里看见。
+        eprintln!("[model-store] HF token 回退文件写入失败：{e}");
+    }
+}
+
+/// 删掉回退文件。不存在就什么也不做。
+fn clear_token_fallback() {
+    let _ = fs::remove_file(token_fallback_file());
+}
+
+pub fn get_hf_token() -> Option<String> {
+    // 条目不存在时底座返回 Ok(None)，够不着密钥环才返回 Err——两种情况都落回退文件。
+    if let Ok(Some(token)) = keyring_store().get(KEYRING_USERNAME) {
+        if !token.is_empty() {
+            return Some(token);
         }
     }
-    let f = token_fallback_file();
+    read_token_fallback()
+}
+
+pub fn set_hf_token(token: Option<&str>) {
+    let store = keyring_store();
+    let stored_in_keyring = match token {
+        Some(t) => store.set(KEYRING_USERNAME, t).is_ok(),
+        // 条目本来就不存在时底座也返回 Ok(())——"要它没了"这个目标已经达成，
+        // 算成功。原先手写 keyring 时这里是 Err(NoEntry)，会多绕一圈落到下面
+        // 那个 match 的 None 分支，最后同样是清回退文件，净效果一致。
+        None => store.delete(KEYRING_USERNAME).is_ok(),
+    };
+    if stored_in_keyring {
+        // 密钥环这条路走通了，就顺手把回退文件清掉——**这一步不能省**。
+        //
+        // 回退是有状态的：用户某次设 token 时密钥环恰好不可用（刚装完系统还没
+        // 解锁 keyring、跑在没有 D-Bus 的会话里），token 就以明文落在
+        // `~/.pinvou3/model-store/hf_token`。之后密钥环恢复正常，他再改一次或者
+        // 删掉 token，走的是上面这条成功分支，那份**旧明文一直留在盘上**；而
+        // `get_hf_token` 优先读密钥环，界面上看什么都对，用户完全无从察觉自己
+        // 主目录里还躺着一个早就作废的 HF token。
+        //
+        // 「密钥环里有一份」和「明文文件里有一份」不能同时成立：密钥环是唯一
+        // 真相源，回退文件只在密钥环够不着的时候临时顶一下。
+        clear_token_fallback();
+        return;
+    }
     match token {
-        Some(t) => {
-            use std::io::Write as _;
-            // 用 `OpenOptions::mode(0o600)` 直接按 0600 创建，而不是「先 write 再
-            // chmod」。后者按 umask 先落成 0644，中间有一个同机其他用户读得到的
-            // 窗口，而这个文件里装的是 HF token。
-            //
-            // 同文件的 `save_settings` 已经是这么写的——那里存的只是商店地址，
-            // token 比它敏感得多，没有理由反而更松。
-            let written = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&f)
-                .and_then(|mut file| file.write_all(t.as_bytes()));
-            if let Err(e) = written {
-                // 不能静默：写不进去意味着下次下载私有权重会以"没有 token"失败，
-                // 而用户明明刚填过。至少让排查的人在日志里看见。
-                eprintln!("[model-store] HF token 回退文件写入失败：{e}");
-            }
-        }
-        None => {
-            let _ = fs::remove_file(&f);
-        }
+        Some(t) => write_token_fallback(t),
+        None => clear_token_fallback(),
     }
 }
 
@@ -376,16 +462,16 @@ mod tests {
     /// 配置文件里存着旧默认商店地址的，读出来要换成新地址；用户自己改过的不动。
     #[test]
     fn legacy_default_store_url_is_migrated_but_custom_one_is_kept() {
-        let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
         // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
         // 只认 HOME。这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
         // 原生化之后没有任何生产代码再读它，设了等于没隔离，测试会直接读写开发机
         // 上真实的 ~/.pinvou3/model-store。
         //
-        // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
-        // 这里由 ENV_TEST_LOCK 串行化（那是一把跨模块唯一的锁，见 config.rs）。
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        // 必须用 TempHome 而不是裸 set_var：后者结束时不还原，tempdir 一析构
+        // HOME 就悬空指向一个已删路径，同进程后续跑的**别的模块**的测试会按这个
+        // HOME 解析默认目录然后失败（CI 上真出过，见 TempHome 的说明）。
+        // ENV_TEST_LOCK 只防并发互撕，防不了这种污染——TempHome 把锁和还原一起管了。
+        let _home = TempHome::new();
         let path = config_file();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
@@ -397,10 +483,13 @@ mod tests {
         .unwrap();
         assert_eq!(load_settings().store_url, Settings::default().store_url);
 
-        std::fs::write(&path, r#"{"store_url": "http://10.0.0.5:8088"}"#).unwrap();
+        // 192.0.2.x 是 RFC5737 的文档保留段（TEST-NET-1），跟任何真实环境无关。
+        // 这条断言只关心"不在 LEGACY_DEFAULT_STORE_URLS 名单里的地址一律不动"，
+        // 与地址是公网还是私网无关，所以换成文档段不影响语义。
+        std::fs::write(&path, r#"{"store_url": "http://192.0.2.10:8088"}"#).unwrap();
         assert_eq!(
             load_settings().store_url,
-            "http://10.0.0.5:8088",
+            "http://192.0.2.10:8088",
             "用户自定义的地址被改掉了"
         );
     }
@@ -424,5 +513,50 @@ mod tests {
         assert_eq!(s.max_concurrent_downloads(), 1);
         s.max_concurrent_downloads = 99;
         assert_eq!(s.max_concurrent_downloads(), 3);
+    }
+
+    /// 回退文件必须按 0600 落盘，并且读得回来（空白会被 trim 掉）。
+    ///
+    /// 这几个测试只碰回退文件那一半，**不调 `set_hf_token` / `get_hf_token`**：
+    /// 那两个会先去够系统密钥环，在开发机上就是往真实的 Secret Service 里写东西。
+    #[test]
+    fn token_fallback_round_trips_at_0600() {
+        let _home = TempHome::new();
+        assert_eq!(read_token_fallback(), None, "干净环境下不该读出 token");
+
+        write_token_fallback("hf_abc123\n");
+        assert_eq!(read_token_fallback().as_deref(), Some("hf_abc123"));
+
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(token_fallback_file())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "回退文件权限是 {mode:o}，同机其他用户读得到");
+    }
+
+    /// 密钥环恢复之后，早先那次降级留下的明文必须被清掉。
+    ///
+    /// 场景：某次设 token 时密钥环不可用 → 明文落回退文件；后来密钥环好了，
+    /// 用户再改或再删 token 走的是密钥环成功分支。那条分支要是不清一次回退文件，
+    /// 这份作废的 token 就永远躺在用户主目录里，而 `get_hf_token` 优先读密钥环，
+    /// 界面上一切正常，用户根本无从察觉。
+    #[test]
+    fn clearing_the_fallback_removes_an_earlier_plaintext_token() {
+        let _home = TempHome::new();
+        write_token_fallback("hf_stale_from_a_degraded_run");
+        assert!(token_fallback_file().exists());
+
+        clear_token_fallback();
+        assert!(
+            !token_fallback_file().exists(),
+            "降级时期留下的明文 token 文件没被清掉"
+        );
+        assert_eq!(read_token_fallback(), None);
+
+        // 再清一次不能出事：`set_hf_token` 每次走通密钥环都会调它，
+        // 而绝大多数机器上这个文件根本就不存在。
+        clear_token_fallback();
     }
 }

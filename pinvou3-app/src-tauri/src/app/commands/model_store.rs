@@ -124,6 +124,24 @@ pub fn model_store_answer_run(
     model_store::answer_run(&service, run_id, answer)
 }
 
+/// 还在跑的长操作。给了 `card_id` 就只看那一张卡。
+///
+/// 界面进入模型商店时用它把任务卡接回去。模型商店的视图是条件挂载的，切一下视图
+/// 整棵树就卸载、run_id 索引跟着一起没；而一次下载要跑几十分钟到十几小时。没有
+/// 这条路，切走再回来就等于把这次运行丢了：看不到进度、点不了取消、脚本请求输入
+/// 也没人答（600 秒后被判死），再点一次下载还会撞上卡片互斥，被渲染成一张说不清
+/// 原因的失败卡。
+///
+/// 回的只是登记表快照；日志照常走 `model_store_run_log`，游标在调用方手里，
+/// 接回来时前半段一行都不会丢。
+#[tauri::command]
+pub fn model_store_active_runs(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: Option<String>,
+) -> Result<Value, String> {
+    model_store::active_runs(&service, card_id)
+}
+
 // ---------------------------------------------------------------- API Key
 
 #[tauri::command]
