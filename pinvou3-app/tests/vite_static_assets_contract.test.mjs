@@ -8,7 +8,6 @@ import {
   localClassicScriptPaths,
   resolveContainedRuntimePath,
 } from '../scripts/vite-runtime-assets.mjs';
-import { classicStartupBundlePaths } from '../vite.config.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = path.join(appRoot, 'src');
@@ -16,11 +15,22 @@ const distRoot = path.join(appRoot, 'dist');
 const distIndexPath = path.join(distRoot, 'index.html');
 const webDistIndexPath = path.resolve(appRoot, '../remote-control-relay/web/dist/index.html');
 
-function assertStartupBundles({ built, expectedPlatform, outputRoot, sourceIndex, webBuild }) {
+function assertStartupBundles({ built, expectedPlatform, outputRoot, webBuild }) {
   const startup = built.filter(relative => relative.startsWith('startup/'));
   assert.ok(startup.length > 0, `${expectedPlatform} index must load classic startup bundles`);
-  const unbundledCount = webBuild ? 3 : 2;
-  assert.ok(startup.length + unbundledCount <= 10, `${expectedPlatform} classic startup scripts exceed the request budget`);
+  // Exact pin of the intentionally unbundled startup scripts (keep in sync
+  // with the allowlist test in classic_startup_bundle.test.mjs): anything
+  // else retained here means a script silently dropped out of the bundle
+  // manifest, so its source tag survived the transform.
+  const retained = built.filter(relative => !relative.startsWith('startup/'));
+  assert.deepEqual(
+    new Set(retained),
+    new Set(webBuild
+      ? ['features/updater/update-notice-logic.js', 'platform/web/bootstrap.js', 'shared/legacy-polyfills.js']
+      : ['features/updater/update-notice-logic.js', 'shared/legacy-polyfills.js']),
+    `${expectedPlatform} index must retain only the intentionally unbundled startup scripts`,
+  );
+  assert.ok(startup.length + retained.length <= 10, `${expectedPlatform} classic startup scripts exceed the request budget`);
   for (const relative of startup) {
     assert.match(
       relative,
@@ -31,11 +41,6 @@ function assertStartupBundles({ built, expectedPlatform, outputRoot, sourceIndex
       `missing ${expectedPlatform} startup bundle: ${relative}`,
     );
   }
-  const bundledSources = classicStartupBundlePaths(webBuild, sourceIndex);
-  assert.ok(
-    bundledSources.every(relative => !built.includes(relative)),
-    `${expectedPlatform} index must not retain source tags replaced by startup bundles`,
-  );
 }
 
 test('classic runtime script parser recognizes only real HTML attributes', () => {
@@ -125,7 +130,7 @@ test('Vite build contains every local classic runtime script referenced by index
     [],
     'built index introduced classic runtime references absent from source index',
   );
-  assertStartupBundles({ built, expectedPlatform: 'desktop', outputRoot: distRoot, sourceIndex, webBuild: false });
+  assertStartupBundles({ built, expectedPlatform: 'desktop', outputRoot: distRoot, webBuild: false });
   for (const prefix of ['platform/web/']) {
     assert.ok(
       built.every((relative) => !relative.startsWith(prefix)),
@@ -181,7 +186,6 @@ test('web build index strips tauri-only bridge scripts', {
     built,
     expectedPlatform: 'web',
     outputRoot: path.dirname(webDistIndexPath),
-    sourceIndex,
     webBuild: true,
   });
   assert.ok(built.includes('platform/web/bootstrap.js'), 'web bootstrap must retain document.currentScript semantics');

@@ -34,6 +34,32 @@ test('classic startup manifests keep source order and isolate each platform', ()
   }
 });
 
+test('every local classic script is bundled or on the intentionally unbundled allowlist', () => {
+  // Independent expectation, deliberately not derived from vite.config.mjs:
+  // a script that silently drops out of classicStartupBundlePaths (a wrong
+  // exclusion entry, a stale platform filter) must fail here instead of
+  // surviving as an unbundled tag in the built index.
+  const intentionallyUnbundled = new Set([
+    'shared/legacy-polyfills.js',
+    'platform/web/bootstrap.js',
+    'features/updater/update-notice-logic.js',
+  ]);
+  for (const [webBuild, otherPlatformPrefix] of [
+    [false, 'platform/web/'],
+    [true, 'platform/tauri/'],
+  ]) {
+    const bundled = new Set(classicStartupBundlePaths(webBuild, sourceIndex));
+    const ownPlatformScripts = localClassicScriptPaths(sourceIndex)
+      .filter(relative => !relative.startsWith(otherPlatformPrefix));
+    for (const relative of ownPlatformScripts) {
+      assert.ok(
+        bundled.has(relative) || intentionallyUnbundled.has(relative),
+        `${relative} is neither bundled into a startup bundle nor intentionally unbundled`,
+      );
+    }
+  }
+});
+
 test('desktop classic transform replaces source tags with ordered bundles and preserves lifecycle marks', () => {
   const platformHtml = transformIndexHtmlForPlatform(false, sourceIndex);
   const bundlePaths = classicStartupBundlePaths(false, sourceIndex);
