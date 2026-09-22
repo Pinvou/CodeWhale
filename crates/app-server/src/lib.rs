@@ -674,7 +674,9 @@ async fn thread_handler(State(state): State<AppState>, Json(req): Json<ThreadReq
     // start/resume/fork that declares `workspace_roots` must land in the
     // hint cache, or the turn-executing runtime thread is created
     // single-root and the attached-root ask/deny rules never fire
-    // (review round-9, must-fix 1).
+    // (review round-9, must-fix 1). The `missing` guard mirrors the stdio
+    // named arms: a not-found resume/fork answers 404 and never touches
+    // the cache, or its null fields would clobber the cached hint.
     let should_record_hint = matches!(
         &req,
         ThreadRequest::Create { .. }
@@ -686,6 +688,9 @@ async fn thread_handler(State(state): State<AppState>, Json(req): Json<ThreadReq
     match runtime.handle_thread(req).await {
         Ok(res) => {
             if should_record_hint {
+                if let Err(err) = ensure_thread_found(&res) {
+                    return http_error_from_jsonrpc(err).into_response();
+                }
                 record_stdio_thread_hint(&state, &res).await;
             }
             (StatusCode::OK, Json(res)).into_response()
@@ -2085,7 +2090,12 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                     | ThreadRequest::Fork(_)
             );
             let response = handle_thread_request(state, request).await?;
+            // The envelope arm shares the named arms' guard: a `missing`
+            // resume/fork must fail and must not record — recording its null
+            // model/workspace would clobber the cached hint, and the next
+            // bridged turn would PATCH the live thread down to single-root.
             if should_record_hint {
+                ensure_thread_found(&response)?;
                 record_stdio_thread_hint(state, &response).await;
             }
             StdioDispatchResult {
@@ -3343,6 +3353,80 @@ mod tests {
         let hint = hints.get("ghost-thread").expect("cached hint survives");
         assert_eq!(hint.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(hint.workspace.as_deref(), Some(workspace.as_path()));
+    }
+
+    /// The generic `thread/request` envelope and the HTTP `/thread` face share
+    /// the named arms' guard: a `missing` resume/fork must fail with the named
+    /// not-found error on every surface, and none of them may record the
+    /// response's null fields over the cached hint (same clobber chain as
+    /// #5171 — the next bridged turn would PATCH the live thread down to
+    /// single-root).
+    #[tokio::test]
+    async fn missing_resume_never_clobbers_the_hint_on_any_face() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+
+        let workspace = tmp.path().join("ws");
+        {
+            let mut hints = state.stdio_thread_hints.lock().await;
+            hints.insert(
+                "ghost-thread".to_string(),
+                RuntimeThreadHint {
+                    model: Some("deepseek-v4-pro".to_string()),
+                    workspace: Some(workspace.clone()),
+                    workspace_roots: vec![workspace.clone(), tmp.path().join("attached")],
+                },
+            );
+        }
+
+        // Generic stdio envelope arm.
+        let err = dispatch_stdio_request(
+            &state,
+            "thread/request",
+            json!({ "kind": "resume", "thread_id": "ghost-thread" }),
+        )
+        .await
+        .expect_err("an envelope resume of a missing thread must fail like the named arm");
+        assert_eq!(err.code, -32004);
+
+        // HTTP face: 404 with the named error, hint untouched.
+        let app = app_router(state.clone(), &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/thread")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &json!({ "kind": "resume", "thread_id": "ghost-thread" }),
+                        )
+                        .expect("request json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_body_json(response).await;
+        assert!(
+            format!("{body}").contains("thread_not_found"),
+            "the HTTP error names the not-found cause: {body}"
+        );
+
+        let hints = state.stdio_thread_hints.lock().await;
+        let hint = hints
+            .get("ghost-thread")
+            .expect("cached hint survives both faces");
+        assert_eq!(hint.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(hint.workspace.as_deref(), Some(workspace.as_path()));
+        assert_eq!(
+            hint.workspace_roots,
+            vec![workspace.clone(), tmp.path().join("attached")],
+            "the attached root set survives — a wipe here is what collapses the next turn to single-root"
+        );
     }
 
     fn sse_frame(event: &str, payload: Value) -> String {
