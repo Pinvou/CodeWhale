@@ -173,6 +173,31 @@ func TestSessionHandoffRoutesReachHandlersThroughProductionMiddleware(t *testing
 	}
 }
 
+func TestSessionHandoffPagePersistsDesktopLocale(t *testing.T) {
+	response := httptest.NewRecorder()
+	StaticHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/portal-session-handoff.js", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("script status = %d", response.Code)
+	}
+	helperResponse := httptest.NewRecorder()
+	StaticHandler().ServeHTTP(helperResponse, httptest.NewRequest(http.MethodGet, "/assets/portal-session-handoff-url.js", nil))
+	if helperResponse.Code != http.StatusOK {
+		t.Fatalf("URL helper status = %d", helperResponse.Code)
+	}
+	script := response.Body.String() + helperResponse.Body.String()
+	for _, contract := range []string{
+		`new URLSearchParams(location.search).get("locale")`,
+		`portalSessionHandoffLanguage(requestedLocale, navigator.language, localStorage)`,
+		`storage.setItem('pinvou.account.language', requestedLanguage)`,
+		`takePortalSessionHandoffTicket(location.href, history.replaceState.bind(history))`,
+		`cleanURL.searchParams.delete('locale')`,
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("handoff locale contract missing %q", contract)
+		}
+	}
+}
+
 func TestSessionHandoffCreatesSingleUsePortalSession(t *testing.T) {
 	service, store := newSessionHandoffTestService(t, "11111111-1111-4111-8111-111111111111")
 	request := httptest.NewRequest(http.MethodPost, "/portal-session-handoff", http.NoBody)

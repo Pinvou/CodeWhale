@@ -1,14 +1,14 @@
 import { portalSessionHandoffCopy } from "./assets/portal-session-handoff-i18n.js";
+import { portalSessionHandoffLanguage, takePortalSessionHandoffTicket } from "./assets/portal-session-handoff-url.js";
 
-const language = navigator.language?.toLowerCase() || "en";
-const localeKey = language.startsWith("ja") ? "ja" : language.startsWith("zh") ? "zh" : "en";
+const requestedLocale = new URLSearchParams(location.search).get("locale")?.toLowerCase();
+const localeKey = portalSessionHandoffLanguage(requestedLocale, navigator.language, localStorage);
 const locale = localeKey === "zh" ? "zh-CN" : localeKey;
 const messages = portalSessionHandoffCopy[localeKey];
 document.documentElement.lang = locale;
 document.title = messages.title;
 document.querySelector("main").textContent = messages.opening;
-const ticket = location.hash.startsWith("#ticket=") ? location.hash.slice(8) : "";
-history.replaceState(null, "", location.pathname + location.search);
+const ticket = takePortalSessionHandoffTicket(location.href, history.replaceState.bind(history));
 if (!ticket) {
   document.querySelector("main").textContent = messages.invalid;
 } else {

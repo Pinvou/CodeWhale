@@ -173,6 +173,55 @@ func TestLoginCreatesServerSidePKCEFlow(t *testing.T) {
 	}
 }
 
+func TestLoginPropagatesSupportedLocaleToIdentityProvider(t *testing.T) {
+	for _, test := range []struct {
+		requested string
+		want      string
+	}{
+		{requested: "zh-Hans", want: "zh-CN"},
+		{requested: "en", want: "en"},
+		{requested: "ja", want: "ja"},
+		{requested: "unsupported", want: ""},
+	} {
+		t.Run(test.requested, func(t *testing.T) {
+			service := testService(t, newMemoryStore())
+			request := httptest.NewRequest(http.MethodGet, "/auth/login?locale="+url.QueryEscape(test.requested), nil)
+			response := httptest.NewRecorder()
+			service.Handler(nil).ServeHTTP(response, request)
+			if response.Code != http.StatusFound {
+				t.Fatalf("status = %d", response.Code)
+			}
+			location, err := url.Parse(response.Header().Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := location.Query().Get("ui_locales"); got != test.want {
+				t.Fatalf("ui_locales = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAnonymousPortalLocaleSurvivesLoginReturn(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	response := httptest.NewRecorder()
+
+	service.Handler(http.NotFoundHandler()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/?locale=ja", nil))
+
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("ui_locales"); got != "ja" {
+		t.Fatalf("ui_locales = %q, want ja", got)
+	}
+	flow := store.flows[location.Query().Get("state")]
+	if flow.ReturnTo != "/?locale=ja&section=creditsUsage" && flow.ReturnTo != "/?section=creditsUsage&locale=ja" {
+		t.Fatalf("locale was not preserved in return target: %q", flow.ReturnTo)
+	}
+}
+
 func TestAnonymousPortalRootStartsIdentityLoginImmediately(t *testing.T) {
 	store := newMemoryStore()
 	service := testService(t, store)

@@ -233,6 +233,7 @@ func (s *Service) tokenAdminIngressDeadline(next http.Handler) http.Handler {
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	reauthenticate := r.URL.Query().Get("reauthenticate") == "1"
 	forceLogin := r.URL.Query().Get("force_login") == "1"
+	locale := portalLocale(r.URL.Query().Get("locale"))
 	previousSession := ""
 	if reauthenticate {
 		session, sessionErr := s.authenticatedSession(r.Context(), r)
@@ -278,6 +279,9 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	query.Set("nonce", nonce)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
+	if locale != "" {
+		query.Set("ui_locales", locale)
+	}
 	if reauthenticate || forceLogin {
 		query.Set("prompt", "login")
 	}
@@ -991,6 +995,19 @@ func safeReturnTo(value string) string {
 		return "/"
 	}
 	return value
+}
+
+func portalLocale(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "zh", "zh-cn", "zh-hans":
+		return "zh-CN"
+	case "en", "en-us", "en-gb":
+		return "en"
+	case "ja", "ja-jp":
+		return "ja"
+	default:
+		return ""
+	}
 }
 
 func accountPathAllowed(method, resource string) bool {

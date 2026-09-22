@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
+use crate::platform::prefs::UserPrefs;
 
 #[cfg(any(debug_assertions, test))]
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
@@ -285,19 +286,25 @@ const ACCOUNT_PORTAL_LABEL: &str = "账号平台个人中心";
 impl AccountPlatformState {
     pub async fn open_portal(&self) -> Result<(), String> {
         let config = AccountPlatformConfig::current()?;
-        let target = self.portal_target(&config).await?;
+        let target = self
+            .portal_target(&config, UserPrefs::load().language.locale_tag())
+            .await?;
         crate::platform::os::open_target(target.as_str(), ACCOUNT_PORTAL_LABEL)
     }
 
-    async fn portal_target(&self, config: &AccountPlatformConfig) -> Result<Url, String> {
+    async fn portal_target(
+        &self,
+        config: &AccountPlatformConfig,
+        locale: &str,
+    ) -> Result<Url, String> {
         let restored = portal_restore_state(self.ensure_restored(config).await)?;
         if !restored {
-            return Ok(portal_login_target(&config.portal_url));
+            return Ok(portal_login_target(&config.portal_url, locale));
         }
         let mut access_token = match self.access_token(config, None).await {
             Ok(access_token) => access_token,
             Err(error) if is_unauthenticated_error(&error) => {
-                return Ok(portal_login_target(&config.portal_url));
+                return Ok(portal_login_target(&config.portal_url, locale));
             }
             Err(error) => return Err(error),
         };
@@ -307,18 +314,18 @@ impl AccountPlatformState {
             .await?
         {
             PortalSessionHandoffResult::Ticket(ticket) => {
-                return Ok(portal_handoff_target(&config.portal_url, &ticket));
+                return Ok(portal_handoff_target(&config.portal_url, &ticket, locale));
             }
             PortalSessionHandoffResult::Unauthorized => {}
             PortalSessionHandoffResult::Unsupported => {
-                return Ok(portal_login_target(&config.portal_url));
+                return Ok(portal_login_target(&config.portal_url, locale));
             }
         }
 
         access_token = match self.access_token(config, Some(&access_token)).await {
             Ok(access_token) => access_token,
             Err(error) if is_unauthenticated_error(&error) => {
-                return Ok(portal_login_target(&config.portal_url));
+                return Ok(portal_login_target(&config.portal_url, locale));
             }
             Err(error) => return Err(error),
         };
@@ -327,10 +334,14 @@ impl AccountPlatformState {
             .await?
         {
             PortalSessionHandoffResult::Ticket(ticket) => {
-                Ok(portal_handoff_target(&config.portal_url, &ticket))
+                Ok(portal_handoff_target(&config.portal_url, &ticket, locale))
             }
-            PortalSessionHandoffResult::Unauthorized => Ok(portal_login_target(&config.portal_url)),
-            PortalSessionHandoffResult::Unsupported => Ok(portal_login_target(&config.portal_url)),
+            PortalSessionHandoffResult::Unauthorized => {
+                Ok(portal_login_target(&config.portal_url, locale))
+            }
+            PortalSessionHandoffResult::Unsupported => {
+                Ok(portal_login_target(&config.portal_url, locale))
+            }
         }
     }
 
@@ -389,18 +400,25 @@ fn portal_restore_state(result: Result<bool, String>) -> Result<bool, String> {
     }
 }
 
-fn portal_login_target(portal_url: &Url) -> Url {
+fn portal_login_target(portal_url: &Url, locale: &str) -> Url {
     let mut target = portal_url.clone();
     target.set_path("auth/login");
-    target.set_query(Some("force_login=1&return_to=%2F"));
+    target.set_query(None);
     target.set_fragment(None);
+    let return_to = format!("/?locale={locale}");
+    target
+        .query_pairs_mut()
+        .append_pair("force_login", "1")
+        .append_pair("return_to", &return_to)
+        .append_pair("locale", locale);
     target
 }
 
-fn portal_handoff_target(portal_url: &Url, ticket: &str) -> Url {
+fn portal_handoff_target(portal_url: &Url, ticket: &str, locale: &str) -> Url {
     let mut target = portal_url.clone();
     target.set_path("portal-session-handoff");
     target.set_query(None);
+    target.query_pairs_mut().append_pair("locale", locale);
     target.set_fragment(Some(&format!("ticket={ticket}")));
     target
 }
@@ -2286,19 +2304,34 @@ mod tests {
     }
 
     #[test]
-    fn portal_open_targets_are_fixed_and_keep_the_handoff_out_of_the_query() {
+    fn portal_open_targets_carry_locale_and_keep_the_ticket_out_of_the_query() {
         let portal = Url::parse("https://account.pinvou.com/").unwrap();
-        let login = portal_login_target(&portal);
+        let login = portal_login_target(&portal, "ja");
         assert_eq!(login.path(), "/auth/login");
-        assert_eq!(login.query(), Some("force_login=1&return_to=%2F"));
+        assert_eq!(
+            login
+                .query_pairs()
+                .find(|(key, _)| key == "locale")
+                .unwrap()
+                .1,
+            "ja"
+        );
+        assert_eq!(
+            login
+                .query_pairs()
+                .find(|(key, _)| key == "return_to")
+                .unwrap()
+                .1,
+            "/?locale=ja"
+        );
         assert!(login.fragment().is_none());
 
-        let handoff = portal_handoff_target(&portal, "one-time-ticket");
+        let handoff = portal_handoff_target(&portal, "one-time-ticket", "en");
         assert_eq!(
             handoff.as_str(),
-            "https://account.pinvou.com/portal-session-handoff#ticket=one-time-ticket"
+            "https://account.pinvou.com/portal-session-handoff?locale=en#ticket=one-time-ticket"
         );
-        assert!(handoff.query().is_none());
+        assert_eq!(handoff.query(), Some("locale=en"));
     }
 
     #[test]
@@ -2378,9 +2411,10 @@ mod tests {
         config.token_url = base.join("token").unwrap();
         config.portal_url = base;
 
-        let target = state.portal_target(&config).await.unwrap();
+        let target = state.portal_target(&config, "ja").await.unwrap();
         server.join().unwrap();
         assert_eq!(target.path(), "/portal-session-handoff");
+        assert_eq!(target.query(), Some("locale=ja"));
         assert_eq!(target.fragment(), Some("ticket=single-use-ticket"));
         assert_eq!(
             credentials.refresh_token().as_deref(),
@@ -2418,7 +2452,7 @@ mod tests {
         config.token_url = base.join("token").unwrap();
         config.portal_url = base;
 
-        let target = state.portal_target(&config).await.unwrap();
+        let target = state.portal_target(&config, "en").await.unwrap();
         server.join().unwrap();
         assert_eq!(target.fragment(), Some("ticket=restored-ticket"));
     }
@@ -2444,7 +2478,7 @@ mod tests {
         config.token_url = base.join("token").unwrap();
         config.portal_url = base;
 
-        let error = state.portal_target(&config).await.unwrap_err();
+        let error = state.portal_target(&config, "en").await.unwrap_err();
         server.join().unwrap();
         assert!(error.starts_with("oidc_token_exchange_failed:"));
         assert_eq!(
@@ -2474,7 +2508,7 @@ mod tests {
         config.token_url = base.join("token").unwrap();
         config.portal_url = base;
 
-        let target = state.portal_target(&config).await.unwrap();
+        let target = state.portal_target(&config, "zh-Hans").await.unwrap();
         server.join().unwrap();
         assert_eq!(target.path(), "/auth/login");
         assert!(credentials.refresh_token().is_none());
@@ -2493,7 +2527,7 @@ mod tests {
         let mut config = config();
         config.portal_url = base;
 
-        let error = state.portal_target(&config).await.unwrap_err();
+        let error = state.portal_target(&config, "en").await.unwrap_err();
         server.join().unwrap();
         assert!(error.contains("identity returned 503"));
     }
@@ -2512,10 +2546,25 @@ mod tests {
         let mut config = config();
         config.portal_url = base;
 
-        let target = state.portal_target(&config).await.unwrap();
+        let target = state.portal_target(&config, "en").await.unwrap();
         server.join().unwrap();
         assert_eq!(target.path(), "/auth/login");
-        assert_eq!(target.query(), Some("force_login=1&return_to=%2F"));
+        assert_eq!(
+            target
+                .query_pairs()
+                .find(|(key, _)| key == "locale")
+                .unwrap()
+                .1,
+            "en"
+        );
+        assert_eq!(
+            target
+                .query_pairs()
+                .find(|(key, _)| key == "return_to")
+                .unwrap()
+                .1,
+            "/?locale=en"
+        );
         assert_eq!(
             credentials.refresh_token().as_deref(),
             Some("saved-refresh")
@@ -2526,9 +2575,24 @@ mod tests {
     #[tokio::test]
     async fn missing_saved_login_opens_browser_login_without_network_request() {
         let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
-        let target = state.portal_target(&config()).await.unwrap();
+        let target = state.portal_target(&config(), "ja").await.unwrap();
         assert_eq!(target.path(), "/auth/login");
-        assert_eq!(target.query(), Some("force_login=1&return_to=%2F"));
+        assert_eq!(
+            target
+                .query_pairs()
+                .find(|(key, _)| key == "locale")
+                .unwrap()
+                .1,
+            "ja"
+        );
+        assert_eq!(
+            target
+                .query_pairs()
+                .find(|(key, _)| key == "return_to")
+                .unwrap()
+                .1,
+            "/?locale=ja"
+        );
     }
 
     #[test]
