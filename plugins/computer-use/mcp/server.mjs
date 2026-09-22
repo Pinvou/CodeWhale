@@ -94,12 +94,16 @@ function normalizeTarget(computer, target, kind) {
 }
 
 function bindRaster(computer, shot) {
+  // A screenshot whose geometry is unknown must not poison the frame: keep
+  // the previous binding, or none — coordinate targets then fail closed with
+  // no_raster instead of silently clicking from a guessed (0,0). Screenshots
+  // carry `points` (screen-space origin); a zoom child carries the
+  // precomputed `origin` from zoomChildRaster.
+  if (!shot.points && !shot.origin) return;
   lastRasters.set(computer.id, {
     file: shot.file ?? shot.path,
     scale: shot.scale ?? 1,
-    // Screenshots carry `points` (screen-space origin); a zoom child carries
-    // the precomputed `origin` from zoomChildRaster.
-    origin: shot.points ?? shot.origin ?? { x: 0, y: 0 },
+    origin: shot.points ?? shot.origin,
     pixels: shot.pixels ?? null,
     capturedAt: shot.capturedAt ?? new Date().toISOString(),
   });
@@ -309,10 +313,12 @@ async function callTool(params) {
       if (Array.isArray(data)) data = { items: data };
       if (backendMethod === "screenshot" && data?.file) {
         // Bind geometry for coordinate mapping; the file field is the remote
-        // path on purpose — the zoom below needs it as the crop source.
+        // path on purpose — the zoom below needs it as the crop source. The
+        // backend's own note (e.g. an unbound-raster warning) must survive
+        // the scp hint, so join instead of overwrite — as zoom does below.
         assertComputerUnchanged(computer);
         bindRaster(computer, data);
-        data.note = "file lives on the remote computer; pull it with scp if you need the bytes locally";
+        data.note = [data.note, "file lives on the remote computer; pull it with scp if you need the bytes locally"].filter(Boolean).join(" ");
       }
       if (backendMethod === "zoom") {
         assertComputerUnchanged(computer);

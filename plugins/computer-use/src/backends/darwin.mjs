@@ -11,7 +11,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
-import { clampRegion, screenshotRaster } from "../raster.mjs";
+import { clampRegion, screenshotRaster, virtualScreen } from "../raster.mjs";
 
 const KEY_CODES = {
   return: 36, enter: 36, tab: 48, space: 49, escape: 53, esc: 53, delete: 51,
@@ -286,12 +286,15 @@ export function create({ exec }) {
     const bounds = await runL("osascript", ["-e", 'tell application "Finder" to get bounds of window of desktop'], { timeoutMs: 12_000 }).then((x) =>
       x.code === 0 ? x.stdout.trim().split(",").map((n) => Number(n.trim())) : null).catch(() => null);
     return items.map((d, i) => {
-      const res = (d._spdisplays_resolution ?? "").match(/(\d+)\s*x\s*(\d+)/) ?? [null, null, null];
+      // _spdisplays_resolution is the POINT resolution on Retina panels; the
+      // backing pixels live in _spdisplays_pixels. Confusing the two makes
+      // every bound scale 1 and misplaces raster coordinates by that factor.
+      const px = (d._spdisplays_pixels ?? d._spdisplays_resolution ?? "").match(/(\d+)\s*x\s*(\d+)/) ?? [null, null, null];
       return {
         index: i + 1,
         id: d._spdisplays_display_id ?? null,
         name: d._name ?? `Display ${i + 1}`,
-        pixels: { w: Number(res[1]) || null, h: Number(res[2]) || null },
+        pixels: { w: Number(px[1]) || null, h: Number(px[2]) || null },
         main: String(d.spdisplays_main ?? "n").toLowerCase() === "y" || i === 0,
       };
     }).map((d, i) => ({
@@ -311,46 +314,80 @@ export function create({ exec }) {
     return process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
   }
 
+  /** Actual pixel size of an image file on disk (the sips probe zoom uses). */
+  async function rasterPixelSize(file) {
+    const probe = await runL("sips", ["-g", "pixelWidth", "-g", "pixelHeight", file], { timeoutMs: 10_000 });
+    const pw = /pixelWidth:\s*(\d+)/.exec(probe.stdout);
+    const ph = /pixelHeight:\s*(\d+)/.exec(probe.stdout);
+    return pw && ph ? { w: Number(pw[1]), h: Number(ph[1]) } : null;
+  }
+
   async function screenshot({ display, region, path: outPath } = {}) {
     const dir = recordingsDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
     if (!/\.png$/.test(file)) throw new ExecError("screenshot path must end in .png");
+    if (region !== undefined && (!Array.isArray(region) || region.length !== 4 || !region.every((n) => Number.isFinite(n)) || region[2] < 1 || region[3] < 1)) {
+      throw new ExecError("region must be [x, y, w, h] in global screen points");
+    }
+    const displays = await displayInfo();
     const args = ["-x", "-t", "png"];
     const disp = display ?? state.activeDisplay;
-    if (disp && disp !== "all") args.push("-D", String(disp));
+    let eff = null;
     if (region) {
-      if (!region.every((n) => Number.isFinite(n) && n >= 0) || region.length !== 4) {
-        throw new ExecError("region must be [x, y, w, h] in screen points");
+      // -R crops in GLOBAL screen points — the same frame list_displays and
+      // cursor_position report — so the region itself pins the crop and -D is
+      // left off (its interaction with -R is undocumented). Clamp only on a
+      // complete display union: precise geometry here is main-display-only,
+      // and clamping against a partial union could pull a region that sits on
+      // another display into the main one.
+      eff = region.map(Math.round);
+      const complete = displays.length > 0 && displays.every((d) => [d.points?.x, d.points?.y, d.points?.w, d.points?.h].every(Number.isFinite));
+      const u = complete ? virtualScreen(displays) : null;
+      if (u) {
+        const clipped = clampRegion([eff[0] - u.x, eff[1] - u.y, eff[2], eff[3]], u.w, u.h);
+        if (clipped) eff = [clipped[0] + u.x, clipped[1] + u.y, clipped[2], clipped[3]];
       }
-      args.push("-R", region.join(","));
+      args.push("-R", eff.join(","));
+    } else {
+      if (disp && disp !== "all") args.push("-D", String(disp));
     }
     args.push(file);
     const r = await runL("screencapture", args, { timeoutMs: 20_000 });
     if (r.code !== 0) throw new ExecError(`screencapture exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`, r);
     const stat = fs.statSync(file);
-    const displays = await displayInfo();
-    const d = displays.find((x) => x.index === (disp === "all" ? 1 : disp)) ?? displays[0];
-    // Bind the geometry of the crop actually taken: a region shot crops at the
-    // display origin + region offset (-R is display-space with -D), so its
-    // raster origin is that point at region size — not the display's full
-    // bounds. This is the zoom raster contract (ce783728c) applied to the
-    // screenshot path. When the display origin is unknown (non-main displays
-    // get no precise point geometry), keep the previous binding and say so —
-    // never a silently guessed origin.
-    const surface = d ? { ...d.points, scale: d.scale, pixels: d.pixels } : null;
-    const geom = screenshotRaster(surface, region ?? undefined);
     const capturedAt = new Date().toISOString();
-    let note;
+    // Bind the geometry of the crop actually taken: a region shot's raster
+    // origin is the global region origin itself (no display metadata needed),
+    // a full display shot's is the display's bounds. The PNG's real pixel
+    // size fixes the scale where display metadata understates the backing
+    // resolution (Retina), as zoom's sips probe already does for crops.
+    const measured = await rasterPixelSize(file);
+    let geom = null;
+    if (region) {
+      const scale = displays.reduce((m, d) => (Number.isFinite(d.scale) && d.scale > 0 ? Math.max(m, d.scale) : m), 1);
+      geom = screenshotRaster({ x: 0, y: 0, scale }, eff);
+    } else {
+      const d = displays.find((x) => x.index === (disp === "all" ? 1 : disp)) ?? displays[0];
+      geom = d ? screenshotRaster({ ...d.points, scale: d.scale, pixels: d.pixels }, null) : null;
+    }
+    if (geom && measured) {
+      geom.pixels = measured;
+      const s = geom.points.w > 0 ? measured.w / geom.points.w : null;
+      if (Number.isFinite(s) && s > 0) geom.scale = +s.toFixed(3);
+    }
     if (geom) {
       state.lastRaster = { file, bytes: stat.size, display: disp ?? 1, ...geom, capturedAt };
-    } else {
-      note = state.lastRaster?.points
-        ? "display origin unknown for this capture; coordinate targets still resolve against the previous raster — take a full-display screenshot to rebind"
-        : "display origin unknown for this capture; coordinate targets resolve from screen origin (0,0)";
-      state.lastRaster = { ...state.lastRaster, file, bytes: stat.size, display: disp ?? 1, capturedAt };
+      return { ...state.lastRaster, path: file };
     }
-    return { ...state.lastRaster, path: file, ...(note ? { note } : {}) };
+    // Unknown display geometry (only the main display reports precise point
+    // bounds) — keep the previous binding WHOLE, file included: pairing the
+    // new file with the previous raster's geometry would let a follow-up zoom
+    // slip past the server's foreign-source guard carrying a stale frame.
+    const note = state.lastRaster?.points
+      ? "this display's origin is unknown (macOS reports precise display geometry for the main display only), so the raster is unbound — coordinate targets still resolve against the previous raster; aim on this capture with element targets, or screenshot display 1"
+      : "this display's origin is unknown (macOS reports precise display geometry for the main display only), so no raster is bound — coordinate targets fail until a boundable screenshot succeeds; use element targets meanwhile";
+    return { ...(state.lastRaster ?? {}), path: file, capturedAt, note };
   }
 
   async function zoom({ source, region, path: outPath }) {

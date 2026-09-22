@@ -129,7 +129,7 @@ export const TOOLS = [
       type: "object",
       properties: {
         display: { type: ["integer", "string"], description: "Display index or 'all'" },
-        region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in screen points" },
+        region: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4, description: "[x, y, w, h] in global screen points — the same frame list_displays and cursor_position report; may be negative on multi-monitor layouts. A region reaching past the capturable surface is clipped to it; the receipt's points name the crop actually taken, so aim from that" },
         path: { type: "string", description: "Optional output path (absolute). Defaults into the recordings directory." },
         computer: computerParam,
       },

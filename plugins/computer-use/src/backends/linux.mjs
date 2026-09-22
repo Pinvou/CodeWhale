@@ -340,7 +340,10 @@ except Exception as e:
     },
     screenshot: async ({ display, region, path: outPath } = {}) => {
       await probeSession();
-      if (region !== undefined && (!Array.isArray(region) || region.length !== 4 || !region.every((n) => Number.isFinite(n) && n >= 0) || region[2] < 1 || region[3] < 1)) {
+      // Region is in global layout points (grim/scrot/import all crop in that
+      // frame), which go negative on layouts whose smallest output x/y is
+      // negative — exactly the layouts the virtual-screen binding exists for.
+      if (region !== undefined && (!Array.isArray(region) || region.length !== 4 || !region.every((n) => Number.isFinite(n)) || region[2] < 1 || region[3] < 1)) {
         throw new ExecError("region must be [x, y, w, h] in screen points");
       }
       const { cmd, base } = await shotTool();
@@ -355,40 +358,43 @@ except Exception as e:
       // smallest output x/y is negative.
       let surface = null;
       try { surface = virtualScreen(await listDisplays()); } catch {}
-      let eff = region ?? null;
+      let eff = region ? region.map(Math.round) : null;
       if (region && surface) {
-        const clipped = clampRegion([region[0] - surface.x, region[1] - surface.y, region[2], region[3]], surface.w, surface.h);
+        const clipped = clampRegion([eff[0] - surface.x, eff[1] - surface.y, eff[2], eff[3]], surface.w, surface.h);
         if (clipped) eff = [clipped[0] + surface.x, clipped[1] + surface.y, clipped[2], clipped[3]];
       }
       let args = [...base];
       if (cmd === "grim") {
-        if (eff) args.push("-g", `${Math.round(eff[0])},${Math.round(eff[1])} ${Math.round(eff[2])}x${Math.round(eff[3])}`);
+        if (eff) args.push("-g", `${eff[0]},${eff[1]} ${eff[2]}x${eff[3]}`);
         args.push(file);
       } else if (cmd === "scrot") {
-        if (eff) args.push("-a", `${Math.round(eff[0])},${Math.round(eff[1])},${Math.round(eff[2])},${Math.round(eff[3])}`);
+        if (eff) args.push("-a", `${eff[0]},${eff[1]},${eff[2]},${eff[3]}`);
         args.push(file);
       } else {
-        if (eff) args.push("-crop", `${Math.round(eff[2])}x${Math.round(eff[3])}+${Math.round(eff[0])}+${Math.round(eff[1])}`);
+        if (eff) args.push("-crop", `${eff[2]}x${eff[3]}+${eff[0]}+${eff[1]}`);
         args.push(file);
       }
       const r = await run(cmd, args, { timeoutMs: 20_000 });
       if (r.code !== 0) throw new ExecError(`${cmd} exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`, r);
-      // Bind the geometry of the crop actually taken at scale 1: a region
-      // shot's raster origin is the region origin itself, a full shot's is the
-      // virtual screen's min corner — the same contract the zoom path binds by.
+      // Bind the geometry of the crop actually taken at the compositor's
+      // scale (grim renders at the highest output scale, so the PNG carries
+      // that many pixels per point): a region shot's raster origin is the
+      // region origin itself, a full shot's is the virtual screen's min
+      // corner — the same contract the zoom path binds by.
       const bytes = fs.statSync(file).size;
       const capturedAt = new Date().toISOString();
       const geom = eff
-        ? screenshotRaster({ x: 0, y: 0, scale: 1 }, eff)
-        : surface ? screenshotRaster({ ...surface, scale: 1 }, null) : null;
-      let note;
+        ? screenshotRaster({ x: 0, y: 0, scale: surface?.scale ?? 1 }, eff)
+        : surface ? screenshotRaster(surface, null) : null;
       if (geom) {
         lastRaster = { file, bytes, ...geom, capturedAt };
-      } else {
-        note = "display enumeration unavailable; the raster origin is unknown and coordinate targets resolve from (0,0)";
-        lastRaster = { file, bytes, capturedAt };
+        return { ...lastRaster };
       }
-      return { ...lastRaster, ...(note ? { note } : {}) };
+      // No usable geometry — keep the previous binding WHOLE, file included:
+      // pairing the new file with a stale frame would let a follow-up zoom
+      // slip past the server's foreign-source guard, and an unbound raster
+      // must not silently claim (0,0). The new crop rides along as `path`.
+      return { ...(lastRaster ?? {}), path: file, capturedAt, note: "display enumeration unavailable; the raster stays unbound — coordinate targets resolve against the last bound raster, or fail until a screenshot with known geometry succeeds" };
     },
     zoom: async ({ source, region, path: outPath }) => {
       if (!Array.isArray(region) || region.length < 4 || ![region[0], region[1]].every((n) => Number.isFinite(n) && n >= 0) || ![region[2], region[3]].every((n) => Number.isFinite(n) && n >= 1)) {

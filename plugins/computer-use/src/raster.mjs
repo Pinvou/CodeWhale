@@ -53,13 +53,15 @@ export function clampRegion(region, srcW, srcH) {
  * Union bounding box (screen points) of enumerated displays — the surface a
  * full-virtual-screen capture actually photographs (linux grim/scrot/import
  * crop the compositor/root layout; the win32 VirtualScreen starts at its min
- * corner, which is not 0,0 on multi-monitor layouts). Returns null when no
- * display carries usable point geometry — the caller then cannot know where
- * its capture sits and must not guess an origin.
+ * corner, which is not 0,0 on multi-monitor layouts). `scale` is the highest
+ * contributing output's scale — grim renders at the highest of all output
+ * scales, so the captured PNG carries that many pixels per point. Returns
+ * null when no display carries usable point geometry — the caller then cannot
+ * know where its capture sits and must not guess an origin.
  */
 export function virtualScreen(displays) {
   if (!Array.isArray(displays)) return null;
-  let x0 = null, y0 = null, x1 = null, y1 = null;
+  let x0 = null, y0 = null, x1 = null, y1 = null, scale = null;
   for (const d of displays) {
     const p = d?.points;
     if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.w) || !Number.isFinite(p.h)) continue;
@@ -67,9 +69,10 @@ export function virtualScreen(displays) {
     y0 = y0 === null ? p.y : Math.min(y0, p.y);
     x1 = x1 === null ? p.x + p.w : Math.max(x1, p.x + p.w);
     y1 = y1 === null ? p.y + p.h : Math.max(y1, p.y + p.h);
+    if (Number.isFinite(d.scale) && d.scale > 0) scale = scale === null ? d.scale : Math.max(scale, d.scale);
   }
   if (x0 === null || y0 === null || x1 <= x0 || y1 <= y0) return null;
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, scale: scale ?? 1 };
 }
 
 /**
