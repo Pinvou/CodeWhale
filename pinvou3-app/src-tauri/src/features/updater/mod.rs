@@ -1,13 +1,10 @@
-//! 应用内升级（当前未实施）：各平台更新检查与安装均为 unsupported 占位——
-//! `check_for_update_info` 恒返回无更新，下载/安装返回不支持；应用内更新能力规划中。
-//!
-//! 以下为历史设计（未实施，仅作背景保留）：
+//! 应用内升级：
 //! - Linux：检查 latest.json → 下载 deb（sha256 校验）→ pkexec apt 安装 → 重启。
-//! - Windows：查询 H3C OTA → 下载 zip（MD5 校验）→ 解析 FullPack/OtaInfo → 启动 MSI/NSIS 安装器 → 下次启动反馈。
+//! - macOS：检查平台清单 → 下载 dmg（sha256 校验）→ 原子替换 app → 重启。
+//! - Windows：检查平台清单 → 下载已签名 NSIS/MSI（sha256 校验）→ UAC 安装 → 拉起新版。
 //!
-//! 设计要点（未实施）：
-//! - **更新源是静态 HTTP**：服务器只托管 `latest.json` + deb 文件，零服务端逻辑。
-//!   Tauri 官方 updater plugin 不支持 deb，所以这里自建轻量机制。
+//! 设计要点：
+//! - **更新源是静态 HTTPS**：服务器只托管 `latest.json` + 各平台安装包，零服务端逻辑。
 //! - **URL 不进 settings.json**：更新源是基础设施不是用户偏好，可改会成攻击面。
 //!   `PINVOU3_UPDATE_URL` env 可覆盖（e2e 测试指本地 http server）。
 //! - **下载目录用 `~/.pinvou3/updates/`** 而非 /tmp：tmpfs 受内存限制且重启清空。
@@ -81,6 +78,8 @@ pub struct PlatformAsset {
     pub restart_after_install: bool,
     #[serde(default)]
     pub notes: String,
+    #[serde(default)]
+    pub pub_date: String,
     /// 本平台资产自己的版本号。各平台独立发版(Mac 先发 0.7.0、Linux 还在 0.6.3)时,
     /// 客户端用**本平台**版本判要不要升级,而不是读顶层 .version —— 后者代表「最近一次
     /// Linux 发版」,Mac 客户端读它会被误导。旧 manifest / 旧 platform 条目无此字段 → 空
@@ -147,7 +146,7 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
 
 /// 下载更新包到 `~/.pinvou3/updates/`，流式写盘 + 校验，进度走
 /// `update:progress` 事件。Linux 返回 deb 路径字符串；Windows 返回
-/// 已解析出的 zip/Windows 安装器信息对象。
+/// 已校验的 NSIS/MSI 安装器信息对象。
 pub async fn download_update(
     info: UpdateInfo,
     app: AppHandle,
@@ -249,6 +248,7 @@ mod tests {
             size: 1024,
             restart_after_install: false,
             notes: "mac only".to_string(),
+            pub_date: "2026-09-22T08:00:00Z".to_string(),
             version: "0.7.0".to_string(),
         };
         let json = serde_json::to_string(&asset).unwrap();
