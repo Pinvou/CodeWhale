@@ -35,6 +35,9 @@ const LEGACY_TOOL_SEARCH_REGEX_NAME: &str = "tool_search_tool_regex";
 const LEGACY_TOOL_SEARCH_BM25_NAME: &str = "tool_search_tool_bm25";
 const TOOL_SEARCH_DEFAULT_MAX_RESULTS: usize = 8;
 const TOOL_SEARCH_MAX_RESULTS_LIMIT: usize = 8;
+/// Model-facing contract for the boot-window `mcp_boot` status (#588): a
+/// missing capability during the connect window is "not yet", not "absent".
+const TOOL_SEARCH_BOOT_NOTE: &str = "These MCP servers are still connecting; the tools they expose are not searchable yet. Other matching tools are unaffected. Wait briefly and run the search again before deciding a capability is unavailable.";
 
 pub(crate) fn is_tool_search_tool(name: &str) -> bool {
     matches!(
@@ -324,7 +327,7 @@ pub(crate) fn ensure_advanced_tooling(
         catalog.push(Tool {
             tool_type: Some(TOOL_SEARCH_TYPE.to_string()),
             name: TOOL_SEARCH_NAME.to_string(),
-            description: "Search deferred tool definitions and return matching tool references.".to_string(),
+            description: "Search deferred tool definitions and return matching tool references. When the result includes `mcp_boot`, those MCP servers are still connecting: retry the search shortly before treating a capability as unavailable.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -538,7 +541,10 @@ impl ToolSurfacePolicy {
         }
     }
 
-    #[cfg(test)]
+    /// One spelling of the build's allow/deny narrowing, shared by the
+    /// boot-window refresh; both delegate to the same [`tool_denied`] and
+    /// [`tool_allowed`] pair the build's retain runs, so the two surfaces
+    /// cannot drift apart.
     pub(super) fn allows_tool(&self, name: &str) -> bool {
         !self.denies_tool(name) && self.passes_allow_list(name)
     }
@@ -1255,20 +1261,32 @@ pub(super) fn execute_tool_search(
     catalog: &[Tool],
     active_tools: &mut HashSet<String>,
 ) -> Result<ToolResult, ToolError> {
-    execute_tool_search_inner(tool_name, input, catalog, active_tools, None)
+    execute_tool_search_inner(tool_name, input, catalog, active_tools, None, None)
 }
 
 /// Execute tool search while retaining activated schemas in the bounded
 /// conversation cache. Kept separate from the test-only pure search helper so existing
 /// pure catalog tests and compatibility callers do not need an engine session.
+///
+/// `connecting_mcp_servers` carries the boot-window status (#588): while the
+/// spawn-time MCP boot is still settling, the result must tell the model that
+/// a miss may only mean "not yet", never "absent".
 pub(crate) fn execute_tool_search_with_cache(
     tool_name: &str,
     input: &serde_json::Value,
     catalog: &[Tool],
     active_tools: &mut HashSet<String>,
     cache: &mut crate::core::session::ToolActivationCache,
+    connecting_mcp_servers: Option<&[String]>,
 ) -> Result<ToolResult, ToolError> {
-    execute_tool_search_inner(tool_name, input, catalog, active_tools, Some(cache))
+    execute_tool_search_inner(
+        tool_name,
+        input,
+        catalog,
+        active_tools,
+        Some(cache),
+        connecting_mcp_servers,
+    )
 }
 
 fn execute_tool_search_inner(
@@ -1277,6 +1295,7 @@ fn execute_tool_search_inner(
     catalog: &[Tool],
     active_tools: &mut HashSet<String>,
     cache: Option<&mut crate::core::session::ToolActivationCache>,
+    connecting_mcp_servers: Option<&[String]>,
 ) -> Result<ToolResult, ToolError> {
     let query = required_str(input, "query")?;
     let match_kind = match tool_name {
@@ -1341,19 +1360,37 @@ fn execute_tool_search_inner(
         })
     }));
 
-    let payload = json!({
+    // Boot-window status (#588): a bare empty result is byte-identical to
+    // "no server configured", which is how a transient connect window
+    // collapses into a definitive "capability unavailable" verdict. When
+    // servers are still settling, say so explicitly so the model retries
+    // before concluding anything.
+    let boot_status = connecting_mcp_servers.filter(|servers| !servers.is_empty());
+    let mut payload = json!({
         "type": "tool_search_tool_search_result",
         "tool_references": references,
         "unavailable_tool_references": unavailable_references.clone(),
     });
+    if let Some(servers) = boot_status {
+        payload["mcp_boot"] = json!({
+            "status": "connecting",
+            "servers_pending": servers,
+            "note": TOOL_SEARCH_BOOT_NOTE,
+        });
+    }
+
+    let mut metadata = json!({
+        "tool_references": discovered,
+        "unavailable_tool_references": unavailable_references,
+    });
+    if boot_status.is_some() {
+        metadata["mcp_boot"] = payload["mcp_boot"].clone();
+    }
 
     Ok(ToolResult {
         content: serde_json::to_string(&payload).unwrap_or_else(|_| payload.to_string()),
         success: true,
-        metadata: Some(json!({
-            "tool_references": discovered,
-            "unavailable_tool_references": unavailable_references,
-        })),
+        metadata: Some(metadata),
     })
 }
 

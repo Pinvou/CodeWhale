@@ -6962,11 +6962,27 @@ impl Engine {
         ))
     }
 
+    /// Enabled servers that have delivered no searchable tools yet and carry
+    /// no diagnosis, from the pool's own live truth: a server counts as
+    /// answered once its tools are exposed (`catalog_authorized`, the
+    /// `all_tools` filter — deliberately wider than `is_ready`, because a
+    /// dropped connection keeps its discovered tools listed) or once its
+    /// connect attempt settled with a failure (`connect_backoff`, which
+    /// exists exactly while no attempt is in flight). The engine-side error
+    /// map is the third diagnosis source; it lags the pool until a boot
+    /// update is drained, so the pool-side signals are what keep a settled
+    /// failure out of the list inside a live turn (#588).
     fn mcp_connecting_names(pool: &McpPool, errors: &HashMap<String, String>) -> Vec<String> {
-        let connected = pool.connected_servers();
+        let searchable: HashSet<String> =
+            pool.catalog_authorized_server_names().into_iter().collect();
+        let diagnosed: HashSet<String> = pool.settled_failure_names().into_iter().collect();
         pool.enabled_server_names()
             .into_iter()
-            .filter(|name| !connected.contains(&name.as_str()) && !errors.contains_key(name))
+            .filter(|name| {
+                !searchable.contains(name.as_str())
+                    && !diagnosed.contains(name)
+                    && !errors.contains_key(name)
+            })
             .collect()
     }
 
@@ -7230,7 +7246,7 @@ impl Engine {
                 self.mcp_event_generation = generation;
                 self.replace_mcp_boot_errors(&authority_errors, connection_errors);
                 self.finish_mcp_boot_generation(generation);
-                self.session.pending_prefix_change_reason = Some("mcp-session-boot".to_string());
+                self.declare_prefix_change_if_unset("mcp-session-boot");
                 self.emit_mcp_session_boot(generation, true).await;
                 self.maybe_inject_mcp_boot_briefing(generation).await;
             }
@@ -7276,8 +7292,7 @@ impl Engine {
                     self.mcp_event_generation = generation;
                     self.replace_mcp_boot_errors(&authority_errors, connection_errors);
                     self.finish_mcp_boot_generation(generation);
-                    self.session.pending_prefix_change_reason =
-                        Some("mcp-session-boot".to_string());
+                    self.declare_prefix_change_if_unset("mcp-session-boot");
                     self.maybe_inject_mcp_boot_briefing(generation).await;
                     break;
                 }
@@ -7364,18 +7379,28 @@ impl Engine {
             async move {
                 let mut remaining: Vec<String> =
                     pending.iter().map(|(name, _)| name.clone()).collect();
-                let results = McpPool::connect_pending_concurrently(
+                let mut joins = McpPool::spawn_pending_connects(
                     pending,
                     timeouts,
                     network_policy,
                     catalog_generation,
-                )
-                .await;
+                );
                 let mut connection_errors = HashMap::new();
-                {
-                    let mut pool = pool_for_task.lock().await;
-                    for (name, result) in results {
-                        remaining.retain(|pending_name| pending_name != &name);
+                // First-settled-first-available: each result is applied under
+                // a short pool lock the moment its handshake ends. A local
+                // command server must not wait for a network-bound remote to
+                // run out its connect timeout before its tools become
+                // snapshot-able for a live turn — the batch return shape here
+                // is exactly what let two slow remote 401s hold local tool
+                // availability hostage for the whole boot window (#588).
+                while let Some(joined) = joins.join_next().await {
+                    let (name, result) = match joined {
+                        Ok(pair) => pair,
+                        Err(join_error) => McpPool::join_error_result(join_error),
+                    };
+                    remaining.retain(|pending_name| pending_name != &name);
+                    {
+                        let mut pool = pool_for_task.lock().await;
                         match result {
                             Ok(connection) => pool.store_ready_connection(name, connection),
                             Err(error) => {
@@ -7384,20 +7409,23 @@ impl Engine {
                                     .insert(name, crate::mcp::format_mcp_error_for_display(&error));
                             }
                         }
-                        let _ = progress_tx.send(McpBootUpdate::Progress {
-                            generation,
-                            authority_errors: Arc::clone(&authority_errors),
-                            connection_errors: connection_errors.clone(),
-                            connecting: remaining.clone(),
-                        });
                     }
-                    let mut required = Vec::new();
+                    let _ = progress_tx.send(McpBootUpdate::Progress {
+                        generation,
+                        authority_errors: Arc::clone(&authority_errors),
+                        connection_errors: connection_errors.clone(),
+                        connecting: remaining.clone(),
+                    });
+                }
+                let mut required = Vec::new();
+                {
+                    let pool = pool_for_task.lock().await;
                     pool.push_required_server_errors(&mut required);
-                    for (name, error) in required {
-                        connection_errors
-                            .entry(name)
-                            .or_insert_with(|| crate::mcp::format_mcp_error_for_display(&error));
-                    }
+                }
+                for (name, error) in required {
+                    connection_errors
+                        .entry(name)
+                        .or_insert_with(|| crate::mcp::format_mcp_error_for_display(&error));
                 }
                 let _ = progress_tx.send(McpBootUpdate::Finished {
                     generation,
@@ -7494,8 +7522,10 @@ impl Engine {
         if self.mcp_boot_in_flight {
             // Optional servers are still connecting in the background. Snapshot
             // currently-ready tools so the first LLM call is not serialized
-            // behind the slowest handshake. The catalog refreshes on a later
-            // turn once boot settles (KV-cache prefix re-pin: mcp-session-boot).
+            // behind the slowest handshake. A later turn re-pins under
+            // `mcp-session-boot` — declared at turn start for as long as the
+            // boot is in flight, since the pool fills incrementally now;
+            // within the live turn, `refresh_booting_mcp_tools` closes the gap.
             return pool.lock().await.to_api_tools();
         }
 
@@ -7515,6 +7545,118 @@ impl Engine {
             .lock()
             .await
             .to_api_tools()
+    }
+
+    /// Fold boot-window settles into a live turn's tool catalog (#588).
+    ///
+    /// The spawn-time boot now stores each server's tools the moment that
+    /// server settles, but a turn that started during the boot window built
+    /// its catalog from the earlier snapshot. Appending the tools of servers
+    /// that became ready since then lets a `tool_search` retry inside the
+    /// same turn find them, instead of the model re-deriving "capability
+    /// unavailable" from a stale catalog until the next turn.
+    ///
+    /// The append applies the same treatments a fresh turn build would: the
+    /// MCP feature and tool-security gates (the turn build produces no MCP
+    /// surface under either), the build's own allow/deny narrowing via the
+    /// turn's [`ToolSurfacePolicy`], and `apply_mcp_tool_deferral` for the
+    /// deferral treatment. An `always_load` append resolves eager and joins
+    /// the active set immediately; the caller declares that activation
+    /// through the existing `tool_surface` re-pin, exactly as a `tool_search`
+    /// activation would.
+    ///
+    /// This deliberately does not consume the boot update channel: its
+    /// `Finished` handler owns the model-readable failure briefing, and the
+    /// briefing must never be appended mid-tool-loop. The pool itself is the
+    /// live truth, so the diff needs no drained state. Appends land after
+    /// every existing entry, so already-sent request bytes never shift.
+    async fn refresh_booting_mcp_tools(
+        &mut self,
+        catalog: &mut Vec<Tool>,
+        active_tool_names: &mut HashSet<String>,
+        tool_policy: &ToolSurfacePolicy,
+    ) {
+        if !self.mcp_boot_in_flight {
+            return;
+        }
+        // Mirror the turn build's MCP gates: under turn tool security the
+        // build produces no MCP surface at all, and a disabled feature does
+        // not build a pool in the first place (kept defensive). `mcp_access`
+        // is not mirrored: it parameterizes the passive preview snapshot,
+        // which never runs a turn loop, so a live refresh can never see it.
+        if self.active_turn_tool_security.is_some() || !self.config.features.enabled(Feature::Mcp) {
+            return;
+        }
+        let Some(pool) = self.mcp_pool.as_ref() else {
+            return;
+        };
+        let known: HashSet<String> = catalog.iter().map(|tool| tool.name.clone()).collect();
+        let always_load = self.config.tools_always_load.clone();
+        let mut missing: Vec<Tool> = {
+            let pool = pool.lock().await;
+            pool.to_api_tools()
+                .into_iter()
+                .filter(|tool| !known.contains(&tool.name))
+                // Same policy narrowing the build ran over its catalog: a
+                // tool the build stripped must not re-enter mid-turn, where
+                // a `tool_search` hit would defeat the denied-name
+                // concealment and a declared activation would serialize an
+                // operator-excluded schema into the request.
+                .filter(|tool| tool_policy.allows_tool(&tool.name))
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        // Same deferral treatment as the turn build.
+        tool_catalog::apply_mcp_tool_deferral(&mut missing, tool_policy.mode, &always_load);
+        for tool in &missing {
+            // An eager append joins the active set exactly like
+            // `initial_active_tools` would have on a fresh build.
+            if !tool.defer_loading.unwrap_or(false) {
+                active_tool_names.insert(tool.name.clone());
+            }
+        }
+        catalog.extend(missing);
+    }
+
+    /// First-set wins for the declared re-pin reason: an already-pending
+    /// reason (`resume`, `tool_surface`) names the same surface change more
+    /// precisely than a later boot stamp, and one declared reason is all
+    /// the C5 guard consults.
+    fn declare_prefix_change_if_unset(&mut self, reason: &str) {
+        if self.session.pending_prefix_change_reason.is_none() {
+            self.session.pending_prefix_change_reason = Some(reason.to_string());
+        }
+    }
+
+    /// Boot-window status for a `tool_search` result: the enabled servers
+    /// that have delivered no searchable tools yet, while the spawn-time boot
+    /// is still settling. Diagnosis is read from the pool's live state, so a
+    /// server that already settled with a failure (or dropped into
+    /// needs-auth) is never reported as "still connecting" — its story
+    /// belongs to the boot briefing and `authenticate` tools, and the pool
+    /// knows that even before the engine drains the queued boot update
+    /// (#588). `None` once boot has finished.
+    ///
+    /// The same MCP gates as the refresh apply: under turn tool security the
+    /// turn build produces no MCP surface at all, so a connecting note would
+    /// advertise servers this turn can never reach. Dynamic runtime servers
+    /// never join the boot pass (they connect inline on first use), so they
+    /// are not expected in this list.
+    async fn mcp_boot_search_status(&self) -> Option<Vec<String>> {
+        if !self.mcp_boot_in_flight {
+            return None;
+        }
+        if self.active_turn_tool_security.is_some() || !self.config.features.enabled(Feature::Mcp) {
+            return None;
+        }
+        let pool = self.mcp_pool.as_ref()?;
+        let connecting = {
+            let pool = pool.lock().await;
+            Self::mcp_connecting_names(&pool, &self.mcp_connection_errors)
+        };
+        (!connecting.is_empty()).then_some(connecting)
     }
 
     /// Handle a turn using the DeepSeek API.

@@ -7227,3 +7227,65 @@ fn mcp_display_target_shows_command_names_only() {
         "https://example.invalid/sse?token=abc"
     );
 }
+
+/// The boot window reads "backoff entry with nothing in flight" as "already
+/// diagnosed, not connecting" (#588), and the entry must survive re-pends so
+/// the failure ladder keeps climbing across automatic reconnect cycles.
+/// Dropping the entry when a connect pass re-pends the server would reset
+/// every dead server to the 30s base cooldown on each cycle.
+#[test]
+fn reconnect_repend_preserves_the_failure_ladder_and_the_boot_diagnosis_split() {
+    let mut config = McpConfig::default();
+    config
+        .servers
+        .insert("flaky".to_string(), test_server_config());
+    let mut pool = McpPool::new(config);
+
+    pool.note_connect_failure("flaky", &anyhow::anyhow!("first"));
+    assert_eq!(pool.connect_backoff["flaky"].consecutive_failures, 1);
+
+    // Expire the cooldown, then collect: the server re-pends for a boot-pass
+    // attempt while the recorded ladder survives.
+    pool.connect_backoff.get_mut("flaky").unwrap().retry_after =
+        std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let (pending, errors) = pool.collect_pending_connects();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["flaky"]
+    );
+    assert!(errors.is_empty());
+    assert_eq!(
+        pool.connect_backoff["flaky"].consecutive_failures, 1,
+        "the failure ladder must survive the re-pend"
+    );
+    assert!(
+        pool.connects_in_flight.contains("flaky"),
+        "the re-pended server must read as connecting, not diagnosed"
+    );
+    assert!(
+        !pool
+            .settled_failure_names()
+            .iter()
+            .any(|name| name == "flaky")
+    );
+
+    // The attempt fails: the ladder climbs (second failure → 60s) instead of
+    // restarting, and the settled diagnosis is the live truth again.
+    pool.note_connect_failure("flaky", &anyhow::anyhow!("second"));
+    assert_eq!(pool.connect_backoff["flaky"].consecutive_failures, 2);
+    assert!(pool.connects_in_flight.is_empty());
+    assert_eq!(
+        pool.settled_failure_names(),
+        vec!["flaky".to_string()],
+        "a settled failure must read as diagnosed, not connecting"
+    );
+    let remaining = pool.connect_backoff["flaky"].retry_after - std::time::Instant::now();
+    assert!(
+        remaining <= connect_backoff_delay(2)
+            && remaining >= connect_backoff_delay(2) - std::time::Duration::from_secs(5),
+        "the second failure must buy the ladder's 60s cooldown, got {remaining:?}"
+    );
+}
