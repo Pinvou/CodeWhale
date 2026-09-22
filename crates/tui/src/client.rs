@@ -3022,6 +3022,11 @@ impl DeepSeekClient {
                     crate::retry_status::failed(last.to_string());
                     self.mark_request_failure("non-streaming request envelope exceeded")
                         .await;
+                    // A provider that just wedged past the whole envelope is
+                    // exactly the case where the /models health probe
+                    // matters; without it, connection health stays degraded
+                    // until the next real request succeeds.
+                    self.maybe_probe_recovery().await;
                     return Err(anyhow::Error::new(last));
                 }
             }
