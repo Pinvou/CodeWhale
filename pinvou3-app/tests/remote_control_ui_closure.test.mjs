@@ -137,10 +137,12 @@ test('the bridge subscribes the journal stream and exposes the A-side commands',
 test('the controlled-side authoritative journal is projected locally before forwarding to A', () => {
   const task = read('../src-tauri/src/app/commands/desktop_remote_task.rs');
   const history = read('../src-tauri/src/app/commands/desktop_remote_history.rs');
+  const lib = read('../src-tauri/src/lib.rs');
   assert.ok(task.includes('"journal_event_projected"'));
   assert.ok(task.includes('CONTROLLED_JOURNAL_EVENT'));
   assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event(&self.app, &event)'));
-  assert.ok(task.includes('publish_authoritative_task_status(&self.app, event)'));
+  assert.ok(history.includes('publish_authoritative_task_status(&self.app, event)'));
+  assert.ok(lib.includes('DesktopTaskEventSink::new('));
   assert.ok(task.indexOf('app.emit(TASK_EVENT, &status)') < task.indexOf('tauri::async_runtime::spawn(async move'));
   assert.ok(history.includes('lane.seal("task_status", &payload, &capabilities)'));
 });

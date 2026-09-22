@@ -365,8 +365,20 @@ impl RemoteJournal {
             "terminal_reason": event.terminal_reason,
             "result_digest": event.result_digest,
             "sequence": event.sequence,
+            "transition_sequence": event.transition_sequence,
         });
-        let event_id = format!("task-{}:{}", event.task_id, event.sequence);
+        // `RemoteTaskRecord::sequence` identifies task admission order and is
+        // intentionally stable across admitted/running/terminal transitions.
+        // Include status so those distinct events do not collapse into the
+        // first non-exportable admitted event in the journal.
+        let event_identity = format!(
+            "{}\0{}\0{}",
+            event.task_id, event.sequence, event.transition_sequence
+        );
+        let event_id = format!(
+            "task-{}",
+            crate::platform::encoding::hex_lower(&Sha256::digest(event_identity.as_bytes()))
+        );
         let terminal = matches!(
             event.status.as_str(),
             "succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown"
@@ -755,6 +767,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "running".into(),
             sequence: "1".into(),
+            transition_sequence: 2,
             outcome_unknown: false,
             terminal_reason: None,
             result_digest: Some("a".repeat(64)),
@@ -764,6 +777,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "succeeded".into(),
             sequence: "2".into(),
+            transition_sequence: 3,
             outcome_unknown: false,
             terminal_reason: Some("completed".into()),
             result_digest: Some("a".repeat(64)),
@@ -788,6 +802,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "running".into(),
             sequence: "1".into(),
+            transition_sequence: 2,
             outcome_unknown: false,
             terminal_reason: None,
             result_digest: None,
@@ -801,15 +816,38 @@ mod tests {
         let again = journal.record_task_event(&event).unwrap();
         assert_eq!(again, stored);
         assert_eq!(journal.len(), 1);
+        let waiting = RemoteTaskEvent {
+            status: "waiting_permission".into(),
+            transition_sequence: 3,
+            ..event.clone()
+        };
+        journal.record_task_event(&waiting).unwrap();
+        let resumed = RemoteTaskEvent {
+            transition_sequence: 4,
+            ..event.clone()
+        };
+        journal.record_task_event(&resumed).unwrap();
+        assert_eq!(journal.len(), 3);
         // 终态只落一次，冲突的终态不会改写已落库结果。
         let terminal = RemoteTaskEvent {
             status: "succeeded".into(),
-            sequence: "2".into(),
+            // Task sequence is the admission order, so transitions retain it.
+            sequence: "1".into(),
+            transition_sequence: 5,
             terminal_reason: Some("completed".into()),
             ..event.clone()
         };
         let stored = journal.record_task_event(&terminal).unwrap();
         assert_eq!(stored.terminal_status.as_deref(), Some("succeeded"));
-        assert_eq!(stored.sequence, 2);
+        assert_eq!(stored.sequence, 4);
+
+        let long_id_event = RemoteTaskEvent {
+            task_id: "t".repeat(MAX_TASK_ID_CHARS),
+            ..event
+        };
+        let long_id_journal = RemoteJournal::new("epoch-long-id");
+        let stored = long_id_journal.record_task_event(&long_id_event).unwrap();
+        assert!(stored.event_id.len() <= MAX_TASK_ID_CHARS);
+        assert!(stored.event_id.starts_with("task-"));
     }
 }

@@ -519,6 +519,12 @@
       text: payload.text
         ? String(payload.text).slice(0, 8192)
         : (index >= 0 ? tasks[index].text || null : null),
+      messageIndex: Number.isInteger(payload.messageIndex)
+        ? payload.messageIndex
+        : (index >= 0 ? tasks[index].messageIndex : null),
+      assistantText: index >= 0 ? tasks[index].assistantText || null : null,
+      errorText: index >= 0 ? tasks[index].errorText || null : null,
+      contentEventIds: index >= 0 ? (tasks[index].contentEventIds || []).slice() : [],
       outcomeUnknown: !!(payload.outcomeUnknown || payload.outcome_unknown),
       terminalReason: (payload.terminalReason || payload.terminal_reason)
         ? String(payload.terminalReason || payload.terminal_reason)
@@ -531,6 +537,9 @@
       if (
         tasks[index].status === status
         && tasks[index].text === entry.text
+        && tasks[index].messageIndex === entry.messageIndex
+        && tasks[index].assistantText === entry.assistantText
+        && tasks[index].errorText === entry.errorText
         && tasks[index].outcomeUnknown === entry.outcomeUnknown
         && tasks[index].terminalReason === entry.terminalReason
         && tasks[index].resultDigest === entry.resultDigest
@@ -558,6 +567,51 @@
       return state;
     }
     return applyTaskEventTo(state, payload, "controlledTasks");
+  }
+
+  /**
+   * Projects authoritative B-side task text into the same durable task entry
+   * used by status events. Admission text is visible immediately; assistant
+   * output remains visible after the task reaches a terminal state.
+   */
+  function applyTaskContent(state, event) {
+    var payload = event || {};
+    var taskId = payload.taskId ? String(payload.taskId) : "";
+    var role = payload.role ? String(payload.role) : "";
+    var text = payload.text ? String(payload.text).slice(0, 8192) : "";
+    var eventId = payload.eventId ? String(payload.eventId) : "";
+    if (!taskId || !eventId || !text || (role !== "user" && role !== "assistant" && role !== "error")) {
+      return state;
+    }
+    var session = state.controlledSession || {};
+    if (!session.sessionId || String(payload.sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    var tasks = (state.controlledTasks || []).slice();
+    var index = tasks.findIndex(function (task) { return task && task.taskId === taskId; });
+    if (index < 0) return state;
+    var current = tasks[index];
+    if (payload.sessionId && current.sessionId && String(payload.sessionId) !== current.sessionId) {
+      return state;
+    }
+    var nextEntry = shallowCopy(current);
+    var contentEventIds = (current.contentEventIds || []).slice();
+    if (contentEventIds.indexOf(eventId) >= 0) return state;
+    if (contentEventIds.length >= 32) contentEventIds.shift();
+    contentEventIds.push(eventId);
+    nextEntry.contentEventIds = contentEventIds;
+    if (role === "user") {
+      nextEntry.text = text;
+    } else if (role === "assistant") {
+      nextEntry.assistantText = String(current.assistantText || "") + text;
+    } else {
+      nextEntry.errorText = String(current.errorText || "") + text;
+    }
+    tasks[index] = nextEntry;
+    var next = shallowCopy(state);
+    next.controlledTasks = tasks;
+    next.revision = state.revision + 1;
+    return next;
   }
 
   /** True when the envelope still belongs to the live connection context. */
@@ -594,6 +648,7 @@
     applyHistories: applyHistories,
     applyTaskEvent: applyTaskEvent,
     applyControlledTaskEvent: applyControlledTaskEvent,
+    applyTaskContent: applyTaskContent,
     matchesLiveContext: matchesLiveContext,
     isTaskTerminal: function (status) {
       return !!TASK_TERMINAL[status];

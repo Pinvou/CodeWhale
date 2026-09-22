@@ -48,7 +48,12 @@ import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachment
 import { ConversationAttachmentBubble } from '../attachments/ConversationAttachmentBubble.jsx';
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
-import { isRemoteChatActive, remoteChatItems as projectRemoteChatItems } from '../remote-control/chat-transcript-projection.mjs';
+import {
+  controlledTaskChatItems as projectControlledTaskChatItems,
+  isRemoteChatActive,
+  mergeControlledTaskChatItems,
+  remoteChatItems as projectRemoteChatItems,
+} from '../remote-control/chat-transcript-projection.mjs';
 import {
   isControlledDeviceChatActive,
   isTaskTerminal,
@@ -820,6 +825,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const controlledDevice = (bs && bs.controlledDevice) || {};
       const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
       const controlledSession = (bs && bs.controlledSession) || {};
+      const activeSessionId = bs ? bs.activeSessionId : null;
       const [remoteSessionBusy, setRemoteSessionBusy] = useState(false);
       const [remoteSessionError, setRemoteSessionError] = useState(null);
       const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
@@ -862,13 +868,31 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           bs && bs.controlledTasks,
         ],
       );
-      const displayChatItems = remoteTranscriptActive ? projectedRemoteChatItems : chatItems;
+      const projectedControlledTaskItems = useMemo(
+        () => projectControlledTaskChatItems(
+          bs ? bs.controlledTasks : [],
+          t.remoteConversation,
+          controlledSession.sessionId || '',
+        ),
+        [bs && bs.controlledTasks, controlledSession.sessionId, t.remoteConversation],
+      );
+      const controlledSessionChatItems = useMemo(
+        () => mergeControlledTaskChatItems(projectedRemoteChatItems, projectedControlledTaskItems),
+        [projectedRemoteChatItems, projectedControlledTaskItems],
+      );
+      const displayChatItems = remoteChatActive
+        ? projectedRemoteChatItems
+        : (controlledChatActive ? controlledSessionChatItems : chatItems);
       const controlledActiveTasks = useMemo(
-        () => ((bs && bs.controlledTasks) || []).filter(task => task && !isTaskTerminal(task.status)),
-        [bs && bs.controlledTasks],
+        () => ((bs && bs.controlledTasks) || []).filter(task => (
+          task
+          && task.sessionId === controlledSession.sessionId
+          && (!activeSessionId || activeSessionId === controlledSession.sessionId)
+          && !isTaskTerminal(task.status)
+        )),
+        [bs && bs.controlledTasks, controlledSession.sessionId, activeSessionId],
       );
       const showControlledTask = controlledDevice.status === 'connected' && controlledActiveTasks.length > 0;
-      const activeSessionId = bs ? bs.activeSessionId : null;
       const activeSessionIdRef = useRef(activeSessionId);
       // eslint-disable-next-line react-hooks/refs -- latest-session mirror for non-reactive reads; legacy pattern surfaced by compiler lint after floating-ball removal
       activeSessionIdRef.current = activeSessionId;

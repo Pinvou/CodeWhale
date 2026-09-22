@@ -322,6 +322,72 @@ test('B-side projections reject stale sessions and reset with the controlled gen
   assert.equal(state.controlledTranscript.length, 0);
 });
 
+test('B-side task content remains visible after a terminal failure', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-b',
+    sessionRef: 'remote-session-b',
+    generation: 'generation-1',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'admitted',
+    text: 'inspect the repository',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'failed',
+    terminalReason: 'task_engine_unavailable',
+  });
+  state = logic.applyTaskContent(state, {
+    eventId: 'journal-partial-1',
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    role: 'assistant',
+    text: 'partial response',
+  });
+  assert.equal(state.controlledTasks[0].status, 'failed');
+  assert.equal(state.controlledTasks[0].text, 'inspect the repository');
+  assert.equal(state.controlledTasks[0].terminalReason, 'task_engine_unavailable');
+  assert.equal(state.controlledTasks[0].assistantText, 'partial response');
+
+  const duplicate = logic.applyTaskContent(state, {
+    eventId: 'journal-partial-1',
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    role: 'assistant',
+    text: 'partial response',
+  });
+  assert.equal(duplicate, state);
+  assert.equal(duplicate.controlledTasks[0].assistantText, 'partial response');
+});
+
+test('a new controlled-device generation drops old task projections', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'old-session',
+    sessionRef: 'old-remote-session',
+    generation: 'generation-1',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'old-task',
+    sessionId: 'old-session',
+    status: 'failed',
+    text: 'old prompt',
+  });
+  state = logic.applyControlledStatus(state, { status: 'stopped' });
+  assert.equal(state.controlledTasks.length, 0);
+  state = logic.applyControlledStatus(state, {
+    status: 'waiting_connection',
+    generation: 'generation-2',
+  });
+  assert.equal(state.controlledTasks.length, 0);
+});
+
 test('live-context matching rejects foreign connections and leases', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {

@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use deepseek_tui::models::{ContentBlock, Message, Role};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
@@ -26,18 +27,18 @@ use crate::features::remote_control::controller::protocol::{
 };
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
-    RemoteSessionProvisioner, RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskHooks,
-    RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT, TASK_MODE_CODE,
-    TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
+    RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger, RemoteTaskService,
+    TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
 };
 use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
-use crate::features::sessions::SessionStore;
+use crate::features::sessions::{transcript_revision, SessionStore};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
 pub(crate) const CONTROLLED_SESSION_EVENT: &str = "desktop-remote-controlled-session";
 const CONTROLLED_JOURNAL_EVENT: &str = "desktop-remote-controlled-journal";
+const TASK_CONTENT_EVENT: &str = "desktop-remote-task-content";
 fn monotonic_millis() -> u64 {
     use std::sync::OnceLock;
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -108,6 +109,28 @@ impl ControllerTaskEventSink for TaskEventBridge {
         payload: Value,
     ) {
         use tauri::Manager as _;
+        // B owns this conversation too. Project accepted user/assistant/error
+        // text into B's local chat independently of encrypted B -> A delivery.
+        // The journal event id is also the frontend idempotency key.
+        let role = match kind {
+            crate::features::remote_control::controller::journal::JournalKind::UserMessage => {
+                Some("user")
+            }
+            crate::features::remote_control::controller::journal::JournalKind::AssistantDelta => {
+                Some("assistant")
+            }
+            crate::features::remote_control::controller::journal::JournalKind::Error => {
+                Some("error")
+            }
+            _ => None,
+        };
+        let local_content = role.zip(task_id).and_then(|(role, task_id)| {
+            payload
+                .get("text")
+                .or_else(|| payload.get("message"))
+                .and_then(Value::as_str)
+                .map(|text| (role, task_id.to_owned(), text.to_owned()))
+        });
         let history = self
             .app
             .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
@@ -123,6 +146,18 @@ impl ControllerTaskEventSink for TaskEventBridge {
                         "event": &event,
                     }),
                 );
+                if let Some((role, task_id, text)) = local_content {
+                    let _ = self.app.emit(
+                        TASK_CONTENT_EVENT,
+                        serde_json::json!({
+                            "eventId": &event.event_id,
+                            "taskId": task_id,
+                            "sessionId": session_id,
+                            "role": role,
+                            "text": text,
+                        }),
+                    );
+                }
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                     "journal_event_projected",
                     &event.kind,
@@ -139,11 +174,69 @@ impl ControllerTaskEventSink for TaskEventBridge {
     }
 }
 
-impl RemoteTaskEventSink for TaskEventBridge {
-    fn publish_task_event(&self, event: &RemoteTaskEvent) {
-        let _ = self.app.emit(TASK_STATUS_EVENT, event);
-        super::desktop_remote_history::publish_authoritative_task_status(&self.app, event);
+fn message_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn text_message(role: Role, text: impl Into<String>) -> Message {
+    Message {
+        role,
+        content: vec![ContentBlock::Text {
+            text: text.into(),
+            cache_control: None,
+        }],
     }
+}
+
+fn append_remote_failure_messages(
+    messages: &mut Vec<Message>,
+    baseline_messages: usize,
+    prompt: &str,
+    reason: &str,
+) {
+    let tail = &messages[baseline_messages.min(messages.len())..];
+    let prompt_persisted = tail
+        .iter()
+        .any(|message| message.role == Role::User && message_text(message) == prompt);
+    if !prompt_persisted {
+        messages.push(text_message(Role::User, prompt.to_owned()));
+    }
+    messages.push(text_message(Role::Assistant, reason.to_owned()));
+}
+
+/// A failed remote turn must remain part of B's authoritative transcript.
+/// The engine normally persists the user turn itself; failures before engine
+/// admission do not, so use the pre-dispatch message count to fill only the
+/// missing prompt and then append the bounded failure reason.
+fn persist_remote_task_failure(
+    store: &SessionStore,
+    session_id: &str,
+    baseline_messages: usize,
+    prompt: &str,
+    reason: &str,
+) -> std::result::Result<(), String> {
+    for _ in 0..4 {
+        let session = store
+            .load(session_id)
+            .map_err(|_| "task_failure_persist_failed".to_owned())?;
+        let revision = transcript_revision(&session.messages)
+            .map_err(|_| "task_failure_persist_failed".to_owned())?;
+        let mut messages = session.messages;
+        append_remote_failure_messages(&mut messages, baseline_messages, prompt, reason);
+        match store.compare_and_swap_messages(session_id, &revision, messages) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.to_string().contains("session_revision_conflict") => continue,
+            Err(_) => return Err("task_failure_persist_failed".to_owned()),
+        }
+    }
+    Err("task_failure_persist_conflict".to_owned())
 }
 
 /// Managed state for the remote task owner: ledger, session map, engine ports
@@ -155,7 +248,7 @@ pub(crate) struct DesktopRemoteTaskRuntime {
 
 impl DesktopRemoteTaskRuntime {
     pub(crate) fn new(
-        app: AppHandle,
+        _app: AppHandle,
         store: SessionStore,
         pool: EnginePool,
         acp_pool: AcpPool,
@@ -180,9 +273,8 @@ impl DesktopRemoteTaskRuntime {
                 Arc::clone(&authorizations),
             )))),
         );
-        service
-            .hooks()
-            .set_journal(Arc::new(TaskEventBridge { app }));
+        // The composition root installs DesktopTaskEventSink with the shared
+        // authoritative journal before recovery or task admission.
         Arc::new(Self {
             service,
             authorizations,
@@ -614,24 +706,33 @@ fn admit_and_dispatch(
             .map_err(|error| error.code.to_owned()),
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
+            let task_session_id = ticket.record.session_id.clone();
+            let prompt = validated
+                .get("input")
+                .and_then(|input| input.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let session_store = app.state::<SessionStore>().inner().clone();
+            let baseline_messages = session_store
+                .load(&task_session_id)
+                .map(|session| session.messages.len())
+                .unwrap_or(0);
             let status = service
                 .status_payload(&task_id)
                 .map_err(|error| error.code.to_owned())?;
             // The persisted ledger intentionally excludes prompt text. Project
             // it once to B's local UI only after admission so the controlled
             // device can visibly confirm what it is executing.
-            if let Some(text) = validated
-                .get("input")
-                .and_then(|input| input.get("text"))
-                .and_then(Value::as_str)
-            {
+            if !prompt.is_empty() {
                 let _ = app.emit(
                     TASK_STATUS_EVENT,
                     serde_json::json!({
                         "taskId": &task_id,
                         "sessionId": session_id,
                         "status": "admitted",
-                        "text": text,
+                        "text": &prompt,
+                        "messageIndex": baseline_messages,
                     }),
                 );
             }
@@ -656,12 +757,40 @@ fn admit_and_dispatch(
                     .await
                 {
                     Ok(record) => {
+                        if record.wire_status() != "succeeded" {
+                            let reason = record
+                                .terminal_reason
+                                .as_deref()
+                                .unwrap_or_else(|| record.wire_status());
+                            if let Err(error) = persist_remote_task_failure(
+                                &session_store,
+                                &task_session_id,
+                                baseline_messages,
+                                &prompt,
+                                reason,
+                            ) {
+                                eprintln!(
+                                    "[remote-control] failed to persist terminal task content: {error}"
+                                );
+                            }
+                        }
                         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                             "task_execution_finished",
                             record.wire_status(),
                         );
                     }
                     Err(error) => {
+                        if let Err(persist_error) = persist_remote_task_failure(
+                            &session_store,
+                            &task_session_id,
+                            baseline_messages,
+                            &prompt,
+                            error.code,
+                        ) {
+                            eprintln!(
+                                "[remote-control] failed to persist rejected task content: {persist_error}"
+                            );
+                        }
                         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                             "task_execution_failed",
                             error.code,
@@ -771,6 +900,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "succeeded".into(),
             sequence: "1".into(),
+            transition_sequence: 2,
             outcome_unknown: false,
             terminal_reason: Some("completed".into()),
             result_digest: None,
@@ -793,6 +923,36 @@ mod tests {
         let first = monotonic_millis();
         let second = monotonic_millis();
         assert!(second >= first);
+    }
+
+    #[test]
+    fn remote_failure_fills_a_missing_prompt_and_preserves_partial_output() {
+        let mut missing_prompt = Vec::new();
+        append_remote_failure_messages(
+            &mut missing_prompt,
+            0,
+            "today's weather",
+            "task_engine_unavailable",
+        );
+        assert_eq!(missing_prompt.len(), 2);
+        assert_eq!(missing_prompt[0].role, Role::User);
+        assert_eq!(message_text(&missing_prompt[0]), "today's weather");
+        assert_eq!(missing_prompt[1].role, Role::Assistant);
+        assert_eq!(message_text(&missing_prompt[1]), "task_engine_unavailable");
+
+        let mut partial = vec![
+            text_message(Role::User, "today's weather"),
+            text_message(Role::Assistant, "partly cloudy"),
+        ];
+        append_remote_failure_messages(
+            &mut partial,
+            0,
+            "today's weather",
+            "task_turn_failed",
+        );
+        assert_eq!(partial.len(), 3);
+        assert_eq!(message_text(&partial[1]), "partly cloudy");
+        assert_eq!(message_text(&partial[2]), "task_turn_failed");
     }
 
     #[test]

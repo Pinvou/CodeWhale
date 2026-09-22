@@ -132,6 +132,12 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
+      listen("desktop-remote-task-content", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyTaskContent(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
       listen("desktop-remote-controller-session", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         applyControllerSession(payload);

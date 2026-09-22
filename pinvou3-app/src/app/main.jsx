@@ -1389,8 +1389,18 @@ const NAV_PREFETCH = {
       const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
       const controlledDeviceAutoOpenRef = useRef(null);
       const controlledDeviceAutoOpenInFlightRef = useRef(null);
+      const controlledSessionAutoOpenRef = useRef(null);
+      const controlledSessionAutoOpenInFlightRef = useRef(null);
       const controlledDeviceStatus = bs?.controlledDevice?.status || null;
       const controlledDeviceGeneration = bs?.controlledDevice?.generation || null;
+      const controlledTaskSessionId = (() => {
+        if (bs?.controlledSession?.sessionId) return String(bs.controlledSession.sessionId);
+        const tasks = Array.isArray(bs?.controlledTasks) ? bs.controlledTasks : [];
+        for (let index = tasks.length - 1; index >= 0; index -= 1) {
+          if (tasks[index]?.sessionId) return String(tasks[index].sessionId);
+        }
+        return null;
+      })();
       const remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === 'connected');
       const remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)
         ? (bs?.controllerConnection?.status === 'connected' ? bs.controllerConnection : { status: 'connected' })
@@ -2327,6 +2337,66 @@ const NAV_PREFETCH = {
           }
         };
       }, [controlledDeviceGeneration, controlledDeviceStatus, navigateFromScheduledRun]);
+
+      // A remote session is provisioned only when B receives the first task.
+      // Connection-time navigation therefore cannot select it yet; once the
+      // admitted task publishes its authoritative session id, select that
+      // session exactly once so filtering never hides the received command.
+      useEffect(() => {
+        if (controlledDeviceStatus !== 'connected' || !controlledTaskSessionId) return undefined;
+        const sessionKey = `${controlledDeviceGeneration || 'legacy'}:${controlledTaskSessionId}`;
+        if (
+          controlledSessionAutoOpenRef.current === sessionKey
+          || controlledSessionAutoOpenInFlightRef.current === sessionKey
+        ) return undefined;
+        let cancelled = false;
+        controlledSessionAutoOpenInFlightRef.current = sessionKey;
+        void runBrowserUiTransition(async ({ isCurrent }) => {
+          const latest = bsRef.current;
+          if (latest?.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
+            const exited = await bridge.scheduled.exitScheduledRunChat();
+            if (!exited || !isCurrent() || cancelled) return false;
+          }
+          if (!bridge.available || !bridge.sessions?.switchToSession || !isCurrent() || cancelled) {
+            return false;
+          }
+          setCodeModeOn(false);
+          setCurrentView('chat');
+          closeMobileSidebar();
+          const switched = await bridge.sessions.switchToSession(controlledTaskSessionId);
+          if (!switched || !isCurrent() || cancelled) return false;
+          setActiveChat(controlledTaskSessionId);
+          return true;
+        }, {
+          channel: 'session',
+          hideMode: 'workspace',
+          serialize: true,
+          sessionTarget: controlledTaskSessionId,
+        }).then((opened) => {
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+          if (opened) controlledSessionAutoOpenRef.current = sessionKey;
+        }).catch((error) => {
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+          console.warn('[remote-control] B-side session open failed', error);
+        });
+        return () => {
+          cancelled = true;
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+        };
+      }, [
+        controlledDeviceGeneration,
+        controlledDeviceStatus,
+        controlledTaskSessionId,
+        closeMobileSidebar,
+        runBrowserUiTransition,
+        setCurrentView,
+      ]);
 
       function openSettingsSection(section = 'general') {
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，

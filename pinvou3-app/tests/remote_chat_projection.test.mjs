@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isRemoteChatActive, remoteChatItems } from '../src/features/remote-control/chat-transcript-projection.mjs';
+import {
+  controlledTaskChatItems,
+  isRemoteChatActive,
+  mergeControlledTaskChatItems,
+  remoteChatItems,
+} from '../src/features/remote-control/chat-transcript-projection.mjs';
 
 const connection = { status: 'connected', sessionId: 'session-1' };
 const transcript = [
@@ -64,4 +69,154 @@ test('controlled-side projection accepts its local session task without an A-sid
   );
   assert.equal(items.length, 1);
   assert.equal(items[0].text, 'from controller');
+});
+
+test('the controlled device keeps accepted prompts and terminal failures as conversation items', () => {
+  const items = controlledTaskChatItems([
+    {
+      taskId: 'task-1',
+      sessionId: 'session-b',
+      status: 'failed',
+      text: 'check the weather',
+      terminalReason: 'task_engine_unavailable',
+    },
+  ], {
+    statusFailed: '执行失败',
+  }, 'session-b');
+  assert.deepEqual(items.map(item => item.type), ['user', 'assistant']);
+  assert.equal(items[0].text, 'check the weather');
+  assert.equal(items[0].remote, true);
+  assert.equal(items[1].text, '执行失败: task_engine_unavailable');
+  assert.equal(items[1].streaming, false);
+});
+
+test('the controlled device projects assistant output for a completed task', () => {
+  const items = controlledTaskChatItems([
+    {
+      taskId: 'task-2',
+      sessionId: 'session-b',
+      status: 'succeeded',
+      text: 'hello',
+      assistantText: 'world',
+    },
+  ], {}, 'session-b');
+  assert.deepEqual(items.map(item => item.text), ['hello', 'world']);
+  assert.equal(items[1].streaming, false);
+});
+
+test('controlled projection filters sessions, preserves real history, and keeps partial failure visible', () => {
+  const projected = controlledTaskChatItems([
+    {
+      taskId: 'task-current',
+      sessionId: 'session-b',
+      status: 'failed',
+      text: 'same prompt',
+      assistantText: 'partial output',
+      terminalReason: 'task_turn_failed',
+    },
+    {
+      taskId: 'task-foreign',
+      sessionId: 'other-session',
+      status: 'failed',
+      text: 'must not leak',
+    },
+  ], { statusFailed: '执行失败' }, 'session-b');
+  assert.deepEqual(
+    projected.map(item => item.text),
+    ['same prompt', 'partial output', '执行失败: task_turn_failed'],
+  );
+
+  const merged = mergeControlledTaskChatItems([
+    { id: 'local-history', type: 'assistant', text: 'older local history' },
+    { id: 'engine-user', type: 'user', text: 'same prompt' },
+    { id: 'engine-partial', type: 'assistant', text: 'partial output' },
+    { id: 'persisted-failure', type: 'assistant', text: 'task_turn_failed' },
+  ], projected);
+  assert.deepEqual(
+    merged.map(item => item.text),
+    ['older local history', 'same prompt', 'partial output', '执行失败: task_turn_failed'],
+  );
+});
+
+test('a repeated failure code is matched only inside its task turn', () => {
+  const projected = controlledTaskChatItems([
+    {
+      taskId: 'task-current',
+      sessionId: 'session-b',
+      status: 'failed',
+      text: 'current prompt',
+      messageIndex: 2,
+      terminalReason: 'task_engine_unavailable',
+    },
+  ], { statusFailed: '执行失败' }, 'session-b');
+  const merged = mergeControlledTaskChatItems([
+    { id: 'old-user', type: 'user', text: 'old prompt', messageIndex: 0 },
+    { id: 'old-error', type: 'assistant', text: 'task_engine_unavailable', messageIndex: 1 },
+    { id: 'current-user', type: 'user', text: 'current prompt', messageIndex: 2 },
+  ], projected);
+  assert.deepEqual(
+    merged.map(item => item.text),
+    ['old prompt', 'task_engine_unavailable', 'current prompt', '执行失败: task_engine_unavailable'],
+  );
+});
+
+test('an immediately failed repeated prompt is appended when its durable turn is not hydrated yet', () => {
+  const projected = controlledTaskChatItems([
+    {
+      taskId: 'task-repeat',
+      sessionId: 'session-b',
+      status: 'failed',
+      text: 'same prompt',
+      messageIndex: 2,
+      terminalReason: 'task_engine_unavailable',
+    },
+  ], { statusFailed: '执行失败' }, 'session-b');
+  const merged = mergeControlledTaskChatItems([
+    { id: 'previous-user', type: 'user', text: 'same prompt', messageIndex: 0 },
+    { id: 'previous-error', type: 'assistant', text: 'task_engine_unavailable', messageIndex: 1 },
+  ], projected);
+  assert.deepEqual(
+    merged.map(item => item.text),
+    [
+      'same prompt',
+      'task_engine_unavailable',
+      'same prompt',
+      '执行失败: task_engine_unavailable',
+    ],
+  );
+});
+
+test('controlled task overlays match the authoritative journal by task id', () => {
+  const journalItems = remoteChatItems({ status: 'connected', sessionId: 'session-b' }, [
+    {
+      sessionId: 'session-b',
+      epoch: 'epoch-1',
+      sequence: 1,
+      taskId: 'task-old',
+      role: 'user',
+      text: 'same prompt',
+    },
+    {
+      sessionId: 'session-b',
+      epoch: 'epoch-1',
+      sequence: 2,
+      taskId: 'task-current',
+      role: 'user',
+      text: 'same prompt',
+    },
+  ]);
+  const projected = controlledTaskChatItems([{
+    taskId: 'task-current',
+    sessionId: 'session-b',
+    status: 'failed',
+    text: 'same prompt',
+    messageIndex: 10,
+    terminalReason: 'task_engine_unavailable',
+  }], { statusFailed: '执行失败' }, 'session-b');
+
+  const merged = mergeControlledTaskChatItems(journalItems, projected);
+  assert.deepEqual(
+    merged.map(item => item.text),
+    ['same prompt', 'same prompt', '执行失败: task_engine_unavailable'],
+  );
 });

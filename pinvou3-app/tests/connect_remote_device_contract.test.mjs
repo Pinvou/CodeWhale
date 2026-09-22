@@ -147,7 +147,9 @@ test('connection is integrated into the remote-control page instead of a detache
 test('connected remote output renders in the ordinary ChatView timeline', () => {
   assert.ok(chatView.includes('chat-transcript-projection.mjs'));
   assert.ok(chatView.includes('const projectedRemoteChatItems = useMemo('));
-  assert.ok(chatView.includes('const displayChatItems = remoteTranscriptActive ? projectedRemoteChatItems : chatItems;'));
+  assert.ok(chatView.includes('? projectedRemoteChatItems'));
+  assert.ok(chatView.includes('projectedControlledTaskItems'));
+  assert.ok(chatView.includes(': chatItems'));
   assert.ok(chatView.includes('data-testid="chat-remote-status"'));
   assert.ok(chatView.includes('data-testid="chat-remote-status-banner"'));
   assert.ok(chatView.includes('remoteSessionReady'));
@@ -167,6 +169,9 @@ test('the controlled side opens chat once per connection and shows its own statu
   assert.ok(main.includes("const connectionKey = controlledDeviceGeneration || 'legacy-connected';"));
   assert.ok(main.includes('openControlledDeviceChatWithRetry({'));
   assert.ok(main.includes('if (opened) controlledDeviceAutoOpenRef.current = connectionKey;'));
+  assert.ok(main.includes('bridge.sessions.switchToSession(controlledTaskSessionId)'));
+  assert.ok(main.includes('setActiveChat(controlledTaskSessionId)'));
+  assert.ok(main.includes("channel: 'session'"));
   assert.ok(chatView.includes('isControlledDeviceChatActive(controlledDevice)'));
   assert.ok(chatView.includes('data-testid="chat-controlled-status"'));
   assert.ok(chatView.includes('t.controlledDevice.controlledStatus'));
@@ -229,4 +234,8 @@ test('the controlled device projects an admitted task into its main chat view', 
   assert.ok(chatView.includes('bridge.desktopRemoteControl.controlledTaskSend(controlledSession.sessionId, outgoing)'));
   assert.ok(bridge.includes('function controlledTaskSend(sessionId, text)'));
   assert.ok(bridge.includes('logic.applyControlledTaskEvent(current()'));
+  assert.ok(chatView.includes('projectControlledTaskChatItems'));
+  assert.ok(chatView.includes('projectedControlledTaskItems'));
+  assert.ok(chatView.includes('mergeControlledTaskChatItems'));
+  assert.ok(chatView.includes('controlledSession.sessionId ||'));
 });

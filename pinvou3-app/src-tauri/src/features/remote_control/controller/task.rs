@@ -347,6 +347,8 @@ impl RemoteTaskRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct RemoteTaskRecord {
     pub(crate) sequence: u64,
+    #[serde(default)]
+    pub(crate) transition_sequence: u64,
     pub(crate) lease: TaskLeaseBinding,
     pub(crate) task_id: String,
     pub(crate) client_request_id: String,
@@ -595,6 +597,7 @@ impl RemoteTaskLedger {
             .ok_or_else(|| error("task_ledger_capacity"))?;
         let record = RemoteTaskRecord {
             sequence: inner.sequence,
+            transition_sequence: 1,
             lease: request.lease.clone(),
             task_id: request.task_id.clone(),
             client_request_id: request.client_request_id.clone(),
@@ -673,6 +676,17 @@ impl RemoteTaskLedger {
         result_digest: Option<String>,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
+        self.complete_with_reason(task_id, terminal, None, result_digest, now_b)
+    }
+
+    fn complete_with_reason(
+        &self,
+        task_id: &str,
+        terminal: RemoteTaskTerminal,
+        terminal_reason: Option<String>,
+        result_digest: Option<String>,
+        now_b: u64,
+    ) -> Result<RemoteTaskRecord> {
         if let Some(digest) = result_digest.as_deref() {
             if digest.len() > MAX_RESULT_DIGEST_CHARS || !is_lower_hex(digest) {
                 return Err(error("task_result_digest_invalid"));
@@ -687,7 +701,11 @@ impl RemoteTaskLedger {
         }
         let mut updated = previous.clone();
         updated.state = terminal.state();
-        updated.terminal_reason = Some(terminal.reason().to_owned());
+        updated.terminal_reason = Some(
+            terminal_reason
+                .map(bounded_reason_owned)
+                .unwrap_or_else(|| terminal.reason().to_owned()),
+        );
         updated.result_digest = result_digest;
         updated.outcome_unknown =
             terminal == RemoteTaskTerminal::Interrupted && previous.outcome_unknown;
@@ -844,8 +862,11 @@ impl RemoteTaskLedger {
     fn commit(
         &self,
         inner: &mut LedgerInner,
-        updated: RemoteTaskRecord,
+        mut updated: RemoteTaskRecord,
     ) -> Result<RemoteTaskRecord> {
+        if let Some(previous) = inner.tasks.get(&updated.task_id) {
+            updated.transition_sequence = previous.transition_sequence.saturating_add(1);
+        }
         self.store
             .persist(&updated)
             .map_err(|_| error("task_ledger_persist_failed"))?;
@@ -1163,6 +1184,7 @@ pub(crate) struct RemoteTaskEvent {
     pub(crate) session_id: String,
     pub(crate) status: String,
     pub(crate) sequence: String,
+    pub(crate) transition_sequence: u64,
     pub(crate) outcome_unknown: bool,
     pub(crate) terminal_reason: Option<String>,
     pub(crate) result_digest: Option<String>,
@@ -1403,14 +1425,25 @@ impl RemoteTaskService {
                 now_b,
             );
         };
-        let result = executor.execute(ticket.input, events, cancel).await;
+        // Executors consume the complete execution envelope. The ledger keeps
+        // prompt input separate from durable task metadata so secrets never
+        // enter the status record; rebuild the narrow envelope here instead
+        // of passing only `input` (which makes `extract_turn` fail before the
+        // engine ever sees the accepted prompt).
+        let execution_request = json!({
+            "task_id": running.task_id,
+            "session_id": running.session_id,
+            "mode": running.mode,
+            "input": ticket.input,
+        });
+        let result = executor.execute(execution_request, events, cancel).await;
         self.cancel_tokens.lock().remove(&task_id);
-        let terminal = match result {
-            Ok(()) => RemoteTaskTerminal::Succeeded,
-            Err(code) if code == TASK_CANCELLED_CODE => RemoteTaskTerminal::Cancelled,
-            Err(_) => RemoteTaskTerminal::Failed,
+        let (terminal, reason) = match result {
+            Ok(()) => (RemoteTaskTerminal::Succeeded, None),
+            Err(code) if code == TASK_CANCELLED_CODE => (RemoteTaskTerminal::Cancelled, None),
+            Err(code) => (RemoteTaskTerminal::Failed, Some(code)),
         };
-        self.finish(&task_id, terminal, None, now_b)
+        self.finish(&task_id, terminal, reason, now_b)
     }
 
     pub(crate) fn complete(
@@ -1543,12 +1576,9 @@ impl RemoteTaskService {
         reason: Option<String>,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
-        let mut record = self
-            .ledger
-            .complete(task_id, terminal, None, now_b)?;
-        if let Some(reason) = reason {
-            record.terminal_reason = Some(bounded_reason_owned(reason));
-        }
+        let record =
+            self.ledger
+                .complete_with_reason(task_id, terminal, reason, None, now_b)?;
         let cleanup_reason = record
             .terminal_reason
             .clone()
@@ -1602,6 +1632,7 @@ impl RemoteTaskService {
                 session_id: record.session_id.clone(),
                 status: record.wire_status().to_owned(),
                 sequence: record.sequence.to_string(),
+                transition_sequence: record.transition_sequence,
                 outcome_unknown: record.outcome_unknown,
                 terminal_reason: Some(bounded_reason_owned(reason)),
                 result_digest: record.result_digest.clone(),
@@ -1728,6 +1759,7 @@ mod tests {
         calls: AtomicUsize,
         fail: AtomicBool,
         seen_mode: Mutex<Option<String>>,
+        seen_request: Mutex<Option<Value>>,
     }
 
     impl RecordingExecutor {
@@ -1736,6 +1768,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(false),
                 seen_mode: Mutex::new(None),
+                seen_request: Mutex::new(None),
             })
         }
 
@@ -1744,6 +1777,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(true),
                 seen_mode: Mutex::new(None),
+                seen_request: Mutex::new(None),
             })
         }
     }
@@ -1756,6 +1790,7 @@ mod tests {
             _events: Arc<dyn ControllerTaskEventSink>,
             _cancel: CancellationToken,
         ) -> std::result::Result<(), String> {
+            *self.seen_request.lock() = Some(request.clone());
             *self.seen_mode.lock() = request
                 .get("mode")
                 .and_then(Value::as_str)
@@ -2216,6 +2251,12 @@ mod tests {
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Succeeded);
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        let seen = executor.seen_request.lock();
+        let seen = seen.as_ref().expect("complete executor request");
+        assert_eq!(seen["task_id"], "task-0001");
+        assert_eq!(seen["session_id"], "session-0001");
+        assert_eq!(seen["mode"], TASK_MODE_CHAT);
+        assert_eq!(seen["input"]["text"], "run the report");
         assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
         assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
         assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
@@ -2252,6 +2293,15 @@ mod tests {
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Failed);
         assert_eq!(record.terminal_reason.as_deref(), Some("executor_error"));
+        assert_eq!(
+            failing_service
+                .ledger()
+                .record("task-0002")
+                .unwrap()
+                .terminal_reason
+                .as_deref(),
+            Some("executor_error")
+        );
         assert_eq!(failing_hooks.model.load(Ordering::SeqCst), 1);
     }
 
