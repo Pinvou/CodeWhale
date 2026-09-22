@@ -772,6 +772,36 @@
         "file": "000077_usage_settlement_repair_consumer_route.up.sql",
         "version": 77,
         "sha256": "04abf54982185b6189ca4994f26d2ace66871634d8533f7a4ffbea0fd7b1fe00"
+      },
+      {
+        "file": "000078_expand_sms_send_attempt_purposes.down.sql",
+        "version": 78,
+        "sha256": "726aa7410f5346beb2400052e74a49a9685907cd3a3af231b2791b916691d330"
+      },
+      {
+        "file": "000078_expand_sms_send_attempt_purposes.up.sql",
+        "version": 78,
+        "sha256": "9824b409efd7633cb4035e67ddd57f52dae299dc6442faebb4ae2210adc34808"
+      },
+      {
+        "file": "000079_validate_sms_send_attempt_purposes.down.sql",
+        "version": 79,
+        "sha256": "8f33d1f8ca70227f24ad7b4303f5619bc0164c7bbc0ff581ca4f38e8d7213d08"
+      },
+      {
+        "file": "000079_validate_sms_send_attempt_purposes.up.sql",
+        "version": 79,
+        "sha256": "cd272d189529ddb7e10a888e1b744230c19dea0492634af5ac155f7b7f93de46"
+      },
+      {
+        "file": "000080_activate_sms_send_attempt_purposes.down.sql",
+        "version": 80,
+        "sha256": "df97f86bb928553158e13cdfbfcdceec33fcb107a1bdec53a48e30e5155d7ac1"
+      },
+      {
+        "file": "000080_activate_sms_send_attempt_purposes.up.sql",
+        "version": 80,
+        "sha256": "10d0a5120b55d6d09a95c8a1309748e46d7cea7180e95a973e29cd867f6fab81"
       }
     ],
     "billing": [
