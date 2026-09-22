@@ -24,6 +24,7 @@
     llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
+    computerUse: ["computerUse"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
@@ -136,6 +137,16 @@
   function unsupportedTeamRelay() {
     return Promise.reject(new Error("Team Relay is only available in the Pinvou desktop app"));
   }
+  // Computer use controls the desktop's own screen, mouse and keyboard, so it
+  // must never be driven from the remote web client (the desktop RPC funnel
+  // keeps the commands off the access-policy allowlist as well). The domain
+  // still exists with rejecting stubs so shared UI code can feature-detect it.
+  function computerUseUnsupported() {
+    return Promise.reject(new Error("computer use is not supported on the web client"));
+  }
+  const computerUseStubs = {};
+  ["getStatus", "refreshStatus", "grant", "revoke", "stop", "confirm", "deny", "setEnabled", "requestPermissions"]
+    .forEach(function (name) { computerUseStubs[name] = computerUseUnsupported; });
 
   window.TauriBridge = {
     available: true,
@@ -208,6 +219,7 @@
       openPreparedMaterial: unsupportedTeamRelay,
       revealPreparedMaterial: unsupportedTeamRelay,
       disconnect: unsupportedTeamRelay
-    }
+    },
+    computerUse: computerUseStubs
   };
 })();
