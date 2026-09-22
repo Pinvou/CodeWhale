@@ -2040,6 +2040,14 @@ impl TaskManager {
         if execution_event_is_progress(&event) {
             guard.note_progress(Instant::now());
         }
+        // Liveness-only heartbeats never mutate the record: short-circuit
+        // before the state lock so a silent build's ~5 ticks/s do not take
+        // the manager-wide lock for a no-op, and so they do not mark the
+        // record dirty (which would defer the persistence of real mutations
+        // past the debounce window for the whole silent tool).
+        if matches!(event, TaskExecutionEvent::ToolHeartbeat { .. }) {
+            return;
+        }
         append_message_delta(accumulated_result_text, &event);
         match self.apply_execution_event(task_id, event).await {
             Ok(outcome) => {
