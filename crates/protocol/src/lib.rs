@@ -150,6 +150,11 @@ pub struct ThreadStartParams {
     pub model_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    /// The full accessible root set with the cwd as the primary; a start has
+    /// no parent to inherit from, so this is a plain `Vec` (empty ≡ the bare
+    /// cwd), omitted from the wire when empty. Senders carry the full set
+    /// (cwd first) even where the field name reads "additional" — both
+    /// spellings are accepted and normalized to cwd-first on intake.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_roots: Vec<PathBuf>,
     #[serde(default)]

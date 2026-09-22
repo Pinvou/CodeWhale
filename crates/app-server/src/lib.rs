@@ -3825,8 +3825,9 @@ mod tests {
 
     /// Round-9 M-B: a roots-bearing `thread/resume` after the first bridged
     /// turn updates the stdio record and the hint, but the already-mapped
-    /// runtime thread was created with the old set. The bridge must re-create
-    /// and re-map so later turns execute the declared set; an unchanged hint
+    /// runtime thread was created with the old set. The bridge must reshape
+    /// the SAME runtime thread in place via PATCH (session id and turns
+    /// survive) so later turns execute the declared set; an unchanged hint
     /// must keep the existing mapping.
     #[tokio::test]
     async fn stdio_runtime_bridge_remaps_when_the_hint_root_set_changes() {

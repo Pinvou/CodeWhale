@@ -1424,6 +1424,36 @@ mod tests {
         );
     }
 
+    /// The tui→wire SyncSession projection must carry the root set: the
+    /// engine's whole multi-root posture rides on this one mapping, and a
+    /// regression to an empty set compiles and stays green without this
+    /// round-trip (round-13 note).
+    #[test]
+    fn sync_session_projection_round_trips_a_non_empty_root_set() {
+        let op = Op::SyncSession {
+            session_id: Some("sess-1".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "m".to_string(),
+            workspace: std::path::PathBuf::from("/work"),
+            workspace_roots: vec![
+                std::path::PathBuf::from("/work"),
+                std::path::PathBuf::from("/shared"),
+            ],
+            mode: AppMode::Agent,
+        };
+        let msg = op_to_protocol(&op);
+        let value = serde_json::to_value(&msg).unwrap();
+        let back: wire_op::Op = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(back, msg);
+        assert_eq!(
+            value["workspace_roots"],
+            json!(["/work", "/shared"]),
+            "the projection must ship the live set, not an empty one"
+        );
+    }
+
     #[test]
     fn mode_labels_round_trip_through_app_mode_parse() {
         for mode in [AppMode::Agent, AppMode::Plan, AppMode::Operate] {

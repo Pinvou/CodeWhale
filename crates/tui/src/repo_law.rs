@@ -18,7 +18,7 @@
 //! - Only the repo-local constitution participates. The user-global
 //!   constitution stays advisory prose and never reaches this module.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
@@ -241,29 +241,15 @@ fn push_normalized(targets: &mut Vec<String>, workspace: &Path, root: &Path, raw
     // the fail-closed across-roots judgment for plain relative targets is
     // untouched.
     if parts.first().map(String::as_str) == Some("..") && !path.is_absolute() {
-        let mut executed: Vec<String> = Vec::new();
-        for component in workspace.join(&trimmed).to_string_lossy().split('/') {
-            match component {
-                "" | "." => {}
-                ".." => {
-                    if executed.pop().is_none() {
-                        // Escapes the filesystem root entirely; nothing
-                        // sane to tail against any root.
-                        executed.clear();
-                        break;
-                    }
-                }
-                other => executed.push(other.to_string()),
-            }
-        }
-        let root_parts: Vec<String> = root
-            .to_string_lossy()
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .map(str::to_string)
-            .collect();
-        if executed.len() > root_parts.len() && executed.starts_with(&root_parts) {
-            let tail = executed[root_parts.len()..].join("/");
+        // Execution joins the *raw* spelling onto the primary and lexically
+        // normalizes it (`ToolContext::resolve_path`). Derive that path with
+        // component operations — splitting display strings is not a path
+        // operation and silently misparses Windows separators — and keep its
+        // tail under this root when it lands inside.
+        if let Some(candidate) = normalize_lexical_components(&workspace.join(raw))
+            && let Ok(tail) = candidate.strip_prefix(root)
+        {
+            let tail = tail.to_string_lossy().replace('\\', "/");
             if !tail.is_empty() {
                 targets.push(tail);
             }
@@ -273,6 +259,27 @@ fn push_normalized(targets: &mut Vec<String>, workspace: &Path, root: &Path, raw
     if !normalized.is_empty() {
         targets.push(normalized);
     }
+}
+
+/// Lexically collapse CurDir and ParentDir components of `path` (what the
+/// write tools' `resolve_path` normalizes a joined candidate to), using
+/// component operations so the result is platform-correct. `None` when a
+/// `..` escapes above the filesystem root: there is no sane tail to judge
+/// against any root, and the ordinary gates govern the call.
+fn normalize_lexical_components(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            component => out.push(component.as_os_str()),
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]

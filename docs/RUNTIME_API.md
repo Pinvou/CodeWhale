@@ -590,9 +590,21 @@ provider, model, workspace, and permission fields:
   "model_provider": "openai-codex",
   "model": "gpt-5.6",
   "reasoning_effort": "high",
-  "allowed_tools": ["read_file", "search"]
+  "allowed_tools": ["read_file", "search"],
+  "workspace_roots": ["/Users/you/projects/codewhale", "/Users/you/projects/shared"]
 }
 ```
+
+`workspace_roots` (added by the multi-root workspace theme) declares the
+thread's full accessible root set: the first entry is the primary root (the
+thread's `workspace`) and the rest are attached roots whose writes the
+thread's sandbox policy, write carve-out, and repo law also govern. Omitting
+it is exactly the historical single-root thread (`[workspace]`). `PATCH
+/v1/threads/{id}` accepts the same field to reshape a live thread (empty
+array clears back to the bare workspace); a change while a turn is active is
+rejected. `POST /v1/threads/{id}/fork` inherits the parent's set when the
+field is absent, and `POST /v1/threads/{id}/resume` treats `null` as inherit
+and `[]` as an explicit clear.
 
 `reasoning_effort` uses the canonical Runtime vocabulary (`auto`, `off`,
 `low`, `medium`, `high`, `xhigh`, `ultra`, or `max`; documented compatibility
@@ -1013,7 +1025,9 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
 
 - **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`,
   `model_provider` (generic kind), `model_provider_id` (optional exact configured
-  route), `workspace`, `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
+  route), `workspace`, `workspace_roots` (the full accessible root set,
+  primary first; single-root threads carry just the workspace), `mode`,
+  `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
   failed|interrupted|canceled`), `effective_provider`, `effective_model`,

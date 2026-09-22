@@ -1259,7 +1259,9 @@ pub(crate) async fn apply_command_result(
                 app.status_message = Some(success_message);
                 // The imported record's root set arrived from another host;
                 // name it in the transcript beside the load receipt.
-                if let Some(notice) = workspace_roots_notice(&app.workspace, &app.workspace_roots) {
+                if let Some(notice) =
+                    workspace_roots_notice(app.ui_locale, &app.workspace, &app.workspace_roots)
+                {
                     app.add_message(HistoryCell::System { content: notice });
                 }
                 // A loaded session is the working screen. The launch card's

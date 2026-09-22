@@ -309,7 +309,10 @@ fn workspace_roots_summary(app: &App) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     if remainder > 0 {
-        listed.push_str(&format!(" … (+{remainder} more)"));
+        listed.push_str(
+            &tr(app.ui_locale, MessageId::WorkspaceRootsRemainder)
+                .replace("{count}", &remainder.to_string()),
+        );
     }
     Some(listed)
 }
@@ -1016,18 +1019,37 @@ mod tests {
     fn workspace_roots_notice_only_fires_beside_the_primary() {
         use crate::tui::ui::workspace_roots_notice;
 
-        assert_eq!(workspace_roots_notice(Path::new("/w"), &[]), None);
         assert_eq!(
-            workspace_roots_notice(Path::new("/w"), &[PathBuf::from("/w")]),
+            workspace_roots_notice(Locale::En, Path::new("/w"), &[]),
+            None
+        );
+        assert_eq!(
+            workspace_roots_notice(Locale::En, Path::new("/w"), &[PathBuf::from("/w")]),
             None,
             "the primary alone is not a disclosure"
         );
         let notice = workspace_roots_notice(
+            Locale::En,
             Path::new("/w"),
             &[PathBuf::from("/w"), PathBuf::from("/r2")],
         )
         .expect("notice");
         assert!(notice.contains("Accessible folders beside /w"), "{notice}");
         assert!(notice.contains("/r2"), "{notice}");
+
+        // The disclosure is user-visible prose: a non-English locale must
+        // render its own pack, not the English template.
+        let japanese = workspace_roots_notice(
+            Locale::Ja,
+            Path::new("/w"),
+            &[PathBuf::from("/w"), PathBuf::from("/r2")],
+        )
+        .expect("notice");
+        assert!(japanese.contains("アクセス可能なフォルダ"), "{japanese}");
+        assert!(
+            !japanese.contains("Accessible folders beside"),
+            "{japanese}"
+        );
+        assert!(japanese.contains("/r2"), "{japanese}");
     }
 }

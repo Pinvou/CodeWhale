@@ -621,30 +621,92 @@ pub(crate) async fn sync_runtime_workspace_state(
 /// with zero indication that writes under an attached root are governed by
 /// this session's policy — and under the default Ask posture an attached git
 /// root's writes are carve-out modal-free.
-pub(crate) fn workspace_roots_notice(workspace: &Path, roots: &[PathBuf]) -> Option<String> {
+pub(crate) fn workspace_roots_notice(
+    locale: crate::localization::Locale,
+    workspace: &Path,
+    roots: &[PathBuf],
+) -> Option<String> {
     const MAX_LISTED_ROOTS: usize = 5;
-    let additional: Vec<String> = roots
+    let additional: Vec<&PathBuf> = roots
         .iter()
         .filter(|root| root.as_path() != workspace)
-        .map(|root| root.display().to_string())
+        .take(MAX_LISTED_ROOTS)
         .collect();
     if additional.is_empty() {
         return None;
     }
-    let remainder = additional.len().saturating_sub(MAX_LISTED_ROOTS);
-    let mut notice = format!(
-        "Accessible folders beside {}: {}",
-        workspace.display(),
-        additional
-            .into_iter()
-            .take(MAX_LISTED_ROOTS)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    let remainder = roots.len().saturating_sub(1) - additional.len();
+    let listed = additional
+        .into_iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut roots_value = listed;
     if remainder > 0 {
-        notice.push_str(&format!(" … (+{remainder} more)"));
+        roots_value.push_str(
+            &tr(locale, MessageId::WorkspaceRootsRemainder)
+                .replace("{count}", &remainder.to_string()),
+        );
     }
-    Some(notice)
+    Some(
+        tr(locale, MessageId::WorkspaceRootsNotice)
+            .replace("{workspace}", &workspace.display().to_string())
+            .replace("{roots}", &roots_value),
+    )
+}
+
+/// Persist the post-switch snapshot through both durability paths and
+/// report exactly what happened. The direct save is the immediate disk
+/// authority; the actor enqueue heals the reorder window (a queued
+/// pre-switch snapshot is coalesced away by this fresher one). The status
+/// must never claim a persistence that did not happen: when both paths fail
+/// the next restart would resurrect the pre-switch workspace/root set, and
+/// that has to be the visible failure.
+fn persist_workspace_switch_snapshot(
+    app: &mut App,
+    manager: &SessionManager,
+    snapshot: crate::session_manager::SavedSession,
+) {
+    let save_error = manager.save_session(&snapshot).err();
+    // The direct save bypasses the persistence actor, so a pre-`/cd`
+    // snapshot already queued there (an autosave that fired moments ago)
+    // could still land after it and revert the root swap on disk. Enqueue
+    // the post-switch snapshot: the actor's latest-wins coalescing drops
+    // the queued stale one, and even a stale write already in flight is
+    // followed by this fresher record of the swapped set.
+    let queued = persistence_actor::try_persist(PersistRequest::SessionSnapshot(snapshot));
+    if let Some(message) = workspace_switch_persistence_message(
+        app.ui_locale,
+        save_error.as_ref().map(|err| err.to_string()),
+        queued,
+    ) {
+        app.status_message = Some(message);
+    }
+}
+
+/// The status receipt for the two `/cd` persistence paths, from the actual
+/// outcomes: a save error plus an unavailable actor means NEITHER path
+/// persisted the swap, and the message must say so — a "persisted" claim
+/// there would hide a restart resurrecting the pre-switch workspace/root
+/// set.
+fn workspace_switch_persistence_message(
+    locale: crate::localization::Locale,
+    save_error: Option<String>,
+    queued: bool,
+) -> Option<String> {
+    let message: Option<String> = match (&save_error, queued) {
+        (None, true) => None,
+        (None, false) => {
+            Some(tr(locale, MessageId::WorkspaceSwitchPersistedActorUnavailable).into_owned())
+        }
+        (Some(error), true) => Some(
+            tr(locale, MessageId::WorkspaceSwitchSaveFailedActorQueued).replace("{error}", error),
+        ),
+        (Some(error), false) => {
+            Some(tr(locale, MessageId::WorkspaceSwitchPersistFailed).replace("{error}", error))
+        }
+    };
+    message
 }
 
 pub(crate) async fn switch_workspace(
@@ -693,22 +755,7 @@ pub(crate) async fn switch_workspace(
     match SessionManager::default_location() {
         Ok(manager) => match crate::tui::ui::frame::build_session_snapshot(app, &manager) {
             Ok(snapshot) => {
-                if let Err(err) = manager.save_session(&snapshot) {
-                    app.status_message = Some(format!("Failed to persist workspace switch: {err}"));
-                }
-                // The direct save above bypasses the persistence actor, so a
-                // pre-`/cd` snapshot already queued there (an autosave that
-                // fired moments ago) could still land after it and revert the
-                // root swap on disk. Enqueue the post-switch snapshot: the
-                // actor's latest-wins coalescing drops the queued stale one,
-                // and even a stale write already in flight is followed by
-                // this fresher record of the swapped set.
-                if !persistence_actor::try_persist(PersistRequest::SessionSnapshot(snapshot)) {
-                    app.status_message = Some(
-                        "Workspace switch persisted, but the persistence actor is unavailable; the next autosave re-persists it"
-                            .to_string(),
-                    );
-                }
+                persist_workspace_switch_snapshot(app, &manager, snapshot);
             }
             Err(err) => {
                 app.status_message = Some(format!("Failed to snapshot workspace switch: {err}"));
@@ -1278,6 +1325,78 @@ mod launch_resume_tests {
         assert!(
             matches!(result.action, Some(AppAction::SyncSession { .. })),
             "the engine syncs the fresh session"
+        );
+    }
+}
+
+#[cfg(test)]
+mod workspace_switch_persistence_tests {
+    use super::*;
+
+    fn message_for(save_error: Option<String>, queued: bool) -> Option<String> {
+        workspace_switch_persistence_message(crate::localization::Locale::En, save_error, queued)
+    }
+
+    /// The round-13 blocker: when the direct save AND the actor enqueue both
+    /// fail, neither path persisted the swap — the receipt must say so
+    /// instead of claiming persistence while a restart would resurrect the
+    /// pre-switch workspace/root set.
+    #[test]
+    fn double_failure_reports_failure_never_persistence() {
+        let message = message_for(Some("disk full".to_string()), false)
+            .expect("both paths failed; a receipt is required");
+        assert!(
+            message.contains("Failed to persist workspace switch"),
+            "{message}"
+        );
+        assert!(message.contains("disk full"), "{message}");
+        assert!(
+            !message.to_ascii_lowercase().contains("persisted, but"),
+            "the double-failure receipt must not claim persistence: {message}"
+        );
+
+        // The actor-unavailable leg (save succeeded) is the only one allowed
+        // to say "persisted".
+        let saved_but_unqueued =
+            message_for(None, false).expect("save ok, actor down; a receipt is required");
+        assert!(
+            saved_but_unqueued.contains("persisted"),
+            "{saved_but_unqueued}"
+        );
+
+        // Save failed but the actor holds the snapshot: no "persisted" claim
+        // about the direct save, and the actor leg is named.
+        let queued_anyway = message_for(Some("read-only fs".to_string()), true)
+            .expect("save failed; a receipt is required");
+        assert!(
+            queued_anyway.contains("Direct workspace-switch save failed"),
+            "{queued_anyway}"
+        );
+        assert!(
+            !queued_anyway
+                .to_ascii_lowercase()
+                .contains("persisted, but"),
+            "{queued_anyway}"
+        );
+
+        // Both paths succeeded: no receipt (the switch message follows).
+        assert_eq!(message_for(None, true), None);
+    }
+
+    /// The receipt is user-visible prose: a non-English locale renders its
+    /// own pack, never the English template.
+    #[test]
+    fn double_failure_receipt_is_localized() {
+        let message = workspace_switch_persistence_message(
+            crate::localization::Locale::Ja,
+            Some("disk full".to_string()),
+            false,
+        )
+        .expect("receipt");
+        assert!(message.contains("永続化"), "{message}");
+        assert!(
+            !message.contains("Failed to persist workspace switch"),
+            "{message}"
         );
     }
 }

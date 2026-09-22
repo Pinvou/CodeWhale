@@ -8163,7 +8163,6 @@ fn string_field(input: &Value, key: &str) -> Option<String> {
     input
         .get(key)
         .and_then(Value::as_str)
-        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
 }

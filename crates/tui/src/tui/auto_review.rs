@@ -389,10 +389,12 @@ fn file_write_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>
     let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     Some(match canonical {
         "write_file" | "edit_file" => vec![
+            // Raw spelling, untrimmed: the carve-out must judge exactly the
+            // path execution resolves (`ToolContext::resolve_path` joins the
+            // raw string onto the workspace).
             input
                 .get("path")
                 .and_then(Value::as_str)
-                .map(str::trim)
                 .filter(|path| !path.is_empty())
                 .map(str::to_string)?,
         ],

@@ -650,11 +650,23 @@ impl StateStore {
             // no-op version bump.
             conn.execute_batch("BEGIN IMMEDIATE;")
                 .context("failed to begin the workspace roots migration")?;
-            let migration = if column_exists(conn, "threads", "workspace_roots")? {
-                String::new()
-            } else {
-                "ALTER TABLE threads\n                    ADD COLUMN workspace_roots TEXT NOT NULL DEFAULT '[]';\n"
-                    .to_string()
+            // Any failure after the BEGIN must leave no open transaction
+            // behind; the connection would roll back on drop, but the
+            // explicit ROLLBACK keeps the same connection usable for the
+            // error report.
+            let migration = match column_exists(conn, "threads", "workspace_roots") {
+                Ok(exists) => {
+                    if exists {
+                        String::new()
+                    } else {
+                        "ALTER TABLE threads\n                            ADD COLUMN workspace_roots TEXT NOT NULL DEFAULT '[]';\n"
+                            .to_string()
+                    }
+                }
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(error).context("failed to inspect the threads table");
+                }
             };
             let committed = conn.execute_batch(&format!(
                 r#"{migration}
@@ -729,8 +741,11 @@ impl StateStore {
                 (
                     "COALESCE(excluded.sandbox_policy, threads.sandbox_policy)",
                     "COALESCE(excluded.approval_mode, threads.approval_mode)",
+                    // Payload-blind while archived: the row's stamp is the
+                    // authority, so a stale payload carrying its own old
+                    // stamp cannot resurrect a concurrently cleared one.
                     "CASE WHEN excluded.archived = 0 THEN NULL \
-                     ELSE COALESCE(excluded.archived_at, threads.archived_at) END",
+                     ELSE threads.archived_at END",
                 )
             } else {
                 (
@@ -2424,12 +2439,15 @@ mod tests {
         // write: mark_unarchived clears flag and stamp on the row.
         store.mark_unarchived("thread-1").expect("unarchive");
 
-        // A stale payload whose in-memory snapshot still says archived — but
-        // which carries no stamp of its own — must not resurrect the cleared
-        // stamp: the CASE reads the in-transaction row, which no longer
-        // carries one.
+        // A stale payload whose in-memory snapshot still says archived and
+        // still carries the pre-clear stamp must not resurrect it: while the
+        // payload says archived, the row's stamp is the only authority, and
+        // the row no longer carries one. (With a payload stamp of None this
+        // pin would be vacuous — the passthrough arm writes NULL too — so the
+        // payload deliberately carries the stale value.)
         let mut stale = test_thread("thread-1");
         stale.archived = true;
+        stale.archived_at = Some(1_234);
         store
             .upsert_thread_preserving_policy_and_archive(&stale)
             .expect("preserving upsert");

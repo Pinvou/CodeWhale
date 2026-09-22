@@ -594,9 +594,11 @@ pub async fn run_tui(
                             // Name the inherited set in the transcript: the
                             // roots arrived from another host and no header
                             // chrome reports them.
-                            if let Some(notice) =
-                                workspace_roots_notice(&app.workspace, &app.workspace_roots)
-                            {
+                            if let Some(notice) = workspace_roots_notice(
+                                app.ui_locale,
+                                &app.workspace,
+                                &app.workspace_roots,
+                            ) {
                                 app.add_message(HistoryCell::System { content: notice });
                             }
                             app.status_message = Some(format!(

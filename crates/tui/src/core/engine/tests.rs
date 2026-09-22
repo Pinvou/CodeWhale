@@ -9088,6 +9088,50 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
 }
 
 #[test]
+fn workspace_write_carve_out_judges_the_raw_spelling_on_the_real_pipeline() {
+    // The gate must judge exactly what execution resolves: the engine's path
+    // collector passes the tool input through untrimmed, and
+    // `ToolContext::resolve_path` branches on the raw spelling. A
+    // leading-whitespace absolute-looking target is a *relative* path to the
+    // write tools (joined onto the primary), so a trimmed judgment would let
+    // it qualify through an attached git root modal-free while the write
+    // lands inside the non-git primary tree — fail-open where base was
+    // fail-closed.
+    let primary = tempdir().expect("non-git primary");
+    let attached = tempdir().expect("attached dir");
+    std::fs::create_dir(attached.path().join(".git")).expect("git marker");
+    let ask = (
+        crate::tui::app::AppMode::Agent,
+        crate::tui::approval::ApprovalMode::Suggest,
+        false,
+    );
+    let carve_out = |input: &serde_json::Value| {
+        workspace_write_carve_out_applies(
+            ask.0,
+            ask.1,
+            ask.2,
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            input,
+            ApprovalRequirement::Suggest,
+        )
+    };
+
+    let whitespace_prefixed = format!(" {}", attached.path().join("src/main.rs").display());
+    assert!(
+        !carve_out(&json!({"path": whitespace_prefixed})),
+        "the raw pipeline must keep the modal for a whitespace-prefixed target"
+    );
+
+    // The trimmed spelling stays qualified on the same pipeline: trimming
+    // decides nothing but emptiness anywhere on this path.
+    assert!(carve_out(
+        &json!({"path": attached.path().join("src/main.rs")})
+    ));
+}
+
+#[test]
 fn sandbox_escalation_requires_a_pair_and_a_strictly_wider_mode() {
     use crate::sandbox::SandboxPolicy;
 
