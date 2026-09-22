@@ -15,7 +15,36 @@ import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGro
 import { createFinanceDetailRecovery, financeCursorContext, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from '../src/features/account-platform/admin-finance-pagination.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
+import { accountPlatformErrorCodes, localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
+
+test('account platform errors prefer wrapped domain codes over generic bridge failures', () => {
+  const copy = accountPlatformCopy.zh;
+  const wrapped = {
+    code: 'REQUEST_FAILED',
+    message: 'Error: oidc_credentials_invalid: account or password is incorrect',
+  };
+  assert.deepEqual(accountPlatformErrorCodes(wrapped), [
+    'REQUEST_FAILED',
+    'Error',
+    'oidc_credentials_invalid',
+  ]);
+  assert.equal(localizedAccountPlatformError(copy, wrapped), copy.errors.oidc_credentials_invalid);
+  assert.equal(
+    localizedAccountPlatformError(copy, { code: 'MOBILE_INVALID', message: 'CAPTCHA_INVALID: conflicting wrapper message' }, {
+      MOBILE_INVALID: copy.mobileInvalid,
+      CAPTCHA_INVALID: copy.captchaInvalid,
+    }),
+    copy.mobileInvalid,
+  );
+  assert.equal(
+    localizedAccountPlatformError(copy, { code: 'REQUEST_FAILED', message: 'mobile_auth_failed: SMS_CODE_INVALID' }, {
+      SMS_CODE_INVALID: copy.mobileAuthFailed,
+    }),
+    copy.mobileAuthFailed,
+  );
+  assert.equal(localizedAccountPlatformError(copy, new Error('unclassified transport detail')), copy.requestFailed);
+});
 
 test('admin portal navigation groups and URL state remain deterministic', () => {
   assert.deepEqual(adminNavigationGroups, [

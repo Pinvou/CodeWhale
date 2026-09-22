@@ -5,32 +5,33 @@ import { formatPoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
 import { isPayablePaymentOrder, orderSummaryStatus } from './order-view.js';
+import { localizedAccountPlatformError } from './error-localization.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
 const fallbackChannels = ['ALIPAY'];
 
 function localizedError(copy, reason) {
-  const raw = String(reason?.code || reason?.message || reason || '');
-  const serverCode = raw.match(/\b(?:USERNAME|PASSWORD|MOBILE|CAPTCHA|SMS|REGISTRATION|PROFILE|RECENT)_[A-Z_]+\b/)?.[0];
-  const code = serverCode || raw.split(':', 1)[0].trim();
-  if (code === 'USERNAME_ALREADY_REGISTERED') return copy.usernameAlreadyRegistered;
-  if (code === 'USERNAME_INVALID') return copy.usernameInvalid;
-  if (code === 'PASSWORD_INVALID') return copy.passwordInvalid;
-  if (code === 'PASSWORD_EDGE_SPACE_NOT_ALLOWED') return copy.passwordEdgeSpace;
-  if (code === 'PASSWORD_MISMATCH') return copy.passwordMismatch;
-  if (code === 'PASSWORD_REFERENCE_INVALID' || code === 'PASSWORD_REFERENCE_CONFLICT') return copy.registrationPrecheckExpired;
-  if (code === 'MOBILE_ALREADY_REGISTERED') return copy.mobileAlreadyRegistered;
-  if (code === 'MOBILE_INVALID') return copy.mobileInvalid;
-  if (code === 'CAPTCHA_INVALID') return copy.captchaInvalid;
-  if (code === 'SMS_RATE_LIMITED') return copy.smsRateLimited;
-  if (code === 'SMS_UNAVAILABLE') return copy.smsUnavailable;
-  if (code === 'SMS_CODE_INVALID' || code === 'mobile_auth_code_invalid') return copy.mobileAuthFailed;
-  if (code === 'mobile_auth_failed') return copy.mobileAuthFailed;
-  if (code === 'REGISTRATION_IDEMPOTENCY_CONFLICT') return copy.registrationConflict;
-  if (code === 'REGISTRATION_RESTART_REQUIRED') return copy.registrationRestartRequired;
-  if (code === 'registration_recovery_unavailable') return copy.registrationRecoveryUnavailable;
-  return copy.errors?.[code] || copy.requestFailed;
+  return localizedAccountPlatformError(copy, reason, {
+    USERNAME_ALREADY_REGISTERED: copy.usernameAlreadyRegistered,
+    USERNAME_INVALID: copy.usernameInvalid,
+    PASSWORD_INVALID: copy.passwordInvalid,
+    PASSWORD_EDGE_SPACE_NOT_ALLOWED: copy.passwordEdgeSpace,
+    PASSWORD_MISMATCH: copy.passwordMismatch,
+    PASSWORD_REFERENCE_INVALID: copy.registrationPrecheckExpired,
+    PASSWORD_REFERENCE_CONFLICT: copy.registrationPrecheckExpired,
+    MOBILE_ALREADY_REGISTERED: copy.mobileAlreadyRegistered,
+    MOBILE_INVALID: copy.mobileInvalid,
+    CAPTCHA_INVALID: copy.captchaInvalid,
+    SMS_RATE_LIMITED: copy.smsRateLimited,
+    SMS_UNAVAILABLE: copy.smsUnavailable,
+    SMS_CODE_INVALID: copy.mobileAuthFailed,
+    mobile_auth_code_invalid: copy.mobileAuthFailed,
+    mobile_auth_failed: copy.mobileAuthFailed,
+    REGISTRATION_IDEMPOTENCY_CONFLICT: copy.registrationConflict,
+    REGISTRATION_RESTART_REQUIRED: copy.registrationRestartRequired,
+    registration_recovery_unavailable: copy.registrationRecoveryUnavailable,
+  });
 }
 
 function retryAfterFromError(reason) {

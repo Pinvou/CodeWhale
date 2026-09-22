@@ -11,6 +11,7 @@ import { invitationSubmissionAttempt } from './invitation-client.js';
 import { PendingInvitations } from './pending-invitations.js';
 import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
+import { localizedAccountPlatformError } from './error-localization.js';
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -146,20 +147,19 @@ function NavIcon({ name }) {
 }
 
 function localizedError(copy, reason) {
-  const raw = String(reason?.code || reason?.message || reason || '');
-  const code = raw.split(':', 1)[0].trim();
-  if (code === 'RECENT_AUTHENTICATION_REQUIRED') return copy.recentAuthenticationRequired;
-  if (code === 'USERNAME_INVALID') return copy.usernameInvalid;
-  if (code === 'USERNAME_ALREADY_REGISTERED') return copy.usernameAlreadyRegistered;
-  if (code === 'MOBILE_INVALID') return copy.mobileInvalid;
-  if (code === 'MOBILE_ALREADY_REGISTERED') return copy.mobileAlreadyRegistered;
-  if (code === 'CAPTCHA_INVALID') return copy.captchaInvalid;
-  if (code === 'SMS_RATE_LIMITED') return copy.smsRateLimited;
-  if (code === 'SMS_CODE_INVALID') return copy.mobileAuthFailed;
-  if (code === 'PROFILE_CHANGE_CONFLICT') return copy.profileChangeConflict;
-  if (code === 'MOBILE_VERIFICATION_REQUIRED') return copy.mobileVerificationRequired;
-  if (code === 'PROFILE_CHANGE_NOT_FOUND') return copy.profileChangeNotFound;
-  return copy.errors?.[code] || copy.requestFailed;
+  return localizedAccountPlatformError(copy, reason, {
+    RECENT_AUTHENTICATION_REQUIRED: copy.recentAuthenticationRequired,
+    USERNAME_INVALID: copy.usernameInvalid,
+    USERNAME_ALREADY_REGISTERED: copy.usernameAlreadyRegistered,
+    MOBILE_INVALID: copy.mobileInvalid,
+    MOBILE_ALREADY_REGISTERED: copy.mobileAlreadyRegistered,
+    CAPTCHA_INVALID: copy.captchaInvalid,
+    SMS_RATE_LIMITED: copy.smsRateLimited,
+    SMS_CODE_INVALID: copy.mobileAuthFailed,
+    PROFILE_CHANGE_CONFLICT: copy.profileChangeConflict,
+    MOBILE_VERIFICATION_REQUIRED: copy.mobileVerificationRequired,
+    PROFILE_CHANGE_NOT_FOUND: copy.profileChangeNotFound,
+  });
 }
 
 function serviceRequestFailed(result) {
