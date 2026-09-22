@@ -3007,7 +3007,10 @@ fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
         DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS + 30
     );
 
-    let follows_long_api_timeout = Config {
+    // With a 900s api timeout the api floor is 930, but the tool-timeout
+    // floor (1800s tool timeout + 30s) dominates it, so the resolved value
+    // is 1830 — a heartbeat cleanup must never fire before the tool floor.
+    let tool_floor_dominates_api_floor = Config {
         subagents: Some(SubagentsConfig {
             api_timeout_secs: Some(900),
             heartbeat_timeout_secs: Some(300),
@@ -3016,8 +3019,23 @@ fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
         ..Config::default()
     };
     assert_eq!(
-        follows_long_api_timeout.subagent_heartbeat_timeout_secs(),
-        930
+        tool_floor_dominates_api_floor.subagent_heartbeat_timeout_secs(),
+        DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS + 30
+    );
+
+    // A genuinely long api timeout still wins (up to the heartbeat clamp):
+    // 3600s api floor is 3630, clamped to the 3600s heartbeat maximum.
+    let follows_maxed_api_timeout = Config {
+        subagents: Some(SubagentsConfig {
+            api_timeout_secs: Some(MAX_SUBAGENT_API_TIMEOUT_SECS),
+            heartbeat_timeout_secs: Some(300),
+            ..SubagentsConfig::default()
+        }),
+        ..Config::default()
+    };
+    assert_eq!(
+        follows_maxed_api_timeout.subagent_heartbeat_timeout_secs(),
+        MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
     );
 
     let high = Config {

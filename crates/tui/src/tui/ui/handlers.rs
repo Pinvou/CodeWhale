@@ -513,7 +513,7 @@ pub(crate) async fn handle_mcp_ui_action(
         }
         crate::tui::app::McpUiAction::Login { name, scopes } => {
             // Only the handshake runs inline: it is a couple of HTTP calls and
-            // it yields the authorization URL. The five-minute browser-callback
+            // it yields the authorization URL. The fifteen-minute browser-callback
             // wait goes to the background task pattern, because awaiting it
             // here parked the event loop — a misclicked `[re-auth]` row left
             // the session unusable with no way to back out.

@@ -323,16 +323,15 @@ mod tests {
     fn retrieval_defaults_are_coherent_across_search_and_fetch() {
         use super::super::fetch::{DEFAULT_TIMEOUT, HARD_MAX_TIMEOUT};
 
-        // Search and fetch share one default and one hard-cap timeout so the
-        // two halves of the retrieval path behave identically by default.
+        // Search and fetch share one default timeout so the two halves of
+        // the retrieval path behave identically by default. The fetch hard
+        // cap may exceed the search cap: a page fetch streams up to a 10 MB
+        // body while a search API answers small JSON payloads.
         assert_eq!(
             u128::from(DEFAULT_SEARCH_TIMEOUT_MS),
             DEFAULT_TIMEOUT.as_millis()
         );
-        assert_eq!(
-            u128::from(MAX_SEARCH_TIMEOUT_MS),
-            HARD_MAX_TIMEOUT.as_millis()
-        );
+        assert!(HARD_MAX_TIMEOUT.as_millis() >= u128::from(MAX_SEARCH_TIMEOUT_MS));
         assert!(DEFAULT_SEARCH_RESULTS <= usize::from(MAX_SEARCH_RESULTS));
     }
 

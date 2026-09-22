@@ -111,13 +111,20 @@ pub(crate) async fn validate_fetch_target(
         return Ok(None);
     }
 
-    let addrs = tokio::net::lookup_host((host.as_str(), 0u16))
-        .await
-        .map_err(|e| {
-            ToolError::permission_denied(format!(
-                "could not resolve host before {tool} request: {e}"
-            ))
-        })?;
+    // Bound the pre-flight resolution: this runs before the guarded request
+    // (and once per redirect), so a hung resolver would otherwise stall the
+    // tool far beyond the documented request timeout envelope.
+    let addrs = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::net::lookup_host((host.as_str(), 0u16)),
+    )
+    .await
+    .map_err(|_| {
+        ToolError::permission_denied(format!("timed out resolving host before {tool} request"))
+    })?
+    .map_err(|e| {
+        ToolError::permission_denied(format!("could not resolve host before {tool} request: {e}"))
+    })?;
     let mut first_valid: Option<IpAddr> = None;
     for addr in addrs {
         validate_dns_resolved_ip(&host, &addr.ip(), context.network_policy.as_ref(), tool)?;

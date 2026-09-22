@@ -439,14 +439,20 @@ fn snapshot_with_label(
         Ok(repo) => {
             let id = match repo.snapshot_with_session(label, session_id) {
                 Ok(id) => Some(id.0),
+                // A git command that times out here (e.g. a wedged `git add
+                // -A`) is the case that leaves the fresh index.lock behind;
+                // the once-per-workspace notice must cover it, not just
+                // open_or_init failures.
                 Err(e) => {
                     tracing::warn!(target: "snapshot", "snapshot '{label}' failed: {e}");
+                    maybe_notify_snapshots_disabled_once(workspace, &e);
                     return None;
                 }
             };
             // Prune oldest snapshots to cap disk usage (#1112).
             if let Err(e) = repo.prune_keep_last_n(crate::snapshot::DEFAULT_MAX_SNAPSHOTS) {
                 tracing::warn!(target: "snapshot", "snapshot prune failed: {e}");
+                maybe_notify_snapshots_disabled_once(workspace, &e);
             }
             id
         }
@@ -464,9 +470,13 @@ fn snapshot_with_label(
 #[allow(clippy::print_stderr)]
 fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error) {
     let message = error.to_string();
-    if !(message.contains("workspace too large for snapshots")
-        || message.contains("workspace snapshots are disabled"))
-    {
+    let size_gated = message.contains("workspace too large for snapshots")
+        || message.contains("workspace snapshots are disabled");
+    // A timed-out git is killed mid-write and leaves a fresh side-repo
+    // index.lock behind, so every snapshot fast-fails for about an hour.
+    // That must reach the user's stderr, not just the tracing log — silent
+    // undo-history loss is the §2.7 failure mode.
+    if !size_gated && error.kind() != std::io::ErrorKind::TimedOut {
         return;
     }
     use std::collections::HashSet;
@@ -483,10 +493,15 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
     // One prominent notice per workspace process lifetime — silent disable is
     // the §2.7 failure mode. Opt-in remains `[snapshots] max_workspace_gb`
     // (raise the cap or set 0 to disable the size gate).
+    let hint = if size_gated {
+        "  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in."
+    } else {
+        "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
+    };
     eprintln!(
-        "warning: workspace snapshots/undo are OFF for {}
+        "warning: workspace snapshots/undo are failing for {}
   {message}
-  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in.",
+{hint}",
         workspace.display()
     );
 }

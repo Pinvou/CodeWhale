@@ -79,7 +79,7 @@ fn mark_workspace_trusted(workspace: &Path) -> WorkspaceTrustConfigGuard {
 fn test_mcp_config_defaults() {
     let config = McpConfig::default();
     assert_eq!(config.timeouts.connect_timeout, 10);
-    assert_eq!(config.timeouts.execute_timeout, 60);
+    assert_eq!(config.timeouts.execute_timeout, 1800);
     assert_eq!(config.timeouts.read_timeout, 120);
     assert!(config.servers.is_empty());
 }
@@ -2521,8 +2521,104 @@ fn test_server_effective_timeouts() {
     };
 
     assert_eq!(server_with_override.effective_connect_timeout(&global), 20);
-    assert_eq!(server_with_override.effective_execute_timeout(&global), 60); // global default
+    assert_eq!(
+        server_with_override.effective_execute_timeout(&global),
+        1800 // global default
+    );
     assert_eq!(server_with_override.effective_read_timeout(&global), 180);
+}
+
+#[test]
+fn connect_keeps_the_read_knob_unclamped() {
+    // The audit fix clamped the connection read timeout to
+    // max(read, execute), silently disabling user-configured read budgets:
+    // a fast request (`resources/read`, discovery) on a wedged server then
+    // waited out the 1800s execute budget instead of failing at the
+    // configured read timeout. The knob must survive the connection.
+    let global = McpTimeouts {
+        connect_timeout: 10,
+        execute_timeout: 1800,
+        read_timeout: 120,
+    };
+    let mut server = McpServerConfig {
+        command: Some("test".to_string()),
+        args: vec![],
+        env: HashMap::new(),
+        cwd: None,
+        url: None,
+        transport: None,
+        connect_timeout: None,
+        execute_timeout: None,
+        read_timeout: Some(180),
+        disabled: false,
+        enabled: true,
+        required: false,
+        enabled_tools: Vec::new(),
+        disabled_tools: Vec::new(),
+        headers: HashMap::new(),
+        env_headers: HashMap::new(),
+        bearer_token_env_var: None,
+        scopes: Vec::new(),
+        oauth: None,
+        oauth_resource: None,
+        reviewed_plugin: None,
+    };
+    assert_eq!(connection_read_timeout(&server, &global), 180);
+
+    server.read_timeout = Some(30);
+    assert_eq!(connection_read_timeout(&server, &global), 30);
+
+    server.read_timeout = None;
+    assert_eq!(connection_read_timeout(&server, &global), 120);
+}
+
+#[test]
+fn http_transport_total_covers_the_execute_budget() {
+    // The reqwest client-level total must bound the longest request the
+    // connection carries (tools/call at the execute budget), independent of
+    // the read knob.
+    let global = McpTimeouts {
+        connect_timeout: 10,
+        execute_timeout: 1800,
+        read_timeout: 120,
+    };
+    let mut server = McpServerConfig {
+        command: Some("test".to_string()),
+        args: vec![],
+        env: HashMap::new(),
+        cwd: None,
+        url: None,
+        transport: None,
+        connect_timeout: None,
+        execute_timeout: None,
+        read_timeout: Some(30),
+        disabled: false,
+        enabled: true,
+        required: false,
+        enabled_tools: Vec::new(),
+        disabled_tools: Vec::new(),
+        headers: HashMap::new(),
+        env_headers: HashMap::new(),
+        bearer_token_env_var: None,
+        scopes: Vec::new(),
+        oauth: None,
+        oauth_resource: None,
+        reviewed_plugin: None,
+    };
+    assert_eq!(http_total_timeout(&server, &global), 1800);
+
+    server.execute_timeout = Some(3600);
+    assert_eq!(http_total_timeout(&server, &global), 3600);
+}
+
+#[test]
+fn per_request_read_budget_widens_for_long_calls_only() {
+    // A tools/call with the default 1800s execute budget must not be cut
+    // short by a smaller read knob, while a 120s resources/read keeps the
+    // knob as its inner budget.
+    assert_eq!(per_request_read_budget(120, 1800), 1800);
+    assert_eq!(per_request_read_budget(30, 1800), 1800);
+    assert_eq!(per_request_read_budget(180, 120), 180);
 }
 
 #[test]
@@ -2570,6 +2666,49 @@ impl McpTransport for HangingValueTransport {
             .unwrap()
             .push(serde_json::from_slice(&msg)?);
         Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        std::future::pending().await
+    }
+}
+
+/// Answers every request with a valid response after a fixed delay: the
+/// shape of a server that is alive and working, just slower than a small
+/// read knob would allow.
+struct DelayedValueTransport {
+    sent: Arc<Mutex<Vec<serde_json::Value>>>,
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl McpTransport for DelayedValueTransport {
+    async fn send(&mut self, msg: Vec<u8>) -> Result<()> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&msg)?);
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Vec<u8>> {
+        tokio::time::sleep(self.delay).await;
+        Ok(json_frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"ok": true}
+        })))
+    }
+}
+
+/// A transport whose write side never completes — the shape of a server
+/// that wedged without draining stdin.
+struct StalledSendTransport;
+
+#[async_trait::async_trait]
+impl McpTransport for StalledSendTransport {
+    async fn send(&mut self, _msg: Vec<u8>) -> Result<()> {
+        std::future::pending().await
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
@@ -2754,7 +2893,7 @@ async fn recv_times_out_waiting_for_mcp_response_and_disconnects() {
     conn.read_timeout_secs = 0;
 
     let err = conn
-        .recv("1".to_string())
+        .recv("1".to_string(), 0)
         .await
         .expect_err("hung transport should time out inside recv");
 
@@ -2763,6 +2902,44 @@ async fn recv_times_out_waiting_for_mcp_response_and_disconnects() {
             .contains("Timed out waiting for MCP JSON-RPC response from server 'mock' after 0s"),
         "unexpected error: {err:#}"
     );
+    assert_eq!(conn.state(), ConnectionState::Disconnected);
+}
+
+#[tokio::test]
+async fn call_method_read_wait_is_widened_to_the_request_budget() {
+    // Pins the wiring, not just the pure function: a small stored read knob
+    // must not undercut a raised per-request budget. The server answers at
+    // 1.5s; the 1s knob alone would give up first, the widened wait carries
+    // the request to the answer.
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let mut conn = test_connection(Box::new(DelayedValueTransport {
+        sent: Arc::clone(&sent),
+        delay: Duration::from_millis(1500),
+    }));
+    conn.read_timeout_secs = 1;
+
+    let result = conn
+        .call_method("tools/call", serde_json::json!({"name": "echo"}), 5)
+        .await
+        .expect("the per-request read budget must widen the 1s knob past the 1.5s answer");
+    assert_eq!(result, serde_json::json!({"ok": true}));
+}
+
+#[tokio::test]
+async fn call_method_bounds_a_stalled_send_inside_the_request_budget() {
+    let mut conn = test_connection(Box::new(StalledSendTransport));
+
+    let err = conn
+        .call_method("tools/call", serde_json::json!({"name": "echo"}), 2)
+        .await
+        .expect_err("a wedged write side must hit the request budget");
+    assert!(
+        err.to_string().contains("timed out sending after 2s"),
+        "unexpected error: {err:#}"
+    );
+    // A timed-out write may have left a partial line in the pipe, which
+    // desyncs the line protocol: the pool must rebuild instead of handing
+    // the broken transport back out.
     assert_eq!(conn.state(), ConnectionState::Disconnected);
 }
 
@@ -2784,6 +2961,10 @@ async fn call_method_times_out_while_waiting_for_response() {
         "unexpected error: {err:#}"
     );
     assert_eq!(sent.lock().unwrap().len(), 1);
+    // The widened inner wait cannot fire before the outer budget, so an
+    // elapsed outer wait means the answer may still arrive late and would
+    // be read as the next request's response: the connection is poison.
+    assert_eq!(conn.state(), ConnectionState::Disconnected);
 }
 
 /// JSON-RPC requires exactly one of `result` / `error` on a response. A
@@ -6217,7 +6398,7 @@ async fn needs_auth_server_advertises_synthetic_authenticate_tool() {
         auth_tool.description
     );
     assert!(
-        auth_tool.description.contains("blocks (up to 5 minutes)"),
+        auth_tool.description.contains("blocks (up to 15 minutes)"),
         "{}",
         auth_tool.description
     );

@@ -528,8 +528,12 @@ pub struct McpTimeouts {
 fn default_connect_timeout() -> u64 {
     10
 }
+// 30 minutes: an MCP tool call legitimately runs minutes (scrapes, remote
+// jobs, agent-side work). The old 60s default returned "timed out" to the
+// model for healthy-but-slow tools, which then retried and compounded cost.
+// Per-server/global overrides still apply via `execute_timeout`.
 fn default_execute_timeout() -> u64 {
-    60
+    1800
 }
 fn default_read_timeout() -> u64 {
     120
@@ -1494,6 +1498,34 @@ impl Drop for PendingAuthorityWatch {
     }
 }
 
+/// Connection-level response-read wait: the user's `read_timeout` knob,
+/// unclamped. Per-request widening happens in `call_method`; keeping the
+/// knob intact here means fast requests (`resources/read`, discovery) fail
+/// at the configured budget on a wedged server instead of waiting out the
+/// execute budget.
+fn connection_read_timeout(config: &McpServerConfig, global: &McpTimeouts) -> u64 {
+    config.effective_read_timeout(global)
+}
+
+/// Per-request inner read budget: the read knob, widened to at least the
+/// request's own outer budget so a server that is silent for the whole
+/// execution of a long tool call is not declared dead mid-call (an inner
+/// read firing first would mark the connection Disconnected and silently
+/// defeat a raised execute budget).
+fn per_request_read_budget(read_timeout_secs: u64, request_timeout_secs: u64) -> u64 {
+    read_timeout_secs.max(request_timeout_secs)
+}
+
+/// Transport-level total backstop for the HTTP client: it must cover the
+/// longest request the connection carries (`tools/call` at the execute
+/// budget), so a raised `execute_timeout` governs there too. This is a
+/// ceiling for the transport, not the read knob — the two stay independent.
+fn http_total_timeout(config: &McpServerConfig, global: &McpTimeouts) -> u64 {
+    config
+        .effective_read_timeout(global)
+        .max(config.effective_execute_timeout(global))
+}
+
 impl McpConnection {
     /// Connect to an MCP server and initialize it.
     ///
@@ -1507,7 +1539,23 @@ impl McpConnection {
         network_policy: Option<&NetworkPolicyDecider>,
     ) -> Result<Self> {
         let connect_timeout_secs = config.effective_connect_timeout(global_timeouts);
-        let read_timeout_secs = config.effective_read_timeout(global_timeouts);
+        // The response-read wait is the user's `read_timeout` knob. Per
+        // request, `call_method` widens it to at least that request's own
+        // outer budget so an inner read can never undercut a long
+        // `tools/call` (a server is silent until its tool finishes; a
+        // smaller inner read would fire first, mark the connection
+        // Disconnected, and silently defeat a raised `execute_timeout`).
+        // Keeping the knob intact here means fast requests (`resources/read`,
+        // discovery) still fail at the configured read budget instead of
+        // waiting out the execute budget on a wedged server.
+        let read_timeout_secs = connection_read_timeout(&config, global_timeouts);
+        // Transport-level total backstop for the HTTP client below: it must
+        // cover the longest request the connection carries (`tools/call` at
+        // the execute budget), so a raised `execute_timeout` governs there
+        // too. (Previously this was set from connect_timeout(10s), silently
+        // capping every request at 10s and making the per-server knobs dead
+        // for HTTP transports.)
+        let http_total_timeout_secs = http_total_timeout(&config, global_timeouts);
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let authority_revocation_reason = Arc::new(std::sync::Mutex::new(None));
         if let Some(source) = config.reviewed_plugin.as_ref() {
@@ -1556,15 +1604,16 @@ impl McpConnection {
             // local Clash / Shadowsocks tunnel, etc. previously had MCP
             // HTTP traffic bypass the proxy entirely while every other
             // tool on the box (curl, npm, …) used it.
-            // `connect_timeout` bounds only the connect phase; the total request
-            // timeout is the read timeout (a sane backstop) so per-call
-            // execute_timeout can actually govern request duration. Previously
+            // `connect_timeout` bounds only the connect phase; the total
+            // request timeout is the per-request budget ceiling (read vs
+            // execute, see `http_total_timeout_secs`) so a raised
+            // execute_timeout actually governs request duration. Previously
             // this set reqwest's TOTAL `.timeout()` from connect_timeout (10s),
             // which silently capped every request at 10s and made the per-server
             // execute_timeout / read_timeout dead for HTTP transports.
             let mut client_builder = crate::tls::reqwest_client_builder()
                 .connect_timeout(Duration::from_secs(connect_timeout_secs))
-                .timeout(Duration::from_secs(read_timeout_secs));
+                .timeout(Duration::from_secs(http_total_timeout_secs));
             if let Some(approved_origin) = config
                 .reviewed_plugin
                 .as_ref()
@@ -1754,7 +1803,7 @@ impl McpConnection {
         }))
         .await?;
 
-        let response = self.recv(init_id).await?;
+        let response = self.recv(init_id, self.read_timeout_secs).await?;
         response_result(
             &response,
             "initialize",
@@ -1844,7 +1893,7 @@ impl McpConnection {
             }))
             .await?;
 
-            let response = self.recv(list_id).await?;
+            let response = self.recv(list_id, self.read_timeout_secs).await?;
             let Some(result) = response_result(
                 &response,
                 "tools/list",
@@ -1905,7 +1954,7 @@ impl McpConnection {
             }))
             .await?;
 
-            let response = self.recv(list_id).await?;
+            let response = self.recv(list_id, self.read_timeout_secs).await?;
             let Some(result) = response_result(
                 &response,
                 "resources/list",
@@ -1958,7 +2007,7 @@ impl McpConnection {
             }))
             .await?;
 
-            let response = self.recv(list_id).await?;
+            let response = self.recv(list_id, self.read_timeout_secs).await?;
             let Some(result) = response_result(
                 &response,
                 "resources/templates/list",
@@ -2014,7 +2063,7 @@ impl McpConnection {
             }))
             .await?;
 
-            let response = self.recv(list_id).await?;
+            let response = self.recv(list_id, self.read_timeout_secs).await?;
             let Some(result) = response_result(
                 &response,
                 "prompts/list",
@@ -2119,31 +2168,71 @@ impl McpConnection {
         }
 
         let call_id = self.next_id();
-        if let Err(error) = self
-            .send(serde_json::json!({
+        // The send leg shares the request budget: a server that wedges
+        // without draining stdin would otherwise block `write_all` forever,
+        // outside every budget — the same liveness hole the read leg's
+        // per-request budget closed. A timed-out write may have left a
+        // partial line in the pipe, which desyncs the line protocol, and a
+        // timed-out outer read wait may still be answered late — either way
+        // the connection is poison for the next request. Mark it
+        // Disconnected (like the inner read timeout in `recv`) so the pool
+        // rebuilds instead of handing the broken transport back out.
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            self.send(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": &call_id,
                 "method": method,
                 "params": params
-            }))
-            .await
+            })),
+        )
+        .await
         {
-            return self.finish_guarded_error(error).await;
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return self.finish_guarded_error(error).await,
+            Err(error) => {
+                // A timed-out write can linger as a partial line; the
+                // connection must not be reused (see the budget comment
+                // above).
+                self.state = ConnectionState::Disconnected;
+                return self
+                    .finish_guarded_error(anyhow::anyhow!(
+                        "MCP method '{}' on server '{}' timed out sending after {}s: {error}",
+                        method,
+                        self.name,
+                        timeout_secs
+                    ))
+                    .await;
+            }
         }
 
-        let response =
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), self.recv(call_id))
-                .await
-                .with_context(|| {
-                    format!(
-                        "MCP method '{}' on server '{}' timed out after {}s",
-                        method, self.name, timeout_secs
-                    )
-                }) {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) => return self.finish_guarded_error(error).await,
-                Err(error) => return self.finish_guarded_error(error).await,
-            };
+        // The inner read wait must never undercut this request's own outer
+        // budget: a server is silent for the whole execution of a tool call,
+        // so a smaller read knob would fire first, mark the connection
+        // Disconnected, and silently defeat a raised execute budget.
+        let read_budget_secs = per_request_read_budget(self.read_timeout_secs, timeout_secs);
+        let response = match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            self.recv(call_id, read_budget_secs),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "MCP method '{}' on server '{}' timed out after {}s",
+                method, self.name, timeout_secs
+            )
+        }) {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return self.finish_guarded_error(error).await,
+            Err(error) => {
+                // The inner wait cannot fire first (it is widened to this
+                // request's own budget), so an elapsed outer budget means
+                // the response may still arrive late and would be read as
+                // the answer to the NEXT request. Poison the connection.
+                self.state = ConnectionState::Disconnected;
+                return self.finish_guarded_error(error).await;
+            }
+        };
 
         if let Some(error) = response.get("error") {
             if self.config.reviewed_plugin.is_some() {
@@ -2238,20 +2327,21 @@ impl McpConnection {
         result
     }
 
-    async fn recv(&mut self, expected_id: String) -> Result<serde_json::Value> {
+    async fn recv(
+        &mut self,
+        expected_id: String,
+        read_budget_secs: u64,
+    ) -> Result<serde_json::Value> {
         loop {
-            let bytes = match tokio::time::timeout(
-                Duration::from_secs(self.read_timeout_secs),
-                async {
-                    tokio::select! {
-                        biased;
-                        _ = self.cancel_token.cancelled() => {
-                            anyhow::bail!("MCP connection '{}' was cancelled", self.name)
-                        }
-                        result = self.transport.recv() => result,
+            let bytes = match tokio::time::timeout(Duration::from_secs(read_budget_secs), async {
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => {
+                        anyhow::bail!("MCP connection '{}' was cancelled", self.name)
                     }
-                },
-            )
+                    result = self.transport.recv() => result,
+                }
+            })
             .await
             {
                 Ok(result) => result.inspect_err(|_e| {
@@ -2262,7 +2352,7 @@ impl McpConnection {
                     anyhow::bail!(
                         "Timed out waiting for MCP JSON-RPC response from server '{}' after {}s",
                         self.name,
-                        self.read_timeout_secs
+                        read_budget_secs
                     );
                 }
             };
@@ -3328,7 +3418,7 @@ impl McpPool {
     /// whether a browser login is needed and, if so, start it. Only touches
     /// config, the connection map, and the token store — it returns as soon
     /// as the authorization URL exists, so a caller holding the pool lock can
-    /// release it before the (up to five minute) browser wait in
+    /// release it before the (up to fifteen minute) browser wait in
     /// [`oauth::McpOAuthToolLogin::finish`]. Holding the lock across that wait
     /// would freeze every other MCP call, the `/mcp` manager, and the
     /// Extensions view for the whole sign-in.

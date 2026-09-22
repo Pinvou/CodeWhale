@@ -46,7 +46,7 @@ impl ModelClientRlmAdapter {
 }
 
 /// Per-child completion timeout — same as the previous sidecar default.
-const CHILD_TIMEOUT_SECS: u64 = 120;
+pub(super) const CHILD_TIMEOUT_SECS: u64 = 120;
 /// Hard cap on prompts per batch RPC.
 pub const MAX_BATCH: usize = 16;
 
@@ -124,6 +124,10 @@ pub struct RlmBridge {
     /// Recursion budget remaining for `Rlm` / `RlmBatch` requests. When
     /// zero, those requests fall back to plain `Llm` completions.
     depth_remaining: u32,
+    /// Wall-clock budget for one child completion. Configurable via the
+    /// RLM session's `sub_query_timeout_secs` so callers can size it for
+    /// big-context child generations.
+    sub_query_timeout: Duration,
     usage: Arc<Mutex<Usage>>,
 }
 
@@ -137,8 +141,15 @@ impl RlmBridge {
             client,
             child_model,
             depth_remaining,
+            sub_query_timeout: Duration::from_secs(CHILD_TIMEOUT_SECS),
             usage: Arc::new(Mutex::new(Usage::default())),
         }
+    }
+
+    /// Override the per-child-completion wall-clock budget (seconds).
+    pub(crate) fn with_sub_query_timeout_secs(mut self, secs: u64) -> Self {
+        self.sub_query_timeout = Duration::from_secs(secs);
+        self
     }
 
     pub fn usage_handle(&self) -> Arc<Mutex<Usage>> {
@@ -187,22 +198,24 @@ impl RlmBridge {
         };
 
         let fut = self.client.create_message_boxed(request);
-        let response =
-            match tokio::time::timeout(Duration::from_secs(CHILD_TIMEOUT_SECS), fut).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    return SingleResp {
-                        text: String::new(),
-                        error: Some(format!("llm_query failed: {e}")),
-                    };
-                }
-                Err(_) => {
-                    return SingleResp {
-                        text: String::new(),
-                        error: Some(format!("llm_query timed out after {CHILD_TIMEOUT_SECS}s")),
-                    };
-                }
-            };
+        let response = match tokio::time::timeout(self.sub_query_timeout, fut).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return SingleResp {
+                    text: String::new(),
+                    error: Some(format!("llm_query failed: {e}")),
+                };
+            }
+            Err(_) => {
+                return SingleResp {
+                    text: String::new(),
+                    error: Some(format!(
+                        "llm_query timed out after {}s",
+                        self.sub_query_timeout.as_secs()
+                    )),
+                };
+            }
+        };
 
         {
             let mut u = self.usage.lock().await;
@@ -287,6 +300,7 @@ impl RlmBridge {
             child_model,
             tx,
             self.depth_remaining.saturating_sub(1),
+            self.sub_query_timeout,
         )
         .await;
 
@@ -437,6 +451,60 @@ mod tests {
     fn bridge_for(mock: Arc<MockLlmClient>, depth_remaining: u32) -> RlmBridge {
         let client: Arc<dyn RlmLlmClient> = mock;
         RlmBridge::new(client, "child-model".to_string(), depth_remaining)
+    }
+
+    /// A child client that accepts the request and never answers: the
+    /// configured per-completion budget must cut it off.
+    struct HangingChildClient;
+
+    impl RlmLlmClient for HangingChildClient {
+        fn effective_route_envelope(
+            &self,
+            _requested_model: &str,
+            _dispatched_at: chrono::DateTime<chrono::Utc>,
+        ) -> crate::cost_status::EffectiveRouteEnvelope {
+            crate::cost_status::EffectiveRouteEnvelope {
+                provider: crate::config::ApiProvider::Custom,
+                provider_identity: "mock".to_string(),
+                model: _requested_model.to_string(),
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::default(),
+                dispatched_at: _dispatched_at,
+            }
+        }
+
+        fn effective_max_output_tokens(&self, _requested_model: &str) -> u32 {
+            64
+        }
+
+        fn create_message_boxed(
+            &self,
+            _request: MessageRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<MessageResponse>> + Send + '_>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_query_timeout_governs_the_child_completion_deadline() {
+        // The session's sub_query_timeout_secs was historically stored but
+        // never read (the bridge always used its 120s const); this pins the
+        // configured budget actually governing the deadline, including the
+        // timeout message naming the configured value.
+        let client: Arc<dyn RlmLlmClient> = Arc::new(HangingChildClient);
+        let bridge = RlmBridge::new(Arc::clone(&client), "child-model".to_string(), 1)
+            .with_sub_query_timeout_secs(1);
+
+        let response = bridge
+            .dispatch_llm("hang forever".to_string(), None, None, None)
+            .await;
+
+        let error = response.error.expect("hanging child must time out");
+        assert!(
+            error.contains("timed out after 1s"),
+            "timeout must reflect the configured budget; got {error}"
+        );
     }
 
     #[test]

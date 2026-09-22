@@ -1297,7 +1297,10 @@ impl DeepSeekClient {
                         .await?)
                 }
                 super::stream_entry::StreamHttpPolicy::DualWithH1Fallback => {
-                    self.send_json_with_retry(url, body).await
+                    // Stream open: no per-request total — the response body
+                    // outlives the open, and a total would ride on it and
+                    // truncate the stream.
+                    self.open_stream_json_with_retry(url, body).await
                 }
             }
         })

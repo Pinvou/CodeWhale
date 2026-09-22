@@ -16,7 +16,7 @@ use crate::models::{
 };
 use crate::repl::PythonRuntime;
 
-use super::bridge::{RlmBridge, RlmLlmClient};
+use super::bridge::{CHILD_TIMEOUT_SECS, RlmBridge, RlmLlmClient};
 use super::prompt::rlm_system_prompt;
 use crate::models::Role;
 
@@ -106,6 +106,7 @@ pub async fn run_rlm_turn(
         child_model,
         tx_event,
         max_depth,
+        Duration::from_secs(CHILD_TIMEOUT_SECS),
     )
     .await
 }
@@ -129,6 +130,7 @@ pub async fn run_rlm_turn_with_root(
         child_model,
         tx_event,
         max_depth,
+        Duration::from_secs(CHILD_TIMEOUT_SECS),
     )
     .await
 }
@@ -136,6 +138,7 @@ pub async fn run_rlm_turn_with_root(
 /// Inner entry point — also used by the bridge when it recurses. Returns
 /// a boxed future to break the recursive opaque-future-type cycle:
 /// `run_rlm_turn_inner` → `RlmBridge::dispatch` → `run_rlm_turn_inner`.
+#[allow(clippy::too_many_arguments)] // one knob per concern; struct-ifying the boxed-future entry adds churn
 pub(crate) fn run_rlm_turn_inner(
     client: Arc<dyn RlmLlmClient>,
     model: String,
@@ -144,6 +147,7 @@ pub(crate) fn run_rlm_turn_inner(
     child_model: String,
     tx_event: mpsc::Sender<Event>,
     max_depth: u32,
+    sub_query_timeout: Duration,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RlmTurnResult> + Send>> {
     Box::pin(run_rlm_turn_impl(
         client,
@@ -153,6 +157,7 @@ pub(crate) fn run_rlm_turn_inner(
         child_model,
         tx_event,
         max_depth,
+        sub_query_timeout,
     ))
 }
 
@@ -167,6 +172,7 @@ fn turn_timeout() -> Option<Duration> {
 // Implementation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_rlm_turn_impl(
     client: Arc<dyn RlmLlmClient>,
     model: String,
@@ -175,6 +181,7 @@ async fn run_rlm_turn_impl(
     child_model: String,
     tx_event: mpsc::Sender<Event>,
     max_depth: u32,
+    sub_query_timeout: Duration,
 ) -> RlmTurnResult {
     let start = Instant::now();
     let mut total_usage = Usage::default();
@@ -218,8 +225,12 @@ async fn run_rlm_turn_impl(
         }
     };
 
-    // 3. Build the bridge that services llm_query / rlm_query RPCs.
-    let bridge = RlmBridge::new(Arc::clone(&client), child_model.clone(), max_depth);
+    // 3. Build the bridge that services llm_query / rlm_query RPCs. The
+    // session's sub-query budget follows the recursion: a nested bridge
+    // inherits what the outer bridge was configured with, so the knob
+    // governs llm_query at every depth.
+    let bridge = RlmBridge::new(Arc::clone(&client), child_model.clone(), max_depth)
+        .with_sub_query_timeout_secs(sub_query_timeout.as_secs());
     let usage_handle = bridge.usage_handle();
 
     let _ = tx_event
@@ -944,6 +955,7 @@ mod tests {
             "child-model".to_string(),
             tx,
             0,
+            Duration::from_secs(crate::rlm::bridge::CHILD_TIMEOUT_SECS),
         )
         .await;
 

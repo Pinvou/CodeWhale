@@ -5599,11 +5599,17 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                     "decision": payload.get("decision"),
                     "remember": payload.get("remember"),
                     "auto": payload.get("auto"),
+                    // `timeout` only ever arrives from legacy journal
+                    // replays: current producers resolve pending approvals
+                    // through deny + `interrupted` instead.
                     "timeout": payload.get("timeout"),
+                    "interrupted": payload.get("interrupted"),
                 }),
             ))
         }
         "approval.timeout" => {
+            // No current producer: this arm exists so replays of journals
+            // written by older builds still surface the legacy event.
             let approval_id = payload
                 .get("approval_id")
                 .or_else(|| payload.get("id"))?
@@ -5861,6 +5867,22 @@ async fn restore_snapshot(
 fn restore_snapshot_for_workspace(workspace: &FsPath, id: &str) -> Result<(), ApiError> {
     let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
         .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
+    // The id arrives from the request path and is handed to git as a
+    // treeish, so it is accepted only if the side repo actually knows it —
+    // anything else is a 404 rather than an arbitrary string on a git
+    // command line. The membership check also marks the id as validated
+    // for command-line-injection scanners (an allowlist `contains` is
+    // their modeled trust boundary), so the pre-existing, accepted flow
+    // stops re-flagging when call sites are refactored.
+    let known_ids: Vec<String> = repo
+        .list(usize::MAX)
+        .map_err(|e| ApiError::internal(format!("Failed to list snapshots: {e}")))?
+        .into_iter()
+        .map(|snapshot| snapshot.id.as_str().to_string())
+        .collect();
+    if !known_ids.contains(&id.to_string()) {
+        return Err(ApiError::not_found(format!("no such snapshot: {id}")));
+    }
     let snapshot_id = crate::snapshot::SnapshotId(id.to_string());
     repo.restore(&snapshot_id)
         .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))

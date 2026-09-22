@@ -19696,6 +19696,49 @@ async fn code_execution_scenario() {
     }
 }
 
+// The pid-liveness assertion polls the process via libc, which is only a
+// dependency on unix targets — same gate as the js/plugin kill tests.
+#[cfg(unix)]
+#[tokio::test]
+async fn code_execution_timeout_kills_the_interpreter_instead_of_orphaning_it() {
+    // The kill path needs a real interpreter; skip where python is absent.
+    if crate::dependencies::resolve_python_interpreter().is_none() {
+        eprintln!("skipping: python not present");
+        return;
+    }
+    let tmp = tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("child_pid");
+    let code = format!(
+        "import os, time\nopen({}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n",
+        serde_json::json!(pid_file.to_string_lossy())
+    );
+
+    let err = execute_code_execution_tool(&json!({ "code": code }), tmp.path())
+        .await
+        .expect_err("a 60s sleep must hit the execution timeout");
+    assert!(
+        matches!(err, ToolError::Timeout { .. }),
+        "expected a timeout error; got {err:?}"
+    );
+
+    // The interpreter reported its pid before sleeping; the timeout must
+    // have killed it (explicit kill), not left it running.
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("interpreter must have written its pid")
+        .trim()
+        .parse()
+        .expect("pid file must contain an integer");
+    let mut attempts = 0;
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            attempts < 50,
+            "interpreter {pid} is still alive after the timeout kill"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        attempts += 1;
+    }
+}
+
 #[test]
 fn plan_mode_catalog_skips_code_execution_tool_but_agent_keeps_it() {
     let mut plan_catalog = vec![api_tool("read_file")];
@@ -23847,6 +23890,103 @@ async fn turn_wall_clock_budget_is_overridable() {
 
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     assert_eq!(mock.call_count(), 1);
+}
+
+/// R1: the request_user_input wait is human-paced, so like the approval wait
+/// it must be excluded from the turn wall-clock budget. An answer submitted
+/// past the budget must still drive the turn to completion — not be
+/// collected and then discarded with a budget-exhausted failure at the next
+/// provider boundary.
+#[tokio::test]
+async fn user_input_human_wait_is_excluded_from_the_turn_wall_clock() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let questions = json!({
+        "questions": [{
+            "header": "Confirm",
+            "id": "q1",
+            "question": "Proceed?",
+            "options": [
+                {"label": "Yes", "description": "continue the work"},
+                {"label": "No", "description": "stop here"}
+            ]
+        }]
+    });
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call_1", "request_user_input", &questions.to_string()),
+        canned::simple_text_turn("The user confirmed; the work is complete."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let engine_config = EngineConfig {
+        // A 2s budget: the 3s answer delay below exceeds it, so without
+        // the human-wait exclusion the turn would fail right after the
+        // answer finally lands. The margin above the pre-pause work stays
+        // generous so a loaded CI host cannot trip the budget before the
+        // wait even begins.
+        turn_wall_clock: std::time::Duration::from_secs(2),
+        ..deterministic_engine_config(workspace.path())
+    };
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let registry = crate::tools::ToolRegistry::new(context);
+    // The question tool must be present AND active, or the model's call is
+    // rejected as an unknown/inactive tool and the turn never waits on a
+    // human. request_user_input is deferred by default, so activate it the
+    // way tool_search would.
+    let registry = {
+        let mut registry = registry;
+        registry.register(std::sync::Arc::new(
+            crate::tools::user_input::RequestUserInputTool,
+        ));
+        registry
+    };
+    let surface = ToolSurfacePolicy::new(
+        registry,
+        Some(vec![api_tool(REQUEST_USER_INPUT_NAME)]),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[REQUEST_USER_INPUT_NAME],
+        engine.config.strict_tool_mode,
+        engine.config.allowed_tools.clone(),
+        engine.config.disallowed_tools.clone(),
+        engine.config.max_tool_calls,
+        engine.session.approval_mode,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(engine.config.max_steps);
+
+    // Answer after 3s — past the 2s budget, well inside the test timeout.
+    let submit_task = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        handle
+            .submit_user_input(
+                "call_1",
+                crate::tools::user_input::UserInputResponse {
+                    answers: vec![crate::tools::user_input::UserInputAnswer {
+                        id: "q1".to_string(),
+                        label: "Yes".to_string(),
+                        value: "Yes".to_string(),
+                    }],
+                },
+            )
+            .await
+            .expect("submit user input");
+    });
+
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    submit_task.await.expect("submit task joins");
+
+    assert_eq!(
+        status,
+        TurnOutcomeStatus::Completed,
+        "a human-paced answer must complete the turn, not be dropped: {error:?}"
+    );
+    assert_eq!(
+        mock.call_count(),
+        2,
+        "the submitted answer must reach the next model request"
+    );
 }
 
 /// R1: a turn that keeps calling tools past its model-step ceiling ends as a

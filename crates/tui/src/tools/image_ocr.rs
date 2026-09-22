@@ -9,8 +9,9 @@
 //! asset the user drops into the workspace without bouncing through
 //! a shell.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -62,9 +63,32 @@ impl ToolSpec for ImageOcrTool {
             )));
         }
 
-        let text = ocr_image_path(&image_path)?;
+        let text = ocr_image_path_bounded(image_path).await?;
         Ok(ToolResult::success(text))
     }
+}
+
+/// Wall-clock bound for one OCR call. Tesseract on a large scan can run
+/// for minutes and native Vision OCR is blocking FFI; without a bound the
+/// tool occupied an executor thread (and the turn) for as long as the
+/// backend felt like taking. The bounded wrapper runs the sync work on the
+/// blocking pool and hands control back to the caller when the deadline
+/// fires; a wedged backend keeps its blocking thread (and any tesseract
+/// child it spawned) running until it returns on its own, but the tool
+/// call itself is bounded. Known, disclosed trade-off: neither the FFI
+/// call nor the orphaned child can be killed mid-flight.
+const OCR_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub(crate) async fn ocr_image_path_bounded(image_path: PathBuf) -> Result<String, ToolError> {
+    tokio::time::timeout(
+        OCR_TIMEOUT,
+        tokio::task::spawn_blocking(move || ocr_image_path(&image_path)),
+    )
+    .await
+    .map_err(|_| ToolError::Timeout {
+        seconds: OCR_TIMEOUT.as_secs(),
+    })?
+    .map_err(|e| ToolError::execution_failed(format!("image_ocr task failed: {e}")))?
 }
 
 pub(crate) fn ocr_available() -> bool {

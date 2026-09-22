@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
@@ -33,8 +32,20 @@ use super::spec::{
 
 use crate::config::ToolOverride;
 
-/// Timeout for plugin script execution (120 seconds).
-const PLUGIN_EXECUTION_TIMEOUT: Duration = Duration::from_secs(120);
+/// Timeout for plugin script execution. Plugin scripts are
+/// model-invoked interpreters in the same class as js_execution /
+/// code_execution (600s there): 120s killed healthy long-running
+/// plugins, and a timeout used to leave the script running orphaned.
+fn plugin_execution_timeout() -> Duration {
+    if cfg!(test) {
+        // Same test budget as the js/code interpreters: short enough that
+        // the kill test finishes fast, long enough that happy-path tests
+        // never approach it.
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(600)
+    }
+}
 
 /// Metadata extracted from a plugin script's frontmatter header.
 #[derive(Debug, Clone)]
@@ -274,40 +285,34 @@ async fn run_plugin_child_raw(
     label: &str,
     input: Value,
 ) -> Result<ToolResult, ToolError> {
-    let input_bytes = serde_json::to_vec(&input)
-        .map_err(|e| ToolError::invalid_input(format!("failed to serialize input: {e}")))?;
+    let input_bytes = super::process::stdin_json(&input)?;
 
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ToolError::execution_failed(format!("failed to spawn {label}: {e}")))?;
-
-    let stdin_writer = child.stdin.take().map(|mut stdin| {
-        tokio::spawn(async move {
-            if stdin.write_all(&input_bytes).await.is_ok() {
-                let _ = stdin.shutdown().await;
-            }
-        })
-    });
-
-    let output = tokio::time::timeout(PLUGIN_EXECUTION_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| ToolError::Timeout {
-            seconds: PLUGIN_EXECUTION_TIMEOUT.as_secs(),
-        })?
-        .map_err(|e| ToolError::execution_failed(format!("process error: {e}")))?;
-
-    if let Some(stdin_writer) = stdin_writer {
-        let _ = stdin_writer.await;
-    }
+    // The shared runner pipes and drains stdout/stderr while the child runs,
+    // writes the stdin payload, kills and reaps explicitly on timeout, and
+    // bounds the post-exit drain so a grandchild that inherited the pipes
+    // cannot hold the call.
+    let output = super::process::run_bounded_child(
+        cmd,
+        Some(input_bytes),
+        plugin_execution_timeout(),
+        label,
+    )
+    .await?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if let Ok(parsed) = serde_json::from_str::<ToolResult>(&stdout) {
             Ok(parsed)
+        } else if super::process::drain_truncated(&output) {
+            // This surface reports stdout only, so the runner's
+            // truncation note on stderr would otherwise vanish: an
+            // unparseable, possibly cut-off output must not pass as a
+            // silent success.
+            Err(ToolError::execution_failed(format!(
+                "plugin script stdout did not parse as a tool result and the output \
+                 pipes did not close after the interpreter exited (the captured \
+                 output may be truncated): {stdout}"
+            )))
         } else {
             Ok(ToolResult::success(stdout))
         }
@@ -700,6 +705,48 @@ echo hello
 
         assert!(result.success);
         assert!(result.content.len() > 64 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_plugin_child_instead_of_orphaning_it() {
+        let dir = TempDir::new().unwrap();
+        let pid_file = dir.path().join("child_pid");
+        let script = dir.path().join("hang.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n# name: hang\necho $$ > '{}'\nsleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        let (interpreter, args) = script_command_parts(&script, &[]);
+        let err = run_plugin_child(&interpreter, &args, "hang", serde_json::json!({}))
+            .await
+            .expect_err("a 60s sleep must hit the plugin execution timeout");
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "expected a timeout error; got {err:?}"
+        );
+
+        // The script reported its pid before sleeping; the timeout must
+        // have killed it instead of leaving it running orphaned.
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("child must have written its pid")
+            .trim()
+            .parse()
+            .expect("pid file must contain an integer");
+        let mut attempts = 0;
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                attempts < 50,
+                "plugin child {pid} is still alive after the timeout kill"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            attempts += 1;
+        }
     }
 
     #[test]

@@ -4371,8 +4371,11 @@ heartbeat_timeout_secs = 1
                 "subagents.api_timeout_secs = 0 (resolved global 600; active provider 600)"
             )
         );
+        // api_timeout 0 -> default 600, so the api floor is 630; but the
+        // heartbeat floor also sits above the 1800s sub-agent tool timeout
+        // (plus 30s), so the resolved value is 1830.
         assert!(msg.contains(
-            "subagents.heartbeat_timeout_secs = 1 (resolved global 630; active provider 630)"
+            "subagents.heartbeat_timeout_secs = 1 (resolved global 1830; active provider 1830)"
         ));
         assert!(msg.contains("subagents.providers.deepseek = inherits global"));
     }

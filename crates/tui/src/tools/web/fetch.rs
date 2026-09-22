@@ -15,7 +15,10 @@ use super::guard::{
 use crate::tools::spec::{ToolContext, ToolError};
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
-pub(crate) const HARD_MAX_TIMEOUT: Duration = Duration::from_secs(60);
+// 300s hard max: the previous 60s cap made any page needing more than
+// ~1.3 Mbps of effective throughput unfetchable, and this bound covers the
+// whole request including body streaming (10 MB bodies are allowed).
+pub(crate) const HARD_MAX_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const DEFAULT_MAX_BYTES: usize = 1_000_000;
 pub(crate) const HARD_MAX_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
