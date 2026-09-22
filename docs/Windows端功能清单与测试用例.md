@@ -61,7 +61,7 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | `bundle/` | 内置说明、技能、工作流、MCP 配置和随应用释放的扩展资源 |
 | `knowledge/` | 本地知识库数据库、索引和模型 |
 | `asr/` | 按需下载的语音识别模型 |
-| `updates/` | OTA 下载、解包和安装反馈状态 |
+| `updates/` | 静态更新安装器下载暂存目录；完整校验后才会成为可安装文件 |
 | `marketplace/` | 工具、技能安装状态和动态配置 |
 | `settings.json` | 用户设置；敏感凭据按代码策略进入系统凭据存储，不应明文展示在 UI、日志或测试报告中 |
 | `pet_window.json` / `selected_pet.json` | 桌伴公仔位置、缩放和当前选择；启用开关保存在 `settings.json` |
@@ -276,8 +276,8 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | SET-05 | 运行依赖自检 | 可用 | 检查 PDF、Pandoc、OCR、压缩、邮件、语音等依赖并给出修复入口 |
 | SET-06 | 用户反馈 | 条件可用 | 提交问题或建议，可附最多 5 个图片/视频附件，校验类型并支持失败重试 |
 | OTA-01 | 启动静默检查更新 | 条件可用 | 不阻塞启动；发现新版本后设置页和设置图标显示红点 |
-| OTA-02 | Windows OTA 下载 | 条件可用 | 下载时展示进度，支持取消，校验包和文件哈希 |
-| OTA-03 | Windows OTA 安装 | 条件可用 | 准备双层 OTA 包并启动安装程序；升级结果在下次启动上报 |
+| OTA-02 | Windows OTA 下载 | 条件可用 | 从 `latest.json` 的 Windows 平台节点下载，展示进度并支持取消，强校验大小和 SHA-256 |
+| OTA-03 | Windows OTA 安装 | 条件可用 | 启动已签名 NSIS/MSI 安装器并触发 UAC；安装成功后拉起新版本 |
 | OTA-04 | 版本保护 | 可用 | 只提示更高版本，拒绝不完整、损坏或越界的更新包 |
 
 ## 4. 测试范围与方法
@@ -513,11 +513,11 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | WIN-OTA-001 | P0 | 更新服务返回同版/旧版 | 检查更新 | 显示已是最新，不下载、不降级 |
 | WIN-OTA-002 | P0 | 更新服务返回更高 Windows 版本 | 检查并下载 | 设置图标出现红点；展示版本和说明；进度从 0 到 100 |
 | WIN-OTA-003 | P0 | 下载进行中 | 点击取消 | 网络请求停止；UI 退出下载状态；可重新检查和下载 |
-| WIN-OTA-004 | P0 | OTA 外层或内层 ZIP 条目不符 | 尝试安装 | 拒绝安装，不执行任意文件，不覆盖当前版本 |
-| WIN-OTA-005 | P0 | EXE、`FullPack.zip` 或清单哈希不符 | 尝试安装 | 校验失败并清理不可信临时内容 |
-| WIN-OTA-006 | P0 | 合法 OTA | 下载并安装 | 启动安装程序；应用当前状态有明确提示；升级后版本正确 |
-| WIN-OTA-007 | P1 | 升级安装成功 | 首次启动新版本 | 读取并上报成功结果；删除或归档待上报记录，不重复提示 |
-| WIN-OTA-008 | P1 | 升级被用户取消或失败 | 再次启动 | 上报失败/取消状态；旧版本仍可使用，后续可重试 |
+| WIN-OTA-004 | P0 | 清单缺少 `windows-x86_64`、URL 非 HTTPS、格式与扩展名不符或版本非法 | 检查更新 | 拒绝该资产，不回退到顶层 Linux 或其他平台节点 |
+| WIN-OTA-005 | P0 | 安装器大小或 SHA-256 与清单不符 | 下载或尝试安装 | 校验失败并清理不完整临时文件，不执行安装器 |
+| WIN-OTA-006 | P0 | 合法的已签名 NSIS 安装器 | 下载并安装 | 触发 UAC，覆盖安装成功；应用退出并由安装辅助进程拉起新版本 |
+| WIN-OTA-007 | P1 | 用户在 UAC 或安装器中取消升级 | 再次启动 | 旧版本仍可使用，不产生服务端结果上报；后续可重新下载和安装 |
+| WIN-OTA-008 | P1 | `latest.json` 同时包含 Linux、macOS、Windows 条目 | 发布 Windows 新版本 | 离线工具只替换 Windows 节点，其他平台条目和顶层字段不变 |
 
 ### 5.11 安全、稳定性与兼容性
 
@@ -596,7 +596,7 @@ npm run build:nsis
 |---|---|
 | P0 | Windows CI 真进程测试：PowerShell/CMD 前台实时输出、后台输出、任务取消、父子进程树清理 |
 | P0 | Engine 缺失/主动回收时的取消和 `chat:done` 权威终态端到端测试 |
-| P0 | OTA 双层 ZIP、JSON 无 BOM、两级哈希、路径越界和损坏包拒绝测试 |
+| P0 | 静态清单 JSON 无 BOM、平台隔离、HTTPS、大小/SHA-256、临时文件及路径越界拒绝测试 |
 | P1 | 中文用户名、空格路径、UNC 和联接点的附件/制品/运行时路径测试 |
 | P1 | NSIS 安装与卸载虚拟机流水线，检查注册表、PATH、VC++ 和用户数据选项 |
 | P1 | 连接器状态高频轮询期间长 turn 不被 Engine 回收的并发回归 |
@@ -635,7 +635,7 @@ npm run build:nsis
 - [ ] 桌伴三款公仔、开关持久化、状态卡回复、定时提醒、多屏拖拽、缩放、资源降级和退出联动通过。
 - [ ] 工作流启动、人工门禁、重跑、停止并修改、鉴权熔断和重启恢复通过。
 - [ ] 麦克风拒绝、首次模型下载、录音识别和会话切换保护通过。
-- [ ] OTA 检查、下载、取消、哈希失败、合法安装和升级结果上报通过。
+- [ ] OTA 检查、下载、取消、哈希失败、UAC 取消和合法安装通过；静态更新不产生旧服务端结果上报。
 - [ ] 中文用户名、含空格路径、非系统盘和低磁盘空间专项通过。
 - [ ] UI、日志、设置、会话和反馈材料均未泄露敏感凭据。
 - [ ] `npm test`、UI/知识库/输入框工具/工具市场/定时任务/桌伴/Markdown smoke、Rust 检查和 fork guard 全部记录实际结果。
@@ -662,5 +662,5 @@ npm run build:nsis
 | 监控 | `features/monitor/MonitorView.jsx`、`tauri-bridge.js` | `commands.rs`、`os/windows/windows_cpu.rs`、`windows_memory.rs` | `tests/ui_smoke.js` 及监控模块测试 |
 | 语音输入 | `features/chat/ChatView.jsx`、`tauri-bridge.js` | `voice_asr.rs`、`os/windows/windows_system.rs` | `tests/voice_input_error_logic.test.js`、`voice_asr.rs` 内模型校验和状态测试 |
 | 设置、依赖、反馈 | `features/settings/SettingsView.jsx` | `commands.rs`、`file_ingest.rs`、`windows_dependency.rs`、`windows_permission.rs` | 设置/文件解析模块测试 |
-| Windows OTA | `features/settings/SettingsView.jsx`、`tauri-bridge.js` | `updater.rs`、`os/windows/windows_update.rs` | `tests/update_notice_logic.test.js`、`tests/update_notice_ui_smoke.js`、OTA 脚本验证 |
+| Windows OTA | `features/settings/SettingsView.jsx`、`tauri-bridge.js` | `features/updater/platform/windows.rs` | `tests/update_notice_logic.test.js`、`tests/update_notice_ui_smoke.js`、`tests/windows_static_update_contract.test.js`、离线发布脚本验证 |
 | Windows 安装包 | 无 | `src-tauri/tauri.conf.json`、`packaging/windows/nsis/`、`src-tauri/packaging/windows/runtime/scripts/stage-runtime.ps1`、`scripts/tauri/build.js` | `tests/windows_runtime_packaging_contract.test.js`、`tests/wosign_signing_contract.test.js`、`tests/tauri_platform_layout.test.js`、NSIS 发版机人工/虚拟机验收 |

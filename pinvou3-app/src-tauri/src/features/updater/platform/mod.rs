@@ -6,8 +6,6 @@ mod macos;
 mod unsupported;
 #[cfg(target_os = "windows")]
 mod windows;
-#[cfg(target_os = "windows")]
-mod windows_domain_bootstrap;
 
 #[cfg(target_os = "linux")]
 pub use linux::{
