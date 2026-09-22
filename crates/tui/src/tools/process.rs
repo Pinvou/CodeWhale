@@ -10,8 +10,11 @@
 //! * the budget bounds the child only. Once it exits, the drains get a short
 //!   grace to see EOF; if a grandchild that inherited the write ends keeps
 //!   them open past the grace, the drains are aborted and the output read so
-//!   far is returned with a note on stderr. Aborting drops our read ends,
-//!   which hands the grandchild an EPIPE on its next write;
+//!   far is returned with a note on stderr. On Unix, aborting drops our read
+//!   ends and hands the grandchild an EPIPE on its next write; on Windows
+//!   the aborted read lingers on a blocking-pool thread until the
+//!   grandchild closes the pipe, so the grandchild is not signalled (see the
+//!   PR-level disclosure for this platform);
 //! * the timeout path kills the child explicitly and reaps it before
 //!   returning, so there is no window where the tool has failed but the
 //!   interpreter is still running, and the kill is directly assertable in
@@ -106,8 +109,20 @@ pub(crate) async fn run_bounded_child(
 
     let output = match tokio::time::timeout(budget, child.wait()).await {
         Ok(status) => {
-            let status =
-                status.map_err(|e| ToolError::execution_failed(format!("{label}: {e}")))?;
+            let status = match status {
+                Ok(status) => status,
+                Err(e) => {
+                    // The one exit that isn't a timeout or a clean exit:
+                    // abort the drains (and the stdin writer) before
+                    // propagating so no pipe outlives the call here either.
+                    stdout_task.abort();
+                    stderr_task.abort();
+                    if let Some(writer) = &stdin_writer {
+                        writer.abort();
+                    }
+                    return Err(ToolError::execution_failed(format!("{label}: {e}")));
+                }
+            };
             // The child closed its write ends; EOF should already have
             // arrived. The grace only bounds the grandchild case, where the
             // write ends live on in an inherited copy and read_to_end would
