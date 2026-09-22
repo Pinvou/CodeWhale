@@ -1,12 +1,14 @@
 //! 应用内升级：
 //! - Linux：检查 latest.json → 下载 deb（sha256 校验）→ pkexec apt 安装 → 重启。
 //! - macOS：检查平台清单 → 下载 dmg（sha256 校验）→ 原子替换 app → 重启。
-//! - Windows：检查平台清单 → 下载已签名 NSIS/MSI（sha256 校验）→ UAC 安装 → 拉起新版。
+//! - Windows：检查平台清单 → 下载已签名 NSIS/MSI（sha256 校验）→ UAC 安装；
+//!   NSIS 由安装器自身的 `/R`/RunAsUser 启动新版，MSI 不自动重启应用。
 //!
 //! 设计要点：
 //! - **更新源是静态 HTTPS**：服务器只托管 `latest.json` + 各平台安装包，零服务端逻辑。
 //! - **URL 不进 settings.json**：更新源是基础设施不是用户偏好，可改会成攻击面。
-//!   `PINVOU3_UPDATE_URL` env 可覆盖（e2e 测试指本地 http server）。
+//!   仅 debug/test 构建允许 `PINVOU3_UPDATE_URL` 指向 loopback e2e server；
+//!   release 构建始终使用固定 HTTPS 地址。
 //! - **下载目录用 `~/.pinvou3/updates/`** 而非 /tmp：tmpfs 受内存限制且重启清空。
 //! - **安装走 pkexec**（弹系统密码框），与 super_permission.rs 同套路；但这里用
 //!   `.output()` 捕 stderr 透传 apt 真实报错（lock 占用 / 磁盘不足等）。
@@ -30,7 +32,135 @@ pub(crate) fn cleanup_stale_backup() {
 /// 只有真正长时间收不到任何字节（更新源挂起 / 半开连接）才中断。
 const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 下载取消标志。前端 `cancel_download` 置位，下载循环每轮检查一次。
+const UPDATE_MANIFEST_URL: &str = "https://pinvou.com/pinvou3/latest.json";
+
+fn manifest_url() -> String {
+    #[cfg(any(debug_assertions, test))]
+    if let Ok(value) = std::env::var("PINVOU3_UPDATE_URL") {
+        if is_loopback_update_url(&value) {
+            return value;
+        }
+    }
+    UPDATE_MANIFEST_URL.to_string()
+}
+
+fn allow_loopback_test_urls() -> bool {
+    cfg!(any(debug_assertions, test))
+}
+
+fn is_loopback_update_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value.trim()) else {
+        return false;
+    };
+    is_loopback_http_url(&url)
+}
+
+fn is_loopback_http_url(url: &reqwest::Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateRedirectBoundary {
+    HttpsOnly,
+    LoopbackOnly,
+}
+
+fn redirect_boundary_for_start(
+    initial_url: &str,
+    allow_loopback: bool,
+) -> Result<UpdateRedirectBoundary, String> {
+    let url = reqwest::Url::parse(initial_url.trim())
+        .map_err(|_| "更新 URL 无效，已拒绝请求".to_string())?;
+    if allow_loopback && is_loopback_http_url(&url) {
+        return Ok(UpdateRedirectBoundary::LoopbackOnly);
+    }
+    if url.scheme() == "https" && url.host_str().is_some() {
+        return Ok(UpdateRedirectBoundary::HttpsOnly);
+    }
+    Err("更新 URL 必须使用 HTTPS；HTTP 仅允许 debug/test loopback 源".to_string())
+}
+
+fn redirect_chain_allowed(
+    boundary: UpdateRedirectBoundary,
+    previous: &[reqwest::Url],
+    next: &reqwest::Url,
+) -> bool {
+    previous
+        .iter()
+        .chain(std::iter::once(next))
+        .all(|url| match boundary {
+            UpdateRedirectBoundary::HttpsOnly => {
+                url.scheme() == "https" && url.host_str().is_some()
+            }
+            UpdateRedirectBoundary::LoopbackOnly => is_loopback_http_url(url),
+        })
+}
+
+fn update_redirect_policy(boundary: UpdateRedirectBoundary) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > 10 {
+            attempt.error("更新请求重定向次数超过上限")
+        } else if redirect_chain_allowed(boundary, attempt.previous(), attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.error("更新请求重定向越过了允许的 HTTPS/loopback 边界")
+        }
+    })
+}
+
+fn update_client_builder(initial_url: &str) -> Result<reqwest::ClientBuilder, String> {
+    let boundary = redirect_boundary_for_start(initial_url, allow_loopback_test_urls())?;
+    Ok(reqwest::Client::builder().redirect(update_redirect_policy(boundary)))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadWaitError<E> {
+    Cancelled,
+    Stalled,
+    Request(E),
+}
+
+async fn wait_download_step<F, T, E>(
+    cancel: &AtomicBool,
+    stall_timeout: Duration,
+    operation: F,
+) -> Result<T, DownloadWaitError<E>>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let result = tokio::select! {
+        biased;
+        () = wait_for_download_cancel(cancel) => return Err(DownloadWaitError::Cancelled),
+        result = tokio::time::timeout(stall_timeout, operation) => result,
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Err(DownloadWaitError::Cancelled);
+    }
+    match result {
+        Err(_) => Err(DownloadWaitError::Stalled),
+        Ok(Err(error)) => Err(DownloadWaitError::Request(error)),
+        Ok(Ok(value)) => Ok(value),
+    }
+}
+
+async fn wait_for_download_cancel(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// 下载取消标志。前端 `cancel_download` 置位；等待响应头及每个响应块时都会检查。
 /// 进程级单例：同一时刻只允许一个下载在跑（前端 updateDownloading gate 保证）。
 static DOWNLOAD_CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -148,11 +278,12 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         .try_lock()
         .map_err(|_| "已有更新检查、下载或安装正在进行".to_string())?;
     let current = env!("CARGO_PKG_VERSION");
-    let client = reqwest::Client::builder()
+    let manifest_url = manifest_url();
+    let client = update_client_builder(&manifest_url)?
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
-    platform::check_for_update_info(&client, current).await
+    platform::check_for_update_info(&client, current, &manifest_url).await
 }
 
 /// 下载更新包到 `~/.pinvou3/updates/`，流式写盘 + 校验，进度走
@@ -208,7 +339,7 @@ pub fn cancel_download() {
 
 /// Windows OTA 安装后反馈升级结果；其他平台无待反馈记录时静默成功。
 pub async fn report_pending_update_result() -> Result<PendingUpdateReportResult, String> {
-    let client = reqwest::Client::builder()
+    let client = update_client_builder(UPDATE_MANIFEST_URL)?
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
@@ -277,5 +408,96 @@ mod tests {
         assert_eq!(back.size, 1024);
         assert_eq!(back.format, "dmg");
         assert_eq!(back.version, "0.7.0");
+    }
+
+    #[test]
+    fn update_url_override_only_accepts_loopback_urls() {
+        assert!(is_loopback_update_url("http://127.0.0.1:8787/latest.json"));
+        assert!(is_loopback_update_url("http://[::1]:8787/latest.json"));
+        assert!(is_loopback_update_url("https://localhost/latest.json"));
+        assert!(!is_loopback_update_url("http://pinvou.com/latest.json"));
+        assert!(!is_loopback_update_url("file:///tmp/latest.json"));
+        assert_eq!(
+            UPDATE_MANIFEST_URL,
+            "https://pinvou.com/pinvou3/latest.json"
+        );
+    }
+
+    #[test]
+    fn release_redirect_boundary_rejects_https_downgrade_and_mixed_chain() {
+        let boundary =
+            redirect_boundary_for_start("https://pinvou.com/pinvou3/latest.json", false).unwrap();
+        let https_start = reqwest::Url::parse("https://pinvou.com/pinvou3/latest.json").unwrap();
+        let http_hop = reqwest::Url::parse("http://cdn.example.com/update").unwrap();
+        let https_end = reqwest::Url::parse("https://cdn.example.com/update").unwrap();
+
+        assert!(!redirect_chain_allowed(
+            boundary,
+            std::slice::from_ref(&https_start),
+            &http_hop,
+        ));
+        assert!(!redirect_chain_allowed(
+            boundary,
+            &[https_start, http_hop],
+            &https_end,
+        ));
+        assert!(redirect_boundary_for_start("http://pinvou.com/latest.json", false).is_err());
+    }
+
+    #[test]
+    fn loopback_redirect_boundary_allows_only_loopback_http_or_https() {
+        let boundary =
+            redirect_boundary_for_start("http://127.0.0.1:8787/latest.json", true).unwrap();
+        assert_eq!(boundary, UpdateRedirectBoundary::LoopbackOnly);
+        let http_start = reqwest::Url::parse("http://127.0.0.1:8787/latest.json").unwrap();
+        let https_hop = reqwest::Url::parse("https://localhost:9443/asset.exe").unwrap();
+        let http_end = reqwest::Url::parse("http://[::1]:8787/asset.exe").unwrap();
+        assert!(redirect_chain_allowed(
+            boundary,
+            &[http_start.clone(), https_hop],
+            &http_end,
+        ));
+
+        let external = reqwest::Url::parse("https://example.com/asset.exe").unwrap();
+        assert!(!redirect_chain_allowed(
+            boundary,
+            std::slice::from_ref(&http_start),
+            &external,
+        ));
+        assert!(!redirect_chain_allowed(
+            boundary,
+            &[
+                http_start,
+                reqwest::Url::parse("http://example.com/intermediate").unwrap(),
+            ],
+            &http_end,
+        ));
+    }
+
+    #[tokio::test]
+    async fn download_wait_can_cancel_while_response_headers_are_pending() {
+        let cancel = AtomicBool::new(false);
+        let wait = wait_download_step(
+            &cancel,
+            Duration::from_secs(5),
+            std::future::pending::<Result<(), ()>>(),
+        );
+        let trigger = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::join!(wait, trigger);
+        assert_eq!(result, Err(DownloadWaitError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn download_wait_rejects_response_that_arrives_after_cancel() {
+        let cancel = AtomicBool::new(false);
+        let result = wait_download_step(&cancel, Duration::from_secs(1), async {
+            cancel.store(true, Ordering::SeqCst);
+            Ok::<_, ()>(())
+        })
+        .await;
+        assert_eq!(result, Err(DownloadWaitError::Cancelled));
     }
 }

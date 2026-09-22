@@ -987,10 +987,14 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RUST_CACHE", windows_rust_test)
         self.assertIn("WINDOWS_RUST_TIMING", windows_rust_test)
 
-        # Node/npm were inherited from a retired JS-contract step. The remaining
-        # Rust build scripts and six filtered regressions do not consume node_modules.
+        # The static updater contract is dependency-free and uses the runner's
+        # preinstalled Node. Rust checks still must not install frontend dependencies.
         self.assertNotIn("actions/setup-node", windows_rust_test)
         self.assertNotIn("npm --prefix pinvou3-app ci", windows_rust_test)
+        self.assertIn(
+            "npm --prefix pinvou3-app run test:windows-static-updater",
+            windows_rust_test,
+        )
 
         self.assertIn(
             "defaults:\n      run:\n        shell: bash",
@@ -1024,6 +1028,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "artifact_writes_never_expose_partial_utf8_to_concurrent_readers",
             "artifact_public_read_",
             "features::memory::tests::topic_migration_",
+            "features::updater::platform::windows::tests::",
         ):
             self.assertEqual(regression.count(filter_name), 1)
         self.assertIn("running [1-9][0-9]* tests?", regression)

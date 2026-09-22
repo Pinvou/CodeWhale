@@ -1,17 +1,15 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
-use tokio::time::timeout;
 
 use crate::platform::paths;
 
-const UPDATE_MANIFEST_URL: &str = "https://pinvou.com/pinvou3/latest.json";
 const APT_INDEX_REFRESH_RETRY_MARKER: &str = "PINVOU3_APT_INDEX_REFRESH_RETRY";
 
 /// OTA 覆盖安装只处理 Pinvou 本体及其必需依赖，避免 LibreOffice 等推荐包把
@@ -66,10 +64,6 @@ exit "$retry_status"
 
 pub fn cleanup_stale_backup() {}
 
-fn manifest_url() -> String {
-    std::env::var("PINVOU3_UPDATE_URL").unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LatestManifest {
     pub version: String,
@@ -90,9 +84,10 @@ pub fn check_update_platform_support() -> Result<(), String> {
 pub async fn check_for_update_info(
     client: &reqwest::Client,
     current_version: &str,
+    manifest_url: &str,
 ) -> Result<super::super::UpdateInfo, String> {
     let m: LatestManifest = client
-        .get(manifest_url())
+        .get(manifest_url)
         .send()
         .await
         .map_err(|e| format!("更新源连接失败: {e}"))?
@@ -174,17 +169,27 @@ pub async fn download_update_package(
         }
     }
 
-    let client = reqwest::Client::builder()
+    let client = super::super::update_client_builder(&info.url)?
         .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
-    let mut resp = client
-        .get(&info.url)
-        .send()
-        .await
-        .map_err(|e| format!("下载请求失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("下载响应异常: {e}"))?;
+    let response =
+        super::super::wait_download_step(cancel, stall_timeout, client.get(&info.url).send()).await;
+    let mut resp = match response {
+        Ok(response) => response,
+        Err(super::super::DownloadWaitError::Cancelled) => return Err("已取消下载".to_string()),
+        Err(super::super::DownloadWaitError::Stalled) => {
+            return Err(format!(
+                "下载响应超时：超过 {}s 未收到响应头",
+                stall_timeout.as_secs()
+            ));
+        }
+        Err(super::super::DownloadWaitError::Request(error)) => {
+            return Err(format!("下载请求失败: {error}"));
+        }
+    }
+    .error_for_status()
+    .map_err(|e| format!("下载响应异常: {e}"))?;
 
     let total = if info.size > 0 {
         info.size
@@ -195,26 +200,30 @@ pub async fn download_update_package(
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut last_emit: u64 = 0;
-    cancel.store(false, Ordering::SeqCst);
     loop {
-        if cancel.load(Ordering::SeqCst) {
-            drop(file);
-            let _ = std::fs::remove_file(&dest);
-            return Err("已取消下载".to_string());
-        }
-        let chunk = match timeout(stall_timeout, resp.chunk()).await {
-            Err(_) => {
-                drop(file);
-                let _ = std::fs::remove_file(&dest);
-                return Err(format!(
-                    "下载停滞：超过 {}s 无数据，已中断（网络异常或更新源无响应）",
-                    stall_timeout.as_secs()
-                ));
-            }
-            Ok(Err(e)) => return Err(format!("下载中断: {e}")),
-            Ok(Ok(None)) => break,
-            Ok(Ok(Some(c))) => c,
-        };
+        let chunk =
+            match super::super::wait_download_step(cancel, stall_timeout, resp.chunk()).await {
+                Err(super::super::DownloadWaitError::Cancelled) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&dest);
+                    return Err("已取消下载".to_string());
+                }
+                Err(super::super::DownloadWaitError::Stalled) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&dest);
+                    return Err(format!(
+                        "下载停滞：超过 {}s 无数据，已中断（网络异常或更新源无响应）",
+                        stall_timeout.as_secs()
+                    ));
+                }
+                Err(super::super::DownloadWaitError::Request(error)) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&dest);
+                    return Err(format!("下载中断: {error}"));
+                }
+                Ok(None) => break,
+                Ok(Some(chunk)) => chunk,
+            };
         file.write_all(&chunk)
             .map_err(|e| format!("写盘失败: {e}"))?;
         hasher.update(&chunk);

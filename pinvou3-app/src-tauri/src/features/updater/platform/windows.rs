@@ -1,5 +1,6 @@
 //! Windows 静态 OTA：latest.json 平台清单 → 直接下载已签名 NSIS/MSI
-//! （SHA-256）→ UAC 启动安装器 → 当前进程退出 → 安装成功后启动新版。
+//! （SHA-256）→ UAC 启动安装器 → 当前进程退出。NSIS 通过 `/R` 由安装器自身
+//! 的 RunAsUser 逻辑启动新版；MSI 暂不自动重启应用。
 //!
 //! Windows 正式安装包仍由独立签名服务器构建并签署；本模块不执行签名，也不做
 //! Authenticode 二次阻断校验。更新器只信任固定更新源中的平台清单，并以清单内的
@@ -9,7 +10,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,7 +21,6 @@ use tauri::{AppHandle, Emitter};
 
 use crate::platform::paths;
 
-const UPDATE_MANIFEST_URL: &str = "https://pinvou.com/pinvou3/latest.json";
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const OWNED_PART_PREFIX: &str = ".pinvou3-update-";
 const OWNED_PART_SUFFIX: &str = ".part";
@@ -223,14 +223,9 @@ struct TrustedSystemTools {
 
 pub fn cleanup_stale_backup() {}
 
-fn manifest_url() -> String {
-    std::env::var("PINVOU3_UPDATE_URL").unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string())
-}
-
 fn allow_insecure_asset_url() -> bool {
-    std::env::var("PINVOU3_UPDATE_URL")
-        .ok()
-        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("http://"))
+    let manifest = super::super::manifest_url();
+    manifest.starts_with("http://") && super::super::is_loopback_update_url(&manifest)
 }
 
 pub fn check_update_platform_support() -> Result<(), String> {
@@ -246,10 +241,11 @@ pub fn check_update_platform_support() -> Result<(), String> {
 pub async fn check_for_update_info(
     client: &reqwest::Client,
     current_version: &str,
+    manifest_url: &str,
 ) -> Result<super::super::UpdateInfo, String> {
     check_update_platform_support()?;
     let manifest: LatestManifest = client
-        .get(manifest_url())
+        .get(manifest_url)
         .send()
         .await
         .map_err(|e| format!("更新源连接失败: {e}"))?
@@ -303,8 +299,10 @@ fn validate_asset(
 
     let parsed = reqwest::Url::parse(asset.url.trim())
         .map_err(|_| "Windows 更新资产 URL 无效".to_string())?;
-    let scheme_allowed =
-        parsed.scheme() == "https" || (allow_insecure_http && parsed.scheme() == "http");
+    let scheme_allowed = parsed.scheme() == "https"
+        || (allow_insecure_http
+            && parsed.scheme() == "http"
+            && super::super::is_loopback_update_url(parsed.as_str()));
     if !scheme_allowed || parsed.host_str().is_none() {
         return Err("Windows 更新资产必须使用 HTTPS；HTTP 仅允许测试更新源".to_string());
     }
@@ -376,24 +374,29 @@ pub async fn download_update_package(
     ));
     let mut temp_guard = TempDownload::new(temp_path.clone());
 
-    let client = reqwest::Client::builder()
+    let client = super::super::update_client_builder(&approved.url)?
         .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
-    let response = tokio::select! {
-        biased;
-        () = wait_for_cancel(cancel) => return Err("已取消下载".to_string()),
-        result = tokio::time::timeout(stall_timeout, client.get(&approved.url).send()) => {
-            result
-                .map_err(|_| format!("下载响应超时:超过 {}s 未收到响应头", stall_timeout.as_secs()))?
-                .map_err(|e| format!("下载请求失败: {e}"))?
+    let response = match super::super::wait_download_step(
+        cancel,
+        stall_timeout,
+        client.get(&approved.url).send(),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(super::super::DownloadWaitError::Cancelled) => return Err("已取消下载".to_string()),
+        Err(super::super::DownloadWaitError::Stalled) => {
+            return Err(format!(
+                "下载响应超时:超过 {}s 未收到响应头",
+                stall_timeout.as_secs()
+            ));
+        }
+        Err(super::super::DownloadWaitError::Request(error)) => {
+            return Err(format!("下载请求失败: {error}"));
         }
     };
-    // `biased` 只能保证同一轮同时 ready 时优先取消；响应在两次轮询之间完成时仍要
-    // 再检查一次，避免晚到响应越过已经置位的取消。
-    if cancel.load(Ordering::SeqCst) {
-        return Err("已取消下载".to_string());
-    }
     let mut response = response
         .error_for_status()
         .map_err(|e| format!("下载响应异常: {e}"))?;
@@ -416,24 +419,22 @@ pub async fn download_update_package(
     let mut downloaded = 0_u64;
     let mut last_emit = 0_u64;
     loop {
-        let chunk = tokio::select! {
-            biased;
-            () = wait_for_cancel(cancel) => return Err("已取消下载".to_string()),
-            result = tokio::time::timeout(stall_timeout, response.chunk()) => match result {
-                Err(_) => {
+        let chunk = match super::super::wait_download_step(cancel, stall_timeout, response.chunk())
+            .await
+        {
+            Err(super::super::DownloadWaitError::Cancelled) => return Err("已取消下载".to_string()),
+            Err(super::super::DownloadWaitError::Stalled) => {
                 return Err(format!(
                     "下载停滞:超过 {}s 无数据，已中断",
                     stall_timeout.as_secs()
                 ));
-                }
-                Ok(Err(e)) => return Err(format!("下载中断: {e}")),
-                Ok(Ok(None)) => break,
-                Ok(Ok(Some(chunk))) => chunk,
             }
+            Err(super::super::DownloadWaitError::Request(error)) => {
+                return Err(format!("下载中断: {error}"));
+            }
+            Ok(None) => break,
+            Ok(Some(chunk)) => chunk,
         };
-        if cancel.load(Ordering::SeqCst) {
-            return Err("已取消下载".to_string());
-        }
         let next = downloaded.saturating_add(chunk.len() as u64);
         if next > approved.size || next > MAX_DOWNLOAD_BYTES {
             return Err("下载体积超过清单声明或安全上限，已中断".to_string());
@@ -479,12 +480,6 @@ fn prepared_result(path: &Path, version: &str) -> super::super::DownloadUpdateRe
         installer_path: path,
         latest_version: version.to_string(),
     })
-}
-
-async fn wait_for_cancel(cancel: &AtomicBool) {
-    while !cancel.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
 }
 
 fn cleanup_stale_artifacts(updates_dir: &Path) {
@@ -588,10 +583,6 @@ fn install_update_package(
     expected_sha256: &str,
 ) -> Result<(), String> {
     let trusted_tools = trusted_system_tools()?;
-    let current_install_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .map(|path| windows_tool_path(&path));
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let markers = HandshakeFiles {
         nonce: nonce.clone(),
@@ -626,7 +617,6 @@ fn install_update_package(
         &windows_tool_path(&markers.aborted),
         &markers.nonce,
         expires_at,
-        current_install_dir.as_deref(),
     );
     let encoded_script = powershell_encoded_command(&elevated_script);
     let broker_script = elevation_broker_script(
@@ -877,7 +867,11 @@ fn msi_install_args(installer: &Path) -> Vec<OsString> {
 }
 
 fn nsis_install_args() -> Vec<OsString> {
-    vec![OsString::from("/P"), OsString::from("/UPDATE")]
+    vec![
+        OsString::from("/P"),
+        OsString::from("/UPDATE"),
+        OsString::from("/R"),
+    ]
 }
 
 fn create_empty_marker(path: &Path) -> Result<(), String> {
@@ -939,7 +933,6 @@ fn elevated_installer_script(
     aborted_state: &Path,
     nonce: &str,
     expires_at: u64,
-    current_install_dir: Option<&Path>,
 ) -> String {
     let system_msiexec = powershell_single_quoted(&system_msiexec.to_string_lossy());
     let installer = powershell_single_quoted(&installer.to_string_lossy());
@@ -952,12 +945,9 @@ fn elevated_installer_script(
     let claimed_state = powershell_single_quoted(&claimed_state.to_string_lossy());
     let aborted_state = powershell_single_quoted(&aborted_state.to_string_lossy());
     let nonce_prefix = powershell_single_quoted(&format!("{nonce}:"));
-    let current_install_dir = current_install_dir
-        .map(|path| powershell_single_quoted(&path.to_string_lossy()))
-        .unwrap_or_else(|| "$null".to_string());
     let start_installer = match kind {
         WindowsInstallerKind::NsisExe => {
-            "$p = Start-Process -FilePath $installer -ArgumentList @('/P','/UPDATE') -PassThru; "
+            "$p = Start-Process -FilePath $installer -ArgumentList @('/P','/UPDATE','/R') -PassThru; "
                 .to_string()
         }
         WindowsInstallerKind::Msi => format!(
@@ -987,19 +977,7 @@ fn elevated_installer_script(
             "if ($null -eq $p -or $p.Id -le 0) {{ throw 'installer process was not created' }}; ",
             "[IO.File]::WriteAllText({started_marker}, {nonce_prefix} + [string]$p.Id, [Text.UTF8Encoding]::new($false)); ",
             "$installerStarted = $true; ",
-            "$p.WaitForExit(); $code = $p.ExitCode; ",
-            "if ($code -eq 0 -or $code -eq 3010) {{ ",
-            "$candidates = [Collections.Generic.List[string]]::new(); ",
-            "$machineProduct = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('Software\\pinvou\\pinvou3'); ",
-            "if ($null -ne $machineProduct) {{ try {{ $candidates.Add([string]$machineProduct.GetValue('')) }} finally {{ $machineProduct.Dispose() }} }}; ",
-            "$machineUninstall = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\pinvou3'); ",
-            "if ($null -ne $machineUninstall) {{ try {{ $candidates.Add([string]$machineUninstall.GetValue('InstallLocation')) }} finally {{ $machineUninstall.Dispose() }} }}; ",
-            "$userProduct = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\\pinvou\\pinvou3'); ",
-            "if ($null -ne $userProduct) {{ try {{ $candidates.Add([string]$userProduct.GetValue('InstallDir')); $candidates.Add([string]$userProduct.GetValue('')) }} finally {{ $userProduct.Dispose() }} }}; ",
-            "$candidates.Add([string]{current_install_dir}); ",
-            "$candidates.Add((Join-Path $env:ProgramFiles 'pinvou3')); ",
-            "foreach ($candidate in $candidates) {{ if ([string]::IsNullOrWhiteSpace($candidate)) {{ continue }}; $candidate = $candidate.Trim().Trim('\"'); $exe = Join-Path $candidate 'pinvou3-tauri.exe'; if (Test-Path -LiteralPath $exe -PathType Leaf) {{ Start-Process -FilePath $exe; break }} }} ",
-            "}} ",
+            "$p.WaitForExit(); ",
             "}} finally {{ $stream.Dispose() }}; ",
             "}} catch {{ if (-not $installerStarted) {{ [IO.File]::WriteAllText({error_marker}, {nonce_prefix} + $_.Exception.Message, [Text.UTF8Encoding]::new($false)) }}; exit 1 }}"
         ),
@@ -1015,7 +993,6 @@ fn elevated_installer_script(
         aborted_state = aborted_state,
         expires_at = expires_at,
         nonce_prefix = nonce_prefix,
-        current_install_dir = current_install_dir,
         error_marker = error_marker,
     )
 }
@@ -1140,7 +1117,7 @@ mod tests {
             .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(args, vec!["/P", "/UPDATE"]);
+        assert_eq!(args, vec!["/P", "/UPDATE", "/R"]);
 
         let msi: Vec<String> = msi_install_args(Path::new(r"C:\pinvou3.msi"))
             .into_iter()
@@ -1152,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn elevated_launcher_revalidates_and_restarts_from_machine_install_location() {
+    fn elevated_launcher_revalidates_and_delegates_restart_to_nsis() {
         let rendered = elevated_installer_script(
             WindowsInstallerKind::NsisExe,
             Path::new(r"C:\Windows\System32\msiexec.exe"),
@@ -1168,21 +1145,19 @@ mod tests {
             Path::new(r"C:\updates\.aborted"),
             "test-nonce",
             4_102_444_800,
-            Some(Path::new(r"D:\Custom Pinvou")),
         );
         assert!(rendered.contains("[IO.FileShare]::Read"));
         assert!(rendered.contains("SHA-256 does not match manifest"));
         assert!(rendered.contains("installer process was not created"));
         assert!(rendered.contains("Move-Item -LiteralPath 'C:\\updates\\.pending'"));
         assert!(rendered.contains("'test-nonce:' + [string]$p.Id"));
-        assert!(rendered.contains("@('/P','/UPDATE')"));
-        assert!(rendered.contains(
-            "[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('Software\\pinvou\\pinvou3')"
-        ));
-        assert!(rendered.contains("Uninstall\\pinvou3"));
-        assert!(rendered.contains("InstallLocation"));
-        assert!(rendered.contains("D:\\Custom Pinvou"));
-        assert!(rendered.contains("pinvou3-tauri.exe"));
+        assert!(rendered.contains("@('/P','/UPDATE','/R')"));
+        assert!(!rendered.contains("Microsoft.Win32.Registry"));
+        assert!(!rendered.contains("CurrentUser"));
+        assert!(!rendered.contains("LocalMachine"));
+        assert!(!rendered.contains("InstallLocation"));
+        assert!(!rendered.contains("ProgramFiles"));
+        assert!(!rendered.contains("pinvou3-tauri.exe"));
         assert!(rendered.contains("pinvou3''s-setup.exe"));
         assert!(
             rendered.find("$p.WaitForExit()").unwrap()
@@ -1207,7 +1182,6 @@ mod tests {
             Path::new(r"C:\updates with space\.aborted"),
             "test-nonce",
             4_102_444_800,
-            None,
         );
         assert!(rendered.contains(
             "$installer = [IO.Path]::GetFullPath('C:\\updates with space\\pinvou3''s package.msi')"
@@ -1218,6 +1192,8 @@ mod tests {
         assert!(rendered.contains(
             "Start-Process -FilePath 'C:\\Windows\\System32\\msiexec.exe' -ArgumentList $msiArguments -PassThru"
         ));
+        assert!(!rendered.contains("pinvou3-tauri.exe"));
+        assert!(!rendered.contains("Microsoft.Win32.Registry"));
     }
 
     #[test]

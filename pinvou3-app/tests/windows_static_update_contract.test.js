@@ -17,6 +17,7 @@ const windowsUpdater = readRepo(
   'platform',
   'windows.rs',
 );
+const windowsUpdaterProduction = windowsUpdater.split('\n#[cfg(test)]', 1)[0];
 const platformModule = readRepo(
   'pinvou3-app',
   'src-tauri',
@@ -25,6 +26,12 @@ const platformModule = readRepo(
   'updater',
   'platform',
   'mod.rs',
+);
+const linuxUpdater = readRepo(
+  'pinvou3-app', 'src-tauri', 'src', 'features', 'updater', 'platform', 'linux.rs',
+);
+const macosUpdater = readRepo(
+  'pinvou3-app', 'src-tauri', 'src', 'features', 'updater', 'platform', 'macos.rs',
 );
 const prepareScript = path.join(repoRoot, 'scripts', 'prepare-windows-release.ps1');
 const onlineVerifyScript = path.join(
@@ -39,8 +46,7 @@ assert.match(windowsUpdater, /\.create_new\(true\)/);
 assert.match(windowsUpdater, /-EncodedCommand','\{encoded_script\}'\) -Verb RunAs/);
 assert.match(windowsUpdater, /\[IO\.FileShare\]::Read/);
 assert.match(windowsUpdater, /installer SHA-256 does not match manifest/);
-assert.match(windowsUpdater, /LocalMachine\.OpenSubKey\('Software\\\\pinvou\\\\pinvou3'/);
-assert.match(windowsUpdater, /GetValue\('InstallLocation'\)/);
+assert.match(windowsUpdater, /@\('\/P','\/UPDATE','\/R'\)/);
 assert.match(windowsUpdater, /static APPROVED_ASSET: Mutex<Option<ApprovedAsset>>/);
 assert.match(windowsUpdater, /approval_receipt/);
 assert.match(windowsUpdater, /mark_approved_downloaded/);
@@ -49,6 +55,11 @@ assert.match(windowsUpdater, /Move-Item -LiteralPath \{pending_state\} -Destinat
 assert.match(windowsUpdater, /marker_payload\(&markers\.started, &markers\.nonce\)/);
 assert.doesNotMatch(windowsUpdater, /HiddenCommand::new\("powershell\.exe"\)/);
 assert.doesNotMatch(windowsUpdater, /Start-Process -FilePath 'msiexec\.exe'/);
+assert.doesNotMatch(windowsUpdaterProduction, /Start-Process -FilePath \$exe/);
+assert.doesNotMatch(
+  windowsUpdaterProduction,
+  /Microsoft\.Win32\.Registry|InstallLocation|current_install_dir|ProgramFiles/,
+);
 assert.doesNotMatch(windowsUpdater, /Get-AuthenticodeSignature/);
 assert.doesNotMatch(windowsUpdater, /package\/upgrade\/check|OtaInfo\.json|package_md5\.to_ascii_lowercase/);
 const updaterModule = readRepo(
@@ -61,6 +72,23 @@ const updaterModule = readRepo(
 );
 assert.match(updaterModule, /static UPDATE_OPERATION: tokio::sync::Mutex/);
 assert.match(updaterModule, /DOWNLOAD_CANCEL\.store\(false, Ordering::SeqCst\)/);
+assert.match(updaterModule, /const UPDATE_MANIFEST_URL: &str = "https:\/\/pinvou\.com\/pinvou3\/latest\.json"/);
+assert.match(
+  updaterModule,
+  /fn manifest_url\(\).*?#\[cfg\(any\(debug_assertions, test\)\)\].*?std::env::var\("PINVOU3_UPDATE_URL"\).*?is_loopback_update_url.*?UPDATE_MANIFEST_URL\.to_string\(\)/s,
+);
+assert.match(updaterModule, /Policy::custom/);
+assert.match(updaterModule, /redirect_chain_allowed\(boundary, attempt\.previous\(\), attempt\.url\(\)\)/);
+assert.match(updaterModule, /update_client_builder\(&manifest_url\)/);
+for (const source of [windowsUpdater, linuxUpdater, macosUpdater]) {
+  assert.ok(
+    source.match(/wait_download_step/g)?.length >= 2,
+    'each platform must cancel/timeout both response headers and response chunks',
+  );
+  assert.doesNotMatch(source, /cancel\.store\(false, Ordering::SeqCst\)/);
+  assert.match(source, /update_client_builder\(/);
+  assert.doesNotMatch(source, /reqwest::Client::builder\(\)/);
+}
 assert.doesNotMatch(platformModule, /mod windows_domain_bootstrap/);
 assert.ok(!fs.existsSync(path.join(
   repoRoot,

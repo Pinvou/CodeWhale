@@ -1660,8 +1660,9 @@ jobs:
       # debug profile tauri's generate_context! uses devUrl, dist/ is never
       # packaged, and build.rs only depends on tauri-build/cc (verified on
       # macOS in 2026-08: cargo check --all-targets passes after moving
-      # node_modules away). So node/npm setup is dropped, saving 3-5 minutes
-      # per run.
+      # node_modules away). The regression leg uses the runner's preinstalled
+      # Node only for a dependency-free static updater contract, so setup-node
+      # and npm ci remain unnecessary.
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
@@ -1823,6 +1824,10 @@ jobs:
             }
           done
 
+      - name: Windows 静态更新契约
+        if: ${{ matrix.phase == 'regression' }}
+        run: npm --prefix pinvou3-app run test:windows-static-updater
+
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
@@ -1853,6 +1858,7 @@ jobs:
             'run_with_timeout_reaps_and_stays_bounded' \
             'reap_killed_child_' \
             'features::browser::platform::windows::tests::' \
+            'features::updater::platform::windows::tests::' \
             'features::monitor::platform::windows_cpu::tests::' \
             'features::monitor::platform::windows_memory::tests::' \
             'features::monitor::platform::windows_gpu::tests::' \

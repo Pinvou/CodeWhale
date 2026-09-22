@@ -10,6 +10,7 @@ pub fn cleanup_stale_backup() {}
 pub async fn check_for_update_info(
     _client: &reqwest::Client,
     current_version: &str,
+    _manifest_url: &str,
 ) -> Result<UpdateInfo, String> {
     Ok(UpdateInfo {
         available: false,

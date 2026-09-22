@@ -3,7 +3,7 @@
 //! 安装完成返回 Ok(false)(进程不退出),前端自动调 restart_app 切到新版。
 //!
 //! 设计与 linux_update.rs 对齐:
-//! - 更新源同是静态 HTTP latest.json,新增可选 `platforms` map(mac/linux/win 各一项)。
+//! - 更新源同是静态 HTTPS latest.json,新增可选 `platforms` map(mac/linux/win 各一项)。
 //! - 下载目录用 `crate::platform::paths::updates_dir()`(~/.pinvou3/updates/),跨平台一致。
 //! - dmg 安装不需要 pkexec(/Applications 通常当前用户可写);首次拖拽权限由 Finder 引导。
 //! - 安装后自动重启:app.restart() 按路径 exec,bundle 被替换后该路径已指向新文件
@@ -18,24 +18,17 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
-use tokio::time::timeout;
 
 use crate::platform::paths;
 
-const UPDATE_MANIFEST_URL: &str = "https://pinvou.com/pinvou3/latest.json";
-
 /// pinvou3.app 的 CFBundleIdentifier。安装前 PlistBuddy 读出来比对,防 dmg 伪装。
 const EXPECTED_BUNDLE_ID: &str = "com.pinvou.pinvou3";
-
-fn manifest_url() -> String {
-    std::env::var("PINVOU3_UPDATE_URL").unwrap_or_else(|_| UPDATE_MANIFEST_URL.to_string())
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LatestManifest {
@@ -109,9 +102,10 @@ fn resolve_asset(m: &LatestManifest) -> (String, String, u64, String, String) {
 pub async fn check_for_update_info(
     client: &reqwest::Client,
     current_version: &str,
+    manifest_url: &str,
 ) -> Result<super::super::UpdateInfo, String> {
     let m: LatestManifest = client
-        .get(manifest_url())
+        .get(manifest_url)
         .send()
         .await
         .map_err(|e| format!("更新源连接失败: {e}"))?
@@ -225,17 +219,27 @@ pub async fn download_update_package(
     }
 
     // 流式下载(与 linux_update.rs 同结构:cancel 检查、stall_timeout、progress 事件)。
-    let client = reqwest::Client::builder()
+    let client = super::super::update_client_builder(&info.url)?
         .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
-    let mut resp = client
-        .get(&info.url)
-        .send()
-        .await
-        .map_err(|e| format!("下载请求失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("下载响应异常: {e}"))?;
+    let response =
+        super::super::wait_download_step(cancel, stall_timeout, client.get(&info.url).send()).await;
+    let mut resp = match response {
+        Ok(response) => response,
+        Err(super::super::DownloadWaitError::Cancelled) => return Err("已取消下载".to_string()),
+        Err(super::super::DownloadWaitError::Stalled) => {
+            return Err(format!(
+                "下载响应超时:超过 {}s 未收到响应头",
+                stall_timeout.as_secs()
+            ));
+        }
+        Err(super::super::DownloadWaitError::Request(error)) => {
+            return Err(format!("下载请求失败: {error}"));
+        }
+    }
+    .error_for_status()
+    .map_err(|e| format!("下载响应异常: {e}"))?;
 
     let total = if info.size > 0 {
         info.size
@@ -250,30 +254,30 @@ pub async fn download_update_package(
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut last_emit: u64 = 0;
-    cancel.store(false, Ordering::SeqCst);
     loop {
-        if cancel.load(Ordering::SeqCst) {
-            drop(file);
-            let _ = std::fs::remove_file(&temp);
-            return Err("已取消下载".to_string());
-        }
-        let chunk = match timeout(stall_timeout, resp.chunk()).await {
-            Err(_) => {
-                drop(file);
-                let _ = std::fs::remove_file(&temp);
-                return Err(format!(
-                    "下载停滞:超过 {}s 无数据,已中断(网络异常或更新源无响应)",
-                    stall_timeout.as_secs()
-                ));
-            }
-            Ok(Err(e)) => {
-                drop(file);
-                let _ = std::fs::remove_file(&temp);
-                return Err(format!("下载中断: {e}"));
-            }
-            Ok(Ok(None)) => break,
-            Ok(Ok(Some(c))) => c,
-        };
+        let chunk =
+            match super::super::wait_download_step(cancel, stall_timeout, resp.chunk()).await {
+                Err(super::super::DownloadWaitError::Cancelled) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&temp);
+                    return Err("已取消下载".to_string());
+                }
+                Err(super::super::DownloadWaitError::Stalled) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(format!(
+                        "下载停滞:超过 {}s 无数据,已中断(网络异常或更新源无响应)",
+                        stall_timeout.as_secs()
+                    ));
+                }
+                Err(super::super::DownloadWaitError::Request(error)) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(format!("下载中断: {error}"));
+                }
+                Ok(None) => break,
+                Ok(Some(chunk)) => chunk,
+            };
         // 防御性硬上限(防 DoS / 磁盘填充):在写盘前检查,避免超额数据落盘。
         if downloaded + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
             drop(file);
