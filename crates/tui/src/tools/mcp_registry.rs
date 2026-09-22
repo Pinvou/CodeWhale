@@ -594,8 +594,9 @@ const _: () = assert!(
     MAX_REGISTRY_MATCHES == 8,
     "update the \"eight\" wording in \
      crates/tui/assets/skills/mcp-discovery/SKILL.md, the registry_sync \
-     schema description here, and MCP_REGISTRY_FIRST_INSTRUCTION in \
-     core/engine.rs",
+     schema description here, MCP_REGISTRY_FIRST_INSTRUCTION in \
+     core/engine.rs, and REGISTRY_FIRST_SHELL_GUIDANCE in \
+     core/engine/tool_catalog.rs",
 );
 
 #[derive(Serialize)]

@@ -28,6 +28,7 @@ use crate::tools::handle::VarHandle;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
+use crate::tools::subagent::HANDLE_READ_ACTIVATION_HINT;
 
 const DEFAULT_CHILD_MODEL: &str = "deepseek-v4-flash";
 const MAX_INLINE_CONTENT_CHARS: usize = 200_000;
@@ -73,17 +74,85 @@ pub struct RlmTool {
     /// Kept only for replay-compatible explicit RLM sessions. New normal
     /// agent work uses the session kernel and inherits its route there.
     root_model: String,
+    /// Precomposed model-facing description. The `eval` and family surfaces
+    /// pair stored handles with `handle_read`, so they embed the shared
+    /// activation hint and cannot stay `&'static` (Pinvou #534).
+    description: String,
 }
 
 impl RlmTool {
-    #[must_use]
-    pub fn new(name: &'static str, client: Option<DeepSeekClient>) -> Self {
+    fn compose(
+        name: &'static str,
+        forced_action: Option<&'static str>,
+        client: Option<DeepSeekClient>,
+    ) -> Self {
         Self {
             name,
-            forced_action: None,
+            forced_action,
             client,
             root_model: DEFAULT_CHILD_MODEL.to_string(),
+            description: Self::compose_description(forced_action),
         }
+    }
+
+    /// Model-facing description for this surface. Descriptions that pair
+    /// stored handles with `handle_read` must carry the shared activation
+    /// hint: `handle_read` is deferred on stock hosts, so model-facing text
+    /// must teach the `tool_search` activation path instead of commanding a
+    /// tool absent from the first-turn catalog (Pinvou #490 class, #534).
+    fn compose_description(forced_action: Option<&str>) -> String {
+        match forced_action {
+            Some("session_objects") => {
+                "List active prompt/history/session symbolic objects as compact cards. \
+                 Pass one of the returned `id` values to `rlm_open` as \
+                 `session_object` to inspect it inside an RLM REPL without copying the \
+                 full prompt or transcript into the parent context."
+                    .to_string()
+            }
+            Some("open") => "Open a persistent RLM context. Loads `file_path`, `content`, `url`, \
+                 or `session_object` into a named Python kernel and returns only \
+                 metadata: name, length, preview, and sha256. Use this for large or \
+                 unfamiliar inputs so the parent transcript holds a handle, not the \
+                 body."
+                .to_string(),
+            Some("eval") => format!(
+                "Run one Python REPL block against a named RLM context. Returns a \
+                 bounded projection of stdout/stderr plus metadata. If the code calls \
+                 FINAL/finalize, the final value is stored as a var_handle retrievable \
+                 with handle_read instead of copied unbounded into the parent context. \
+                 Large stdout/stderr payloads (>1k chars) are also stored as \
+                 var_handles (returned in stdout_handle / stderr_handle) to keep the \
+                 parent transcript lean. Batch child helpers require \
+                 dependency_mode='independent'; use sub_query_sequence or a \
+                 sequential loop for dependent work; \
+                 {HANDLE_READ_ACTIVATION_HINT}."
+            ),
+            Some("configure") => {
+                "Configure a named RLM context: output feedback, child query timeout, \
+                 recursive sub-RLM depth, and explicit session sharing."
+                    .to_string()
+            }
+            Some("close") => "Close a named RLM context, tear down its Python kernel, and return \
+                 usage/lifecycle metadata."
+                .to_string(),
+            _ => format!(
+                "Persistent RLM sessions over large contexts. Actions: \"session_objects\" \
+                 (list active prompt/history/session symbolic objects as compact cards), \
+                 \"open\" (load file_path/content/url/session_object into a named Python \
+                 kernel; returns only metadata so the parent transcript holds a handle, \
+                 not the body), \"eval\" (run one bounded Python REPL block against a \
+                 named context; approval required; FINAL/finalize values and large \
+                 stdout/stderr become var_handles retrievable with handle_read; \
+                 {HANDLE_READ_ACTIVATION_HINT}), \
+                 \"configure\" (output feedback, child timeout, sub-RLM depth, session \
+                 sharing), \"close\" (tear down the kernel and return usage metadata)."
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn new(name: &'static str, client: Option<DeepSeekClient>) -> Self {
+        Self::compose(name, None, client)
     }
 
     /// Bind an explicit compatibility session to the active parent route.
@@ -98,12 +167,7 @@ impl RlmTool {
     #[cfg(test)]
     #[must_use]
     pub fn alias(name: &'static str, action: &'static str, client: Option<DeepSeekClient>) -> Self {
-        Self {
-            name,
-            forced_action: Some(action),
-            client,
-            root_model: DEFAULT_CHILD_MODEL.to_string(),
-        }
+        Self::compose(name, Some(action), client)
     }
 
     fn resolve_action<'a>(&'a self, input: &'a Value) -> Result<&'a str, ToolError> {
@@ -171,52 +235,8 @@ impl ToolSpec for RlmTool {
         false
     }
 
-    fn description(&self) -> &'static str {
-        match self.forced_action {
-            Some("session_objects") => {
-                "List active prompt/history/session symbolic objects as compact cards. \
-                 Pass one of the returned `id` values to `rlm_open` as \
-                 `session_object` to inspect it inside an RLM REPL without copying the \
-                 full prompt or transcript into the parent context."
-            }
-            Some("open") => {
-                "Open a persistent RLM context. Loads `file_path`, `content`, `url`, \
-                 or `session_object` into a named Python kernel and returns only \
-                 metadata: name, length, preview, and sha256. Use this for large or \
-                 unfamiliar inputs so the parent transcript holds a handle, not the \
-                 body."
-            }
-            Some("eval") => {
-                "Run one Python REPL block against a named RLM context. Returns a \
-                 bounded projection of stdout/stderr plus metadata. If the code calls \
-                 FINAL/finalize, the final value is stored as a var_handle retrievable \
-                 with handle_read instead of copied unbounded into the parent context. \
-                 Large stdout/stderr payloads (>1k chars) are also stored as \
-                 var_handles (returned in stdout_handle / stderr_handle) to keep the \
-                 parent transcript lean. Batch child helpers require \
-                 dependency_mode='independent'; use sub_query_sequence or a \
-                 sequential loop for dependent work."
-            }
-            Some("configure") => {
-                "Configure a named RLM context: output feedback, child query timeout, \
-                 recursive sub-RLM depth, and explicit session sharing."
-            }
-            Some("close") => {
-                "Close a named RLM context, tear down its Python kernel, and return \
-                 usage/lifecycle metadata."
-            }
-            _ => {
-                "Persistent RLM sessions over large contexts. Actions: \"session_objects\" \
-                 (list active prompt/history/session symbolic objects as compact cards), \
-                 \"open\" (load file_path/content/url/session_object into a named Python \
-                 kernel; returns only metadata so the parent transcript holds a handle, \
-                 not the body), \"eval\" (run one bounded Python REPL block against a \
-                 named context; approval required; FINAL/finalize values and large \
-                 stdout/stderr become var_handles retrievable with handle_read), \
-                 \"configure\" (output feedback, child timeout, sub-RLM depth, session \
-                 sharing), \"close\" (tear down the kernel and return usage metadata)."
-            }
-        }
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn input_schema(&self) -> Value {
@@ -354,7 +374,14 @@ impl RlmTool {
                     "session_object": "session://active/system_prompt"
                 }
             },
-            "redaction": "Large tool results and thinking blocks are represented by compact metadata in transcript objects; use returned handles and handle_read for bounded payload projections."
+            // #534: this note commands `handle_read`, which is deferred on
+            // stock hosts, so it must teach the activation path too.
+            "redaction": format!(
+                "Large tool results and thinking blocks are represented by compact \
+                 metadata in transcript objects; use returned handles and handle_read \
+                 for bounded payload projections; \
+                 {HANDLE_READ_ACTIVATION_HINT}."
+            )
         }))
         .map_err(|e| ToolError::execution_failed(e.to_string()))
     }
@@ -544,7 +571,11 @@ impl RlmTool {
                     let name = format!("{tag}_{}", 0); // single counter is fine
                     let handle = store.insert_text(session_id, name, text);
                     (
-                        Some(format!("{} chars; retrieve via handle_read", text.len())),
+                        Some(format!(
+                            "{} chars; retrieve via handle_read; \
+                             {HANDLE_READ_ACTIVATION_HINT}",
+                            text.len()
+                        )),
                         Some(handle),
                     )
                 }
@@ -853,7 +884,8 @@ fn preview_output(text: &str) -> String {
         .skip(total.saturating_sub(FULL_STDOUT_TAIL_CHARS))
         .collect();
     format!(
-        "{head}\n... [{} chars truncated, retrieve via handle_read when returned as a handle] ...\n{tail}",
+        "{head}\n... [{} chars truncated, retrieve via handle_read when \
+         returned as a handle; {HANDLE_READ_ACTIVATION_HINT}] ...\n{tail}",
         total.saturating_sub(FULL_STDOUT_HEAD_CHARS + FULL_STDOUT_TAIL_CHARS)
     )
 }
@@ -947,6 +979,119 @@ mod tests {
                 alias.name()
             );
         }
+    }
+
+    /// rlm descriptions and the session_objects redaction note pair stored
+    /// handles with `handle_read`, which is deferred on stock hosts; every
+    /// such model-facing site must carry the `tool_search` activation hint
+    /// so the model is never commanded to call a tool it cannot see
+    /// (Pinvou #490 phantom-tool class, #534).
+    #[test]
+    fn rlm_handle_read_pairings_teach_activation_hint() {
+        assert!(
+            HANDLE_READ_ACTIVATION_HINT.contains("`tool_search`"),
+            "shared hint must name the activation tool:\n{HANDLE_READ_ACTIVATION_HINT}"
+        );
+
+        let eval = RlmTool::alias("rlm_eval", "eval", None)
+            .description()
+            .to_string();
+        assert!(
+            eval.contains("with handle_read") && eval.contains(HANDLE_READ_ACTIVATION_HINT),
+            "eval description must pair handle_read with the activation hint:\n{eval}"
+        );
+
+        let family = RlmTool::new("rlm", None).description().to_string();
+        assert!(
+            family.contains("with handle_read") && family.contains(HANDLE_READ_ACTIVATION_HINT),
+            "family description must pair handle_read with the activation hint:\n{family}"
+        );
+
+        // Surfaces that never name `handle_read` stay hint-free: the hint
+        // exists only where a pairing would command the deferred tool.
+        for action in ["session_objects", "open", "configure", "close"] {
+            let description = RlmTool::alias("rlm_compat", action, None)
+                .description()
+                .to_string();
+            assert!(
+                !description.contains("handle_read"),
+                "{action} description does not pair handle_read and must not name it:\n{description}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rlm_session_objects_redaction_note_teaches_activation_hint() {
+        let ctx = ctx_with_session_objects();
+        let result = RlmTool::alias("rlm_session_objects", "session_objects", None)
+            .execute(json!({}), &ctx)
+            .await
+            .expect("list session objects");
+        let body: Value = serde_json::from_str(&result.content).expect("json");
+        let redaction = body["redaction"].as_str().expect("redaction note");
+
+        assert!(
+            redaction.contains("handle_read") && redaction.contains(HANDLE_READ_ACTIVATION_HINT),
+            "session_objects redaction note must pair handle_read with the \
+             activation hint:\n{redaction}"
+        );
+    }
+
+    /// The handle-route preview line ("N chars; retrieve via handle_read")
+    /// is emitted on every eval output past the handle threshold, so it is
+    /// the pairing site the model acts on right before calling
+    /// `handle_read`; it must teach the activation path too (Pinvou #534).
+    #[tokio::test]
+    async fn rlm_eval_large_stdout_handle_preview_teaches_activation_hint() {
+        let ctx = ctx();
+        RlmTool::alias("rlm_open", "open", None)
+            .execute(json!({"name": "wide", "content": "body"}), &ctx)
+            .await
+            .expect("open");
+
+        // 2000 chars of output clears the 1k handle threshold, so the eval
+        // result carries the handle-route preview line instead of the body.
+        let eval = RlmTool::alias("rlm_eval", "eval", None)
+            .execute(json!({"name": "wide", "code": "print('x' * 2000)"}), &ctx)
+            .await
+            .expect("eval");
+        let eval_json: Value = serde_json::from_str(&eval.content).expect("eval json");
+        assert!(
+            eval_json.get("stdout_handle").is_some(),
+            "large stdout must be handle-routed: {eval_json}"
+        );
+        let stdout_preview = eval_json["stdout_preview"]
+            .as_str()
+            .expect("handle-routed stdout must still carry a preview line")
+            .replace("\r\n", "\n");
+
+        assert!(
+            stdout_preview.contains(" chars; retrieve via handle_read;"),
+            "handle-route preview line shape:\n{stdout_preview}"
+        );
+        assert!(
+            stdout_preview.contains(HANDLE_READ_ACTIVATION_HINT),
+            "preview line must pair handle_read with the activation hint:\n{stdout_preview}"
+        );
+    }
+
+    /// The truncation marker commands `handle_read` the same way; it is
+    /// currently unreachable through `route_output` (the handle threshold
+    /// fires first) but the wording must stay correct if that threshold
+    /// ever rises above head+tail (Pinvou #534).
+    #[test]
+    fn rlm_truncation_marker_teaches_activation_hint() {
+        let body = "x".repeat(FULL_STDOUT_HEAD_CHARS + FULL_STDOUT_TAIL_CHARS + 1);
+        let preview = preview_output(&body);
+
+        assert!(
+            preview.contains("chars truncated, retrieve via handle_read"),
+            "truncation marker shape:\n{preview}"
+        );
+        assert!(
+            preview.contains(HANDLE_READ_ACTIVATION_HINT),
+            "truncation marker must pair handle_read with the activation hint:\n{preview}"
+        );
     }
 
     #[test]
