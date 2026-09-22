@@ -285,10 +285,10 @@ impl ExportRoute {
             object.insert("endpoint_mode".into(), json!(mode));
         }
         if let Some(tokens) = self.context_window_tokens {
-            object.insert("context_window_tokens".into(), json!(tokens));
+            object.insert("context_window_tokens".into(), json!(tokens.to_string()));
         }
         if let Some(tokens) = self.max_output_tokens {
-            object.insert("max_output_tokens".into(), json!(tokens));
+            object.insert("max_output_tokens".into(), json!(tokens.to_string()));
         }
         if let Some(effort) = &self.reasoning_effort {
             object.insert("reasoning_effort".into(), json!(effort));
@@ -403,7 +403,7 @@ impl TemporaryModelPackageV1 {
             json!({
                 "connection_id": self.binding.connection_id,
                 "controller_lease_id": self.binding.controller_lease_id,
-                "lease_epoch": self.binding.lease_epoch,
+                "lease_epoch": self.binding.lease_epoch.to_string(),
                 "task_id": self.binding.task_id,
             }),
         );
@@ -475,10 +475,8 @@ impl TemporaryModelPackageV1 {
             &[],
             "temporary_model_package.binding",
         )?;
-        let lease_epoch = binding
-            .get("lease_epoch")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| error("model_binding_invalid"))?;
+        let lease_epoch = required_uint_string(binding, "lease_epoch", u64::MAX)
+            .map_err(|_| error("model_binding_invalid"))?;
         let binding = TemporaryModelBinding {
             connection_id: required_string(binding, "connection_id", MAX_ID_CHARS)?,
             controller_lease_id: required_string(binding, "controller_lease_id", MAX_ID_CHARS)?,
@@ -600,14 +598,24 @@ fn optional_string(
 fn optional_u32(object: &Map<String, Value>, field: &'static str) -> Result<Option<u32>> {
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => {
-            let number = value
-                .as_u64()
-                .filter(|number| *number <= u32::MAX as u64)
-                .ok_or_else(|| error("model_package_field_invalid"))?;
-            Ok(Some(number as u32))
-        }
+        Some(_) => Ok(Some(
+            required_uint_string(object, field, u32::MAX as u64)? as u32
+        )),
     }
+}
+
+fn required_uint_string(object: &Map<String, Value>, field: &'static str, max: u64) -> Result<u64> {
+    let text = required_string(object, field, 20)?;
+    if text.is_empty()
+        || (text.len() > 1 && text.starts_with('0'))
+        || !text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(error("model_package_field_invalid"));
+    }
+    text.parse::<u64>()
+        .ok()
+        .filter(|number| *number <= max)
+        .ok_or_else(|| error("model_package_field_invalid"))
 }
 
 fn credential_secret(value: &Value, label: &'static str) -> Result<SensitiveString> {
@@ -939,6 +947,9 @@ pub(crate) type SharedTemporaryModelStore = Arc<TemporaryModelStore>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::remote_control::controller::protocol::{
+        SenderRole, validate_controller_payload_json,
+    };
     use crate::platform::credential_store::CredentialEditAction;
 
     fn lease() -> LeaseContext {
@@ -1014,7 +1025,14 @@ mod tests {
     #[test]
     fn wire_serialization_carries_the_key_but_logs_and_debug_never_do() {
         let package = package("sk-a-secret-value");
-        let wire = serde_json::to_string(&package.to_wire_value()).unwrap();
+        let wire_value = package.to_wire_value();
+        assert_eq!(wire_value["binding"]["lease_epoch"], json!("7"));
+        assert_eq!(
+            wire_value["primary"]["context_window_tokens"],
+            json!("131072")
+        );
+        assert_eq!(wire_value["primary"]["max_output_tokens"], json!("8192"));
+        let wire = serde_json::to_string(&wire_value).unwrap();
         assert!(wire.contains("sk-a-secret-value"));
         let redacted = serde_json::to_string(&package.to_redacted_value()).unwrap();
         assert!(!redacted.contains("sk-a-secret-value"));
@@ -1027,6 +1045,53 @@ mod tests {
             "SensitiveString([REDACTED])"
         );
         assert_eq!(format!("{}", package.primary.secret), "[REDACTED]");
+    }
+
+    #[test]
+    fn generated_package_uses_the_frozen_protocol_integer_encoding() {
+        let payload = json!({
+            "v": 1,
+            "type": "task_submit",
+            "connection_id": "connection-0001",
+            "controller_lease_id": "lease-0001",
+            "lease_epoch": "7",
+            "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001",
+            "request_id": "request-0001",
+            "task_id": "task-0001",
+            "client_request_id": "client-request-0001",
+            "session_id": "session-0001",
+            "capability_revision": "1",
+            "model_source": "controller_temporary",
+            "mode": "chat",
+            "input_digest": "0".repeat(64),
+            "input": {
+                "text": "hello",
+                "attachment_ids": [],
+                "skill_ids": [],
+            },
+            "temporary_model_package": package("sk-value").to_wire_value(),
+        });
+        validate_controller_payload_json(
+            &serde_json::to_string(&payload).unwrap(),
+            SenderRole::ControllerA,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn controlled_parser_accepts_the_frozen_protocol_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let package = TemporaryModelPackageV1::from_wire_value(
+            &fixture["task_submit_vectors"]["temporary"]["temporary_model_package"],
+        )
+        .unwrap();
+        assert_eq!(package.binding.lease_epoch, 1);
+        assert_eq!(package.primary.context_window_tokens, Some(128_000));
+        assert_eq!(package.primary.max_output_tokens, Some(4_096));
     }
 
     #[test]
