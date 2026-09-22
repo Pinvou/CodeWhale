@@ -30,10 +30,10 @@ fn has_compaction_summary_header(text: &str) -> bool {
 
 /// Structural recognition of the one generated checkpoint in saved history.
 ///
-/// The marker substring scan in `compaction` (`is_compaction_summary_text`)
-/// stays scoped to system-prompt carriers:
-/// on history it matches an ordinary user turn that merely *quotes* the
-/// header, and every consumer here either deletes or replaces what it matches.
+/// The marker substring scans in `compaction` (`extract_compaction_summary`,
+/// `strip_summary_text`) stay scoped to system-prompt carriers: on history
+/// they match an ordinary user turn that merely *quotes* the header, and
+/// every consumer here either deletes or replaces what it matches.
 /// Structure instead — a `role="user"` message whose first text block begins
 /// with the header and whose remaining block, if any, is exactly the
 /// engine-written provenance marker.
