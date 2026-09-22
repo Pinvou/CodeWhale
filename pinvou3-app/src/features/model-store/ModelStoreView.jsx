@@ -425,8 +425,22 @@ const ModelStoreView = ({ theme, t, bs }) => {
     // 接入时存的是 endpoint_model，只按 model_name 找必然落空——见 findLinkedRows。
     async (names, displayName, { quiet = false } = {}) => {
       const bridge = tryGetTauriBridge();
-      const rows = findLinkedRows(bs?.savedModels, ...names);
-      // 没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
+      // **先分清「查过了没有」和「根本没查成」**。
+      //
+      // `findLinkedRows` 对 `undefined` 和空数组返回的都是 `[]`，下面那句
+      // `rows.length === 0 → return true` 于是会在**我们压根没能力查看**的情况下
+      // 宣告清理成功。品悟模型列表那一行照样留着，而调用方拿到 true、提示语说
+      // 「已卸载」，用户毫不知情——2026-09-22 真机上驭光卡删除后留下的那行死数据
+      // 就是这么来的（卸载本身成功、清理这步悄悄放过）。
+      //
+      // 拿不到快照时返回 false：宁可让用户看见一句「没能自动清掉，请手动删」，
+      // 也不能让他以为清干净了。
+      if (!Array.isArray(bs?.savedModels)) {
+        showToast(copy.linkBridgeMissing);
+        return false;
+      }
+      const rows = findLinkedRows(bs.savedModels, ...names);
+      // 真的没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
       if (rows.length === 0) return true;
       // 有死行、但拿不到 deleteModel。这两个条件**不能**合并成一句 return:合并之后
       // 「该清但清不掉」会被当成「没什么要清的」静默放过,留下一行静默失效的默认模型。
