@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "Ha fallat la persistència del canvi d'workspace: {error}; l'actor de persistència tampoc no està disponible",
   "WorkspaceSwitchSaveFailedActorQueued": "El desat directe del canvi d'workspace ha fallat ({error}); l'actor de persistència conserva la instantània posterior al canvi",
   "WorkspaceSwitchPersistedActorUnavailable": "El canvi d'workspace s'ha desat, però l'actor de persistència no està disponible; el proper desat automàtic el torna a escriure",
+  "WorkspaceSwitchSnapshotFailed": "Ha fallat la instantània del canvi d'workspace: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "No s'ha pogut obrir el directori de sessions: {error}",
   "WorkspaceRootsRemainder": "… (+{count} més)",
   "WorkspaceRootsNotice": "Carpetes accessibles a més de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs del projecte",

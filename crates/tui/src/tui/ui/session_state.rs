@@ -635,7 +635,10 @@ pub(crate) fn workspace_roots_notice(
     if additional.is_empty() {
         return None;
     }
-    let remainder = roots.len().saturating_sub(1) - additional.len();
+    let remainder = roots
+        .len()
+        .saturating_sub(1)
+        .saturating_sub(additional.len());
     let listed = additional
         .into_iter()
         .map(|root| root.display().to_string())
@@ -656,17 +659,18 @@ pub(crate) fn workspace_roots_notice(
 }
 
 /// Persist the post-switch snapshot through both durability paths and
-/// report exactly what happened. The direct save is the immediate disk
+/// return exactly what happened. The direct save is the immediate disk
 /// authority; the actor enqueue heals the reorder window (a queued
 /// pre-switch snapshot is coalesced away by this fresher one). The status
 /// must never claim a persistence that did not happen: when both paths fail
 /// the next restart would resurrect the pre-switch workspace/root set, and
-/// that has to be the visible failure.
+/// that has to be the visible failure. The caller assigns the receipt LAST —
+/// the closing "Workspace: X" line must not clobber it (round-14 M-1).
 fn persist_workspace_switch_snapshot(
-    app: &mut App,
+    locale: crate::localization::Locale,
     manager: &SessionManager,
     snapshot: crate::session_manager::SavedSession,
-) {
+) -> Option<String> {
     let save_error = manager.save_session(&snapshot).err();
     // The direct save bypasses the persistence actor, so a pre-`/cd`
     // snapshot already queued there (an autosave that fired moments ago)
@@ -675,13 +679,11 @@ fn persist_workspace_switch_snapshot(
     // the queued stale one, and even a stale write already in flight is
     // followed by this fresher record of the swapped set.
     let queued = persistence_actor::try_persist(PersistRequest::SessionSnapshot(snapshot));
-    if let Some(message) = workspace_switch_persistence_message(
-        app.ui_locale,
+    workspace_switch_persistence_message(
+        locale,
         save_error.as_ref().map(|err| err.to_string()),
         queued,
-    ) {
-        app.status_message = Some(message);
-    }
+    )
 }
 
 /// The status receipt for the two `/cd` persistence paths, from the actual
@@ -752,19 +754,7 @@ pub(crate) async fn switch_workspace(
     // empty incoming set, so without a direct save the stale pre-`/cd`
     // set would be rewritten on disk and resurrect the old directory as a
     // writable root on the next resume.
-    match SessionManager::default_location() {
-        Ok(manager) => match crate::tui::ui::frame::build_session_snapshot(app, &manager) {
-            Ok(snapshot) => {
-                persist_workspace_switch_snapshot(app, &manager, snapshot);
-            }
-            Err(err) => {
-                app.status_message = Some(format!("Failed to snapshot workspace switch: {err}"));
-            }
-        },
-        Err(err) => {
-            app.status_message = Some(format!("Failed to open sessions directory: {err}"));
-        }
-    }
+    let persist_receipt = persist_workspace_switch_receipt(app);
 
     let _ = engine_handle.send(Op::Shutdown).await;
     let engine_config = build_engine_config(app, config);
@@ -787,7 +777,44 @@ pub(crate) async fn switch_workspace(
     app.add_message(HistoryCell::System {
         content: format!("Switched workspace to {}", workspace.display()),
     });
-    app.status_message = Some(format!("Workspace: {}", workspace.display()));
+    // The receipt rides the closing line instead of being assigned earlier:
+    // an unconditional "Workspace: X" assignment after the persist block used
+    // to clobber every failure receipt it exists to disclose (round-14 M-1).
+    app.status_message = Some(workspace_switch_closing_status(&workspace, persist_receipt));
+}
+
+/// The closing `/cd` status line: the persistence receipt (when any) is
+/// composed into the success line, so the success text can never silently
+/// replace a failure disclosure.
+fn workspace_switch_closing_status(workspace: &Path, receipt: Option<String>) -> String {
+    match receipt {
+        Some(receipt) => format!("Workspace: {} — {receipt}", workspace.display()),
+        None => format!("Workspace: {}", workspace.display()),
+    }
+}
+
+/// The `/cd` persist step, returning the user-visible receipt (if any). Only
+/// an existing session has a record to swap: with no current session,
+/// `build_session_snapshot` would mint AND durably save an empty
+/// "New Session" orphan on every bare-prompt `/cd` (round-14 M-3), so the
+/// step is skipped entirely there.
+fn persist_workspace_switch_receipt(app: &mut App) -> Option<String> {
+    if app.current_session_id.is_none() {
+        return None;
+    }
+    match SessionManager::default_location() {
+        Ok(manager) => match crate::tui::ui::frame::build_session_snapshot(app, &manager) {
+            Ok(snapshot) => persist_workspace_switch_snapshot(app.ui_locale, &manager, snapshot),
+            Err(err) => Some(
+                tr(app.ui_locale, MessageId::WorkspaceSwitchSnapshotFailed)
+                    .replace("{error}", &err.to_string()),
+            ),
+        },
+        Err(err) => Some(
+            tr(app.ui_locale, MessageId::WorkspaceSwitchSessionsDirFailed)
+                .replace("{error}", &err.to_string()),
+        ),
+    }
 }
 
 pub(crate) fn restore_failed_immediate_submit(
@@ -1398,5 +1425,66 @@ mod workspace_switch_persistence_tests {
             !message.contains("Failed to persist workspace switch"),
             "{message}"
         );
+    }
+
+    /// M-1 wiring: the closing status line composes the receipt into the
+    /// success text instead of overwriting it, so a double persistence
+    /// failure can never surface as a bare "Workspace: X".
+    #[test]
+    fn closing_status_carries_the_receipt() {
+        let workspace = Path::new("/tmp/ws");
+        let bare = workspace_switch_closing_status(workspace, None);
+        assert_eq!(bare, "Workspace: /tmp/ws");
+
+        let with_receipt = workspace_switch_closing_status(
+            workspace,
+            Some("Failed to persist workspace switch: disk full".to_string()),
+        );
+        assert!(
+            with_receipt.contains("Workspace: /tmp/ws"),
+            "{with_receipt}"
+        );
+        assert!(
+            with_receipt.contains("Failed to persist workspace switch"),
+            "the receipt must survive the closing line: {with_receipt}"
+        );
+    }
+
+    /// M-3: a bare-prompt `/cd` has no session record to swap; the persist
+    /// step must not mint (and durably save) an empty "New Session" orphan.
+    #[test]
+    fn bare_cd_persists_nothing_and_mints_no_orphan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let options = crate::test_support::test_tui_options(dir.path());
+        let mut app = App::new(options, &Config::default());
+        assert!(app.current_session_id.is_none(), "fresh TUI has no session");
+
+        let receipt = persist_workspace_switch_receipt(&mut app);
+        assert_eq!(receipt, None, "no session, no receipt, no disk write");
+        assert!(
+            app.current_session_id.is_none() && app.current_session_metadata.is_none(),
+            "the persist step must not mint a session on a bare /cd"
+        );
+    }
+
+    /// M-2: the two `/cd` failure strings are typed MessageIds rendered from
+    /// every pack, never hardcoded English.
+    #[test]
+    fn cd_failure_strings_are_localized() {
+        for locale in [
+            crate::localization::Locale::En,
+            crate::localization::Locale::Ja,
+            crate::localization::Locale::ZhHans,
+        ] {
+            let snapshot = tr(locale, MessageId::WorkspaceSwitchSnapshotFailed);
+            let sessions_dir = tr(locale, MessageId::WorkspaceSwitchSessionsDirFailed);
+            assert!(snapshot.contains("{error}"), "{snapshot}");
+            assert!(sessions_dir.contains("{error}"), "{sessions_dir}");
+        }
+        let ja = tr(
+            crate::localization::Locale::Ja,
+            MessageId::WorkspaceSwitchSnapshotFailed,
+        );
+        assert!(!ja.contains("Failed to snapshot"), "{ja}");
     }
 }

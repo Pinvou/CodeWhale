@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "Не вдалося зберегти зміну робочого простору: {error}; суб'єкт персистентності також недоступний",
   "WorkspaceSwitchSaveFailedActorQueued": "Пряме збереження зміни робочого простору не вдалося ({error}); суб'єкт персистентності зберігає знімок після зміни",
   "WorkspaceSwitchPersistedActorUnavailable": "Зміну робочого простору збережено, але суб'єкт персистентності недоступний; наступне автозбереження запише її знову",
+  "WorkspaceSwitchSnapshotFailed": "Не вдалося створити знімок зміни робочого простору: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "Не вдалося відкрити каталог сеансів: {error}",
   "WorkspaceRootsRemainder": "… (ще {count})",
   "WorkspaceRootsNotice": "Доступні папки окрім {workspace}: {roots}",
   "StatusLabelProjectDocs": "Документи проєкту",

@@ -1583,6 +1583,8 @@ pub enum MessageId {
     WorkspaceSwitchPersistedActorUnavailable,
     WorkspaceSwitchSaveFailedActorQueued,
     WorkspaceSwitchPersistFailed,
+    WorkspaceSwitchSnapshotFailed,
+    WorkspaceSwitchSessionsDirFailed,
     // Underwater post-launch empty state.
     EmptyStateNoGit,
     EmptyStateMcpLabel,
@@ -3711,6 +3713,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::WorkspaceSwitchPersistedActorUnavailable,
     MessageId::WorkspaceSwitchSaveFailedActorQueued,
     MessageId::WorkspaceSwitchPersistFailed,
+    MessageId::WorkspaceSwitchSnapshotFailed,
+    MessageId::WorkspaceSwitchSessionsDirFailed,
     MessageId::EmptyStateNoGit,
     MessageId::EmptyStateMcpLabel,
     MessageId::EmptyStatePrompt,

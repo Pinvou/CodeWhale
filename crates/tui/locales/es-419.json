@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "Error al persistir el cambio de workspace: {error}; el actor de persistencia tampoco está disponible",
   "WorkspaceSwitchSaveFailedActorQueued": "El guardado directo del cambio de workspace falló ({error}); el actor de persistencia conserva el snapshot posterior al cambio",
   "WorkspaceSwitchPersistedActorUnavailable": "El cambio de workspace se guardó, pero el actor de persistencia no está disponible; el siguiente autoguardado lo vuelve a escribir",
+  "WorkspaceSwitchSnapshotFailed": "Error al crear la instantánea del cambio de workspace: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "No se pudo abrir el directorio de sesiones: {error}",
   "WorkspaceRootsRemainder": "… (+{count} más)",
   "WorkspaceRootsNotice": "Carpetas accesibles además de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs del proyecto",

@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "工作區切換持久化失敗：{error}；持久化執行器也不可用",
   "WorkspaceSwitchSaveFailedActorQueued": "工作區切換的直接保存失敗（{error}）；持久化執行器持有切換後的快照",
   "WorkspaceSwitchPersistedActorUnavailable": "工作區切換已保存，但持久化執行器不可用；下次自動保存會重新寫入",
+  "WorkspaceSwitchSnapshotFailed": "工作區切換快照失敗：{error}",
+  "WorkspaceSwitchSessionsDirFailed": "無法開啟工作階段目錄：{error}",
   "WorkspaceRootsRemainder": "…（另有 {count} 個）",
   "WorkspaceRootsNotice": "{workspace} 之外可存取的資料夾：{roots}",
   "StatusLabelProjectDocs": "專案文件",

@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "Gagal mempersistenkan perubahan workspace: {error}; actor persistensi juga tidak tersedia",
   "WorkspaceSwitchSaveFailedActorQueued": "Penyimpanan langsung perubahan workspace gagal ({error}); actor persistensi menyimpan snapshot setelah perubahan",
   "WorkspaceSwitchPersistedActorUnavailable": "Perubahan workspace disimpan, tetapi actor persistensi tidak tersedia; penyimpanan otomatis berikutnya akan menulisnya ulang",
+  "WorkspaceSwitchSnapshotFailed": "Gagal membuat snapshot perubahan workspace: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "Gagal membuka direktori sesi: {error}",
   "WorkspaceRootsRemainder": "… (+{count} lainnya)",
   "WorkspaceRootsNotice": "Folder yang dapat diakses selain {workspace}: {roots}",
   "StatusLabelProjectDocs": "Dokumen proyek",

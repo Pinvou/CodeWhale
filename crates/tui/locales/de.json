@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "Das Persistieren des Arbeitsbereichswechsels ist fehlgeschlagen: {error}; der Persistenz-Aktor ist ebenfalls nicht verfügbar",
   "WorkspaceSwitchSaveFailedActorQueued": "Das direkte Speichern des Arbeitsbereichswechsels schlug fehl ({error}); der Persistenz-Aktor hält den Snapshot nach dem Wechsel",
   "WorkspaceSwitchPersistedActorUnavailable": "Der Arbeitsbereichswechsel wurde gespeichert, aber der Persistenz-Aktor ist nicht verfügbar; das nächste Autosave schreibt ihn erneut",
+  "WorkspaceSwitchSnapshotFailed": "Die Momentaufnahme des Arbeitsbereichswechsels ist fehlgeschlagen: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "Das Sitzungsverzeichnis konnte nicht geöffnet werden: {error}",
   "WorkspaceRootsRemainder": "… (+{count} weitere)",
   "WorkspaceRootsNotice": "Zugängliche Ordner neben {workspace}: {roots}",
   "StatusLabelProjectDocs": "Projektdokumente",

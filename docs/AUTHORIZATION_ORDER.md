@@ -42,7 +42,10 @@ overlay. `/permissions` reports that source, matcher, scope, and whether the
 scope covers the current session. In a multi-root session the scope matches
 the session's accessible root set by name; the action carried by that rule
 stays primary-root-scoped, so a scoped `allow` never auto-approves a write
-under an attached root, while scoped `ask`/`deny` reach every attached root
+under an attached root — one exception, inherited from the single-root base:
+a rule spelling an ABSOLUTE path falls back to matching the call's original
+spelling exactly, root-independently, so such a rule can approve a write
+under an attached root — while scoped `ask`/`deny` reach every attached root
 (the same narrowing the execution-policy engine applies).
 
 The execution-policy engine evaluates matching rules as follows:

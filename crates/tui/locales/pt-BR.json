@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "Falha ao persistir a mudança de workspace: {error}; o ator de persistência também está indisponível",
   "WorkspaceSwitchSaveFailedActorQueued": "O salvamento direto da mudança de workspace falhou ({error}); o ator de persistência mantém o snapshot pós-mudança",
   "WorkspaceSwitchPersistedActorUnavailable": "A mudança de workspace foi salva, mas o ator de persistência está indisponível; o próximo salvamento automático a regrava",
+  "WorkspaceSwitchSnapshotFailed": "Falha no instantâneo da mudança de workspace: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "Falha ao abrir o diretório de sessões: {error}",
   "WorkspaceRootsRemainder": "… (+{count} mais)",
   "WorkspaceRootsNotice": "Pastas acessíveis além de {workspace}: {roots}",
   "StatusLabelProjectDocs": "Docs do projeto",

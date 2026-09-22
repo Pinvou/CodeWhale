@@ -1755,6 +1755,8 @@
   "WorkspaceSwitchPersistFailed": "ワークスペース切り替えの永続化に失敗しました: {error}。永続化アクターも利用できません",
   "WorkspaceSwitchSaveFailedActorQueued": "ワークスペース切り替えの直接保存に失敗しました（{error}）。永続化アクターが切り替え後のスナップショットを保持しています",
   "WorkspaceSwitchPersistedActorUnavailable": "ワークスペース切り替えは保存されましたが、永続化アクターが利用できません。次の自動保存で再保存されます",
+  "WorkspaceSwitchSnapshotFailed": "ワークスペース切り替えのスナップショットに失敗しました: {error}",
+  "WorkspaceSwitchSessionsDirFailed": "セッションディレクトリを開けませんでした: {error}",
   "WorkspaceRootsRemainder": "…（ほか {count} 件）",
   "WorkspaceRootsNotice": "{workspace} のほかにアクセス可能なフォルダ: {roots}",
   "StatusLabelProjectDocs": "プロジェクト文書",
