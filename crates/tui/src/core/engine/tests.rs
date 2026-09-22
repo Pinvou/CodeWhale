@@ -450,9 +450,13 @@ fn forkguard_registry_first_instruction_names_registered_tool_specs() {
         "instruction must keep naming the registered `{start}`"
     );
     // The match cap is quoted as a literal word in the instruction, the
-    // `registry_sync` schema description, and the bundled mcp-discovery
-    // skill; `MAX_REGISTRY_MATCHES` pins the constant to it at compile time,
-    // and these two assertions pin the remaining text sides.
+    // `registry_sync` schema description and tool description, the bundled
+    // mcp-discovery skill, and the legacy shell-surface guidance. The
+    // compile-time pins (`MAX_REGISTRY_MATCHES` in tools/mcp_registry.rs and
+    // the local "eight" pin in core/engine/tool_catalog.rs) hold the
+    // constant and the guidance wording, and these assertions pin the
+    // instruction and registry_sync texts; the skill markdown is only
+    // reached by the tripwire message, with no mechanical pin.
     assert!(
         MCP_REGISTRY_FIRST_INSTRUCTION.contains("eight"),
         "instruction must keep the match-cap wording in sync with \
@@ -463,6 +467,12 @@ fn forkguard_registry_first_instruction_names_registered_tool_specs() {
         schema.contains("eight"),
         "registry_sync schema must keep the match-cap wording in sync with \
          MAX_REGISTRY_MATCHES: {schema}"
+    );
+    let description = ToolSpec::description(&sync);
+    assert!(
+        description.contains("eight"),
+        "registry_sync description must keep the match-cap wording in sync \
+         with MAX_REGISTRY_MATCHES: {description}"
     );
     // Both registry commands are deferred on stock hosts, so the instruction
     // must teach the `tool_search` activation path instead of only
