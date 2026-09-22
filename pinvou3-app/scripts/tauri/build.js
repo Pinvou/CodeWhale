@@ -286,10 +286,12 @@ const TARGET_MACHINE_ARCHITECTURES = {
 };
 
 /**
- * 明确允许回落宿主架构的三元组。
+ * 明确允许回落宿主架构的三元组（只对 darwin 宿主生效）。
  *
  * `universal-apple-darwin` 一次编出 x86_64 与 aarch64 两份再合成通用二进制，
  * 本来就没有单一「目标架构」可言，回落宿主架构才是对的，不能当成「不认识」拒绝。
+ * 限定 darwin 宿主：Linux 上传这个三元组没有任何意义（cargo 编不出 macOS 产物，
+ * 构建本来就走不通），落到未知机器段硬失败才是对的，别给它开一条绕过闸门的口子。
  */
 const HOST_FALLBACK_TARGET_TRIPLES = new Set(["universal-apple-darwin"]);
 
@@ -344,7 +346,7 @@ function targetArchitecture(
     }
   }
   if (!triple) return null;
-  if (HOST_FALLBACK_TARGET_TRIPLES.has(triple)) return null;
+  if (platform === "darwin" && HOST_FALLBACK_TARGET_TRIPLES.has(triple)) return null;
   const machine = triple.split("-")[0];
   const architecture = TARGET_MACHINE_ARCHITECTURES[machine];
   if (architecture) return architecture;
@@ -354,15 +356,19 @@ function targetArchitecture(
     `无法从 --target ${triple} 判定目标架构：机器段「${machine}」不在架构映射表里。`
       + `宿主是 ${hostArch}，回落宿主架构会挑错 overlay，并让语音识别运行时和共享`
       + `知识库服务按宿主架构备料，产出「主程序是目标架构、侧车全是宿主架构」的`
-      + `静默错包，所以这里直接拒绝。要支持这个架构，下面四处都要补，缺一处就会`
-      + `重新引入静默错包：①本文件的 TARGET_MACHINE_ARCHITECTURES；`
-      + `②scripts/tauri/platform-config.js 的 ARCHITECTURE_CONFIG_NAMES；`
-      + `③src-tauri/config/platforms/linux/ 下对应的架构 overlay；`
+      + `静默错包，所以这里直接拒绝。要支持这个架构，下面几处都要补——漏②或④`
+      + `会重新引入静默错包，漏①、③或⑤会在构建时当场报错：`
+      + `①本文件的 TARGET_MACHINE_ARCHITECTURES；`
+      + `②scripts/tauri/platform-config.js 的 ARCHITECTURE_CONFIG_NAMES（漏了它 `
+      + `platformArchitectureConfigPath 返回 null，整层架构 overlay 会被静默跳过）；`
+      + `③src-tauri/config/platforms/linux/ 下对应的架构 overlay（漏了它是`
+      + `「解析配置失败/Tauri overlay 不存在」的响亮失败）；`
       + `④scripts/tauri/codex-bridge.js 里 node arch → 机器段的那张 machine 映射`
       + `（漏了它 machine 会是 undefined，环境变量不注入，备料脚本回落 uname -m 按`
-      + `**宿主**架构备 Node，包里的 Bridge node 架构就错了，而且全程零报错）。`
-      + `若它是通用二进制那类没有单一目标架构的三元组，则加进 `
-      + `HOST_FALLBACK_TARGET_TRIPLES。`,
+      + `**宿主**架构备 Node，包里的 Bridge node 架构就错了，而且全程零报错）；`
+      + `⑤scripts/prepare-codex-bridge-runtime.sh 的目标词表（漏了它落到 *) 硬失败）。`
+      + `若它是通用二进制那类没有单一目标架构的三元组（仅 darwin 宿主回落），`
+      + `则加进 HOST_FALLBACK_TARGET_TRIPLES。`,
   );
 }
 
@@ -407,8 +413,10 @@ function targetArchitecture(
  * 那样每次交叉构建都要「改了记得还原」，而且 `tests/tauri_platform_layout.test.js`
  * 会一直是红的。构建期的临时差异就该留在构建脚本里。
  *
- * `--config` 既收路径也收内联 JSON 串（`linuxStartupWindowConfigSpec` 就是这么用的），
- * 所以这里直接返回 JSON 串，不落临时文件——落文件的话资源路径的相对基准会变。
+ * `--config` 既收路径也收内联 JSON 串（`linuxStartupWindowConfigSpec` 就是这么用的）。
+ * 这里返回内联 JSON 串只是为了不落临时文件——省掉清理和「进程中断留下脏文件」的
+ * 尾巴。资源路径的解析基准始终是 src-tauri，与 `--config` 是文件还是内联无关
+ * （Tauri CLI 对两种形态走同一条合并链）。
  * @param {string} configPath overlay 的绝对路径。
  * @param {string[]} markers 命中即摘除的资源源路径子串。
  * @returns {string} 摘过之后的内联 JSON；没有可摘的就原样返回路径。

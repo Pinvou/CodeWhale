@@ -90,7 +90,9 @@ test("--target 没跟值：报「少了值」，不要把下一个 flag 当三�
 const LINUX_X64 = { platform: "linux", hostArch: "x64" };
 
 test("Linux 宿主交叉构建到不认识的机器段：硬失败，不静默回落宿主架构", () => {
-  for (const triple of ["riscv64gc-unknown-linux-gnu", "armv7-unknown-linux-gnueabihf"]) {
+  // 反例选几乎不会进词表的机器段：riscv64 是相对主流的目标，哪天真被支持，
+  // 这组「不认识」反例会自己撞红，还得回头改测试。
+  for (const triple of ["loongarch64-unknown-linux-gnu", "armv7-unknown-linux-gnueabihf"]) {
     assert.throws(
       () => targetArchitecture(["build", `--target=${triple}`], LINUX_X64),
       (error) => {
@@ -120,16 +122,28 @@ test("universal-apple-darwin 必须继续回落宿主架构", () => {
     ),
     null,
   );
+  // 白名单只对 darwin 宿主生效：Linux 上传这个三元组 cargo 编不出 macOS 产物，
+  // 这条构建路径本来就不存在，不能给它开一条绕过未知架构硬失败的口子。
+  assert.throws(
+    () => targetArchitecture(
+      ["build", "--target=universal-apple-darwin"],
+      LINUX_X64,
+    ),
+    /universal/,
+  );
 });
 
 test("硬失败的范围只到「确实在交叉构建」为止", () => {
-  const unknown = ["build", "--target=riscv64gc-unknown-linux-gnu"];
+  const unknown = ["build", "--target=loongarch64-unknown-linux-gnu"];
   // 非 Linux 宿主：那几步「只按宿主架构备料」的侧车不在这条打包路径上，没有要防的错包。
   assert.equal(targetArchitecture(unknown, { platform: "win32", hostArch: "x64" }), null);
   assert.equal(targetArchitecture(unknown, { platform: "darwin", hostArch: "arm64" }), null);
-  // 宿主自己的 arch 就不在表里：在 riscv64 机器上编 riscv64 是**原生**构建，
+  // 宿主自己的 arch 就不在表里：在 loongarch64 机器上编 loongarch64 是**原生**构建，
   // 我们无从判断这是不是交叉，不该越权拦。
-  assert.equal(targetArchitecture(unknown, { platform: "linux", hostArch: "riscv64" }), null);
+  assert.equal(
+    targetArchitecture(unknown, { platform: "linux", hostArch: "loongarch64" }),
+    null,
+  );
   // 没传 --target 时根本不必判断机器段。
   assert.equal(targetArchitecture(["build"], LINUX_X64), null);
 });

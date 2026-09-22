@@ -134,6 +134,13 @@ bridge_runtime_valid() {
     # 最后才把 node / acp / manifest 依次 mv 进 OUT_DIR（manifest 是三次 mv 里的
     # 最后一次）。所以 OUT_DIR 里躺着一份版本对得上的 manifest，本身就是「这份
     # 产物当时通过了执行校验，且三次 mv 都做完了」的凭证。
+    #
+    # 三个版本都比对（Node、两个 ACP 包）：manifest 里既然都记着，少比一个就留一个
+    # 「单 bump 该版本时旧 staging 被判 ready」的口子。这个凭证只覆盖构建时序——
+    # 两次构建之间 OUT_DIR 里的文件被外部改动（内容损坏但 [ -s ] 仍过）是不设防的；
+    # 执行校验只在「本次构建刚备完料」那一次全量跑过。
+    [ "$(manifest_field "$root/manifest.json" node_version)" = "$NODE_VERSION" ] \
+      || return 1
     [ "$(manifest_field "$root/manifest.json" codex_acp_version)" = "$CODEX_ACP_VERSION" ] \
       || return 1
     [ "$(manifest_field "$root/manifest.json" claude_acp_version)" = "$CLAUDE_ACP_VERSION" ] \

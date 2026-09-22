@@ -364,10 +364,18 @@ const hostBridgeSpawn = capturedBridgeSpawn({
   platform: "linux",
   env: bridgeEnvFixture,
 });
-assert.equal(
+// 非交叉构建回落到 uname -m：其余环境变量原样透传（deepEqual），但必须是复制的
+// 新对象——prepareCodexBridge 在这条路径上要清掉调用环境里可能残留的
+// PINVOU3_BRIDGE_TARGET_ARCH，不能动调用方的对象。
+assert.deepEqual(
   hostBridgeSpawn.options.env,
   bridgeEnvFixture,
   "非交叉构建必须原样透传环境，让备料脚本回落到 uname -m",
+);
+assert.notEqual(
+  hostBridgeSpawn.options.env,
+  bridgeEnvFixture,
+  "透传必须走副本，不能把调用方的 env 对象直接交给子进程改动",
 );
 assert.equal(
   hostBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH,
@@ -404,14 +412,32 @@ assert.equal(
   undefined,
   "注入必须复制一份环境，不能就地污染调用方的 env",
 );
-assert.equal(
-  capturedBridgeSpawn({
-    platform: "linux",
-    targetArch: "riscv64",
-    env: bridgeEnvFixture,
-  }).options.env,
+// machine 映射里没有的记法回落宿主行为：其余环境变量原样透传（复制，不就地污染），
+// 且必须清掉调用环境里可能残留的 PINVOU3_BRIDGE_TARGET_ARCH——那是备料脚本的手动
+// 开关，shell 里残留它时若原样透传，非交叉构建会被按残留值备出另一架构的 Node，
+// 而 overlay 仍按 process.arch 挑，静默错包只是换了个入口。
+// 反例用 loongarch64 这类几乎不会进词表的机器段：riscv64 是相对主流的目标，哪天真
+// 被支持，用它会把这个反例用例本身撞红，还得回头改测试。
+const leftoverBridgeEnv = { ...bridgeEnvFixture, PINVOU3_BRIDGE_TARGET_ARCH: "x86_64" };
+const fallbackBridgeEnv = capturedBridgeSpawn({
+  platform: "linux",
+  targetArch: "loongarch64",
+  env: leftoverBridgeEnv,
+}).options.env;
+assert.deepEqual(
+  fallbackBridgeEnv,
   bridgeEnvFixture,
-  "映射表里没有的记法只能回落到宿主行为，不能注入一个备料脚本不认识的词",
+  "回落时其余环境变量原样透传，残留的 PINVOU3_BRIDGE_TARGET_ARCH 必须被清掉",
+);
+assert.notEqual(
+  fallbackBridgeEnv,
+  leftoverBridgeEnv,
+  "回落也必须复制一份环境，不能就地污染调用方的 env",
+);
+assert.equal(
+  leftoverBridgeEnv.PINVOU3_BRIDGE_TARGET_ARCH,
+  "x86_64",
+  "残留值是调用方环境的一部分，只能清副本，不能动调用方的对象",
 );
 
 // 注入的词必须落在备料脚本的目标词表里，两个 OS 都要。
@@ -448,7 +474,7 @@ for (const machine of injectedBridgeMachines) {
 // 扩展新架构时，build.js 的词表和 codex-bridge.js 的 machine 映射必须同步扩展。
 //
 // 上面那组用例把 arm64→aarch64 / x64→x86_64 逐项写死了，它钉的是**映射值对不对**；
-// 但因为对照表是硬编码的，往 TARGET_MACHINE_ARCHITECTURES 里加一个 riscv64 而不动
+// 但因为对照表是硬编码的，往 TARGET_MACHINE_ARCHITECTURES 里加一个 loongarch64 而不动
 // machine 映射，上面照样全绿。而那正是要防的洞：machine 落成 undefined → 环境变量
 // 不注入 → 备料脚本回落 `uname -m` 按**宿主**架构备 Node → 包里的 Bridge node 是
 // 宿主架构，全程零报错，恰是本 PR 要消灭的静默错包。
@@ -479,6 +505,20 @@ for (const targetArch of new Set(Object.values(TARGET_MACHINE_ARCHITECTURES))) {
   }
 }
 
+// 派生链再补一环（targetArchitecture 硬失败文案清单②）：每个 build.js 能解析出的
+// 目标架构，platform-config.js 的 ARCHITECTURE_CONFIG_NAMES.linux 必须有对应的
+// overlay。漏②时 platformArchitectureConfigPath 返回 null，prepareTauriArgs 的
+// `if (architectureConfig)` 把整层架构 overlay **静默**跳过——上面那组映射断言
+// 照绿，只有这条能照到。反例机器段在 gate 测试里，那边用 loongarch64。
+for (const targetArch of new Set(Object.values(TARGET_MACHINE_ARCHITECTURES))) {
+  assert.ok(
+    platformArchitectureConfigPath("linux", targetArch) !== null,
+    `build.js 的 TARGET_MACHINE_ARCHITECTURES 能解析出 ${targetArch}，但 `
+      + `platform-config.js 的 ARCHITECTURE_CONFIG_NAMES.linux 里没有它：整层架构 `
+      + "overlay 会被静默跳过。两张表必须一起改。",
+  );
+}
+
 assert.throws(() => requireWrapper({}), /禁止绕过平台 overlay/);
 assert.doesNotThrow(() => requireWrapper({ [WRAPPER_ENV]: "1" }));
 
@@ -488,10 +528,13 @@ const buildArgs = prepareTauriArgs(
   { platform: "linux", stageRuntime: noRuntime },
 );
 assert.equal(tauriCommandIndex(buildArgs), 1, "build command may follow global options");
+// architecture 没显式传时默认 process.arch，期望值跟着宿主走：别硬编码 x64，
+// 否则这条断言在 arm64 宿主上预存红，而这个文件是顶层脚本式断言、首错即中断，
+// 会把它后面的所有断言（含本 PR 新增的接线断言）一起截断。
 assert.deepEqual(configSpecs(buildArgs), [
   platformConfigPath("linux"),
   linuxStartupOverlay,
-  platformArchitectureConfigPath("linux", "x64"),
+  platformArchitectureConfigPath("linux", process.arch),
 ]);
 const linuxArmArgs = prepareTauriArgs(
   ["build", "--bundles", "deb"],

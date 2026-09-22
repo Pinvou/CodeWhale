@@ -67,6 +67,32 @@ function withSwitches(env, body) {
   }
 }
 
+test("非 Linux 平台：开关打开也不动 overlay 链", () => {
+  // 与 tauri_skip_knowledge_host_overlay.test.js 的对称用例同一件事：ASR 顶替
+  // 的 `platform === "linux"` 守卫丢了，macOS/Windows 的 overlay 也会被读进来
+  // 重写一遍——当前 marker 在那些文件里恰好命中不了，这种「靠 marker 恰好不命中」
+  // 的无害是会过期的，所以钉住「非 Linux 上一条内联顶替项都不该出现」。
+  // win32 没有架构 overlay（ARCHITECTURE_CONFIG_NAMES 只有 linux），平台 overlay
+  // 必须原样走文件路径。
+  const saved = process.env.PINVOU3_SKIP_LINUX_ASR;
+  try {
+    process.env.PINVOU3_SKIP_LINUX_ASR = "1";
+    const specs = overlayEntries(
+      prepareTauriArgs(["build"], { platform: "win32", stageRuntime: () => null }),
+    );
+    assert.ok(specs.length > 0, "win32 构建仍应注入平台 overlay");
+    for (const spec of specs) {
+      assert.ok(
+        !spec.trim().startsWith("{"),
+        `非 Linux 平台上不该出现内联顶替项：${spec.slice(0, 48)}`,
+      );
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PINVOU3_SKIP_LINUX_ASR;
+    else process.env.PINVOU3_SKIP_LINUX_ASR = saved;
+  }
+});
+
 test("默认情况下架构 overlay 走文件路径，ASR 资源照常声明", () => {
   withSwitches({}, (run) => {
     const args = run();

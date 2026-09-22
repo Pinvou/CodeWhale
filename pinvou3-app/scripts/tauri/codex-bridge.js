@@ -368,14 +368,23 @@ function prepareCodexBridge({
   // 维护第二张映射表。tests/tauri_effective_config.test.js 钉住了这条对应关系。
   //
   // 这张表必须覆盖 build.js 的 `TARGET_MACHINE_ARCHITECTURES` 能产出的**每个** arch。
-  // 少一个不会报错：machine 落成 undefined，下面的 env 原样透传，备料脚本回落
-  // `uname -m` 按**宿主**架构备 Node，包里的 Bridge node 就是错架构的——全程零提示，
-  // 正是本条链路要消灭的静默错包。那条子集断言同样在上面那个测试文件里。
+  // 少一个不会报错：machine 落成 undefined，下面的 env 在清掉残留注入键后原样
+  // 透传，备料脚本回落 `uname -m` 按**宿主**架构备 Node，包里的 Bridge node 就是
+  // 错架构的——全程零提示，正是本条链路要消灭的静默错包。那条子集断言同样在
+  // 上面那个测试文件里。
   const machine = { arm64: "aarch64", x64: "x86_64" }[targetArch];
+  // 永远复制一份：machine 有值时注入，没有值时把调用环境里可能残留的
+  // PINVOU3_BRIDGE_TARGET_ARCH 清掉。这个变量是备料脚本的手动开关，直接调脚本
+  // 时设它合法；但经由这里时 machine 为空意味着这次构建没有交叉目标——留着
+  // shell 里的残留值，脚本会按它给非交叉构建备出另一架构的 Node，而 overlay 仍
+  // 按 process.arch 挑，静默错包只是换了个环境变量的入口进来。
+  const childEnv = { ...env };
+  if (machine) childEnv.PINVOU3_BRIDGE_TARGET_ARCH = machine;
+  else delete childEnv.PINVOU3_BRIDGE_TARGET_ARCH;
   const result = spawn(script, [], {
     cwd: APP_ROOT,
     stdio: "inherit",
-    env: machine ? { ...env, PINVOU3_BRIDGE_TARGET_ARCH: machine } : env,
+    env: childEnv,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {

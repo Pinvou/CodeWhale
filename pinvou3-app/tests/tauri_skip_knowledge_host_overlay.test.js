@@ -8,6 +8,9 @@
 //   - 脏树：目录里躺着上次**宿主架构**构建留下的 server，被原样打进另一个架构的包。
 // 两种都要等用户在设备上用到共享知识库才暴露。所以这里走真正的 `prepareTauriArgs`，
 // 从它吐出来的 `--config` 列表上做断言。
+//
+// 为什么摘的手法是「顶替整个 overlay」而不是「叠一层把那条键置 null」，论证在
+// build.js 的 `configWithoutResources` 头注释里，唯一一份，这里不复述。
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const test = require("node:test");
