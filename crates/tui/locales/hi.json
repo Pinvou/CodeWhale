@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "सत्र मेट्रिक्स: {metrics}",
   "StatusLabelRoute": "रूट",
   "StatusLabelDirectory": "डायरेक्टरी",
+  "StatusLabelWorkspaceRoots": "सुलभ फ़ोल्डर",
   "StatusLabelProjectDocs": "प्रोजेक्ट दस्तावेज़",
   "StatusLabelMode": "मोड",
   "StatusLabelSafety": "सुरक्षा",

@@ -640,28 +640,40 @@ impl StateStore {
             .context("failed to initialize thread goal continuation schema")?;
         }
         if user_version < 5 {
-            // Same restore/race guard as the v0 block: the column may
-            // already exist even though the header predates version 5.
-            let add_workspace_roots = if column_exists(conn, "threads", "workspace_roots")? {
-                ""
+            // Two processes first-opening the same store race here: deciding
+            // the column's presence outside the transaction (the v0/v4 shape)
+            // lets both see it missing and makes the loser's ALTER fail with
+            // a duplicate-column error. `BEGIN IMMEDIATE` alone is not
+            // enough — the decision would still precede the lock — so the
+            // presence check runs inside the write transaction, where the
+            // loser observes the winner's committed column and becomes a
+            // no-op version bump.
+            conn.execute_batch("BEGIN IMMEDIATE;")
+                .context("failed to begin the workspace roots migration")?;
+            let migration = if column_exists(conn, "threads", "workspace_roots")? {
+                String::new()
             } else {
-                "ALTER TABLE threads\n                    ADD COLUMN workspace_roots TEXT NOT NULL DEFAULT '[]';"
+                "ALTER TABLE threads\n                    ADD COLUMN workspace_roots TEXT NOT NULL DEFAULT '[]';\n"
+                    .to_string()
             };
-            conn.execute_batch(&format!(
-                r#"
-                BEGIN;
-                {add_workspace_roots}
-
+            let committed = conn.execute_batch(&format!(
+                r#"{migration}
                 PRAGMA user_version = 5;
                 COMMIT;
                 "#
-            ))
-            .context("failed to initialize thread workspace roots schema")?;
+            ));
+            if committed.is_err() {
+                // Leave no open transaction behind on a failed migration;
+                // the open error propagates below.
+                let _ = conn.execute_batch("ROLLBACK;");
+                committed.context("failed to initialize thread workspace roots schema")?;
+            }
             // Deliberately no local `user_version` mirror here: this is the
             // terminal migration step, so the stale pre-migration value is
             // never read again (an unused assignment fails -D warnings).
             // A future v6 step re-reads PRAGMA user_version first, and the
-            // column_exists guard keeps re-entry into this block harmless.
+            // in-transaction column_exists guard keeps re-entry into this
+            // block harmless.
         }
         Ok(())
     }
@@ -672,8 +684,64 @@ impl StateStore {
     /// or [`set_current_leaf_id`](Self::set_current_leaf_id) for that.
     pub fn upsert_thread(&self, thread: &ThreadMetadata) -> Result<()> {
         let conn = self.conn()?;
+        Self::upsert_thread_row(&conn, thread, false)?;
+        self.append_thread_name(
+            &thread.id,
+            thread.name.clone(),
+            thread.updated_at,
+            thread.rollout_path.clone(),
+        )
+    }
+
+    /// Insert or update thread metadata while keeping, atomically inside the
+    /// upsert statement, the columns whose authority the caller's snapshot
+    /// does not carry: the per-thread policy fields (kept when the payload
+    /// carries `None`) and the archive timestamp (kept only while the payload
+    /// still says archived, so a resume that reactivates the thread clears
+    /// the stamp instead of ghosting `archived=0` + stamp set).
+    ///
+    /// A get-then-upsert pair cannot express this: a row cleared concurrently
+    /// (unarchive, policy detach) between the read and the write would be
+    /// resurrected from the stale snapshot. The conditions here run on the
+    /// in-transaction row, so the read-modify-write collapses into one
+    /// statement.
+    pub fn upsert_thread_preserving_policy_and_archive(
+        &self,
+        thread: &ThreadMetadata,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        Self::upsert_thread_row(&conn, thread, true)?;
+        self.append_thread_name(
+            &thread.id,
+            thread.name.clone(),
+            thread.updated_at,
+            thread.rollout_path.clone(),
+        )
+    }
+
+    fn upsert_thread_row(
+        conn: &rusqlite::Connection,
+        thread: &ThreadMetadata,
+        preserve_policy_and_archive: bool,
+    ) -> Result<()> {
+        let (sandbox_policy_arm, approval_mode_arm, archived_at_arm) =
+            if preserve_policy_and_archive {
+                (
+                    "COALESCE(excluded.sandbox_policy, threads.sandbox_policy)",
+                    "COALESCE(excluded.approval_mode, threads.approval_mode)",
+                    "CASE WHEN excluded.archived = 0 THEN NULL \
+                     ELSE COALESCE(excluded.archived_at, threads.archived_at) END",
+                )
+            } else {
+                (
+                    "excluded.sandbox_policy",
+                    "excluded.approval_mode",
+                    "excluded.archived_at",
+                )
+            };
         conn.execute(
-            r#"
+            &format!(
+                r#"
             INSERT INTO threads (
                 id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd,
                 cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at,
@@ -696,16 +764,16 @@ impl StateStore {
                 cli_version=excluded.cli_version,
                 source=excluded.source,
                 title=excluded.title,
-                sandbox_policy=excluded.sandbox_policy,
-                approval_mode=excluded.approval_mode,
+                sandbox_policy={sandbox_policy_arm},
+                approval_mode={approval_mode_arm},
                 archived=excluded.archived,
-                archived_at=excluded.archived_at,
+                archived_at={archived_at_arm},
                 git_sha=excluded.git_sha,
                 git_branch=excluded.git_branch,
                 git_origin_url=excluded.git_origin_url,
                 memory_mode=excluded.memory_mode,
                 workspace_roots=excluded.workspace_roots
-            "#,
+            "#),
             params![
                 thread.id,
                 path_to_opt_string(thread.rollout_path.as_deref()),
@@ -732,13 +800,6 @@ impl StateStore {
             ],
         )
         .context("failed to upsert thread metadata")?;
-
-        self.append_thread_name(
-            &thread.id,
-            thread.name.clone(),
-            thread.updated_at,
-            thread.rollout_path.clone(),
-        )?;
         Ok(())
     }
 
@@ -2058,7 +2119,10 @@ fn workspace_roots_from_json(raw: Option<String>) -> Vec<PathBuf> {
     };
     // The fallback direction is safe (empty = single-root legacy), but a
     // writer-side serialization bug must not present as silent degradation;
-    // tolerance with visibility, as for the other legacy-shaped columns.
+    // tolerance with visibility, as for the other legacy-shaped columns. The
+    // warning surfaces only on hosts that installed a `tracing` subscriber
+    // (the TUI does); headless hosts without one still get the safe fallback
+    // but no log line.
     match serde_json::from_str::<Vec<PathBuf>>(&value) {
         Ok(roots) => roots,
         Err(error) => {
@@ -2078,7 +2142,11 @@ fn workspace_roots_from_json(raw: Option<String>) -> Vec<PathBuf> {
 /// is the one direction that can lose the set. Degrading to an empty list
 /// keeps the thread writable — an upsert failure would cost the whole record
 /// — but it must not be silent: the reader only warns on malformed JSON, so
-/// without this the loss is invisible.
+/// without this the loss is invisible. Visibility note: the warning surfaces
+/// only on hosts that installed a `tracing` subscriber before this call (the
+/// TUI does; a headless host with no subscriber sees nothing on stderr), so
+/// the tolerant empty-set fallback remains the load-bearing guarantee, not
+/// the log line.
 fn workspace_roots_to_json(roots: &[PathBuf]) -> String {
     match serde_json::to_string(roots) {
         Ok(json) => json,
@@ -2277,6 +2345,102 @@ mod tests {
                 .expect("count child rows");
             assert_eq!(count, 0, "{table} row survived thread deletion");
         }
+    }
+
+    #[test]
+    fn preserving_upsert_keeps_policy_and_archive_stamp_the_payload_does_not_carry() {
+        let store = temp_state_store("preserving-upsert-keeps");
+        let mut seeded = test_thread("thread-1");
+        seeded.sandbox_policy = Some("workspace-write".to_string());
+        seeded.approval_mode = Some("suggest".to_string());
+        seeded.archived = true;
+        seeded.archived_at = Some(1_234);
+        store.upsert_thread(&seeded).expect("seed thread");
+
+        // The resume/persist payload carries no policy or stamp but still
+        // says archived (a cached resume keeps the cached status): the row's
+        // own values rule, inside the one statement.
+        let mut payload = test_thread("thread-1");
+        payload.archived = true;
+        store
+            .upsert_thread_preserving_policy_and_archive(&payload)
+            .expect("preserving upsert");
+        let row = store
+            .get_thread("thread-1")
+            .expect("read thread")
+            .expect("thread exists");
+        assert_eq!(row.sandbox_policy, seeded.sandbox_policy);
+        assert_eq!(row.approval_mode, seeded.approval_mode);
+        assert!(row.archived, "payload still says archived");
+        assert_eq!(
+            row.archived_at,
+            Some(1_234),
+            "stamp survives while archived"
+        );
+
+        // The plain upsert keeps its passthrough semantics: a None payload
+        // value really does clear the column.
+        let mut plain = test_thread("thread-1");
+        plain.archived = true;
+        store.upsert_thread(&plain).expect("plain upsert");
+        let row = store
+            .get_thread("thread-1")
+            .expect("read thread")
+            .expect("thread exists");
+        assert_eq!(row.sandbox_policy, None);
+        assert_eq!(row.archived_at, None);
+    }
+
+    #[test]
+    fn preserving_upsert_clears_the_stamp_when_the_payload_reactivates_the_thread() {
+        let store = temp_state_store("preserving-upsert-reactivates");
+        let mut seeded = test_thread("thread-1");
+        seeded.archived = true;
+        seeded.archived_at = Some(1_234);
+        store.upsert_thread(&seeded).expect("seed thread");
+
+        // A resume forces the thread back to Running: persisting it must not
+        // ghost `archived=0` with a stamp set — base never produced that pair.
+        let payload = test_thread("thread-1");
+        store
+            .upsert_thread_preserving_policy_and_archive(&payload)
+            .expect("preserving upsert");
+        let row = store
+            .get_thread("thread-1")
+            .expect("read thread")
+            .expect("thread exists");
+        assert!(!row.archived);
+        assert_eq!(row.archived_at, None, "reactivation clears the stamp");
+    }
+
+    #[test]
+    fn preserving_upsert_does_not_resurrect_a_concurrently_cleared_stamp() {
+        let store = temp_state_store("preserving-upsert-no-resurrection");
+        let mut seeded = test_thread("thread-1");
+        seeded.archived = true;
+        seeded.archived_at = Some(1_234);
+        store.upsert_thread(&seeded).expect("seed thread");
+        // Another process unarchives between the stale snapshot and this
+        // write: mark_unarchived clears flag and stamp on the row.
+        store.mark_unarchived("thread-1").expect("unarchive");
+
+        // A stale payload whose in-memory snapshot still says archived — but
+        // which carries no stamp of its own — must not resurrect the cleared
+        // stamp: the CASE reads the in-transaction row, which no longer
+        // carries one.
+        let mut stale = test_thread("thread-1");
+        stale.archived = true;
+        store
+            .upsert_thread_preserving_policy_and_archive(&stale)
+            .expect("preserving upsert");
+        let row = store
+            .get_thread("thread-1")
+            .expect("read thread")
+            .expect("thread exists");
+        assert_eq!(
+            row.archived_at, None,
+            "a concurrently cleared stamp stays cleared"
+        );
     }
 
     #[test]

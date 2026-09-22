@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Session metrics: {metrics}",
   "StatusLabelRoute": "Route",
   "StatusLabelDirectory": "Directory",
+  "StatusLabelWorkspaceRoots": "Accessible folders",
   "StatusLabelProjectDocs": "Project docs",
   "StatusLabelMode": "Mode",
   "StatusLabelSafety": "Safety",

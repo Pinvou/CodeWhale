@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Sitzungsmetriken: {metrics}",
   "StatusLabelRoute": "Route",
   "StatusLabelDirectory": "Verzeichnis",
+  "StatusLabelWorkspaceRoots": "Zugängliche Ordner",
   "StatusLabelProjectDocs": "Projektdokumente",
   "StatusLabelMode": "Modus",
   "StatusLabelSafety": "Sicherheit",

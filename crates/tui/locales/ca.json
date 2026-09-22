@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Mètriques de la sessió: {metrics}",
   "StatusLabelRoute": "Ruta",
   "StatusLabelDirectory": "Directori",
+  "StatusLabelWorkspaceRoots": "Carpetes accessibles",
   "StatusLabelProjectDocs": "Docs del projecte",
   "StatusLabelMode": "Mode",
   "StatusLabelSafety": "Seguretat",

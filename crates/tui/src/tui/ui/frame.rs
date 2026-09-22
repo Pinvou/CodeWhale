@@ -2042,6 +2042,32 @@ mod tests {
     use super::{register_info_interaction_targets, render_info_row, short_title_truncate};
     use ratatui::{Terminal, backend::TestBackend};
 
+    /// The autosave chokepoint is a roots writer like any other: an erased
+    /// `workspace_roots` here durably degrades a multi-root session on disk,
+    /// so the stamp needs a behavior test of its own.
+    #[test]
+    fn autosave_snapshot_stamps_the_live_root_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("work");
+        let attached = tmp.path().join("attached");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(&attached).expect("attached dir");
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(&workspace),
+        );
+        app.workspace_roots = vec![workspace.clone(), attached.clone()];
+
+        let manager = crate::session_manager::SessionManager::new(tmp.path().join("sessions"))
+            .expect("manager");
+        let session = super::build_session_snapshot(&mut app, &manager).expect("snapshot");
+
+        assert_eq!(
+            session.metadata.workspace_roots,
+            vec![workspace, attached],
+            "the autosave chokepoint must persist the live set, not an empty one"
+        );
+    }
+
     /// Chrome that answers a click must also answer the pointer, or the app
     /// teaches people that pointing at things does not work here.
     #[test]

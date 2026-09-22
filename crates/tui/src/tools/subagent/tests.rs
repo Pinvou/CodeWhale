@@ -20269,6 +20269,81 @@ async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root()
     );
 }
 
+/// Isolation must not key on the write claim's existence: a claim can be
+/// released or never created for a worktree child. The worker record's
+/// launch manifest durably pins the worktree spawn, so the claim-less resume
+/// still comes back with the worktree as its only root instead of the
+/// caller's full set.
+#[tokio::test]
+async fn claim_less_resume_of_a_recorded_worktree_child_stays_isolated() {
+    let tmp = tempdir().unwrap();
+    let parent_workspace = tmp.path().join("parent");
+    let attached_root = tmp.path().join("attached");
+    let worktree = tmp.path().join("worktree");
+    for dir in [&parent_workspace, &attached_root, &worktree] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        let (agent_id, _handle) = guard.insert_test_interrupted_continuable_agent(
+            "released_worktree_child",
+            &worktree,
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "prior work".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        );
+        // The claim has been released (or never existed) — no ledger record
+        // remains. The worker record still carries the worktree spawn.
+        let mut spec = make_worker_spec(&agent_id, worktree.clone());
+        spec.agent_type = FleetRole::Builder;
+        spec.runtime_profile = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        spec.launch_manifest = Some(ChildLaunchManifest {
+            owner_session: "root".to_string(),
+            child_id: agent_id.clone(),
+            profile: spec.runtime_profile.clone(),
+            prompt: spec.objective.clone(),
+            cwd: Some(worktree.display().to_string()),
+            worktree: true,
+            writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+            expected_artifact: None,
+            token_budget: None,
+            resume_identity: Some(agent_id.clone()),
+            generation: 1,
+            resume_from_agent_id: None,
+        });
+        guard.register_worker(spec);
+        agent_id
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context.workspace = parent_workspace.clone();
+    runtime.context.workspace_roots = vec![parent_workspace.clone(), attached_root.clone()];
+
+    let resumed = {
+        let mut guard = manager.write().await;
+        guard
+            .resume_from_checkpoint(Arc::clone(&manager), runtime, &agent_id, "continue")
+            .expect("resume ok")
+    };
+
+    let guard = manager.read().await;
+    let child_roots = guard
+        .spawned_workspace_roots
+        .get(&resumed.agent_id)
+        .expect("the spawn seam captured the resumed child's root set");
+    assert!(
+        child_roots.is_empty(),
+        "a claim-less worktree child must not inherit the caller's root set: {child_roots:?}"
+    );
+}
+
 #[test]
 fn user_follow_up_to_running_child_counts_queued_until_the_loop_takes_it() {
     let tmp = tempdir().expect("tempdir");

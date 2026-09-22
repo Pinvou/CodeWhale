@@ -591,6 +591,14 @@ pub async fn run_tui(
                             // resumed from the CLI runs single-root for the
                             // whole process lifetime.
                             app.workspace_roots = saved.metadata.workspace_roots.clone();
+                            // Name the inherited set in the transcript: the
+                            // roots arrived from another host and no header
+                            // chrome reports them.
+                            if let Some(notice) =
+                                workspace_roots_notice(&app.workspace, &app.workspace_roots)
+                            {
+                                app.add_message(HistoryCell::System { content: notice });
+                            }
                             app.status_message = Some(format!(
                                 "Resumed session: {}",
                                 crate::session_manager::truncate_id(&saved.metadata.id)

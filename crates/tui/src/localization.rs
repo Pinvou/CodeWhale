@@ -1524,6 +1524,7 @@ pub enum MessageId {
     // `/status` report labels and runtime summaries.
     StatusLabelRoute,
     StatusLabelDirectory,
+    StatusLabelWorkspaceRoots,
     StatusLabelProjectDocs,
     StatusLabelMode,
     StatusLabelSafety,
@@ -3646,6 +3647,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::SessionMetricsStatusLine,
     MessageId::StatusLabelRoute,
     MessageId::StatusLabelDirectory,
+    MessageId::StatusLabelWorkspaceRoots,
     MessageId::StatusLabelProjectDocs,
     MessageId::StatusLabelMode,
     MessageId::StatusLabelSafety,

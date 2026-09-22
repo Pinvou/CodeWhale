@@ -39,7 +39,11 @@ a hold that the layer actually produced.
 There is no project-local permission-rule source today. An optional `workspace`
 field scopes one user rule to a repository; it does not create a project
 overlay. `/permissions` reports that source, matcher, scope, and whether the
-scope applies to the current workspace.
+scope covers the current session. In a multi-root session the scope matches
+the session's accessible root set by name; the action carried by that rule
+stays primary-root-scoped, so a scoped `allow` never auto-approves a write
+under an attached root, while scoped `ask`/`deny` reach every attached root
+(the same narrowing the execution-policy engine applies).
 
 The execution-policy engine evaluates matching rules as follows:
 

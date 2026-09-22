@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "工作階段指標：{metrics}",
   "StatusLabelRoute": "路由",
   "StatusLabelDirectory": "目錄",
+  "StatusLabelWorkspaceRoots": "可存取的資料夾",
   "StatusLabelProjectDocs": "專案文件",
   "StatusLabelMode": "模式",
   "StatusLabelSafety": "安全性",

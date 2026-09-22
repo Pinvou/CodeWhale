@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "会话指标：{metrics}",
   "StatusLabelRoute": "路由",
   "StatusLabelDirectory": "目录",
+  "StatusLabelWorkspaceRoots": "可访问的文件夹",
   "StatusLabelProjectDocs": "项目文档",
   "StatusLabelMode": "模式",
   "StatusLabelSafety": "安全",

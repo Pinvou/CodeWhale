@@ -512,6 +512,12 @@ pub(crate) fn write_carve_out_posture(
 /// tree, and the path must touch no `.git` internals, runtime state, or
 /// sensitive file. Every root is judged independently.
 ///
+/// The absolute/relative branch runs on the *untrimmed* spelling, exactly as
+/// execution does (`ToolContext::resolve_path`): a leading-whitespace
+/// absolute-looking target is joined onto the primary by the write tools, so
+/// judging it as an absolute attached-root path would auto-approve a write
+/// that lands somewhere else.
+///
 /// The git work-tree marker is deliberate (the same shape as kimi-code's
 /// `git-cwd-write-approve` policy): the carve-out exists because
 /// version-controlled edits stay reviewable and recoverable, so a workspace
@@ -527,7 +533,7 @@ pub(crate) fn paths_within_workspace_write_carve_out(
     }
     let roots = codewhale_core::normalize_workspace_roots(workspace, workspace_roots);
     paths.iter().all(|raw| {
-        if Path::new(raw.trim()).is_absolute() {
+        if Path::new(raw).is_absolute() {
             roots
                 .iter()
                 .any(|root| carve_out_target_within_root(root, raw))
@@ -555,8 +561,12 @@ fn carve_out_target_within_root(root: &Path, raw: &str) -> bool {
 }
 
 fn carve_out_target_allowed(workspace: &Path, workspace_canonical: &Path, raw: &str) -> bool {
-    let raw = raw.trim();
-    if raw.is_empty() {
+    // The branch runs on the untrimmed spelling, matching both the caller's
+    // branch and execution's (`ToolContext::resolve_path`): trimming here
+    // would judge ` /abs/path` as an absolute out-of-tree path while the
+    // write lands at `<root>/ /abs/path`, or the reverse. Trim decides only
+    // whether the target is empty.
+    if raw.trim().is_empty() {
         return false;
     }
     let raw_path = Path::new(raw);
@@ -978,6 +988,39 @@ mod tests {
                 "{target} must stay excluded under an attached root"
             );
         }
+    }
+
+    #[test]
+    fn forkguard_workspace_roots_carve_out_branches_on_the_untrimmed_spelling() {
+        // Judgment branches exactly as execution does (`resolve_path`): a
+        // leading-whitespace absolute-looking target is a *relative* path to
+        // the write tools, joined onto the primary. Judging it on its trimmed
+        // spelling would let it qualify through an attached git root
+        // modal-free while the write lands under the primary — the exact
+        // reviewability gap the carve-out's primary-only relative rule
+        // exists to prevent.
+        let primary = tempfile::tempdir().expect("non-git primary");
+        std::fs::create_dir_all(primary.path().join("src")).expect("primary src dir");
+        let attached = carve_out_workspace();
+        let roots = vec![attached.path().to_path_buf()];
+
+        let whitespace_prefixed = format!(" {}", attached.path().join("src/main.rs").display());
+        assert!(
+            !paths_within_workspace_write_carve_out(primary.path(), &roots, &[whitespace_prefixed],),
+            "a whitespace-prefixed absolute-looking target must keep the modal"
+        );
+
+        // The trimmed spelling stays qualified: trimming decides nothing but
+        // emptiness at the inner guard.
+        assert!(paths_within_workspace_write_carve_out(
+            primary.path(),
+            &roots,
+            &[attached
+                .path()
+                .join("src/main.rs")
+                .to_string_lossy()
+                .into_owned()],
+        ));
     }
 
     #[test]

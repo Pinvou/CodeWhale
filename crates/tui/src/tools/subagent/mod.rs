@@ -5827,6 +5827,7 @@ impl SubAgentManager {
             fork_context,
             workspace,
             claim,
+            recorded_worktree_isolation,
             preserved_profile,
             child_route,
         ) = {
@@ -5869,13 +5870,26 @@ impl SubAgentManager {
             // stays inside the coordination ledger with the original bounded
             // scope instead of inheriting the caller's unchecked write surface.
             // The ledger claim is already namespaced and carries the isolation
-            // flag; both are passed through to the spawn seam.
+            // flag; both are passed through to the spawn seam. The claim is
+            // not the isolation authority, though — it can be released or
+            // never have existed for a worktree child — so the worker
+            // record's launch manifest is read below as the durable fallback.
             let claim = self
                 .coordination
                 .write_claims
                 .iter()
                 .find(|record| record.claim.owner == agent_id)
                 .map(|record| (record.claim.clone(), record.isolated_worktree));
+            // The spec's launch manifest durably pins that this child was
+            // spawned into an isolated worktree, independent of the claim
+            // lifecycle. Keying isolation on the claim alone resumed a
+            // released or claim-less worktree child in the caller's full
+            // root set — wider than the spawn it continues.
+            let recorded_worktree_isolation = self
+                .worker_records
+                .get(&agent_id)
+                .and_then(|record| record.spec.launch_manifest.as_ref())
+                .map(|manifest| manifest.worktree);
             // Preserve the interrupted child's runtime posture (read_only /
             // denied tools / shell) instead of rebuilding from the caller's
             // role, which could widen the resumed child's authority.
@@ -5896,6 +5910,7 @@ impl SubAgentManager {
                 agent.fork_context,
                 agent.workspace.clone(),
                 claim,
+                recorded_worktree_isolation,
                 preserved_profile,
                 child_route,
             )
@@ -5912,9 +5927,12 @@ impl SubAgentManager {
             ));
         }
         let runtime = runtime.background_runtime();
+        // The live claim's flag wins (it is the freshest isolation truth);
+        // the launch manifest covers the released/never-claimed legs.
         let isolated_worktree = claim
             .as_ref()
             .map(|(_, isolated)| *isolated)
+            .or(recorded_worktree_isolation)
             .unwrap_or(false);
         // Resume in the interrupted child's workspace, not the caller's
         // (worktree/cwd children must not resume in the parent directory).

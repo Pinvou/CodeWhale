@@ -77,7 +77,7 @@ pub(crate) fn repo_law_plan_decision(
     // outlive the per-root rule set.
     let mut hold: Option<(bool, String)> = None;
     for root in codewhale_core::normalize_workspace_roots(workspace, workspace_roots) {
-        let targets = write_target_paths(&root, tool_input);
+        let targets = write_target_paths(workspace, &root, tool_input);
         if targets.is_empty() {
             continue;
         }
@@ -118,18 +118,21 @@ pub(crate) fn repo_law_plan_decision(
 /// tab-timestamp suffixes stripped, and `/dev/null` (deletion) falling back
 /// to the counterpart path. Missing any shape the tool honors is a hold
 /// bypass, so this deliberately over-collects candidate paths.
-fn write_target_paths(workspace: &Path, input: &Value) -> Vec<String> {
+///
+/// `workspace` is the primary root (what execution resolves relative targets
+/// against); `root` is the root whose law is being judged.
+fn write_target_paths(workspace: &Path, root: &Path, input: &Value) -> Vec<String> {
     let mut targets = Vec::new();
     for key in ["path", "target", "destination", "file_path"] {
         if let Some(path) = input.get(key).and_then(Value::as_str) {
-            push_normalized(&mut targets, workspace, path);
+            push_normalized(&mut targets, workspace, root, path);
         }
     }
     match normalize_apply_patch_input(input) {
         Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
             for change in entries {
                 if let Some(path) = change.get("path").and_then(Value::as_str) {
-                    push_normalized(&mut targets, workspace, path);
+                    push_normalized(&mut targets, workspace, root, path);
                 }
             }
         }
@@ -137,25 +140,25 @@ fn write_target_paths(workspace: &Path, input: &Value) -> Vec<String> {
             let mut pending_old: Option<String> = None;
             for line in patch.lines() {
                 if let Some(rest) = line.strip_prefix("*** Update File: ") {
-                    push_normalized(&mut targets, workspace, rest.trim());
+                    push_normalized(&mut targets, workspace, root, rest.trim());
                 } else if let Some(rest) = line.strip_prefix("*** Add File: ") {
-                    push_normalized(&mut targets, workspace, rest.trim());
+                    push_normalized(&mut targets, workspace, root, rest.trim());
                 } else if let Some(rest) = line.strip_prefix("*** Delete File: ") {
-                    push_normalized(&mut targets, workspace, rest.trim());
+                    push_normalized(&mut targets, workspace, root, rest.trim());
                 } else if let Some(rest) = line.strip_prefix("--- ") {
                     // Old path: remember it so a `+++ /dev/null` deletion still
                     // holds the file being removed.
                     pending_old = diff_header_path(rest);
                     if let Some(ref p) = pending_old {
-                        push_normalized(&mut targets, workspace, p);
+                        push_normalized(&mut targets, workspace, root, p);
                     }
                 } else if let Some(rest) = line.strip_prefix("+++ ") {
                     match diff_header_path(rest) {
-                        Some(new_path) => push_normalized(&mut targets, workspace, &new_path),
+                        Some(new_path) => push_normalized(&mut targets, workspace, root, &new_path),
                         // `+++ /dev/null` → deletion; the target is the old path.
                         None => {
                             if let Some(old) = pending_old.take() {
-                                push_normalized(&mut targets, workspace, &old);
+                                push_normalized(&mut targets, workspace, root, &old);
                             }
                         }
                     }
@@ -184,20 +187,33 @@ fn diff_header_path(rest: &str) -> Option<String> {
     Some(stripped.to_string())
 }
 
-/// Normalize to a forward-slash, workspace-relative string so globs written
+/// Normalize to a forward-slash, root-relative string so globs written
 /// as `crates/x/**` match regardless of how the tool spelled the path. Crucially
 /// this collapses `.`/`..` path components the same way the write tools'
 /// `resolve_path` does, so an interior `crates/./protocol/x` or
 /// `x/../crates/protocol/x` cannot spell its way past a glob (a confirmed
 /// bypass before this).
-fn push_normalized(targets: &mut Vec<String>, workspace: &Path, raw: &str) {
+///
+/// `workspace` (primary) and `root` (the law being judged) differ for
+/// multi-root sessions. A relative spelling is judged against every root —
+/// keep the raw collapsed tail per root, so an attached root's law can hold
+/// a write that execution would place under the primary (fail-closed: an
+/// extra prompt or block at worst). When that collapse leaves a leading
+/// `..` marker — a `..`-spelled target execution resolves *outside* the
+/// spelling's own root — also judge the execution-resolved path: join it
+/// onto the primary, collapse lexically (what `resolve_path` normalizes to),
+/// and keep its tail under *this* root when it lands inside. Without that,
+/// `../attached/secret/x` keeps its `..` spelling in the attached root's
+/// tail and that root's anchored globs never fire — a spelling-only bypass
+/// of the attached law.
+fn push_normalized(targets: &mut Vec<String>, workspace: &Path, root: &Path, raw: &str) {
     let trimmed = raw.trim().replace('\\', "/");
     if trimmed.is_empty() {
         return;
     }
-    // Make workspace-relative when the tool gave an absolute path inside it.
+    // Make root-relative when the tool gave an absolute path inside it.
     let path = Path::new(&trimmed);
-    let relative = path.strip_prefix(workspace).unwrap_or(path);
+    let relative = path.strip_prefix(root).unwrap_or(path);
 
     // Lexically collapse CurDir (`.`) and ParentDir (`..`) components, and
     // drop any leading root/empty component. An absolute path outside the
@@ -216,6 +232,41 @@ fn push_normalized(targets: &mut Vec<String>, workspace: &Path, raw: &str) {
                 }
             }
             other => parts.push(other.to_string()),
+        }
+    }
+    // A surviving leading `..` is a relative spelling that escapes this root.
+    // Where execution actually lands it (primary-joined, lexically collapsed)
+    // may still be inside *this* root — judge that shape too, so the root's
+    // anchored globs hold it. The raw spelling above is kept unchanged, so
+    // the fail-closed across-roots judgment for plain relative targets is
+    // untouched.
+    if parts.first().map(String::as_str) == Some("..") && !path.is_absolute() {
+        let mut executed: Vec<String> = Vec::new();
+        for component in workspace.join(&trimmed).to_string_lossy().split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if executed.pop().is_none() {
+                        // Escapes the filesystem root entirely; nothing
+                        // sane to tail against any root.
+                        executed.clear();
+                        break;
+                    }
+                }
+                other => executed.push(other.to_string()),
+            }
+        }
+        let root_parts: Vec<String> = root
+            .to_string_lossy()
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_string)
+            .collect();
+        if executed.len() > root_parts.len() && executed.starts_with(&root_parts) {
+            let tail = executed[root_parts.len()..].join("/");
+            if !tail.is_empty() {
+                targets.push(tail);
+            }
         }
     }
     let normalized = parts.join("/");
@@ -616,5 +667,48 @@ mod tests {
             matches!(decision, Some(RepoLawPlanDecision::Block(_))),
             "{decision:?}"
         );
+    }
+
+    #[test]
+    fn dotdot_spelled_relative_target_still_holds_in_the_attached_root() {
+        // A `..`-spelled relative target execution resolves into an attached
+        // root must not escape that root's anchored globs by spelling: the
+        // judged tail is the execution-resolved path under the containing
+        // root, not the raw `..` spelling (which never matched anything).
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        let spelling = format!(
+            "../{}/vendor/lib.rs",
+            attached.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": spelling, "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the attached root's law to hold a ..-spelled target, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+
+        // A `..`-spelled target that resolves outside every root stays
+        // unheld by anchored globs (the ordinary gates govern it).
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "../../elsewhere/lib.rs", "content": "x"}),
+        );
+        assert_eq!(decision, None, "an out-of-tree escape has no anchored hold");
     }
 }

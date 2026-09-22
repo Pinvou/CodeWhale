@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Métriques de session : {metrics}",
   "StatusLabelRoute": "Itinéraire",
   "StatusLabelDirectory": "Répertoire",
+  "StatusLabelWorkspaceRoots": "Dossiers accessibles",
   "StatusLabelProjectDocs": "Docs du projet",
   "StatusLabelMode": "Mode",
   "StatusLabelSafety": "Sécurité",

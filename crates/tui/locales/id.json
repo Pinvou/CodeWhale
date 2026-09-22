@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Metrik sesi: {metrics}",
   "StatusLabelRoute": "Rute",
   "StatusLabelDirectory": "Direktori",
+  "StatusLabelWorkspaceRoots": "Folder yang dapat diakses",
   "StatusLabelProjectDocs": "Dokumen proyek",
   "StatusLabelMode": "Mode",
   "StatusLabelSafety": "Keamanan",

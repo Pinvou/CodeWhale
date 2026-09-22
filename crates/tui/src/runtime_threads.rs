@@ -5889,7 +5889,14 @@ impl RuntimeThreadManager {
                     .and_then(|state| state.active_turn.as_ref())
                     .is_some()
             {
-                bail!("workspace cannot be changed while the thread has an active turn");
+                // Name the leg that actually moved: a roots-only PATCH must
+                // not report a workspace change that was never requested.
+                let what = match (workspace_changed, roots_changed) {
+                    (true, true) | (false, false) => "workspace/roots",
+                    (true, false) => "workspace",
+                    (false, true) => "workspace_roots",
+                };
+                bail!("{what} cannot be changed while the thread has an active turn");
             }
 
             // A posture/mode edit must reach the live engine even while a

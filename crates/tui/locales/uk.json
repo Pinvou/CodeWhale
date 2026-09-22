@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Метрики сесії: {metrics}",
   "StatusLabelRoute": "Маршрут",
   "StatusLabelDirectory": "Каталог",
+  "StatusLabelWorkspaceRoots": "Доступні папки",
   "StatusLabelProjectDocs": "Документи проєкту",
   "StatusLabelMode": "Режим",
   "StatusLabelSafety": "Безпека",

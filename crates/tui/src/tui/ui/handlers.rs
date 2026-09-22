@@ -1213,6 +1213,15 @@ pub(crate) async fn handle_view_events(
                             content: loaded_message.clone(),
                         });
                         app.status_message = Some(loaded_message);
+                        // The picker can cross workspaces and the loaded
+                        // session may carry roots the header never showed;
+                        // name them in the transcript (durable, like the
+                        // receipt above) rather than a transient toast.
+                        if let Some(notice) =
+                            workspace_roots_notice(&app.workspace, &app.workspace_roots)
+                        {
+                            app.add_message(HistoryCell::System { content: notice });
+                        }
                         app.launch.visible = false;
                         app.launch.status = None;
                     }

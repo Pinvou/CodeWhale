@@ -687,8 +687,15 @@ impl ThreadManager {
             // The cache alone is not enough in-process: a later resume that
             // carries history bypasses this branch entirely, re-reads the
             // stored row, and would silently reinstate the pre-override set.
-            thread.updated_at = chrono::Utc::now().timestamp();
-            self.persist_thread(&thread, None)?;
+            // Only an override pays that write: base neither persisted nor
+            // bumped `updated_at` on a parameterless cached resume, and doing
+            // it unconditionally reordered recency listings, refreshed
+            // archived threads to active timestamps, and taxed every resume
+            // with a read+write for no state change.
+            if params.cwd.is_some() || params.workspace_roots.is_some() {
+                thread.updated_at = chrono::Utc::now().timestamp();
+                self.persist_thread(&thread, None)?;
+            }
             self.running_threads
                 .insert(params.thread_id.clone(), thread.clone());
             return Ok(Some(NewThread {
@@ -956,38 +963,39 @@ impl ThreadManager {
 
     fn persist_thread(&self, thread: &Thread, rollout_path: Option<PathBuf>) -> Result<()> {
         // This update payload carries no per-thread policy or archive
-        // timestamp, so preserve the ones already stored for the thread
-        // rather than erasing them with NULLs on every persist/resume.
-        let existing = self.store.get_thread(&thread.id)?;
-        self.store.upsert_thread(&ThreadMetadata {
-            id: thread.id.clone(),
-            rollout_path,
-            preview: thread.preview.clone(),
-            ephemeral: thread.ephemeral,
-            model_provider: thread.model_provider.clone(),
-            created_at: thread.created_at,
-            updated_at: thread.updated_at,
-            status: to_persisted_status(&thread.status),
-            path: thread.path.clone(),
-            cwd: thread.cwd.clone(),
-            workspace_roots: thread.workspace_roots.clone(),
-            cli_version: thread.cli_version.clone(),
-            source: to_persisted_source(&thread.source),
-            name: thread.name.clone(),
-            sandbox_policy: existing
-                .as_ref()
-                .and_then(|metadata| metadata.sandbox_policy.clone()),
-            approval_mode: existing
-                .as_ref()
-                .and_then(|metadata| metadata.approval_mode.clone()),
-            archived: matches!(thread.status, ThreadStatus::Archived),
-            archived_at: existing.as_ref().and_then(|metadata| metadata.archived_at),
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
-            memory_mode: None,
-            current_leaf_id: None,
-        })
+        // timestamp, and the preserved values must survive concurrently
+        // applied clears: the state layer keeps them inside the upsert
+        // statement itself (policy fields while the payload carries none,
+        // the stamp only while the thread stays archived). A get-then-upsert
+        // here would resurrect a concurrently unarchived or detached record
+        // from a stale snapshot, and forced-Running resumes would ghost
+        // `archived=0` rows with a stamp set.
+        self.store
+            .upsert_thread_preserving_policy_and_archive(&ThreadMetadata {
+                id: thread.id.clone(),
+                rollout_path,
+                preview: thread.preview.clone(),
+                ephemeral: thread.ephemeral,
+                model_provider: thread.model_provider.clone(),
+                created_at: thread.created_at,
+                updated_at: thread.updated_at,
+                status: to_persisted_status(&thread.status),
+                path: thread.path.clone(),
+                cwd: thread.cwd.clone(),
+                workspace_roots: thread.workspace_roots.clone(),
+                cli_version: thread.cli_version.clone(),
+                source: to_persisted_source(&thread.source),
+                name: thread.name.clone(),
+                sandbox_policy: None,
+                approval_mode: None,
+                archived: matches!(thread.status, ThreadStatus::Archived),
+                archived_at: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
+                memory_mode: None,
+                current_leaf_id: None,
+            })
     }
 }
 
@@ -3181,6 +3189,136 @@ mod tests {
         assert_eq!(
             persisted.archived_at, archived_at,
             "a parameterless cached resume must not null the archive timestamp"
+        );
+    }
+
+    #[test]
+    fn parameterless_cached_resume_does_not_rewrite_the_row() {
+        // Base neither persisted nor bumped `updated_at` on a parameterless
+        // cached resume; the override writeback is gated the same way. Without
+        // the gate every parameterless resume reordered recency listings,
+        // refreshed archived rows to active timestamps, and paid a read+write
+        // for no state change.
+        let store = temp_core_state("cached-resume-no-writeback");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        let mut aged = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        aged.updated_at = 1_000;
+        manager
+            .state_store()
+            .upsert_thread(&aged)
+            .expect("age the stored row");
+
+        manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: None,
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume thread")
+            .expect("thread in cache");
+
+        let row = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            row.updated_at, 1_000,
+            "a parameterless cached resume must not rewrite the stored row"
+        );
+    }
+
+    #[test]
+    fn resumed_archived_thread_does_not_ghost_an_archive_stamp() {
+        // Resuming a persisted archived thread forces it back to Running.
+        // Persisting that reactivation must produce `archived=0` with no
+        // stamp — base never produced the `archived=0` + stamp-set pair, and
+        // unconditionally preserving the stored stamp recreated exactly that
+        // ghost.
+        let store = temp_core_state("resume-archived-no-ghost");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        manager.archive_thread(&thread_id).expect("archive thread");
+        assert!(
+            manager
+                .state_store()
+                .get_thread(&thread_id)
+                .expect("read thread")
+                .expect("thread persisted")
+                .archived_at
+                .is_some(),
+            "archiving stamps archived_at"
+        );
+
+        manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: Some(Vec::new()),
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume thread")
+            .expect("thread resumed");
+
+        let row = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert!(!row.archived, "the resume reactivates the thread");
+        assert_eq!(
+            row.archived_at, None,
+            "reactivation must not ghost an archive stamp"
         );
     }
 

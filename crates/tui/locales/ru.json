@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Метрики сессии: {metrics}",
   "StatusLabelRoute": "Маршрут",
   "StatusLabelDirectory": "Каталог",
+  "StatusLabelWorkspaceRoots": "Доступные папки",
   "StatusLabelProjectDocs": "Документы проекта",
   "StatusLabelMode": "Режим",
   "StatusLabelSafety": "Безопасность",

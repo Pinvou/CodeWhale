@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "세션 지표: {metrics}",
   "StatusLabelRoute": "경로",
   "StatusLabelDirectory": "디렉터리",
+  "StatusLabelWorkspaceRoots": "접근 가능한 폴더",
   "StatusLabelProjectDocs": "프로젝트 문서",
   "StatusLabelMode": "모드",
   "StatusLabelSafety": "안전",

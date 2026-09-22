@@ -613,6 +613,40 @@ pub(crate) async fn sync_runtime_workspace_state(
     task_manager.set_default_workspace(workspace).await;
 }
 
+/// One-line human disclosure for a session that carries accessible roots
+/// beside its primary workspace, capped like the model-facing
+/// `Accessible folders:` line. The turn-meta envelope is model-facing only
+/// and the TUI has no multi-root UI, so without this a session whose roots
+/// were attached once (or inherited through resume or a bare fork) re-enters
+/// with zero indication that writes under an attached root are governed by
+/// this session's policy — and under the default Ask posture an attached git
+/// root's writes are carve-out modal-free.
+pub(crate) fn workspace_roots_notice(workspace: &Path, roots: &[PathBuf]) -> Option<String> {
+    const MAX_LISTED_ROOTS: usize = 5;
+    let additional: Vec<String> = roots
+        .iter()
+        .filter(|root| root.as_path() != workspace)
+        .map(|root| root.display().to_string())
+        .collect();
+    if additional.is_empty() {
+        return None;
+    }
+    let remainder = additional.len().saturating_sub(MAX_LISTED_ROOTS);
+    let mut notice = format!(
+        "Accessible folders beside {}: {}",
+        workspace.display(),
+        additional
+            .into_iter()
+            .take(MAX_LISTED_ROOTS)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if remainder > 0 {
+        notice.push_str(&format!(" … (+{remainder} more)"));
+    }
+    Some(notice)
+}
+
 pub(crate) async fn switch_workspace(
     app: &mut App,
     engine_handle: &mut EngineHandle,
@@ -661,6 +695,19 @@ pub(crate) async fn switch_workspace(
             Ok(snapshot) => {
                 if let Err(err) = manager.save_session(&snapshot) {
                     app.status_message = Some(format!("Failed to persist workspace switch: {err}"));
+                }
+                // The direct save above bypasses the persistence actor, so a
+                // pre-`/cd` snapshot already queued there (an autosave that
+                // fired moments ago) could still land after it and revert the
+                // root swap on disk. Enqueue the post-switch snapshot: the
+                // actor's latest-wins coalescing drops the queued stale one,
+                // and even a stale write already in flight is followed by
+                // this fresher record of the swapped set.
+                if !persistence_actor::try_persist(PersistRequest::SessionSnapshot(snapshot)) {
+                    app.status_message = Some(
+                        "Workspace switch persisted, but the persistence actor is unavailable; the next autosave re-persists it"
+                            .to_string(),
+                    );
                 }
             }
             Err(err) => {

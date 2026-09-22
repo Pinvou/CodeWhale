@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "Số liệu phiên: {metrics}",
   "StatusLabelRoute": "Tuyến",
   "StatusLabelDirectory": "Thư mục",
+  "StatusLabelWorkspaceRoots": "Thư mục có thể truy cập",
   "StatusLabelProjectDocs": "Tài liệu dự án",
   "StatusLabelMode": "Chế độ",
   "StatusLabelSafety": "An toàn",

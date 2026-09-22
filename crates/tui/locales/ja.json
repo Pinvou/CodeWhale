@@ -1751,6 +1751,7 @@
   "SessionMetricsStatusLine": "セッション指標: {metrics}",
   "StatusLabelRoute": "経路",
   "StatusLabelDirectory": "ディレクトリ",
+  "StatusLabelWorkspaceRoots": "アクセス可能なフォルダ",
   "StatusLabelProjectDocs": "プロジェクト文書",
   "StatusLabelMode": "モード",
   "StatusLabelSafety": "安全性",
