@@ -1980,6 +1980,7 @@ dictJa["controlledDevice"] = {
   statusReserved: "相手が接続中…",
   statusHandshake: "暗号化チャネルを確立中…",
   statusConnected: "接続済み",
+  controlledStatus: "遠隔操作中",
   statusReconnecting: "切断されました。復旧中…",
   statusStopping: "停止中…",
   statusStopped: "停止しました",

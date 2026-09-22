@@ -59,6 +59,7 @@ import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRou
 import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
+import { openControlledDeviceChatWithRetry } from '../features/remote-control/remote-control-logic.mjs';
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -1386,6 +1387,10 @@ const NAV_PREFETCH = {
       const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
       const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
       const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
+      const controlledDeviceAutoOpenRef = useRef(null);
+      const controlledDeviceAutoOpenInFlightRef = useRef(null);
+      const controlledDeviceStatus = bs?.controlledDevice?.status || null;
+      const controlledDeviceGeneration = bs?.controlledDevice?.generation || null;
       const remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === 'connected');
       const remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)
         ? (bs?.controllerConnection?.status === 'connected' ? bs.controllerConnection : { status: 'connected' })
@@ -2279,6 +2284,49 @@ const NAV_PREFETCH = {
             : keepsDesktopBrowserVisible ? 'none' : 'visible',
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      // B 端建立连接后进入普通会话页，便于立即看到远程请求及执行过程。
+      // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
+      useEffect(() => {
+        if (controlledDeviceStatus !== 'connected') {
+          // 旧后端若没有 generation，只能在明确离开连接生命周期后允许下一次自动打开。
+          if (!controlledDeviceGeneration && controlledDeviceStatus !== 'reconnecting') {
+            controlledDeviceAutoOpenRef.current = null;
+          }
+          return;
+        }
+        const connectionKey = controlledDeviceGeneration || 'legacy-connected';
+        if (
+          controlledDeviceAutoOpenRef.current === connectionKey
+          || controlledDeviceAutoOpenInFlightRef.current === connectionKey
+        ) return;
+        const originView = currentViewRef.current;
+        let cancelled = false;
+        controlledDeviceAutoOpenInFlightRef.current = connectionKey;
+        setRemoteConversationOpen(false);
+        void openControlledDeviceChatWithRetry({
+          navigate: () => navigateFromScheduledRun('chat'),
+          isCurrent: () => {
+            if (cancelled) return false;
+            const latest = bsRef.current && bsRef.current.controlledDevice;
+            const latestKey = (latest && latest.generation) || 'legacy-connected';
+            const viewIsCurrent = currentViewRef.current === originView || currentViewRef.current === 'chat';
+            return !!(latest && latest.status === 'connected' && latestKey === connectionKey && viewIsCurrent);
+          },
+          onError: (error) => console.warn('[remote-control] B-side chat auto-open failed', error),
+        }).then((opened) => {
+          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
+            controlledDeviceAutoOpenInFlightRef.current = null;
+          }
+          if (opened) controlledDeviceAutoOpenRef.current = connectionKey;
+        });
+        return () => {
+          cancelled = true;
+          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
+            controlledDeviceAutoOpenInFlightRef.current = null;
+          }
+        };
+      }, [controlledDeviceGeneration, controlledDeviceStatus, navigateFromScheduledRun]);
 
       function openSettingsSection(section = 'general') {
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，

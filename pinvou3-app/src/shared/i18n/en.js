@@ -1980,6 +1980,7 @@ dictEn["controlledDevice"] = {
   statusReserved: "The other side is connecting…",
   statusHandshake: "Establishing the encrypted channel…",
   statusConnected: "Connected",
+  controlledStatus: "Being controlled",
   statusReconnecting: "Connection lost, recovering…",
   statusStopping: "Stopping…",
   statusStopped: "Stopped",

@@ -13,6 +13,7 @@ const settings = source('features/settings/SettingsView.jsx');
 
 const CONTROLLED_KEYS = [
   'section', 'title', 'desc', 'enable', 'disable', 'statusIdle', 'statusWaiting', 'statusConnected',
+  'controlledStatus',
   'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'modelSource', 'workspacesTitle',
   'readOnlyNotice', 'stopTasks', 'pendingPermissions', 'noAllowControl', 'unsupported',
   // E2E-08 后的零配置体验：服务端点（生产/测试）内置在应用中，用户不需要环境变量。

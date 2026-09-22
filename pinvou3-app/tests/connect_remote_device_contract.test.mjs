@@ -7,7 +7,9 @@ import { dict } from '../src/shared/i18n-all.js';
 import {
   connectionErrorKey,
   groupPairingCode,
+  isControlledDeviceChatActive,
   normalizePairingCode,
+  openControlledDeviceChatWithRetry,
 } from '../src/features/remote-control/remote-control-logic.mjs';
 
 const source = (relative) => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
@@ -141,4 +143,70 @@ test('connected remote output renders in the ordinary ChatView timeline', () => 
   assert.ok(chatView.includes('data-testid="chat-remote-status-banner"'));
   assert.ok(chatView.includes('remoteSessionReady'));
   assert.ok(chatView.includes('controllerSessionOpen(t.remoteConversation.title || \'remote\', \'chat\')'));
+});
+
+test('the controlled side opens chat once per connection and shows its own status', () => {
+  assert.equal(isControlledDeviceChatActive({ status: 'connected' }), true);
+  assert.equal(isControlledDeviceChatActive({ status: 'reconnecting' }), true);
+  assert.equal(isControlledDeviceChatActive({ status: 'waiting_connection' }), false);
+  assert.equal(isControlledDeviceChatActive({ status: 'stopped' }), false);
+  assert.equal(isControlledDeviceChatActive(null), false);
+
+  assert.ok(main.includes('controlledDeviceAutoOpenRef'));
+  assert.ok(main.includes('controlledDeviceAutoOpenInFlightRef'));
+  assert.ok(main.includes("if (controlledDeviceStatus !== 'connected')"));
+  assert.ok(main.includes("const connectionKey = controlledDeviceGeneration || 'legacy-connected';"));
+  assert.ok(main.includes('openControlledDeviceChatWithRetry({'));
+  assert.ok(main.includes('if (opened) controlledDeviceAutoOpenRef.current = connectionKey;'));
+  assert.ok(chatView.includes('isControlledDeviceChatActive(controlledDevice)'));
+  assert.ok(chatView.includes('data-testid="chat-controlled-status"'));
+  assert.ok(chatView.includes('t.controlledDevice.controlledStatus'));
+});
+
+test('controlled-side auto-open marks success only after navigation succeeds', async () => {
+  let attempts = 0;
+  let waits = 0;
+  const opened = await openControlledDeviceChatWithRetry({
+    navigate: async () => {
+      attempts += 1;
+      return attempts === 2;
+    },
+    wait: async () => { waits += 1; },
+  });
+  assert.equal(opened, true);
+  assert.equal(attempts, 2);
+  assert.equal(waits, 1);
+});
+
+test('controlled-side auto-open stops retrying after the original intent is superseded', async () => {
+  let isCurrent = true;
+  let attempts = 0;
+  const opened = await openControlledDeviceChatWithRetry({
+    navigate: async () => {
+      attempts += 1;
+      isCurrent = false;
+      return false;
+    },
+    isCurrent: () => isCurrent,
+    wait: async () => assert.fail('superseded navigation must not wait or retry'),
+  });
+  assert.equal(opened, false);
+  assert.equal(attempts, 1);
+});
+
+test('controlled-side auto-open contains a rejected navigation and retries', async () => {
+  let attempts = 0;
+  let errors = 0;
+  const opened = await openControlledDeviceChatWithRetry({
+    navigate: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('transient navigation failure');
+      return true;
+    },
+    wait: async () => {},
+    onError: () => { errors += 1; },
+  });
+  assert.equal(opened, true);
+  assert.equal(attempts, 2);
+  assert.equal(errors, 1);
 });

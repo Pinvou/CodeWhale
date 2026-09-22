@@ -50,6 +50,7 @@ import { splitAttachmentLine } from '../attachments/attachment-message.js';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
 import { isRemoteChatActive, remoteChatItems as projectRemoteChatItems } from '../remote-control/chat-transcript-projection.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
+import { isControlledDeviceChatActive } from '../remote-control/remote-control-logic.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
 import {
@@ -812,6 +813,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // 远程模式下 ChatView 只承担输入/正文输出；权威数据仍来自 remote journal，
       // 本地会话的普通工具/产物流程不参与远程回合。
       const remoteChatActive = isRemoteChatActive(remoteConnection);
+      const controlledDevice = bs && bs.controlledDevice;
+      const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
       const [remoteSessionBusy, setRemoteSessionBusy] = useState(false);
       const [remoteSessionError, setRemoteSessionError] = useState(null);
       const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
@@ -2359,6 +2362,29 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           {/* Top Header (浮动) */}
           <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-20 pointer-events-none">
             <div className="flex items-center gap-2 min-w-0">
+              {controlledChatActive && (
+                <div
+                  data-testid="chat-controlled-status"
+                  role="status"
+                  title={controlledDevice.controllerDeviceName
+                    ? `${t.controlledDevice.controlledStatus}: ${controlledDevice.controllerDeviceName}`
+                    : t.controlledDevice.controlledStatus}
+                  className={`pointer-events-auto flex h-10 min-w-0 items-center gap-1.5 rounded-full border px-3 text-[13px] font-medium ${'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300'}`}
+                >
+                  <Monitor size={15} className="shrink-0" />
+                  <span className="shrink-0">{t.controlledDevice.controlledStatus}</span>
+                  {controlledDevice.controllerDeviceName && (
+                    <span className="max-w-[180px] truncate text-[11px] opacity-80">
+                      {controlledDevice.controllerDeviceName}
+                    </span>
+                  )}
+                  {controlledDevice.status === 'reconnecting' && (
+                    <span className="max-w-[180px] truncate text-[11px] opacity-80">
+                      {t.controlledDevice.statusReconnecting}
+                    </span>
+                  )}
+                </div>
+              )}
               {remoteChatActive && (
                 <div
                   data-testid="chat-remote-status"

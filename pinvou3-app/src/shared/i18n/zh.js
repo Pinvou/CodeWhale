@@ -1948,6 +1948,7 @@ dictZh["controlledDevice"] = {
   statusReserved: "对方正在连接…",
   statusHandshake: "正在建立加密通道…",
   statusConnected: "已连接",
+  controlledStatus: "被控中",
   statusReconnecting: "连接中断，正在恢复…",
   statusStopping: "正在停止…",
   statusStopped: "已停止",
