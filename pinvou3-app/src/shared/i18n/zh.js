@@ -1999,6 +1999,7 @@ dictZh["controllerConnection"] = {
   controlledSide: "被控端",
   remoteStatus: "远程控制中",
   remoteSessionPreparing: "会话准备中",
+  remoteCapabilityPreparing: "能力准备中",
   remoteSessionReady: "会话已就绪",
   connected: "已连接",
   connectedTo: device => `已连接到 ${device}`,

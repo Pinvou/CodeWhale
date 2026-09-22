@@ -813,6 +813,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const remoteChatActive = isRemoteChatActive(remoteConnection);
       const [remoteSessionBusy, setRemoteSessionBusy] = useState(false);
       const [remoteSessionError, setRemoteSessionError] = useState(null);
+      const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
+      const [remoteCapabilityError, setRemoteCapabilityError] = useState(null);
+      const [remoteSendError, setRemoteSendError] = useState(null);
       const projectedRemoteChatItems = useMemo(
         () => projectRemoteChatItems(remoteConnection, bs ? bs.transcript : []),
         [remoteConnection, bs && bs.transcript],
@@ -823,8 +826,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // eslint-disable-next-line react-hooks/refs -- latest-session mirror for non-reactive reads; legacy pattern surfaced by compiler lint after floating-ball removal
       activeSessionIdRef.current = activeSessionId;
       const localBusy = bs ? bs.busy : false;
+      const remoteLinkReady = !!(remoteConnection.sessionRef && remoteConnection.capabilityRevision != null);
       const busy = remoteChatActive
-        ? (localBusy || remoteSessionBusy || !remoteConnection.sessionRef)
+        ? (localBusy || remoteSessionBusy || remoteCapabilityBusy || !remoteLinkReady)
         : localBusy;
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
       // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
@@ -1611,7 +1615,13 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (remoteConnection && remoteConnection.status === 'connected') {
           const sessionRef = remoteConnection.sessionRef;
           if (!sessionRef) throw new Error('remote_session_not_ready');
-          await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, remoteModelSource);
+          try {
+            await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, remoteModelSource);
+            setRemoteSendError(null);
+          } catch (failure) {
+            setRemoteSendError(String((failure && failure.code) || 'errorGeneric'));
+            throw failure;
+          }
           return true;
         }
         const matchedPersonalWorkbenchDraft = findPersonalWorkbenchTemplateDraft(outgoing);
@@ -1710,6 +1720,22 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (!remoteChatActive || remoteConnection.sessionRef) return;
         openRemoteSession();
       }, [openRemoteSession, remoteChatActive, remoteConnection]);
+      const requestRemoteCapabilities = useCallback(() => {
+        const sessionRef = remoteConnection?.sessionRef;
+        if (!remoteConnection || remoteConnection.status !== 'connected' || !sessionRef) return;
+        if (remoteConnection.capabilityRevision != null || remoteCapabilityBusy) return;
+        setRemoteCapabilityBusy(true);
+        setRemoteCapabilityError(null);
+        bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef)
+          .then(() => setRemoteCapabilityError(null))
+          .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
+          .finally(() => setRemoteCapabilityBusy(false));
+      }, [remoteCapabilityBusy, remoteConnection]);
+
+      useEffect(() => {
+        if (!remoteChatActive || !remoteConnection.sessionRef || remoteConnection.capabilityRevision != null) return;
+        requestRemoteCapabilities();
+      }, [requestRemoteCapabilities, remoteChatActive, remoteConnection]);
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');
@@ -2355,7 +2381,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     <span className="min-w-0 truncate opacity-80">· {remoteConnection.deviceName}</span>
                   )}
                   <span className={`text-[12px] ${remoteConnection.sessionRef ? 'opacity-80' : 'animate-pulse opacity-90'}`}>
-                    {remoteConnection.sessionRef ? t.controllerConnection.remoteSessionReady : t.controllerConnection.remoteSessionPreparing}
+                    {remoteConnection.capabilityRevision != null
+                      ? t.controllerConnection.remoteSessionReady
+                      : (remoteConnection.sessionRef ? t.controllerConnection.remoteCapabilityPreparing : t.controllerConnection.remoteSessionPreparing)}
                   </span>
                   <div className="ml-auto flex min-w-0 items-center gap-2">
                     <span className="shrink-0 text-[12px] opacity-70">{t.remoteConversation.modelPickerTitle}</span>
@@ -2364,7 +2392,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       aria-label={t.remoteConversation.modelPickerTitle}
                       value={remoteModelSource}
                       onChange={(event) => onRemoteModelSourceChange?.(event.target.value)}
-                      disabled={remoteSessionBusy || !remoteConnection.sessionRef}
+                      disabled={remoteSessionBusy || remoteCapabilityBusy || !remoteLinkReady}
                       className="min-w-0 max-w-[180px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
                     >
                       <option value="controlled_device">{t.remoteConversation.modelSourceDevice}</option>
@@ -2372,6 +2400,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     </select>
                   </div>
                 </div>
+                {(remoteSessionError || remoteCapabilityError || remoteSendError) && (
+                  <p role="alert" className="mt-2 px-1 text-[12px] text-[#EA4335]">
+                    {remoteSendError || remoteCapabilityError || remoteSessionError}
+                  </p>
+                )}
               </div>
             )}
 

@@ -2031,6 +2031,7 @@ dictEn["controllerConnection"] = {
   controlledSide: "Controlled device",
   remoteStatus: "Remote control active",
   remoteSessionPreparing: "Preparing session",
+  remoteCapabilityPreparing: "Preparing capabilities",
   remoteSessionReady: "Session ready",
   connected: "Connected",
   connectedTo: device => `Connected to ${device}`,
