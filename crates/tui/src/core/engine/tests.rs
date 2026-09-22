@@ -10150,12 +10150,12 @@ async fn forkguard_turn_started_echoes_submission_id_self_starts_stay_none() {
 #[tokio::test]
 async fn forkguard_turn_started_composer_shell_self_start_stays_none() {
     let workspace = tempdir().expect("tempdir");
-    // The composer shell turn never reaches the model; a client that would
-    // block forever turns any accidental dispatch into a bounded timeout
-    // instead of a silent pass.
+    // The composer shell turn never reaches the model; calls starts
+    // pre-advanced so every provider request blocks, turning any accidental
+    // dispatch into a bounded timeout instead of a silent pass.
     let client: crate::core::model_client::SharedModelClient =
         std::sync::Arc::new(CompleteOnceThenBlockModelClient {
-            calls: std::sync::atomic::AtomicUsize::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(1),
             entered: std::sync::Arc::new(tokio::sync::Notify::new()),
             request_dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
@@ -10322,6 +10322,10 @@ async fn forkguard_turn_started_goal_continuation_self_start_stays_none() {
         &api_config,
         client,
     );
+    // Idempotent with the constructor-armed `goal_objective` (same
+    // objective, already Active); kept because a host-injected continuation
+    // passes through this sync before the op, and the echo pin must not
+    // depend on that ordering.
     engine
         .config
         .goal_state
