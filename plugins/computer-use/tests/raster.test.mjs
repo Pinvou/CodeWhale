@@ -94,7 +94,27 @@ test("virtualScreen unions display point geometry into one surface", () => {
     { points: { x: 0, y: 0, w: 1920, h: 1080 } },
     { points: { x: -1280, y: 240, w: 1280, h: 840 } },
   ];
-  assert.deepEqual(virtualScreen(displays), { x: -1280, y: 0, w: 3200, h: 1080 });
+  assert.deepEqual(virtualScreen(displays), { x: -1280, y: 0, w: 3200, h: 1080, scale: 1 });
+});
+
+test("virtualScreen carries the highest contributing output scale", () => {
+  // grim renders at the highest of all output scales, so the surface must
+  // report that many pixels per point.
+  const displays = [
+    { points: { x: 0, y: 0, w: 1920, h: 1080 }, scale: 1 },
+    { points: { x: 1920, y: 0, w: 1280, h: 840 }, scale: 2 },
+  ];
+  assert.deepEqual(virtualScreen(displays), { x: 0, y: 0, w: 3200, h: 1080, scale: 2 });
+});
+
+test("virtualScreen keeps the union of valid displays when others lack geometry", () => {
+  // A display without usable points contributes neither bounds nor scale.
+  const displays = [
+    { points: { x: 0, y: 0, w: 1920, h: 1080 }, scale: 1 },
+    { points: { x: null, y: null, w: null, h: null }, scale: 2 },
+    {},
+  ];
+  assert.deepEqual(virtualScreen(displays), { x: 0, y: 0, w: 1920, h: 1080, scale: 1 });
 });
 
 test("virtualScreen refuses unusable geometry so the caller does not guess", () => {
