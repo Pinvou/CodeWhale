@@ -8,7 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { run, runOk, ExecError, tryJson, have } from "../exec.mjs";
-import { clampRegion } from "../raster.mjs";
+import { clampRegion, screenshotRaster, virtualScreen } from "../raster.mjs";
 
 const XKEYS = {
   return: "Return", enter: "Return", tab: "Tab", escape: "Escape", esc: "Escape",
@@ -76,6 +76,34 @@ export function create({ exec }) {
 
   function recordingsDir() {
     return process.env.CODEWHALE_CU_RECORDINGS_DIR || path.join(os.homedir(), ".codewhale-cu", "recordings");
+  }
+
+  async function listDisplays() {
+    await probeSession();
+    if (session === "x11" && tools.xrandr) {
+      const r = await runOk("xrandr", ["--query"], { timeoutMs: 15_000 });
+      const displays = [];
+      let i = 1;
+      for (const m of r.stdout.matchAll(/^(\S+) connected (?:primary )?(\d+)x(\d+)\+(\d+)\+(\d+)/gm)) {
+        displays.push({ index: i++, name: m[1], points: { x: Number(m[4]), y: Number(m[5]), w: Number(m[2]), h: Number(m[3]) }, pixels: { w: Number(m[2]), h: Number(m[3]) }, scale: 1, main: /primary/.test(m[0]) || i === 1 });
+      }
+      if (displays.length) return displays;
+    }
+    if (session === "wayland" && tools.swaymsg) {
+      const r = await run("swaymsg", ["-t", "get_outputs", "-r"], { timeoutMs: 15_000 });
+      const outs = tryJson(r.stdout, []);
+      if (Array.isArray(outs) && outs.length) {
+        return outs.map((o, i) => ({ index: i + 1, name: o.name, points: { x: o.rect?.x, y: o.rect?.y, w: o.rect?.width, h: o.rect?.height }, pixels: { w: o.current_mode?.width, h: o.current_mode?.height }, scale: o.scale ?? 1, main: i === 0 }));
+      }
+    }
+    if (session === "wayland" && tools.hyprctl) {
+      const r = await run("hyprctl", ["-j", "monitors"], { timeoutMs: 15_000 });
+      const ms = tryJson(r.stdout, []);
+      if (Array.isArray(ms) && ms.length) {
+        return ms.map((o, i) => ({ index: i + 1, name: o.name, points: { x: o.x, y: o.y, w: o.width, h: o.height }, pixels: { w: o.width, h: o.height }, scale: o.scale ?? 1, main: !!o.main || i === 0 }));
+      }
+    }
+    throw new ExecError("display enumeration needs xrandr (X11) or swaymsg/hyprctl (Wayland) — install one and retry");
   }
 
   async function xdotool(args, opts = {}) {
@@ -242,33 +270,7 @@ except Exception as e:
       if (!tools.pyatspi) missing.push("python3-pyatspi (accessibility tree)");
       return { platform: "linux", session: s, capabilities: caps, missing, note: "Every capability probes at call time and fails closed naming the missing tool." };
     },
-    list_displays: async () => {
-      await probeSession();
-      if (session === "x11" && tools.xrandr) {
-        const r = await runOk("xrandr", ["--query"], { timeoutMs: 15_000 });
-        const displays = [];
-        let i = 1;
-        for (const m of r.stdout.matchAll(/^(\S+) connected (?:primary )?(\d+)x(\d+)\+(\d+)\+(\d+)/gm)) {
-          displays.push({ index: i++, name: m[1], points: { x: Number(m[4]), y: Number(m[5]), w: Number(m[2]), h: Number(m[3]) }, pixels: { w: Number(m[2]), h: Number(m[3]) }, scale: 1, main: /primary/.test(m[0]) || i === 1 });
-        }
-        if (displays.length) return displays;
-      }
-      if (session === "wayland" && tools.swaymsg) {
-        const r = await run("swaymsg", ["-t", "get_outputs", "-r"], { timeoutMs: 15_000 });
-        const outs = tryJson(r.stdout, []);
-        if (Array.isArray(outs) && outs.length) {
-          return outs.map((o, i) => ({ index: i + 1, name: o.name, points: { x: o.rect?.x, y: o.rect?.y, w: o.rect?.width, h: o.rect?.height }, pixels: { w: o.current_mode?.width, h: o.current_mode?.height }, scale: o.scale ?? 1, main: i === 0 }));
-        }
-      }
-      if (session === "wayland" && tools.hyprctl) {
-        const r = await run("hyprctl", ["-j", "monitors"], { timeoutMs: 15_000 });
-        const ms = tryJson(r.stdout, []);
-        if (Array.isArray(ms) && ms.length) {
-          return ms.map((o, i) => ({ index: i + 1, name: o.name, points: { x: o.x, y: o.y, w: o.width, h: o.height }, pixels: { w: o.width, h: o.height }, scale: o.scale ?? 1, main: !!o.main || i === 0 }));
-        }
-      }
-      throw new ExecError("display enumeration needs xrandr (X11) or swaymsg/hyprctl (Wayland) — install one and retry");
-    },
+    list_displays: listDisplays,
     switch_display: async ({ index }) => ({ activeDisplay: index ?? 1, note: "linux screenshots grab the compositor's virtual screen; per-display selection applies only where the shot tool supports it" }),
     list_apps: async () => {
       await probeSession();
@@ -338,25 +340,61 @@ except Exception as e:
     },
     screenshot: async ({ display, region, path: outPath } = {}) => {
       await probeSession();
+      // Region is in global layout points (grim/scrot/import all crop in that
+      // frame), which go negative on layouts whose smallest output x/y is
+      // negative — exactly the layouts the virtual-screen binding exists for.
+      if (region !== undefined && (!Array.isArray(region) || region.length !== 4 || !region.every((n) => Number.isFinite(n)) || region[2] < 1 || region[3] < 1)) {
+        throw new ExecError("region must be [x, y, w, h] in screen points");
+      }
       const { cmd, base } = await shotTool();
       const dir = recordingsDir();
       fs.mkdirSync(dir, { recursive: true });
       const file = outPath || path.join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}.png`);
+      // grim/scrot/import crop the compositor/root layout in global screen
+      // points, so the surface they photograph is the virtual screen (the
+      // union of enumerated displays). Regions clamp against it — the receipt
+      // must name the crop actually taken — and a full shot binds at the
+      // layout's min corner, not (0,0), which is wrong on layouts whose
+      // smallest output x/y is negative.
+      let surface = null;
+      try { surface = virtualScreen(await listDisplays()); } catch {}
+      let eff = region ? region.map(Math.round) : null;
+      if (region && surface) {
+        const clipped = clampRegion([eff[0] - surface.x, eff[1] - surface.y, eff[2], eff[3]], surface.w, surface.h);
+        if (clipped) eff = [clipped[0] + surface.x, clipped[1] + surface.y, clipped[2], clipped[3]];
+      }
       let args = [...base];
       if (cmd === "grim") {
-        if (region) args.push("-g", `${Math.round(region[0])},${Math.round(region[1])} ${Math.round(region[2])}x${Math.round(region[3])}`);
+        if (eff) args.push("-g", `${eff[0]},${eff[1]} ${eff[2]}x${eff[3]}`);
         args.push(file);
       } else if (cmd === "scrot") {
-        if (region) args.push("-a", `${Math.round(region[0])},${Math.round(region[1])},${Math.round(region[2])},${Math.round(region[3])}`);
+        if (eff) args.push("-a", `${eff[0]},${eff[1]},${eff[2]},${eff[3]}`);
         args.push(file);
       } else {
-        if (region) args.push("-crop", `${Math.round(region[2])}x${Math.round(region[3])}+${Math.round(region[0])}+${Math.round(region[1])}`);
+        if (eff) args.push("-crop", `${eff[2]}x${eff[3]}+${eff[0]}+${eff[1]}`);
         args.push(file);
       }
       const r = await run(cmd, args, { timeoutMs: 20_000 });
       if (r.code !== 0) throw new ExecError(`${cmd} exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`, r);
-      lastRaster = { file, bytes: fs.statSync(file).size, capturedAt: new Date().toISOString() };
-      return { ...lastRaster };
+      // Bind the geometry of the crop actually taken at the compositor's
+      // scale (grim renders at the highest output scale, so the PNG carries
+      // that many pixels per point): a region shot's raster origin is the
+      // region origin itself, a full shot's is the virtual screen's min
+      // corner — the same contract the zoom path binds by.
+      const bytes = fs.statSync(file).size;
+      const capturedAt = new Date().toISOString();
+      const geom = eff
+        ? screenshotRaster({ x: 0, y: 0, scale: surface?.scale ?? 1 }, eff)
+        : surface ? screenshotRaster(surface, null) : null;
+      if (geom) {
+        lastRaster = { file, bytes, ...geom, capturedAt };
+        return { ...lastRaster };
+      }
+      // No usable geometry — keep the previous binding WHOLE, file included:
+      // pairing the new file with a stale frame would let a follow-up zoom
+      // slip past the server's foreign-source guard, and an unbound raster
+      // must not silently claim (0,0). The new crop rides along as `path`.
+      return { ...(lastRaster ?? {}), path: file, capturedAt, note: "display enumeration unavailable; the raster stays unbound — coordinate targets resolve against the last bound raster, or fail until a screenshot with known geometry succeeds" };
     },
     zoom: async ({ source, region, path: outPath }) => {
       if (!Array.isArray(region) || region.length < 4 || ![region[0], region[1]].every((n) => Number.isFinite(n) && n >= 0) || ![region[2], region[3]].every((n) => Number.isFinite(n) && n >= 1)) {

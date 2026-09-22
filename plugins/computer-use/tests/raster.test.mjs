@@ -1,8 +1,10 @@
 // Pure geometry for coordinate targets: a zoom crops the previous raster 1:1,
-// so child pixels must resolve against the region offset at the parent scale.
+// so child pixels must resolve against the region offset at the parent scale;
+// a screenshot must bind the geometry of the crop actually taken, not the
+// display's full bounds.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { zoomChildRaster, clampRegion } from "../src/raster.mjs";
+import { zoomChildRaster, clampRegion, screenshotRaster, virtualScreen } from "../src/raster.mjs";
 
 test("zoom child raster offsets the parent origin by the region at the parent scale", () => {
   const child = zoomChildRaster({ scale: 2, origin: { x: 10, y: 20 } }, [100, 50, 300, 200]);
@@ -51,4 +53,74 @@ test("clampRegion rounds and refuses degenerate or unusable input", () => {
   assert.equal(clampRegion([0, 0], 64, 48), null);
   assert.equal(clampRegion([0, 0, 10, 10], 0, 48), null);
   assert.equal(clampRegion([0, 0, 10, 10], 64, undefined), null);
+});
+
+test("screenshotRaster binds a full-surface shot at the surface origin", () => {
+  const geom = screenshotRaster({ x: -1920, y: 0, w: 3840, h: 1080, scale: 1, pixels: { w: 3840, h: 1080 } }, null);
+  assert.deepEqual(geom.points, { x: -1920, y: 0, w: 3840, h: 1080 });
+  assert.deepEqual(geom.pixels, { w: 3840, h: 1080 });
+  assert.equal(geom.scale, 1);
+});
+
+test("screenshotRaster offsets a region shot by the surface origin, not the display bounds", () => {
+  // A region crop's raster origin is display origin + region offset; binding
+  // the display bounds here is exactly the #554 bug.
+  const geom = screenshotRaster({ x: 100, y: 200, w: 2560, h: 1440, scale: 1, pixels: { w: 2560, h: 1440 } }, [40, 60, 640, 480]);
+  assert.deepEqual(geom.points, { x: 140, y: 260, w: 640, h: 480 });
+  assert.deepEqual(geom.pixels, { w: 640, h: 480 });
+});
+
+test("screenshotRaster scales region pixels by the display scale", () => {
+  // Retina: a 640x480 point region is 1280x960 pixels; the origin stays in
+  // points because the server divides pixel targets by the bound scale.
+  const geom = screenshotRaster({ x: 0, y: 0, w: 1920, h: 1080, scale: 2, pixels: { w: 3840, h: 2160 } }, [100, 200, 640, 480]);
+  assert.deepEqual(geom.points, { x: 100, y: 200, w: 640, h: 480 });
+  assert.deepEqual(geom.pixels, { w: 1280, h: 960 });
+  assert.equal(geom.scale, 2);
+});
+
+test("screenshotRaster refuses an unknown surface origin so the caller keeps the previous binding", () => {
+  assert.equal(screenshotRaster(null, [0, 0, 10, 10]), null);
+  assert.equal(screenshotRaster(undefined, null), null);
+  assert.equal(screenshotRaster({ x: null, y: null, w: null, h: null }, null), null);
+  assert.equal(screenshotRaster({ x: 0, y: 0, w: 100, h: 100 }, [0, 0, 0, 10]), null);
+  assert.equal(screenshotRaster({ x: 0, y: 0, w: 100, h: 100 }, [0, 0]), null);
+});
+
+test("virtualScreen unions display point geometry into one surface", () => {
+  // A layout whose smallest x is negative: the full-shot surface starts at
+  // x -1280, not 0,0.
+  const displays = [
+    { points: { x: 0, y: 0, w: 1920, h: 1080 } },
+    { points: { x: -1280, y: 240, w: 1280, h: 840 } },
+  ];
+  assert.deepEqual(virtualScreen(displays), { x: -1280, y: 0, w: 3200, h: 1080, scale: 1 });
+});
+
+test("virtualScreen carries the highest contributing output scale", () => {
+  // grim renders at the highest of all output scales, so the surface must
+  // report that many pixels per point.
+  const displays = [
+    { points: { x: 0, y: 0, w: 1920, h: 1080 }, scale: 1 },
+    { points: { x: 1920, y: 0, w: 1280, h: 840 }, scale: 2 },
+  ];
+  assert.deepEqual(virtualScreen(displays), { x: 0, y: 0, w: 3200, h: 1080, scale: 2 });
+});
+
+test("virtualScreen keeps the union of valid displays when others lack geometry", () => {
+  // A display without usable points contributes neither bounds nor scale.
+  const displays = [
+    { points: { x: 0, y: 0, w: 1920, h: 1080 }, scale: 1 },
+    { points: { x: null, y: null, w: null, h: null }, scale: 2 },
+    {},
+  ];
+  assert.deepEqual(virtualScreen(displays), { x: 0, y: 0, w: 1920, h: 1080, scale: 1 });
+});
+
+test("virtualScreen refuses unusable geometry so the caller does not guess", () => {
+  assert.equal(virtualScreen([]), null);
+  assert.equal(virtualScreen(undefined), null);
+  assert.equal(virtualScreen([{ points: { x: null, y: null, w: null, h: null } }]), null);
+  assert.equal(virtualScreen([{ points: { x: 0, y: 0, w: 0, h: 100 } }]), null);
+  assert.equal(virtualScreen([{}]), null);
 });

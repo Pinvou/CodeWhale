@@ -36,11 +36,16 @@ const CANNED = {
     found: true, name: "Fake App", truncated: false,
     elements: [{ index: 0, path: [0, 1], role: "button", label: "OK", value: "", position: { x: 10, y: 10 }, size: { w: 40, h: 20 }, actions: ["press"] }],
   }),
-  screenshot: () => ({
+  // path "/remote/unbound-shot.png" is the sentinel for "the remote captured
+  // a raster it cannot bind" — no geometry, backend note only.
+  screenshot: (r) => r.args?.path === "/remote/unbound-shot.png" ? {
+    file: "/remote/unbound-shot.png", bytes: 1024, note: "the raster stays unbound",
+    capturedAt: "2026-09-14T00:00:00.000Z",
+  } : {
     file: "/remote/shot-1.png", bytes: 2048, scale: 2,
     points: { x: 10, y: 20, w: 1280, h: 800 }, pixels: { w: 2560, h: 1600 },
     capturedAt: "2026-09-14T00:00:00.000Z",
-  }),
+  },
   // region[0] === 999 is the sentinel for "the agent cropped a stale raster".
   // region[0] === 50 mirrors the real backends' out-of-bounds behavior: the
   // cropper clips the request against the source raster and the receipt
@@ -432,6 +437,38 @@ test("switch_display over ssh fails closed instead of silently evaporating", { s
   const sw = await tool("switch_display", { computer: "box", index: 1 });
   assert.equal(sw.ok, false);
   assert.equal(sw.error.code, "persistent_session_required");
+});
+
+test("ssh: a screenshot without geometry binds nothing — clicks fail closed instead of guessing (0,0)", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // The tests above leave "box" registered with no bound raster.
+  const shot = await tool("screenshot", { computer: "box", path: "/remote/unbound-shot.png" });
+  assert.equal(shot.ok, true, JSON.stringify(shot.error ?? {}));
+  assert.equal(shot.points, undefined);
+  // The backend's unbound note must survive the scp hint — joined, not
+  // overwritten.
+  assert.match(String(shot.note ?? ""), /unbound/u);
+  assert.match(String(shot.note ?? ""), /scp/u);
+  // Coordinate targets fail closed with the named reason, not a silent
+  // click at the guessed (0,0) frame; zoom has no raster to crop either.
+  const click = await tool("left_click", { computer: "box", target: { type: "coordinate", x: 5, y: 5 } });
+  assert.equal(click.ok, false);
+  assert.equal(click.error.code, "no_raster");
+  const zoom = await tool("zoom", { computer: "box", region: [0, 0, 10, 10] });
+  assert.equal(zoom.ok, false);
+  assert.equal(zoom.error.code, "no_raster");
+});
+
+test("ssh: an unbound screenshot keeps the previous binding instead of guessing (0,0)", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const bound = await tool("screenshot", { computer: "box" });
+  assert.equal(bound.ok, true, JSON.stringify(bound.error ?? {}));
+  const unbound = await tool("screenshot", { computer: "box", path: "/remote/unbound-shot.png" });
+  assert.equal(unbound.ok, true, JSON.stringify(unbound.error ?? {}));
+  // The binding is untouched: pixel (10,10) of the bound raster still
+  // resolves against origin {10,20} at scale 2 -> screen (15,25).
+  const click = await tool("left_click", { computer: "box", target: { type: "coordinate", x: 10, y: 10 } });
+  assert.equal(click.ok, true, JSON.stringify(click.error ?? {}));
+  const sent = wireCalls("left_click").at(-1);
+  assert.deepEqual({ x: sent.args.target.x, y: sent.args.target.y }, { x: 15, y: 25 });
 });
 
 test("kill switch refuses mutating tools but keeps read-only probes", async () => {
