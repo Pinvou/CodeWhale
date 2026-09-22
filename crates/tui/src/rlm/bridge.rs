@@ -147,8 +147,10 @@ impl RlmBridge {
     }
 
     /// Override the per-child-completion wall-clock budget (seconds).
+    /// Values below one second are floored at one: `0` would build a tokio
+    /// timeout that fires immediately and kill every child query.
     pub(crate) fn with_sub_query_timeout_secs(mut self, secs: u64) -> Self {
-        self.sub_query_timeout = Duration::from_secs(secs);
+        self.sub_query_timeout = Duration::from_secs(secs.max(1));
         self
     }
 
