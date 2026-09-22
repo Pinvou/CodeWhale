@@ -1,10 +1,11 @@
 //! Structural recognition of the compaction checkpoint in saved history.
 //!
 //! Leaf module shared by `compaction` and `runtime_handoff`. Hosting the
-//! checkpoint-recognition family here keeps `runtime_handoff` from importing
-//! `compaction`: `compaction` already imports `runtime_handoff` for
-//! restore-time topology relocation, so a reverse edge would close a module
-//! dependency cycle.
+//! checkpoint-recognition family here keeps `runtime_handoff`'s production
+//! code from importing `compaction` (its tests still build carriers through
+//! `compaction`'s constructors): `compaction` already imports
+//! `runtime_handoff` for restore-time topology relocation, so a reverse edge
+//! would close a module dependency cycle.
 
 use crate::models::{ContentBlock, Message, Role};
 
@@ -33,7 +34,9 @@ fn has_compaction_summary_header(text: &str) -> bool {
 /// The marker substring scan in `compaction` (`is_compaction_summary_text`)
 /// stays scoped to system-prompt carriers:
 /// on history it matches an ordinary user turn that merely *quotes* the
-/// header, and every consumer here either deletes or replaces what it matches.
+/// header, and the consumers that match on history — `compaction` restore,
+/// `runtime_handoff` placement and edit-guarding — replace what they match
+/// or must protect it from deletion.
 /// Structure instead — a `role="user"` message whose first text block begins
 /// with the header and whose remaining block, if any, is exactly the
 /// engine-written provenance marker.
