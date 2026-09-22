@@ -734,11 +734,15 @@ jobs:
         run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
 
   update-release-console-test:
-    name: update-release-console-test
+    name: update-release-console-test (Node ${{ matrix.node-version }})
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "24"]
     steps:
       - uses: actions/checkout@v7
 
@@ -748,7 +752,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: update-release-console/package-lock.json
 
@@ -760,6 +764,43 @@ jobs:
 
       - name: 发布台依赖审计
         run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
+
+      - name: 发布台容器与 Compose 配置校验
+        if: ${{ matrix.node-version == '20' }}
+        env:
+          PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+        run: |
+          docker build --file update-release-console/Dockerfile update-release-console
+          docker compose --file update-release-console/deploy/compose.yaml config --quiet
+          docker run --rm \
+            -v "$PWD/update-release-console/deploy/nginx-test.conf:/etc/nginx/nginx.conf:ro" \
+            -v "$PWD/update-release-console/deploy/nginx-location.conf:/etc/nginx/pinvou3-release-location.conf:ro" \
+            nginx:1.27-alpine nginx -t
+          sudo mkdir -p /var/www/pinvou3
+          printf '%s\n' '{"platforms":{"linux-x86_64":{"version":"0.10.4"},"macos-universal":{"version":"0.10.4"}}}' \
+            | sudo tee /var/www/pinvou3/latest.json >/dev/null
+          sudo chown -R 1000:1000 /var/www/pinvou3
+          docker compose --file update-release-console/deploy/compose.yaml up --detach --build
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:8792/pinvou3/release-console/healthz; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker compose --file update-release-console/deploy/compose.yaml logs
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer $PINVOU_UPDATE_ADMIN_TOKEN" \
+            http://127.0.0.1:8792/pinvou3/release-console/api/status
+
+      - name: 清理发布台容器
+        if: ${{ always() && matrix.node-version == '20' }}
+        env:
+          PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+        run: docker compose --file update-release-console/deploy/compose.yaml down --volumes --remove-orphans
 
   release-contract-test:
     name: release-contract-test

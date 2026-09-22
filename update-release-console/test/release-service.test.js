@@ -2,11 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   compareVersions,
   mergeWindowsEntry,
   parseVersion,
   verifyOnlineAsset,
+  ReleaseService,
 } from "../src/release-service.js";
 
 test("版本比较支持三段和四段数字版本", () => {
@@ -62,4 +66,47 @@ test("线上安装器通过 HTTP 响应体重新计算大小和 SHA-256", async 
     ),
     (error) => error.code === "online_sha256_mismatch",
   );
+});
+
+test("初始化要求有效 publicRoot/latest.json 并清理自有陈旧临时文件", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-console-readiness-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const publicRoot = join(root, "public");
+  const stateRoot = join(root, "state");
+  const config = {
+    publicRoot,
+    stateRoot,
+    publicBaseUrl: "https://updates.example.test/pinvou3",
+    onlineVerifyTimeoutMs: 5000,
+  };
+  const service = new ReleaseService(config);
+  assert.deepEqual(service.getHealthStatus(), { status: "not_ready" });
+  await assert.rejects(service.initialize(), (error) => error.code === "not_ready");
+
+  await mkdir(publicRoot);
+  await writeFile(join(publicRoot, "latest.json"), "not-json");
+  await assert.rejects(service.initialize(), (error) => error.code === "invalid_json");
+
+  await writeFile(join(publicRoot, "latest.json"), "{}\n");
+  const ownedTemporary = ".pinvou3-release-123e4567-e89b-42d3-a456-426614174000.tmp";
+  const manifestTemporary = "latest.json.123e4567-e89b-42d3-a456-426614174001.tmp";
+  const draftTemporary = "windows-draft.json.123e4567-e89b-42d3-a456-426614174002.tmp";
+  const historyTemporary = "1-123e4567-e89b-42d3-a456-426614174003.json.123e4567-e89b-42d3-a456-426614174004.tmp";
+  await writeFile(join(publicRoot, ownedTemporary), "stale");
+  await writeFile(join(publicRoot, manifestTemporary), "stale");
+  await writeFile(join(stateRoot, draftTemporary), "stale");
+  await writeFile(join(service.historyDir, historyTemporary), "stale");
+  await writeFile(join(publicRoot, "customer.tmp"), "keep");
+  await service.initialize();
+  assert.deepEqual(service.getHealthStatus(), { status: "ok" });
+  assert.equal((await readdir(publicRoot)).includes(ownedTemporary), false);
+  assert.equal((await readdir(publicRoot)).includes(manifestTemporary), false);
+  assert.equal((await readdir(stateRoot)).includes(draftTemporary), false);
+  assert.equal((await readdir(service.historyDir)).includes(historyTemporary), false);
+  assert.equal(await readFile(join(publicRoot, "customer.tmp"), "utf8"), "keep");
+
+  await rm(service.stagingDir, { recursive: true });
+  await writeFile(service.stagingDir, "not-a-directory");
+  await assert.rejects(service.initialize());
+  assert.deepEqual(service.getHealthStatus(), { status: "not_ready" });
 });

@@ -1,4 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isIP } from "node:net";
 
 const DEFAULT_MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
 
@@ -28,6 +29,41 @@ function normalizedBasePath(value) {
 function isInside(parent, candidate) {
   const path = relative(parent, candidate);
   return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
+}
+
+function ipv4Number(address) {
+  return address.split(".").reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0);
+}
+
+export function parseTrustedProxies(value = "") {
+  if (!value.trim()) return [];
+  return value.split(",").map((raw) => {
+    const rule = raw.trim();
+    const [address, prefixText] = rule.split("/");
+    const family = isIP(address);
+    if (!family || rule.split("/").length > 2) {
+      throw new Error(`PINVOU_UPDATE_TRUSTED_PROXIES contains invalid address: ${rule}`);
+    }
+    const prefix = prefixText === undefined ? (family === 4 ? 32 : 128) : Number(prefixText);
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > (family === 4 ? 32 : 128)) {
+      throw new Error(`PINVOU_UPDATE_TRUSTED_PROXIES contains invalid CIDR: ${rule}`);
+    }
+    if (family === 6 && prefix !== 128) {
+      throw new Error("PINVOU_UPDATE_TRUSTED_PROXIES currently supports IPv6 hosts only (/128)");
+    }
+    return { address, family, prefix, network: family === 4 ? ipv4Number(address) : address.toLowerCase() };
+  });
+}
+
+export function isTrustedProxy(remoteAddress, rules) {
+  const address = remoteAddress.startsWith("::ffff:") ? remoteAddress.slice(7) : remoteAddress;
+  const family = isIP(address);
+  return rules.some((rule) => {
+    if (rule.family !== family) return false;
+    if (family === 6) return address.toLowerCase() === rule.network;
+    const mask = rule.prefix === 0 ? 0 : (0xffffffff << (32 - rule.prefix)) >>> 0;
+    return (ipv4Number(address) & mask) === (rule.network & mask);
+  });
 }
 
 export function loadConfig(environment = process.env) {
@@ -74,5 +110,6 @@ export function loadConfig(environment = process.env) {
       "PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS",
       { min: 1000, max: 60 * 60 * 1000 },
     ),
+    trustedProxies: parseTrustedProxies(environment.PINVOU_UPDATE_TRUSTED_PROXIES),
   };
 }

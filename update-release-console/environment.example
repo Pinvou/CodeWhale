@@ -9,3 +9,5 @@ PINVOU_UPDATE_STATE_ROOT=/var/lib/pinvou-update-console
 PINVOU_UPDATE_PUBLIC_BASE_URL=https://pinvou.com/pinvou3
 PINVOU_UPDATE_MAX_UPLOAD_BYTES=4294967296
 PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS=900000
+# Only these direct peers may supply X-Real-IP. Docker bridge gateways commonly use 172.16/12.
+PINVOU_UPDATE_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12

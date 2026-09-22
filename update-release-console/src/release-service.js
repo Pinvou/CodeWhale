@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import {
   appendFile,
   chmod,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -11,11 +12,12 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import Busboy from "busboy";
 import { AppError, badRequest, conflict } from "./errors.js";
+import { inspectPeInstaller } from "./pe-inspector.js";
 
 export const WINDOWS_PLATFORM = "windows-x86_64";
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:\.\d+)?$/u;
@@ -23,6 +25,10 @@ const HASH_PATTERN = /^[0-9a-f]{64}$/u;
 const COMMIT_PATTERN = /^[0-9a-f]{7,40}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const STAGING_FILE_PATTERN = /^[0-9a-f-]{36}\.upload$/u;
+const PUBLIC_TMP_PATTERN = /^\.pinvou3-release-[0-9a-f-]{36}\.tmp$/u;
+const MANIFEST_TMP_PATTERN = /^latest\.json\.[0-9a-f-]{36}\.tmp$/u;
+const DRAFT_TMP_PATTERN = /^windows-draft\.json\.[0-9a-f-]{36}\.tmp$/u;
+const HISTORY_TMP_PATTERN = /^\d+-[0-9a-f-]{36}\.json\.[0-9a-f-]{36}\.tmp$/u;
 
 function jsonClone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -116,9 +122,24 @@ async function atomicWriteJson(path, value, mode = 0o600) {
   }
   try {
     await rename(temporaryPath, path);
+    await syncDirectory(dirname(path));
   } catch (error) {
     await rm(temporaryPath, { force: true });
     throw error;
+  }
+}
+
+async function syncDirectory(path) {
+  // Node can open a directory handle on Windows, but FlushFileBuffers on that
+  // handle may never complete. Directory fsync is the Linux durability
+  // primitive used by the production container; skip it before opening there.
+  if (process.platform === "win32") return;
+  let handle;
+  try {
+    handle = await open(path, "r");
+    await handle.sync();
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -130,6 +151,69 @@ async function hashFile(path) {
     hash.update(chunk);
   }
   return { sha256: hash.digest("hex"), size };
+}
+
+function sameHashAndSize(actual, expected) {
+  return actual.sha256 === expected.sha256 && actual.size === expected.size;
+}
+
+async function copyStagedAsset(stagingPath, destinationPath, expected) {
+  const publicDirectory = dirname(destinationPath);
+  const temporaryPath = join(publicDirectory, `.pinvou3-release-${randomUUID()}.tmp`);
+  const streamedHash = createHash("sha256");
+  let streamedSize = 0;
+  try {
+    const inspect = new Transform({
+      transform(chunk, _encoding, callback) {
+        streamedSize += chunk.length;
+        streamedHash.update(chunk);
+        callback(null, chunk);
+      },
+    });
+    await pipeline(
+      createReadStream(stagingPath),
+      inspect,
+      createWriteStream(temporaryPath, { flags: "wx", mode: 0o600 }),
+    );
+    await syncFile(temporaryPath);
+
+    const streamed = { sha256: streamedHash.digest("hex"), size: streamedSize };
+    if (!sameHashAndSize(streamed, expected)) {
+      throw conflict("staged_file_changed", "暂存安装器在复制期间发生变化");
+    }
+    const copied = await hashFile(temporaryPath);
+    if (!sameHashAndSize(copied, expected)) {
+      throw conflict("public_copy_verification_failed", "发布目录临时安装器回读校验失败");
+    }
+
+    if (await pathExists(destinationPath)) {
+      const existing = await hashFile(destinationPath);
+      if (!sameHashAndSize(existing, expected)) {
+        throw conflict("immutable_asset_exists", "线上已有同名但内容不同的安装器，拒绝覆盖");
+      }
+      await rm(temporaryPath, { force: true });
+      await chmod(destinationPath, 0o644);
+      await syncFile(destinationPath);
+      await syncDirectory(publicDirectory);
+    } else {
+      // temporaryPath 与 destinationPath 同属 publicRoot；这里只做同目录原子切换，
+      // 不再依赖 stateRoot 与 publicRoot 是否位于同一文件系统。
+      await chmod(temporaryPath, 0o644);
+      await syncFile(temporaryPath);
+      await rename(temporaryPath, destinationPath);
+      await syncDirectory(publicDirectory);
+    }
+    const published = await hashFile(destinationPath);
+    if (!sameHashAndSize(published, expected)) {
+      throw conflict("online_verification_failed", "发布目录中的安装器回读校验失败");
+    }
+    await rm(stagingPath, { force: true });
+    await syncDirectory(dirname(stagingPath));
+    return published;
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
 }
 
 export async function verifyOnlineAsset(url, expected, timeoutMs) {
@@ -197,26 +281,38 @@ async function syncFile(path) {
   }
 }
 
-async function assertPortableExecutable(path) {
-  const handle = await open(path, "r");
+async function requireDirectory(path, label) {
+  let metadata;
   try {
-    const dosHeader = Buffer.alloc(64);
-    const { bytesRead } = await handle.read(dosHeader, 0, dosHeader.length, 0);
-    if (bytesRead !== dosHeader.length || dosHeader.toString("ascii", 0, 2) !== "MZ") {
-      throw badRequest("invalid_installer", "安装器不是有效的 Windows PE 可执行文件");
+    metadata = await lstat(path);
+  } catch (error) {
+    throw new AppError(503, "not_ready", `${label} 不可访问：${error.message}`);
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new AppError(503, "not_ready", `${label} 必须是实际目录`);
+  }
+}
+
+async function removeOwnedTemporaryFiles(directory, patterns) {
+  for (const name of await readdir(directory)) {
+    if (patterns.some((pattern) => pattern.test(name))) {
+      await rm(join(directory, name), { force: true });
     }
-    const peOffset = dosHeader.readUInt32LE(0x3c);
-    const file = await handle.stat();
-    if (peOffset < 64 || peOffset > file.size - 4) {
-      throw badRequest("invalid_installer", "安装器的 Windows PE 头无效");
-    }
-    const peSignature = Buffer.alloc(4);
-    await handle.read(peSignature, 0, peSignature.length, peOffset);
-    if (!peSignature.equals(Buffer.from([0x50, 0x45, 0x00, 0x00]))) {
-      throw badRequest("invalid_installer", "安装器的 Windows PE 签名无效");
-    }
+  }
+}
+
+async function verifyWritableDirectory(path, label) {
+  const probe = join(path, `.pinvou3-write-probe-${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await open(probe, "wx", 0o600);
+    await handle.writeFile("ready\n", "utf8");
+    await handle.sync();
+  } catch (error) {
+    throw new AppError(503, "not_ready", `${label} 不可写：${error.message}`);
   } finally {
-    await handle.close();
+    await handle?.close().catch(() => {});
+    await rm(probe, { force: true }).catch(() => {});
   }
 }
 
@@ -372,21 +468,48 @@ export class ReleaseService {
     this.draftPath = join(config.stateRoot, "windows-draft.json");
     this.auditPath = join(config.stateRoot, "audit.ndjson");
     this.lockPath = join(config.stateRoot, "publish.lock");
+    this.ready = false;
   }
 
   async initialize() {
-    await mkdir(this.config.publicRoot, { recursive: true, mode: 0o755 });
+    this.ready = false;
+    // publicRoot 必须由部署挂载预先提供；自行创建会把缺失/错误挂载伪装成健康服务。
+    await requireDirectory(this.config.publicRoot, "publicRoot");
     await mkdir(this.config.stateRoot, { recursive: true, mode: 0o700 });
     await mkdir(this.stagingDir, { recursive: true, mode: 0o700 });
     await mkdir(this.historyDir, { recursive: true, mode: 0o700 });
     // The supported deployment is a single process. A lock can only survive
     // when that process was interrupted, so clear it during process startup.
     await rm(this.lockPath, { force: true });
+    await removeOwnedTemporaryFiles(
+      this.config.publicRoot,
+      [PUBLIC_TMP_PATTERN, MANIFEST_TMP_PATTERN],
+    );
+    await removeOwnedTemporaryFiles(this.config.stateRoot, [DRAFT_TMP_PATTERN]);
+    await removeOwnedTemporaryFiles(this.historyDir, [HISTORY_TMP_PATTERN]);
     const draft = await this.getDraft();
     const retainedStagingFile = draft ? validateStoredDraft(draft).staging_file : null;
     for (const name of await readdir(this.stagingDir)) {
       if (name !== retainedStagingFile) await rm(join(this.stagingDir, name), { force: true });
     }
+    await this.verifyStartupReadiness();
+    this.ready = true;
+  }
+
+  async verifyStartupReadiness() {
+    const directories = [
+      [this.config.publicRoot, "publicRoot"],
+      [this.config.stateRoot, "stateRoot"],
+      [this.stagingDir, "stagingDir"],
+      [this.historyDir, "historyDir"],
+    ];
+    for (const [path, label] of directories) await requireDirectory(path, label);
+    await this.readManifest();
+    for (const [path, label] of directories) await verifyWritableDirectory(path, label);
+  }
+
+  getHealthStatus() {
+    return { status: this.ready ? "ok" : "not_ready" };
   }
 
   async readManifest() {
@@ -443,7 +566,7 @@ export class ReleaseService {
       if (upload.sha256 !== upload.fields.expectedSha256) {
         throw badRequest("sha256_mismatch", `SHA-256 不一致，实际值为 ${upload.sha256}`);
       }
-      await assertPortableExecutable(upload.temporaryPath);
+      await inspectPeInstaller(upload.temporaryPath, upload.fields.version);
       await syncFile(upload.temporaryPath);
 
       const manifest = await this.readManifest();
@@ -579,34 +702,25 @@ export class ReleaseService {
 
       const stagingPath = join(this.stagingDir, draft.staging_file);
       const destinationPath = join(this.config.publicRoot, draft.file_name);
+      const expectedAsset = { sha256: draft.entry.sha256, size: draft.entry.size };
       if (await pathExists(stagingPath)) {
         const actual = await hashFile(stagingPath);
-        if (actual.sha256 !== draft.entry.sha256 || actual.size !== draft.entry.size) {
+        if (!sameHashAndSize(actual, expectedAsset)) {
           throw conflict("staged_file_changed", "暂存安装器的大小或 SHA-256 已变化");
         }
-        if (await pathExists(destinationPath)) {
-          const existing = await hashFile(destinationPath);
-          if (existing.sha256 !== actual.sha256 || existing.size !== actual.size) {
-            throw conflict("immutable_asset_exists", "线上已有同名但内容不同的安装器，拒绝覆盖");
-          }
-          await rm(stagingPath, { force: true });
-        } else {
-          await rename(stagingPath, destinationPath);
-        }
+        await copyStagedAsset(stagingPath, destinationPath, expectedAsset);
       } else {
         if (!(await pathExists(destinationPath))) {
           throw conflict("staged_file_missing", "暂存安装器不存在，请取消草稿并重新上传");
         }
         const existing = await hashFile(destinationPath);
-        if (existing.sha256 !== draft.entry.sha256 || existing.size !== draft.entry.size) {
+        if (!sameHashAndSize(existing, expectedAsset)) {
           throw conflict("published_asset_changed", "线上安装器与草稿不一致");
         }
       }
 
-      await chmod(destinationPath, 0o644);
-
       const onlineAsset = await hashFile(destinationPath);
-      if (onlineAsset.sha256 !== draft.entry.sha256 || onlineAsset.size !== draft.entry.size) {
+      if (!sameHashAndSize(onlineAsset, expectedAsset)) {
         throw conflict("online_verification_failed", "发布目录中的安装器回读校验失败");
       }
       await this.onlineVerifier(
@@ -644,6 +758,31 @@ export class ReleaseService {
     });
   }
 
+  async verifyRollbackTarget(entry) {
+    const valid = entry
+      && typeof entry === "object"
+      && VERSION_PATTERN.test(entry.version || "")
+      && entry.format === "nsis"
+      && HASH_PATTERN.test(entry.sha256 || "")
+      && Number.isSafeInteger(entry.size)
+      && entry.size > 0;
+    if (!valid) throw new AppError(500, "invalid_rollback_asset", "回滚目标 Windows 资产结构无效");
+    const fileName = `pinvou3_${entry.version}_x64-setup.exe`;
+    if (entry.url !== `${this.config.publicBaseUrl}/${fileName}`) {
+      throw new AppError(500, "invalid_rollback_asset", "回滚目标 URL 不属于当前发布目录");
+    }
+    const expected = { sha256: entry.sha256, size: entry.size };
+    const localPath = join(this.config.publicRoot, fileName);
+    if (!(await pathExists(localPath))) {
+      throw conflict("rollback_asset_missing", "回滚目标安装器在发布目录中不存在");
+    }
+    const local = await hashFile(localPath);
+    if (!sameHashAndSize(local, expected)) {
+      throw conflict("rollback_asset_changed", "回滚目标安装器的大小或 SHA-256 不一致");
+    }
+    await this.onlineVerifier(entry.url, expected, this.config.onlineVerifyTimeoutMs);
+  }
+
   async rollback(releaseId, operator, reason, remoteAddress) {
     return this.withPublishLock(async () => {
       const actor = validateText(operator, "operator", 80);
@@ -657,7 +796,13 @@ export class ReleaseService {
       const existingRollback = history.find(
         (record) => record.type === "rollback" && record.release_id === release.id,
       );
-      if (sameJson(currentWindows, release.previous_windows)) {
+      const targetIsCurrent = sameJson(currentWindows, release.previous_windows);
+      const releaseIsCurrent = sameJson(currentWindows, release.entry);
+      if (!targetIsCurrent && !releaseIsCurrent) {
+        throw conflict("release_not_current", "只能回滚当前正在生效的 Windows 版本");
+      }
+      if (release.previous_windows) await this.verifyRollbackTarget(release.previous_windows);
+      if (targetIsCurrent) {
         if (existingRollback) return existingRollback;
         const recoveredRollback = {
           id: randomUUID(),
@@ -680,9 +825,6 @@ export class ReleaseService {
           operator: actor,
         });
         return recoveredRollback;
-      }
-      if (!sameJson(currentWindows, release.entry)) {
-        throw conflict("release_not_current", "只能回滚当前正在生效的 Windows 版本");
       }
       const rolledBack = jsonClone(manifest);
       if (!rolledBack.platforms || typeof rolledBack.platforms !== "object") rolledBack.platforms = {};

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { loadConfig } from "../src/config.js";
+import { isTrustedProxy, loadConfig, parseTrustedProxies } from "../src/config.js";
 
 function environment(overrides = {}) {
   return {
@@ -19,6 +19,7 @@ test("配置默认只监听回环地址并规范化路径", () => {
   assert.equal(config.port, 8792);
   assert.equal(config.basePath, "/console");
   assert.equal(config.publicBaseUrl, "https://updates.example.test/pinvou3");
+  assert.deepEqual(config.trustedProxies, []);
 });
 
 test("拒绝 HTTP 下载地址和公开目录内的状态目录", () => {
@@ -34,4 +35,14 @@ test("拒绝 HTTP 下载地址和公开目录内的状态目录", () => {
     })),
     /must not be inside/u,
   );
+});
+
+test("仅显式可信代理可提供 X-Real-IP", () => {
+  const rules = parseTrustedProxies("127.0.0.1,172.16.0.0/12,::1");
+  assert.equal(isTrustedProxy("127.0.0.1", rules), true);
+  assert.equal(isTrustedProxy("::ffff:172.20.5.6", rules), true);
+  assert.equal(isTrustedProxy("172.32.0.1", rules), false);
+  assert.equal(isTrustedProxy("::1", rules), true);
+  assert.throws(() => parseTrustedProxies("not-an-ip"), /invalid address/u);
+  assert.throws(() => parseTrustedProxies("2001:db8::/64"), /IPv6 hosts only/u);
 });

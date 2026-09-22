@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AppError, badRequest } from "./errors.js";
-import { loadConfig } from "./config.js";
+import { isTrustedProxy, loadConfig } from "./config.js";
 import { ReleaseService } from "./release-service.js";
 
 const sourceDir = dirname(fileURLToPath(import.meta.url));
@@ -61,12 +62,12 @@ function routePath(pathname, basePath) {
   return pathname.slice(basePath.length) || "/";
 }
 
-function requestAddress(request) {
+function requestAddress(request, trustedProxies) {
   const direct = request.socket.remoteAddress || "unknown";
-  const isLoopback = direct === "127.0.0.1" || direct === "::1" || direct === "::ffff:127.0.0.1";
   const forwarded = request.headers["x-real-ip"];
-  if (isLoopback && typeof forwarded === "string" && /^[0-9a-f:.]{2,64}$/iu.test(forwarded)) {
-    return forwarded;
+  if (isTrustedProxy(direct, trustedProxies) && typeof forwarded === "string") {
+    const candidate = forwarded.trim();
+    if (isIP(candidate)) return candidate;
   }
   return direct;
 }
@@ -99,7 +100,8 @@ export async function createAppServer(config, dependencies = {}) {
         return;
       }
       if (request.method === "GET" && path === "/healthz") {
-        sendJson(response, 200, { status: "ok" });
+        const health = service.getHealthStatus();
+        sendJson(response, health.status === "ok" ? 200 : 503, health);
         return;
       }
       if (request.method === "GET" && path === "/") {
@@ -127,7 +129,7 @@ export async function createAppServer(config, dependencies = {}) {
         return;
       }
 
-      const remoteAddress = requestAddress(request);
+      const remoteAddress = requestAddress(request, config.trustedProxies || []);
       if (request.method === "GET" && path === "/api/status") {
         sendJson(response, 200, await service.getStatus());
         return;

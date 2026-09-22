@@ -248,11 +248,38 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("npm --prefix update-release-console ci", console_job)
         self.assertIn("npm --prefix update-release-console test", console_job)
+        self.assertIn('node-version: ["20", "24"]', console_job)
+        self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
         self.assertIn(
             "npm --prefix update-release-console audit "
             "--registry=https://registry.npmjs.org --audit-level=high",
             console_job,
         )
+        self.assertIn(
+            "docker build --file update-release-console/Dockerfile "
+            "update-release-console",
+            console_job,
+        )
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "config --quiet",
+            console_job,
+        )
+        self.assertIn("nginx:1.27-alpine nginx -t", console_job)
+        self.assertIn("/var/www/pinvou3/latest.json", console_job)
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "up --detach --build",
+            console_job,
+        )
+        self.assertIn("release-console/healthz", console_job)
+        self.assertIn("release-console/api/status", console_job)
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "down --volumes --remove-orphans",
+            console_job,
+        )
+        self.assertIn("always() && matrix.node-version == '20'", console_job)
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
         portability = self.workflow.split(

@@ -1,23 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAppServer } from "../src/server.js";
 import { ReleaseService } from "../src/release-service.js";
 import { AppError } from "../src/errors.js";
+import { peFixture } from "./pe-fixture.js";
 
 const TOKEN = "test-admin-token-that-is-at-least-32-characters";
-
-function fakePe(payload) {
-  const content = Buffer.alloc(132 + Buffer.byteLength(payload));
-  content.write("MZ", 0, "ascii");
-  content.writeUInt32LE(128, 0x3c);
-  content.write("PE\0\0", 128, "binary");
-  content.write(payload, 132, "utf8");
-  return content;
-}
 
 function requestHeaders(extra = {}) {
   return { Authorization: `Bearer ${TOKEN}`, ...extra };
@@ -29,10 +21,27 @@ async function json(response) {
   return payload;
 }
 
+async function uploadInstaller(baseUrl, content, version = "0.10.4", extraHeaders = {}) {
+  const form = new FormData();
+  form.set("version", version);
+  form.set("gitCommit", "abcdef1234567890");
+  form.set("expectedSha256", createHash("sha256").update(content).digest("hex"));
+  form.set("notes", "fixture release");
+  form.set("operator", "测试发布员");
+  form.set("installer", new Blob([content]), `pinvou3_${version}_x64-setup.exe`);
+  return fetch(`${baseUrl}api/releases/windows/upload`, {
+    method: "POST",
+    headers: requestHeaders(extraHeaders),
+    body: form,
+  });
+}
+
 async function startFixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "pinvou-update-console-"));
   const publicRoot = join(root, "public");
-  const stateRoot = join(root, "state");
+  const stateRoot = options.stateRoot || join(root, "state");
+  const previousInstaller = peFixture({ productVersion: "0.10.3.0" });
+  const previousSha256 = createHash("sha256").update(previousInstaller).digest("hex");
   const initialManifest = {
     version: "0.8.0",
     url: "https://updates.example.test/linux.deb",
@@ -41,10 +50,10 @@ async function startFixture(t, options = {}) {
       "macos-universal": { version: "0.9.0", marker: "keep-mac" },
       "windows-x86_64": {
         version: "0.10.3",
-        url: "https://updates.example.test/pinvou3_0.10.3_x64-setup.exe",
+        url: "https://updates.example.test/pinvou3/pinvou3_0.10.3_x64-setup.exe",
         format: "nsis",
-        sha256: "1".repeat(64),
-        size: 42,
+        sha256: previousSha256,
+        size: previousInstaller.length,
         restart_after_install: false,
         notes: "previous",
         pub_date: "2026-09-20T00:00:00.000Z",
@@ -62,7 +71,11 @@ async function startFixture(t, options = {}) {
     adminToken: TOKEN,
     maxUploadBytes: 1024 * 1024,
     onlineVerifyTimeoutMs: 10_000,
+    trustedProxies: options.trustedProxies || [],
   };
+  await mkdir(publicRoot, { recursive: true });
+  await writeFile(join(publicRoot, "pinvou3_0.10.3_x64-setup.exe"), previousInstaller);
+  await writeFile(join(publicRoot, "latest.json"), `${JSON.stringify(initialManifest, null, 2)}\n`);
   const onlineVerifications = [];
   const service = new ReleaseService(config, {
     onlineVerifier: options.onlineVerifier || (async (url, expected) => {
@@ -71,7 +84,6 @@ async function startFixture(t, options = {}) {
     }),
   });
   const { server } = await createAppServer(config, { service });
-  await writeFile(service.manifestPath, `${JSON.stringify(initialManifest, null, 2)}\n`);
   await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
   const address = server.address();
   const baseUrl = `http://127.0.0.1:${address.port}/console/`;
@@ -81,6 +93,7 @@ async function startFixture(t, options = {}) {
       server.closeAllConnections();
     });
     await rm(root, { recursive: true, force: true });
+    if (options.stateRoot) await rm(options.stateRoot, { recursive: true, force: true });
   });
   return { baseUrl, service, initialManifest, onlineVerifications };
 }
@@ -97,7 +110,7 @@ test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
   const unauthorized = await fetch(`${baseUrl}api/status`);
   assert.equal(unauthorized.status, 401);
 
-  const installer = fakePe("signed-nsis-fixture\0binary-content");
+  const installer = peFixture({ productVersion: "0.10.4.0" });
   const expectedSha256 = createHash("sha256").update(installer).digest("hex");
   const form = new FormData();
   form.set("version", "0.10.4");
@@ -158,6 +171,73 @@ test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
   assert.doesNotMatch(audit, new RegExp(TOKEN, "u"));
 });
 
+test("healthz 使用初始化缓存且不会按请求创建写探针", async (t) => {
+  const { baseUrl, service } = await startFixture(t);
+  await writeFile(service.manifestPath, "{broken-json");
+  const beforePublic = await stat(service.config.publicRoot, { bigint: true });
+  const beforeState = await stat(service.config.stateRoot, { bigint: true });
+  for (let request = 0; request < 5; request += 1) {
+    const response = await fetch(`${baseUrl}healthz`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: "ok" });
+  }
+  const afterPublic = await stat(service.config.publicRoot, { bigint: true });
+  const afterState = await stat(service.config.stateRoot, { bigint: true });
+  assert.equal(afterPublic.mtimeNs, beforePublic.mtimeNs);
+  assert.equal(afterState.mtimeNs, beforeState.mtimeNs);
+});
+
+test("healthz 未就绪时仅返回通用状态", async (t) => {
+  const config = {
+    host: "127.0.0.1",
+    port: 0,
+    basePath: "/console",
+    adminToken: TOKEN,
+    trustedProxies: [],
+  };
+  const service = {
+    async initialize() {},
+    getHealthStatus() { return { status: "not_ready" }; },
+  };
+  const { server } = await createAppServer(config, { service });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  t.after(() => new Promise((resolvePromise) => server.close(resolvePromise)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/console/healthz`);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { status: "not_ready" });
+});
+
+test("仅从显式可信反向代理记录 X-Real-IP", async (t) => {
+  const trusted = await startFixture(t, {
+    trustedProxies: [{ address: "127.0.0.1", family: 4, prefix: 32, network: 0x7f000001 }],
+  });
+  const installer = peFixture({ productVersion: "0.10.4.0" });
+  const draft = await json(await uploadInstaller(
+    trusted.baseUrl,
+    installer,
+    "0.10.4",
+    { "X-Real-IP": "203.0.113.9" },
+  ));
+  await json(await fetch(`${trusted.baseUrl}api/releases/windows/draft`, {
+    method: "DELETE",
+    headers: requestHeaders({ "Content-Type": "application/json", "X-Real-IP": "203.0.113.9" }),
+    body: JSON.stringify({ draftId: draft.id, operator: "测试发布员" }),
+  }));
+  const audit = await readFile(trusted.service.auditPath, "utf8");
+  assert.match(audit, /"remote_address":"203\.0\.113\.9"/u);
+
+  const untrusted = await startFixture(t);
+  const untrustedDraft = await json(await uploadInstaller(
+    untrusted.baseUrl,
+    installer,
+    "0.10.4",
+    { "X-Real-IP": "198.51.100.7" },
+  ));
+  assert.ok(untrustedDraft.id);
+  const untrustedAudit = await readFile(untrusted.service.auditPath, "utf8");
+  assert.doesNotMatch(untrustedAudit, /198\.51\.100\.7/u);
+});
+
 test("SHA-256 不一致时拒绝草稿且不残留暂存文件", async (t) => {
   const { baseUrl, service } = await startFixture(t);
   const form = new FormData();
@@ -166,7 +246,7 @@ test("SHA-256 不一致时拒绝草稿且不残留暂存文件", async (t) => {
   form.set("expectedSha256", "a".repeat(64));
   form.set("notes", "hash mismatch");
   form.set("operator", "测试发布员");
-  form.set("installer", new Blob([fakePe("different")]), "pinvou3_0.10.4_x64-setup.exe");
+  form.set("installer", new Blob([peFixture({ productVersion: "0.10.4.0" })]), "pinvou3_0.10.4_x64-setup.exe");
   const response = await fetch(`${baseUrl}api/releases/windows/upload`, {
     method: "POST",
     headers: requestHeaders(),
@@ -199,6 +279,45 @@ test("非 PE 文件即使摘要一致也不能生成草稿", async (t) => {
   assert.deepEqual(await readdir(service.stagingDir), []);
 });
 
+test("接受 AMD64 stub，并拒绝不支持的 stub、版本不匹配和损坏 PE", async (t) => {
+  const { baseUrl, service } = await startFixture(t);
+  const amd64 = await json(await uploadInstaller(
+    baseUrl,
+    peFixture({ machine: 0x8664, imageFormat: "pe32+" }),
+  ));
+  assert.equal(amd64.status, "draft");
+  await json(await fetch(`${baseUrl}api/releases/windows/draft`, {
+    method: "DELETE",
+    headers: requestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ draftId: amd64.id, operator: "测试发布员" }),
+  }));
+  const cases = [
+    {
+      content: peFixture({ productVersion: "0.10.4.0", machine: 0xaa64 }),
+      error: "invalid_installer_arch",
+    },
+    {
+      content: peFixture({ productVersion: "0.10.5.0" }),
+      error: "installer_version_mismatch",
+    },
+    {
+      content: (() => {
+        const value = peFixture({ productVersion: "0.10.4.0" });
+        value.writeUInt32LE(0xfffffff0, 0x400 + 20);
+        return value;
+      })(),
+      error: "invalid_installer",
+    },
+  ];
+  for (const fixture of cases) {
+    const response = await uploadInstaller(baseUrl, fixture.content);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, fixture.error);
+    assert.equal(await service.getDraft(), null);
+    assert.deepEqual(await readdir(service.stagingDir), []);
+  }
+});
+
 test("HTTPS 回读失败时不切换清单，并可在网络恢复后重试", async (t) => {
   let shouldFail = true;
   const { baseUrl, service, initialManifest } = await startFixture(t, {
@@ -207,7 +326,7 @@ test("HTTPS 回读失败时不切换清单，并可在网络恢复后重试", as
       return expected;
     },
   });
-  const installer = fakePe("retryable-signed-installer");
+  const installer = peFixture({ productVersion: "0.10.4.0" });
   const sha256 = createHash("sha256").update(installer).digest("hex");
   const form = new FormData();
   form.set("version", "0.10.4");
@@ -238,4 +357,85 @@ test("HTTPS 回读失败时不切换清单，并可在网络恢复后重试", as
   }));
   assert.equal(published.entry.version, "0.10.4");
   assert.equal((JSON.parse(await readFile(service.manifestPath, "utf8"))).platforms["windows-x86_64"].sha256, sha256);
+});
+
+test("回滚目标本地或 HTTPS 复验失败时不修改 manifest", async (t) => {
+  let rejectPreviousOnline = false;
+  const { baseUrl, service } = await startFixture(t, {
+    onlineVerifier: async (url, expected) => {
+      if (rejectPreviousOnline && url.includes("0.10.3")) {
+        throw new AppError(502, "online_asset_unavailable", "模拟旧版本线上不可用");
+      }
+      return expected;
+    },
+  });
+  const draft = await json(await uploadInstaller(baseUrl, peFixture({ productVersion: "0.10.4.0" })));
+  const published = await json(await fetch(`${baseUrl}api/releases/windows/publish`, {
+    method: "POST",
+    headers: requestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ draftId: draft.id, operator: "发布员" }),
+  }));
+  const publishedManifest = await readFile(service.manifestPath, "utf8");
+  const rollbackBody = {
+    releaseId: published.id,
+    operator: "值班发布员",
+    reason: "验证失败不应切换清单",
+  };
+
+  const previousPath = join(service.config.publicRoot, "pinvou3_0.10.3_x64-setup.exe");
+  const previousBytes = await readFile(previousPath);
+  await writeFile(previousPath, Buffer.from("tampered"));
+  let response = await fetch(`${baseUrl}api/releases/windows/rollback`, {
+    method: "POST",
+    headers: requestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(rollbackBody),
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, "rollback_asset_changed");
+  assert.equal(await readFile(service.manifestPath, "utf8"), publishedManifest);
+
+  await writeFile(previousPath, previousBytes);
+  rejectPreviousOnline = true;
+  response = await fetch(`${baseUrl}api/releases/windows/rollback`, {
+    method: "POST",
+    headers: requestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(rollbackBody),
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, "online_asset_unavailable");
+  assert.equal(await readFile(service.manifestPath, "utf8"), publishedManifest);
+});
+
+test("stateRoot 与 publicRoot 跨文件系统时仍通过同目录临时文件发布", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows 测试机没有稳定的独立挂载点");
+    return;
+  }
+  let stateRoot;
+  try {
+    const sharedMemory = await stat("/dev/shm");
+    const temporary = await stat(tmpdir());
+    if (sharedMemory.dev === temporary.dev) {
+      t.skip("/dev/shm 与临时目录位于同一文件系统");
+      return;
+    }
+    stateRoot = await mkdtemp("/dev/shm/pinvou-update-console-state-");
+  } catch {
+    t.skip("当前环境没有可用的 /dev/shm 独立挂载");
+    return;
+  }
+  const { baseUrl, service } = await startFixture(t, { stateRoot });
+  const installer = peFixture({ productVersion: "0.10.4.0" });
+  const draft = await json(await uploadInstaller(baseUrl, installer));
+  await json(await fetch(`${baseUrl}api/releases/windows/publish`, {
+    method: "POST",
+    headers: requestHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ draftId: draft.id, operator: "跨挂载测试" }),
+  }));
+  assert.deepEqual(await readFile(join(service.config.publicRoot, draft.file_name)), installer);
+  assert.deepEqual(await readdir(service.stagingDir), []);
+  assert.equal(
+    (await readdir(service.config.publicRoot)).some((name) => /^\.pinvou3-release-.+\.tmp$/u.test(name)),
+    false,
+  );
 });

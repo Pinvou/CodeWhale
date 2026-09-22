@@ -191,7 +191,7 @@
     <form id="authForm" class="auth-box">
       <div class="eyebrow">受保护的发布入口</div><h2>连接发布服务</h2>
       <p>输入管理员令牌。令牌只保存在当前页面内存中，刷新或关闭页面后会清除。</p>
-      <label>管理员令牌<input id="tokenInput" type="password" required minlength="32" autocomplete="current-password"></label>
+      <label>管理员令牌<input id="tokenInput" type="password" required minlength="32" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
       <div id="authMessage" class="message error" role="alert"></div>
       <button class="btn" type="submit">安全连接</button>
     </form>

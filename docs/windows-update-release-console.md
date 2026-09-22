@@ -42,9 +42,13 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 | `PINVOU_UPDATE_CONSOLE_BASE_PATH` | 否 | 反代路径，默认 `/` |
 | `PINVOU_UPDATE_MAX_UPLOAD_BYTES` | 否 | 最大安装器字节数，默认 4 GiB |
 | `PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS` | 否 | HTTPS 回读超时，默认 15 分钟 |
+| `PINVOU_UPDATE_TRUSTED_PROXIES` | 否 | 可提供 `X-Real-IP` 的直接反向代理 IP/CIDR，逗号分隔；不配置时忽略该请求头 |
 
-服务启动时要求公开目录已有有效 `latest.json`。这是有意的安全门禁：发布台不会从空对象
-重建清单，以免丢失 Linux 或 macOS 节点。
+服务启动时要求公开目录已有有效 `latest.json`，并逐一验证公开目录、状态目录、暂存目录与历史目录
+都是真实目录且可写。这是有意的安全门禁：错误或只读挂载不会启动成健康服务，发布台也不会从空对象
+重建清单，以免丢失 Linux 或 macOS 节点。公开 `/healthz` 只返回初始化阶段缓存的通用就绪状态，
+不会因探活请求重复写盘、fsync 或回显内部路径。只有列入 `PINVOU_UPDATE_TRUSTED_PROXIES` 的直接代理才能提供审计日志里的
+`X-Real-IP`；示例 Compose 仅信任 Docker 私有网段，Nginx 每次覆盖该请求头。
 
 ## Docker Compose 部署
 
@@ -79,7 +83,11 @@ Nginx 路径。不要把管理服务端口绑定到公网地址。
 3. 上传后核对草稿中的大小、摘要、下载 URL 和完整清单预览。此时客户端不受影响。
 4. 点击“发布到客户端”并填写本次操作人。服务端将：
    - 再次校验暂存文件；
-   - 把安装器移动到公开目录且拒绝覆盖不同内容；
+   - 解析 NSIS PE 启动外壳（Tauri 默认 I386/PE32，也兼容 AMD64/PE32+）的完整映像结构与
+     VERSIONINFO（优先 ProductVersion），并匹配发布版本；stub 的 Machine 不用于推断安装 payload 架构；
+   - 将暂存安装器流式复制到公开目录内随机临时文件，写盘并复验大小/SHA-256 后同目录原子切换，
+     因而状态目录与公开目录可以位于不同挂载点；
+   - 拒绝覆盖同名但不同内容的历史安装器；
    - 从公开目录回读并计算大小与 SHA-256；
    - 通过最终 HTTPS URL 再次下载并校验大小与 SHA-256；
    - 重新读取当前清单，仅合并 `platforms["windows-x86_64"]`；
@@ -91,6 +99,9 @@ Nginx 路径。不要把管理服务端口绑定到公网地址。
 最近一次仍在线的 Windows 发布会显示“回滚此版本”。填写操作人和原因后，服务只恢复该次
 发布前的 Windows 节点；当前 Linux/macOS 内容不会回退，安装器也不会删除。已安装问题版本
 的设备不会自动降级，后续仍需发布版本号更高的修复包。
+
+回滚非空的上一 Windows 节点前，服务会先按历史记录复验对应本地安装器的大小和 SHA-256，
+再通过最终 HTTPS URL 回读复验；任一步失败都不会修改 `latest.json`。
 
 状态目录包含：
 

@@ -21,3 +21,6 @@ Node.js 最低版本为 20.9。运行测试：
 ```bash
 npm test
 ```
+
+`PINVOU_UPDATE_TRUSTED_PROXIES` 必须显式列出允许提供 `X-Real-IP` 的直接反向代理
+地址或 CIDR。Docker 示例只信任私有 bridge 范围，禁止配置全网段通配。
