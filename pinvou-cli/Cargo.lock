@@ -6468,7 +6468,6 @@ dependencies = [
  "gtk",
  "include_dir",
  "javascriptcore-rs",
- "keyring",
  "libc",
  "log",
  "md5",
