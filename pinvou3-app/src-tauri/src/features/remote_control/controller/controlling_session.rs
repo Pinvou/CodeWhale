@@ -25,8 +25,10 @@ use super::protocol::{
 
 /// 首版唯一开放的会话模式（代码模式需要工作区授权与能力开关，属后续任务）。
 const SESSION_MODE_CHAT: &str = "chat";
-/// 首版唯一的模型来源：使用被控设备（B）本机模型。
+/// 使用被控设备（B）本机模型。
 const MODEL_SOURCE_CONTROLLED: &str = "controlled_device";
+/// 使用主控设备（A）为当前任务加密传输的临时模型。
+const MODEL_SOURCE_TEMPORARY: &str = "controller_temporary";
 /// 一个连接上同时存在的会话意图上限（内存态，防无界增长）。
 const MAX_SESSION_INTENTS: usize = 4;
 const MAX_TITLE_CHARS: usize = 120;
@@ -44,7 +46,7 @@ pub(crate) struct SessionError {
 }
 
 impl SessionError {
-    const fn new(code: &'static str) -> Self {
+    pub(crate) const fn new(code: &'static str) -> Self {
         Self { code }
     }
 }
@@ -179,7 +181,10 @@ impl ControllingSessionManager {
             None => format!("session-ref-{}", Uuid::new_v4().simple()),
         };
         let mut intents = self.intents.lock();
-        if let Some(existing) = intents.iter_mut().find(|intent| intent.session_ref == session_ref) {
+        if let Some(existing) = intents
+            .iter_mut()
+            .find(|intent| intent.session_ref == session_ref)
+        {
             ensure_context(existing, lease)?;
             return Ok(existing.projection());
         }
@@ -370,9 +375,33 @@ impl ControllingSessionManager {
         text: &str,
         lease: &LeaseContext,
     ) -> Result<ControllingIntentProjection> {
+        self.task_intent_with_model(remote_ref, text, lease, MODEL_SOURCE_CONTROLLED, |_| {
+            Ok(None)
+        })
+    }
+
+    /// 构造带任务级模型来源的 `task_submit`。临时模型包必须由调用方在这里通过
+    /// `task_id` 现建，确保包绑定与任务标识完全一致，且不会经过前端明文投影。
+    pub(crate) fn task_intent_with_model<F>(
+        &self,
+        remote_ref: &str,
+        text: &str,
+        lease: &LeaseContext,
+        model_source: &str,
+        package_for_task: F,
+    ) -> Result<ControllingIntentProjection>
+    where
+        F: FnOnce(&str) -> Result<Option<Value>>,
+    {
         let text = text.trim();
         if text.is_empty() || text.len() > MAX_TASK_INPUT_TEXT_BYTES {
             return Err(SessionError::new("task_input_invalid"));
+        }
+        if !matches!(
+            model_source,
+            MODEL_SOURCE_CONTROLLED | MODEL_SOURCE_TEMPORARY
+        ) {
+            return Err(SessionError::new("task_model_source_invalid"));
         }
         let mut intents = self.intents.lock();
         let intent = find_intent(&mut intents, remote_ref)?;
@@ -387,7 +416,17 @@ impl ControllingSessionManager {
         let request_id = intent.next_request_id();
         let task_id = format!("task-{}", Uuid::new_v4().simple());
         let client_request_id = format!("client-request-{}", Uuid::new_v4().simple());
-        let payload = build_task_submit(intent, &request_id, &task_id, &client_request_id, text)?;
+        let temporary_model_package = package_for_task(&task_id)?;
+        let payload = build_task_submit(
+            intent,
+            &request_id,
+            &task_id,
+            &client_request_id,
+            text,
+            model_source,
+            temporary_model_package,
+        )?;
+        intent.model_source = model_source.to_owned();
         intent
             .tasks
             .insert(task_id.clone(), client_request_id.clone());
@@ -574,6 +613,8 @@ fn build_task_submit(
     task_id: &str,
     client_request_id: &str,
     text: &str,
+    model_source: &str,
+    temporary_model_package: Option<Value>,
 ) -> Result<Value> {
     let revision = intent
         .capability_revision
@@ -583,7 +624,7 @@ fn build_task_submit(
         "attachment_ids": Vec::<String>::new(),
         "skill_ids": Vec::<String>::new(),
     });
-    let payload = json!({
+    let mut payload = json!({
         "v": 1,
         "type": "task_submit",
         "connection_id": intent.lease.connection_id,
@@ -596,11 +637,14 @@ fn build_task_submit(
         "client_request_id": client_request_id,
         "session_id": intent.session_id,
         "capability_revision": revision.to_string(),
-        "model_source": intent.model_source,
+        "model_source": model_source,
         "mode": intent.mode,
         "input_digest": task_input_digest(text),
         "input": input,
     });
+    if let Some(package) = temporary_model_package {
+        payload["temporary_model_package"] = package;
+    }
     validate_outbound_payload(intent, &payload)
 }
 
@@ -649,8 +693,8 @@ fn validate_outbound_payload(intent: &SessionIntent, payload: &Value) -> Result<
 }
 
 fn validate_inbound_payload(intent: &SessionIntent, payload: &Value, kind: &str) -> Result<Value> {
-    let encoded =
-        serde_json::to_string(payload).map_err(|_| SessionError::new("capability_snapshot_invalid"))?;
+    let encoded = serde_json::to_string(payload)
+        .map_err(|_| SessionError::new("capability_snapshot_invalid"))?;
     let validated = validate_controller_runtime_payload_json(
         &encoded,
         SenderRole::ControlledB,
@@ -833,10 +877,22 @@ mod tests {
     fn capability_responses_are_request_and_session_bound() {
         let sessions = ControllingSessionManager::default();
         let first = sessions
-            .open(Some("session-ref-first"), "First", "chat", &lease(), &capabilities())
+            .open(
+                Some("session-ref-first"),
+                "First",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
             .unwrap();
         let second = sessions
-            .open(Some("session-ref-second"), "Second", "chat", &lease(), &capabilities())
+            .open(
+                Some("session-ref-second"),
+                "Second",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
             .unwrap();
         let request = sessions
             .capability_request(&second.session_ref, &lease())
@@ -850,7 +906,10 @@ mod tests {
         assert_eq!(applied.session_ref, second.session_ref);
         assert_eq!(applied.capability_revision, Some(5));
         assert_eq!(
-            sessions.state(&first.session_ref, &lease()).unwrap().capability_revision,
+            sessions
+                .state(&first.session_ref, &lease())
+                .unwrap()
+                .capability_revision,
             None
         );
 
@@ -872,7 +931,10 @@ mod tests {
             .apply_capability_error_for_lease(&lease(), &failure)
             .unwrap();
         assert_eq!(failed.session_ref, first.session_ref);
-        assert_eq!(failed.capability_error.as_deref(), Some("capability_snapshot_unavailable"));
+        assert_eq!(
+            failed.capability_error.as_deref(),
+            Some("capability_snapshot_unavailable")
+        );
         assert_eq!(failed.capability_revision, None);
     }
 
@@ -880,7 +942,13 @@ mod tests {
     fn relay_failure_is_only_associated_when_one_capability_session_is_pending() {
         let sessions = ControllingSessionManager::default();
         let first = sessions
-            .open(Some("session-ref-first"), "First", "chat", &lease(), &capabilities())
+            .open(
+                Some("session-ref-first"),
+                "First",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
             .unwrap();
         let first_request = sessions
             .capability_request(&first.session_ref, &lease())
@@ -896,7 +964,13 @@ mod tests {
         );
 
         let second = sessions
-            .open(Some("session-ref-second"), "Second", "chat", &lease(), &capabilities())
+            .open(
+                Some("session-ref-second"),
+                "Second",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
             .unwrap();
         sessions
             .capability_request(&first.session_ref, &lease())
@@ -906,20 +980,23 @@ mod tests {
             .unwrap();
         assert_eq!(
             sessions
-                .fail_pending_capability_for_lease(
-                    &lease(),
-                    "capability_snapshot_unavailable",
-                )
+                .fail_pending_capability_for_lease(&lease(), "capability_snapshot_unavailable",)
                 .unwrap_err()
                 .code,
             "capability_response_ambiguous"
         );
         assert_eq!(
-            sessions.state(&first.session_ref, &lease()).unwrap().capability_error,
+            sessions
+                .state(&first.session_ref, &lease())
+                .unwrap()
+                .capability_error,
             None
         );
         assert_eq!(
-            sessions.state(&second.session_ref, &lease()).unwrap().capability_error,
+            sessions
+                .state(&second.session_ref, &lease())
+                .unwrap()
+                .capability_error,
             None
         );
     }
@@ -1016,6 +1093,48 @@ mod tests {
     }
 
     #[test]
+    fn temporary_model_selection_binds_the_package_to_the_generated_task() {
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease(), &capabilities())
+            .unwrap();
+        sessions
+            .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())
+            .unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let intent = sessions
+            .task_intent_with_model(
+                &session.session_ref,
+                "use my model",
+                &lease(),
+                MODEL_SOURCE_TEMPORARY,
+                |task_id| {
+                    let mut package =
+                        fixture["task_submit_vectors"]["temporary"]["temporary_model_package"]
+                            .clone();
+                    package["binding"]["task_id"] = json!(task_id);
+                    Ok(Some(package))
+                },
+            )
+            .unwrap();
+        assert_eq!(intent.payload["model_source"], MODEL_SOURCE_TEMPORARY);
+        assert_eq!(
+            intent.payload["temporary_model_package"]["binding"]["task_id"],
+            intent.task_id.unwrap()
+        );
+        assert_eq!(
+            sessions
+                .state(&session.session_ref, &lease())
+                .unwrap()
+                .model_source,
+            MODEL_SOURCE_TEMPORARY
+        );
+    }
+
+    #[test]
     fn capabilities_change_how_requests_fail_closed() {
         let sessions = ControllingSessionManager::default();
         // 未协商 task_v1 时，快照请求本身就非法（能力闭集失败关闭）。
@@ -1075,10 +1194,7 @@ mod tests {
         );
         sessions.clear();
         assert_eq!(
-            sessions
-                .state("session-ref-0", &lease())
-                .unwrap_err()
-                .code,
+            sessions.state("session-ref-0", &lease()).unwrap_err().code,
             "session_not_found"
         );
     }

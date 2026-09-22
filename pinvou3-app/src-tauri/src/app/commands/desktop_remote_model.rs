@@ -14,9 +14,10 @@ use tauri::State;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::temporary_model::{
-    export_decision, project_saved_model, SharedTemporaryModelStore, TemporaryModelBinding,
-    TemporaryModelError, TemporaryModelPackageV1, TemporaryModelStore,
+    SharedTemporaryModelStore, TemporaryModelBinding, TemporaryModelError, TemporaryModelPackageV1,
+    TemporaryModelStore, export_decision, project_saved_model,
 };
+use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
 use crate::platform::prefs::{SavedModel, UserPrefs};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -71,9 +72,12 @@ pub(crate) fn build_task_package(
     task_id: &str,
     package_id: &str,
 ) -> Result<TemporaryModelPackageV1, TemporaryModelError> {
-    let epoch = live.lease_epoch.parse::<u64>().map_err(|_| TemporaryModelError {
-        code: "model_binding_invalid",
-    })?;
+    let epoch = live
+        .lease_epoch
+        .parse::<u64>()
+        .map_err(|_| TemporaryModelError {
+            code: "model_binding_invalid",
+        })?;
     let package = TemporaryModelPackageV1 {
         package_id: package_id.to_owned(),
         binding: TemporaryModelBinding {
@@ -89,6 +93,62 @@ pub(crate) fn build_task_package(
     Ok(package)
 }
 
+fn hydrate_export_secret(
+    mut model: SavedModel,
+    store: &impl CredentialStore,
+    allow_primary_env_override: bool,
+) -> Result<SavedModel, TemporaryModelError> {
+    if allow_primary_env_override && let Ok(value) = std::env::var("DEEPSEEK_API_KEY") {
+        if !value.trim().is_empty() {
+            model.api_key = value;
+            return Ok(model);
+        }
+    }
+    if let Some(reference) = model.credential_ref.as_ref() {
+        model.api_key = store
+            .get(reference)
+            .map_err(|_| TemporaryModelError {
+                code: "model_credential_unavailable",
+            })?
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(TemporaryModelError {
+                code: "model_credential_missing",
+            })?;
+    }
+    Ok(model)
+}
+
+/// Resolve A's current active model and build the task-bound package entirely
+/// in Rust. The returned value goes straight into the encrypted business
+/// payload; it is never projected through the WebView.
+pub(crate) fn build_active_task_package(
+    live: &LeaseContext,
+    task_id: &str,
+) -> Result<Value, TemporaryModelError> {
+    let prefs = UserPrefs::load();
+    let primary = prefs.active_model().cloned().ok_or(TemporaryModelError {
+        code: "model_not_configured",
+    })?;
+    let vision = primary
+        .vision_model_id
+        .as_deref()
+        .and_then(|id| prefs.model_by_id(id))
+        .cloned();
+    let credentials = SystemCredentialStore::new();
+    let primary = hydrate_export_secret(primary, &credentials, true)?;
+    let vision = vision
+        .map(|model| hydrate_export_secret(model, &credentials, false))
+        .transpose()?;
+    build_task_package(
+        live,
+        &primary,
+        vision.as_ref(),
+        task_id,
+        &format!("package-{}", uuid::Uuid::new_v4().simple()),
+    )
+    .map(|package| package.to_wire_value())
+}
+
 #[tauri::command]
 pub async fn desktop_remote_model_list_exportable(
     controlled: State<'_, ControlledDeviceManager>,
@@ -97,11 +157,22 @@ pub async fn desktop_remote_model_list_exportable(
         return Err(UNSUPPORTED.to_owned());
     }
     let prefs = UserPrefs::load();
+    let credentials = SystemCredentialStore::new();
     Ok(prefs
         .advanced
         .saved_models
         .iter()
-        .map(project_descriptor)
+        .map(|model| {
+            hydrate_export_secret(model.clone(), &credentials, true)
+                .map(|hydrated| project_descriptor(&hydrated))
+                .unwrap_or_else(|error| RemoteModelDescriptor {
+                    model_id: model.id.clone(),
+                    display_name: display_name(model),
+                    exportable: false,
+                    reason: Some(error.code.to_owned()),
+                    vision_model_id: None,
+                })
+        })
         .collect())
 }
 
@@ -118,8 +189,8 @@ pub fn desktop_remote_model_install(
     let live = controlled
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
-    let package =
-        TemporaryModelPackageV1::from_wire_value(&package).map_err(|error| error.code.to_owned())?;
+    let package = TemporaryModelPackageV1::from_wire_value(&package)
+        .map_err(|error| error.code.to_owned())?;
     store
         .install(package, &live, &task_id, monotonic_millis())
         .map_err(|error| error.code.to_owned())?;
@@ -169,7 +240,7 @@ pub(crate) fn shared_model_store() -> SharedTemporaryModelStore {
 mod tests {
     use super::*;
     use crate::platform::prefs::{
-        ImageCapabilityOverride, ModelPreset, MODEL_PROVIDER_KIND_CODING_PLAN,
+        ImageCapabilityOverride, MODEL_PROVIDER_KIND_CODING_PLAN, ModelPreset,
     };
 
     fn model(id: &str) -> SavedModel {

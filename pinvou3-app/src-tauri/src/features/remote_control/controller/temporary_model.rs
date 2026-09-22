@@ -11,13 +11,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::crypto::SensitiveString;
-use super::protocol::{validate_controller_base_url, LeaseContext};
+use super::protocol::{LeaseContext, validate_controller_base_url};
 use super::task::RemoteTaskModelScope;
+use crate::platform::credential_store::CredentialState;
 use crate::platform::prefs::{
-    ImageCapabilityOverride, ModelPreset, SavedModel, MODEL_PROVIDER_KIND_CODING_PLAN,
+    ImageCapabilityOverride, MODEL_PROVIDER_KIND_CODING_PLAN, ModelPreset, SavedModel,
 };
 
 pub(crate) const PACKAGE_SCHEMA: &str = "temporary_model_package/v1";
@@ -169,6 +170,52 @@ impl fmt::Debug for ExportRoute {
 }
 
 impl ExportRoute {
+    fn to_runtime_model(&self, task_id: &str) -> Result<SavedModel> {
+        let preset = match self.preset.as_str() {
+            "local_vllm" => ModelPreset::LocalVllm,
+            "deepseek" => ModelPreset::Deepseek,
+            "kimi" => ModelPreset::Kimi,
+            "openai_compatible" => ModelPreset::OpenaiCompatible,
+            "qwen" => ModelPreset::Qwen,
+            "doubao" => ModelPreset::Doubao,
+            "minimax" => ModelPreset::Minimax,
+            "glm" => ModelPreset::Glm,
+            "mimo" => ModelPreset::Mimo,
+            "openai" => ModelPreset::Openai,
+            "anthropic" => ModelPreset::Anthropic,
+            "gemini" => ModelPreset::Gemini,
+            "xai" => ModelPreset::Xai,
+            _ => return Err(error("model_preset_unsupported")),
+        };
+        let image_capability_override = match self.image_capability_override.as_str() {
+            "pinvou" => ImageCapabilityOverride::Pinvou,
+            "enabled" => ImageCapabilityOverride::Enabled,
+            "disabled" => ImageCapabilityOverride::Disabled,
+            _ => return Err(error("model_image_override_unsupported")),
+        };
+        Ok(SavedModel {
+            id: format!("remote-temporary-{task_id}"),
+            name: self.display_name.clone(),
+            alias: None,
+            preset,
+            context_window_tokens: self.context_window_tokens,
+            max_output_tokens: self.max_output_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            provider_kind: self.provider_kind.clone(),
+            vendor: self.vendor.clone(),
+            endpoint_mode: self.endpoint_mode.clone(),
+            image_capability_override,
+            vision_model_id: None,
+            api_key: self.secret.expose().to_owned(),
+            credential_ref: None,
+            credential_state: CredentialState::Configured,
+            has_secret: true,
+            credential_action: None,
+        })
+    }
+
     fn validate(&self) -> Result<()> {
         if self.display_name.trim().is_empty()
             || self.display_name.chars().count() > MAX_DISPLAY_CHARS
@@ -814,7 +861,22 @@ impl TemporaryModelStore {
             .filter(|package| package.binding.task_id == task_id)
             .ok_or_else(|| error("model_package_missing"))?;
         package.validate_for_task(live, task_id)?;
-        Ok(use_route(&package.primary, package.vision_fallback.as_ref()))
+        Ok(use_route(
+            &package.primary,
+            package.vision_fallback.as_ref(),
+        ))
+    }
+
+    /// Materializes the task-scoped route for an EnginePool turn. The model is
+    /// returned only to the in-process executor and is never persisted.
+    pub(crate) fn runtime_model_for_task(
+        &self,
+        task_id: &str,
+        live: &LeaseContext,
+    ) -> Result<SavedModel> {
+        self.with_credentials(task_id, live, |primary, _| {
+            primary.to_runtime_model(task_id)
+        })?
     }
 
     pub(crate) fn installed_at_ms(&self) -> Option<u64> {
@@ -1082,7 +1144,9 @@ mod tests {
     fn package_size_guard_rejects_oversized_payloads() {
         assert!(enforce_package_size(MAX_PACKAGE_BYTES).is_ok());
         assert_eq!(
-            enforce_package_size(MAX_PACKAGE_BYTES + 1).unwrap_err().code,
+            enforce_package_size(MAX_PACKAGE_BYTES + 1)
+                .unwrap_err()
+                .code,
             "model_package_too_large"
         );
     }
@@ -1135,11 +1199,7 @@ mod tests {
     #[test]
     fn vision_fallback_is_one_layer_with_its_own_credential() {
         let mut package = package("sk-primary");
-        package.vision_fallback = Some(route(
-            "https://api.openai.com/v1",
-            "openai",
-            "sk-vision",
-        ));
+        package.vision_fallback = Some(route("https://api.openai.com/v1", "openai", "sk-vision"));
         package.validate().unwrap();
         let wire = package.to_wire_value();
         assert_eq!(wire["primary_credential"]["secret"], json!("sk-primary"));
@@ -1184,8 +1244,15 @@ mod tests {
             .unwrap();
         assert_eq!(store.active_task().as_deref(), Some("task-0001"));
         assert!(store.redacted_route("task-0001", &lease()).is_ok());
+        let runtime_model = store.runtime_model_for_task("task-0001", &lease()).unwrap();
+        assert_eq!(runtime_model.model, "deepseek-chat");
+        assert_eq!(runtime_model.api_key, "sk-value");
+        assert!(runtime_model.id.contains("task-0001"));
         assert_eq!(
-            store.redacted_route("task-0002", &lease()).unwrap_err().code,
+            store
+                .redacted_route("task-0002", &lease())
+                .unwrap_err()
+                .code,
             "model_package_missing"
         );
         let copied = store
@@ -1209,7 +1276,10 @@ mod tests {
         assert!(!store.clear_task("task-0001"));
         assert!(store.is_empty());
         assert_eq!(
-            store.redacted_route("task-0001", &lease()).unwrap_err().code,
+            store
+                .redacted_route("task-0001", &lease())
+                .unwrap_err()
+                .code,
             "model_package_missing"
         );
     }

@@ -50,7 +50,7 @@ use crate::features::assistant::expert_roster::ExpertRosterSnapshot;
 use crate::features::assistant::platform::bridge::{Pinvou3Bridge, base_url_uses_local_or_private};
 use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
-    RuntimeModelProvider, RuntimeModelRequest,
+    RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
@@ -1113,6 +1113,7 @@ impl EnginePool {
         session_id: &str,
         scheduled_unattended: bool,
         explicit_model_override: Option<SavedModel>,
+        explicit_credential: Option<RuntimeModelCredential>,
     ) -> Result<(Pinvou3Bridge, PreparedRuntimeModel, bool)> {
         let mut bridge = self.bridge.clone();
         bridge.prefs = UserPrefs::load();
@@ -1136,7 +1137,7 @@ impl EnginePool {
             .effective_model_owned()
             .context("No effective model is available for runtime preparation")?;
         let selected_id = selected.id.clone();
-        let prepared = self
+        let mut prepared = self
             .runtime_model_provider
             .prepare(RuntimeModelRequest {
                 session_id: session_id.to_string(),
@@ -1144,6 +1145,10 @@ impl EnginePool {
                 scheduled_unattended,
             })
             .await?;
+        if let Some(credential) = explicit_credential {
+            prepared.credential = Some(credential);
+            prepared.revision = Some(format!("task-scoped-{selected_id}"));
+        }
         if prepared.model.id != selected_id {
             bail!(
                 "Runtime model provider changed model identity from '{}' to '{}'",
@@ -1224,7 +1229,7 @@ impl EnginePool {
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
         let (bridge, prepared, pins_scheduled_model) = self
-            .prepare_runtime_model(session_id, scheduled_unattended, eval_model)
+            .prepare_runtime_model(session_id, scheduled_unattended, eval_model, None)
             .await?;
         Ok(self
             .finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model)
@@ -1239,7 +1244,7 @@ impl EnginePool {
         let eval_model = self.eval_model_snapshots.for_session(session_id);
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
-        self.get_or_spawn_with_policy(session_id, false, eval_model)
+        self.get_or_spawn_with_policy(session_id, false, eval_model, None)
             .await
     }
 
@@ -1251,11 +1256,17 @@ impl EnginePool {
         session_id: &str,
         scheduled_unattended: bool,
         explicit_model_override: Option<SavedModel>,
+        explicit_credential: Option<RuntimeModelCredential>,
     ) -> Result<AppEngine> {
         let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
         let _runtime = runtime_lock.lock().await;
         let (bridge, prepared, pins_scheduled_model) = self
-            .prepare_runtime_model(session_id, scheduled_unattended, explicit_model_override)
+            .prepare_runtime_model(
+                session_id,
+                scheduled_unattended,
+                explicit_model_override,
+                explicit_credential,
+            )
             .await?;
         let model_update_revision = self.model_update_revisions.current(&prepared.model.id);
         let prepared = PreparedRuntimeState::new(prepared, model_update_revision);
@@ -1956,6 +1967,30 @@ impl EnginePool {
         .await
     }
 
+    /// Remote-control turn entry point with a task-scoped model override.
+    /// The override participates in normal runtime preparation and engine
+    /// rebuild checks but is never written to the session model sidecar.
+    pub(crate) async fn send_remote_user_message(
+        &self,
+        session_id: &str,
+        content: String,
+        model_override: Option<SavedModel>,
+    ) -> Result<()> {
+        let reservation = self.reserve_turn(session_id)?;
+        let display_message = user_display_message(content.clone());
+        self.send_reserved_user_message_with_model_override(
+            session_id,
+            content,
+            display_message,
+            AppMode::Agent,
+            false,
+            None,
+            reservation,
+            model_override,
+        )
+        .await
+    }
+
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub(crate) async fn send_eval_user_message(
         &self,
@@ -2015,7 +2050,32 @@ impl EnginePool {
         mode: AppMode,
         restrict_tools_for_turn: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        reservation: TurnReservation,
+    ) -> Result<()> {
+        self.send_reserved_user_message_with_model_override(
+            session_id,
+            content,
+            display_message,
+            mode,
+            restrict_tools_for_turn,
+            expert_snapshot,
+            reservation,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_reserved_user_message_with_model_override(
+        &self,
+        session_id: &str,
+        content: String,
+        display_message: Message,
+        mode: AppMode,
+        restrict_tools_for_turn: bool,
+        expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         mut reservation: TurnReservation,
+        model_override: Option<SavedModel>,
     ) -> Result<()> {
         let baseline_revision = reservation
             .base_transcript_revision()
@@ -2060,7 +2120,11 @@ impl EnginePool {
             .as_ref()
             .map_or(false, |c| c.conversational_only);
         let restrict_tools = restrict_tools || restrict_tools_for_turn;
-        self.get_or_spawn(session_id)
+        let explicit_credential = model_override
+            .as_ref()
+            .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
+            .transpose()?;
+        self.get_or_spawn_with_policy(session_id, false, model_override, explicit_credential)
             .await?
             .send_reserved_user_message(
                 content,
@@ -2134,7 +2198,7 @@ impl EnginePool {
             // fresh session, so nothing propagates to the next run.
             self.evict_locked(session_id).await;
             let engine = match self
-                .get_or_spawn_with_policy(session_id, true, None)
+                .get_or_spawn_with_policy(session_id, true, None, None)
                 .await
             {
                 Ok(engine) => engine,

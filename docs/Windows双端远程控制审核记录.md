@@ -152,9 +152,9 @@
 - 逐条核对：v1 严格解析（未知字段/枚举/组合拒绝）、SavedModel→route 投影与不可导出原因、loopback/私网/metadata SSRF 拒绝、任务绑定、内存态存储与幂等释放、清理 hook 接入 DEV-13，均有用例（12 条）。
 - 发现（major，已修复）：任务提交路径未校验 `controller_temporary` 是否真装有与该任务绑定的临时包，存在「拿不到凭证仍提交」的口子，与 RC-M-006/RC-M-009 冲突。
   - 修复提交：`7e296f7f` — 提交前要求存在 active_task == task_id 的临时包，否则 `model_package_missing`；新增用例覆盖无包、正确绑定与跨任务复用三种情形。
-- 登记缺口（未修，需后续任务）：临时模型包尚未注入引擎请求路径（B 还不能真正用 A 的凭证执行），属引擎层集成，需单独排期。
-- 验证：`cargo test temporary_model` 12 通过；`cargo test desktop_remote_task` 5 通过。
-- 结论：**REVIEW: PASS**（含 1 项已登记缺口）。
+- 发现（major，已修复）：临时模型包此前只参与准入校验，未注入 chat executor/`EnginePool`，导致“我的模型”仍由 B 模型执行。现已接通 A 端任务级模型来源与加密模型包、B 端绑定安装、显式运行时模型/凭据覆盖及终态引擎回收；缺包、无凭据或绑定错误均失败关闭，不回退 B 模型。日志只记录 `model_source` 与安装阶段，不记录路由密钥。
+- 验证：`cargo test remote_control::controller::temporary_model` 11 通过；`cargo test remote_control::controller::task` 24 通过；`cargo test remote_control::controller::controlling_session` 9 通过；`cargo test features::assistant::remote_turn` 3 通过；`cargo check --no-default-features --features local-embed` 通过。
+- 结论：**REVIEW: PASS**。
 
 ## 16. DEV-16 / DEV-17 / DEV-18
 

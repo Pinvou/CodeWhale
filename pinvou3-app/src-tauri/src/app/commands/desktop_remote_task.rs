@@ -17,21 +17,26 @@ use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{
     EnginePoolChatEngine, EnginePoolChatTurnPort, StoreChatTranscript,
 };
-use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::codex_acp::AcpPool;
+use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::controlling_session::task_input_digest;
 use crate::features::remote_control::controller::protocol::{
-    validate_controller_runtime_payload_json, LeaseContext, RuntimeValidationContext, SenderRole,
+    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
+#[cfg(test)]
+use crate::features::remote_control::controller::task::RemoteTaskEvent;
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
     RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger, RemoteTaskService,
-    TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
+    RemoteTaskTerminal, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,
+    TASK_MODEL_SOURCE_TEMPORARY,
 };
-use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
-use crate::features::sessions::{transcript_revision, SessionStore};
+use crate::features::remote_control::controller::temporary_model::{
+    SharedTemporaryModelStore, TemporaryModelPackageV1,
+};
+use crate::features::sessions::{SessionStore, transcript_revision};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
@@ -135,7 +140,10 @@ impl ControllerTaskEventSink for TaskEventBridge {
             .app
             .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        match history.journal().append(&event_id, kind, session_id, task_id, payload) {
+        match history
+            .journal()
+            .append(&event_id, kind, session_id, task_id, payload)
+        {
             Ok(event) => {
                 // B owns the authoritative event, so project it to B's UI as
                 // well as forwarding the session-ref-rewritten copy to A.
@@ -252,8 +260,11 @@ impl DesktopRemoteTaskRuntime {
         store: SessionStore,
         pool: EnginePool,
         acp_pool: AcpPool,
+        temporary_models: SharedTemporaryModelStore,
     ) -> Arc<Self> {
-        let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
             store.clone(),
@@ -261,10 +272,12 @@ impl DesktopRemoteTaskRuntime {
         )));
         service.register_executor(
             TASK_MODE_CHAT,
-            Arc::new(ChatTurnExecutor::new(Arc::new(EnginePoolChatTurnPort::new(
-                Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
-                Arc::new(StoreChatTranscript::new(store)),
-            )))),
+            Arc::new(ChatTurnExecutor::new(Arc::new(
+                EnginePoolChatTurnPort::new(
+                    Arc::new(EnginePoolChatEngine::new(Arc::new(pool), temporary_models)),
+                    Arc::new(StoreChatTranscript::new(store)),
+                ),
+            ))),
         );
         service.register_executor(
             TASK_MODE_CODE,
@@ -457,11 +470,9 @@ pub fn desktop_remote_task_switch_session(
         )
         .map_err(|error| error.code.to_owned())
         .and_then(|session_id| {
-            let remains_current = controlled
-                .live_runtime_context()
-                .is_ok_and(|(current, _)| {
-                    current.remote_control_generation == lease.remote_control_generation
-                });
+            let remains_current = controlled.live_runtime_context().is_ok_and(|(current, _)| {
+                current.remote_control_generation == lease.remote_control_generation
+            });
             if remains_current {
                 Ok(session_id)
             } else {
@@ -672,7 +683,23 @@ fn admit_and_dispatch(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
-    temporary_model_gate(&model_source, &task_id, models)?;
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "task_model_source_received",
+        &model_source,
+    );
+    let temporary_package = if model_source == TASK_MODEL_SOURCE_TEMPORARY {
+        let package = validated
+            .get("temporary_model_package")
+            .ok_or_else(|| "model_package_missing".to_owned())?;
+        let package = TemporaryModelPackageV1::from_wire_value(package)
+            .map_err(|error| error.code.to_owned())?;
+        package
+            .validate_for_task(lease, &task_id)
+            .map_err(|error| error.code.to_owned())?;
+        Some(package)
+    } else {
+        None
+    };
     if mode == TASK_MODE_CODE {
         let workspace_id = validated
             .get("input")
@@ -706,6 +733,23 @@ fn admit_and_dispatch(
             .map_err(|error| error.code.to_owned()),
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
+            if let Some(package) = temporary_package {
+                if let Err(error) = models.install(package, lease, &task_id, now_b) {
+                    let code = error.code.to_owned();
+                    let _ = service.complete(
+                        &task_id,
+                        RemoteTaskTerminal::Failed,
+                        Some(code.clone()),
+                        now_b,
+                    );
+                    return Err(code);
+                }
+                temporary_model_gate(&model_source, &task_id, models)?;
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_temporary_model_installed",
+                    "ready",
+                );
+            }
             let task_session_id = ticket.record.session_id.clone();
             let prompt = validated
                 .get("input")
@@ -736,9 +780,8 @@ fn admit_and_dispatch(
                     }),
                 );
             }
-            let events: Arc<dyn ControllerTaskEventSink> = Arc::new(TaskEventBridge {
-                app: app.clone(),
-            });
+            let events: Arc<dyn ControllerTaskEventSink> =
+                Arc::new(TaskEventBridge { app: app.clone() });
             let dispatch_service = Arc::clone(&service);
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "task_execution_scheduled",
@@ -870,13 +913,8 @@ pub fn desktop_remote_task_interrupt_all(
 ) -> Result<Vec<String>, String> {
     ensure_supported(&controlled)?;
     let reason = sanitized_reason(&reason);
-    let records = runtime
-        .service()
-        .interrupt_all(&reason, monotonic_millis());
-    Ok(records
-        .into_iter()
-        .map(|record| record.task_id)
-        .collect())
+    let records = runtime.service().interrupt_all(&reason, monotonic_millis());
+    Ok(records.into_iter().map(|record| record.task_id).collect())
 }
 
 #[cfg(test)]
@@ -944,12 +982,7 @@ mod tests {
             text_message(Role::User, "today's weather"),
             text_message(Role::Assistant, "partly cloudy"),
         ];
-        append_remote_failure_messages(
-            &mut partial,
-            0,
-            "today's weather",
-            "task_turn_failed",
-        );
+        append_remote_failure_messages(&mut partial, 0, "today's weather", "task_turn_failed");
         assert_eq!(partial.len(), 3);
         assert_eq!(message_text(&partial[1]), "partly cloudy");
         assert_eq!(message_text(&partial[2]), "task_turn_failed");

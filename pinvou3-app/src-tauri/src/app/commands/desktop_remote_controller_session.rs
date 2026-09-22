@@ -17,6 +17,9 @@ use crate::features::remote_control::controller::controlling_session::{
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
 use crate::features::remote_control::controller::relay_runtime::log_controller_event;
 use crate::features::remote_control::controller::relay_transport::ControllerSendError;
+use crate::features::remote_control::controller::task::TASK_MODEL_SOURCE_TEMPORARY;
+
+use super::desktop_remote_model::build_active_task_package;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const SESSION_EVENT: &str = "desktop-remote-controller-session";
@@ -53,6 +56,12 @@ fn live_context(
 
 fn emit_session(app: &AppHandle, projection: &ControllingSessionProjection) {
     let _ = app.emit(SESSION_EVENT, projection);
+}
+
+fn redact_temporary_model_package(projection: &mut ControllingIntentProjection) {
+    if let Some(payload) = projection.payload.as_object_mut() {
+        payload.remove("temporary_model_package");
+    }
 }
 
 /// 出站失败收敛为有界错误码（不把内部描述文本透传给前端）。
@@ -102,9 +111,7 @@ pub fn desktop_remote_controller_session_state(
 ) -> Result<ControllingSessionProjection, String> {
     ensure_supported(&manager)?;
     let (lease, _) = live_context(&manager)?;
-    sessions
-        .state(&remote_ref, &lease)
-        .map_err(session_error)
+    sessions.state(&remote_ref, &lease).map_err(session_error)
 }
 
 #[tauri::command]
@@ -194,7 +201,11 @@ pub fn desktop_remote_controller_capability_send(
         .capability_request(&remote_ref, &lease)
         .map_err(session_error)?;
     let frame = business
-        .seal("capability_snapshot_request", &intent.payload, &capabilities)
+        .seal(
+            "capability_snapshot_request",
+            &intent.payload,
+            &capabilities,
+        )
         .map_err(|error| error.code().to_owned())?;
     manager
         .send_authenticated_business(&frame)
@@ -210,16 +221,26 @@ pub fn desktop_remote_controller_task_send(
     business: State<'_, ControllingLaneState>,
     remote_ref: String,
     text: String,
+    model_source: String,
 ) -> Result<ControllingIntentProjection, String> {
     ensure_supported(&manager)?;
     log_controller_event("task_submit_requested", "building");
     let (lease, capabilities) = live_context(&manager)?;
-    let intent = sessions
-        .task_intent(&remote_ref, &text, &lease)
+    let mut intent = sessions
+        .task_intent_with_model(&remote_ref, &text, &lease, &model_source, |task_id| {
+            if model_source == TASK_MODEL_SOURCE_TEMPORARY {
+                build_active_task_package(&lease, task_id)
+                    .map(Some)
+                    .map_err(|error| SessionError::new(error.code))
+            } else {
+                Ok(None)
+            }
+        })
         .map_err(|error| {
             log_controller_event("task_submit_rejected", error.code);
             session_error(error)
         })?;
+    log_controller_event("task_submit_model_source", &model_source);
     log_controller_event("task_submit_constructed", "ready");
     let frame = business
         .seal("task_submit", &intent.payload, &capabilities)
@@ -235,6 +256,9 @@ pub fn desktop_remote_controller_task_send(
             code
         })?;
     log_controller_event("task_submit_queued", "accepted");
+    // The encrypted wire frame is the only allowed credential boundary. The
+    // WebView only needs opaque task/session identifiers, never the package.
+    redact_temporary_model_package(&mut intent);
     Ok(intent)
 }
 
@@ -263,10 +287,32 @@ pub fn desktop_remote_controller_task_cancel_send(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     #[test]
     fn session_command_surface_is_bounded() {
         assert_eq!(super::SESSION_EVENT, "desktop-remote-controller-session");
         assert_eq!(super::UNSUPPORTED, "desktop_remote_control_unsupported");
         assert_eq!(super::DEFAULT_MODE, "chat");
+    }
+
+    #[test]
+    fn temporary_model_credentials_never_return_to_the_webview() {
+        let mut projection = super::ControllingIntentProjection {
+            request_id: "request-1".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            client_request_id: Some("client-1".into()),
+            payload: json!({
+                "type": "task_submit",
+                "temporary_model_package": {
+                    "primary_credential": { "secret": "must-not-cross" }
+                }
+            }),
+        };
+        super::redact_temporary_model_package(&mut projection);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("temporary_model_package"));
+        assert!(!encoded.contains("must-not-cross"));
     }
 }
