@@ -549,8 +549,8 @@ sequenceDiagram
 ### 9.3 桌面与 Web 个人中心入口
 
 - 品悟桌面账号 Popover 在登录状态下提供“打开 Web 个人中心”按钮，建议位于退出登录按钮上方。
-- 桌面从受信配置读取 Portal 地址并固定打开账号独立域名根路径 `/`，使用不接收任意 URL 的专用 Tauri 命令。
-- 跳转不携带桌面 OIDC Token。浏览器复用自己的 Portal 会话；没有会话时由 Portal 执行 Authorization Code + PKCE 登录。
+- 桌面从受信配置读取 Portal 地址，使用不接收任意 URL 的专用 Tauri 命令：已登录时只打开固定 `/portal-session-handoff` 和 Fragment 中的 30 秒单次不透明票据；确定未登录时只打开固定 `/auth/login?force_login=1&return_to=%2F`。
+- 跳转不携带桌面 Access/Refresh Token。Portal 在服务端先经 Account 校验桌面主体，再由独立 confidential handoff client 交换不含 Refresh Token 的短时 Access Token；原始票据不落库，Redis 仅以票据摘要作为 key，value 保存短期服务端交接记录（含 access-only Session）。页面同步清除 Fragment、同源消费并建立不超过交换 Token 有效期的 HttpOnly 会话。桌面会话确定失效时由 Portal 执行 Authorization Code + PKCE 强制登录；瞬时故障保留桌面凭据并显示错误。
 - Web 个人中心保留“充值”入口。个人上下文可直接进入商品选择；组织上下文不得给组织或个人静默充值，应提示用户显式切换到个人上下文。
 - 两个入口都复用简体中文、英文和日文文案，并具备键盘焦点、可访问名称和打开失败提示。
 

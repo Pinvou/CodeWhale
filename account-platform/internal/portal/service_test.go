@@ -23,6 +23,7 @@ type memoryStore struct {
 	sessions                map[string]Session
 	approvalClassifications map[string]ApprovalClassification
 	approvalWires           map[string]int
+	handoffs                map[string]SessionHandoff
 }
 
 type unavailableSessionStore struct{ *memoryStore }
@@ -32,7 +33,7 @@ func (s *unavailableSessionStore) GetSession(context.Context, string) (Session, 
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}, approvalWires: map[string]int{}}
+	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}, approvalWires: map[string]int{}, handoffs: map[string]SessionHandoff{}}
 }
 func (s *memoryStore) SaveFlow(_ context.Context, key string, value LoginFlow) error {
 	s.mu.Lock()
@@ -47,6 +48,24 @@ func (s *memoryStore) TakeFlow(_ context.Context, key string) (LoginFlow, error)
 	delete(s.flows, key)
 	if !ok {
 		return LoginFlow{}, ErrSessionNotFound
+	}
+	return value, nil
+}
+
+func (s *memoryStore) SaveSessionHandoff(_ context.Context, key string, value SessionHandoff) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handoffs[key] = value
+	return nil
+}
+
+func (s *memoryStore) TakeSessionHandoff(_ context.Context, key string) (SessionHandoff, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.handoffs[key]
+	delete(s.handoffs, key)
+	if !ok {
+		return SessionHandoff{}, ErrSessionNotFound
 	}
 	return value, nil
 }
@@ -310,6 +329,61 @@ func TestReauthenticationRequiresExistingPortalSession(t *testing.T) {
 	response := httptest.NewRecorder()
 	service.Handler(nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/auth/login?reauthenticate=1", nil))
 	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+func TestForcedLoginStartsInFreshBrowserAndReplacesExistingSession(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		existingSession bool
+	}{
+		{name: "fresh browser"},
+		{name: "existing browser session", existingSession: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newMemoryStore()
+			service := testService(t, store)
+			request := httptest.NewRequest(http.MethodGet, "/auth/login?force_login=1&return_to=%2F", nil)
+			if test.existingSession {
+				now := time.Now().UTC()
+				session := Session{ID: "existing-session", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("f", 32)}
+				if err := store.SaveSession(context.Background(), session); err != nil {
+					t.Fatal(err)
+				}
+				request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+			}
+			response := httptest.NewRecorder()
+			service.Handler(nil).ServeHTTP(response, request)
+			if response.Code != http.StatusFound {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			location, err := url.Parse(response.Header().Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if location.Query().Get("prompt") != "login" || location.Query().Has("max_age") {
+				t.Fatalf("forced login parameters = %s", location)
+			}
+			flow := store.flows[location.Query().Get("state")]
+			expectedPrevious := ""
+			if test.existingSession {
+				expectedPrevious = "existing-session"
+			}
+			if flow.PreviousSession != expectedPrevious || flow.ReturnTo != "/" {
+				t.Fatalf("unexpected forced login flow: %+v", flow)
+			}
+		})
+	}
+}
+
+func TestForcedLoginFailsClosedWhenExistingSessionCannotBeChecked(t *testing.T) {
+	service := testService(t, &unavailableSessionStore{memoryStore: newMemoryStore()})
+	request := httptest.NewRequest(http.MethodGet, "/auth/login?force_login=1", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: "unknown-session"})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d", response.Code)
 	}
 }

@@ -33,9 +33,13 @@ type Config struct {
 	TokenURL                            *url.URL
 	PrivateCAFile                       string
 	ClientID                            string
+	HandoffClientID                     string
+	HandoffClientSecret                 string
 	AccountURL                          *url.URL
 	BillingURL                          *url.URL
 	TokenGatewayURL                     *url.URL
+	HandoffSubjectTokenEnabled          bool
+	SessionHandoffTTL                   time.Duration
 	ClientVersion                       string
 	TokenAdminProxyHMACKey              []byte
 	AdminModelTokenIAEnabled            bool
@@ -63,6 +67,15 @@ type Service struct {
 	deadlineNow func() time.Time
 }
 
+type oidcTokenEndpointError struct {
+	StatusCode int
+	Code       string
+}
+
+func (e *oidcTokenEndpointError) Error() string {
+	return fmt.Sprintf("OIDC token endpoint returned HTTP %d", e.StatusCode)
+}
+
 func NewService(config Config, store Store) (*Service, error) {
 	if config.PublicURL == nil || config.AuthorizationURL == nil || config.TokenURL == nil || config.AccountURL == nil || config.BillingURL == nil || config.TokenGatewayURL == nil || strings.TrimSpace(config.ClientID) == "" || store == nil {
 		return nil, errors.New("invalid portal configuration")
@@ -81,6 +94,12 @@ func NewService(config Config, store Store) (*Service, error) {
 	if config.AdminModelTokenPageOverviewsEnabled && len(config.TokenAdminProxyHMACKey) < 32 {
 		return nil, errors.New("model and Token page overviews require a proxy HMAC key with at least 32 bytes")
 	}
+	if config.HandoffSubjectTokenEnabled && (config.SessionHandoffTTL <= 0 || config.SessionHandoffTTL > time.Minute) {
+		return nil, errors.New("desktop session handoff TTL must be between one nanosecond and one minute")
+	}
+	if config.HandoffSubjectTokenEnabled && (strings.TrimSpace(config.HandoffClientID) == "" || strings.TrimSpace(config.HandoffClientSecret) == "" || config.HandoffClientID == config.ClientID) {
+		return nil, errors.New("desktop session handoff requires a dedicated confidential OIDC client")
+	}
 	if config.SessionMaxAge <= 0 {
 		config.SessionMaxAge = defaultSessionMaxAge
 	}
@@ -95,6 +114,19 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router := httpserver.NewRouter()
 	router.GET("/auth/login", httpserver.AdaptFunc(s.login))
 	router.GET("/auth/callback", httpserver.AdaptFunc(s.callback))
+	router.GET("/portal-session-handoff", httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
+		if static == nil {
+			http.NotFound(w, r)
+			return
+		}
+		pageRequest := r.Clone(r.Context())
+		pageURL := *r.URL
+		pageURL.Path = "/portal-session-handoff.html"
+		pageRequest.URL = &pageURL
+		static.ServeHTTP(w, pageRequest)
+	}))
+	router.POST("/portal-session-handoff", httpserver.AdaptFunc(s.createSessionHandoff))
+	router.POST("/portal-session-handoff/consume", httpserver.AdaptFunc(s.consumeSessionHandoff))
 	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
 	router.GET("/api/admin/approvals/capability", httpserver.AdaptFunc(s.adminApprovalCapability))
 	router.GET("/api/admin/approvals/directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
@@ -132,7 +164,8 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		} else if !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/auth/") {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || static == nil {
+		isSessionHandoffRoute := r.URL.Path == "/portal-session-handoff" || r.URL.Path == "/portal-session-handoff/consume"
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || isSessionHandoffRoute || static == nil {
 			router.ServeHTTP(w, r)
 			return
 		}
@@ -199,6 +232,7 @@ func (s *Service) tokenAdminIngressDeadline(next http.Handler) http.Handler {
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	reauthenticate := r.URL.Query().Get("reauthenticate") == "1"
+	forceLogin := r.URL.Query().Get("force_login") == "1"
 	previousSession := ""
 	if reauthenticate {
 		session, sessionErr := s.authenticatedSession(r.Context(), r)
@@ -207,6 +241,17 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		previousSession = session.ID
+	} else if forceLogin {
+		session, sessionErr := s.authenticatedSession(r.Context(), r)
+		switch {
+		case sessionErr == nil:
+			previousSession = session.ID
+		case errors.Is(sessionErr, ErrSessionNotFound):
+			// A forced desktop fallback must also work in a fresh browser.
+		case sessionErr != nil:
+			api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_UNAVAILABLE", "the previous login session could not be checked", httpserver.RequestID(r.Context()))
+			return
+		}
 	}
 	state, err := randomToken(32)
 	verifier, verifierErr := randomToken(48)
@@ -233,8 +278,10 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	query.Set("nonce", nonce)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
-	if reauthenticate {
+	if reauthenticate || forceLogin {
 		query.Set("prompt", "login")
+	}
+	if reauthenticate {
 		query.Set("max_age", "900")
 	}
 	redirect := *s.config.AuthorizationURL
@@ -270,6 +317,7 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 	sessionID, sessionIDErr := randomToken(32)
 	csrfToken, csrfErr := randomToken(32)
 	session := Session{ID: sessionID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, AccessExpiresAt: now.Add(time.Duration(tokens.ExpiresIn) * time.Second), RefreshExpiresAt: s.refreshExpiry(now, tokens.RefreshExpiresIn, now.Add(s.config.SessionMaxAge)), CSRFToken: csrfToken, CreatedAt: now, ApprovalV2Eligible: true}
+	session.OIDCClientID = s.config.ClientID
 	if sessionIDErr != nil || csrfErr != nil || session.AccessToken == "" || session.RefreshToken == "" || tokens.ExpiresIn <= 0 || !strings.EqualFold(tokens.TokenType, "Bearer") || s.store.SaveSession(r.Context(), session) != nil {
 		api.WriteError(w, http.StatusBadGateway, "LOGIN_SESSION_FAILED", "login session could not be created", httpserver.RequestID(r.Context()))
 		return
@@ -795,6 +843,9 @@ func (s *Service) authenticatedSession(ctx context.Context, r *http.Request) (Se
 	if session.AccessExpiresAt.After(s.now().Add(30 * time.Second)) {
 		return session, nil
 	}
+	if session.RefreshToken == "" {
+		return Session{}, ErrSessionNotFound
+	}
 	return s.refreshSession(ctx, session)
 }
 
@@ -811,7 +862,11 @@ func (s *Service) refreshSession(ctx context.Context, session Session) (Session,
 			if err != nil || latest.AccessExpiresAt.After(s.now().Add(30*time.Second)) {
 				return latest, err
 			}
-			tokens, err := s.exchange(ctx, url.Values{"grant_type": {"refresh_token"}, "client_id": {s.config.ClientID}, "refresh_token": {latest.RefreshToken}})
+			oidcClientID := latest.OIDCClientID
+			if oidcClientID == "" {
+				oidcClientID = s.config.ClientID
+			}
+			tokens, err := s.exchange(ctx, url.Values{"grant_type": {"refresh_token"}, "client_id": {oidcClientID}, "refresh_token": {latest.RefreshToken}})
 			if err != nil {
 				_ = s.store.DeleteSession(ctx, session.ID)
 				return Session{}, err
@@ -854,6 +909,14 @@ func (s *Service) refreshExpiry(now time.Time, seconds int64, limit time.Time) t
 }
 
 func (s *Service) exchange(ctx context.Context, form url.Values) (TokenResponse, error) {
+	requestForm := make(url.Values, len(form)+1)
+	for key, values := range form {
+		requestForm[key] = append([]string(nil), values...)
+	}
+	form = requestForm
+	if form.Get("client_id") == s.config.HandoffClientID {
+		form.Set("client_secret", s.config.HandoffClientSecret)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.config.TokenURL.String(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return TokenResponse{}, err
@@ -865,7 +928,11 @@ func (s *Service) exchange(ctx context.Context, form url.Values) (TokenResponse,
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return TokenResponse{}, fmt.Errorf("OIDC token endpoint returned HTTP %d", response.StatusCode)
+		var body struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body)
+		return TokenResponse{}, &oidcTokenEndpointError{StatusCode: response.StatusCode, Code: body.Error}
 	}
 	var tokens TokenResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&tokens); err != nil {

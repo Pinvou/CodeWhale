@@ -90,6 +90,9 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.match(combined, /newapi-database-url/);
   assert.match(combined, /newapi-session-secret/);
   assert.match(combined, /SYSTEM_PROBES_JSON/);
+  assert.match(combined, /PORTAL_SESSION_HANDOFF/);
+  assert.match(combined, /PORTAL_HANDOFF_OIDC_CLIENT_ID/);
+  assert.match(combined, /portal-handoff-oidc-client-secret/);
   assert.match(combined, /kind: ExternalSecret/);
   assert.match(combined, /creationPolicy: Owner/);
   assert.match(combined, /TOKEN_SECRET_ROTATION_INTERVAL_SECONDS/);

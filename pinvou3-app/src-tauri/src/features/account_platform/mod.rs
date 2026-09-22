@@ -10,6 +10,7 @@ mod model_proxy;
 mod platform;
 pub(crate) mod runtime_model;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -268,15 +269,128 @@ pub fn account_platform_enabled() -> bool {
     platform_supported()
 }
 
-/// Opens the browser-owned account Portal session without accepting a URL
-/// from the WebView. Credentials are deliberately absent from the fixed URL.
-pub fn open_account_portal() -> Result<(), String> {
-    let target = account_portal_url()?;
-    crate::platform::os::open_target(target.as_str(), "账号平台个人中心")
+#[derive(Debug, Deserialize)]
+struct PortalSessionHandoffResponse {
+    ticket: String,
 }
 
-fn account_portal_url() -> Result<Url, String> {
-    Ok(AccountPlatformConfig::current()?.portal_url)
+enum PortalSessionHandoffResult {
+    Ticket(String),
+    Unauthorized,
+}
+
+const ACCOUNT_PORTAL_LABEL: &str = "账号平台个人中心";
+
+impl AccountPlatformState {
+    pub async fn open_portal(&self) -> Result<(), String> {
+        let config = AccountPlatformConfig::current()?;
+        let target = self.portal_target(&config).await?;
+        crate::platform::os::open_target(target.as_str(), ACCOUNT_PORTAL_LABEL)
+    }
+
+    async fn portal_target(&self, config: &AccountPlatformConfig) -> Result<Url, String> {
+        let restored = portal_restore_state(self.ensure_restored(config).await)?;
+        if !restored {
+            return Ok(portal_login_target(&config.portal_url));
+        }
+        let mut access_token = match self.access_token(config, None).await {
+            Ok(access_token) => access_token,
+            Err(error) if is_unauthenticated_error(&error) => {
+                return Ok(portal_login_target(&config.portal_url));
+            }
+            Err(error) => return Err(error),
+        };
+
+        match self
+            .request_portal_session_handoff(config, &access_token)
+            .await?
+        {
+            PortalSessionHandoffResult::Ticket(ticket) => {
+                return Ok(portal_handoff_target(&config.portal_url, &ticket));
+            }
+            PortalSessionHandoffResult::Unauthorized => {}
+        }
+
+        access_token = match self.access_token(config, Some(&access_token)).await {
+            Ok(access_token) => access_token,
+            Err(error) if is_unauthenticated_error(&error) => {
+                return Ok(portal_login_target(&config.portal_url));
+            }
+            Err(error) => return Err(error),
+        };
+        match self
+            .request_portal_session_handoff(config, &access_token)
+            .await?
+        {
+            PortalSessionHandoffResult::Ticket(ticket) => {
+                Ok(portal_handoff_target(&config.portal_url, &ticket))
+            }
+            PortalSessionHandoffResult::Unauthorized => Ok(portal_login_target(&config.portal_url)),
+        }
+    }
+
+    async fn request_portal_session_handoff(
+        &self,
+        config: &AccountPlatformConfig,
+        access_token: &str,
+    ) -> Result<PortalSessionHandoffResult, String> {
+        let endpoint = config
+            .portal_url
+            .join("portal-session-handoff")
+            .map_err(|_| {
+                "account_platform_configuration_invalid: cannot resolve portal handoff".to_string()
+            })?;
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|error| format!("portal_session_handoff_unavailable: {error}"))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Ok(PortalSessionHandoffResult::Unauthorized);
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "portal_session_handoff_failed: identity returned {}",
+                response.status()
+            ));
+        }
+        let handoff = response
+            .json::<PortalSessionHandoffResponse>()
+            .await
+            .map_err(|_| {
+                "portal_session_handoff_invalid: handoff response is invalid".to_string()
+            })?;
+        if handoff.ticket.trim().is_empty() {
+            return Err("portal_session_handoff_invalid: handoff ticket is empty".to_string());
+        }
+        Ok(PortalSessionHandoffResult::Ticket(handoff.ticket))
+    }
+}
+
+fn portal_restore_state(result: Result<bool, String>) -> Result<bool, String> {
+    match result {
+        Ok(restored) => Ok(restored),
+        Err(error) if is_unauthenticated_error(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn portal_login_target(portal_url: &Url) -> Url {
+    let mut target = portal_url.clone();
+    target.set_path("auth/login");
+    target.set_query(Some("force_login=1&return_to=%2F"));
+    target.set_fragment(None);
+    target
+}
+
+fn portal_handoff_target(portal_url: &Url, ticket: &str) -> Url {
+    let mut target = portal_url.clone();
+    target.set_path("portal-session-handoff");
+    target.set_query(None);
+    target.set_fragment(Some(&format!("ticket={ticket}")));
+    target
 }
 
 fn account_portal_url_from(value: &str) -> Result<Url, String> {
@@ -285,6 +399,12 @@ fn account_portal_url_from(value: &str) -> Result<Url, String> {
         return Err("account_platform_configuration_invalid: account portal URL must not contain query or fragment".to_string());
     }
     Ok(target)
+}
+
+fn is_unauthenticated_error(error: &str) -> bool {
+    error.starts_with("authentication_required:")
+        || error.starts_with("oidc_refresh_token_missing:")
+        || error == "oidc_credentials_invalid: account or password is incorrect"
 }
 
 const fn platform_supported() -> bool {
@@ -437,7 +557,7 @@ pub struct AccountPlatformState {
     login_guard: Mutex<()>,
     refresh_guard: Mutex<()>,
     client: reqwest::Client,
-    credentials: SystemCredentialStore,
+    credentials: Arc<dyn CredentialStore + Send + Sync>,
     session_generation: AtomicU64,
     device_id: String,
 }
@@ -455,7 +575,7 @@ impl AccountPlatformState {
             login_guard: Mutex::new(()),
             refresh_guard: Mutex::new(()),
             client,
-            credentials: SystemCredentialStore::new(),
+            credentials: Arc::new(SystemCredentialStore::new()),
             session_generation: AtomicU64::new(0),
             device_id: random_urlsafe(24),
         })
@@ -1021,7 +1141,9 @@ impl AccountPlatformState {
         let tokens = match self.token_request(config, &form, TokenFlow::Refresh).await {
             Ok(tokens) => tokens,
             Err(error) => {
-                self.clear_authentication().await?;
+                if refresh_failure_invalidates_authentication(&error) {
+                    self.clear_authentication().await?;
+                }
                 return Err(error);
             }
         };
@@ -1047,7 +1169,9 @@ impl AccountPlatformState {
         let tokens = match self.token_request(config, &form, TokenFlow::Refresh).await {
             Ok(tokens) => tokens,
             Err(error) => {
-                self.clear_authentication().await?;
+                if refresh_failure_invalidates_authentication(&error) {
+                    self.clear_authentication().await?;
+                }
                 return Err(error);
             }
         };
@@ -1253,6 +1377,10 @@ impl AccountPlatformState {
 fn access_token_is_usable(session: &RuntimeSession, rejected: Option<&str>) -> bool {
     session.expires_at > Instant::now() + Duration::from_secs(30)
         && rejected.is_none_or(|token| token != session.access_token)
+}
+
+fn refresh_failure_invalidates_authentication(error: &str) -> bool {
+    error.starts_with("authentication_required:")
 }
 
 fn validate_token_response(tokens: TokenResponse) -> Result<TokenResponse, String> {
@@ -1638,6 +1766,157 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex as StdMutex;
+    use std::thread;
+
+    #[derive(Default)]
+    struct MemoryCredentialStore {
+        values: StdMutex<HashMap<(String, String), String>>,
+    }
+
+    impl MemoryCredentialStore {
+        fn with_refresh_token(value: &str) -> Arc<Self> {
+            let store = Arc::new(Self::default());
+            store
+                .set(
+                    &CredentialReference::for_account_platform_refresh_token(),
+                    value,
+                )
+                .unwrap();
+            store
+        }
+
+        fn refresh_token(&self) -> Option<String> {
+            self.get(&CredentialReference::for_account_platform_refresh_token())
+                .unwrap()
+        }
+    }
+
+    impl CredentialStore for MemoryCredentialStore {
+        fn get(
+            &self,
+            reference: &CredentialReference,
+        ) -> Result<Option<String>, crate::platform::credential_store::CredentialError> {
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .get(&(reference.service.clone(), reference.account.clone()))
+                .cloned())
+        }
+
+        fn set(
+            &self,
+            reference: &CredentialReference,
+            value: &str,
+        ) -> Result<(), crate::platform::credential_store::CredentialError> {
+            self.values.lock().unwrap().insert(
+                (reference.service.clone(), reference.account.clone()),
+                value.to_string(),
+            );
+            Ok(())
+        }
+
+        fn delete(
+            &self,
+            reference: &CredentialReference,
+        ) -> Result<(), crate::platform::credential_store::CredentialError> {
+            self.values
+                .lock()
+                .unwrap()
+                .remove(&(reference.service.clone(), reference.account.clone()));
+            Ok(())
+        }
+    }
+
+    fn spawn_portal_fixture(
+        expected_requests: usize,
+        mut respond: impl FnMut(&str) -> (u16, &'static str) + Send + 'static,
+    ) -> (Url, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end + 4]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                let (status, body) = respond(&request);
+                let reason = match status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    401 => "Unauthorized",
+                    503 => "Service Unavailable",
+                    _ => "Fixture",
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        (Url::parse(&format!("http://{address}/")).unwrap(), handle)
+    }
+
+    fn portal_test_state(
+        credentials: Arc<MemoryCredentialStore>,
+        session: Option<RuntimeSession>,
+    ) -> AccountPlatformState {
+        AccountPlatformState {
+            session: Mutex::new(session),
+            login_guard: Mutex::new(()),
+            refresh_guard: Mutex::new(()),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            credentials,
+            session_generation: AtomicU64::new(0),
+            device_id: "fixture-device".to_string(),
+        }
+    }
+
+    fn portal_runtime_session(access: &str, refresh: &str) -> RuntimeSession {
+        RuntimeSession {
+            access_token: access.to_string(),
+            refresh_token: refresh.to_string(),
+            expires_at: Instant::now() + Duration::from_secs(300),
+            generation: 1,
+            account_user_id: None,
+        }
+    }
 
     struct AccountEnvSnapshot(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
@@ -1992,6 +2271,219 @@ mod tests {
         );
         assert!(account_portal_url_from("https://portal.example.test/?token=secret").is_err());
         assert!(account_portal_url_from("https://user:secret@portal.example.test/").is_err());
+    }
+
+    #[test]
+    fn portal_open_targets_are_fixed_and_keep_the_handoff_out_of_the_query() {
+        let portal = Url::parse("https://account.pinvou.com/").unwrap();
+        let login = portal_login_target(&portal);
+        assert_eq!(login.path(), "/auth/login");
+        assert_eq!(login.query(), Some("force_login=1&return_to=%2F"));
+        assert!(login.fragment().is_none());
+
+        let handoff = portal_handoff_target(&portal, "one-time-ticket");
+        assert_eq!(
+            handoff.as_str(),
+            "https://account.pinvou.com/portal-session-handoff#ticket=one-time-ticket"
+        );
+        assert!(handoff.query().is_none());
+    }
+
+    #[test]
+    fn portal_restore_falls_back_only_for_definite_authentication_failures() {
+        assert_eq!(portal_restore_state(Ok(true)).unwrap(), true);
+        assert_eq!(portal_restore_state(Ok(false)).unwrap(), false);
+        assert_eq!(
+            portal_restore_state(Err(
+                "authentication_required: saved sign-in has expired".to_string()
+            ))
+            .unwrap(),
+            false
+        );
+        assert_eq!(
+            portal_restore_state(Err(
+                "oidc_refresh_token_missing: identity provider omitted refresh token".to_string()
+            ))
+            .unwrap(),
+            false
+        );
+        assert!(
+            portal_restore_state(Err("oidc_token_endpoint_unavailable: timed out".to_string()))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn portal_handoff_unauthorized_refreshes_and_retries_before_login() {
+        let mut request_index = 0;
+        let (base, server) = spawn_portal_fixture(3, move |request| {
+            request_index += 1;
+            match request_index {
+                1 => {
+                    assert!(request.starts_with("POST /portal-session-handoff "));
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer stale-access")
+                    );
+                    (401, r#"{"code":"LOGIN_REQUIRED"}"#)
+                }
+                2 => {
+                    assert!(request.starts_with("POST /token "));
+                    assert!(request.contains("grant_type=refresh_token"));
+                    assert!(request.contains("refresh_token=saved-refresh"));
+                    (
+                        200,
+                        r#"{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":300}"#,
+                    )
+                }
+                3 => {
+                    assert!(request.starts_with("POST /portal-session-handoff "));
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer fresh-access")
+                    );
+                    (200, r#"{"ticket":"single-use-ticket"}"#)
+                }
+                _ => unreachable!(),
+            }
+        });
+        let credentials = MemoryCredentialStore::with_refresh_token("saved-refresh");
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("stale-access", "saved-refresh")),
+        );
+        let mut config = config();
+        config.token_url = base.join("token").unwrap();
+        config.portal_url = base;
+
+        let target = state.portal_target(&config).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(target.path(), "/portal-session-handoff");
+        assert_eq!(target.fragment(), Some("ticket=single-use-ticket"));
+        assert_eq!(
+            credentials.refresh_token().as_deref(),
+            Some("fresh-refresh")
+        );
+    }
+
+    #[tokio::test]
+    async fn portal_restore_uses_persisted_refresh_before_handoff() {
+        let mut request_index = 0;
+        let (base, server) = spawn_portal_fixture(2, move |request| {
+            request_index += 1;
+            match request_index {
+                1 => {
+                    assert!(request.starts_with("POST /token "));
+                    (
+                        200,
+                        r#"{"access_token":"restored-access","refresh_token":"rotated-refresh","expires_in":300}"#,
+                    )
+                }
+                2 => {
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer restored-access")
+                    );
+                    (200, r#"{"ticket":"restored-ticket"}"#)
+                }
+                _ => unreachable!(),
+            }
+        });
+        let credentials = MemoryCredentialStore::with_refresh_token("persisted-refresh");
+        let state = portal_test_state(credentials, None);
+        let mut config = config();
+        config.token_url = base.join("token").unwrap();
+        config.portal_url = base;
+
+        let target = state.portal_target(&config).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(target.fragment(), Some("ticket=restored-ticket"));
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_preserves_authentication_and_does_not_open_login() {
+        let mut request_index = 0;
+        let (base, server) = spawn_portal_fixture(2, move |request| {
+            request_index += 1;
+            if request_index == 1 {
+                (401, r#"{"code":"LOGIN_REQUIRED"}"#)
+            } else {
+                assert!(request.starts_with("POST /token "));
+                (503, r#"{"error":"temporarily_unavailable"}"#)
+            }
+        });
+        let credentials = MemoryCredentialStore::with_refresh_token("saved-refresh");
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("stale-access", "saved-refresh")),
+        );
+        let mut config = config();
+        config.token_url = base.join("token").unwrap();
+        config.portal_url = base;
+
+        let error = state.portal_target(&config).await.unwrap_err();
+        server.join().unwrap();
+        assert!(error.starts_with("oidc_token_exchange_failed:"));
+        assert_eq!(
+            credentials.refresh_token().as_deref(),
+            Some("saved-refresh")
+        );
+        assert!(state.session.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn invalid_refresh_clears_authentication_and_opens_login() {
+        let mut request_index = 0;
+        let (base, server) = spawn_portal_fixture(2, move |_| {
+            request_index += 1;
+            if request_index == 1 {
+                (401, r#"{"code":"LOGIN_REQUIRED"}"#)
+            } else {
+                (400, r#"{"error":"invalid_grant"}"#)
+            }
+        });
+        let credentials = MemoryCredentialStore::with_refresh_token("expired-refresh");
+        let state = portal_test_state(
+            credentials.clone(),
+            Some(portal_runtime_session("stale-access", "expired-refresh")),
+        );
+        let mut config = config();
+        config.token_url = base.join("token").unwrap();
+        config.portal_url = base;
+
+        let target = state.portal_target(&config).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(target.path(), "/auth/login");
+        assert!(credentials.refresh_token().is_none());
+        assert!(state.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn handoff_dependency_failure_is_not_downgraded_to_browser_login() {
+        let (base, server) =
+            spawn_portal_fixture(1, |_| (503, r#"{"code":"SESSION_HANDOFF_UNAVAILABLE"}"#));
+        let credentials = MemoryCredentialStore::with_refresh_token("saved-refresh");
+        let state = portal_test_state(
+            credentials,
+            Some(portal_runtime_session("current-access", "saved-refresh")),
+        );
+        let mut config = config();
+        config.portal_url = base;
+
+        let error = state.portal_target(&config).await.unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("identity returned 503"));
+    }
+
+    #[tokio::test]
+    async fn missing_saved_login_opens_browser_login_without_network_request() {
+        let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+        let target = state.portal_target(&config()).await.unwrap();
+        assert_eq!(target.path(), "/auth/login");
+        assert_eq!(target.query(), Some("force_login=1&return_to=%2F"));
     }
 
     #[test]

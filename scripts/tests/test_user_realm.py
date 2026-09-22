@@ -16,7 +16,7 @@ class UserRealmTests(unittest.TestCase):
         value = self.bundle()['realm']
         self.assertNotIn('users', value)
         self.assertNotIn('roles', value)
-        self.assertEqual(len(value['clients']), 4)
+        self.assertEqual(len(value['clients']), 5)
         self.assertEqual([c['clientId'] for c in value['clients'] if c['serviceAccountsEnabled']], [realm.PROVISIONER])
         for client in value['clients']:
             self.assertNotIn('secret', client)
@@ -28,7 +28,7 @@ class UserRealmTests(unittest.TestCase):
         self.assertEqual(value['attributes']['frontendUrl'], 'https://account.example.com')
 
     def test_callbacks_audiences_and_existing_scope_compatibility(self):
-        desktop, portal, credential, provisioner = self.bundle()['realm']['clients']
+        desktop, portal, handoff, credential, provisioner = self.bundle()['realm']['clients']
         self.assertTrue(desktop['directAccessGrantsEnabled'])
         self.assertFalse(desktop['standardFlowEnabled'])
         self.assertEqual(desktop['redirectUris'], [])
@@ -37,10 +37,22 @@ class UserRealmTests(unittest.TestCase):
         for client in (portal, credential):
             self.assertFalse(client['directAccessGrantsEnabled'])
             self.assertEqual(client['attributes']['pkce.code.challenge.method'], 'S256')
+        self.assertTrue(portal['publicClient'])
+        self.assertFalse(handoff['publicClient'])
+        self.assertEqual(handoff['clientAuthenticatorType'], 'client-secret')
+        self.assertFalse(handoff['standardFlowEnabled'])
+        self.assertEqual(handoff['attributes']['standard.token.exchange.enabled'], 'true')
+        for client in (desktop, portal, credential, provisioner):
+            self.assertEqual(client['attributes']['standard.token.exchange.enabled'], 'false')
         for client in (desktop, portal):
             self.assertEqual(client['optionalClientScopes'], ['offline_access'])
             self.assertEqual(client['defaultClientScopes'], ['basic', 'profile', 'email'])
             self.assertEqual(client['protocolMappers'][0]['config']['included.custom.audience'], realm.DESKTOP)
+        self.assertEqual(handoff['optionalClientScopes'], [])
+        self.assertEqual(handoff['defaultClientScopes'], ['basic', 'profile', 'email'])
+        self.assertEqual(handoff['protocolMappers'][0]['config']['included.custom.audience'], realm.DESKTOP)
+        self.assertEqual(handoff['attributes']['use.refresh.tokens'], 'false')
+        self.assertEqual(desktop['protocolMappers'][1]['config']['included.custom.audience'], realm.HANDOFF)
         self.assertEqual(credential['optionalClientScopes'], [])
         self.assertEqual(credential['protocolMappers'][0]['config']['included.custom.audience'], realm.CREDENTIAL)
         for client in (credential, provisioner):

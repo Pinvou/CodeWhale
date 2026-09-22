@@ -27,6 +27,8 @@ type ApprovalWireLocker interface {
 type Store interface {
 	SaveFlow(context.Context, string, LoginFlow) error
 	TakeFlow(context.Context, string) (LoginFlow, error)
+	SaveSessionHandoff(context.Context, string, SessionHandoff) error
+	TakeSessionHandoff(context.Context, string) (SessionHandoff, error)
 	SaveSession(context.Context, Session) error
 	GetSession(context.Context, string) (Session, error)
 	DeleteSession(context.Context, string) error
@@ -70,6 +72,26 @@ func (s *RedisStore) TakeFlow(ctx context.Context, state string) (LoginFlow, err
 		err = json.Unmarshal(value, &flow)
 	}
 	return flow, err
+}
+
+func (s *RedisStore) SaveSessionHandoff(ctx context.Context, hash string, value SessionHandoff) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return s.client.Set(ctx, "portal:session-handoff:"+hash, body, time.Until(value.ExpiresAt)).Err()
+}
+
+func (s *RedisStore) TakeSessionHandoff(ctx context.Context, hash string) (SessionHandoff, error) {
+	value, err := s.client.GetDel(ctx, "portal:session-handoff:"+hash).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return SessionHandoff{}, ErrSessionNotFound
+	}
+	var handoff SessionHandoff
+	if err == nil {
+		err = json.Unmarshal(value, &handoff)
+	}
+	return handoff, err
 }
 
 func (s *RedisStore) SaveSession(ctx context.Context, session Session) error {

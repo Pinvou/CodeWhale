@@ -25,7 +25,7 @@ POSTGRES_BOOTSTRAP_PASSWORD_NAMES = (
     "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
     "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD",
 )
-TEMPLATES = {"redis-accounts.acl.template": "0075ae0ab0aeede003fc0ceb7df0646b8f0fe5d1873801dbffc620734df2ee23",
+TEMPLATES = {"redis-accounts.acl.template": "3ba91cfa8396eb78bd4b3989d28dcb06ef31514e31ea2495a9862105039c4eef",
              "redis-newapi.acl.template": "289a73ac98038bc0c3ecaefe6a0fb629f700db86da60c258c8ca3f739b98cc2f"}
 
 

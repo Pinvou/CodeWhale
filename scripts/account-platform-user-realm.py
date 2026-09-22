@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 DESKTOP = 'pinvou-desktop'
 PORTAL = 'pinvou-token-portal'
+HANDOFF = 'pinvou-token-portal-handoff'
 CREDENTIAL = 'pinvou-token-credential-portal'
 PROVISIONER = 'pinvou-account-provisioner'
 PROVISIONER_ROLES = ('manage-users',)
@@ -30,7 +31,7 @@ def origin(value):
 
 
 def audience_mapper(audience):
-    return {'name': 'pinvou-application-audience', 'protocol': 'openid-connect',
+    return {'name': 'pinvou-' + audience + '-audience', 'protocol': 'openid-connect',
             'protocolMapper': 'oidc-audience-mapper', 'consentRequired': False,
             'config': {'included.custom.audience': audience, 'access.token.claim': 'true',
                        'id.token.claim': 'false', 'userinfo.token.claim': 'false', 'introspection.token.claim': 'true'}}
@@ -57,9 +58,27 @@ def public_client(name, *, callback=None, desktop=False, credential=False):
                        'use.refresh.tokens': 'false' if credential else 'true',
                        'client_credentials.use_refresh_token': 'false',
                        'oauth2.device.authorization.grant.enabled': 'false',
-                       'oidc.ciba.grant.enabled': 'false', 'standard.token.exchange.enabled': 'false'},
+                       'oidc.ciba.grant.enabled': 'false',
+                       'standard.token.exchange.enabled': 'false'},
         'protocolMappers': [audience_mapper(CREDENTIAL if credential else DESKTOP),
+                            *([audience_mapper(HANDOFF)] if desktop else []),
                             *([] if credential else phone_mappers())],
+    }
+
+
+def handoff_client():
+    return {
+        'clientId': HANDOFF, 'name': HANDOFF, 'enabled': True, 'protocol': 'openid-connect',
+        'clientAuthenticatorType': 'client-secret', 'publicClient': False, 'bearerOnly': False,
+        'serviceAccountsEnabled': False, 'standardFlowEnabled': False,
+        'directAccessGrantsEnabled': False, 'implicitFlowEnabled': False, 'fullScopeAllowed': False,
+        'redirectUris': [], 'webOrigins': [],
+        'defaultClientScopes': ['basic', 'profile', 'email'], 'optionalClientScopes': [],
+        'attributes': {'access.token.signed.response.alg': 'RS256', 'use.refresh.tokens': 'false',
+                       'client_credentials.use_refresh_token': 'false',
+                       'oauth2.device.authorization.grant.enabled': 'false',
+                       'oidc.ciba.grant.enabled': 'false', 'standard.token.exchange.enabled': 'true'},
+        'protocolMappers': [audience_mapper(DESKTOP), *phone_mappers()],
     }
 
 
@@ -139,7 +158,7 @@ def build_bundle(account_origin, credential_origin, name='pinvou'):
         'browserFlow': 'pinvou-browser', 'directGrantFlow': 'pinvou-mobile-direct-grant',
         'authenticationFlows': flows,
         'clients': [public_client(DESKTOP, desktop=True),
-                    public_client(PORTAL, callback=account + '/auth/callback'),
+                    public_client(PORTAL, callback=account + '/auth/callback'), handoff_client(),
                     public_client(CREDENTIAL, callback=credential + '/oidc/callback', credential=True), provisioner],
         # This restricts which roles may enter the provisioner token. A separate
         # audited Admin API operation assigns these roles to its real UUID.

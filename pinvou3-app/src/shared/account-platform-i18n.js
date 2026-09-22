@@ -1,5 +1,11 @@
 export const accountPlatformCopy = {
   zh: {
+    sessionHandoff: {
+      title: '正在打开个人中心',
+      opening: '正在打开个人中心…',
+      invalid: '会话交接链接无效或已过期。',
+      unavailable: '暂时无法交接登录会话，请稍后重试。',
+    },
     registrationConflict: '本次注册信息与已验证的信息不一致，请恢复原流程或重新开始。',
     registrationRestartRequired: '原注册操作已结束，请重新开始注册。',
     registrationRecoveryUnavailable: '暂时无法查询注册进度，请稍后重试；不要重复注册。',
@@ -228,6 +234,12 @@ export const accountPlatformCopy = {
     },
   },
   en: {
+    sessionHandoff: {
+      title: 'Opening personal center',
+      opening: 'Opening personal center…',
+      invalid: 'The session handoff link is invalid or expired.',
+      unavailable: 'The sign-in session cannot be handed off right now. Try again shortly.',
+    },
     registrationConflict: 'This registration no longer matches the verified details. Resume the original flow or start again when allowed.',
     registrationRestartRequired: 'The previous registration operation has ended. Start registration again.',
     registrationRecoveryUnavailable: 'Registration progress is temporarily unavailable. Try again later and do not register again.',
@@ -456,6 +468,12 @@ export const accountPlatformCopy = {
     },
   },
   ja: {
+    sessionHandoff: {
+      title: '個人センターを開く',
+      opening: '個人センターを開いています…',
+      invalid: 'セッション引継ぎリンクが無効または期限切れです。',
+      unavailable: '現在セッションを引き継げません。しばらくしてからもう一度お試しください。',
+    },
     registrationConflict: 'この登録内容は確認済みの情報と一致しません。元の手順を再開するか、許可後にやり直してください。',
     registrationRestartRequired: '以前の登録処理は終了しました。登録を最初からやり直してください。',
     registrationRecoveryUnavailable: '登録状況を一時的に確認できません。重複登録せず、後でもう一度お試しください。',

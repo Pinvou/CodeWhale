@@ -76,7 +76,7 @@
 | ID-10 | 支持手机号加短信验证码登录 | 仅支持中国大陆手机号；验证码用途与注册、改手机号、找回密码隔离。 |
 | ID-11 | 短信登录反枚举 | 未知手机号与已知手机号返回一致外部响应，并配合统一耗时、限流和审计。 |
 | ID-12 | 登录成功后支持自动登录 | Refresh Token 只保存在系统凭据库，启动时通过 Identity Provider 刷新。 |
-| ID-13 | 失败后停止自动登录 | 用户登出、刷新失败或凭据错误时删除持久化 Refresh Token，不回退历史缓存。 |
+| ID-13 | 确定失效后停止自动登录 | 用户登出，或 Identity Provider 明确返回 Refresh Token 已失效/凭据错误时删除持久化 Refresh Token，不回退历史缓存；超时、网络、5xx、配置和响应畸形等瞬时或依赖故障必须保留凭据并返回明确错误，不得伪装成未登录。 |
 | ID-14 | 注册不能留下不可登录的半成品账号 | Identity 或 Account 创建失败时使用可恢复 Saga 收敛；Identity 与 Account 均成功后账号必须可登录，钱包初始化不再决定注册是否成功。 |
 | ID-15 | Billing 故障不得删除已验证身份 | Identity 与 Account 已成功后，禁止因钱包初始化失败、超时或 Billing 暂时不可用补偿删除已验证手机号身份。 |
 | ID-16 | MFA 与账号申诉 | 除密码和短信外的 MFA、人工账号申诉不属于当前交付范围；不得用不完整占位流程宣称支持。 |
@@ -1019,7 +1019,7 @@ RECEIVABLE_OPEN -> RESOLVED
 | UI-06 | 只展示当前聊天和计费上下文额度 | 个人与组织权益不混合展示。 |
 | UI-07 | 跨端上下文同步 | 桌面与 Web 使用同一 context_version 并在版本变化时刷新。 |
 | UI-08 | 权益包和到期提醒 | 展示总可用、BASE/BONUS、来源、消耗顺序、到期日和即将到期提醒。 |
-| UI-09 | 桌面打开 Web 个人中心 | 固定使用 `https://account.pinvou.com/` 受信 Portal URL，不在 URL 传递任何 OIDC Token；HTTP 入口只能跳转 HTTPS。 |
+| UI-09 | 桌面打开 Web 个人中心 | 固定使用 `https://account.pinvou.com/` 受信 Portal URL，不在 URL 传递任何 OIDC Token；桌面已登录时以服务端校验身份后签发的 30 秒单次不透明票据建立独立 Portal HttpOnly 会话，票据只进入受信 Portal Fragment。原始票据不落库，Redis 仅以票据摘要作为 key，value 保存短期服务端交接记录（含 access-only Session）；桌面未登录或会话确定失效时进入强制身份登录，瞬时服务故障不得误降级为未登录；HTTP 入口只能跳转 HTTPS。 |
 | UI-10 | Web 个人充值入口、二维码弹窗与待支付列表 | Web 个人中心提供个人权益充值入口；创建或主动继续仍可付款的订单时以弹窗显示二维码，套餐卡下方只列出未支付且未超期的可付款订单。支付成功、超时或进入其他不可付款状态后立即关闭弹窗并移除列表项。 |
 | UI-11 | Web 我的组织管理入口 | 有权限成员切换到显式目标组织后，“我的组织”按 `org.entitlements.purchase`、`org.quota.*`、`org.members.*`、`org.units.*`、`org.models.*` 等既有原子权限分别提供组织购买、额度、成员、节点和模型策略能力；“额度与用量”只保留当前组织余额、只读权益和本人用量，“账号设置”只保留个人账号能力。活动身份本身不得推导管理权限，UNIT 作用域不得扩展到目标子树之外。 |
 | UI-12 | 退款入口屏蔽与支付能力降级展示 | 当前用户端和运营端均不展示新建普通退款入口；其他支付能力按统一 capabilities 展示，退款 capability 不得自动解除产品级屏蔽。 |
@@ -1191,7 +1191,7 @@ T3 owner-bound authority check拆为同一endpoint的两个mode且保持15字段
 4. `[UI-05]` Web 个人中心提供用户名、手机号修改，必须通过统一身份页面重新认证，浏览器不得把密码交给 Portal/Account，个人中心不得以内嵌密码框或密码代理接口替代该流程。近期认证的规范回跳目标分别为 `/?section=accountSettings&profile=username` 与 `/?section=accountSettings&profile=mobile`；默认回跳、资料修改完成后的重新登录和所有资料修改入口都只能生成根路径，成功后直接打开对应修改弹窗且不得出现 404。品悟客户端不提供资料修改区域，但未登录 Popover 保留“忘记密码”入口。
 5. `[UI-06]` 个人中心只展示当前聊天和计费上下文的额度。
 6. `[UI-08]` 组织上下文只展示该成员获得的有效授予、权益组成和到期明细。
-7. `[UI-09]` 桌面 Popover 提供打开 `https://account.pinvou.com/` Web 个人中心的受信入口；URL 不携带 Access Token、Refresh Token 或其他凭据，浏览器使用自己的 OIDC 会话。账号子域名只通过 HTTPS 提供业务能力，HTTP 仅允许同主机跳转 HTTPS。
+7. `[UI-09]` 桌面 Popover 提供打开 `https://account.pinvou.com/` Web 个人中心的受信入口；URL 不携带 Access Token 或 Refresh Token。桌面已登录时，Portal 先验证桌面 Access Token，再使用独立 confidential handoff client 交换不含 Refresh Token 的短时 Portal Access Token，并签发 30 秒单次不透明票据；URL Fragment 只携带该票据。原始票据不落库，Redis 仅以票据摘要作为 key，value 保存短期服务端交接记录（含 access-only Session）；页面同步清除 Fragment 后同源消费并建立不超过交换 Token 有效期的 HttpOnly 会话。桌面会话确定失效时进入强制浏览器登录，瞬时依赖故障不得降级为未登录。账号子域名只通过 HTTPS 提供业务能力，HTTP 仅允许同主机跳转 HTTPS。
 8. `[UI-10]` Web 个人中心提供个人充值入口。创建订单成功后在可关闭的模态弹窗中展示 Provider 返回的金额、二维码、扫码指引和倒计时；套餐选择卡下方以扁平列表展示全部仍可付款的个人订单，用户点击后重新查询并在校验仍可付款时打开同一弹窗。存在待支付订单期间，页面必须定期刷新服务端订单列表以接收弹窗关闭后的回调状态变化，但不得因此自动读取或打开任一订单二维码。轮询、回调结果或本地截止时间发现订单支付成功、超时、关闭、失败、进入人工复核或其他不可付款状态时，必须立即关闭弹窗、撤下二维码和扫码提示并从待支付列表移除；页面刷新后只恢复待支付列表，不自动打开任何二维码。
 9. `[UI-11]` 切换到组织上下文后，组织购买、权益管理、额度分配/撤回/合规回收、成员、节点和模型策略统一进入“我的组织”，并分别按 `org.entitlements.purchase`、`org.wallet.read`、`org.quota.*`、`org.members.*`、`org.units.*`、`org.models.*` 鉴权；“额度与用量”只展示当前组织的余额、只读权益与本人用量，“账号设置”不得挂载组织管理组件。
 10. `[UI-13]` 用户点击停止后立即停止当前界面继续追加内容，并展示服务端返回的真实取消和结算状态；`CANCEL_REQUESTED` 不得显示为“已取消且停止计费”。Provider 不支持取消时明确提示“已停止显示，模型服务仍在结束处理中，将按实际用量结算”；断线重连后继续展示同一请求的执行与费用状态。

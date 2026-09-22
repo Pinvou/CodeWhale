@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
@@ -116,10 +119,14 @@ func main() {
 		TokenURL:                            mustURL("PORTAL_OIDC_TOKEN_URL"),
 		PrivateCAFile:                       strings.TrimSpace(os.Getenv("PORTAL_PRIVATE_CA_FILE")),
 		ClientID:                            os.Getenv("PORTAL_OIDC_CLIENT_ID"),
+		HandoffClientID:                     os.Getenv("PORTAL_HANDOFF_OIDC_CLIENT_ID"),
+		HandoffClientSecret:                 mustSecretFile("PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE", os.Getenv("PORTAL_SESSION_HANDOFF") == "true"),
 		AccountURL:                          mustURL("ACCOUNT_HTTP_URL"),
 		BillingURL:                          mustURL("BILLING_HTTP_URL"),
 		TokenGatewayURL:                     mustURL("TOKEN_GATEWAY_HTTP_URL"),
 		ClientVersion:                       compatibility.Manifest().CurrentClientVersion,
+		HandoffSubjectTokenEnabled:          os.Getenv("PORTAL_SESSION_HANDOFF") == "true",
+		SessionHandoffTTL:                   30 * time.Second,
 		TokenAdminProxyHMACKey:              proxyHMACKey,
 		AdminModelTokenIAEnabled:            adminModelTokenIAEnabled,
 		AdminTokenResourceFormsEnabled:      adminTokenResourceFormsEnabled,
@@ -140,6 +147,33 @@ func main() {
 	if err := httpserver.RunWithApplication("token-portal", compatibility.Wrap(service.Handler(portal.StaticHandler())), store.Ping); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func mustSecretFile(name string, required bool) string {
+	path := strings.TrimSpace(os.Getenv(name))
+	if path == "" {
+		if required {
+			log.Fatalf("%s is required when desktop session handoff is enabled", name)
+		}
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		log.Fatalf("%s must be an absolute path", name)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		log.Fatalf("%s could not be opened", name)
+	}
+	defer file.Close()
+	limited, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil {
+		log.Fatalf("%s could not be read", name)
+	}
+	secret := strings.TrimSpace(string(limited))
+	if len(limited) > 4096 || len(secret) < 32 || strings.ContainsAny(secret, "\r\n\x00") {
+		log.Fatalf("%s must contain one secret of 32 to 4096 bytes", name)
+	}
+	return secret
 }
 
 func systemProbes() []portal.SystemProbe {

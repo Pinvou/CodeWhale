@@ -87,6 +87,7 @@ oidc:
   tokenUrl: ""
   audience: pinvou-desktop
   portalClientId: pinvou-token-portal
+  portalHandoffClientId: pinvou-token-portal-handoff
 
 public:
   portalUrl: https://tokens.example.invalid

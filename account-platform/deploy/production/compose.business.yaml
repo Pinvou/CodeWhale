@@ -324,6 +324,9 @@ services:
       PORTAL_OIDC_TOKEN_URL: "https://keycloak:8443/realms/pinvou/protocol/openid-connect/token"
       PORTAL_PRIVATE_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
       PORTAL_OIDC_CLIENT_ID: "pinvou-token-portal"
+      PORTAL_HANDOFF_OIDC_CLIENT_ID: "pinvou-token-portal-handoff"
+      PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE: "/var/run/secrets/pinvou/portal-handoff/client-secret"
+      PORTAL_SESSION_HANDOFF: "true"
       REDIS_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
       ACCOUNT_HTTP_URL: "http://account-service:8080"
       BILLING_HTTP_URL: "http://billing-service:8080"
@@ -340,6 +343,11 @@ services:
       PORTAL_ADMIN_TOKEN_DETAILS_ENABLED: "true"
       PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED: "true"
     volumes:
+      - type: bind
+        source: "${TOKEN_PORTAL_HANDOFF_OIDC_DIRECTORY:?set verified TOKEN_PORTAL_HANDOFF_OIDC_DIRECTORY}"
+        target: /var/run/secrets/pinvou/portal-handoff
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
         target: /var/run/secrets/pinvou/trust

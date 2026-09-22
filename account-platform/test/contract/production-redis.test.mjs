@@ -39,6 +39,7 @@ test('Redis ACL is closed by default and never grants shared-cache enumeration o
   }
   assert.doesNotMatch(accounts, /\+scan|\+keys|~\*/);
   assert.match(accounts, /user portal .*~portal:approval-wire:\*/);
+  assert.match(accounts, /user portal .*~portal:session-handoff:\*/);
   assert.match(accounts, /~portal:flow:\*/);
   assert.match(accounts, /~pinvou:auth-admission:\*/);
   assert.match(model, /\+scan/);

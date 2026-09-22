@@ -161,11 +161,13 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - `KEYCLOAK_PROVISIONER_CLIENT_ID`
 - `KEYCLOAK_PROVISIONER_CLIENT_SECRET`
 - 各服务的 `OIDC_ISSUER`、`OIDC_JWKS_URL`、`OIDC_AUDIENCE`
-- Portal 的 `PORTAL_PUBLIC_URL`、`PORTAL_OIDC_AUTHORIZATION_URL`、`PORTAL_OIDC_TOKEN_URL`、`PORTAL_PRIVATE_CA_FILE`、`PORTAL_OIDC_CLIENT_ID`
+- Portal 的 `PORTAL_PUBLIC_URL`、`PORTAL_OIDC_AUTHORIZATION_URL`、`PORTAL_OIDC_TOKEN_URL`、`PORTAL_PRIVATE_CA_FILE`、`PORTAL_OIDC_CLIENT_ID`、`PORTAL_SESSION_HANDOFF`
+- 会话交接专用的 `PORTAL_HANDOFF_OIDC_CLIENT_ID` 与 `PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE`；Secret 文件只读挂载，不允许放入镜像、Compose 明文环境或日志
 
 `OIDC_ISSUER` 必须与外部 Token 中的 issuer 完全一致；容器访问 JWKS 可使用内部 URL，但不能改变验证的 issuer。
 Portal 的浏览器授权地址使用公开 issuer；服务端授权码交换使用 Keycloak 内部 HTTPS 服务名，并由
 `PORTAL_PRIVATE_CA_FILE` 在 Portal 专用 HTTP 客户端中扩展系统信任。不得把授权码交换发送到只允许密码和刷新令牌的公网风控入口。
+`PORTAL_SESSION_HANDOFF=true` 仅在用户 Realm 已创建独立 confidential 客户端 `pinvou-token-portal-handoff`、仅为该客户端开启标准 Token Exchange、桌面令牌显式包含该客户端 audience、普通 Portal 与 Credential Portal 均保持 Token Exchange 关闭，并且 Portal Redis ACL 精确包含 `portal:session-handoff:*` 后启用。Compose 从独立只读目录挂载 client secret；Helm 从 `global.runtimeSecret` 的 `portal-handoff-oidc-client-secret` 键投射文件。交接只交换短时 access token，不请求或保存 refresh token；Portal Cookie 会话不得超过交换 token 的剩余有效期。交接票据固定为单次消费且最长 60 秒，生产配置使用 30 秒。
 
 ### 6.3 手机认证
 

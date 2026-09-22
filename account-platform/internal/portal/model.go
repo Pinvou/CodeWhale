@@ -10,6 +10,11 @@ type LoginFlow struct {
 	ExpiresAt       time.Time `json:"expires_at"`
 }
 
+type SessionHandoff struct {
+	Session   Session   `json:"session"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type Session struct {
 	ID               string    `json:"id"`
 	AccessToken      string    `json:"access_token"`
@@ -18,6 +23,7 @@ type Session struct {
 	RefreshExpiresAt time.Time `json:"refresh_expires_at"`
 	CSRFToken        string    `json:"csrf_token"`
 	CreatedAt        time.Time `json:"created_at"`
+	OIDCClientID     string    `json:"oidc_client_id,omitempty"`
 	// Absent on pre-upgrade sessions: those always remain on approval wire v1.
 	ApprovalV2Eligible bool `json:"approval_v2_eligible,omitempty"`
 }

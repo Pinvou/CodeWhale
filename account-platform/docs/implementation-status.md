@@ -495,7 +495,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | ID-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Keycloak 自定义 Direct Grant 调用 Account 内部核验接口；仅中国大陆手机号。 |
 | ID-11 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 已知/未知手机号都创建挑战并在同一最小耗时桶返回 `202`；已知账号异步投递、未知账号不发送，供应商故障不改变外部响应；手机号、来源和设备摘要共同限流并审计 |
 | ID-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Refresh Token 仅存系统凭据库，启动时刷新。 |
-| ID-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 失败路径删除持久化 Refresh Token，不回退历史缓存。 |
+| ID-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 登出或 Identity Provider 明确返回 Refresh Token 失效时删除持久化凭据；超时、网络、5xx、配置和无效响应保留凭据并返回明确错误，不回退历史 Access Token，也不伪装成未登录。 |
 | ID-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 注册阶段持久恢复，先按操作关联查询 Identity 再幂等创建；Account 不即时删除已验证身份，成功提交即返回可登录的 `PROVISIONING` |
 | ID-16 | 非当前范围 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
 | ACC-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Account 仅依赖服务鉴权的 Identity HTTP 端口及不透明密码引用；Keycloak Token、管理 URL、客户端密钥、用户创建/删除协议均只存在于独立 Identity Adapter |
@@ -576,7 +576,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |
 | UI-07 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT | NOT_DEPLOYED | 桌面与 Web 共用服务端活动上下文；客户端只接受递增版本，收到更高版本、窗口聚焦或切换成功即中止旧请求、清空上下文资源并重新读取。 |
 | UI-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 桌面与 Portal 三语展示总可用、BASE/BONUS、来源、各组成余额、到期提醒及确定消费顺序，并明确 BONUS 零现金退款和普通退款关联撤销规则 |
-| UI-09 | 已实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH; ACCOUNT-DOMAIN-UAT-20260825 | NOT_DEPLOYED | 登录后的账号 Popover 提供三语 Web 个人中心入口；专用 Tauri 命令只打开配置的 HTTPS/loopback Portal 根地址，不接受 WebView URL 或在 URL 中携带 Token。`https://account.pinvou.com/` 已发布，但桌面签名制品安装仍待验收 |
+| UI-09 | 已实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH; ACCOUNT-DOMAIN-UAT-20260825 | NOT_DEPLOYED | 登录后的账号 Popover 提供三语 Web 个人中心入口；专用 Tauri 命令只打开配置的 HTTPS/loopback Portal 固定交接路径及 Fragment 中的 30 秒单次不透明票据，不接受 WebView URL，Access/Refresh Token 不进入 URL。Portal 服务端预校验桌面主体，以独立 confidential client 交换不含 Refresh Token 的短时 Token，并建立不超过其有效期的 HttpOnly 会话。`https://account.pinvou.com/` 已发布，但桌面签名制品安装仍待验收。 |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36; ACCOUNT-PLATFORM-STATE; UI-BUILD | NOT_DEPLOYED | Web 个人中心以模态弹窗展示新建或主动恢复订单的二维码，套餐区只列出 `CREATED/PENDING + OPEN + 未超期` 订单并在状态失效时立即移除。 |
 | UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA; PERSONAL-CENTER-IA | NOT_DEPLOYED | Web 切换到目标组织后，仅在具备适用读取权限时显示“我的组织”，并按原子权限分别提供购买、额度分配/撤回、成员、节点和模型策略；额度与用量、账号设置不再承载组织管理动作。 |
 | UI-12 | 已实现 | AUDIT_HEAD | TARGETED-REFUND; REFUND-PRODUCT-GATE; DESKTOP-39 | NOT_DEPLOYED | 用户端不含新建普通退款入口；运营端显式同时消费 `normal_refund_creation_enabled` 与 `refund_supported`，Provider capability 单独变化不能解除产品屏蔽 |
@@ -638,7 +638,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 已实现 | 组成级 API 与三语 UI 已展示 BASE/BONUS、总可用、来源、确定消费顺序和到期提醒；人工赠送为独立 30 天 BONUS |
 | CR-09 | SCOPE-04–SCOPE-06, TOK-15, TOK-35–TOK-37, NFR-20 | 删除旧模型路径及兼容代码，全量迁移到账号平台 + Token Gateway | 部分实现 | 客户端范围内的旧路径删除、数据/凭据迁移、动态目录、非计费 readiness 和三层门禁已实现；正式签名制品升级矩阵、原子回滚和生产联调待外部验收 |
 | CR-10 | ACC-13, ACC-59–ACC-64, BILL-46, TOK-49, UI-22, ADM-05–ADM-07, ADM-45–ADM-49 | 基于当前全部能力重新设计角色系统 | 已实现 | 采用个人、系统、组织三类人类权限，角色只由精确权限集合构成；对象作用域、独立版本、策略审批、受信恢复、工作负载委托、权限驱动界面及全敏感入口发布门禁均默认拒绝并已实现。 |
-| CR-11 | UI-09 | 品悟应用内个人中心提供 Web 个人中心入口 | 已实现 | 桌面账号弹层通过专用命令打开受信配置的 Portal 根地址；WebView 不能注入任意 URL，OIDC Token 不进入 URL |
+| CR-11 | UI-09 | 品悟应用内个人中心提供 Web 个人中心入口 | 已实现 | 桌面账号弹层通过专用命令打开受信 Portal 固定交接路径；Access/Refresh Token 不进入 URL，Fragment 仅携带 30 秒单次消费的不透明票据。原始票据不落库，Redis 仅以摘要作 key，value 保存含 access-only Session 的短期交接记录；确定失效才进入强制浏览器登录，瞬时故障不清凭据。 |
 | CR-12 | UI-10, PAY-07, PAY-08 | Web 个人中心提供充值入口 | 已实现、需保留 | 当前个人活动上下文的“额度”页已经支持套餐选择、待支付订单列表、二维码弹窗和到账查询；后续 UI/角色重构不得删除 |
 | CR-13 | ID-08, NFR-14 | 短信业务流程与供应商实现隔离 | 已实现 | 启动工厂按配置注入供应商托管或平台生成/通用 HTTP 发送 Adapter；业务状态机无厂商条件并持久化 Provider ID、Adapter 版本和不透明校验数据，见 `sms-verification-provider-design.md` |
 | CR-14 | TOK-05, NFR-18 | 模型网关与 New API 具体实现隔离 | 已实现 | Token Gateway 领域、数据库、公开 API 和管理 UI 统一使用 `provider_id`、`adapter_version`、`upstream_request_id` 和 `UsageEvidenceProvider`；New API 请求头、日志接口及用量字段只存在于对应 Adapter，配置可切换通用 OpenAI 兼容 Adapter |
@@ -704,7 +704,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 - 首个超级管理员初始化不再创建可直接登录的短密码：ADM-01 只允许受控交互式直接设密或高熵一次性引导，admin 在原子完成正式密码设置前保持 BOOTSTRAP_PENDING；凭据失败、读取、兑换、过期和重新签发都必须可审计且不可恢复明文。
 - 删除旧路径采用客户端一次性幂等数据迁移和明确切换，不保留长期运行时兼容分支；实现改动不得越过品悟客户端及其直接相关文件边界。
 - Web 个人充值只增加个人钱包额度；具备组织采购权限的企业管理员可以在组织上下文显式购买组织权益。付款人、订单所有者和权益受益组织必须明确保存，不能把个人充值静默记入组织钱包。
-- 桌面打开 Web 个人中心时只传递目标页面，不在 URL、查询参数、Fragment 或浏览器命令中传递 Access/Refresh Token；浏览器使用自己的 Portal OIDC 会话，未登录时进入正常 Web 登录流程。
+- 桌面打开 Web 个人中心时不在 URL、查询参数、Fragment 或浏览器命令中传递 Access/Refresh Token。桌面已登录时由 Portal 使用桌面 Access Token 完成身份校验，并以独立 confidential handoff client 的 Secret 完成标准 Token Exchange，将独立短时 access token 封装进服务端单次交接记录；不请求或保存 refresh token，Cookie 会话不得超过交换 token 的有效期。普通 Portal、Credential Portal 和未持有 Secret 的调用方不能冒用该交换身份。浏览器 Fragment 只携带 384-bit 不透明票据，消费后设置 Portal HttpOnly Cookie。桌面未登录或持久会话确定失效时进入强制身份登录；瞬时网络、凭据库或服务故障保持明确失败，不伪装成未登录。
 - 注册、登录、改手机号和找回密码只依赖统一验证码挑战服务，不识别阿里云 Action、签名、模板 CODE 或响应字段。更换短信方案不得修改这些业务流程、公开 API 或 Keycloak 手机登录协议。
 - “删除旧模型路径”不仅是关闭功能开关：桌面持久化模型中不得继续保存 New API 用户 ID、Token ID、后台密码或 API Key，也不得在账号平台不可用时回退到旧 New API 用户开通和设备账号流程。
 - 模型调用领域只认识上游模型网关、上游请求关联和用量证据；`X-Oneapi-Request-Id`、`New-Api-User`、New API 日志查询参数及其错误文本必须由 New API Adapter 转换为统一模型。
@@ -759,7 +759,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | ID-10 | 手机号 + 短信验证码登录 | 已实现 | Keycloak 自定义 Direct Grant 调用 Account 内部核验接口；仅中国大陆手机号。 |
 | ID-11 | 短信反枚举 | 已实现 | 已知/未知手机号使用相同 `202` 响应和最小耗时桶；登录短信异步投递使供应商状态不泄露账号存在性，并按手机号、来源、设备摘要限流审计。 |
 | ID-12 | 登录成功后下次启动自动登录 | 已实现 | Refresh Token 仅存系统凭据库，启动时刷新。 |
-| ID-13 | 登出、刷新失败或凭据错误后停止自动登录 | 已实现 | 失败路径删除持久化 Refresh Token，不回退历史缓存。 |
+| ID-13 | 登出或 Refresh Token 确定失效后停止自动登录 | 已实现 | 登出或 `invalid_grant` 删除持久化 Refresh Token；瞬时网络、5xx、配置及无效响应保留凭据并明确报错，不回退历史 Access Token。 |
 | ID-14 | 注册不留下不可登录的半成品账号 | 已实现 | 服务端注册操作持久记录阶段，按外部关联恢复 Identity 并幂等提交 Account；成功即返回可登录的 `PROVISIONING`，钱包故障不删除身份。 |
 | ID-16 | 除密码/短信外的 MFA 和账号申诉 | 非当前范围 | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
 | ID-17 | 密码只在 Identity 边界处理 | 已实现 | 独立 Identity Adapter 持有原始密码、冻结策略版本和短期带密钥 HMAC；Account/短信接口仅接收不透明引用，最终创建后清除原文、到期删除记录。 |
@@ -975,7 +975,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | UI-06 | 个人中心只展示活动上下文额度 | 已实现 | 上下文切换和跨端刷新会先清空旧余额、权益、订单与用量；个人/组织数据按新的服务端活动上下文重新加载。 |
 | UI-07 | 跨端活动上下文同步 | 已实现 | Web 响应头和桌面 Tauri 响应都传递 context_version；更高版本、聚焦及切换成功都会终止旧请求并刷新。 |
 | UI-08 | 权益包、到期与退款说明 | 已实现 | 桌面与 Portal 三语展示总可用、BASE/BONUS 分项、来源、消费顺序和到期提醒，并明确 BONUS 零现金退款及普通退款关联撤销。 |
-| UI-09 | 桌面跳转 Web 个人中心 | 已实现 | 登录后的账号 Popover 通过专用命令打开固定 `https://account.pinvou.com/`，不接受任意外链且不携带 Token；旧官网路径未保留。 |
+| UI-09 | 桌面跳转 Web 个人中心 | 已实现 | 登录后的账号 Popover 通过专用命令打开固定 `https://account.pinvou.com/portal-session-handoff`，Fragment 仅携带 30 秒单次不透明票据，不接受任意外链且不携带 Access/Refresh Token；Portal 服务端预校验并交换独立短时会话，旧官网路径未保留。 |
 | UI-10 | Web 个人充值入口 | 已实现 | 新订单二维码使用弹窗；套餐区列出仍可付款订单，支付完成、超时或其他不可付款状态立即移除。 |
 | UI-11 | Web 我的组织管理入口 | 已实现 | 活动组织的购买、额度、成员、节点和模型策略集中在“我的组织”，各区块按既有原子权限独立显示和加载；额度页只读，账号设置保持个人账号职责。 |
 | UI-12 | 退款入口屏蔽与支付能力降级展示 | 已实现 | 用户端无新建入口；运营动作同时要求独立产品门禁和 Provider 退款能力，所有交付配置默认关闭，未来 Provider 声明能力也不会自动展示。 |

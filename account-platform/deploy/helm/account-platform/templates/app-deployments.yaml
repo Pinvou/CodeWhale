@@ -255,6 +255,9 @@ spec:
             - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ printf "%s/realms/pinvou/protocol/openid-connect/auth" $root.Values.keycloak.hostname | quote }} }
             - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
             - { name: PORTAL_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalClientId | quote }} }
+            - { name: PORTAL_HANDOFF_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalHandoffClientId | quote }} }
+            - { name: PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE, value: /var/run/secrets/pinvou/portal-handoff/client-secret }
+            - { name: PORTAL_SESSION_HANDOFF, value: "true" }
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
@@ -270,6 +273,8 @@ spec:
             {{- end }}
             {{- if ne $app.name "token-portal" }}
             - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
+            {{- else }}
+            - { name: portal-handoff-oidc, mountPath: /var/run/secrets/pinvou/portal-handoff, readOnly: true }
             {{- end }}
             {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
             - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
@@ -287,6 +292,11 @@ spec:
           projected:
             sources:
               - serviceAccountToken: { path: token, audience: {{ $root.Values.workloadIdentity.audience | quote }}, expirationSeconds: {{ $root.Values.workloadIdentity.tokenExpirationSeconds }} }
+        {{- else }}
+        - name: portal-handoff-oidc
+          secret:
+            secretName: {{ $root.Values.global.runtimeSecret }}
+            items: [{ key: portal-handoff-oidc-client-secret, path: client-secret }]
         {{- end }}
         {{- if eq $app.name "billing-service" }}
         - name: nats-credentials

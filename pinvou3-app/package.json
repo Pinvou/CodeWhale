@@ -10,7 +10,7 @@
     "serve:src": "vite",
     "build:ui": "vite build",
     "build:web": "vite build --mode web",
-    "build:account-portal": "node ../scripts/build-credential-handoff.mjs && vite build --mode account-portal && node ../scripts/build-credential-handoff.mjs --check-deployment",
+    "build:account-portal": "node ../scripts/build-portal-session-handoff-i18n.mjs && node ../scripts/build-credential-handoff.mjs && vite build --mode account-portal && node ../scripts/build-credential-handoff.mjs --check-deployment",
     "audit:compat": "node scripts/audit-compat.mjs",
     "prepare:codex-bridge": "node scripts/tauri/codex-bridge.js",
     "lint:ui": "eslint src/app src/components src/features src/hooks src/platform src/shared",

@@ -17,8 +17,10 @@ pub async fn account_platform_session(
 }
 
 #[tauri::command]
-pub fn account_platform_open_portal() -> Result<(), String> {
-    crate::features::account_platform::open_account_portal()
+pub async fn account_platform_open_portal(
+    state: State<'_, AccountPlatformState>,
+) -> Result<(), String> {
+    state.open_portal().await
 }
 
 #[tauri::command]

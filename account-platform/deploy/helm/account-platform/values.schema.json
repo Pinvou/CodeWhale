@@ -64,13 +64,14 @@
     },
     "oidc": {
       "type": "object",
-      "required": ["issuer", "jwksUrl", "tokenUrl", "audience", "portalClientId"],
+      "required": ["issuer", "jwksUrl", "tokenUrl", "audience", "portalClientId", "portalHandoffClientId"],
       "properties": {
         "issuer": { "type": "string", "format": "uri" },
         "jwksUrl": { "type": "string" },
         "tokenUrl": { "type": "string" },
         "audience": { "type": "string", "minLength": 1 },
-        "portalClientId": { "type": "string", "minLength": 1 }
+        "portalClientId": { "type": "string", "minLength": 1 },
+        "portalHandoffClientId": { "type": "string", "minLength": 1, "not": { "const": "pinvou-token-portal" } }
       }
     },
     "public": {

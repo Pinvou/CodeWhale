@@ -131,9 +131,16 @@ test('Portal keeps browser authorization public but exchanges codes over private
   assert.equal(environment.PORTAL_OIDC_AUTHORIZATION_URL, 'https://account.pinvou.com/realms/pinvou/protocol/openid-connect/auth');
   assert.equal(environment.PORTAL_OIDC_TOKEN_URL, 'https://keycloak:8443/realms/pinvou/protocol/openid-connect/token');
   assert.equal(environment.PORTAL_PRIVATE_CA_FILE, '/var/run/secrets/pinvou/trust/ca.crt');
+  assert.equal(environment.PORTAL_SESSION_HANDOFF, 'true');
+  assert.equal(environment.PORTAL_HANDOFF_OIDC_CLIENT_ID, 'pinvou-token-portal-handoff');
+  assert.equal(environment.PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE, '/var/run/secrets/pinvou/portal-handoff/client-secret');
+  assert.notEqual(environment.PORTAL_HANDOFF_OIDC_CLIENT_ID, environment.PORTAL_OIDC_CLIENT_ID);
+  assert.ok(config.services['token-portal'].volumes.some(volume => volume.target === '/var/run/secrets/pinvou/portal-handoff' && volume.read_only));
   assert.notEqual(environment.PORTAL_OIDC_TOKEN_URL, environment.PORTAL_OIDC_AUTHORIZATION_URL.replace(/\/auth$/, '/token'));
   rejects(c => { c.services['token-portal'].environment.PORTAL_OIDC_TOKEN_URL = 'https://account.pinvou.com/realms/pinvou/protocol/openid-connect/token'; });
   rejects(c => { delete c.services['token-portal'].environment.PORTAL_PRIVATE_CA_FILE; });
+  rejects(c => { c.services['token-portal'].environment.PORTAL_HANDOFF_OIDC_CLIENT_ID = c.services['token-portal'].environment.PORTAL_OIDC_CLIENT_ID; });
+  rejects(c => { delete c.services['token-portal'].volumes.find(volume => volume.target.endsWith('/portal-handoff')).read_only; });
 });
 test('production business rejects tool auto-start or modified command', () => {
   rejects(c => { delete c.services['event-resources'].profiles; });

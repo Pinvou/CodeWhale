@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { accountPlatformCopy } from '../pinvou3-app/src/shared/account-platform-i18n.js';
 import { adminPlatformCopy } from '../pinvou3-app/src/shared/admin-platform-i18n.js';
 import { supportedLocales } from '../pinvou3-app/src/shared/supported-locales.js';
+import { portalSessionHandoffCopy } from '../account-platform/internal/portal/static/assets/portal-session-handoff-i18n.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const portalAssets = path.join(repositoryRoot, 'account-platform', 'internal', 'portal', 'static', 'assets');
@@ -17,6 +18,8 @@ const userInterfaceSources = [
   'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx',
   'pinvou3-app/src/app/account-main.jsx',
   'pinvou3-app/src/app/admin-main.jsx',
+  'account-platform/internal/portal/static/portal-session-handoff.html',
+  'account-platform/internal/portal/static/portal-session-handoff.js',
 ];
 
 function kind(value) {
@@ -142,6 +145,10 @@ export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
     ['admin', adminPlatformCopy],
   ];
   const validated = catalogs.map(([name, catalog]) => [name, validateCatalog(name, catalog)]);
+  const expectedHandoffCopy = Object.fromEntries(supportedLocales.map(locale => [locale, accountPlatformCopy[locale].sessionHandoff]));
+  if (JSON.stringify(portalSessionHandoffCopy) !== JSON.stringify(expectedHandoffCopy)) {
+    throw new Error('i18n_handoff_artifact_mismatch');
+  }
   await validateIdentityTheme();
   for (const relative of userInterfaceSources) {
     validateUserInterfaceSource(relative, await readFile(path.join(repositoryRoot, relative), 'utf8'));

@@ -195,10 +195,12 @@ Compose environment 明确设置全部非秘密运行选项；缺失真实身份
 | 每个 broker 自己的种子目录 | `/var/run/secrets/pinvou/nats` | `nkey.seed`，0600；Billing、Executor、三 Relay 与显式资源工具；对应已验收六身份 |
 | 独立公开 NATS CA 目录 | `/var/run/secrets/pinvou/nats-ca` | `ca.crt`，0600；仅上述六消费者，与种子来源不重叠 |
 | Identity provisioner 目录 | `/var/run/secrets/pinvou/provisioner` | `client-secret`，0600；仅 Identity，独立于 workload |
+| Portal handoff OIDC 目录 | `/var/run/secrets/pinvou/portal-handoff` | `client-secret`，0600；仅 Portal，值必须与 Keycloak 独立 confidential 客户端 `pinvou-token-portal-handoff` 的当前 Secret 完全一致 |
 | Gateway/Credential 各自 KMS sink 目录 | `/var/run/secrets/pinvou/kms` | `token`，0600；两者来源互异，保持既有 Agent 轮换 |
 | 独立公开 KMS CA 目录 | `/var/run/secrets/pinvou/kms-ca` | `ca.crt`，0600；仅 Gateway/Credential |
 
 各秘密目录 0700，禁止软链与共享祖先挂载；CA 目录也不包含叶私钥、恢复包或其他秘密。
+Portal handoff Secret 轮换必须作为同一个受控变更：在 Keycloak 为 `pinvou-token-portal-handoff` 生成新 Secret，立即以 root 持有的原子文件替换（Compose）或更新 `global.runtimeSecret` 的 `portal-handoff-oidc-client-secret` 键（Helm），随后滚动重启 Portal 并执行真实 handoff 探针；不得把 Secret 写入环境、镜像、命令行、日志或报告。轮换窗口内不一致必须表现为 `SESSION_HANDOFF_UNAVAILABLE`，不得降级成强制登录。
 PGPASSFILE 指向固定目标文件；每条 DSN 无密码、固定对应库与精确角色、verify-full 及上述公开 CA。
 治理工具的两条连接分别指向 Token 库与 Account 库，不把同一个 URL 冒充两个领域。
 Account 连接必须提供 `ACCOUNT_POLICY_RELEASE_ROLE`，使用已验证的专用受限 `account_policy_release_` 运维

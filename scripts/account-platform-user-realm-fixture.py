@@ -98,6 +98,9 @@ def verify(repository, kc, network_name, issuer_files, admin):
         for key in ('publicClient', 'serviceAccountsEnabled', 'standardFlowEnabled', 'directAccessGrantsEnabled',
                     'implicitFlowEnabled', 'fullScopeAllowed', 'redirectUris', 'webOrigins'):
             require(actual[key] == desired[key], 'USER_REALM_CLIENT_GRANT_OR_CALLBACK_MISMATCH')
+        if desired['clientId'] == generator.HANDOFF:
+            require(actual.get('clientAuthenticatorType') == 'client-secret',
+                    'USER_HANDOFF_CLIENT_AUTHENTICATOR_MISMATCH')
         for key in ('defaultClientScopes', 'optionalClientScopes'):
             if set(actual.get(key, [])) != set(desired[key]):
                 print('USER_SCOPE_CLIENT=' + desired['clientId'] + ' FIELD=' + key
@@ -105,15 +108,10 @@ def verify(repository, kc, network_name, issuer_files, admin):
                       + ' EXPECTED=' + ','.join(sorted(desired[key])), flush=True)
             require(set(actual.get(key, [])) == set(desired[key]), 'USER_REALM_CLIENT_SCOPE_MISMATCH')
         require(all(actual['attributes'].get(k) == v for k, v in desired['attributes'].items()), 'USER_REALM_CLIENT_ATTRIBUTE_MISMATCH')
-        audience = [m for m in actual['protocolMappers'] if m['protocolMapper'] == 'oidc-audience-mapper']
-        if len(audience) == 1 and audience[0]['config'] != desired['protocolMappers'][0]['config']:
-            # Configuration keys only; never output a client representation.
-            expected_map = desired['protocolMappers'][0]['config']
-            for key in sorted(set(audience[0]['config']) | set(expected_map)):
-                print('USER_AUDIENCE_CONFIG_KEY=' + key + ' EXPECTED_PRESENT=' + str(key in expected_map)
-                      + ' ACTUAL_PRESENT=' + str(key in audience[0]['config'])
-                      + ' MATCH=' + str(audience[0]['config'].get(key) == expected_map.get(key)), flush=True)
-        require(len(audience) == 1 and audience[0]['config'] == desired['protocolMappers'][0]['config'],
+        audience = [m['config'] for m in actual['protocolMappers'] if m['protocolMapper'] == 'oidc-audience-mapper']
+        expected_audience = [m['config'] for m in desired['protocolMappers'] if m['protocolMapper'] == 'oidc-audience-mapper']
+        require(sorted(audience, key=lambda item: item['included.custom.audience'])
+                == sorted(expected_audience, key=lambda item: item['included.custom.audience']),
                 'USER_REALM_AUDIENCE_MAPPER_MISMATCH')
     actual_realm = request('GET', path, token=token)
     require(actual_realm['browserFlow'] == 'pinvou-browser'
@@ -188,7 +186,77 @@ def verify(repository, kc, network_name, issuer_files, admin):
         refusal = request('POST', endpoint, form, form=True, expected=(400,))
         require(refusal.get('error') == error and refusal.get('error_description') == description,
                 'USER_PROVISIONER_GRANT_NOT_PRECISELY_REJECTED')
-    for client in (generator.PORTAL, generator.CREDENTIAL):
+    # The handoff client is a dedicated confidential identity. Desktop tokens
+    # explicitly include its audience for claim-shape validation. Keycloak's
+    # standard exchange does not use subject audience as an authorization
+    # boundary, so the Portal must validate /v1/me before using this secret.
+    handoff_id = by_name[generator.HANDOFF]['id']
+    handoff_secret = request('GET', path + '/clients/' + handoff_id + '/client-secret', token=token)['value']
+    request('PUT', target, {**updated, 'enabled': True}, access, expected=(204,))
+    # The production mobile direct-grant SPI depends on the separate Identity
+    # service. This isolated Keycloak fixture temporarily selects Keycloak's
+    # built-in password flow only to mint a real user token for the unchanged
+    # desktop client, then immediately restores the production flow.
+    request('PUT', path, {'directGrantFlow': 'direct grant'}, token, expected=(204,))
+    desktop_tokens = request('POST', endpoint, {'grant_type': 'password', 'client_id': generator.DESKTOP,
+                                                'username': updated['username'], 'password': password,
+                                                'scope': 'openid profile email offline_access'}, form=True)
+    request('PUT', path, {'directGrantFlow': 'pinvou-mobile-direct-grant'}, token, expected=(204,))
+    desktop_access = desktop_tokens['access_token']
+    desktop_part = desktop_access.split('.')[1]
+    desktop_claims = json.loads(base64.urlsafe_b64decode(desktop_part + '=' * (-len(desktop_part) % 4)))
+    desktop_audience = desktop_claims.get('aud', [])
+    if isinstance(desktop_audience, str):
+        desktop_audience = [desktop_audience]
+    require(generator.DESKTOP in desktop_audience and generator.HANDOFF in desktop_audience,
+            'USER_DESKTOP_HANDOFF_AUDIENCE_MISSING')
+    exchange_form = {
+        'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+        'subject_token': desktop_access,
+        'subject_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+        'scope': 'openid',
+    }
+    unauthenticated = request('POST', endpoint, {'client_id': generator.HANDOFF, **exchange_form},
+                              form=True, expected=(401,))
+    require(unauthenticated.get('error') in ('invalid_client', 'unauthorized_client'),
+            'USER_HANDOFF_CLIENT_ACCEPTED_WITHOUT_SECRET')
+    wrong_secret = request('POST', endpoint, {'client_id': generator.HANDOFF, 'client_secret': 'wrong', **exchange_form},
+                           form=True, expected=(401,))
+    require(wrong_secret.get('error') in ('invalid_client', 'unauthorized_client'),
+            'USER_HANDOFF_CLIENT_ACCEPTED_WRONG_SECRET')
+    unauthenticated_workload = request('POST', endpoint, {'client_id': generator.HANDOFF,
+                                                         **{**exchange_form, 'subject_token': access}},
+                                       form=True, expected=(401,))
+    require(unauthenticated_workload.get('error') in ('invalid_client', 'unauthorized_client'),
+            'USER_PROVISIONER_BORROWED_HANDOFF_IDENTITY')
+    portal_exchange = request('POST', endpoint, {'client_id': generator.HANDOFF,
+                                                 'client_secret': handoff_secret, **exchange_form},
+                              form=True, expected=(200, 400))
+    if portal_exchange.get('error'):
+        description = portal_exchange.get('error_description', '').lower()
+        categories = [marker for marker in ('audience', 'requested token type', 'scope', 'not allowed',
+                                             'subject token', 'refresh token') if marker in description]
+        print('USER_HANDOFF_EXCHANGE_ERROR=' + portal_exchange.get('error', 'unknown')
+              + ' CATEGORY=' + ','.join(categories)
+              + ' DESCRIPTION=' + description[:240].replace('\n', ' '), flush=True)
+    require(portal_exchange.get('access_token') and not portal_exchange.get('refresh_token')
+            and portal_exchange.get('token_type') == 'Bearer', 'USER_PORTAL_TOKEN_EXCHANGE_FAILED')
+    exchanged_part = portal_exchange['access_token'].split('.')[1]
+    exchanged_claims = json.loads(base64.urlsafe_b64decode(exchanged_part + '=' * (-len(exchanged_part) % 4)))
+    exchanged_audience = exchanged_claims.get('aud', [])
+    if isinstance(exchanged_audience, str):
+        exchanged_audience = [exchanged_audience]
+    require(exchanged_claims.get('azp') == generator.HANDOFF and generator.DESKTOP in exchanged_audience
+            and exchanged_claims.get('sub') == desktop_claims.get('sub'),
+            'USER_PORTAL_TOKEN_EXCHANGE_CLIENT_MISMATCH')
+    for public_client in (generator.PORTAL, generator.CREDENTIAL):
+        public_exchange = request('POST', endpoint, {'client_id': public_client, **exchange_form},
+                                  form=True, expected=(400,))
+        require(public_exchange.get('error') == 'invalid_request'
+                and public_exchange.get('error_description') == 'Standard token exchange is not enabled for the requested client'
+                and not public_exchange.get('access_token') and not public_exchange.get('refresh_token'),
+                'USER_PUBLIC_PORTAL_TOKEN_EXCHANGE_NOT_REJECTED_' + public_client)
+    for client in (generator.PORTAL, generator.HANDOFF, generator.CREDENTIAL):
         refusal = request('POST', endpoint, {'grant_type': 'password', 'client_id': client,
                                             'username': username, 'password': 'not-a-real-password'}, form=True, expected=(400, 401))
         require(refusal.get('error') == 'unauthorized_client', 'USER_BROWSER_PASSWORD_GRANT_NOT_DISABLED')
@@ -210,6 +278,7 @@ def verify(repository, kc, network_name, issuer_files, admin):
     request('DELETE', target, token=access, expected=(204,))
     request('GET', target, token=access, expected=(404,))
     logs = subprocess.run(['docker', 'logs', kc], capture_output=True, check=True, timeout=15)
-    require(not any(value.encode() in logs.stdout + logs.stderr for value in (admin, secret, access, password)),
+    require(not any(value.encode() in logs.stdout + logs.stderr
+                    for value in (admin, secret, handoff_secret, access, desktop_access, password)),
             'USER_REALM_SECRET_IN_ISSUER_LOGS')
     print('USER_REALM_PROVISIONER_REAL_PERMISSIONS_ESCALATION_DENIED_AND_PKCE_PASS', flush=True)

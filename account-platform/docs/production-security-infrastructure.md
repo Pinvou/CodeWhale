@@ -365,9 +365,9 @@ C3C2A 现场结果（2026-09-08）：生产形态隔离演练完整通过，覆�
    浏览器沿用已有 Cookie 与 Pinvou 浏览器认证器，桌面沿用已有密码/短信 direct-grant 认证器；
    不将禁止 workload 交互式登录的规则误套到真实用户客户端。
 2. B1 客户端分离：`pinvou-desktop` 保留桌面密码/短信登录，不开放未使用的通配回调；
-   `pinvou-token-portal` 仅授权码 + S256，精确回调为账户 origin 的 `/auth/callback`；
+   `pinvou-token-portal` 仅授权码 + S256，精确回调为账户 origin 的 `/auth/callback`；独立 confidential `pinvou-token-portal-handoff` 无回调、无密码/服务账户授权，仅允许经客户端 Secret 认证后的标准 Token Exchange；
    `pinvou-token-credential-portal` 仅授权码 + S256，精确回调为凭据 origin 的 `/oidc/callback`。
-   普通账户/桌面令牌使用既定业务 audience `pinvou-desktop`，凭据令牌只含专用 audience；
+   普通 Portal 令牌保留既定业务 audience `pinvou-desktop`，桌面令牌额外包含 `pinvou-token-portal-handoff` audience 以供受密钥保护的交接客户端使用，凭据令牌只含专用 audience；
    不为凭据客户端开放密码、隐式或服务账号授权，不让普通 Portal 令牌通过凭据验证。
    三客户端不共享秘密；公共 PKCE 客户端不人为添加可回显的静态秘密。
    现有桌面与 Portal 请求 `openid profile email offline_access`，需保留该协议 scope 与可续期会话的兼容性，

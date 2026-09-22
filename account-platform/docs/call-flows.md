@@ -63,10 +63,14 @@ sequenceDiagram
             Rust->>A: POST /v1/account/bootstrap
             A-->>Rust: 用户、个人钱包和上下文
             Rust-->>UI: 已登录业务状态
-        else 刷新失败
-            KC-->>Rust: OAuth 错误
+        else Refresh Token 明确失效
+            KC-->>Rust: invalid_grant
             Rust->>Store: 删除 Refresh Token
             Rust-->>UI: 未登录，不使用历史缓存
+        else 瞬时或依赖故障
+            KC-->>Rust: 超时、网络、5xx、配置或无效响应
+            Rust->>Store: 保留 Refresh Token
+            Rust-->>UI: 返回明确错误，不降级为未登录
         end
     end
 ```
@@ -437,7 +441,7 @@ sequenceDiagram
 1. 发布系统先验证公开兼容范围、OIDC discovery、制品摘要和 TOK-37 短时签名证明；失败时不提升更新渠道。
 2. 更新器复核证明、环境固定公钥、系统包签名和只读迁移预检；任一失败都不调用平台安装器。
 3. 安装后的进程要求迁移报告为完成态且配置可解析；失败只显示稳定修复原因，不访问旧 `llmapi_hub` 或产生计费探测请求。
-4. 登录用户打开 Web 个人中心时只经专用 Rust 命令跳转到受信账号独立域名根路径 `/`，不把 OIDC Token 交给浏览器页面。
+4. 登录用户打开 Web 个人中心时，专用 Rust 命令以桌面 Access Token 向受信 Portal 申请 30 秒单次交接票据；Portal 先经 Account 校验主体，再使用独立 confidential handoff client（仅服务端持有 Secret、仅该客户端开启标准 Token Exchange）交换独立短时 access token。原始票据不落库，Redis 仅以票据摘要作为 key，value 保存短期服务端交接记录（含 access-only Session）。该路径不请求或保存 refresh token，Portal Cookie 会话不得超过交换 token 的有效期。浏览器只打开受信域名固定 `/portal-session-handoff` 入口及 Fragment 中的不透明票据，页面立即清除 Fragment、同源消费票据并设置 HttpOnly Cookie；任何 Access/Refresh Token 都不进入 URL 或浏览器脚本。桌面未登录时使用强制身份登录入口，既能在新浏览器启动登录，也会安全替换已有 Portal 会话。
 
 ## 14. 故障判断速查
 
