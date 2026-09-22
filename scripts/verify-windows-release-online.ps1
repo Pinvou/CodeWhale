@@ -16,6 +16,29 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Some minimal Windows PowerShell 5.1 images omit the hashing cmdlet.
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 try {
     $uri = [System.Uri]::new($Url, [System.UriKind]::Absolute)
 } catch {
@@ -36,7 +59,7 @@ try {
         throw "Online installer size mismatch: expected $ExpectedSize bytes, got $($download.Length) bytes"
     }
 
-    $actualSha256 = (Get-FileHash -LiteralPath $tempFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualSha256 = Get-Sha256Hex -Path $tempFile
     $expected = $ExpectedSha256.ToLowerInvariant()
     if ($actualSha256 -cne $expected) {
         throw "Online installer SHA-256 mismatch: expected $expected, got $actualSha256"

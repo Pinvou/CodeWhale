@@ -49,6 +49,29 @@ function Read-StrictUtf8 {
     return [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false, $true))
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Some minimal Windows PowerShell 5.1 images omit the hashing cmdlet.
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Parse-ReleaseVersion {
     param([Parameter(Mandatory = $true)][string]$Value)
 
@@ -109,7 +132,7 @@ if ($null -ne $currentWindows -and $null -ne $currentWindows.Value.version) {
     }
 }
 
-$hash = (Get-FileHash -LiteralPath $resolvedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+$hash = Get-Sha256Hex -Path $resolvedInstaller
 $normalizedExpectedHash = $ExpectedSha256.ToLowerInvariant()
 if ($hash -cne $normalizedExpectedHash) {
     throw "Signed installer SHA-256 mismatch: expected $normalizedExpectedHash, got $hash"

@@ -259,7 +259,9 @@ fn validate_manifest_asset(manifest: &LatestManifest) -> Result<(), String> {
     if manifest.size == 0 || manifest.size > MAX_DOWNLOAD_BYTES {
         return Err(format!("Linux 更新资产大小无效: {} bytes", manifest.size));
     }
-    super::super::update_client_builder(&manifest.url)?;
+    // Building through the shared factory validates the initial URL and binds
+    // its redirect policy; the download path creates the client it will use.
+    let _validated_builder = super::super::update_client_builder(&manifest.url)?;
     Ok(())
 }
 

@@ -108,9 +108,13 @@ assert.ok(!fs.existsSync(path.join(
 )));
 assert.ok(fs.existsSync(prepareScript));
 assert.ok(fs.existsSync(onlineVerifyScript));
+const prepareScriptSource = fs.readFileSync(prepareScript, 'utf8');
+assert.match(prepareScriptSource, /System\.Security\.Cryptography\.SHA256\]::Create\(\)/);
+assert.doesNotMatch(prepareScriptSource, /\bGet-FileHash\b/);
 const onlineVerifier = fs.readFileSync(onlineVerifyScript, 'utf8');
 assert.match(onlineVerifier, /Invoke-WebRequest/);
-assert.match(onlineVerifier, /Get-FileHash/);
+assert.match(onlineVerifier, /System\.Security\.Cryptography\.SHA256\]::Create\(\)/);
+assert.doesNotMatch(onlineVerifier, /\bGet-FileHash\b/);
 assert.match(onlineVerifier, /Remove-Item -LiteralPath \$tempDirectory -Recurse -Force/);
 
 if (process.platform === 'win32') {
