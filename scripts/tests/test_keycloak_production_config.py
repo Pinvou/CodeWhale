@@ -4,9 +4,16 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / 'account-platform/deploy/production'
+KEYCLOAK_DOCKERFILE = ROOT / 'account-platform/deploy/keycloak/Dockerfile'
 
 
 class KeycloakProductionConfigTests(unittest.TestCase):
+    def test_optimized_image_enables_standard_token_exchange(self):
+        dockerfile = KEYCLOAK_DOCKERFILE.read_text()
+        feature = 'KC_FEATURES=token-exchange-standard:v2'
+        self.assertEqual(dockerfile.count(feature), 2)
+        self.assertIn('RUN /opt/keycloak/bin/kc.sh build', dockerfile)
+
     def test_private_file_configuration_and_no_environment_credentials(self):
         compose = (DEPLOY / 'compose.keycloak.yaml').read_text()
         self.assertIn('"--config-file=/run/pinvou/keycloak-config/keycloak.conf", "start", "--optimized"', compose)
