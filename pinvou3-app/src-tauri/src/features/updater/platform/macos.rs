@@ -148,6 +148,7 @@ pub async fn check_for_update_info(
         update_type: String::new(),
         platform: "macos".to_string(),
         ota_host: String::new(),
+        approval_receipt: String::new(),
         platforms: m.platforms,
     })
 }

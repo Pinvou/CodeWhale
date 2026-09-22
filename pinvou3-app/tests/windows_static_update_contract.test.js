@@ -36,8 +36,31 @@ const onlineVerifyScript = path.join(
 assert.match(windowsUpdater, /latest\.json 尚未发布 \{key\} 更新资产/);
 assert.match(windowsUpdater, /Windows 更新资产 sha256 必须是 64 位十六进制/);
 assert.match(windowsUpdater, /\.create_new\(true\)/);
-assert.match(windowsUpdater, /Start-Process -FilePath .* -Verb RunAs -Wait -PassThru/);
+assert.match(windowsUpdater, /-EncodedCommand','\{encoded_script\}'\) -Verb RunAs/);
+assert.match(windowsUpdater, /\[IO\.FileShare\]::Read/);
+assert.match(windowsUpdater, /installer SHA-256 does not match manifest/);
+assert.match(windowsUpdater, /LocalMachine\.OpenSubKey\('Software\\\\pinvou\\\\pinvou3'/);
+assert.match(windowsUpdater, /GetValue\('InstallLocation'\)/);
+assert.match(windowsUpdater, /static APPROVED_ASSET: Mutex<Option<ApprovedAsset>>/);
+assert.match(windowsUpdater, /approval_receipt/);
+assert.match(windowsUpdater, /mark_approved_downloaded/);
+assert.match(windowsUpdater, /GetSystemDirectoryW/);
+assert.match(windowsUpdater, /Move-Item -LiteralPath \{pending_state\} -Destination \{claimed_state\}/);
+assert.match(windowsUpdater, /marker_payload\(&markers\.started, &markers\.nonce\)/);
+assert.doesNotMatch(windowsUpdater, /HiddenCommand::new\("powershell\.exe"\)/);
+assert.doesNotMatch(windowsUpdater, /Start-Process -FilePath 'msiexec\.exe'/);
+assert.doesNotMatch(windowsUpdater, /Get-AuthenticodeSignature/);
 assert.doesNotMatch(windowsUpdater, /package\/upgrade\/check|OtaInfo\.json|package_md5\.to_ascii_lowercase/);
+const updaterModule = readRepo(
+  'pinvou3-app',
+  'src-tauri',
+  'src',
+  'features',
+  'updater',
+  'mod.rs',
+);
+assert.match(updaterModule, /static UPDATE_OPERATION: tokio::sync::Mutex/);
+assert.match(updaterModule, /DOWNLOAD_CANCEL\.store\(false, Ordering::SeqCst\)/);
 assert.doesNotMatch(platformModule, /mod windows_domain_bootstrap/);
 assert.ok(!fs.existsSync(path.join(
   repoRoot,

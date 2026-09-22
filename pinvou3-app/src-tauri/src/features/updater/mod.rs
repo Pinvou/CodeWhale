@@ -34,6 +34,10 @@ const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 进程级单例：同一时刻只允许一个下载在跑（前端 updateDownloading gate 保证）。
 static DOWNLOAD_CANCEL: AtomicBool = AtomicBool::new(false);
 
+/// 后端更新操作门禁。前端状态只能改善交互，不能作为并发正确性的依据；下载和安装
+/// 共用一个 single-flight，避免两个窗口或重复 invoke 同时改写同一个确定性安装包。
+static UPDATE_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// check_for_update 的返回值；前端原样传回 download_update。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -57,6 +61,10 @@ pub struct UpdateInfo {
     pub platform: String,
     #[serde(default)]
     pub ota_host: String,
+    /// Windows 静态更新由后端为已批准 manifest 资产生成的随机收据。调用方只能原样
+    /// 回传；版本、URL、哈希、大小等字段仍由后端批准记录决定。
+    #[serde(default)]
+    pub approval_receipt: String,
     /// 多平台清单:`{ "macos-universal": PlatformAsset, "linux-arm64": ..., ... }`。
     /// 旧版 latest.json 没这字段 → 空 map → 调用方回退到顶层 url/sha256/size。
     #[serde(default)]
@@ -136,6 +144,9 @@ pub fn build_platform_key() -> String {
 /// 拉 latest.json 与当前版本比较。网络失败返回 Err——启动静默检查由前端吞掉，
 /// 手动检查才展示错误。
 pub async fn check_for_update() -> Result<UpdateInfo, String> {
+    let _operation = UPDATE_OPERATION
+        .try_lock()
+        .map_err(|_| "已有更新检查、下载或安装正在进行".to_string())?;
     let current = env!("CARGO_PKG_VERSION");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -151,6 +162,12 @@ pub async fn download_update(
     info: UpdateInfo,
     app: AppHandle,
 ) -> Result<DownloadUpdateResult, String> {
+    let _operation = UPDATE_OPERATION
+        .try_lock()
+        .map_err(|_| "已有更新下载或安装正在进行".to_string())?;
+    // 必须在拿到 single-flight 后、发起请求前重置。下载实现不得在响应到达后再次
+    // 清零，否则会让等待响应期间发生的取消被晚到响应覆盖。
+    DOWNLOAD_CANCEL.store(false, Ordering::SeqCst);
     platform::download_update_package(&info, app, &DOWNLOAD_CANCEL, DOWNLOAD_STALL_TIMEOUT).await
 }
 
@@ -161,6 +178,9 @@ pub async fn install_update(
     info: Option<UpdateInfo>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let _operation = UPDATE_OPERATION
+        .try_lock()
+        .map_err(|_| "已有更新下载或安装正在进行".to_string())?;
     let exit_after_start = tokio::task::spawn_blocking(move || {
         platform::install_downloaded_update(deb_path, installer_path, info)
     })
