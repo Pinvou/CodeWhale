@@ -350,7 +350,7 @@ function validateStoredDraft(draft) {
   return draft;
 }
 
-async function receiveUpload(request, stagingDir, maxUploadBytes) {
+export async function receiveUpload(request, stagingDir, maxUploadBytes) {
   const temporaryPath = join(stagingDir, `${randomUUID()}.upload`);
   let parser;
   try {
@@ -451,6 +451,9 @@ async function receiveUpload(request, stagingDir, maxUploadBytes) {
     return { fields: safeUploadFields(fields), filename, temporaryPath, size, sha256: hash.digest("hex") };
   } catch (error) {
     await rm(temporaryPath, { force: true });
+    if (aborted || request.aborted) {
+      throw badRequest("upload_aborted", "上传已中断");
+    }
     throw error;
   } finally {
     request.off("aborted", abortHandler);

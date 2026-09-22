@@ -41,6 +41,14 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Text, $encoding)
 }
 
+function Read-StrictUtf8 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Windows PowerShell 5.1 treats no-BOM text as the system ANSI code page.
+    # A throwing UTF-8 decoder accepts no-BOM/BOM UTF-8 and rejects malformed bytes.
+    return [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false, $true))
+}
+
 function Parse-ReleaseVersion {
     param([Parameter(Mandatory = $true)][string]$Value)
 
@@ -72,7 +80,10 @@ if ($installer.Name -cne $expectedFileName) {
 }
 
 $resolvedManifest = (Resolve-Path -LiteralPath $CurrentManifest).Path
-$manifestText = Get-Content -LiteralPath $resolvedManifest -Raw
+$manifestText = Read-StrictUtf8 -Path $resolvedManifest
+if ([string]::IsNullOrWhiteSpace($manifestText)) {
+    throw "Current manifest UTF-8 content is empty: $resolvedManifest"
+}
 try {
     $manifest = $manifestText | ConvertFrom-Json
 } catch {
@@ -151,7 +162,7 @@ $releaseInfo = [pscustomobject][ordered]@{
 Write-Utf8NoBom -Path $manifestOutput -Text (($manifest | ConvertTo-Json -Depth 20) + "`n")
 Write-Utf8NoBom -Path $releaseInfoOutput -Text (($releaseInfo | ConvertTo-Json -Depth 5) + "`n")
 
-$verifyManifest = Get-Content -LiteralPath $manifestOutput -Raw | ConvertFrom-Json
+$verifyManifest = Read-StrictUtf8 -Path $manifestOutput | ConvertFrom-Json
 $verifyEntry = $verifyManifest.platforms.PSObject.Properties['windows-x86_64'].Value
 if ($verifyEntry.version -ne $Version -or $verifyEntry.sha256 -ne $hash -or $verifyEntry.size -ne $installer.Length) {
     throw 'Generated manifest verification failed'

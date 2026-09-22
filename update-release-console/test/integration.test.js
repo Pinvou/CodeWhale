@@ -4,12 +4,32 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAppServer } from "../src/server.js";
+import { AuthFailureLimiter, createAppServer } from "../src/server.js";
 import { ReleaseService } from "../src/release-service.js";
 import { AppError } from "../src/errors.js";
 import { peFixture } from "./pe-fixture.js";
 
 const TOKEN = "test-admin-token-that-is-at-least-32-characters";
+
+test("认证失败限流器具有 TTL 和容量上限", () => {
+  let now = 1_000;
+  const limiter = new AuthFailureLimiter({
+    authFailureLimit: 2,
+    authFailureWindowMs: 1_000,
+    authBlockMs: 2_000,
+    authLimiterTtlMs: 3_000,
+    authLimiterMaxEntries: 2,
+  }, () => now);
+  limiter.recordFailure("192.0.2.1");
+  now += 1;
+  limiter.recordFailure("192.0.2.2");
+  now += 1;
+  limiter.recordFailure("192.0.2.3");
+  assert.ok(limiter.entries.size <= 2);
+  now += 4_000;
+  assert.equal(limiter.retryAfter("192.0.2.3"), 0);
+  assert.equal(limiter.entries.size, 0);
+});
 
 function requestHeaders(extra = {}) {
   return { Authorization: `Bearer ${TOKEN}`, ...extra };
@@ -72,6 +92,7 @@ async function startFixture(t, options = {}) {
     maxUploadBytes: 1024 * 1024,
     onlineVerifyTimeoutMs: 10_000,
     trustedProxies: options.trustedProxies || [],
+    ...(options.config || {}),
   };
   await mkdir(publicRoot, { recursive: true });
   await writeFile(join(publicRoot, "pinvou3_0.10.3_x64-setup.exe"), previousInstaller);
@@ -236,6 +257,40 @@ test("仅从显式可信反向代理记录 X-Real-IP", async (t) => {
   assert.ok(untrustedDraft.id);
   const untrustedAudit = await readFile(untrusted.service.auditPath, "utf8");
   assert.doesNotMatch(untrustedAudit, /198\.51\.100\.7/u);
+});
+
+test("认证失败按可信代理解析后的客户端 IP 限流且成功后清除", async (t) => {
+  const fixture = await startFixture(t, {
+    trustedProxies: [{ address: "127.0.0.1", family: 4, prefix: 32, network: 0x7f000001 }],
+    config: {
+      authFailureLimit: 2,
+      authFailureWindowMs: 60_000,
+      authBlockMs: 60_000,
+      authLimiterTtlMs: 120_000,
+      authLimiterMaxEntries: 100,
+    },
+  });
+  const invalidHeaders = {
+    Authorization: `Bearer ${"x".repeat(32)}`,
+    "X-Real-IP": "203.0.113.8",
+  };
+  const first = await fetch(`${fixture.baseUrl}api/status`, { headers: invalidHeaders });
+  assert.equal(first.status, 401);
+  const blocked = await fetch(`${fixture.baseUrl}api/status`, { headers: invalidHeaders });
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.headers.get("retry-after"), "60");
+
+  const otherClient = await fetch(`${fixture.baseUrl}api/status`, {
+    headers: { ...invalidHeaders, "X-Real-IP": "203.0.113.9" },
+  });
+  assert.equal(otherClient.status, 401);
+
+  const success = await fetch(`${fixture.baseUrl}api/status`, {
+    headers: requestHeaders({ "X-Real-IP": "203.0.113.8" }),
+  });
+  assert.equal(success.status, 200);
+  const afterSuccess = await fetch(`${fixture.baseUrl}api/status`, { headers: invalidHeaders });
+  assert.equal(afterSuccess.status, 401);
 });
 
 test("SHA-256 不一致时拒绝草稿且不残留暂存文件", async (t) => {

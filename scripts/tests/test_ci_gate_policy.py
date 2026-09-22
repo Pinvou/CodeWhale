@@ -1059,6 +1059,33 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
         self.assertNotIn("--lib --no-run --features dev-tools", windows_rust_test)
 
+    def test_windows_release_powershell_scripts_route_to_native_static_contract(self):
+        changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  backflow-portability:", maxsplit=1
+        )[0]
+        route = changes.split("            windows_static_updater:", maxsplit=1)[1].split(
+            "            backflow_infra:", maxsplit=1
+        )[0]
+        paths = _extract_quoted_paths(route)
+        for script in (
+            "scripts/prepare-windows-release.ps1",
+            "scripts/verify-windows-release-online.ps1",
+        ):
+            self.assertTrue(_matches_paths_filter(script, paths), script)
+
+        job = self.pr_workflow.split(
+            "\n  windows-static-updater-contract:", maxsplit=1
+        )[1].split("\n  windows-rust-test:", maxsplit=1)[0]
+        self.assertIn("runs-on: windows-latest", job)
+        self.assertIn("needs.changes.outputs.windows_static_updater == 'true'", job)
+        self.assertIn("npm --prefix pinvou3-app run test:windows-static-updater", job)
+        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("- windows-static-updater-contract", required_gate)
+        self.assertIn(
+            '"windows-static-updater-contract:$WINDOWS_STATIC_UPDATER_RESULT"',
+            required_gate,
+        )
+
     def test_windows_policy_condition_truth_table_and_required_result(self):
         windows_job = self.pr_workflow.split(
             "\n  windows-rust-test:", maxsplit=1

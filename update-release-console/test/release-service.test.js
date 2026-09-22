@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { PassThrough } from "node:stream";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +11,27 @@ import {
   mergeWindowsEntry,
   parseVersion,
   verifyOnlineAsset,
+  receiveUpload,
   ReleaseService,
 } from "../src/release-service.js";
+
+test("客户端中断 multipart 时返回 upload_aborted 并清理暂存文件", async (t) => {
+  const stagingDir = await mkdtemp(join(tmpdir(), "pinvou-aborted-upload-"));
+  t.after(() => rm(stagingDir, { recursive: true, force: true }));
+  const request = new PassThrough();
+  request.headers = { "content-type": "multipart/form-data; boundary=pinvou-boundary" };
+  request.aborted = false;
+  const receiving = receiveUpload(request, stagingDir, 1024 * 1024);
+  request.write("--pinvou-boundary\r\nContent-Disposition: form-data; name=\"version\"\r\n\r\n0.10.4\r\n");
+  request.aborted = true;
+  request.emit("aborted");
+  request.destroy();
+  await assert.rejects(
+    receiving,
+    (error) => error.status === 400 && error.code === "upload_aborted",
+  );
+  assert.deepEqual(await readdir(stagingDir), []);
+});
 
 test("版本比较支持三段和四段数字版本", () => {
   assert.equal(compareVersions("0.10.5", "0.10.4"), 1);

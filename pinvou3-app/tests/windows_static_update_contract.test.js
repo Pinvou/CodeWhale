@@ -89,6 +89,12 @@ for (const source of [windowsUpdater, linuxUpdater, macosUpdater]) {
   assert.match(source, /update_client_builder\(/);
   assert.doesNotMatch(source, /reqwest::Client::builder\(\)/);
 }
+assert.match(linuxUpdater, /static APPROVED_ASSET: Mutex<Option<ApprovedAsset>>/);
+assert.match(linuxUpdater, /approval_receipt/);
+assert.match(linuxUpdater, /\.create_new\(true\)/);
+assert.match(linuxUpdater, /renameat2\(/);
+assert.match(linuxUpdater, /verified_regular_file\(/);
+assert.match(linuxUpdater, /root copy does not match approved update asset/);
 assert.doesNotMatch(platformModule, /mod windows_domain_bootstrap/);
 assert.ok(!fs.existsSync(path.join(
   repoRoot,
@@ -129,6 +135,7 @@ if (process.platform === 'win32') {
           format: 'dmg',
           sha256: 'c'.repeat(64),
           size: 42,
+          notes: '保留中文说明：macOS 更新',
         },
         'windows-x86_64': {
           version: '0.0.1',
@@ -175,6 +182,7 @@ if (process.platform === 'win32') {
     const manifest = JSON.parse(manifestBytes.toString('utf8'));
     assert.strictEqual(manifest.version, '0.8.0');
     assert.strictEqual(manifest.platforms['macos-universal'].version, '0.8.0');
+    assert.strictEqual(manifest.platforms['macos-universal'].notes, '保留中文说明：macOS 更新');
     const windows = manifest.platforms['windows-x86_64'];
     assert.strictEqual(windows.version, version);
     assert.strictEqual(windows.format, 'nsis');

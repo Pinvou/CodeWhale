@@ -14,6 +14,10 @@ Web 发布台把原先的 SCP/rsync 和手工编辑清单收敛成一个受保�
 Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独立签名服务器上的沃通工具
 退出码为准，发布台只比较交接单中的 SHA-256。
 
+当前信任模型接受 HTTPS 更新源或发布权限失陷后，攻击者可同时替换安装器与清单并生成
+自洽 SHA-256 的风险；这里不会以额外 Authenticode、证书指纹或时间戳校验改变既定签名
+权威与发布流程。
+
 ## 安全边界
 
 - 默认只监听 `127.0.0.1`，由现有 HTTPS Nginx 反向代理。
@@ -43,12 +47,21 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 | `PINVOU_UPDATE_MAX_UPLOAD_BYTES` | 否 | 最大安装器字节数，默认 4 GiB |
 | `PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS` | 否 | HTTPS 回读超时，默认 15 分钟 |
 | `PINVOU_UPDATE_TRUSTED_PROXIES` | 否 | 可提供 `X-Real-IP` 的直接反向代理 IP/CIDR，逗号分隔；不配置时忽略该请求头 |
+| `PINVOU_UPDATE_AUTH_FAILURE_LIMIT` | 否 | 同一客户端在窗口内允许的认证失败次数，默认 5 |
+| `PINVOU_UPDATE_AUTH_FAILURE_WINDOW_MS` | 否 | 认证失败计数窗口，默认 5 分钟 |
+| `PINVOU_UPDATE_AUTH_BLOCK_MS` | 否 | 超限后的 429 阻断时间，默认 15 分钟 |
+| `PINVOU_UPDATE_AUTH_LIMITER_TTL_MS` | 否 | 闲置失败记录保留时间，默认 1 小时 |
+| `PINVOU_UPDATE_AUTH_LIMITER_MAX_ENTRIES` | 否 | 内存中失败记录容量上限，默认 10000 |
 
 服务启动时要求公开目录已有有效 `latest.json`，并逐一验证公开目录、状态目录、暂存目录与历史目录
 都是真实目录且可写。这是有意的安全门禁：错误或只读挂载不会启动成健康服务，发布台也不会从空对象
 重建清单，以免丢失 Linux 或 macOS 节点。公开 `/healthz` 只返回初始化阶段缓存的通用就绪状态，
 不会因探活请求重复写盘、fsync 或回显内部路径。只有列入 `PINVOU_UPDATE_TRUSTED_PROXIES` 的直接代理才能提供审计日志里的
 `X-Real-IP`；示例 Compose 仅信任 Docker 私有网段，Nginx 每次覆盖该请求头。
+认证失败限流按上述可信代理解析后的客户端 IP 计数，达到阈值返回 `429` 和
+`Retry-After`；成功认证会清除该 IP 的失败记录，TTL 与容量上限避免长期占用内存。
+Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 multipart
+字段、边界和请求头保留空间。
 
 ## Docker Compose 部署
 

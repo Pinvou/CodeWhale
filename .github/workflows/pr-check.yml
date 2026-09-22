@@ -166,6 +166,7 @@ jobs:
       windows_codex: ${{ steps.filter.outputs.windows_codex }}
       windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
       windows_rustup_repair: ${{ steps.filter.outputs.windows_rustup_repair }}
+      windows_static_updater: ${{ steps.filter.outputs.windows_static_updater }}
       backflow_infra: ${{ steps.filter.outputs.backflow_infra }}
       trusted_backflow: ${{ steps.pr-rust-policy.outputs.trusted_backflow || steps.queue-rust-policy.outputs.trusted_backflow || 'false' }}
       backflow_mode: ${{ steps.pr-rust-policy.outputs.backflow_mode || steps.queue-rust-policy.outputs.backflow_mode || 'full' }}
@@ -411,6 +412,12 @@ jobs:
               - 'pinvou3-app/tests/windows_rustup_repair_smoke.ps1'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/package.json'
+            windows_static_updater:
+              - 'scripts/prepare-windows-release.ps1'
+              - 'scripts/verify-windows-release-online.ps1'
+              - 'pinvou3-app/tests/windows_static_update_contract.test.js'
+              - 'pinvou3-app/package.json'
+              - '.github/workflows/pr-check.yml'
             backflow_infra:
               - '.agents/skills/community-backflow/**'
               - '.github/workflows/community-backflow-automation.yml'
@@ -1523,6 +1530,24 @@ jobs:
         working-directory: pinvou-cli
         run: cargo test -p adapter-gaia --features test-support --locked --no-run
 
+  windows-static-updater-contract:
+    name: windows-static-updater-contract
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Windows 静态更新契约
+        run: npm --prefix pinvou3-app run test:windows-static-updater
+
   windows-rust-test:
     name: windows-rust-test (${{ matrix.phase }})
     needs: changes
@@ -2099,6 +2124,7 @@ jobs:
       - cli-test
       - windows-rust-test
       - macos-rust-check
+      - windows-static-updater-contract
       - macos-codex-runtime-test
       - windows-codex-runtime-test
       - windows-runtime-test
@@ -2132,6 +2158,7 @@ jobs:
           CLI_TEST_RESULT: ${{ needs.cli-test.result }}
           WINDOWS_RUST_RESULT: ${{ needs.windows-rust-test.result }}
           MACOS_RUST_CHECK_RESULT: ${{ needs.macos-rust-check.result }}
+          WINDOWS_STATIC_UPDATER_RESULT: ${{ needs.windows-static-updater-contract.result }}
           MACOS_CODEX_RESULT: ${{ needs.macos-codex-runtime-test.result }}
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
@@ -2170,6 +2197,7 @@ jobs:
             "cli-test:$CLI_TEST_RESULT" \
             "windows-rust-test:$WINDOWS_RUST_RESULT" \
             "macos-rust-check:$MACOS_RUST_CHECK_RESULT" \
+            "windows-static-updater-contract:$WINDOWS_STATIC_UPDATER_RESULT" \
             "macos-codex-runtime-test:$MACOS_CODEX_RESULT" \
             "windows-codex-runtime-test:$WINDOWS_CODEX_RESULT" \
             "windows-runtime-test:$WINDOWS_RUNTIME_RESULT" \

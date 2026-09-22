@@ -20,6 +20,11 @@ test("配置默认只监听回环地址并规范化路径", () => {
   assert.equal(config.basePath, "/console");
   assert.equal(config.publicBaseUrl, "https://updates.example.test/pinvou3");
   assert.deepEqual(config.trustedProxies, []);
+  assert.equal(config.authFailureLimit, 5);
+  assert.equal(config.authFailureWindowMs, 300_000);
+  assert.equal(config.authBlockMs, 900_000);
+  assert.equal(config.authLimiterTtlMs, 3_600_000);
+  assert.equal(config.authLimiterMaxEntries, 10_000);
 });
 
 test("拒绝 HTTP 下载地址和公开目录内的状态目录", () => {

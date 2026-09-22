@@ -111,5 +111,30 @@ export function loadConfig(environment = process.env) {
       { min: 1000, max: 60 * 60 * 1000 },
     ),
     trustedProxies: parseTrustedProxies(environment.PINVOU_UPDATE_TRUSTED_PROXIES),
+    authFailureLimit: parseInteger(
+      environment.PINVOU_UPDATE_AUTH_FAILURE_LIMIT || "5",
+      "PINVOU_UPDATE_AUTH_FAILURE_LIMIT",
+      { min: 2, max: 100 },
+    ),
+    authFailureWindowMs: parseInteger(
+      environment.PINVOU_UPDATE_AUTH_FAILURE_WINDOW_MS || String(5 * 60 * 1000),
+      "PINVOU_UPDATE_AUTH_FAILURE_WINDOW_MS",
+      { min: 1000, max: 24 * 60 * 60 * 1000 },
+    ),
+    authBlockMs: parseInteger(
+      environment.PINVOU_UPDATE_AUTH_BLOCK_MS || String(15 * 60 * 1000),
+      "PINVOU_UPDATE_AUTH_BLOCK_MS",
+      { min: 1000, max: 24 * 60 * 60 * 1000 },
+    ),
+    authLimiterTtlMs: parseInteger(
+      environment.PINVOU_UPDATE_AUTH_LIMITER_TTL_MS || String(60 * 60 * 1000),
+      "PINVOU_UPDATE_AUTH_LIMITER_TTL_MS",
+      { min: 1000, max: 7 * 24 * 60 * 60 * 1000 },
+    ),
+    authLimiterMaxEntries: parseInteger(
+      environment.PINVOU_UPDATE_AUTH_LIMITER_MAX_ENTRIES || "10000",
+      "PINVOU_UPDATE_AUTH_LIMITER_MAX_ENTRIES",
+      { min: 100, max: 1_000_000 },
+    ),
   };
 }

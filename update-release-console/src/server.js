@@ -72,6 +72,64 @@ function requestAddress(request, trustedProxies) {
   return direct;
 }
 
+export class AuthFailureLimiter {
+  constructor(config = {}, now = () => Date.now()) {
+    this.limit = config.authFailureLimit || 5;
+    this.windowMs = config.authFailureWindowMs || 5 * 60 * 1000;
+    this.blockMs = config.authBlockMs || 15 * 60 * 1000;
+    this.ttlMs = config.authLimiterTtlMs || 60 * 60 * 1000;
+    this.maxEntries = config.authLimiterMaxEntries || 10_000;
+    this.now = now;
+    this.entries = new Map();
+  }
+
+  #prune(now) {
+    for (const [address, entry] of this.entries) {
+      if (now - entry.lastSeen >= this.ttlMs && entry.blockedUntil <= now) {
+        this.entries.delete(address);
+      }
+    }
+  }
+
+  #evictOldest() {
+    let oldestAddress;
+    let oldestSeen = Infinity;
+    for (const [address, entry] of this.entries) {
+      if (entry.lastSeen < oldestSeen) {
+        oldestAddress = address;
+        oldestSeen = entry.lastSeen;
+      }
+    }
+    if (oldestAddress !== undefined) this.entries.delete(oldestAddress);
+  }
+
+  retryAfter(address) {
+    const now = this.now();
+    this.#prune(now);
+    const entry = this.entries.get(address);
+    return entry?.blockedUntil > now ? Math.max(1, Math.ceil((entry.blockedUntil - now) / 1000)) : 0;
+  }
+
+  recordFailure(address) {
+    const now = this.now();
+    this.#prune(now);
+    let entry = this.entries.get(address);
+    if (!entry || now - entry.windowStarted >= this.windowMs) {
+      if (!entry && this.entries.size >= this.maxEntries) this.#evictOldest();
+      entry = { failures: 0, windowStarted: now, blockedUntil: 0, lastSeen: now };
+    }
+    entry.failures += 1;
+    entry.lastSeen = now;
+    if (entry.failures >= this.limit) entry.blockedUntil = now + this.blockMs;
+    this.entries.set(address, entry);
+    return entry.blockedUntil > now ? Math.max(1, Math.ceil((entry.blockedUntil - now) / 1000)) : 0;
+  }
+
+  clear(address) {
+    this.entries.delete(address);
+  }
+}
+
 function errorResponse(response, error) {
   if (error instanceof AppError) {
     sendJson(response, error.status, { error: error.code, message: error.message });
@@ -85,6 +143,7 @@ export async function createAppServer(config, dependencies = {}) {
   const service = dependencies.service || new ReleaseService(config);
   await service.initialize();
   const indexTemplate = await readFile(indexPath, "utf8");
+  const authLimiter = dependencies.authLimiter || new AuthFailureLimiter(config);
 
   const server = createServer(async (request, response) => {
     try {
@@ -123,13 +182,21 @@ export async function createAppServer(config, dependencies = {}) {
         sendJson(response, 404, { error: "not_found", message: "资源不存在" });
         return;
       }
+      const remoteAddress = requestAddress(request, config.trustedProxies || []);
       if (!authorized(request, config.adminToken)) {
+        const retryAfter = authLimiter.retryAfter(remoteAddress)
+          || authLimiter.recordFailure(remoteAddress);
+        if (retryAfter > 0) {
+          response.setHeader("Retry-After", String(retryAfter));
+          sendJson(response, 429, { error: "too_many_auth_failures", message: "认证失败次数过多，请稍后重试" });
+          return;
+        }
         response.setHeader("WWW-Authenticate", "Bearer");
         sendJson(response, 401, { error: "unauthorized", message: "管理令牌无效" });
         return;
       }
+      authLimiter.clear(remoteAddress);
 
-      const remoteAddress = requestAddress(request, config.trustedProxies || []);
       if (request.method === "GET" && path === "/api/status") {
         sendJson(response, 200, await service.getStatus());
         return;
