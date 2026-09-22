@@ -30,7 +30,9 @@ pub struct ImageAnalyzeTool {
 /// client therefore bounds only the connect handshake, and this envelope
 /// (the same 30-minute budget as non-streaming model requests) is the sole
 /// total bound; a stalled connection errors out through it instead of
-/// hanging.
+/// hanging. The envelope is shared across retry attempts, not per attempt:
+/// an attempt that fails slowly consumes its share of the one budget, and
+/// retries only fire for fast failures (connect errors, quick 5xx).
 const VISION_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
 
 fn vision_request_envelope() -> Duration {
@@ -288,12 +290,15 @@ impl ToolSpec for ImageAnalyzeTool {
             enabled: true,
             ..Default::default()
         };
-        let _inference = match self.route_client.as_ref() {
-            Some(client) => client.acquire_remote_control_inference_permit().await,
-            None => Some(crate::client::acquire_remote_control_inference_participant().await),
-        };
-
         let response_json = tokio::time::timeout(vision_request_envelope(), async {
+            // Acquire inside the envelope: the ownership window is part of
+            // the bounded call, so a contested permit cannot park this tool
+            // (and its share of Runtime Chat availability) outside every
+            // total bound. The guard is still held for the whole request.
+            let _inference = match self.route_client.as_ref() {
+                Some(client) => client.acquire_remote_control_inference_permit().await,
+                None => Some(crate::client::acquire_remote_control_inference_participant().await),
+            };
             let response = with_retry(
                 &retry_config,
                 || {
@@ -338,11 +343,8 @@ impl ToolSpec for ImageAnalyzeTool {
             Ok(json)
         })
         .await
-        .map_err(|_| {
-            ToolError::execution_failed(format!(
-                "Vision API request timed out after {}s",
-                vision_request_envelope().as_secs()
-            ))
+        .map_err(|_| ToolError::Timeout {
+            seconds: vision_request_envelope().as_secs(),
         })??;
 
         let content = response_json
