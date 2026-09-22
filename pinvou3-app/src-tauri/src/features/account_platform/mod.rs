@@ -349,6 +349,10 @@ impl AccountPlatformState {
             .client
             .post(endpoint)
             .bearer_auth(&access_token)
+            .header(
+                crate::platform::client_version::HEADER,
+                crate::platform::client_version::CURRENT,
+            )
             .send()
             .await
             .map_err(|error| format!("portal_session_handoff_unavailable: {error}"))?;
@@ -2334,6 +2338,10 @@ mod tests {
                             .to_ascii_lowercase()
                             .contains("authorization: bearer stale-access")
                     );
+                    assert!(request.to_ascii_lowercase().contains(&format!(
+                        "x-pinvou-client-version: {}",
+                        crate::platform::client_version::CURRENT
+                    )));
                     (401, r#"{"code":"LOGIN_REQUIRED"}"#)
                 }
                 2 => {
@@ -2352,6 +2360,10 @@ mod tests {
                             .to_ascii_lowercase()
                             .contains("authorization: bearer fresh-access")
                     );
+                    assert!(request.to_ascii_lowercase().contains(&format!(
+                        "x-pinvou-client-version: {}",
+                        crate::platform::client_version::CURRENT
+                    )));
                     (200, r#"{"ticket":"single-use-ticket"}"#)
                 }
                 _ => unreachable!(),
