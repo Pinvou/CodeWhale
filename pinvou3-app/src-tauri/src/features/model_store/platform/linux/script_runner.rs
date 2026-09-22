@@ -8,6 +8,7 @@
 //! 本应用统一把已知的变量都传过去，脚本按需取用即可。
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
@@ -305,10 +306,44 @@ pub fn sha256_hex(content: &str) -> String {
 /// 「下载脚本失败：error decoding response body」，把跑到一半的下载整个打断。
 const SCRIPT_FETCH_ATTEMPTS: u32 = 3;
 
+/// 这一跳重定向要不要拒绝。
+///
+/// 两条：目标必须仍然是 https，跳数不超过 10（reqwest 默认上限，照抄
+/// `features/marketplace/python_dependencies.rs` 里那份先例）。抽成具名函数
+/// 只是为了能直测——判据本身跟先例一字不差。
+///
+/// 这里没有主机白名单：商店地址是用户在设置里填的，本来就没有固定域名可以钉；
+/// 能钉住的是"信道自始至终是加密的"，而那正是 `fetch_script_content` 的威胁模型
+/// 所依赖的那一半（另一半是 sha256，见 `FetchPolicy::may_run_as_root`）。
+fn redirect_is_refused(url: &reqwest::Url, previous_hops: usize) -> bool {
+    previous_hops >= 10 || url.scheme() != "https"
+}
+
 fn http_get_text(url: &str) -> Result<String, ScriptError> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
+        // 重定向也得守 https。
+        //
+        // reqwest 默认跟随最多 10 跳且**不看目标 scheme**，于是
+        // `fetch_script_content` 那句"明文 http 一律拒绝"只守住了首跳：商店只要
+        // 被改出（或被配置出）一条 302 → http://，脚本正文就悄悄改走明文链路
+        // 取回了，而拒绝明文的全部理由——内容和校验它的哈希会被中间人一起改掉
+        // ——在第二跳上一个字都没变。
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if redirect_is_refused(attempt.url(), attempt.previous().len()) {
+                // 把被拒的目标地址点出来。否则 reqwest 会把 3xx 的响应体当正文
+                // 交上来，最后以一句毫不相干的"完整性校验失败"收场，排查的人
+                // 会往"后台数据被改了"的方向找半天。
+                let redirect_url = attempt.url().clone();
+                attempt.error(format!(
+                    "{UNTRUSTED_SOURCE_PREFIX}：脚本地址被重定向到了非 https 目标\
+                     （{redirect_url}），已中止"
+                ))
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|e| ScriptError::new(format!("创建 HTTP 客户端失败：{e}")))?;
 
@@ -325,6 +360,20 @@ fn http_get_text(url: &str) -> Result<String, ScriptError> {
                 // 4xx 是商店真的没有这个脚本，重试多少次结果都一样，立刻报错。
                 if e.status().map(|s| s.is_client_error()).unwrap_or(false) {
                     return Err(ScriptError::new(format!("下载脚本失败：{e}")));
+                }
+                // 重定向被上面那条策略拒了：这是来源判定的结果，不是网络抖动，
+                // 重试三次只会把同一条 302 再走三遍。
+                //
+                // 拒绝的**理由**在 source 链上：reqwest 的 Display 只印一句
+                // "error following redirect for url …"，我们塞进 attempt.error
+                // 的那段话（含 UNTRUSTED_SOURCE_PREFIX）在它的 source 里。不取
+                // 出来的话，用户看不到发生了什么，`is_fatal_failure` 那份按文字
+                // 片段匹配的来源策略清单也认不出这一条，自动提权就照跑不误。
+                if e.is_redirect() {
+                    let cause = std::error::Error::source(&e)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| e.to_string());
+                    return Err(ScriptError::new(format!("下载脚本失败：{cause}")));
                 }
                 last_err = e.to_string();
                 if attempt < SCRIPT_FETCH_ATTEMPTS {
@@ -613,6 +662,27 @@ pub struct RunScriptOptions<'a> {
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(21600);
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// 被取消/超时/主动中止打断之后，继续从 pty 捞收尾输出的两个上限。
+///
+/// 两个都必须有，缺哪个都出事：
+/// - `EXIT_GRACE_IDLE`：静默这么久就收工。进程组刚被 SIGKILL，脚本 trap 里的
+///   清理逻辑（卸载挂载点、删半成品目录）还会再吐几行，2 秒足够它们出来；
+///   need_root 那条路上脚本是自己轮询取消文件后退出的，告别语同理。
+/// - `EXIT_GRACE_TOTAL`：**从进入宽限那一刻起算的总量硬上限。** 只有 idle 上限
+///   时，每读到一个字节就把 deadline 推后 2 秒，于是"一直在输出的进程"能把这个
+///   循环永远续下去——而这正是取消路径上最典型的一种进程：pkexec 之后的 root
+///   进程（SIGTERM/SIGKILL 一律 EPERM，杀不掉）跑着 docker pull，进度条每秒重绘
+///   好几次；非 root 那边，脚本用 setsid 甩出进程组的孙进程也一样。
+///   循环不退出 → run_script 不返回 → OpCleanup::drop 不执行 → 卡片在
+///   ActiveCardOps 里永久锁死、RunLog::finish 永不调用、前端长轮询等不到结局，
+///   用户只能重启应用。取消反而把卡片焊死，跟本文件的自订契约正好相反。
+///
+/// 5 秒这个数：宽限的唯一用途是捞 trap 清理那几行，实测都在 2 秒内出齐，5 秒 =
+/// 允许它"边清理边输出"地续两次，正常收尾一行都不会被截掉；再长就等于没修——
+/// 用户点完取消，界面还要再转十几秒才收到"已取消"。
+const EXIT_GRACE_IDLE: Duration = Duration::from_secs(2);
+const EXIT_GRACE_TOTAL: Duration = Duration::from_secs(5);
+
 /// 执行脚本，实时把每行输出喂给 on_progress；非 0 退出码返回 Err。成功时
 /// 返回完整输出行列表，供调用方在需要时解析脚本输出里的约定标记（比如
 /// enable 脚本用 `LMM_ENDPOINT_URL=` 这行告诉 LMM 对外调用地址）。
@@ -889,7 +959,14 @@ pub fn run_script(
         // （而不是自己跑完退出），进程组里可能还有孙子进程正在收尾（比如脚本
         // 自己 trap 里的清理逻辑）。这里给一点点宽限时间继续从 pty 读，避免
         // 刚检测到顶层进程消失就立刻结束，把这些收尾输出硬生生截断。
-        let mut grace_until = Instant::now() + Duration::from_secs(2);
+        //
+        // 但**宽限必须封顶**：`hard_deadline` 从进入这段起算，读到数据只能把
+        // idle deadline 推到它为止，推不过去。少了这一道，杀不掉又一直在输出的
+        // 进程（root 的 docker pull、setsid 甩出进程组的孙进程）会把这个循环
+        // 永远续下去，三条 break 路径（idle 超时 / 绝对超时 / 回显被重开中止）
+        // 全都经过这里，于是"取消"变成"焊死"。见 EXIT_GRACE_TOTAL。
+        let hard_deadline = Instant::now() + EXIT_GRACE_TOTAL;
+        let mut grace_until = (Instant::now() + EXIT_GRACE_IDLE).min(hard_deadline);
         while Instant::now() < grace_until {
             if !poll_readable(&master_file, Duration::from_millis(200)) {
                 continue;
@@ -900,7 +977,7 @@ pub fn run_script(
                 Ok(n) => {
                     buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
                     buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
-                    grace_until = Instant::now() + Duration::from_secs(2);
+                    grace_until = (Instant::now() + EXIT_GRACE_IDLE).min(hard_deadline);
                 }
             }
         }
@@ -1033,6 +1110,47 @@ fn echo_is_off(tty: &File) -> bool {
     !attrs.local_flags.contains(LocalFlags::ECHO) && !attrs.local_flags.contains(LocalFlags::ECHONL)
 }
 
+/// 拼出提权执行的 argv（`pkexec` 之后的那一串）。
+///
+/// **提权这条路上不许带秘密。**
+///
+/// pkexec 不透传环境变量，所以这里把整份 env 拼进 argv —— 而 argv 是公开的：
+/// 提权脚本跑着的那几分钟到几小时里（install_engine 要 docker pull 几十 GB），
+/// 本机**任何**用户都能从 `ps` 或 `/proc/<pid>/cmdline` 读到每一个值。
+///
+/// 剥掉它是零代价的：需要 root 的只有 install_engine（配 NVIDIA runtime），
+/// 而用 token 的只有 download_model（下私有权重），两边从不重合——六张卡
+/// 逐个核对过。真哪天有卡片两样都要，也该用 fd 或 root-only 文件传，
+/// 而不是把它摆进 argv。
+///
+/// 之所以从 `build_command` 里拆出来单列一个纯函数：真跑一次 pkexec 要弹授权框，
+/// 在 CI 和开发机上都跑不了，于是"剥离"这件事长期只能靠盯着代码看。拆开之后
+/// 测试可以直接拿着 argv 断言里面没有 token——钉的是行为，不是清单常量。
+fn privileged_args(
+    script_path: &Path,
+    env_vars: &HashMap<String, String>,
+    cancel_file: Option<&Path>,
+) -> Vec<OsString> {
+    let mut env_vars = env_vars.clone();
+    if let Some(cf) = cancel_file {
+        env_vars.insert(
+            "LMM_CANCEL_FILE".to_string(),
+            cf.to_string_lossy().to_string(),
+        );
+    }
+    for key in SECRET_ENV_KEYS {
+        env_vars.remove(key);
+    }
+    let mut args: Vec<OsString> = vec![OsString::from("--keep-cwd"), OsString::from("env")];
+    args.extend(
+        env_vars
+            .iter()
+            .map(|(k, v)| OsString::from(format!("{k}={v}"))),
+    );
+    args.push(script_path.as_os_str().to_os_string());
+    args
+}
+
 fn build_command(
     script_path: &Path,
     env_vars: &HashMap<String, String>,
@@ -1083,32 +1201,8 @@ fn build_command(
     )?;
 
     let mut cmd = if need_root {
-        let mut env_vars = env_vars.clone();
-        if let Some(cf) = cancel_file {
-            env_vars.insert(
-                "LMM_CANCEL_FILE".to_string(),
-                cf.to_string_lossy().to_string(),
-            );
-        }
-        // **提权这条路上不许带秘密。**
-        //
-        // pkexec 不透传环境变量，所以下面把整份 env 拼进 argv —— 而 argv 是公开的：
-        // 提权脚本跑着的那几分钟到几小时里（install_engine 要 docker pull 几十 GB），
-        // 本机**任何**用户都能从 `ps` 或 `/proc/<pid>/cmdline` 读到每一个值。
-        //
-        // 剥掉它是零代价的：需要 root 的只有 install_engine（配 NVIDIA runtime），
-        // 而用 token 的只有 download_model（下私有权重），两边从不重合——六张卡
-        // 逐个核对过。真哪天有卡片两样都要，也该用 fd 或 root-only 文件传，
-        // 而不是把它摆进 argv。
-        for key in SECRET_ENV_KEYS {
-            env_vars.remove(key);
-        }
         let mut c = Command::new("pkexec");
-        c.arg("--keep-cwd").arg("env");
-        for (k, v) in &env_vars {
-            c.arg(format!("{k}={v}"));
-        }
-        c.arg(script_path);
+        c.args(privileged_args(script_path, env_vars, cancel_file));
         c
     } else {
         let mut c = Command::new(script_path);
@@ -1205,16 +1299,80 @@ mod tests {
     /// 提权路径上必须剥掉秘密——pkexec 不透传 env，只能拼进 argv，而 argv
     /// 对本机所有用户可见。
     ///
-    /// 这里钉的是**清单本身**而不是去跑一次 pkexec：真跑要弹授权框，在 CI 和
-    /// 开发机上都跑不了。清单是那段剥离逻辑的唯一输入，钉住它就钉住了行为；
-    /// 将来谁往 common_env 里加了新的凭据，这条会提醒他也加进来。
+    /// 钉的是**真的拼出来的那串 argv**：把 `privileged_args` 里那几行
+    /// `env_vars.remove` 注释掉，这条立刻变红。上一版只断言 SECRET_ENV_KEYS 里
+    /// 含 "LMM_HF_TOKEN"——清单是剥离逻辑的输入，不是行为本身，把剥离删掉它照样
+    /// 绿。真跑一次 pkexec 要弹授权框，CI 和开发机都跑不了，所以测那个纯函数。
     #[test]
     fn secrets_are_stripped_before_privileged_exec() {
-        assert!(
-            SECRET_ENV_KEYS.contains(&"LMM_HF_TOKEN"),
-            "HF token 必须在提权前被剥掉：install_engine 以 root 跑 docker pull 的几小时里，\
-             argv 对本机任何用户可见"
+        const TOKEN: &str = "hf_this_token_must_never_reach_argv";
+        let mut env = HashMap::new();
+        env.insert("LMM_HF_TOKEN".to_string(), TOKEN.to_string());
+        env.insert("LMM_MODEL_NAME".to_string(), "qwen38".to_string());
+
+        let args = privileged_args(
+            Path::new("/tmp/install_engine.sh"),
+            &env,
+            Some(Path::new("/tmp/lmm-cancel-test")),
         );
+        let argv: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !argv.iter().any(|a| a.contains(TOKEN)),
+            "HF token 进了提权命令的 argv：install_engine 以 root 跑 docker pull 的几小时里，\
+             本机任何用户都能从 ps / proc 读到它——{argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("LMM_HF_TOKEN=")),
+            "提权 argv 里还留着 LMM_HF_TOKEN 这一项：{argv:?}"
+        );
+        // 反过来同样要钉：别为了剥秘密把正常变量一起剥了，那样脚本全读到空值，
+        // 表现是"提权之后什么都找不到"，比泄密更难排查。
+        assert!(
+            argv.iter().any(|a| a == "LMM_MODEL_NAME=qwen38"),
+            "普通环境变量没进 argv，提权脚本会读到一堆空值：{argv:?}"
+        );
+        assert!(
+            argv.iter()
+                .any(|a| a == "LMM_CANCEL_FILE=/tmp/lmm-cancel-test"),
+            "取消标记文件没传进去，root 侧就再没有任何办法配合取消：{argv:?}"
+        );
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("--keep-cwd"),
+            "argv 结构变了：{argv:?}"
+        );
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("/tmp/install_engine.sh"),
+            "脚本必须是 argv 的最后一项，排在前面会被 env 当成变量赋值：{argv:?}"
+        );
+        // 顺带钉一下清单：将来谁往 common_env 里加了新的凭据，这条提醒他登记。
+        assert!(SECRET_ENV_KEYS.contains(&"LMM_HF_TOKEN"));
+    }
+
+    /// 重定向也必须留在 https 上。
+    ///
+    /// reqwest 默认跟随最多 10 跳、且**不看目标 scheme**，于是
+    /// `fetch_script_content` 那句"明文 http 一律拒绝"只守得住首跳：商店被改出
+    /// （或被配置出）一条 302 → http:// 就够把脚本正文换到明文链路上取回，而
+    /// 明文链路上内容和校验它的哈希会被一起改掉。这里直测判据本身——起一个真会
+    /// 重定向的服务器来跑一遍，测到的主要是 reqwest 自己。
+    #[test]
+    fn redirects_must_stay_on_https() {
+        let https = reqwest::Url::parse("https://store.example/install_engine.sh").unwrap();
+        let http = reqwest::Url::parse("http://store.example/install_engine.sh").unwrap();
+        let ftp = reqwest::Url::parse("ftp://store.example/install_engine.sh").unwrap();
+
+        assert!(!redirect_is_refused(&https, 0), "正常的 https 跳转被拦了");
+        assert!(redirect_is_refused(&http, 0), "302 → 明文 http 被放行了");
+        assert!(redirect_is_refused(&ftp, 0), "302 → 非 http(s) 被放行了");
+        // 跳数上限跟 python_dependencies 那份先例同一个数
+        assert!(!redirect_is_refused(&https, 9));
+        assert!(redirect_is_refused(&https, 10), "重定向环没有上限");
     }
 
     #[test]
@@ -1238,6 +1396,70 @@ mod tests {
         };
         let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
         assert_eq!(err.to_string(), "已取消");
+    }
+
+    /// 被打断之后，run_script **必须在有界时间内返回**，哪怕还有进程在源源不断
+    /// 地往 pty 里写。
+    ///
+    /// 这条钉的是宽限读循环的总上限（`EXIT_GRACE_TOTAL`）。没有它的时候，每读到
+    /// 一点数据就把 deadline 往后推 2 秒，于是"杀不掉又一直在输出"的进程能把循环
+    /// 永远续下去：run_script 不返回 → OpCleanup::drop 不执行 → 卡片在
+    /// ActiveCardOps 里永久锁死 → RunLog::finish 永不调用 → 前端长轮询等不到结局，
+    /// 用户只能重启应用。**取消反而把卡片焊死。**
+    ///
+    /// 假进程是这么造的：脚本用 `setsid` 甩一个孙进程出去（新会话 = 新进程组，
+    /// killpg 打不到它——正好复刻 pkexec 之后那个 SIGTERM/SIGKILL 一律 EPERM 的
+    /// root 进程），它先睡 2 秒，也就是**等脚本本体（1 秒的绝对超时）被杀掉之后**
+    /// 才开始每 100ms 吐一行、连吐 20 秒。所以 `spam > 0` 这条断言同时兜住了
+    /// "孙进程真的逃出了进程组"——要是 setsid 不顶用（或者系统里根本没有它），
+    /// 孙进程会跟脚本一起被杀在 sleep 里，一行都吐不出来，这条测试当场报出来
+    /// 而不是假绿。
+    ///
+    /// 三条 break 路径（idle 超时 / 绝对超时 / 回显被重开中止）共用同一个宽限
+    /// 循环，这里用最快到达的绝对超时把测试时间压到几秒。
+    ///
+    /// 怎么证伪：把 `hard_deadline` 那一道去掉（只留 idle 上限），每 100ms 一行
+    /// 永远凑不满 2 秒静默，循环要等孙进程自己吐完 20 秒才退（约 24 秒返回）——
+    /// 越过下面那条 12 秒的上限断言，本条变红。孙进程会自己停，是特意让缺陷版
+    /// **报错**而不是把整个测试进程永久挂住。
+    #[test]
+    fn interrupted_run_returns_even_while_output_keeps_coming() {
+        // 睡 2 秒 → 脚本本体此时早被杀了 → 每 100ms 一行、连吐约 20 秒。
+        let spammer = "sleep 2; i=0; while [ $i -lt 200 ]; do echo GRACE-SPAM; sleep 0.1; \
+                       i=$((i+1)); done";
+        let path = write_script(&format!(
+            "#!/bin/sh\nsetsid sh -c '{spammer}' &\necho main-started\nsleep 30\n"
+        ));
+        let mut spam = 0usize;
+        let mut count = |p: ScriptProgress| {
+            if p.line.contains("GRACE-SPAM") {
+                spam += 1;
+            }
+        };
+        let opts = RunScriptOptions {
+            on_progress: Some(&mut count),
+            // 1 秒：短到测试跑得快，又长到脚本一定有时间把孙进程 fork 出去。
+            timeout: Some(Duration::from_secs(1)),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string().contains("超过安全上限"),
+            "走的不是绝对超时那条 break 路径，这次跑的不是要测的东西：{err}"
+        );
+        assert!(
+            spam > 0,
+            "脚本被杀之后一行输出都没再来：孙进程没能逃出进程组（setsid 不可用？），\
+             这条测试没能构造出它要测的场景"
+        );
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "打断之后等了 {elapsed:?} 才返回：宽限读循环没有总上限，杀不掉又一直在\
+             输出的进程能把 run_script 无限续下去，卡片会锁死在 ActiveCardOps 里"
+        );
     }
 
     /// 脚本请求一次输入 -> 界面作答 -> 答案经 pty 写回脚本的 stdin。

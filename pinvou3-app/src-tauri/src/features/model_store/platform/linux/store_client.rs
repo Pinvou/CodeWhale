@@ -15,6 +15,10 @@ pub type StoreError = AppError;
 
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// 单独的连接阶段时限，取值与 `llmapi_hub/adapter.rs` 的 `HTTP_CONNECT_TIMEOUT_SECS`
+/// 一致。见 `get_json` 里的说明：没有它，握不上手的链路会把整个 API_TIMEOUT 吃光。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// 同一个引擎+模型组合下，不同的部署参数方案（比如"基准测试配置" vs
 /// "生产采样配置"）——研究团队会不定期针对同一个模型调出新的参数组合，用户
 /// 可能已经用旧方案下载/部署/启用着，不该逼着他们重新下载模型才能用上新参数，
@@ -140,9 +144,30 @@ impl StoreClient {
                  明文传输时校验挡不住伪造。请在设置里把商店地址改成 https。",
             ));
         }
+        // 上面那道 https 门只管得住**首跳**。reqwest 默认会跟随最多 10 次重定向，
+        // 而默认策略不挑协议：商店回一个 `302 → http://…`，脚本哈希就照样从明文
+        // 链路取回来了，上面那段理由等于白写。所以重定向策略要自己给：非 https
+        // 的跳转一律拒掉，并且把"拒了哪个地址"写进错误里——否则调用方看到的是
+        // 一个 3xx 响应体解析失败，指向完全错误的方向。
+        // 写法照搬 marketplace/python_dependencies.rs 里下载 wheel 的那处。
+        //
+        // 顺带一提：那里还带了主机白名单，这里没有——商店地址是用户在设置里自己
+        // 填的，本来就没有"可信主机"这个名单可言。
         let url = format!("{}{}", self.base_url, path);
         let client = reqwest::blocking::Client::builder()
+            // 只设总超时的话，一条连不上的慢链路能把 15 秒预算全耗在 TCP/TLS
+            // 握手上，界面要等满 15 秒才看到"连不上"。对照 llmapi_hub/adapter.rs
+            // 的 blocking_client()，两个超时都设。
+            .connect_timeout(CONNECT_TIMEOUT)
             .timeout(API_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
+                    let redirect_url = attempt.url().clone();
+                    attempt.error(format!("商店把请求重定向到了不该跟的地址：{redirect_url}"))
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(|e| StoreError::new(format!("创建 HTTP 客户端失败：{e}")))?;
 

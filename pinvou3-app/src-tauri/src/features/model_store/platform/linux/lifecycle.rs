@@ -26,8 +26,19 @@ use super::store_client::{
 pub type ModelManagerError = AppError;
 
 /// ollama 不是 docker 镜像，没有 LMM_ENGINE_IMAGE 标记可用，删除逻辑必须单独
-/// 写死一份：停服务、删二进制、删 systemd unit。这几步都要改系统级文件/服务，
-/// 必须走 pkexec 提权，跟 install_engine 是同一套需要 root 的理由。
+/// 写死一份：停服务、删二进制、删 systemd unit、删 `$HOME/.ollama`。这几步都要
+/// 改系统级文件/服务，必须走 pkexec 提权，跟 install_engine 是同一套需要 root
+/// 的理由。
+///
+/// **最后那一步会把模型权重一起删掉。** ollama 的 blob 就存在 `~/.ollama/models`
+/// 下（常有几十 GB），这条 `rm -rf` 不区分"引擎"和"模型数据"。重装 ollama 二进制
+/// **不会**把它们找回来——每一个 ollama 模型都得重新下载。
+///
+/// 为什么仍然连着删：只删二进制的话，"删除引擎"会留下几十 GB 谁都看不见的数据
+/// （ollama 自己拉的模型不在 LMM 的模型库里，任何界面都列不出来），用户点了删除
+/// 却一点空间都没回来。两种做法各有代价，这里选的是真把空间还给用户，代价是
+/// 后果必须如实说出去——见 `delete_engine` 的 `affected_models` /
+/// `purged_model_data`。
 const OLLAMA_UNINSTALL_SCRIPT: &str = r#"#!/bin/bash
 set -euo pipefail
 TARGET_UID="${PKEXEC_UID:-$(id -u)}"
@@ -124,6 +135,35 @@ pub struct InstalledEngineInfo {
     pub docker_image: Option<String>,
     pub size_bytes: u64,
     pub affected_models: Vec<String>,
+}
+
+/// `delete_engine` 的结果。跟 `UninstallOutcome` 是同一个理由：**如实说出这次
+/// 到底删掉了什么**。
+///
+/// 这里的"什么"两种形态差别极大：docker 镜像删掉还能自动重装回来，ollama 则是
+/// 连 `~/.ollama` 整个删掉、几十 GB 权重一起没。调用方不该靠自己记着引擎是哪种
+/// 形态去推断后果，所以两件事都摆在返回值里。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineRemoval {
+    pub engine_name: String,
+    pub engine_version: Option<String>,
+    /// 释放量。docker 形态是镜像体积，ollama 是二进制加上 `~/.ollama` 的体积
+    /// （**含模型权重**）；都是删除前量的，不是登记值。
+    pub freed_bytes: u64,
+    /// 这次删除有没有把模型数据一起删掉。ollama 恒为 true，docker 镜像恒为
+    /// false。界面的措辞必须跟着它走，不能一律说"只删引擎"。
+    pub purged_model_data: bool,
+    /// 库里还挂在这个引擎上的卡片名。
+    ///
+    /// `purged_model_data` 为 false 时，它是"下次部署会自动重装一遍引擎"的卡片；
+    /// 为 true 时，它是**权重被一起删掉、需要重新下载**的模型。两种含义都得说给
+    /// 用户听，所以算出来就要带出来，不能算完扔掉。
+    ///
+    /// 注意它列的是卡片名（`db::list_model_names_using_engine` 取的是 card_name），
+    /// 给人看的，不是 model_name。
+    pub affected_models: Vec<String>,
+    /// 一句可以直接显示给用户的话
+    pub summary: String,
 }
 
 /// 已下载的模型里，脚本比商店旧的那些。
@@ -720,9 +760,11 @@ impl ModelManager {
         let staging = self.settings.staging_path();
         let models = self.settings.models_path();
         let mut check = disk::check_space(&staging, size_bytes, self.settings.min_free_space_gb);
-        // 同一块盘就不必查第二遍（绝大多数情况）。不比较挂载点而比较余量：
-        // 拿到同一个 free_bytes 基本就是同一个文件系统，而判断挂载点要读
-        // /proc/mounts 再做前缀匹配，为这点收益不值当。
+        // 判据是**路径字符串**：两个路径一模一样才省掉第二次查询，不做任何挂载点
+        // 归一化——要判断两个路径是不是同一个文件系统得读 /proc/mounts 再做前缀
+        // 匹配，为这点收益不值当。代价只是同盘异路径（默认就是这样：staging 是
+        // models 的兄弟目录）会对同一个文件系统多查一次余量，两次拿到的是同一个
+        // free_bytes，重复检查无害。
         if check.ok && models != staging {
             let target = disk::check_space(&models, size_bytes, self.settings.min_free_space_gb);
             if !target.ok {
@@ -2057,6 +2099,9 @@ impl ModelManager {
     // 东西：卸载模型只删模型权重和部署配置，引擎本身默认保留。这里单独给用户
     // 一个入口去清理引擎本身占用的空间。
     //
+    // "引擎和模型是两个独立的东西"这句话对 docker 形态成立，**对 ollama 不成立**
+    // ——它的引擎和模型数据同住 `~/.ollama`，删引擎就是删模型。见 delete_engine。
+    //
     // **这一节（list_installed_engines / delete_engine）目前零调用点**：命令
     // 未注册，界面上也没有"已安装引擎"这一块，留待后续分期接线。注意
     // delete_engine 虽然用户够不着，它里面的超时/幂等问题仍然照修——接线那天
@@ -2092,10 +2137,23 @@ impl ModelManager {
             .collect()
     }
 
-    /// 只删引擎本身占用的空间，不动任何模型权重、部署配置。如果还有卡片在用
-    /// 这个引擎，删完之后那些卡片下次下载/部署会自动重新走一遍 install_engine
-    /// ——探针（LMM_PROBE_ONLY）会发现引擎不在了从而触发真正安装，这条探针
-    /// 优先的安装流程本身就是自愈的。
+    /// 删掉引擎本身。**后果按引擎形态分两种，措辞绝不能混用**：
+    ///
+    /// - **docker 镜像形态**：只 `docker rmi` 掉镜像，不动任何模型权重、部署
+    ///   配置。还在用它的卡片下次下载/部署会自动重新走一遍 install_engine——
+    ///   探针（LMM_PROBE_ONLY）发现引擎不在了就触发真正安装，这条探针优先的
+    ///   安装流程本身是自愈的。
+    /// - **ollama：连它的全部模型数据一起删。** 卸载脚本里有
+    ///   `rm -rf "$TARGET_HOME/.ollama"`（见 `OLLAMA_UNINSTALL_SCRIPT`），而
+    ///   ollama 的权重 blob 就在这个目录下（`~/.ollama/models`，常有几十 GB）。
+    ///   这一半**不自愈**：重装 ollama 二进制不会把权重带回来，用户得把每个
+    ///   ollama 模型重新下一遍。
+    ///
+    /// 所以返回的是 [`EngineRemoval`] 而不是一个字节数：`purged_model_data` 和
+    /// `affected_models` 是这次操作的后果本身，调用方（接线那天的确认框）必须先
+    /// 把"哪些模型受影响、权重会不会跟着没"摆给用户看，不能只说一句"删除引擎"。
+    /// 本层**不**自行拦截——拦不拦、怎么确认是界面的事，这里只负责把后果如实算
+    /// 出来交上去。
     ///
     /// docker 镜像形态的引擎不需要 root（docker rmi 本来就是普通用户能跑的
     /// 命令）；ollama 是系统级二进制 + systemd 服务，删除必须走 pkexec 提权。
@@ -2103,7 +2161,7 @@ impl ModelManager {
         &self,
         engine_name: &str,
         engine_version: Option<&str>,
-    ) -> Result<u64, ModelManagerError> {
+    ) -> Result<EngineRemoval, ModelManagerError> {
         // 必须按「名字 + 版本」定位。同名不同版本是两个不同的镜像，只按名字取
         // 会拿到另一个版本的记录，然后 rmi 掉别的模型正在用的镜像。
         let rec = db::get_installed_engine(engine_name, engine_version)
@@ -2114,6 +2172,15 @@ impl ModelManager {
                     engine_version.unwrap_or("")
                 ))
             })?;
+
+        // 在分叉之前就把名单取出来：两条分支对它的解读不同（要重装一遍引擎 /
+        // 权重被一起删掉），但两条都得把它带给调用方。`list_installed_engines`
+        // 早就在算同一份名单了，删除这一侧不能算完就扔。
+        //
+        // 取不到就按空名单继续删——删除本身已经是用户点过的动作，为了一句提示
+        // 语把它拦下来更糟；代价是那一次确认框会少列几个模型名。
+        let affected =
+            db::list_model_names_using_engine(engine_name, engine_version).unwrap_or_default();
 
         if let Some(image) = &rec.docker_image {
             let freed = docker_image_size(image);
@@ -2135,7 +2202,25 @@ impl ModelManager {
             }
             db::delete_installed_engine(engine_name, engine_version)
                 .map_err(|e| ModelManagerError::new(format!("删除引擎记录失败：{e}")))?;
-            return Ok(freed);
+            let follow_up = if affected.is_empty() {
+                "。".to_string()
+            } else {
+                format!(
+                    "；以下卡片下次部署会自动重新安装一遍引擎：{}。",
+                    affected.join("、")
+                )
+            };
+            return Ok(EngineRemoval {
+                engine_name: engine_name.to_string(),
+                engine_version: engine_version.map(str::to_string),
+                freed_bytes: freed,
+                purged_model_data: false,
+                affected_models: affected,
+                summary: format!(
+                    "已删除引擎镜像 {image}，释放约 {}。模型权重和部署配置没有动{follow_up}",
+                    disk::format_bytes(freed as f64),
+                ),
+            });
         }
 
         if engine_name == "ollama" {
@@ -2166,7 +2251,26 @@ impl ModelManager {
             result?;
             db::delete_installed_engine(engine_name, engine_version)
                 .map_err(|e| ModelManagerError::new(format!("删除引擎记录失败：{e}")))?;
-            return Ok(freed);
+            // 这句话必须把"权重也没了"说在明处。脚本删的是整个 ~/.ollama，
+            // 模型 blob 就在里面——沿用 docker 分支那套"只删引擎、下次自动装
+            // 回来"的措辞，用户会以为重装一下就好，实际是要重下几十 GB。
+            let follow_up = if affected.is_empty() {
+                String::new()
+            } else {
+                format!("以下模型需要重新下载才能再用：{}。", affected.join("、"))
+            };
+            return Ok(EngineRemoval {
+                engine_name: engine_name.to_string(),
+                engine_version: engine_version.map(str::to_string),
+                freed_bytes: freed,
+                purged_model_data: true,
+                affected_models: affected,
+                summary: format!(
+                    "已卸载 ollama，并删除了 ~/.ollama（释放约 {}）。\
+                     该目录下的模型权重被一并删除，重装 ollama 也不会恢复。{follow_up}",
+                    disk::format_bytes(freed as f64),
+                ),
+            });
         }
 
         Err(ModelManagerError::new(format!(
@@ -2992,6 +3096,327 @@ exit 0
             outcome.summary.contains("仍在磁盘上"),
             "用户点的是彻底删除却没删掉，这句话必须说出来：{}",
             outcome.summary
+        );
+    }
+
+    // ------------------------------------------------ 下载：整段编排的端到端
+
+    // StoreError 是 store_client 里 AppError 的别名，跟 ModelManagerError 同一个
+    // 类型；这里写 trait 声明用的那个名字，读的人不用再去推一遍。
+    use super::super::store_client::StoreError;
+
+    /// 只认一张卡的假商店。`download_from_store` 第一步就是 `store.get_card`，
+    /// 没有它这段编排一行都跑不起来。
+    struct OneCardStore {
+        card: StoreCardDetail,
+    }
+
+    impl StoreSource for OneCardStore {
+        fn list_cards(&self) -> Result<Vec<StoreCardSummary>, StoreError> {
+            Ok(vec![self.card.summary.clone()])
+        }
+
+        fn get_card(&self, card_id: &str) -> Result<StoreCardDetail, StoreError> {
+            if card_id == self.card.summary.id {
+                Ok(self.card.clone())
+            } else {
+                Err(StoreError::new(format!("商店里没有这张卡：{card_id}")))
+            }
+        }
+    }
+
+    /// 探针约定齐全的 install_engine：装过了探针就退 0（整段跳过安装），没装过
+    /// 才真装。真装时往脚印文件里追一行，测试据此分辨"到底跑了几次"——只看
+    /// 返回值分不出"跳过了"和"又装了一遍"。
+    const FAKE_INSTALL_ENGINE: &str = r#"#!/bin/sh
+if [ "${LMM_PROBE_ONLY:-0}" = "1" ]; then
+    if [ -f "$LMM_MODELS_DIR/engine-installed" ]; then
+        exit 0
+    fi
+    echo 'probe: engine missing' >&2
+    exit 1
+fi
+mkdir -p "$LMM_MODELS_DIR"
+echo ran >> "$LMM_MODELS_DIR/engine-installed"
+echo LMM_ENGINE_IMAGE=example/vllm:test
+"#;
+
+    /// 下载脚本，同样留脚印。
+    const FAKE_DOWNLOAD_MODEL: &str = r#"#!/bin/sh
+mkdir -p "$LMM_MODELS_DIR"
+echo "$LMM_MODEL_NAME" >> "$LMM_MODELS_DIR/download-ran"
+echo '权重就绪'
+"#;
+
+    const FAKE_UNINSTALL: &str = "#!/bin/sh\necho '已卸载'\n";
+
+    /// 脚印文件里有几行 = 那个脚本真正跑了几次。文件不在就是 0 次。
+    fn ran_times(marker: &std::path::Path) -> usize {
+        std::fs::read_to_string(marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// 造一张「脚本正文是本地文件」的卡片。内置测试商店在生产里就是这么下发的
+    /// （scripts 的值是本地路径而不是 https URL），所以这条路不用起服务器也能把
+    /// 整段编排真跑一遍，而且用的是 `builtin_store` 这一位生产开关，没有为测试
+    /// 另开后门。
+    ///
+    /// `tampered` 指定哪个脚本的**登记哈希**故意写错：内容没动，动的是商店说
+    /// 它应该是什么——正是"传输被篡改/后台数据被改"到达客户端时的样子。
+    fn local_script_card(dir: &std::path::Path, tampered: Option<&str>) -> StoreCardDetail {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut urls = BTreeMap::new();
+        let mut hashes = BTreeMap::new();
+        for (script_type, body) in [
+            ("install_engine", FAKE_INSTALL_ENGINE),
+            ("download_model", FAKE_DOWNLOAD_MODEL),
+            ("uninstall", FAKE_UNINSTALL),
+        ] {
+            let path = dir.join(format!("{script_type}.sh"));
+            std::fs::write(&path, body).unwrap();
+            urls.insert(script_type.to_string(), path.to_string_lossy().to_string());
+            hashes.insert(
+                script_type.to_string(),
+                if tampered == Some(script_type) {
+                    script_runner::sha256_hex("完全是另外一份内容")
+                } else {
+                    script_runner::sha256_hex(body)
+                },
+            );
+        }
+        let mut card = make_card("Ornith 1.5 35B", None);
+        card.summary.id = "card-dl".into();
+        card.summary.engine_name = "vllm".into();
+        card.summary.engine_version = Some("v0.27.1".into());
+        card.summary.size_bytes = 4096;
+        card.source_repo_id = Some("Org/Ornith-1.5-35B-A3B".into());
+        card.scripts = urls;
+        card.script_sha256 = Some(hashes);
+        card
+    }
+
+    fn download_settings(models_dir: &std::path::Path) -> Settings {
+        Settings {
+            models_dir: models_dir.to_string_lossy().to_string(),
+            staging_dir: models_dir.join("staging").to_string_lossy().to_string(),
+            // 默认要留 2GB 安全余量。这几条盯的是编排本身，不该跟着跑测试那台
+            // 机器还剩多少盘走，所以清零；需要"空间不够"的那条自己调上去。
+            min_free_space_gb: 0.0,
+            ..Default::default()
+        }
+    }
+
+    fn manager_with_card(settings: Settings, card: StoreCardDetail) -> ModelManager {
+        let mut mgr = ModelManager::new(Some(settings), Some(Box::new(OneCardStore { card })));
+        // 卡片里的"URL"是本地文件路径，只有内置测试商店这一位放行它。
+        mgr.builtin_store = true;
+        mgr
+    }
+
+    /// 防的是「下载中途失败，库里却留下一条说它已经好了的记录」。
+    ///
+    /// 失败点挑的是哈希对不上，因为它落在编排的中段：整套脚本已经取过一轮
+    /// （失败后退回按需获取）、引擎探针也跑过了，再往下才炸。这一段里有两处
+    /// 写库（`mark_engine_installed` 和 `add_store_model`），失败之后两处都必须
+    /// 是干净的：
+    ///   ① 全新卡片：一条记录都不能留——留下就是一张点开才发现没有权重的死卡；
+    ///   ② 已部署过的卡片：原状态必须原封不动——被退回「已下载」或者被删掉，
+    ///      用户那边就是一个正跑着的模型忽然从库里消失。
+    /// 引擎同样不能被标成"已安装"：那会让下一次下载整段跳过装引擎。
+    ///
+    /// 断言里先钉住失败原因，再钉库里的状态：只断言"返回了 Err"证明不了这条
+    /// 测试盯的是哪个阶段——真在取卡片那一步就失败了，后面几条照样全绿。
+    #[test]
+    fn a_failed_download_leaves_no_record_claiming_the_model_is_downloaded() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), Some("install_engine")),
+        );
+
+        // ① 全新卡片
+        let err = mgr
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .expect_err("登记哈希对不上，这次下载不该成功");
+        assert!(
+            err.to_string().contains("完整性校验失败"),
+            "失败原因必须是校验没过，否则这条测试盯的不是它以为的那个阶段：{err}"
+        );
+        assert!(
+            db::get_store_model("card-dl").unwrap().is_none(),
+            "下载没成功，模型库里不能留下记录"
+        );
+        assert!(
+            !db::is_engine_installed("vllm", Some("v0.27.1")).unwrap(),
+            "引擎压根没装成，不能登记成已安装"
+        );
+        assert_eq!(
+            ran_times(&models_dir.join("engine-installed")),
+            0,
+            "校验没过就不该真去装引擎"
+        );
+        assert_eq!(
+            ran_times(&models_dir.join("download-ran")),
+            0,
+            "更不该跑到下载权重那一步"
+        );
+
+        // ② 已经部署好的卡片，重新下载时中途失败
+        add_stuck_record("card-dl", "Org/Ornith-1.5-35B-A3B", 168_000_000_000);
+        let err = mgr
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .expect_err("同样不该成功");
+        assert!(err.to_string().contains("完整性校验失败"), "{err}");
+        let rec = db::get_store_model("card-dl")
+            .unwrap()
+            .expect("失败的下载不能把已有记录删掉");
+        assert_eq!(
+            rec.status, "deployed",
+            "下载失败不能动已部署卡片的状态，它那个服务还好好跑着"
+        );
+    }
+
+    /// 防的是「盘明明放不下，还是照样开跑」。
+    ///
+    /// 空间预检查是整段编排的第一道闸。它一失效，用户付出的代价是几个小时的
+    /// 下载最后死在 ENOSPC，而且中途已经往盘上写了一堆半截文件。两条路径都要
+    /// 钉：物理余量不够（判据在 disk 层），以及用户自己设的存储配额被撑破
+    /// （判据就在本文件的 `check_can_download` 里）。
+    ///
+    /// 光断言返回 Err 是不够的——闸门要是挪到下载之后，返回值照样是 Err，但盘
+    /// 已经被写过一遍了。所以一并钉住"两个脚本一次都没跑"。
+    #[test]
+    fn a_download_that_does_not_fit_never_starts() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let scripts_dir = tmp.path().join("scripts");
+
+        // 物理余量：要求留出一百万 GB，任何机器都满足不了
+        let mut tight = download_settings(&models_dir);
+        tight.min_free_space_gb = 1_000_000.0;
+        let err = manager_with_card(tight, local_script_card(&scripts_dir, None))
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .expect_err("余量不够就不该放行");
+        assert!(
+            err.to_string().contains("可用空间不足"),
+            "拦下来的理由必须是余量不够：{err}"
+        );
+
+        // 存储配额：盘上放得下，但用户自己设的上限已经被现有模型占满了
+        let mut quota = download_settings(&models_dir);
+        quota.storage_quota_gb = Some(1.0);
+        add_stuck_record("card-other", "Org/Other-Weights", 10_000_000_000);
+        let err = manager_with_card(quota, local_script_card(&scripts_dir, None))
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .expect_err("超出配额就不该放行");
+        assert!(
+            err.to_string().contains("超出存储配额"),
+            "拦下来的理由必须是配额：{err}"
+        );
+
+        assert!(
+            db::get_store_model("card-dl").unwrap().is_none(),
+            "根本没开跑，不该有记录"
+        );
+        assert_eq!(
+            ran_times(&models_dir.join("engine-installed")),
+            0,
+            "空间不够却已经把引擎装上了"
+        );
+        assert_eq!(
+            ran_times(&models_dir.join("download-ran")),
+            0,
+            "空间不够却已经开始下载了"
+        );
+    }
+
+    /// 防的是「下载跑完了，库里的状态没跟上」——以及反过来，「重下一遍把用户
+    /// 已经部署好的状态给退回去」。
+    ///
+    /// 成功路径上有四处落库，缺一处都是真问题：引擎登记（含这次跑的
+    /// install_engine 哈希，下次靠它判断要不要为刷新部署包重跑一遍）、模型记录、
+    /// 脚本正文固化（之后部署/启用/卸载全用这份本地副本，缺了它商店一挂用户
+    /// 连卸载都卸不掉）、以及状态本身。
+    ///
+    /// 第二遍下载钉的是另外三条现成约定：探针命中就整段跳过装引擎；
+    /// download_model **照跑不误**（库里写着"已下载"不代表权重还在磁盘上，见
+    /// `download_from_store` 的方法注释）；已部署的状态不因为重下一遍而回退。
+    #[test]
+    fn a_successful_download_records_the_engine_the_scripts_and_the_status() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+
+        let result = mgr
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .expect("下载应当成功");
+        assert_eq!(result.model_name, "ornith-1.5-35b");
+        assert!(!result.engine_reused, "第一次下载，引擎是刚装的");
+        assert!(!result.model_reused);
+        assert_eq!(
+            ran_times(&models_dir.join("engine-installed")),
+            1,
+            "引擎该实打实装一次"
+        );
+        assert_eq!(
+            ran_times(&models_dir.join("download-ran")),
+            1,
+            "权重该实打实下一次"
+        );
+
+        let engine = db::get_installed_engine("vllm", Some("v0.27.1"))
+            .unwrap()
+            .expect("引擎必须登记进库，否则下次下载还要再装一遍");
+        assert_eq!(
+            engine.docker_image.as_deref(),
+            Some("example/vllm:test"),
+            "install_engine 报上来的镜像要记下来，删除引擎时靠它精确 rmi"
+        );
+        assert!(
+            engine.install_script_sha256.is_some(),
+            "要记下这次跑的是哪一版 install_engine，否则商店修好的部署包永远刷不下去"
+        );
+
+        let rec = db::get_store_model("card-dl")
+            .unwrap()
+            .expect("下载完必须落库，否则模型库里根本看不到它");
+        assert_eq!(
+            rec.status, "downloaded",
+            "刚下完就该是「已下载」，不能停在中间态"
+        );
+        assert_eq!(rec.model_name, result.model_name);
+        assert!(
+            rec.scripts_content.contains_key("uninstall"),
+            "六类脚本的正文要固化到本地，否则商店一挂用户连卸载都卸不掉：{:?}",
+            rec.scripts_content.keys().collect::<Vec<_>>()
+        );
+
+        // 用户把它部署起来了，之后又点了一次下载
+        db::update_store_model_status("card-dl", "deployed", None).unwrap();
+        let again = mgr
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .expect("重新下载应当成功");
+        assert!(again.engine_reused, "引擎已在库里，这次是复用");
+        assert!(again.model_reused);
+        assert_eq!(
+            ran_times(&models_dir.join("engine-installed")),
+            1,
+            "探针命中就该整段跳过装引擎——真机上多装一遍就是多一个密码框"
+        );
+        assert_eq!(
+            ran_times(&models_dir.join("download-ran")),
+            2,
+            "download_model 必须照跑：库里写着「已下载」不代表权重还在磁盘上"
+        );
+        let rec = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(
+            rec.status, "deployed",
+            "重下一遍不能把已部署的卡片退回「已下载」"
         );
     }
 }

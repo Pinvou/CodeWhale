@@ -11,7 +11,9 @@
 //! Schema 跟 Python 版完全一致，共用同一个 `models.db` 文件（见 `config.rs`
 //! 的路径说明），保证从 Python 版升级过来的用户数据原样可读。
 
-use std::path::PathBuf;
+use std::fs;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
 
 use rand::Rng as _;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -152,12 +154,81 @@ pub fn db_path() -> PathBuf {
 /// 没有任何地方按 `models.db` 这个确切文件名去删除、备份或导出（`db_path()`
 /// 只有本文件在用），所以不存在"删掉主库、留下两个残片"的清理漏网。
 fn connect() -> rusqlite::Result<Connection> {
+    // 开库之前先把库文件的权限收好，库里存着明文网关密钥（见 ensure_db_file_private）。
+    ensure_db_file_private();
     let conn = Connection::open(db_path())?;
     // 顺序有讲究：busy_timeout 要先设。切 journal_mode 需要短暂拿排他锁，
     // 万一此刻另一个连接正在写，没有 busy_timeout 兜着就会当场失败。
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    // 上一句会把 -wal / -shm 建出来，密钥的最新一次写入就落在 -wal 里。
+    tighten_wal_sidecars();
     Ok(conn)
+}
+
+/// 库文件的目标权限：只有属主读写。
+const DB_FILE_MODE: u32 = 0o600;
+
+/// 保证 `models.db` 不对同机其他用户可读。
+///
+/// # 为什么库文件要单独管权限
+///
+/// `api_keys.key_value` 存的是**明文**的网关密钥——局域网里其他应用就是拿它
+/// 调本机模型的。而 SQLite 建库走的是默认 umask，真机上落成 0644：同机任何一个
+/// 登录用户都能直接 `sqlite3 models.db` 读走 `lmm-` 开头的 key。同模块 config.rs
+/// 对 `config.json` 和 HF token 回退文件都是按「同机其他用户不可读」建的
+/// （`OpenOptions::mode(0o600)`），装着密钥的库文件没有理由反而更松。
+///
+/// # 两种情况都要管
+///
+/// - **库还不存在**：用 `OpenOptions::mode(0o600)` 先把零长度文件建出来
+///   （零长度文件就是一个合法的空库，SQLite 照常在上面建表），跟 `save_settings`
+///   同款——不留「先按 umask 落成 0644、再 chmod」的那个窗口。这里**不能带
+///   `truncate`**：库已经存在时这一句必须只是打开再关上，不碰一个字节。
+/// - **库已经存在**：`mode()` 只在创建的那一刻生效，对存量设备（含从 Python 版
+///   升级过来、一直是 0644 的那些）不起作用，得补一次 `set_permissions`。
+///
+/// 失败只记日志不中断：真建不出来的话，紧接着的 `Connection::open` 会给出更
+/// 具体的错误；而 chmod 失败（挂载选项不支持等）不该让整个模型商店打不开。
+fn ensure_db_file_private() {
+    let db = db_path();
+    if let Err(e) = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(DB_FILE_MODE)
+        .open(&db)
+    {
+        eprintln!("[model-store] 预建 models.db 失败：{e}");
+        return;
+    }
+    tighten_to_owner_only(&db);
+}
+
+/// 把 WAL 的两个边车文件（`-wal` / `-shm`）一并收到 0600。
+///
+/// 正常情况下这是空操作：SQLite 建 WAL 和 shm 时会**照抄主库文件的权限位**，
+/// 主库是 0600 它们就是 0600。要防的是错开的时序——上一个进程被强杀时 `-wal`
+/// 不会被删掉，于是设备上可能留着一个在主库还是 0644 的年代建出来的 `-wal`，
+/// 而**最近写进去的密钥恰恰在里面**。只在权限确实更松时才写，正常路径上就是
+/// 三次 stat。
+fn tighten_wal_sidecars() {
+    let db = db_path();
+    for suffix in ["-wal", "-shm"] {
+        let mut name = db.clone().into_os_string();
+        name.push(suffix);
+        tighten_to_owner_only(Path::new(&name));
+    }
+}
+
+/// 文件存在且组/其他用户还读得到时，收成 0600。文件不在就什么也不做。
+fn tighten_to_owner_only(path: &Path) {
+    let Ok(meta) = fs::metadata(path) else { return };
+    if meta.permissions().mode() & 0o077 == 0 {
+        return;
+    }
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(DB_FILE_MODE)) {
+        eprintln!("[model-store] 收紧 {} 的权限失败：{e}", path.display());
+    }
 }
 
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -940,6 +1011,39 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
         assert_eq!(mode.to_ascii_lowercase(), "wal", "库没有跑在 WAL 模式上");
+    }
+
+    /// 库文件不能对同机其他用户可读：`api_keys.key_value` 是明文的网关密钥。
+    /// WAL 的两个边车文件同样算数——最近一次写入就落在 `-wal` 里。
+    #[test]
+    fn db_files_are_not_readable_by_other_users() {
+        let _ctx = setup_temp_db();
+
+        // 模拟存量设备：库在这次改动之前就已经按默认 umask 落成 0644 了。
+        fs::set_permissions(db_path(), fs::Permissions::from_mode(0o644)).unwrap();
+
+        // 连接期间 -wal / -shm 才存在（最后一个连接关掉时 SQLite 会删掉它们），
+        // 所以这条连接必须活到断言结束。
+        let conn = connect().unwrap();
+        // 让密钥真的写进 WAL，而不是只断言两个空文件。
+        add_api_key("card-perm", Some("权限测试")).unwrap();
+
+        // 三个文件都要查到：只断言主库的话，这条测试正好漏掉带着密钥的那个 -wal。
+        for suffix in ["", "-wal", "-shm"] {
+            let mut name = db_path().into_os_string();
+            name.push(suffix);
+            let path = PathBuf::from(name);
+            let meta =
+                fs::metadata(&path).unwrap_or_else(|e| panic!("{} 应该存在：{e}", path.display()));
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} 的权限是 {mode:o}，同机其他用户读得到",
+                path.display()
+            );
+        }
+        drop(conn);
     }
 
     #[test]

@@ -17,7 +17,7 @@
 
 use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use codewhale_secrets::{DefaultKeyringStore, KeyringStore as _};
 use serde::{Deserialize, Serialize};
@@ -41,8 +41,29 @@ const KEYRING_USERNAME: &str = "hf_token";
 ///
 /// 配置和数据放同一个根：模型商店的"配置"（商店地址、权重目录、并发数）本来就只有
 /// 一个 json，为它单独占一个 XDG 配置目录没有意义，反而让"卸载时要清哪些"变成两处。
+///
+/// 根走 `platform::paths::pinvou3_home()`，不再自己解析 `$HOME`：那个函数认
+/// `PINVOU3_HOME`（把整棵 `~/.pinvou3/` 树整体重定位）。自己解析等于设了这个变量时
+/// 模型商店的库、权重、配置全部留在重定位树外面——本文件开头定下的"卸载时要清哪些
+/// 只能有一处答案"又变回两处。
+///
+/// **没设 `PINVOU3_HOME` 时解析结果逐字节不变**，仍然是 `$HOME/.pinvou3/model-store`：
+/// 两边都是 `PathBuf::from($HOME).join(".pinvou3")`（platform 那边见
+/// `platform/os/linux/linux_path.rs` 的 `user_home_dir`）。这一点必须逐字节成立才敢
+/// 换——设备上已经有权重、models.db、config.json 落在这个路径下，路径差一个字节就是
+/// 用户数据全部失联（2026-09-20 改默认权重目录让 124GB 一夜失效，就是这么来的）。
+///
+/// 两处刻意的差别，都只在原来那条路走不到的情况下才出现：
+///
+/// 1. `$HOME` 缺失时的兜底，原来是 `/`，platform 层是 `/tmp`。`/` 对普通用户根本
+///    不可写，那条路上不可能存在既有数据，统一过去没有迁移代价。
+/// 2. 设了 `PINVOU3_HOME` 的机器上，数据根跟着变成 `$PINVOU3_HOME/model-store`
+///    ——这正是本次要的语义（INSTALL.md 把它登记为"可重定位用户数据根目录"）。
+///    代价要说清楚：**已经**把模型商店数据落在 `~/.pinvou3/model-store`、事后又设上
+///    这个变量的机器，得手工把这个目录搬进新根，否则库和权重在界面上表现为"没有"。
+///    没设过该变量的机器（出厂默认、开发机、CI）完全不受影响。
 fn store_root() -> PathBuf {
-    let d = dirs_home().join(".pinvou3").join("model-store");
+    let d = crate::platform::paths::pinvou3_home().join("model-store");
     let _ = fs::create_dir_all(&d);
     d
 }
@@ -53,12 +74,6 @@ pub fn config_dir() -> PathBuf {
 
 pub fn data_dir() -> PathBuf {
     store_root()
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
 fn config_file() -> PathBuf {
@@ -129,10 +144,13 @@ pub struct Settings {
 
     /// 测试模型商店是否开着。
     ///
-    /// 入口是隐藏的：设置页「关于」里连点版本号若干次再输口令才能开（见
-    /// app::commands::settings::test_store_unlock）。这不是安全边界，只是防止
-    /// 普通用户误入——口令哈希编译在二进制里，逆向拿得到。真要挡住有心人，
-    /// 得让测试卡片根本不进发布包。
+    /// 入口是隐藏的：在模型商店页面连点标题 7 次（相邻两次间隔不超过 1.5 秒）弹出
+    /// 口令框，输对口令才开。前端见 `src/features/model-store/ModelStoreView.jsx`
+    /// 的 `handleSecretUnlockClick`，命令是
+    /// `app::commands::model_store::model_store_unlock_test_store`。
+    ///
+    /// 这不是安全边界，只是防止普通用户误入——口令哈希编译在二进制里，逆向拿得到。
+    /// 真要挡住有心人，得让测试卡片根本不进发布包。
     pub test_mode_enabled: bool,
 }
 
@@ -189,17 +207,51 @@ impl Settings {
 /// 一直"连不上"——而且报错里看不出任何线索。
 const LEGACY_DEFAULT_STORE_URLS: &[&str] = &["http://47.120.8.237/model-store"];
 
+/// 解析不了的配置文件改名留存成 `config.json.bad`，再回退默认值。
+///
+/// **不能静默**，理由跟 `write_token_fallback` 那条一样，后果还更重：
+/// `load_settings` 回退到全默认值之后，界面上看不出任何异常，而下一次**任意**保存
+/// ——哪怕只是切一下测试商店开关（service.rs 里每个 `set_*` 都是"先读再改再整体
+/// 写回"）——就会把这堆默认值原样写回盘上。用户自配的权重目录、商店地址、导入扫描
+/// 目录到这一刻才真正**不可恢复**。而 `Settings` 是整体反序列化的，任一字段类型不符
+/// （手改坏、旧版本遗留、磁盘损坏）就足以让整个文件作废，门槛并不高。
+///
+/// 所以坏文件先改名留在原地：至少还能手工把值抄回来，排查的人在日志里也看得见。
+/// 只留最近一份（`.bad` 已存在时 rename 直接覆盖）——这种文件不该攒成一堆，
+/// 真要看的也是刚坏掉的那一份。
+fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
+    let bad = cfg_file.with_extension("json.bad");
+    match fs::rename(cfg_file, &bad) {
+        Ok(()) => eprintln!(
+            "[model-store] 配置文件{reason}，已改名留存为 {}，本次回退默认设置",
+            bad.display()
+        ),
+        Err(e) => eprintln!(
+            "[model-store] 配置文件 {} {reason}，改名留存也失败（{e}），本次回退默认设置",
+            cfg_file.display()
+        ),
+    }
+}
+
 pub fn load_settings() -> Settings {
     let mut settings = Settings::default();
     let cfg_file = config_file();
-    if let Ok(text) = fs::read_to_string(&cfg_file) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            // 逐字段合并，而不是整体反序列化覆盖：老配置文件缺字段时要保留
-            // 上面 Default 给的默认值，不能让 serde 把它们清成各类型的零值。
-            if let Ok(partial) = serde_json::from_value::<Settings>(value) {
-                settings = partial;
-            }
-        }
+    match fs::read_to_string(&cfg_file) {
+        // 整体反序列化。老配置文件里缺掉的字段靠结构体上的 `#[serde(default)]`
+        // （见 `Settings` 定义）取 Default 给的值，而不是各类型的零值——注意这
+        // **不是**逐字段合并：任一字段类型不符，整个文件就废掉，走下面的留存分支。
+        Ok(text) => match serde_json::from_str::<Settings>(&text) {
+            Ok(parsed) => settings = parsed,
+            Err(e) => quarantine_broken_config(&cfg_file, &format!("解析失败（{e}）")),
+        },
+        // 没有配置文件是全新安装的正常状态，不出声。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 文件在、却读不出来（权限、磁盘错误）：**不**改名——内容未必是坏的，而且
+        // 连读都读不了多半也 rename 不了。但同样必须出声，否则又是一次无声重置。
+        Err(e) => eprintln!(
+            "[model-store] 配置文件 {} 读取失败（{e}），本次回退默认设置",
+            cfg_file.display()
+        ),
     }
     if settings.staging_dir.trim().is_empty() {
         settings.staging_dir = data_dir().join("staging").to_string_lossy().to_string();
@@ -221,10 +273,11 @@ pub fn load_settings() -> Settings {
 /// 两件事都不是讲究：
 ///
 /// 1. 直接 `fs::write` 覆盖不是原子的。保存那一瞬断电或被杀，留下的是半截 JSON，
-///    而 `load_settings` 解析失败会**静默回退到全部默认值**——用户自己配的权重
-///    目录、商店地址、导入扫描目录、测试商店开关一起无声消失，界面上没有任何
-///    异常，他只会觉得"设置怎么自己变回去了"。同模块 orphans.rs 的 `store_unlocked`
-///    早就是这么写的，照搬即可。
+///    而 `load_settings` 解析失败就回退到全部默认值——用户自己配的权重目录、商店
+///    地址、导入扫描目录、测试商店开关一起消失，界面上没有任何异常，他只会觉得
+///    "设置怎么自己变回去了"。坏文件现在至少会被 `quarantine_broken_config` 留成
+///    `config.json.bad` 并打一行日志，但那只是事后能抄回来，**不是**可以不做原子
+///    写的理由。同模块 orphans.rs 的 `store_unlocked` 早就是这么写的，照搬即可。
 /// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有商店地址
 ///    这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按 0600 建，
 ///    窗口就不存在了。
@@ -355,6 +408,17 @@ pub fn get_hf_token() -> Option<String> {
     read_token_fallback()
 }
 
+/// 写入（`Some`）或清除（`None`）HF token。这是 token 的**唯一写入口**。
+///
+/// **目前零调用点**：没有对应的命令、前端入口和三语文案，所以全新用户的 token
+/// 恒为空——需要 HF 凭据的 gated / 私有模型下不了（在架的公开模型不受影响：
+/// `get_hf_token` 读不到时 lifecycle 注入的 `LMM_HF_TOKEN` 是空串，脚本按匿名
+/// 下载走）。留待后续分期接线，那是「命令 + 设置里的输入框 + i18n 三语」一整套，
+/// 不在本期范围内。
+///
+/// 读那一侧（`get_hf_token`）是接着的（lifecycle 给每次脚本执行注入
+/// `LMM_HF_TOKEN`），所以真机上早年由 LMM 存进密钥环的那条 token 仍然在用——
+/// 只是用户现在没有办法在品悟里改它或删它。
 pub fn set_hf_token(token: Option<&str>) {
     let store = keyring_store();
     let stored_in_keyring = match token {
@@ -411,10 +475,18 @@ pub static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// 锁一并握在这个守卫里：这样「改 HOME」和「还原 HOME」之间全程持锁，
 /// 不会出现某个测试改完、还没还原就被另一个测试读到的窗口。
+///
+/// # 为什么连 `PINVOU3_HOME` 一起清
+///
+/// `store_root()` 现在走 `platform::paths::pinvou3_home()`，而它**先看
+/// `PINVOU3_HOME`**：开发机上真设了这个变量的话，只切 HOME 是隔离不住的——
+/// 测试会直接读写那棵被重定位的**真实**数据树（models.db、权重、config.json）。
+/// 所以这里把它一并移除，离开作用域再还原成原值。
 #[cfg(test)]
 pub struct TempHome {
     dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
+    previous_pinvou3_home: Option<std::ffi::OsString>,
     // 声明在最后 => 最后析构：HOME 已经还原、临时目录也删掉之后才放锁。
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -425,12 +497,20 @@ impl TempHome {
         let lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("HOME");
+        let previous_pinvou3_home = std::env::var_os("PINVOU3_HOME");
         // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
-        // 这里全程持有 ENV_TEST_LOCK，同一时刻只有一个测试在动 HOME。
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        // 这里全程持有 ENV_TEST_LOCK，同一时刻只有一个测试在动这两个变量。
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            // 移除而不是设成临时目录：设了的话解析结果就变成
+            // `<tmp>/model-store`，跟生产路径 `$HOME/.pinvou3/model-store` 差一层，
+            // 测试也就不再覆盖真实布局了。
+            std::env::remove_var("PINVOU3_HOME");
+        }
         Self {
             dir,
             previous,
+            previous_pinvou3_home,
             _lock: lock,
         }
     }
@@ -451,6 +531,13 @@ impl Drop for TempHome {
                 // 空串会让 `$HOME/...` 拼成绝对路径 `/...`，比没有更糟。
                 None => std::env::remove_var("HOME"),
             }
+            match &self.previous_pinvou3_home {
+                Some(v) => std::env::set_var("PINVOU3_HOME", v),
+                // 原来就没有的，离开时也得是没有：不能只"什么都不做"——作用域内
+                // 万一有别的代码设上了它，就会漏到后面的测试里，而那正是 TempHome
+                // 这个类型存在的理由。
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
         }
     }
 }
@@ -463,7 +550,8 @@ mod tests {
     #[test]
     fn legacy_default_store_url_is_migrated_but_custom_one_is_kept() {
         // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
-        // 只认 HOME。这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
+        // 只认 HOME 和 PINVOU3_HOME（TempHome 两个都管了）。
+        // 这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
         // 原生化之后没有任何生产代码再读它，设了等于没隔离，测试会直接读写开发机
         // 上真实的 ~/.pinvou3/model-store。
         //
@@ -491,6 +579,55 @@ mod tests {
             load_settings().store_url,
             "http://192.0.2.10:8088",
             "用户自定义的地址被改掉了"
+        );
+    }
+
+    /// 数据根必须逐字节等于 `$HOME/.pinvou3/model-store`。
+    ///
+    /// 换走 `platform::paths::pinvou3_home()` 那次改动，安全性全压在这一条上：
+    /// 设备上的权重、models.db、config.json 都躺在这个路径下，差一个分量就是用户
+    /// 数据全部失联。TempHome 保证 `PINVOU3_HOME` 是没设的，也就是出厂状态。
+    #[test]
+    fn store_root_is_byte_for_byte_the_old_path_when_pinvou3_home_is_unset() {
+        let home = TempHome::new();
+        let expected = home.path().join(".pinvou3").join("model-store");
+        assert_eq!(config_dir(), expected);
+        assert_eq!(data_dir(), expected);
+        assert_eq!(config_file(), expected.join("config.json"));
+    }
+
+    /// 坏掉的配置文件不能无声重置：回退默认值之前要先把它改名留存。
+    ///
+    /// 不留存的话，下一次任意保存（切一下测试商店开关就够）会把重置后的默认值
+    /// 整体写回盘上，用户自配的权重目录/商店地址/扫描目录从此不可恢复。
+    #[test]
+    fn a_broken_config_is_kept_aside_instead_of_being_silently_reset() {
+        let _home = TempHome::new();
+        let path = config_file();
+
+        // 合法 JSON，但 gateway_port 的类型不对——整体反序列化时这一个字段
+        // 就足以让整个文件作废，正是"门槛并不高"的那种坏法。
+        std::fs::write(
+            &path,
+            r#"{"store_url": "http://192.0.2.10:8088", "gateway_port": "不是数字"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_settings().store_url,
+            Settings::default().store_url,
+            "坏文件应当回退到默认值"
+        );
+        assert!(
+            !path.exists(),
+            "坏文件必须让开，否则下一次保存会把它原地覆盖掉"
+        );
+
+        let bad = path.with_extension("json.bad");
+        let kept = std::fs::read_to_string(&bad).expect("坏文件没有留存");
+        assert!(
+            kept.contains("192.0.2.10"),
+            "留存的必须是原样内容，用户还指着它把值抄回来：{kept}"
         );
     }
 

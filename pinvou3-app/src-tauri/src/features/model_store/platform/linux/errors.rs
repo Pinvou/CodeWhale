@@ -130,11 +130,19 @@ pub fn humanize_script_message(raw: &str) -> String {
 /// 而真正的原因是 SSH 连不上从机（255 是 ssh 自己的连接失败码），跟超时毫无关系。
 /// 用户照着这句提示「稍后重试」，重试多少次都一样。
 ///
-/// 同类的雷还有一堆：`StrictHostKeyChecking`、路径里带 `unauthorized` 的模型名、
-/// URL 里带 `timeout` 的查询参数。子串匹配在"拿整段命令行当输入"的场景下必然误伤。
+/// 判据只有一条：关键词前后一个字节不是 ASCII 字母数字。于是 `connecttimeout`
+/// 不算命中，`timeout:` 和 `(timeout)` 算；keyword 本身含空格（如
+/// `no space left on device`）时同样适用。
 ///
-/// 只看前后是不是 ASCII 字母数字：`connecttimeout` 不算命中，`timeout:` 和
-/// `(timeout)` 算。keyword 本身含空格（如 `no space left on device`）时同样适用。
+/// **修掉的只有"字母数字粘连"这一类**——`ConnectTimeout`、`StrictHostKeyChecking`、
+/// `timeouts`、`xtimeout`。这条注释原来还写着它能挡住"路径里带 unauthorized 的模型名、
+/// URL 里带 timeout 的查询参数"，那是夸大：`-`、`=`、`/`、`?`、`.` 在这个判据下**都算
+/// 边界**，所以 `models/unauthorized-model`（d 后面是 `-`）和 `?timeout=30`
+/// （`?` 在前、`=` 在后）照样命中，照样被翻成「没有访问权限」/「操作超时」。
+///
+/// 要连这一类一起挡住，就不是收紧边界字符集能了的（`-` 和 `/` 在真实的错误句子里
+/// 本来就是合法的词间分隔），得动"拿整段命令行/URL 当输入去猜原因"这个前提本身。
+/// 那是行为变更，另案处理；在此之前别把这里读成"误伤已经没有了"。
 fn contains_as_word(haystack: &str, keyword: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut from = 0;
