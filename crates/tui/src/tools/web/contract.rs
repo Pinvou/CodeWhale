@@ -331,6 +331,10 @@ mod tests {
             u128::from(DEFAULT_SEARCH_TIMEOUT_MS),
             DEFAULT_TIMEOUT.as_millis()
         );
+        // Pin the absolute value too: the fetch_url schema advertises
+        // "max 300,000" in milliseconds, and only this test binds that
+        // number to the constant.
+        assert_eq!(HARD_MAX_TIMEOUT.as_millis(), 300_000);
         assert!(HARD_MAX_TIMEOUT.as_millis() >= u128::from(MAX_SEARCH_TIMEOUT_MS));
         assert!(DEFAULT_SEARCH_RESULTS <= usize::from(MAX_SEARCH_RESULTS));
     }
