@@ -5809,6 +5809,58 @@ async fn update_thread_workspace_persists_event_and_evicts_idle_engine() -> Resu
 }
 
 #[tokio::test]
+async fn update_thread_roots_evicts_idle_engine() -> Result<()> {
+    // Eviction fires under `workspace_changed || roots_changed`; the workspace
+    // leg is pinned above, this pins the roots leg — regressing the
+    // disjunction would leave the stale single-root engine cached with every
+    // other test green.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-roots-evict");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(workspace.clone()),
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+
+    manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(vec![std::path::PathBuf::from("/shared")]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+
+    {
+        let active = manager.active.lock().await;
+        assert!(
+            !active.engines.contains_key(&thread.id),
+            "a roots change must evict the stale cached engine just like a workspace change"
+        );
+        assert!(!active.lru.iter().any(|id| id == &thread.id));
+    }
+
+    match tokio::time::timeout(Duration::from_secs(1), rx_op.recv()).await {
+        Ok(Some(Op::Shutdown)) => {}
+        other => panic!("expected cached engine shutdown, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_roots_preserves_session_and_turn_context() -> Result<()> {
     // Review #484 round-9 must-fix 2: a roots-bearing resume must re-shape
     // the SAME runtime thread (PATCH primitive), preserving session_id and
