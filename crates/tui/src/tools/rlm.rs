@@ -570,7 +570,11 @@ impl RlmTool {
                     let name = format!("{tag}_{}", 0); // single counter is fine
                     let handle = store.insert_text(session_id, name, text);
                     (
-                        Some(format!("{} chars; retrieve via handle_read", text.len())),
+                        Some(format!(
+                            "{} chars; retrieve via handle_read; \
+                             {HANDLE_READ_ACTIVATION_HINT}",
+                            text.len()
+                        )),
                         Some(handle),
                     )
                 }
@@ -879,7 +883,8 @@ fn preview_output(text: &str) -> String {
         .skip(total.saturating_sub(FULL_STDOUT_TAIL_CHARS))
         .collect();
     format!(
-        "{head}\n... [{} chars truncated, retrieve via handle_read when returned as a handle] ...\n{tail}",
+        "{head}\n... [{} chars truncated, retrieve via handle_read when \
+         returned as a handle; {HANDLE_READ_ACTIVATION_HINT}] ...\n{tail}",
         total.saturating_sub(FULL_STDOUT_HEAD_CHARS + FULL_STDOUT_TAIL_CHARS)
     )
 }
@@ -1028,6 +1033,63 @@ mod tests {
             redaction.contains("handle_read") && redaction.contains(HANDLE_READ_ACTIVATION_HINT),
             "session_objects redaction note must pair handle_read with the \
              activation hint:\n{redaction}"
+        );
+    }
+
+    /// The handle-route preview line ("N chars; retrieve via handle_read")
+    /// is emitted on every eval output past the handle threshold, so it is
+    /// the pairing site the model acts on right before calling
+    /// `handle_read`; it must teach the activation path too (Pinvou #534).
+    #[tokio::test]
+    async fn rlm_eval_large_stdout_handle_preview_teaches_activation_hint() {
+        let ctx = ctx();
+        RlmTool::alias("rlm_open", "open", None)
+            .execute(json!({"name": "wide", "content": "body"}), &ctx)
+            .await
+            .expect("open");
+
+        // 2000 chars of output clears the 1k handle threshold, so the eval
+        // result carries the handle-route preview line instead of the body.
+        let eval = RlmTool::alias("rlm_eval", "eval", None)
+            .execute(json!({"name": "wide", "code": "print('x' * 2000)"}), &ctx)
+            .await
+            .expect("eval");
+        let eval_json: Value = serde_json::from_str(&eval.content).expect("eval json");
+        assert!(
+            eval_json.get("stdout_handle").is_some(),
+            "large stdout must be handle-routed: {eval_json}"
+        );
+        let stdout_preview = eval_json["stdout_preview"]
+            .as_str()
+            .expect("handle-routed stdout must still carry a preview line")
+            .replace("\r\n", "\n");
+
+        assert!(
+            stdout_preview.contains(" chars; retrieve via handle_read;"),
+            "handle-route preview line shape:\n{stdout_preview}"
+        );
+        assert!(
+            stdout_preview.contains(HANDLE_READ_ACTIVATION_HINT),
+            "preview line must pair handle_read with the activation hint:\n{stdout_preview}"
+        );
+    }
+
+    /// The truncation marker commands `handle_read` the same way; it is
+    /// currently unreachable through `route_output` (the handle threshold
+    /// fires first) but the wording must stay correct if that threshold
+    /// ever rises above head+tail (Pinvou #534).
+    #[test]
+    fn rlm_truncation_marker_teaches_activation_hint() {
+        let body = "x".repeat(FULL_STDOUT_HEAD_CHARS + FULL_STDOUT_TAIL_CHARS + 1);
+        let preview = preview_output(&body);
+
+        assert!(
+            preview.contains("chars truncated, retrieve via handle_read"),
+            "truncation marker shape:\n{preview}"
+        );
+        assert!(
+            preview.contains(HANDLE_READ_ACTIVATION_HINT),
+            "truncation marker must pair handle_read with the activation hint:\n{preview}"
         );
     }
 
