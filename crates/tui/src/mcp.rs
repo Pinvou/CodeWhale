@@ -531,7 +531,12 @@ fn default_connect_timeout() -> u64 {
 // 30 minutes: an MCP tool call legitimately runs minutes (scrapes, remote
 // jobs, agent-side work). The old 60s default returned "timed out" to the
 // model for healthy-but-slow tools, which then retried and compounded cost.
-// Per-server/global overrides still apply via `execute_timeout`.
+// Per-server/global overrides still apply via `execute_timeout`. Part of
+// the 1800s family that comments keep in sync (TUI client envelope,
+// sub-agent tool timeout, engine dispatch backstop). Note the budget is
+// per leg: a barely-draining server can consume most of it on the send
+// leg and the read leg waits out its own budget, so a single call can
+// approach twice this value in the worst case.
 fn default_execute_timeout() -> u64 {
     1800
 }
@@ -1520,6 +1525,10 @@ fn per_request_read_budget(read_timeout_secs: u64, request_timeout_secs: u64) ->
 /// longest request the connection carries (`tools/call` at the execute
 /// budget), so a raised `execute_timeout` governs there too. This is a
 /// ceiling for the transport, not the read knob — the two stay independent.
+/// Because reqwest's client total wraps the response body, it also bounds a
+/// long-lived legacy-SSE event stream on the same client at this ceiling;
+/// that is strictly better than the base behavior (the client total was the
+/// 120s read knob), but do not "fix" the stream by removing this total.
 fn http_total_timeout(config: &McpServerConfig, global: &McpTimeouts) -> u64 {
     config
         .effective_read_timeout(global)
