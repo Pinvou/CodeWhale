@@ -476,14 +476,21 @@ pub fn record_engine_turn_started(session_id: &str) {
     record_first_event(session_id, "engine_turn_started", None);
 }
 
-pub fn record_first_message_delta(session_id: &str) {
+/// Capture the first user-visible text delta for startup diagnostics. Empty
+/// deltas are intentionally excluded from this production metric.
+pub fn record_first_output(session_id: &str) {
     if let Ok(mut map) = active_turns().lock()
         && let Some(active) = map.get_mut(session_id).and_then(VecDeque::back_mut)
         && active.first_output_timestamp.is_none()
     {
         active.first_output_timestamp = Some(now_ms());
     }
-    #[cfg(any(feature = "benchmark-hooks", test))]
+}
+
+/// Preserve the benchmark milestone's historical "first MessageDelta event"
+/// semantics, including an empty delta.
+#[cfg(any(feature = "benchmark-hooks", test))]
+pub fn record_first_message_delta(session_id: &str) {
     record_first_event(session_id, "first_message_delta", None);
 }
 
@@ -1572,6 +1579,23 @@ mod tests {
                 sync_session_ms: 4,
             },
         );
+        record_engine_ready(
+            sid,
+            EngineAcquireTiming {
+                kind: "reused",
+                total_ms: 1,
+                runtime_lock_ms: 1,
+                prepare_model_ms: 0,
+                reclaim_ms: 0,
+                finalize_bridge_ms: 0,
+                tool_setup_ms: 0,
+                materialize_skills_ms: 0,
+                spawn_engine_ms: 0,
+                load_session_ms: 0,
+                sync_session_ms: 0,
+            },
+        );
+        record_first_output(sid);
         record_first_message_delta(sid);
         finish_turn(sid, "Completed", None);
 

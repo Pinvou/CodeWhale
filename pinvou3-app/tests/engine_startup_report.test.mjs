@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   collectEngineStartupSamples,
   formatEngineStartupReport,
+  parseArgs,
   summarizeEngineStartup,
 } from '../scripts/engine-startup-report.mjs';
 
@@ -79,4 +80,36 @@ test('requires enough cold and reused samples before confirming an issue', () =>
   assert.equal(confirmed.groups.cold.acquisition.p50_ms, 350);
   assert.equal(confirmed.groups.cold.acquisition.p95_ms, 500);
   assert.match(formatEngineStartupReport(confirmed), /问题成立/u);
+
+  const weakCeiling = summarizeEngineStartup([
+    sample('cold', 400),
+    sample('cold', 500),
+    sample('reused', 390),
+    sample('reused', 410),
+  ], { minSamples: 2, coldP95ThresholdMs: 300, minPotentialImprovementPercent: 20 });
+  assert.equal(weakCeiling.verdict, 'prewarm_ceiling_below_target');
+  assert.match(formatEngineStartupReport(weakCeiling), /不建议预热/u);
+});
+
+test('rejects missing and non-finite numeric CLI arguments', () => {
+  assert.throws(() => parseArgs(['--cold-p95-ms', 'NaN']), /需要数字/u);
+  assert.throws(() => parseArgs(['--cold-p95-ms']), /需要数字/u);
+  assert.throws(() => parseArgs(['--min-samples', '1.5']), /需要整数/u);
+  assert.throws(() => parseArgs(['--min-samples', '0']), /不得小于 1/u);
+  assert.throws(() => parseArgs(['--min-improvement-percent', '101']), /0 到 100/u);
+  assert.throws(() => parseArgs(['--input', '--json']), /需要路径/u);
+  assert.equal(parseArgs(['--min-samples', '42']).minSamples, 42);
+});
+
+test('computes max without spreading an unbounded sample array', () => {
+  const samples = Array.from({ length: 150_000 }, (_, index) => ({
+    kind: 'cold',
+    total_ms: index,
+    send_to_ready_ms: index,
+    ready_to_first_output_ms: 1,
+    send_to_first_output_ms: index + 1,
+    stages: {},
+  }));
+  const report = summarizeEngineStartup(samples);
+  assert.equal(report.groups.cold.acquisition.max_ms, 149_999);
 });

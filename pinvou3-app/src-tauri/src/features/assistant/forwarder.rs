@@ -422,9 +422,7 @@ pub(crate) fn spawn_event_forwarder(
                 Event::MessageDelta { content, .. } => {
                     if !content.is_empty() {
                         if !startup_first_output_recorded {
-                            crate::features::assistant::timing::record_first_message_delta(
-                                &session_id,
-                            );
+                            crate::features::assistant::timing::record_first_output(&session_id);
                             startup_first_output_recorded = true;
                         }
                         if let Some(turn_id) = current_turn_id.as_deref() {
@@ -437,6 +435,7 @@ pub(crate) fn spawn_event_forwarder(
                     }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
+                        crate::features::assistant::timing::record_first_message_delta(&session_id);
                         if let Some(turn_id) = &current_turn_id {
                             if first_delta_done.insert(turn_id.clone()) {
                                 crate::features::assistant::timing::record_milestone(

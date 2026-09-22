@@ -31,7 +31,7 @@ function distribution(values) {
     count: finite.length,
     p50_ms: percentile(finite, 0.5),
     p95_ms: percentile(finite, 0.95),
-    max_ms: finite.length ? Math.max(...finite) : null,
+    max_ms: finite.length ? finite.reduce((maximum, value) => Math.max(maximum, value), -Infinity) : null,
   };
 }
 
@@ -112,7 +112,11 @@ export async function collectEngineStartupSamples(input) {
   return samples;
 }
 
-export function summarizeEngineStartup(samples, { minSamples = 30, coldP95ThresholdMs = 300 } = {}) {
+export function summarizeEngineStartup(samples, {
+  minSamples = 30,
+  coldP95ThresholdMs = 300,
+  minPotentialImprovementPercent = 20,
+} = {}) {
   const groups = {};
   for (const kind of KINDS) {
     const selected = samples.filter(sample => sample.kind === kind);
@@ -127,14 +131,25 @@ export function summarizeEngineStartup(samples, { minSamples = 30, coldP95Thresh
   const enoughSamples = groups.cold.acquisition.count >= minSamples
     && groups.reused.acquisition.count >= minSamples;
   const coldP95 = groups.cold.acquisition.p95_ms;
+  const reusedP95 = groups.reused.acquisition.p95_ms;
+  const potentialImprovementPercent = enoughSamples && coldP95 > 0
+    ? ((coldP95 - reusedP95) / coldP95) * 100
+    : null;
   return {
-    criteria: { min_samples_per_group: minSamples, cold_p95_threshold_ms: coldP95ThresholdMs },
+    criteria: {
+      min_samples_per_group: minSamples,
+      cold_p95_threshold_ms: coldP95ThresholdMs,
+      min_potential_improvement_percent: minPotentialImprovementPercent,
+    },
     groups,
+    potential_improvement_percent: potentialImprovementPercent,
     verdict: !enoughSamples
       ? 'insufficient_samples'
-      : coldP95 > coldP95ThresholdMs
-        ? 'cold_start_issue_confirmed'
-        : 'cold_start_within_threshold',
+      : coldP95 <= coldP95ThresholdMs
+        ? 'cold_start_within_threshold'
+        : potentialImprovementPercent < minPotentialImprovementPercent
+          ? 'prewarm_ceiling_below_target'
+          : 'cold_start_issue_confirmed',
   };
 }
 
@@ -160,25 +175,52 @@ export function formatEngineStartupReport(report) {
   }
   const verdicts = {
     insufficient_samples: `证据不足：cold 与 reused 各需要至少 ${report.criteria.min_samples_per_group} 个样本。`,
-    cold_start_issue_confirmed: `问题成立：cold 获取 P95 超过 ${report.criteria.cold_p95_threshold_ms} ms。`,
+    cold_start_issue_confirmed: `问题成立：cold 获取 P95 超过 ${report.criteria.cold_p95_threshold_ms} ms，且相对 reused 的理论改善空间达到 ${report.criteria.min_potential_improvement_percent}%。`,
     cold_start_within_threshold: `无需改动：cold 获取 P95 未超过 ${report.criteria.cold_p95_threshold_ms} ms。`,
+    prewarm_ceiling_below_target: `不建议预热：即使达到 reused P95，理论改善也不足 ${report.criteria.min_potential_improvement_percent}%。`,
   };
   lines.push(verdicts[report.verdict]);
   return lines.join('\n');
 }
 
-function parseArgs(argv) {
+function requiredNumber(argv, index, flag, { integer = false, minimum = 0, maximum = Infinity } = {}) {
+  const raw = argv[index + 1];
+  const value = Number(raw);
+  if (raw == null || !Number.isFinite(value) || value < minimum || value > maximum
+    || (integer && !Number.isInteger(value))) {
+    const range = Number.isFinite(maximum)
+      ? `范围为 ${minimum} 到 ${maximum}`
+      : `不得小于 ${minimum}`;
+    throw new Error(`${flag} 需要${integer ? '整数' : '数字'}，且${range}`);
+  }
+  return value;
+}
+
+export function parseArgs(argv) {
   const options = {
     input: path.join(process.env.PINVOU3_HOME || path.join(os.homedir(), '.pinvou3'), 'sessions'),
     minSamples: 30,
     coldP95ThresholdMs: 300,
+    minPotentialImprovementPercent: 20,
     json: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--input') options.input = argv[++index];
-    else if (arg === '--min-samples') options.minSamples = Number(argv[++index]);
-    else if (arg === '--cold-p95-ms') options.coldP95ThresholdMs = Number(argv[++index]);
+    if (arg === '--input') {
+      if (argv[index + 1] == null || argv[index + 1].startsWith('--')) {
+        throw new Error('--input 需要路径');
+      }
+      options.input = argv[++index];
+    } else if (arg === '--min-samples') {
+      options.minSamples = requiredNumber(argv, index, arg, { integer: true, minimum: 1 });
+      index += 1;
+    } else if (arg === '--cold-p95-ms') {
+      options.coldP95ThresholdMs = requiredNumber(argv, index, arg);
+      index += 1;
+    } else if (arg === '--min-improvement-percent') {
+      options.minPotentialImprovementPercent = requiredNumber(argv, index, arg, { maximum: 100 });
+      index += 1;
+    }
     else if (arg === '--json') options.json = true;
     else throw new Error(`未知参数: ${arg}`);
   }

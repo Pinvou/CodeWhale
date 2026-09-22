@@ -2391,6 +2391,7 @@ impl EnginePool {
             // The window is ms-scale after create_session; every run owns a
             // fresh session, so nothing propagates to the next run.
             self.evict_locked(session_id).await;
+            crate::features::assistant::timing::start_turn(session_id);
             let engine = match self
                 .get_or_spawn_with_policy(session_id, true, None)
                 .await
@@ -2441,6 +2442,22 @@ impl EnginePool {
 
         drop(_running_slot);
         self.evict_locked(session_id).await;
+        // Reclaim first: if submission succeeded but the scheduler callback or
+        // terminal wait failed, the forwarder owns the authoritative terminal
+        // and consumes this timing turn while eviction cancels it. The calls
+        // below are idempotent fallbacks for failures before submission and
+        // cancellation before send.
+        match &result {
+            Err(error) => crate::features::assistant::timing::finish_turn(
+                session_id,
+                "send_error",
+                Some(&format!("{error:#}")),
+            ),
+            Ok(completion) if completion.turn_id.is_empty() => {
+                crate::features::assistant::timing::finish_turn(session_id, "Interrupted", None);
+            }
+            Ok(_) => {}
+        }
         result
     }
 
