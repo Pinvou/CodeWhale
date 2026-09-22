@@ -1551,7 +1551,11 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: pinvou3-app/src-tauri
+          # This job compiles the CodeWhale Windows-only regression target as
+          # well as the application workspace. Cache both target directories.
+          workspaces: |
+            pinvou3-app/src-tauri
+            CodeWhale
           # Both legs restore the established namespace on their isolated runners.
           # Only regression/main may save, so parallelization adds neither a new
           # cache namespace nor a second writer racing the existing 10GB cache.
@@ -1682,6 +1686,27 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
+
+      # Parent application jobs do not execute a dependency crate's lib tests;
+      # this Windows leg explicitly runs the CodeWhale shell regressions. Assert
+      # that every filter still matches so a rename cannot become a silent pass.
+      - name: CodeWhale Windows PowerShell regressions
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tested fallback chooses pwsh.exe only when SHELL is absent.
+          # Make that runner assumption explicit and deterministic.
+          unset SHELL
+          cd CodeWhale
+          for filter in forkguard_powershell forkguard_windows_shell_text; do
+            log="/tmp/codewhale_windows_${filter}.log"
+            cargo test -p codewhale-tui --lib --locked "$filter" -- --test-threads=1 2>&1 | tee "$log"
+            grep -qE 'running [1-9][0-9]* tests?' "$log" || {
+              echo "FAIL: CodeWhale filter '$filter' matched zero tests" >&2
+              exit 1
+            }
+          done
 
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
