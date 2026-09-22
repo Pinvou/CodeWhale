@@ -65,6 +65,9 @@ fn is_loopback_http_url(url: &reqwest::Url) -> bool {
     url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
             || host
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(host)
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|address| address.is_loopback())
     })
@@ -415,6 +418,12 @@ mod tests {
         assert!(is_loopback_update_url("http://127.0.0.1:8787/latest.json"));
         assert!(is_loopback_update_url("http://[::1]:8787/latest.json"));
         assert!(is_loopback_update_url("https://localhost/latest.json"));
+        assert!(!is_loopback_update_url(
+            "http://[2001:db8::1]:8787/latest.json"
+        ));
+        assert!(!is_loopback_update_url(
+            "https://localhost.evil/latest.json"
+        ));
         assert!(!is_loopback_update_url("http://pinvou.com/latest.json"));
         assert!(!is_loopback_update_url("file:///tmp/latest.json"));
         assert_eq!(
