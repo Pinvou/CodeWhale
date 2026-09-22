@@ -157,25 +157,25 @@ impl FleetRoster {
     /// reviving ambient saved-member dispatch.
     #[must_use]
     pub(crate) fn from_host_config(fleet_config: &FleetConfigToml) -> Self {
-        let mut members = fleet_config
-            .profiles
-            .iter()
-            .map(|(id, profile)| {
-                let mut profile = profile.clone();
-                profile.role.name = super::profile::canonical_public_role_name(&profile.role.name);
-                profile.slot = FleetSlot::from_name(&profile.role.name);
-                AgentProfile {
-                    id: id.clone(),
-                    display_name: None,
-                    description: profile.role.description.clone(),
-                    requires: Vec::new(),
-                    profile,
-                    source: PathBuf::from("host-config"),
-                    origin: ProfileOrigin::Config,
-                    plugin_authority: None,
-                }
-            })
-            .collect::<Vec<_>>();
+        // `FleetConfigToml.profiles` is a byte-order `BTreeMap`, so
+        // case-variant or whitespace-variant keys (`Expert` / `expert` /
+        // ` expert`) are distinct legal entries while [`Self::get`] resolves
+        // all of them to the first member in order (trimmed, ASCII
+        // case-insensitive). Collapse every duplicate to exactly that first
+        // member: the advertised listing must never contain an id that
+        // silently spawns a different profile. The directory profile loaders
+        // already enforce this invariant one layer up; this keeps the
+        // host-config layer consistent with them — and it MUST stay the exact
+        // helper [`Self::load`] applies to the same `[fleet.profiles]` table,
+        // because the roster listing and the spawn path build that layer
+        // through these two independent constructors.
+        let mut members = collapse_conflatable_ids(
+            fleet_config
+                .profiles
+                .iter()
+                .map(|(id, profile)| config_profile_member(id, profile, "host-config"))
+                .collect(),
+        );
         members.sort_by_key(|member| member.id.to_ascii_lowercase());
         Self {
             members,
@@ -318,20 +318,23 @@ impl FleetRoster {
             }
         }
 
-        for (id, profile) in &fleet_config.profiles {
-            let mut profile = profile.clone();
-            profile.role.name = super::profile::canonical_public_role_name(&profile.role.name);
-            profile.slot = FleetSlot::from_name(&profile.role.name);
-            let member = AgentProfile {
-                id: id.clone(),
-                display_name: None,
-                description: profile.role.description.clone(),
-                requires: Vec::new(),
-                profile,
-                source: PathBuf::from("config.toml"),
-                origin: ProfileOrigin::Config,
-                plugin_authority: None,
-            };
+        // `[fleet.profiles]` must collapse conflatable ids exactly like
+        // [`Self::from_host_config`] (see the helper docs): the roster listing
+        // reads a `load`-built roster while the spawn path re-resolves against
+        // a `from_host_config` roster, so two different collapse directions
+        // would let the listing advertise an id that silently spawns the other
+        // variant's prompt. Collapsing FIRST-wins *before* the last-wins
+        // `merge_member` means the merge never sees two conflatable config
+        // keys. Cross-source precedence is untouched: config entries still
+        // override built-ins, and plugin/personal/workspace entries still
+        // override config — only intra-config duplicates are removed here.
+        for member in collapse_conflatable_ids(
+            fleet_config
+                .profiles
+                .iter()
+                .map(|(id, profile)| config_profile_member(id, profile, "config.toml"))
+                .collect(),
+        ) {
             record_shadow(
                 merge_member(&mut built_ins, &mut extras, member),
                 &mut shadowed,
@@ -737,6 +740,48 @@ pub fn layers_from_parts(member: &AgentProfile, shadowed: &[ShadowedProfile]) ->
     layers
 }
 
+/// Project one `[fleet.profiles]` entry onto a config-origin member.
+///
+/// The single mapping shared by every constructor that turns
+/// [`FleetConfigToml`] profiles into roster members ([`FleetRoster::load`]'s
+/// merge input and [`FleetRoster::from_host_config`]'s exact roster), so the
+/// two constructions cannot drift in origin, source label, role canonicalization,
+/// or slot derivation.
+fn config_profile_member(id: &str, profile: &FleetProfile, source: &str) -> AgentProfile {
+    let mut profile = profile.clone();
+    profile.role.name = super::profile::canonical_public_role_name(&profile.role.name);
+    profile.slot = FleetSlot::from_name(&profile.role.name);
+    AgentProfile {
+        id: id.to_string(),
+        display_name: None,
+        description: profile.role.description.clone(),
+        requires: Vec::new(),
+        profile,
+        source: PathBuf::from(source),
+        origin: ProfileOrigin::Config,
+        plugin_authority: None,
+    }
+}
+
+/// Collapse members whose ids [`FleetRoster::get`] resolves together —
+/// trimmed, ASCII case-insensitive — keeping exactly the first definition in
+/// iteration order.
+///
+/// `FleetConfigToml.profiles` is a byte-order `BTreeMap`, so case-variant or
+/// whitespace-variant keys are distinct legal entries that all resolve to the
+/// byte-order-first member; every later duplicate is dropped so an advertised
+/// id can never silently spawn a different profile. Every roster construction
+/// over config profiles ([`FleetRoster::load`] and
+/// [`FleetRoster::from_host_config`]) MUST apply this same helper with the
+/// same iteration order, or the listing and the spawn path would disagree on
+/// which variant survives.
+fn collapse_conflatable_ids(members: Vec<AgentProfile>) -> Vec<AgentProfile> {
+    let mut resolved_keys = std::collections::HashSet::new();
+    let mut members = members;
+    members.retain(|member| resolved_keys.insert(member.id.trim().to_ascii_lowercase()));
+    members
+}
+
 /// Fold a displaced layer (if any) into the shadow log.
 fn record_shadow(displaced: Option<ShadowedProfile>, shadowed: &mut Vec<ShadowedProfile>) {
     if let Some(shadow) = displaced {
@@ -812,6 +857,87 @@ mod tests {
         let dir = workspace.join(super::super::profile::WORKSPACE_AGENT_PROFILE_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(filename), contents).unwrap();
+    }
+
+    #[test]
+    fn from_host_config_collapses_ids_that_get_resolves_together() {
+        // `[fleet.profiles]` is a byte-order BTreeMap, so `Expert`, `expert`,
+        // and ` expert` are distinct legal keys while `get` resolves all of
+        // them (trimmed, ASCII case-insensitive) to the first member in
+        // order. The host roster must not advertise an id that silently
+        // spawns a different profile: every duplicate collapses to exactly
+        // that first member.
+        let profiles = BTreeMap::from([
+            ("expert".to_string(), config_profile("expert", None)),
+            ("Expert".to_string(), config_profile("Expert", None)),
+            (" expert ".to_string(), config_profile("indented", None)),
+            ("scout-aid".to_string(), config_profile("scout-aid", None)),
+        ]);
+        let roster = FleetRoster::from_host_config(&config_with_profiles(profiles));
+
+        // Byte order puts the whitespace variant first, so it is the member
+        // `get` always resolved to; both case variants collapse into it.
+        let ids: Vec<&str> = roster.members().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec![" expert ", "scout-aid"]);
+        assert_eq!(
+            roster.get("expert").expect("tolerant lookup").id,
+            " expert "
+        );
+        assert_eq!(
+            roster.get("EXPERT").expect("tolerant lookup").id,
+            " expert "
+        );
+        assert_eq!(
+            roster.get("Expert").expect("tolerant lookup").id,
+            " expert "
+        );
+
+        // Every advertised id resolves to itself — the listing/spawn
+        // invariant the roster action promises.
+        for member in roster.members() {
+            assert_eq!(roster.get(&member.id).expect("self lookup").id, member.id);
+        }
+    }
+
+    #[test]
+    fn load_collapses_conflatable_config_ids_like_from_host_config() {
+        // The load-side half of the collapse invariant: the merged roster must
+        // keep the SAME single member per conflatable id family that
+        // `from_host_config` keeps (byte-order first), even though `load`
+        // merges through last-wins `merge_member`. Isolate from ambient
+        // personal agent profiles on developer machines.
+        let _env_lock = crate::test_support::lock_test_env();
+        let home = TempDir::new().unwrap();
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+        let tmp = TempDir::new().unwrap();
+        let profiles = BTreeMap::from([
+            ("Expert".to_string(), config_profile("Expert", None)),
+            ("expert".to_string(), config_profile("expert", None)),
+            ("scout-aid".to_string(), config_profile("scout-aid", None)),
+        ]);
+        let roster = FleetRoster::load_with_personal_dir(
+            &config_with_profiles(profiles),
+            tmp.path(),
+            None,
+            true,
+        );
+
+        // `Expert` sorts before `expert` in byte order, so it is the member
+        // `get` always resolved to; the `expert` key must not displace it the
+        // way the old last-wins merge let it.
+        let extras: Vec<&str> = roster
+            .members()
+            .iter()
+            .filter(|member| member.origin == ProfileOrigin::Config)
+            .map(|member| member.id.as_str())
+            .collect();
+        assert_eq!(extras, vec!["Expert", "scout-aid"]);
+        assert_eq!(roster.get("expert").expect("tolerant lookup").id, "Expert");
+
+        // Every advertised config id resolves to itself.
+        for member in roster.members() {
+            assert_eq!(roster.get(&member.id).expect("self lookup").id, member.id);
+        }
     }
 
     #[test]

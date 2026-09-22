@@ -384,11 +384,12 @@ provider's resolved fanout, depth, and timeout profile.
 
 ## Advertised agent-tool fields (v0.9.9)
 
-The model-facing `agent` tool schema advertises exactly **12 fields**
-(#5324, #5123):
+The model-facing `agent` tool schema advertises exactly **13 fields**
+(#5324, #5123; T7 later added `profile_query`, the roster host-profile
+keyword filter):
 
-`action`, `prompt`, `type`, `profile`, `name`, `agent_id`, `message`,
-`until`, `detached`, `worktree`, `write_roots`, `resume_from`
+`action`, `prompt`, `type`, `profile`, `profile_query`, `name`, `agent_id`,
+`message`, `until`, `detached`, `worktree`, `write_roots`, `resume_from`
 
 plus the action-discriminated `dependentSchemas` tree (`start` requires
 `prompt`; `message`/`followup` require a target and `message`; `peek`/
