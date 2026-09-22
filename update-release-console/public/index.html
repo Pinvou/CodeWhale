@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pinvou Windows 发布台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17212b;
+      --muted: #697580;
+      --line: #dce2e5;
+      --paper: #ffffff;
+      --wash: #f4f6f5;
+      --primary: #17695a;
+      --primary-dark: #0d5145;
+      --accent: #db6d32;
+      --danger: #b5483d;
+      --success-wash: #e9f3ef;
+      --warning-wash: #fbefe7;
+      --shadow: 0 14px 34px rgba(23, 33, 43, .08);
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--wash); color: var(--ink); }
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+    aside { background: var(--ink); color: #fff; padding: 30px 24px; display: flex; flex-direction: column; gap: 34px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .mark { width: 34px; height: 34px; border-radius: 10px; background: var(--accent); display: grid; place-items: center; font-weight: 800; }
+    .brand strong { display: block; letter-spacing: .02em; }
+    .brand small { color: #aeb9bf; }
+    .steps { display: grid; gap: 8px; }
+    .step { border-left: 2px solid #46525c; color: #aeb9bf; padding: 10px 12px; }
+    .step.active { border-color: var(--accent); color: #fff; background: rgba(255,255,255,.05); }
+    .step span { display: block; color: inherit; font-size: 12px; margin-bottom: 3px; }
+    .aside-note { margin-top: auto; color: #aeb9bf; font-size: 12px; line-height: 1.7; }
+    main { padding: 30px clamp(20px, 4vw, 58px) 56px; min-width: 0; }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 26px; }
+    h1 { font-size: clamp(25px, 3vw, 34px); margin: 0 0 7px; letter-spacing: -.02em; }
+    header p, .subtle { color: var(--muted); margin: 0; }
+    .connection { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #a5afb4; }
+    .dot.online { background: #39a176; box-shadow: 0 0 0 4px rgba(57,161,118,.14); }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .8fr); gap: 20px; align-items: start; }
+    .stack { display: grid; gap: 20px; }
+    .card { background: var(--paper); border: 1px solid var(--line); border-radius: 16px; padding: 22px; box-shadow: var(--shadow); }
+    .card-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 20px; }
+    h2 { font-size: 18px; margin: 0 0 5px; }
+    h3 { font-size: 14px; margin: 0 0 8px; }
+    .eyebrow { color: var(--primary); font-size: 12px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 9px; font-size: 12px; font-weight: 700; background: var(--success-wash); color: var(--primary-dark); }
+    .badge.warning { background: var(--warning-wash); color: #a14b22; }
+    .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .fact { background: var(--wash); padding: 12px 14px; border-radius: 10px; min-width: 0; }
+    .fact span { color: var(--muted); display: block; font-size: 11px; margin-bottom: 4px; }
+    .fact strong, code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    .fact strong { font-size: 13px; }
+    form { display: grid; gap: 16px; }
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    label { display: grid; gap: 7px; font-size: 13px; font-weight: 650; }
+    label.full { grid-column: 1 / -1; }
+    input, textarea { width: 100%; border: 1px solid #cbd3d7; border-radius: 9px; padding: 11px 12px; background: #fff; color: var(--ink); outline: none; transition: border .15s, box-shadow .15s; }
+    input:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,90,.12); }
+    textarea { resize: vertical; min-height: 88px; }
+    .drop { border: 1.5px dashed #aab6ba; border-radius: 12px; padding: 23px; text-align: center; background: #fafbfa; position: relative; }
+    .drop:hover, .drop.drag { border-color: var(--primary); background: var(--success-wash); }
+    .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .drop strong { display: block; margin-bottom: 4px; }
+    .drop span { color: var(--muted); font-size: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .btn { border: 1px solid transparent; border-radius: 9px; padding: 10px 15px; font-weight: 700; background: var(--primary); color: #fff; }
+    .btn:hover:not(:disabled) { background: var(--primary-dark); }
+    .btn.secondary { background: #fff; color: var(--ink); border-color: #cbd3d7; }
+    .btn.secondary:hover:not(:disabled) { background: var(--wash); }
+    .btn.danger { color: var(--danger); border-color: #e2b9b4; background: #fff; }
+    .btn.accent { background: var(--accent); }
+    .btn.accent:hover:not(:disabled) { background: #bf5825; }
+    .message { display: none; border-radius: 10px; padding: 12px 14px; font-size: 13px; line-height: 1.5; }
+    .message.show { display: block; }
+    .message.error { background: #f9e9e7; color: #8f332b; }
+    .message.success { background: var(--success-wash); color: var(--primary-dark); }
+    .manifest { background: #101820; color: #dbe4e6; border-radius: 11px; padding: 15px; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; max-height: 310px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+    .history { display: grid; gap: 12px; }
+    .history-item { padding: 14px 0; border-top: 1px solid var(--line); }
+    .history-item:first-child { border-top: 0; padding-top: 0; }
+    .history-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .history-meta { color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.5; }
+    .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+    .auth-screen { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 20px; background: rgba(18,29,37,.7); backdrop-filter: blur(8px); }
+    .auth-box { width: min(440px, 100%); background: #fff; border-radius: 18px; padding: 28px; box-shadow: 0 24px 70px rgba(0,0,0,.25); }
+    .auth-box h2 { font-size: 24px; margin-bottom: 8px; }
+    .auth-box p { color: var(--muted); line-height: 1.6; font-size: 13px; margin: 0 0 20px; }
+    dialog { width: min(480px, calc(100% - 32px)); border: 0; border-radius: 16px; padding: 24px; color: var(--ink); box-shadow: 0 25px 70px rgba(0,0,0,.26); }
+    dialog::backdrop { background: rgba(18,29,37,.6); }
+    dialog p { color: var(--muted); line-height: 1.6; }
+    .busy { position: fixed; inset: 0; z-index: 8; display: none; place-items: center; background: rgba(244,246,245,.82); }
+    .busy.show { display: grid; }
+    .busy-box { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px 24px; box-shadow: var(--shadow); text-align: center; }
+    .spinner { width: 24px; height: 24px; margin: 0 auto 10px; border: 3px solid #d9e1e1; border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 980px) {
+      .shell { grid-template-columns: 1fr; }
+      aside { padding: 18px 20px; flex-direction: row; align-items: center; }
+      .steps, .aside-note { display: none; }
+      main { padding-top: 22px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      header { display: block; }
+      .connection { margin-top: 14px; }
+      .card { padding: 18px; border-radius: 13px; }
+      .fields, .facts { grid-template-columns: 1fr; }
+      label.full { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="mark">P</div><div><strong>Pinvou</strong><small>Release Console</small></div></div>
+      <nav class="steps" aria-label="发布流程">
+        <div class="step active"><span>01</span>上传并校验</div>
+        <div class="step"><span>02</span>检查发布草稿</div>
+        <div class="step"><span>03</span>原子发布清单</div>
+        <div class="step"><span>04</span>验证或回滚</div>
+      </nav>
+      <p class="aside-note">发布台不接触签名凭据。请先在独立签名服务器完成 NSIS 构建与签名，再上传交付物。</p>
+    </aside>
+    <main>
+      <header>
+        <div><h1>Windows 更新发布</h1><p>上传签名安装器，核对草稿后再向客户端开放。</p></div>
+        <div class="connection"><span id="connectionDot" class="dot"></span><span id="connectionText">未连接</span></div>
+      </header>
+
+      <div id="globalMessage" class="message" role="status"></div>
+      <div class="grid">
+        <div class="stack">
+          <section class="card" aria-labelledby="currentTitle">
+            <div class="card-head"><div><div class="eyebrow">线上状态</div><h2 id="currentTitle">当前 Windows 版本</h2></div><span id="currentBadge" class="badge">读取中</span></div>
+            <div id="currentFacts" class="facts"><div class="empty">连接后显示线上信息。</div></div>
+          </section>
+
+          <section id="uploadCard" class="card" aria-labelledby="uploadTitle">
+            <div class="card-head"><div><div class="eyebrow">新建发布</div><h2 id="uploadTitle">上传签名安装器</h2><p class="subtle">服务端会计算大小与 SHA-256，并与交接值比较。</p></div></div>
+            <form id="uploadForm">
+              <div class="fields">
+                <label>版本号<input name="version" required pattern="\d+\.\d+\.\d+(\.\d+)?" placeholder="0.10.5"></label>
+                <label>Git commit<input name="gitCommit" required pattern="[0-9a-fA-F]{7,40}" placeholder="7–40 位提交号"></label>
+                <label class="full">签名服务器 SHA-256<input name="expectedSha256" required pattern="[0-9a-fA-F]{64}" placeholder="64 位十六进制摘要"></label>
+                <label>操作人<input name="operator" required maxlength="80" placeholder="姓名或工号"></label>
+                <label class="full">更新说明<textarea name="notes" required maxlength="2000" placeholder="面向客户端用户的更新说明"></textarea></label>
+              </div>
+              <label class="drop" id="dropZone"><input id="installer" name="installer" type="file" accept=".exe" required><strong id="fileTitle">选择或拖入签名 NSIS 安装器</strong><span id="fileHint">文件名须为 pinvou3_&lt;version&gt;_x64-setup.exe</span></label>
+              <div class="actions"><button class="btn" type="submit">上传并生成草稿</button><span class="subtle">上传不会立即影响客户端。</span></div>
+            </form>
+          </section>
+
+          <section id="draftCard" class="card" aria-labelledby="draftTitle" hidden>
+            <div class="card-head"><div><div class="eyebrow">待发布</div><h2 id="draftTitle">发布草稿</h2><p class="subtle">确认版本、摘要与清单变更无误后再发布。</p></div><span class="badge warning">草稿</span></div>
+            <div id="draftFacts" class="facts"></div>
+            <h3 style="margin-top:20px">latest.json 预览</h3>
+            <pre id="manifestPreview" class="manifest"></pre>
+            <div class="actions" style="margin-top:16px"><button id="publishButton" class="btn accent" type="button">发布到客户端</button><button id="cancelDraftButton" class="btn danger" type="button">取消草稿</button></div>
+          </section>
+        </div>
+
+        <div class="stack">
+          <section class="card" aria-labelledby="guardTitle">
+            <div class="card-head"><div><div class="eyebrow">发布门禁</div><h2 id="guardTitle">自动执行的检查</h2></div></div>
+            <div class="history">
+              <div><h3>交付物一致</h3><p class="subtle">文件名、版本、大小和 SHA-256 均由服务端核验。</p></div>
+              <div><h3>禁止覆盖与降级</h3><p class="subtle">历史安装器不可变，新版本必须高于线上版本。</p></div>
+              <div><h3>清单安全合并</h3><p class="subtle">只替换 Windows 节点，保留 Linux 与 macOS 内容。</p></div>
+              <div><h3>发布后回读</h3><p class="subtle">安装器进入公开目录后再次计算摘要，再原子替换清单。</p></div>
+            </div>
+          </section>
+          <section class="card" aria-labelledby="historyTitle">
+            <div class="card-head"><div><div class="eyebrow">审计与恢复</div><h2 id="historyTitle">最近操作</h2></div><button id="refreshButton" class="btn secondary" type="button">刷新</button></div>
+            <div id="history" class="history"><div class="empty">尚未读取记录。</div></div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="authScreen" class="auth-screen">
+    <form id="authForm" class="auth-box">
+      <div class="eyebrow">受保护的发布入口</div><h2>连接发布服务</h2>
+      <p>输入管理员令牌。令牌只保存在当前页面内存中，刷新或关闭页面后会清除。</p>
+      <label>管理员令牌<input id="tokenInput" type="password" required minlength="32" autocomplete="current-password"></label>
+      <div id="authMessage" class="message error" role="alert"></div>
+      <button class="btn" type="submit">安全连接</button>
+    </form>
+  </div>
+
+  <dialog id="confirmDialog">
+    <form method="dialog"><div class="eyebrow" id="dialogEyebrow">确认操作</div><h2 id="dialogTitle">确认发布</h2><p id="dialogText"></p><label>本次操作人<input id="dialogOperator" maxlength="80" required placeholder="姓名或工号"></label><label id="reasonLabel" hidden>回滚原因<textarea id="rollbackReason" maxlength="500"></textarea></label><div class="actions" style="margin-top:18px"><button class="btn secondary" value="cancel" formnovalidate>返回检查</button><button id="dialogConfirm" class="btn accent" value="confirm">确认</button></div></form>
+  </dialog>
+  <div id="busy" class="busy"><div class="busy-box"><div class="spinner"></div><strong id="busyText">正在处理…</strong></div></div>
+
+  <script nonce="__CSP_NONCE__">
+    (() => {
+      "use strict";
+      let token = "";
+      let state = { windows: null, draft: null, history: [] };
+      const $ = (selector) => document.querySelector(selector);
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+      const formatBytes = (bytes) => {
+        if (!Number.isFinite(Number(bytes))) return "—";
+        const units = ["B", "KB", "MB", "GB"];
+        let value = Number(bytes), index = 0;
+        while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
+        return `${value.toFixed(index ? 2 : 0)} ${units[index]}`;
+      };
+      const formatTime = (value) => { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date); };
+      const api = async (path, options = {}) => {
+        const response = await fetch(`api/${path}`, { ...options, headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) } });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) { const error = new Error(payload.message || `请求失败 (${response.status})`); error.status = response.status; throw error; }
+        return payload;
+      };
+      const showBusy = (text) => { $("#busyText").textContent = text; $("#busy").classList.add("show"); };
+      const hideBusy = () => $("#busy").classList.remove("show");
+      const message = (text, type = "success") => {
+        const node = $("#globalMessage"); node.textContent = text; node.className = `message show ${type}`;
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+      const fact = (label, value) => `<div class="fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+
+      function render() {
+        const current = state.windows;
+        $("#currentBadge").textContent = current ? `v${current.version}` : "尚未发布";
+        $("#currentFacts").innerHTML = current ? [
+          fact("版本", current.version), fact("发布时间", formatTime(current.pub_date)),
+          fact("安装器大小", formatBytes(current.size)), fact("格式", String(current.format || "—").toUpperCase()),
+          fact("SHA-256", current.sha256), fact("下载地址", current.url),
+        ].join("") : '<div class="empty">清单中尚无 windows-x86_64 节点。</div>';
+
+        const draft = state.draft;
+        $("#draftCard").hidden = !draft;
+        $("#uploadCard").hidden = Boolean(draft);
+        if (draft) {
+          $("#draftFacts").innerHTML = [fact("版本", draft.entry.version), fact("操作人", draft.operator), fact("安装器大小", formatBytes(draft.entry.size)), fact("Git commit", draft.git_commit), fact("SHA-256", draft.entry.sha256), fact("生成时间", formatTime(draft.prepared_at))].join("");
+          $("#manifestPreview").textContent = JSON.stringify(draft.preview_manifest, null, 2);
+        }
+
+        const currentHash = current?.sha256;
+        $("#history").innerHTML = state.history.length ? state.history.map((item) => {
+          if (item.type === "rollback") return `<article class="history-item"><div class="history-top"><strong>已回滚 v${escapeHtml(item.from_windows?.version || "—")}</strong><span class="badge warning">回滚</span></div><div class="history-meta">${escapeHtml(item.operator)} · ${escapeHtml(formatTime(item.rolled_back_at))}<br>${escapeHtml(item.reason)}</div></article>`;
+          const canRollback = item.entry?.sha256 === currentHash;
+          return `<article class="history-item"><div class="history-top"><strong>v${escapeHtml(item.entry?.version || "—")}</strong><span class="badge">已发布</span></div><div class="history-meta">${escapeHtml(item.operator)} · ${escapeHtml(formatTime(item.published_at))}<br><code>${escapeHtml(item.entry?.sha256 || "")}</code></div>${canRollback ? `<button class="btn danger rollback" type="button" data-release="${escapeHtml(item.id)}" style="margin-top:10px">回滚此版本</button>` : ""}</article>`;
+        }).join("") : '<div class="empty">暂无发布记录。</div>';
+      }
+
+      async function refresh() {
+        state = await api("status"); render();
+        $("#connectionDot").classList.add("online"); $("#connectionText").textContent = "服务已连接";
+      }
+      $("#authForm").addEventListener("submit", async (event) => {
+        event.preventDefault(); token = $("#tokenInput").value;
+        try { showBusy("正在验证权限…"); await refresh(); $("#authScreen").hidden = true; }
+        catch (error) { token = ""; $("#authMessage").textContent = error.message; $("#authMessage").classList.add("show"); }
+        finally { hideBusy(); }
+      });
+      $("#installer").addEventListener("change", () => {
+        const file = $("#installer").files[0];
+        if (file) { $("#fileTitle").textContent = file.name; $("#fileHint").textContent = formatBytes(file.size); }
+      });
+      for (const name of ["dragenter", "dragover"]) $("#dropZone").addEventListener(name, () => $("#dropZone").classList.add("drag"));
+      for (const name of ["dragleave", "drop"]) $("#dropZone").addEventListener(name, () => $("#dropZone").classList.remove("drag"));
+      $("#uploadForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try { showBusy("正在上传并计算 SHA-256，请勿关闭页面…"); state.draft = await api("releases/windows/upload", { method: "POST", body: new FormData(event.currentTarget) }); await refresh(); message("安装器校验通过，发布草稿已生成。请再次检查后发布。"); }
+        catch (error) { message(error.message, "error"); }
+        finally { hideBusy(); }
+      });
+      function confirmDialog({ title, text, confirmText, danger = false, reason = false, operator = "" }) {
+        $("#dialogTitle").textContent = title; $("#dialogText").textContent = text; $("#dialogConfirm").textContent = confirmText;
+        $("#dialogConfirm").className = `btn ${danger ? "danger" : "accent"}`; $("#reasonLabel").hidden = !reason; $("#rollbackReason").value = ""; $("#dialogOperator").value = operator;
+        $("#confirmDialog").returnValue = ""; $("#confirmDialog").showModal();
+        return new Promise((resolve) => $("#confirmDialog").addEventListener("close", () => resolve({ confirmed: $("#confirmDialog").returnValue === "confirm", operator: $("#dialogOperator").value.trim(), reason: $("#rollbackReason").value.trim() }), { once: true }));
+      }
+      $("#publishButton").addEventListener("click", async () => {
+        const draft = state.draft; if (!draft) return;
+        const confirmation = await confirmDialog({ title: `发布 v${draft.entry.version}？`, text: "确认后安装器将进入公开目录，latest.json 会原子切换，旧版客户端随即能够发现更新。", confirmText: "确认发布", operator: draft.operator });
+        if (!confirmation.confirmed) return;
+        try { showBusy("正在回读安装器并原子发布…"); await api("releases/windows/publish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftId: draft.id, operator: confirmation.operator }) }); await refresh(); message(`Windows v${draft.entry.version} 已发布。请继续进行真实客户端验证。`); }
+        catch (error) { message(error.message, "error"); } finally { hideBusy(); }
+      });
+      $("#cancelDraftButton").addEventListener("click", async () => {
+        const draft = state.draft; if (!draft) return;
+        const confirmation = await confirmDialog({ title: "取消发布草稿？", text: "暂存安装器会被删除，线上版本不受影响。", confirmText: "删除草稿", danger: true, operator: draft.operator });
+        if (!confirmation.confirmed) return;
+        try { showBusy("正在删除草稿…"); await api("releases/windows/draft", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draftId: draft.id, operator: confirmation.operator }) }); await refresh(); message("草稿已取消，线上版本未变化。"); }
+        catch (error) { message(error.message, "error"); } finally { hideBusy(); }
+      });
+      $("#history").addEventListener("click", async (event) => {
+        const button = event.target.closest(".rollback"); if (!button) return;
+        const release = state.history.find((item) => item.id === button.dataset.release);
+        const confirmation = await confirmDialog({ title: "回滚当前 Windows 版本？", text: "latest.json 将恢复上一 Windows 节点。已经安装此版本的设备不会自动降级。", confirmText: "确认回滚", danger: true, reason: true, operator: release?.operator || "" });
+        if (!confirmation.confirmed) return;
+        if (!confirmation.reason) { message("回滚原因不能为空。", "error"); return; }
+        try { showBusy("正在原子回滚清单…"); await api("releases/windows/rollback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ releaseId: button.dataset.release, operator: confirmation.operator, reason: confirmation.reason }) }); await refresh(); message("Windows 清单已回滚。历史安装器仍保持不变。"); }
+        catch (error) { message(error.message, "error"); } finally { hideBusy(); }
+      });
+      $("#refreshButton").addEventListener("click", async () => { try { showBusy("正在刷新…"); await refresh(); } catch (error) { message(error.message, "error"); } finally { hideBusy(); } });
+    })();
+  </script>
+</body>
+</html>

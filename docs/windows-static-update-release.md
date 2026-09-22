@@ -79,6 +79,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-windows-re
 
 ## 4. 人工上传
 
+推荐使用 [Windows 更新 Web 发布台](windows-update-release-console.md) 完成上传、草稿复核、
+原子发布、审计和回滚。发布台仍是人工确认流程，不接触签名凭据，也不会自动触发发布。
+
+若发布台尚未部署，可继续使用下面的命令行流程。两种入口必须共享同一发布窗口，不能并行
+修改 `latest.json`。
+
 上传顺序不可颠倒：
 
 1. 上传签名安装器，文件名包含版本，不覆盖历史文件。

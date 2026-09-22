@@ -194,6 +194,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "frontend",
             "relay",
             "team_relay_hub",
+            "update_release_console",
             "acp_runtime",
             "windows_codex",
             "windows_runtime",
@@ -215,6 +216,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("Merge Queue 基础检查失败", required_gate)
         for job in (
             "team-relay-hub-test",
+            "update-release-console-test",
             "backflow-portability",
             "release-contract-test",
             "windows-runtime-test",
@@ -235,6 +237,21 @@ class CiGatePolicyTests(unittest.TestCase):
             "npm --prefix team-relay-hub audit "
             "--registry=https://registry.npmjs.org --audit-level=high",
             hub_job,
+        )
+
+        console_job = self.workflow.split(
+            "\n  update-release-console-test:", maxsplit=1
+        )[1].split("\n  release-contract-test:", maxsplit=1)[0]
+        self.assertIn(
+            "needs.changes.outputs.update_release_console == 'true'",
+            console_job,
+        )
+        self.assertIn("npm --prefix update-release-console ci", console_job)
+        self.assertIn("npm --prefix update-release-console test", console_job)
+        self.assertIn(
+            "npm --prefix update-release-console audit "
+            "--registry=https://registry.npmjs.org --audit-level=high",
+            console_job,
         )
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):

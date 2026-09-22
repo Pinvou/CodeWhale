@@ -161,6 +161,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
+      update_release_console: ${{ steps.filter.outputs.update_release_console }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
       windows_codex: ${{ steps.filter.outputs.windows_codex }}
       windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
@@ -352,6 +353,12 @@ jobs:
             team_relay_hub:
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
+              - '.github/workflows/pr-check.yml'
+            update_release_console:
+              - 'update-release-console/**'
+              - 'deploy/nginx-pinvou3-updates.conf'
+              - 'docs/windows-static-update-release.md'
+              - 'docs/windows-update-release-console.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
@@ -725,6 +732,34 @@ jobs:
 
       - name: Hub 依赖审计
         run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
+
+  update-release-console-test:
+    name: update-release-console-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: update-release-console/package-lock.json
+
+      - name: 安装发布台依赖
+        run: npm --prefix update-release-console ci --prefer-offline --no-audit
+
+      - name: 发布台测试
+        run: npm --prefix update-release-console test
+
+      - name: 发布台依赖审计
+        run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
 
   release-contract-test:
     name: release-contract-test
@@ -2009,6 +2044,7 @@ jobs:
       - frontend-test
       - relay-test
       - team-relay-hub-test
+      - update-release-console-test
       - release-contract-test
       - knowledge-rust
       - rust-lint
@@ -2041,6 +2077,7 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
+          UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
           KNOWLEDGE_RUST_RESULT: ${{ needs.knowledge-rust.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
@@ -2078,6 +2115,7 @@ jobs:
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
+            "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
             "knowledge-rust:$KNOWLEDGE_RUST_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
