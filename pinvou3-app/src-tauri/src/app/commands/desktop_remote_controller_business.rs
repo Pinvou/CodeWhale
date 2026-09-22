@@ -74,14 +74,18 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
     ) -> Result<Value, String> {
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         // 本地已持有同一 revision 且未过期时直接复用，避免每次请求都抬 revision。
-        if let Ok(current) = capabilities.validate(
-            &known_revision.to_string(),
-            lease,
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(),
-        ) {
-            if known_revision > 0 {
-                return Ok(capabilities.wire_capability_snapshot(&current, request_id));
-            }
+        let now_b =
+            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis();
+        let current = if known_revision > 0 {
+            capabilities.validate(&known_revision.to_string(), lease, now_b)
+        } else {
+            // A may retry with revision 0 when the prior response was lost.
+            // Reuse the snapshot already bound to this exact lease instead of
+            // repeating ACP and marketplace discovery.
+            capabilities.current_for_context(lease, now_b)
+        };
+        if let Ok(current) = current {
+            return Ok(capabilities.wire_capability_snapshot(&current, request_id));
         }
         let snapshot =
             super::desktop_remote_capabilities::build_capability_snapshot(&self.app).await?;

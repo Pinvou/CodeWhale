@@ -49,6 +49,7 @@ import { ConversationAttachmentBubble } from '../attachments/ConversationAttachm
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
 import { isRemoteChatActive, remoteChatItems as projectRemoteChatItems } from '../remote-control/chat-transcript-projection.mjs';
+import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
 import {
@@ -815,6 +816,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const [remoteSessionError, setRemoteSessionError] = useState(null);
       const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
       const [remoteCapabilityError, setRemoteCapabilityError] = useState(null);
+      const remoteCapabilityRequesterRef = useRef(null);
       const [remoteSendError, setRemoteSendError] = useState(null);
       const projectedRemoteChatItems = useMemo(
         () => projectRemoteChatItems(remoteConnection, bs ? bs.transcript : []),
@@ -1723,23 +1725,49 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (!remoteChatActive || remoteConnection.sessionRef) return;
         openRemoteSession();
       }, [openRemoteSession, remoteChatActive, remoteConnection]);
-      const requestRemoteCapabilities = useCallback(() => {
-        const sessionRef = remoteConnection?.sessionRef;
-        if (!remoteConnection || remoteConnection.status !== 'connected' || !sessionRef) return;
-        if (remoteConnection.capabilityRevision != null || remoteCapabilityBusy) return;
-        setRemoteCapabilityBusy(true);
-        setRemoteCapabilityError(null);
-        setRemoteSendError(null);
-        bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef)
-          .then(() => setRemoteCapabilityError(null))
-          .catch((failure) => setRemoteCapabilityError(String((failure && failure.code) || 'errorGeneric')))
-          .finally(() => setRemoteCapabilityBusy(false));
-      }, [remoteCapabilityBusy, remoteConnection]);
+      useEffect(() => {
+        const requester = createCapabilityRequestLoop({
+          send: (sessionRef) => bridge.desktopRemoteControl.controllerCapabilitySend(sessionRef),
+          onBusy: (busy) => {
+            setRemoteCapabilityBusy(busy);
+            if (busy) setRemoteSendError(null);
+          },
+          onError: setRemoteCapabilityError,
+        });
+        remoteCapabilityRequesterRef.current = requester;
+        return () => {
+          requester.dispose();
+          remoteCapabilityRequesterRef.current = null;
+        };
+      }, []);
 
       useEffect(() => {
-        if (!remoteChatActive || !remoteConnection.sessionRef || remoteConnection.capabilityRevision != null) return;
-        requestRemoteCapabilities();
-      }, [requestRemoteCapabilities, remoteChatActive, remoteConnection]);
+        const requester = remoteCapabilityRequesterRef.current;
+        if (!requester) return;
+        const sessionRef = remoteConnection?.sessionRef || null;
+        const requestKey = [
+          remoteConnection?.connectionId,
+          remoteConnection?.leaseEpoch,
+          remoteConnection?.remoteControlGeneration,
+          sessionRef,
+        ].map((part) => String(part || '')).join(':');
+        requester.update({
+          enabled: remoteChatActive
+            && remoteConnection?.status === 'connected'
+            && !!sessionRef
+            && remoteConnection?.capabilityRevision == null,
+          key: requestKey,
+          sessionRef,
+        });
+      }, [
+        remoteChatActive,
+        remoteConnection?.capabilityRevision,
+        remoteConnection?.connectionId,
+        remoteConnection?.leaseEpoch,
+        remoteConnection?.remoteControlGeneration,
+        remoteConnection?.sessionRef,
+        remoteConnection?.status,
+      ]);
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');

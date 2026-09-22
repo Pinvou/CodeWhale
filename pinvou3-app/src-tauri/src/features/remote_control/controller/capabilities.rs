@@ -193,13 +193,28 @@ impl CapabilitySnapshotManager {
         context: &LeaseContext,
         now_b: u64,
     ) -> Result<CapabilitySnapshot> {
+        let snapshot = self.current_for_context(context, now_b)?;
+        if snapshot.capability_revision != revision {
+            return Err(CapabilityError::new("capability_snapshot_stale"));
+        }
+        Ok(snapshot)
+    }
+
+    /// Return the current unexpired snapshot for the exact lease. This is used
+    /// when A has not observed a revision yet (known revision 0), for example
+    /// after a response was lost. Reusing it avoids repeating expensive ACP and
+    /// marketplace discovery for duplicate requests.
+    pub(crate) fn current_for_context(
+        &self,
+        context: &LeaseContext,
+        now_b: u64,
+    ) -> Result<CapabilitySnapshot> {
         let snapshot = self
             .current
             .lock()
             .clone()
             .ok_or_else(|| CapabilityError::new("capability_snapshot_missing"))?;
-        if snapshot.capability_revision != revision
-            || snapshot.connection_id != context.connection_id
+        if snapshot.connection_id != context.connection_id
             || snapshot.controller_lease_id != context.controller_lease_id
             || snapshot.lease_epoch != context.lease_epoch
             || snapshot.relay_epoch != context.relay_epoch
@@ -390,6 +405,12 @@ mod tests {
         assert_eq!(
             manager
                 .validate("1", &context("generation-0001"), 2_000)
+                .unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            manager
+                .current_for_context(&context("generation-0001"), 2_000)
                 .unwrap(),
             snapshot
         );
