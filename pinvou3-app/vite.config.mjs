@@ -104,14 +104,23 @@ function conditionalPlatformScripts(webBuild) {
 }
 
 const startupBundleExcludedScripts = new Set([
+  // legacy-polyfills.js must precede every bundled script on each entry, and
+  // pet.html/reader.html also load it standalone.
   'shared/legacy-polyfills.js',
   // The Web bootstrap resolves its policy and WebSocket endpoints relative to
   // document.currentScript. It must retain its own URL instead of observing a
   // generated bundle URL.
   'platform/web/bootstrap.js',
+  // personas-i18n.js has no static tag — it is injected at runtime by the
+  // inline loader in index.html, which the manifest parser skips. Listed so
+  // the never-bundle contract stays explicit if it ever gains a static tag.
   'features/personas/personas-i18n.js',
+  // update-notice-logic.js carries its own onload/onerror lifecycle marks.
   'features/updater/update-notice-logic.js',
 ]);
+// Static classic tags that intentionally stay unbundled: desktop loads the
+// polyfill and update-notice-logic, web additionally keeps bootstrap.js. The
+// retained-set contract test pins the exact list per platform.
 const unbundledStartupScriptCount = webBuild => webBuild ? 3 : 2;
 
 export function classicStartupBundlePaths(webBuild, indexHtml = readFileSync(join(sourceRoot, 'index.html'), 'utf8')) {
@@ -154,6 +163,9 @@ export function transformIndexHtmlForClassicBundle(webBuild, html, bundlePaths, 
 function bundleClassicStartup(webBuild) {
   const bundlePaths = classicStartupBundlePaths(webBuild);
   const bundlePrefix = `startup/pinvou-${webBuild ? 'web' : 'desktop'}-classic`;
+  // Soft per-request cap: a single minified source larger than the cap (e.g.
+  // platform/web/bridge.js) becomes its own oversize bundle instead of being
+  // split — a classic script cannot be divided across load boundaries.
   const maxBundleBytes = 80_000;
   let bundles;
   return {
@@ -164,8 +176,8 @@ function bundleClassicStartup(webBuild) {
       for (const relative of bundlePaths) {
         const source = readFileSync(resolveContainedRuntimePath(sourceRoot, relative), 'utf8');
         const result = await minify(relative, source, {});
-        if (result.errors.length > 0) {
-          throw new Error(`Could not minify ${relative}: ${result.errors.map(error => error.message).join('; ')}`);
+        if (result.errors.length > 0 || typeof result.code !== 'string') {
+          throw new Error(`Could not minify ${relative}: ${result.errors.map(error => error.message).join('; ') || 'minifier returned no code'}`);
         }
         minifiedSources.push(result.code);
       }

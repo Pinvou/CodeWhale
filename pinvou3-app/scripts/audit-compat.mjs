@@ -356,6 +356,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.exitCode = 1;
     }
   }
+  // Same fail-closed principle for the generated classic startup bundles:
+  // runAudit only audits them when dist/startup exists, so a dist built
+  // without them would otherwise green-light without the minified layer.
+  const distStartupDir = join(distRoot, 'startup');
+  const hasStartupBundles = existsSync(distStartupDir)
+    && readdirSync(distStartupDir).some((name) => name.endsWith('.js'));
+  if (!hasStartupBundles) {
+    console.error('audit-compat: no startup bundles found in dist/startup — run `npm run build:ui` first');
+    process.exitCode = 1;
+  }
   if (violations.length) {
     console.error(`audit-compat: ${violations.length} violation(s) against the Safari 14 baseline:`);
     for (const violation of violations) console.error(`  ${violation}`);
