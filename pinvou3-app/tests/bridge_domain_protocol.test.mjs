@@ -80,6 +80,7 @@ const protocolSources = {
   multiAgent: ['bridge/multiagent.js'],
   teamRelay: ['bridge/team-relay.js'],
   projects: ['bridge/projects.js'],
+  computerUse: ['bridge/computer_use.js'],
 };
 
 const expectedProtocolHashes = {
@@ -88,6 +89,31 @@ const expectedProtocolHashes = {
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
   artifacts: 'de912dc47531a442428f1649d933c8b91d0616196a1b7ac6176bf0f59939fa12',
+// New domain: computer-use consent commands/events (desktop-only; the web
+  // RPC allowlist excludes them, same policy as browser:*).
+  // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
+  // only closes its own dialog and fresh requests re-prompt immediately (no
+  // invoke/listen call-set change; comment wording is part of the digest).
+  // Recomputed when the deny()/grant_required handler comments were updated
+  // for the mainstream narrowing (no deny-cooldown memory, no idle-expired
+  // grant re-arm; comment wording inside the listen callback span is part of
+  // the digest). Recomputed again when the confirm_required handler's
+  // type-preview comment was corrected to the shipped contract (full text
+  // rides for every non-password Type action, short texts included).
+  // Recomputed for the fresh-review fixes: the grant/confirm_required inert branches
+  // now re-read authoritative status (other-window enable gap) and sameRequest compares
+  // the typed-text preview (comment and expression wording inside the callback spans
+  // is part of the digest; no invoke/listen call-set change).
+  // Recomputed for the structured confirm payload: confirm_required builds the
+  // request via buildConfirmRequest (action/button/click_count/point/text_preview/
+  // text_preview_truncated passthrough + summary fallback) and dismissConfirm was
+  // removed (no invoke/listen call-set change; listener body wording is part of
+  // the digest).
+  // Recomputed for the round-15 fix wave: secure-target chord masking (the
+  // chord_masked_chars passthrough in buildConfirmRequest), the
+  // background-session refresh guard, and the inert-branch optional chaining
+  // inside the listener callback spans (no invoke/listen call-set change).
+  computerUse: '9d0bad5bab784eb784a92b8df52ff7e83adef94cc0f6cb7bdbb99f913217e5b8',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
