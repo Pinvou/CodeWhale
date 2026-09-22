@@ -1161,12 +1161,19 @@ mod tests {
         fn write(&self, relative: &str, content: &str) {
             let path = self.0.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            // 先删后写：同一文件系统时间戳粒度内用等长内容重写文件时，stat
-            // （mtime/ctime/size/ino）与索引条目完全一致，git 会信任索引条目而
-            // 跳过内容重读——`add -A` 保留陈旧 blob，diff/restore 断言随机失败
-            // （2026-09-18 `rust-test` flake 的根因）。换新 inode 必然不匹配。
-            let _ = fs::remove_file(&path);
-            fs::write(path, content).unwrap();
+            // 先写暂存文件再 rename 覆盖目标：暂存文件创建时目标仍存在，其
+            // inode 必然不同于目标——也就是不同于 git 上次 `add` 缓存的索引
+            // 条目（前提：每条路径在两次索引刷新之间至多写一次，本模块各测试
+            // 均如此）。原地重写与「先删后写」都不安全：ext4 会把刚释放的
+            // inode 立刻发回，等长重写落进同一时间戳粒度时 stat（ino/mtime/
+            // size）可能与缓存条目完全一致，git 信任索引跳过内容重读——
+            // `add -A` 保留陈旧 blob，diff/restore 断言随机失败（2026-09-18
+            // `rust-test` flake 的根因，#576 的 CI 在 Linux 上复发过）。
+            let mut staging = path.clone().into_os_string();
+            staging.push(format!(".pinjou3-new-{}", now_nanos()));
+            let staging = PathBuf::from(staging);
+            fs::write(&staging, content).unwrap();
+            fs::rename(&staging, &path).unwrap();
         }
 
         fn read(&self, relative: &str) -> Option<String> {
