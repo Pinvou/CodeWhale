@@ -60,6 +60,14 @@ test('the A view opens the session, requests capabilities and renders the transc
   assert.ok(!/input_digest|client_request_id|capability_revision|controller_lease_id/.test(view));
 });
 
+test('the main chat tolerates an absent remote connection', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(
+    chat.includes('remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null'),
+    'local chat startup must not dereference a null remote connection',
+  );
+});
+
 test('journal events project into a deduplicated transcript', () => {
   const frame = (kind, sequence, text) => ({
     event: {

@@ -826,7 +826,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // eslint-disable-next-line react-hooks/refs -- latest-session mirror for non-reactive reads; legacy pattern surfaced by compiler lint after floating-ball removal
       activeSessionIdRef.current = activeSessionId;
       const localBusy = bs ? bs.busy : false;
-      const remoteLinkReady = !!(remoteConnection.sessionRef && remoteConnection.capabilityRevision != null);
+      const remoteLinkReady = !!(remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null);
       const busy = remoteChatActive
         ? (localBusy || remoteSessionBusy || remoteCapabilityBusy || !remoteLinkReady)
         : localBusy;
