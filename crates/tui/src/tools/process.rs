@@ -199,8 +199,10 @@ pub(crate) fn stdin_json(input: &Value) -> Result<Vec<u8>, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
+    #[cfg(unix)]
     fn shell_command(script: &str) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(script);
