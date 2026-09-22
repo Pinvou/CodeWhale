@@ -55,7 +55,11 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
         let now_b = controlled_monotonic_millis();
         let _ = runtime
             .service()
-            .interrupt_generation(generation, "remote_control_stopped", now_b);
+            .interrupt_generation_and_clear_sessions(
+                generation,
+                "remote_control_stopped",
+                now_b,
+            );
     }
 }
 
@@ -70,9 +74,21 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         &self,
         lease: &LeaseContext,
         request_id: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         known_revision: u64,
     ) -> Result<Value, String> {
+        let controlled_session = if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
+            let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
+                &self.app,
+                session_ref,
+                "",
+                false,
+                &lease.remote_control_generation,
+            )?;
+            Some((session_ref.to_owned(), authoritative_id))
+        } else {
+            None
+        };
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         let now_b =
             crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis();
@@ -90,6 +106,14 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                 .unwrap_or(0)
                 .saturating_sub(now_b);
             if revision > known_revision && remaining_ms >= 29_000 {
+                if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
+                    super::desktop_remote_task::project_controlled_session(
+                        &self.app,
+                        session_ref,
+                        authoritative_id,
+                        lease,
+                    )?;
+                }
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                     "capability_snapshot_ready",
                     "cached",
@@ -111,6 +135,14 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             "capability_snapshot_ready",
             "fresh",
         );
+        if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
+            super::desktop_remote_task::project_controlled_session(
+                &self.app,
+                session_ref,
+                authoritative_id,
+                lease,
+            )?;
+        }
         Ok(capabilities.wire_capability_snapshot(&snapshot, request_id))
     }
 

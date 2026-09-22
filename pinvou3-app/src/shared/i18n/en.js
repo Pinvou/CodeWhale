@@ -2107,6 +2107,7 @@ dictEn["remoteConversation"] = {
   offlineHint: "This is a local copy; it does not mean the remote device is still connected.",
   journalResync: "The conversation state was re-synced.",
   resultUnknownHint: "The connection dropped, so this task's outcome cannot be confirmed.",
+  sessionBusy: "This remote session is running a task. Try again shortly; your message was kept.",
   errorGeneric: "The operation failed. Please try again.",
 };
 

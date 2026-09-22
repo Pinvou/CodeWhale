@@ -6,16 +6,35 @@ export function isRemoteChatActive(connection) {
   return !!connection && connection.status === 'connected';
 }
 
-export function remoteChatItems(connection, transcript = []) {
+export function remoteChatItems(connection, transcript = [], tasks = []) {
   if (!isRemoteChatActive(connection)) return [];
   const sessionId = connection.sessionId ? String(connection.sessionId) : '';
   const entries = (Array.isArray(transcript) ? transcript : []).filter(entry => (
     entry
     && (!sessionId || String(entry.sessionId || '') === sessionId)
   ));
+  const journaledTaskIds = new Set(entries
+    .filter(entry => entry.role === 'user' && entry.taskId)
+    .map(entry => String(entry.taskId)));
+  const promptFallbacks = (Array.isArray(tasks) ? tasks : [])
+    .filter(task => (
+      task
+      && task.taskId
+      && task.text
+      && !journaledTaskIds.has(String(task.taskId))
+      && (!sessionId || !task.sessionId || String(task.sessionId) === sessionId)
+    ))
+    .map((task, index) => ({
+      sessionId: String(task.sessionId || sessionId || ''),
+      epoch: 'task-intent',
+      sequence: index + 1,
+      taskId: String(task.taskId),
+      role: 'user',
+      text: String(task.text),
+    }));
 
   const items = [];
-  for (const entry of entries) {
+  for (const entry of entries.concat(promptFallbacks)) {
     const key = `${entry.sessionId || ''}:${entry.epoch || ''}`;
     const text = String(entry.text || '');
     if (!text) continue;
@@ -32,7 +51,9 @@ export function remoteChatItems(connection, transcript = []) {
       continue;
     }
     items.push({
-      id: `remote-${key}:${entry.sequence || items.length}`,
+      id: entry.taskId && entry.epoch === 'task-intent'
+        ? `remote-task-${entry.taskId}`
+        : `remote-${key}:${entry.sequence || items.length}`,
       type: entry.role === 'user' ? 'user' : 'assistant',
       text,
       remote: true,

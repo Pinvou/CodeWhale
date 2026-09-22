@@ -46,12 +46,15 @@
     // undefined——后端已 waiting_connection 且带连接码，面板却显示未开启（2026-09-20 实测）。
     var STATE_SLICES = [
       "controlledDevice",
+      "controlledSession",
       "controllerConnection",
       "remoteCapabilities",
       "remoteModels",
       "remoteHistories",
       "tasks",
       "transcript",
+      "controlledTasks",
+      "controlledTranscript",
       "remotePermissions",
     ];
 
@@ -100,14 +103,35 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
-      ["desktop-remote-task-status", "desktop-remote-task-event"].forEach(function (name) {
-        listen(name, function (event) {
-          var payload = event && event.payload ? event.payload : event || {};
-          publish(logic.applyTaskEvent(current(), payload));
-        }).then(function (off) {
-          unlisten.push(off);
-        }).catch(function () {});
-      });
+      listen("desktop-remote-task-status", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        var state = current();
+        var controlledSession = state.controlledSession || {};
+        var sessionId = payload.sessionId || payload.session_id || "";
+        publish(controlledSession.sessionId && String(controlledSession.sessionId) === String(sessionId)
+          ? logic.applyControlledTaskEvent(state, payload)
+          : logic.applyTaskEvent(state, payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
+      listen("desktop-remote-task-event", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControlledTaskEvent(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
+      listen("desktop-remote-controlled-session", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControlledSession(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
+      listen("desktop-remote-controlled-journal", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControlledJournalEvent(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
       listen("desktop-remote-controller-session", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         applyControllerSession(payload);
@@ -585,11 +609,28 @@
      */
     function controllerTaskSend(remoteRef, text, modelSource) {
       ensureAvailable();
+      var visibleText = String(text || "").trim();
       return invoke("desktop_remote_controller_task_send", {
         remoteRef: remoteRef,
-        text: String(text || ""),
+        text: visibleText,
         modelSource: modelSource || "controlled_device",
-      }).catch(function (failure) { throw asBoundedError(failure); });
+      }).catch(function (failure) { throw asBoundedError(failure); }).then(function (result) {
+        // The encrypted task-status acknowledgement intentionally carries no
+        // prompt. Retain the text from the successfully queued local intent so
+        // ChatView can show the sent message immediately; the authoritative
+        // journal entry replaces this fallback by task id when it arrives.
+        var projection = result && typeof result === "object" ? result : {};
+        var taskId = projection.taskId || projection.task_id || null;
+        if (taskId) {
+          publish(logic.applyTaskEvent(current(), {
+            taskId: taskId,
+            sessionId: projection.sessionId || projection.session_id || null,
+            status: "admitted",
+            text: visibleText,
+          }));
+        }
+        return result;
+      });
     }
 
     function controllerTaskCancelSend(remoteRef, taskId) {
@@ -598,6 +639,28 @@
         remoteRef: remoteRef,
         taskId: taskId,
       }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /** B submits through the same authoritative remote task service as A. */
+    function controlledTaskSend(sessionId, text) {
+      ensureAvailable();
+      var visibleText = String(text || "").trim();
+      return invoke("desktop_remote_controlled_task_send", {
+        sessionId: sessionId,
+        text: visibleText,
+      }).catch(function (failure) { throw asBoundedError(failure); }).then(function (result) {
+        var projection = result && typeof result === "object" ? result : {};
+        var taskId = projection.taskId || projection.task_id || null;
+        if (taskId) {
+          publish(logic.applyControlledTaskEvent(current(), {
+            taskId: taskId,
+            sessionId: projection.sessionId || projection.session_id || sessionId,
+            status: projection.taskStatus || projection.task_status || "admitted",
+            text: visibleText,
+          }));
+        }
+        return result;
+      });
     }
 
     function applyControllerSession(result) {
@@ -687,7 +750,7 @@
         selectedModelId: selectedModelId || null,
         permissionRequest: permissionRequest || null,
       }).then(function (result) {
-        publish(logic.applyTaskEvent(current(), result || {}));
+        publish(logic.applyControlledTaskEvent(current(), result || {}));
         return result;
       });
     }
@@ -695,7 +758,7 @@
     function cancelRemoteTask(taskId) {
       ensureAvailable();
       return invoke("desktop_remote_task_cancel", { taskId: taskId }).then(function (result) {
-        publish(logic.applyTaskEvent(current(), result || {}));
+        publish(logic.applyControlledTaskEvent(current(), result || {}));
         return result;
       });
     }
@@ -907,6 +970,7 @@
       controllerTaskCancelIntent: controllerTaskCancelIntent,
       controllerTaskSend: controllerTaskSend,
       controllerTaskCancelSend: controllerTaskCancelSend,
+      controlledTaskSend: controlledTaskSend,
       controllerListHistory: controllerListHistory,
       controllerCreateHistory: controllerCreateHistory,
       capabilitiesSnapshot: capabilitiesSnapshot,

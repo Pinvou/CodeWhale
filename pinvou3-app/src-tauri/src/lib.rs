@@ -1514,6 +1514,7 @@ pub fn run() {
             commands::desktop_remote_task::desktop_remote_task_switch_session,
             commands::desktop_remote_task::desktop_remote_task_close_session,
             commands::desktop_remote_task::desktop_remote_task_submit,
+            commands::desktop_remote_task::desktop_remote_controlled_task_send,
             commands::desktop_remote_task::desktop_remote_task_cancel,
             commands::desktop_remote_task::desktop_remote_task_status,
             commands::desktop_remote_task::desktop_remote_task_interrupt_all,

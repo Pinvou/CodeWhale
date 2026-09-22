@@ -134,6 +134,30 @@ test('the bridge subscribes the journal stream and exposes the A-side commands',
   assert.ok(bridge.includes('desktop_remote_controller_capability_send'));
 });
 
+test('the controlled-side authoritative journal is projected locally before forwarding to A', () => {
+  const task = read('../src-tauri/src/app/commands/desktop_remote_task.rs');
+  const history = read('../src-tauri/src/app/commands/desktop_remote_history.rs');
+  assert.ok(task.includes('"journal_event_projected"'));
+  assert.ok(task.includes('CONTROLLED_JOURNAL_EVENT'));
+  assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event(&self.app, &event)'));
+  assert.ok(task.includes('publish_authoritative_task_status(&self.app, event)'));
+  assert.ok(task.indexOf('app.emit(TASK_EVENT, &status)') < task.indexOf('tauri::async_runtime::spawn(async move'));
+  assert.ok(history.includes('lane.seal("task_status", &payload, &capabilities)'));
+});
+
+test('controlled-side send failures are visible in the shared remote transcript area', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(chat.includes('data-testid="chat-remote-send-error"'));
+  assert.match(
+    chat,
+    /remoteTranscriptActive && remoteSendMessage[\s\S]*?data-testid="chat-remote-send-error"[\s\S]*?role="alert"/,
+  );
+  assert.ok(chat.includes("`controlled:${controlledDevice.generation || ''}:${controlledSession.sessionId || ''}`"));
+  assert.ok(chat.includes('identity: sendIdentity'));
+  assert.ok(chat.includes('remoteSendError?.identity === remoteSendIdentity'));
+  assert.match(chat, /current && current\.identity !== remoteSendIdentity \? null : current/);
+});
+
 test('bounded command failures keep their code for the UI copy', () => {
   const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
   assert.ok(bridge.includes('function asBoundedError'), 'bounded errors are restored');

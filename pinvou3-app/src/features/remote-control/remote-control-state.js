@@ -59,12 +59,19 @@
   function createState() {
     return {
       controlledDevice: createControlledDevice(),
+      controlledSession: {
+        sessionId: null,
+        sessionRef: null,
+        generation: null,
+      },
       controllerConnection: createControllerConnection(),
       remoteCapabilities: null,
       remoteModels: [],
       remoteHistories: [],
       tasks: [],
       transcript: [],
+      controlledTasks: [],
+      controlledTranscript: [],
       intents: { controlled: 0, controller: 0 },
       revision: 0,
     };
@@ -131,6 +138,15 @@
       return state;
     }
     var next = shallowCopy(state);
+    var startsNewGeneration = starting
+      && generation
+      && current.generation
+      && generation !== current.generation;
+    if (startsNewGeneration) {
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: generation };
+      next.controlledTasks = [];
+      next.controlledTranscript = [];
+    }
     next.controlledDevice = {
       status: status,
       generation: generation || (starting ? current.generation : null),
@@ -141,6 +157,41 @@
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.error || payload.errorCode || null,
     };
+    if (CONTROLLED_TERMINAL[status]) {
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: null };
+      next.controlledTasks = [];
+      next.controlledTranscript = [];
+    }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  /** Bind B's visible composer and transcript to the authoritative session
+   * created for the current controlled generation. */
+  function applyControlledSession(state, envelope) {
+    var payload = envelope || {};
+    var sessionId = payload.sessionId ? String(payload.sessionId) : "";
+    var sessionRef = payload.sessionRef ? String(payload.sessionRef) : "";
+    var generation = payload.generation ? String(payload.generation) : "";
+    var currentGeneration = String((state.controlledDevice && state.controlledDevice.generation) || "");
+    var status = state.controlledDevice && state.controlledDevice.status;
+    if (!sessionId || !sessionRef || !generation) return state;
+    if (status !== "connected" && status !== "reconnecting") return state;
+    if (!currentGeneration || generation !== currentGeneration) return state;
+    var current = state.controlledSession || {};
+    if (
+      current.sessionId === sessionId
+      && current.sessionRef === sessionRef
+      && current.generation === generation
+    ) return state;
+    var next = shallowCopy(state);
+    next.controlledSession = {
+      sessionId: sessionId,
+      sessionRef: sessionRef,
+      generation: generation,
+    };
+    next.controlledTasks = [];
+    next.controlledTranscript = [];
     next.revision = state.revision + 1;
     return next;
   }
@@ -317,25 +368,26 @@
    * snapshot) into the A-side transcript. Entries are deduplicated by
    * session+epoch+sequence and every payload is treated as plain text.
    */
-  function applyJournalEvent(state, envelope) {
+  function applyJournalEventTo(state, envelope, transcriptField) {
     var payload = envelope || {};
+    var transcript = state[transcriptField] || [];
     if (payload.snapshot) {
       var snapshot = payload.snapshot;
       var events = Array.isArray(snapshot.events) ? snapshot.events : [];
       var sessionId = events.length ? String(events[0].sessionId || "") : "";
       if (!sessionId) return state;
       var entries = events.map(toTranscriptEntry).filter(Boolean);
-      var kept = (state.transcript || []).filter(function (entry) {
+      var kept = transcript.filter(function (entry) {
         return entry.sessionId !== sessionId;
       });
       var next = shallowCopy(state);
-      next.transcript = kept.concat(entries).slice(-MAX_TRANSCRIPT_ENTRIES);
+      next[transcriptField] = kept.concat(entries).slice(-MAX_TRANSCRIPT_ENTRIES);
       next.revision = state.revision + 1;
       return next;
     }
     var entry = toTranscriptEntry(payload.event);
     if (!entry) return state;
-    var current = state.transcript || [];
+    var current = transcript;
     for (var index = 0; index < current.length; index += 1) {
       if (
         current[index].sessionId === entry.sessionId &&
@@ -350,9 +402,22 @@
       list = list.slice(list.length - MAX_TRANSCRIPT_ENTRIES);
     }
     var updated = shallowCopy(state);
-    updated.transcript = list;
+    updated[transcriptField] = list;
     updated.revision = state.revision + 1;
     return updated;
+  }
+
+  function applyJournalEvent(state, envelope) {
+    return applyJournalEventTo(state, envelope, "transcript");
+  }
+
+  function applyControlledJournalEvent(state, envelope) {
+    var event = envelope && envelope.event;
+    var session = state.controlledSession || {};
+    if (!event || !session.sessionId || String(event.sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    return applyJournalEventTo(state, envelope, "controlledTranscript");
   }
 
   /** Only user/assistant text becomes a transcript entry; everything else
@@ -412,16 +477,19 @@
    * Task events are deduplicated by (taskId, status) and never regress a
    * committed terminal state.
    */
-  function applyTaskEvent(state, event) {
+  function applyTaskEventTo(state, event, tasksField) {
     var payload = event || {};
-    var taskId = payload.taskId ? String(payload.taskId) : "";
-    var status = payload.status ? String(payload.status) : "";
+    var taskIdValue = payload.taskId || payload.task_id;
+    var statusValue = payload.status || payload.taskStatus || payload.task_status;
+    var taskId = taskIdValue ? String(taskIdValue) : "";
+    var status = statusValue ? String(statusValue) : "";
     if (!taskId || !status) return state;
     var connection = state.controllerConnection;
-    if (connection.connectionId && payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) {
+    var connectionId = payload.connectionId || payload.connection_id;
+    if (connection.connectionId && connectionId && String(connectionId) !== String(connection.connectionId)) {
       return state;
     }
-    var tasks = (state.tasks || []).slice();
+    var tasks = (state[tasksField] || []).slice();
     var index = -1;
     for (var i = 0; i < tasks.length; i += 1) {
       if (tasks[i].taskId === taskId) {
@@ -430,16 +498,34 @@
       }
     }
     if (index >= 0 && TASK_TERMINAL[tasks[index].status]) return state;
+    // An admitted acknowledgement may arrive after the executor's running
+    // event on a multi-thread runtime. Keep the newer lifecycle state while
+    // still accepting prompt text that only the admitted projection carries.
+    if (index >= 0 && status === "admitted" && tasks[index].status !== "admitted") {
+      var lateText = payload.text ? String(payload.text).slice(0, 8192) : null;
+      if (!lateText || tasks[index].text) return state;
+      tasks[index] = Object.assign({}, tasks[index], { text: lateText });
+      var promptUpdated = shallowCopy(state);
+      promptUpdated[tasksField] = tasks;
+      promptUpdated.revision = state.revision + 1;
+      return promptUpdated;
+    }
     var entry = {
       taskId: taskId,
-      sessionId: payload.sessionId ? String(payload.sessionId) : (index >= 0 ? tasks[index].sessionId : null),
+      sessionId: (payload.sessionId || payload.session_id)
+        ? String(payload.sessionId || payload.session_id)
+        : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
       text: payload.text
         ? String(payload.text).slice(0, 8192)
         : (index >= 0 ? tasks[index].text || null : null),
-      outcomeUnknown: !!payload.outcomeUnknown,
-      terminalReason: payload.terminalReason ? String(payload.terminalReason) : null,
-      resultDigest: payload.resultDigest ? String(payload.resultDigest) : null,
+      outcomeUnknown: !!(payload.outcomeUnknown || payload.outcome_unknown),
+      terminalReason: (payload.terminalReason || payload.terminal_reason)
+        ? String(payload.terminalReason || payload.terminal_reason)
+        : null,
+      resultDigest: (payload.resultDigest || payload.result_digest)
+        ? String(payload.resultDigest || payload.result_digest)
+        : null,
     };
     if (index >= 0) {
       if (
@@ -455,9 +541,23 @@
       tasks.push(entry);
     }
     var next = shallowCopy(state);
-    next.tasks = tasks;
+    next[tasksField] = tasks;
     next.revision = state.revision + 1;
     return next;
+  }
+
+  function applyTaskEvent(state, event) {
+    return applyTaskEventTo(state, event, "tasks");
+  }
+
+  function applyControlledTaskEvent(state, event) {
+    var payload = event || {};
+    var session = state.controlledSession || {};
+    var sessionId = payload.sessionId || payload.session_id;
+    if (!session.sessionId || String(sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    return applyTaskEventTo(state, payload, "controlledTasks");
   }
 
   /** True when the envelope still belongs to the live connection context. */
@@ -482,15 +582,18 @@
     beginControllerIntent: beginControllerIntent,
     isCurrentIntent: isCurrentIntent,
     applyControlledStatus: applyControlledStatus,
+    applyControlledSession: applyControlledSession,
     applyControllerStatus: applyControllerStatus,
     applyControllerSession: applyControllerSession,
     applyCapabilityPending: applyCapabilityPending,
     applyCapabilityFailure: applyCapabilityFailure,
     applyCapabilities: applyCapabilities,
     applyJournalEvent: applyJournalEvent,
+    applyControlledJournalEvent: applyControlledJournalEvent,
     applyModels: applyModels,
     applyHistories: applyHistories,
     applyTaskEvent: applyTaskEvent,
+    applyControlledTaskEvent: applyControlledTaskEvent,
     matchesLiveContext: matchesLiveContext,
     isTaskTerminal: function (status) {
       return !!TASK_TERMINAL[status];

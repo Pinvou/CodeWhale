@@ -893,50 +893,84 @@ fn prune_terminal(inner: &mut LedgerInner) {
 /// session. The map is per connection and never persisted.
 #[derive(Default)]
 pub(crate) struct RemoteSessionMap {
-    forward: Mutex<HashMap<String, String>>,
-    reverse: Mutex<HashMap<String, String>>,
+    forward: Mutex<HashMap<String, (String, String)>>,
+    reverse: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl RemoteSessionMap {
-    pub(crate) fn bind(&self, remote_ref: &str, session_id: &str) -> Result<String> {
+    pub(crate) fn bind(
+        &self,
+        remote_ref: &str,
+        session_id: &str,
+        generation: &str,
+    ) -> Result<String> {
         validate_identifier(remote_ref)?;
         validate_identifier(session_id)?;
+        validate_identifier(generation)?;
         let mut forward = self.forward.lock();
         let mut reverse = self.reverse.lock();
         if let Some(existing) = reverse.get(session_id) {
-            if existing != remote_ref {
+            if existing.0 != remote_ref || existing.1 != generation {
                 return Err(error("task_session_map_conflict"));
             }
         }
-        if let Some(previous) = forward.insert(remote_ref.to_owned(), session_id.to_owned()) {
-            if previous != session_id {
-                reverse.remove(&previous);
+        if forward
+            .get(remote_ref)
+            .is_some_and(|existing| existing.1 != generation)
+        {
+            return Err(error("task_session_generation_conflict"));
+        }
+        let binding = (session_id.to_owned(), generation.to_owned());
+        if let Some(previous) = forward.insert(remote_ref.to_owned(), binding) {
+            if previous.0 != session_id {
+                reverse.remove(&previous.0);
             }
         }
-        reverse.insert(session_id.to_owned(), remote_ref.to_owned());
+        reverse.insert(
+            session_id.to_owned(),
+            (remote_ref.to_owned(), generation.to_owned()),
+        );
         Ok(session_id.to_owned())
     }
 
-    pub(crate) fn session_for(&self, remote_ref: &str) -> Option<String> {
-        self.forward.lock().get(remote_ref).cloned()
+    pub(crate) fn session_for(&self, remote_ref: &str, generation: &str) -> Option<String> {
+        self.forward
+            .lock()
+            .get(remote_ref)
+            .filter(|binding| binding.1 == generation)
+            .map(|binding| binding.0.clone())
     }
 
     pub(crate) fn is_remote_session(&self, session_id: &str) -> bool {
         self.reverse.lock().contains_key(session_id)
     }
 
-    /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
-    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
-        self.reverse.lock().get(session_id).cloned()
+    pub(crate) fn is_remote_session_for(&self, session_id: &str, generation: &str) -> bool {
+        self.reverse
+            .lock()
+            .get(session_id)
+            .is_some_and(|binding| binding.1 == generation)
     }
 
-    pub(crate) fn unbind(&self, remote_ref: &str) -> Option<String> {
+    /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
+    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
+        self.reverse
+            .lock()
+            .get(session_id)
+            .map(|binding| binding.0.clone())
+    }
+
+    pub(crate) fn unbind(&self, remote_ref: &str, generation: &str) -> Option<String> {
         let mut forward = self.forward.lock();
-        let session_id = forward.remove(remote_ref)?;
+        let binding = forward.get(remote_ref)?;
+        if binding.1 != generation {
+            return None;
+        }
+        let (session_id, _) = forward.remove(remote_ref)?;
         let mut reverse = self.reverse.lock();
         if reverse
             .get(&session_id)
-            .is_some_and(|candidate| candidate == remote_ref)
+            .is_some_and(|candidate| candidate.0 == remote_ref && candidate.1 == generation)
         {
             reverse.remove(&session_id);
         }
@@ -946,6 +980,20 @@ impl RemoteSessionMap {
     pub(crate) fn clear(&self) {
         self.forward.lock().clear();
         self.reverse.lock().clear();
+    }
+
+    pub(crate) fn clear_generation(&self, generation: &str) {
+        let mut forward = self.forward.lock();
+        let mut reverse = self.reverse.lock();
+        let stale: Vec<(String, String)> = forward
+            .iter()
+            .filter(|(_, binding)| binding.1 == generation)
+            .map(|(remote_ref, binding)| (remote_ref.clone(), binding.0.clone()))
+            .collect();
+        for (remote_ref, session_id) in stale {
+            forward.remove(&remote_ref);
+            reverse.remove(&session_id);
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -1151,6 +1199,9 @@ impl RemoteTaskHooks {
 pub(crate) struct RemoteTaskService {
     ledger: Arc<RemoteTaskLedger>,
     sessions: RemoteSessionMap,
+    /// A retried capability request and the first task can provision at once.
+    /// Serialize lookup/create/bind so one A reference owns one B session.
+    session_open_lock: Mutex<()>,
     provisioner: Mutex<Option<Arc<dyn RemoteSessionProvisioner>>>,
     executors: Mutex<HashMap<String, Arc<dyn ControllerTaskExecutor>>>,
     /// DEV-13 审核修复：取消必须真正中断执行器。dispatch 注册当前任务的取消令牌，
@@ -1164,6 +1215,7 @@ impl RemoteTaskService {
         Self {
             ledger,
             sessions: RemoteSessionMap::default(),
+            session_open_lock: Mutex::new(()),
             provisioner: Mutex::new(None),
             executors: Mutex::new(HashMap::new()),
             cancel_tokens: Mutex::new(HashMap::new()),
@@ -1192,6 +1244,7 @@ impl RemoteTaskService {
         remote_ref: &str,
         title: &str,
         code_mode: bool,
+        generation: &str,
     ) -> Result<String> {
         let provisioner = self
             .provisioner
@@ -1201,14 +1254,32 @@ impl RemoteTaskService {
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
             .map_err(|_| error("task_session_create_failed"))?;
-        self.sessions.bind(remote_ref, &session_id)
+        self.sessions.bind(remote_ref, &session_id, generation)
+    }
+
+    /// Return the B-authoritative session already bound to `remote_ref`, or
+    /// create it once before either endpoint is allowed to submit.
+    pub(crate) fn ensure_remote_session(
+        &self,
+        remote_ref: &str,
+        title: &str,
+        code_mode: bool,
+        generation: &str,
+    ) -> Result<String> {
+        let _guard = self.session_open_lock.lock();
+        if let Some(session_id) = self.sessions.session_for(remote_ref, generation) {
+            return Ok(session_id);
+        }
+        self.open_remote_session(remote_ref, title, code_mode, generation)
     }
 
     pub(crate) fn switch_remote_session(
         &self,
         remote_ref: &str,
         session_id: &str,
+        generation: &str,
     ) -> Result<String> {
+        let _guard = self.session_open_lock.lock();
         let provisioner = self
             .provisioner
             .lock()
@@ -1219,24 +1290,34 @@ impl RemoteTaskService {
             Ok(false) => return Err(error("task_session_not_found")),
             Err(_) => return Err(error("task_session_lookup_failed")),
         }
-        self.sessions.bind(remote_ref, session_id)
+        self.sessions.bind(remote_ref, session_id, generation)
     }
 
-    pub(crate) fn close_remote_session(&self, remote_ref: &str) -> Result<Option<String>> {
-        if let Some(session_id) = self.sessions.session_for(remote_ref) {
+    pub(crate) fn close_remote_session(
+        &self,
+        remote_ref: &str,
+        generation: &str,
+    ) -> Result<Option<String>> {
+        let _guard = self.session_open_lock.lock();
+        if let Some(session_id) = self.sessions.session_for(remote_ref, generation) {
             if self.ledger.active_for_session(&session_id).is_some() {
                 return Err(error("task_session_busy"));
             }
         }
-        Ok(self.sessions.unbind(remote_ref))
+        Ok(self.sessions.unbind(remote_ref, generation))
     }
 
-    pub(crate) fn session_for(&self, remote_ref: &str) -> Option<String> {
-        self.sessions.session_for(remote_ref)
+    pub(crate) fn session_for(&self, remote_ref: &str, generation: &str) -> Option<String> {
+        self.sessions.session_for(remote_ref, generation)
     }
 
     pub(crate) fn is_remote_session(&self, session_id: &str) -> bool {
         self.sessions.is_remote_session(session_id)
+    }
+
+    pub(crate) fn is_remote_session_for(&self, session_id: &str, generation: &str) -> bool {
+        self.sessions
+            .is_remote_session_for(session_id, generation)
     }
 
     /// E2E-05：B 权威会话 id → A 的会话引用（未绑定或本地会话返回 None）。
@@ -1245,7 +1326,13 @@ impl RemoteTaskService {
     }
 
     pub(crate) fn clear_sessions(&self) {
+        let _guard = self.session_open_lock.lock();
         self.sessions.clear();
+    }
+
+    pub(crate) fn clear_generation_sessions(&self, generation: &str) {
+        let _guard = self.session_open_lock.lock();
+        self.sessions.clear_generation(generation);
     }
 
     pub(crate) fn submit(
@@ -1262,6 +1349,31 @@ impl RemoteTaskService {
         Ok(outcome)
     }
 
+    /// Admit only while the submitted B-authoritative session is still bound
+    /// to the live controlled-device lifecycle. Cleanup takes the same lock,
+    /// so a send racing stop/refresh is either admitted before cleanup (and
+    /// then interrupted) or rejected after the mapping is cleared.
+    pub(crate) fn submit_bound(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+    ) -> Result<AdmissionOutcome> {
+        let request = RemoteTaskRequest::from_payload(payload)?;
+        let _guard = self.session_open_lock.lock();
+        if !self
+            .sessions
+            .is_remote_session_for(&request.session_id, &live.remote_control_generation)
+        {
+            return Err(error("task_session_not_found"));
+        }
+        let outcome = self.ledger.admit(live, &request, now_b)?;
+        if let AdmissionOutcome::Admitted(ticket) = &outcome {
+            self.publish(&ticket.record);
+        }
+        Ok(outcome)
+    }
+
     pub(crate) async fn dispatch(
         &self,
         ticket: RemoteTaskTicket,
@@ -1270,9 +1382,17 @@ impl RemoteTaskService {
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
         let task_id = ticket.record.task_id.clone();
-        let running = self.ledger.begin_dispatch(&task_id, now_b)?;
+        self.cancel_tokens
+            .lock()
+            .insert(task_id.clone(), cancel.clone());
+        let running = match self.ledger.begin_dispatch(&task_id, now_b) {
+            Ok(running) => running,
+            Err(error) => {
+                self.cancel_tokens.lock().remove(&task_id);
+                return Err(error);
+            }
+        };
         self.publish(&running);
-        self.cancel_tokens.lock().insert(task_id.clone(), cancel.clone());
         let executor = self.executors.lock().get(&running.mode).cloned();
         let Some(executor) = executor else {
             self.cancel_tokens.lock().remove(&task_id);
@@ -1363,6 +1483,22 @@ impl RemoteTaskService {
         self.finish_interrupted(records)
     }
 
+    /// End one controlled-device lifecycle and invalidate every ephemeral
+    /// A-ref/B-session mapping atomically with respect to bound admission.
+    pub(crate) fn interrupt_generation_and_clear_sessions(
+        &self,
+        generation: &str,
+        reason: &str,
+        now_b: u64,
+    ) -> Vec<RemoteTaskRecord> {
+        let _guard = self.session_open_lock.lock();
+        let records = self
+            .ledger
+            .interrupt_generation(generation, reason, now_b);
+        self.sessions.clear_generation(generation);
+        self.finish_interrupted(records)
+    }
+
     pub(crate) fn interrupt_all(&self, reason: &str, now_b: u64) -> Vec<RemoteTaskRecord> {
         let records = self.ledger.interrupt_all(reason, now_b);
         self.finish_interrupted(records)
@@ -1423,6 +1559,9 @@ impl RemoteTaskService {
 
     fn finish_interrupted(&self, records: Vec<RemoteTaskRecord>) -> Vec<RemoteTaskRecord> {
         for record in &records {
+            if let Some(token) = self.cancel_tokens.lock().remove(&record.task_id) {
+                token.cancel();
+            }
             self.cleanup(
                 record,
                 record
@@ -2202,6 +2341,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lifecycle_cleanup_cancels_the_running_executor() {
+        let executor = Arc::new(HangingExecutor {
+            started: Arc::new(tokio::sync::Notify::new()),
+            observed_cancel: AtomicBool::new(false),
+        });
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.register_executor(TASK_MODE_CHAT, executor.clone());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+
+        let record = runtime().block_on(async {
+            let dispatch = service.dispatch(
+                ticket,
+                Arc::new(NoopSink),
+                CancellationToken::new(),
+                1_100,
+            );
+            tokio::pin!(dispatch);
+            tokio::select! {
+                _ = executor.started.notified() => {}
+                outcome = &mut dispatch => panic!("dispatch finished before cleanup: {outcome:?}"),
+            }
+            let interrupted = service.interrupt_generation_and_clear_sessions(
+                "generation-0001",
+                "remote_control_stopped",
+                1_200,
+            );
+            assert_eq!(interrupted.len(), 1);
+            dispatch.await.unwrap()
+        });
+
+        assert_eq!(record.state, RemoteTaskState::Interrupted);
+        assert!(executor.observed_cancel.load(Ordering::SeqCst));
+        assert_eq!(record.terminal_reason.as_deref(), Some("remote_control_stopped"));
+    }
+
     /// E2E-05：chat 执行器把用户消息与 assistant 回复都交给正文事件端口
     /// （命令层据此写权威 journal 并回传 A）。
     #[test]
@@ -2304,12 +2483,165 @@ mod tests {
     }
 
     #[test]
+    fn ensure_remote_session_is_idempotent_under_concurrent_preparation() {
+        let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
+        let sessions = Arc::new(FakeSessions::default());
+        service.set_session_provisioner(sessions.clone());
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let service = service.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    service
+                        .ensure_remote_session(
+                            "remote-session-shared",
+                            "Remote",
+                            false,
+                            "generation-0001",
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(ids.iter().all(|id| id == "session-0001"));
+        assert_eq!(sessions.created.lock().len(), 1);
+        assert_eq!(
+            service
+                .session_for("remote-session-shared", "generation-0001")
+                .as_deref(),
+            Some("session-0001")
+        );
+    }
+
+    #[test]
+    fn lifecycle_cleanup_invalidates_old_session_before_next_generation_can_submit() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        let sessions = Arc::new(FakeSessions::default());
+        service.set_session_provisioner(sessions.clone());
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-shared",
+                    "Remote",
+                    false,
+                    "generation-0001",
+                )
+                .unwrap(),
+            "session-0001"
+        );
+
+        service.interrupt_generation_and_clear_sessions(
+            "generation-0001",
+            "remote_control_stopped",
+            1_100,
+        );
+
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-shared",
+                    "Remote",
+                    false,
+                    "generation-0001",
+                )
+                .unwrap(),
+            "session-0002",
+            "a late old-generation prepare may create a session but must stay generation-bound"
+        );
+
+        let mut stale = payload(
+            "session-0002",
+            "task-generation-0002",
+            "client-generation-0002",
+            &digest(2),
+        );
+        stale["remote_control_generation"] = json!("generation-0002");
+        assert_eq!(
+            service
+                .submit_bound(&context("generation-0002"), &stale, 1_200)
+                .unwrap_err()
+                .code,
+            "task_session_not_found"
+        );
+        service.clear_generation_sessions("generation-0001");
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-shared",
+                    "Remote",
+                    false,
+                    "generation-0002",
+                )
+                .unwrap(),
+            "session-0003"
+        );
+        assert_eq!(sessions.created.lock().len(), 3);
+    }
+
+    #[test]
+    fn old_generation_cleanup_preserves_a_new_generation_mapping() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-generation-1",
+                    "Remote 1",
+                    false,
+                    "generation-0001",
+                )
+                .unwrap(),
+            "session-0001"
+        );
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-generation-2",
+                    "Remote 2",
+                    false,
+                    "generation-0002",
+                )
+                .unwrap(),
+            "session-0002"
+        );
+
+        service.interrupt_generation_and_clear_sessions(
+            "generation-0001",
+            "remote_control_stopped",
+            1_100,
+        );
+
+        assert_eq!(
+            service.session_for("remote-session-generation-1", "generation-0001"),
+            None
+        );
+        assert_eq!(
+            service
+                .session_for("remote-session-generation-2", "generation-0002")
+                .as_deref(),
+            Some("session-0002")
+        );
+    }
+
+    #[test]
     fn session_map_is_opaque_and_blocks_closing_a_busy_session() {
         let (service, _hooks) = service(RecordingExecutor::ok());
         service.set_session_provisioner(Arc::new(FakeSessions::default()));
         assert_eq!(
             service
-                .open_remote_session("remote-session-0001", "Remote", false)
+                .open_remote_session(
+                    "remote-session-0001",
+                    "Remote",
+                    false,
+                    "generation-0001",
+                )
                 .unwrap(),
             "session-0001"
         );
@@ -2322,7 +2654,7 @@ mod tests {
         );
         assert_eq!(
             service
-                .close_remote_session("remote-session-0001")
+                .close_remote_session("remote-session-0001", "generation-0001")
                 .unwrap_err()
                 .code,
             "task_session_busy"
@@ -2331,7 +2663,9 @@ mod tests {
             .complete("task-0001", RemoteTaskTerminal::Succeeded, None, 1_100)
             .unwrap();
         assert_eq!(
-            service.close_remote_session("remote-session-0001").unwrap(),
+            service
+                .close_remote_session("remote-session-0001", "generation-0001")
+                .unwrap(),
             Some("session-0001".to_owned())
         );
         assert!(!service.is_remote_session("session-0001"));

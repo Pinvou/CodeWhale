@@ -141,7 +141,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   }
 
   const workspaces = Array.isArray(device.workspaces) ? device.workspaces : [];
-  const tasks = Array.isArray(bs && bs.tasks) ? bs.tasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown'].includes(task.status)) : [];
+  const tasks = Array.isArray(bs && bs.controlledTasks) ? bs.controlledTasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown'].includes(task.status)) : [];
   const permissions = Array.isArray(bs && bs.remotePermissions) ? bs.remotePermissions : [];
 
   return (

@@ -207,6 +207,13 @@ test('task events deduplicate and never regress a terminal state', () => {
   let state = logic.createState();
   state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'admitted' });
   state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'running' });
+  state = logic.applyTaskEvent(state, {
+    taskId: 'task-1',
+    status: 'admitted',
+    text: 'late prompt projection',
+  });
+  assert.equal(state.tasks[0].status, 'running', 'late admitted must not regress running');
+  assert.equal(state.tasks[0].text, 'late prompt projection', 'late prompt text is still retained');
   state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'succeeded' });
   assert.equal(state.tasks[0].status, 'succeeded');
 
@@ -227,26 +234,92 @@ test('task events deduplicate and never regress a terminal state', () => {
 
 test('B-side task projection keeps locally visible prompt text across status changes', () => {
   let state = logic.createState();
-  state = logic.applyTaskEvent(state, {
+  state = logic.applyControlledStatus(state, {
+    status: 'connected',
+    generation: 'generation-b',
+  });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-b',
+    sessionRef: 'session-ref-a',
+    generation: 'generation-b',
+  });
+  state = logic.applyControlledTaskEvent(state, {
     taskId: 'task-visible',
     sessionId: 'session-b',
     status: 'admitted',
   });
-  state = logic.applyTaskEvent(state, {
+  state = logic.applyControlledTaskEvent(state, {
     taskId: 'task-visible',
     sessionId: 'session-b',
     status: 'admitted',
     text: 'inspect the repository',
   });
-  assert.equal(state.tasks[0].text, 'inspect the repository');
+  assert.equal(state.controlledTasks[0].text, 'inspect the repository');
 
-  state = logic.applyTaskEvent(state, {
-    taskId: 'task-visible',
-    sessionId: 'session-b',
+  state = logic.applyControlledTaskEvent(state, {
+    task_id: 'task-visible',
+    session_id: 'session-b',
+    task_status: 'running',
+  });
+  assert.equal(state.controlledTasks[0].status, 'running');
+  assert.equal(state.controlledTasks[0].text, 'inspect the repository');
+});
+
+test('B-side projections reject stale sessions and reset with the controlled generation', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, {
+    status: 'connected',
+    generation: 'generation-1',
+  });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-current',
+    sessionRef: 'session-ref-current',
+    generation: 'generation-1',
+  });
+
+  const staleTask = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-stale',
+    sessionId: 'session-old',
     status: 'running',
   });
-  assert.equal(state.tasks[0].status, 'running');
-  assert.equal(state.tasks[0].text, 'inspect the repository');
+  assert.equal(staleTask, state);
+
+  const staleJournal = logic.applyControlledJournalEvent(state, {
+    event: {
+      sessionId: 'session-old',
+      epoch: 'epoch-1',
+      sequence: 1,
+      kind: 'user_message',
+      payload: { text: 'stale' },
+    },
+  });
+  assert.equal(staleJournal, state);
+
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-current',
+    sessionId: 'session-current',
+    status: 'running',
+  });
+  state = logic.applyControlledJournalEvent(state, {
+    event: {
+      sessionId: 'session-current',
+      epoch: 'epoch-1',
+      sequence: 1,
+      kind: 'user_message',
+      taskId: 'task-current',
+      payload: { text: 'current' },
+    },
+  });
+  assert.equal(state.controlledTasks.length, 1);
+  assert.equal(state.controlledTranscript.length, 1);
+
+  state = logic.applyControlledStatus(state, {
+    status: 'reserving',
+    generation: 'generation-2',
+  });
+  assert.equal(state.controlledSession.sessionId, null);
+  assert.equal(state.controlledTasks.length, 0);
+  assert.equal(state.controlledTranscript.length, 0);
 });
 
 test('live-context matching rejects foreign connections and leases', () => {

@@ -562,6 +562,7 @@ fn build_capability_snapshot_request(intent: &SessionIntent, request_id: &str) -
         "relay_epoch": intent.lease.relay_epoch,
         "remote_control_generation": intent.lease.remote_control_generation,
         "request_id": request_id,
+        "session_id": intent.session_id,
         "known_revision": intent.capability_revision.unwrap_or(0).to_string(),
     });
     validate_outbound_payload(intent, &payload)
@@ -786,7 +787,7 @@ mod tests {
             .unwrap();
         assert_eq!(request.payload["type"], "capability_snapshot_request");
         assert_eq!(request.payload["known_revision"], "0");
-        assert!(request.payload.get("session_id").is_none());
+        assert_eq!(request.payload["session_id"], session.session_id);
 
         let applied = sessions
             .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())

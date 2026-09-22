@@ -49,9 +49,12 @@ import { ConversationAttachmentBubble } from '../attachments/ConversationAttachm
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
 import { isRemoteChatActive, remoteChatItems as projectRemoteChatItems } from '../remote-control/chat-transcript-projection.mjs';
-import { isTaskTerminal, taskStatusKey } from '../remote-control/remote-control-logic.mjs';
+import {
+  isControlledDeviceChatActive,
+  isTaskTerminal,
+  taskStatusKey,
+} from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
-import { isControlledDeviceChatActive } from '../remote-control/remote-control-logic.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
 import {
@@ -816,20 +819,53 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const remoteChatActive = isRemoteChatActive(remoteConnection);
       const controlledDevice = (bs && bs.controlledDevice) || {};
       const controlledChatActive = isControlledDeviceChatActive(controlledDevice);
+      const controlledSession = (bs && bs.controlledSession) || {};
       const [remoteSessionBusy, setRemoteSessionBusy] = useState(false);
       const [remoteSessionError, setRemoteSessionError] = useState(null);
       const [remoteCapabilityBusy, setRemoteCapabilityBusy] = useState(false);
       const [remoteCapabilityError, setRemoteCapabilityError] = useState(null);
       const remoteCapabilityRequesterRef = useRef(null);
       const [remoteSendError, setRemoteSendError] = useState(null);
+      const remoteTranscriptActive = remoteChatActive || controlledChatActive;
+      const remoteSendIdentity = remoteChatActive
+        ? `controller:${remoteConnection?.connectionId || ''}:${remoteConnection?.leaseEpoch || ''}:${remoteConnection?.sessionRef || ''}`
+        : (controlledChatActive
+          ? `controlled:${controlledDevice.generation || ''}:${controlledSession.sessionId || ''}`
+          : '');
+      useEffect(() => {
+        setRemoteSendError(current => (
+          current && current.identity !== remoteSendIdentity ? null : current
+        ));
+      }, [remoteSendIdentity]);
       const projectedRemoteChatItems = useMemo(
-        () => projectRemoteChatItems(remoteConnection, bs ? bs.transcript : []),
-        [remoteConnection, bs && bs.transcript],
+        () => projectRemoteChatItems(
+          remoteChatActive
+            ? remoteConnection
+            : (controlledChatActive
+              ? { status: 'connected', sessionId: controlledSession.sessionId }
+              : null),
+          remoteChatActive
+            ? (bs ? bs.transcript : [])
+            : (bs ? bs.controlledTranscript : []),
+          remoteChatActive
+            ? (bs ? bs.tasks : [])
+            : (bs ? bs.controlledTasks : []),
+        ),
+        [
+          remoteChatActive,
+          controlledChatActive,
+          remoteConnection,
+          controlledSession.sessionId,
+          bs && bs.transcript,
+          bs && bs.tasks,
+          bs && bs.controlledTranscript,
+          bs && bs.controlledTasks,
+        ],
       );
-      const displayChatItems = remoteChatActive ? projectedRemoteChatItems : chatItems;
+      const displayChatItems = remoteTranscriptActive ? projectedRemoteChatItems : chatItems;
       const controlledActiveTasks = useMemo(
-        () => ((bs && bs.tasks) || []).filter(task => task && !isTaskTerminal(task.status)),
-        [bs && bs.tasks],
+        () => ((bs && bs.controlledTasks) || []).filter(task => task && !isTaskTerminal(task.status)),
+        [bs && bs.controlledTasks],
       );
       const showControlledTask = controlledDevice.status === 'connected' && controlledActiveTasks.length > 0;
       const activeSessionId = bs ? bs.activeSessionId : null;
@@ -839,6 +875,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const localBusy = bs ? bs.busy : false;
       const remoteLinkReady = !!(remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null
         && remoteConnection.capabilityStatus !== 'error');
+      const controlledLinkReady = !!(
+        controlledChatActive
+        && controlledSession.sessionId
+        && controlledSession.generation
+        && String(controlledSession.generation) === String(controlledDevice.generation || '')
+      );
       const busy = remoteChatActive
         ? (localBusy || remoteSessionBusy || remoteCapabilityBusy || !remoteLinkReady)
         : localBusy;
@@ -932,7 +974,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // 当前会话仍在运行的后台 shell 任务（编译、下载等），驱动输入框上方的胶囊指示器。
       // chatItems 只含当前会话条目，且由 bridge 轮询保持新鲜，直接派生即可。
       const runningShellTasks = deriveRunningShellTasks(displayChatItems);
-      const conversationStarted = displayChatItems.some(item => item && item.type === 'user') || (!remoteChatActive && artifactCount > 0);
+      const conversationStarted = displayChatItems.some(item => item && item.type === 'user') || (!remoteTranscriptActive && artifactCount > 0);
       const pinvouMode = pinvouModeState.mode;
       const sceneSubtab = pinvouModeState.subtab;
       const designScopeKey = createDesignChangeScopeKey(activeSessionId, activeArtifactPath);
@@ -1305,8 +1347,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // updates). Follow the last streaming/running item's traits as well.
       let streamingFollowHtml;
       let runningFollowOutputLength;
-      for (let followIdx = chatItems.length - 1; followIdx >= 0; followIdx--) {
-        const followItem = chatItems[followIdx];
+      for (let followIdx = displayChatItems.length - 1; followIdx >= 0; followIdx--) {
+        const followItem = displayChatItems[followIdx];
         if (followItem?.streaming && streamingFollowHtml === undefined) {
           streamingFollowHtml = followItem.html;
         }
@@ -1318,7 +1360,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       useEffect(() => {
         const el = scrollRef.current;
         if (!el) return;
-        const lastItem = chatItems[chatItems.length - 1];
+        const lastItem = displayChatItems[displayChatItems.length - 1];
         // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously reset the back-to-bottom button when there are no messages
         if (!lastItem) { autoScrollRef.current = true; lastUserSnapLengthRef.current = 0; setShowScrollBottom(false); return; }
         // A mid-turn steered bubble parks a user item LAST while the turn's
@@ -1330,10 +1372,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (shouldForceScrollFollow({
           following: autoScrollRef.current,
           lastItemType: lastItem.type,
-          itemCount: chatItems.length,
+          itemCount: displayChatItems.length,
           lastSnapItemCount: lastUserSnapLengthRef.current,
         })) {
-          lastUserSnapLengthRef.current = chatItems.length;
+          lastUserSnapLengthRef.current = displayChatItems.length;
           el.scrollTop = el.scrollHeight;
           autoScrollRef.current = true;
           setShowScrollBottom(false);
@@ -1342,12 +1384,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           setShowScrollBottom(v => v === shouldShow ? v : shouldShow);
         }
       }, [
-        chatItems.length,
-        chatItems[chatItems.length - 1]?.html,
+        displayChatItems.length,
+        displayChatItems[displayChatItems.length - 1]?.html,
         streamingFollowHtml,
         // eslint-disable-next-line react-hooks/exhaustive-deps -- streaming output length is an intentionally narrow conditional-expression dep
-        chatItems[chatItems.length - 1]?.state === 'running'
-          ? chatItems[chatItems.length - 1]?.output?.length
+        displayChatItems[displayChatItems.length - 1]?.state === 'running'
+          ? displayChatItems[displayChatItems.length - 1]?.output?.length
           : 0,
         runningFollowOutputLength,
         composerH,
@@ -1613,7 +1655,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       ));
       const canSend = !isMultiAgentReadOnly
         && !firstTurnPending
-        && (remoteChatActive ? hasDraftText : (hasDraftText || hasReadyAttachment));
+        && (remoteTranscriptActive ? hasDraftText : (hasDraftText || hasReadyAttachment));
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       const canClearInput = hasDraftText && !voiceActive;
       function handleClearInput() {
@@ -1624,17 +1666,40 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const dispatchChatMessage = useCallback(async (text, voiceMeta, voiceOwner) => {
         if (!bridge.available) return false;
         const outgoing = String(text || '').trim();
+        if (controlledChatActive && !remoteChatActive) {
+          if (!controlledLinkReady) return false;
+          const sendIdentity = remoteSendIdentity;
+          try {
+            await bridge.desktopRemoteControl.controlledTaskSend(controlledSession.sessionId, outgoing);
+            setRemoteSendError(current => (
+              current && current.identity === sendIdentity ? null : current
+            ));
+          } catch (failure) {
+            setRemoteSendError({
+              identity: sendIdentity,
+              code: String((failure && failure.code) || 'errorGeneric'),
+            });
+            throw failure;
+          }
+          return true;
+        }
         if (remoteConnection && remoteConnection.status === 'connected') {
           // 会话引用只表示 A/B 通道已建立；Rust 仅在能力快照已经应用后才允许
           // 构造 task intent。发送按钮、回车、语音与欢迎卡片最终都经过这里，
           // 因此必须在统一入口拦截，不能只依赖按钮 disabled。
           if (!remoteLinkReady) return false;
           const sessionRef = remoteConnection.sessionRef;
+          const sendIdentity = remoteSendIdentity;
           try {
             await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, remoteModelSource);
-            setRemoteSendError(null);
+            setRemoteSendError(current => (
+              current && current.identity === sendIdentity ? null : current
+            ));
           } catch (failure) {
-            setRemoteSendError(String((failure && failure.code) || 'errorGeneric'));
+            setRemoteSendError({
+              identity: sendIdentity,
+              code: String((failure && failure.code) || 'errorGeneric'),
+            });
             throw failure;
           }
           return true;
@@ -1717,7 +1782,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // composer (first-turn materialization abort, session switch);
         // restoring again would duplicate it.
         return dispatchResult;
-      }, [activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteConnection, remoteLinkReady, remoteModelSource, t, visualPosterSceneActive]);
+      }, [activeSessionId, controlledChatActive, controlledLinkReady, controlledSession.sessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteChatActive, remoteConnection, remoteLinkReady, remoteModelSource, remoteSendIdentity, t, visualPosterSceneActive]);
 
       // 断开重连或窗口重载后，进入 ChatView 时也要确保远程 session 可用；
       // sessionRef 是把普通输入框路由到远端的必要条件。
@@ -1802,6 +1867,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const remoteCapabilityMessage = remoteCapabilityError === 'capability_snapshot_timeout'
         ? t.controllerConnection.remoteCapabilityTimeout
         : (remoteCapabilityError ? t.controllerConnection.remoteCapabilityFailed : null);
+      const currentRemoteSendError = remoteSendError?.identity === remoteSendIdentity
+        ? remoteSendError.code
+        : null;
+      const remoteSendMessage = currentRemoteSendError === 'task_session_busy'
+        ? t.remoteConversation.sessionBusy
+        : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null);
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');
@@ -1987,7 +2058,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // 不再因 busy 拦截:bridge.chat.sendMessage 在生成中会把这句排队(本轮跑完自动发)。
         // 远程能力准备不是生成中的「可排队」状态：快照到达前 Rust 无法构造
         // task intent，必须保留草稿并等待 remoteLinkReady。
-        if (isMultiAgentReadOnly || !canSend || (remoteChatActive && !remoteLinkReady)) return;
+        if (
+          isMultiAgentReadOnly
+          || !canSend
+          || (remoteChatActive && !remoteLinkReady)
+          || (controlledChatActive && !remoteChatActive && !controlledLinkReady)
+        ) return;
         if (chatVoice && chatVoice.editPreview) {
           await chatVoice.applyVoiceEditPreview({ send: true });
           return;
@@ -2493,9 +2569,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     </select>
                   </div>
                 </div>
-                {(remoteSessionError || remoteCapabilityMessage || remoteSendError) && (
+                {(remoteSessionError || remoteCapabilityMessage) && (
                   <div role="alert" className="mt-2 flex items-center gap-2 px-1 text-[12px] text-[#EA4335]">
-                    <span>{remoteSendError || remoteCapabilityMessage || remoteSessionError}</span>
+                    <span>{remoteCapabilityMessage || remoteSessionError}</span>
                     {remoteCapabilityMessage && remoteConnection.sessionRef && (
                       <button
                         type="button"
@@ -2508,6 +2584,16 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     )}
                   </div>
                 )}
+              </div>
+            )}
+
+            {remoteTranscriptActive && remoteSendMessage && (
+              <div
+                data-testid="chat-remote-send-error"
+                role="alert"
+                className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}
+              >
+                {remoteSendMessage}
               </div>
             )}
 
@@ -3008,11 +3094,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   const ready = canSend
                     && !sceneCapabilityPreparing
                     && !chatVoice.editPreview
-                    && (!remoteChatActive || remoteLinkReady);
+                    && (!remoteChatActive || remoteLinkReady)
+                    && (!controlledChatActive || remoteChatActive || controlledLinkReady);
                   const isQueue = busy && ready;
                   return (
                     <div className="flex items-center gap-1">
-                      {busy && !remoteChatActive && (
+                      {busy && !remoteTranscriptActive && (
                         <button type="button" onClick={handleCancel} disabled={cancellingSessionIds.has(activeSessionId)}
                           className="w-9 h-9 shrink-0 rounded-full flex items-center justify-center bg-black/5 dark:bg-white/10 text-[#C5221F] dark:text-[#F28B82] hover:bg-black/10 dark:hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                           <StopCircle size={20} />

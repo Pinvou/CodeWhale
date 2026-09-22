@@ -2075,6 +2075,7 @@ dictZh["remoteConversation"] = {
   offlineHint: "这是本机保存的副本，不代表当前仍连接对方设备。",
   journalResync: "已重新同步会话状态。",
   resultUnknownHint: "连接中断，无法确认该任务是否执行完成。",
+  sessionBusy: "当前远程会话正在执行任务，请稍后重试；消息已保留。",
   errorGeneric: "操作失败，请稍后重试。",
 };
 

@@ -91,7 +91,7 @@ test('the shell separates hiding the page section from disconnecting', () => {
   assert.ok(!/onClose[\s\S]{0,80}controllerDisconnect/.test(shell));
 });
 
-test('the controller and controlled operation zones stay separated', () => {
+test('the controlled operation zone precedes the controller zone in settings', () => {
   for (const language of ['zh', 'en', 'ja']) {
     assert.ok(dict[language].controllerConnection.controllerSide);
     assert.ok(dict[language].controllerConnection.controlledSide);
@@ -110,9 +110,18 @@ test('the controller and controlled operation zones stay separated', () => {
   assert.notEqual(panelIndex, -1);
   assert.notEqual(controlledIndex, -1);
   assert.notEqual(controlledPanelIndex, -1);
-  assert.ok(controllerIndex < panelIndex);
-  assert.ok(panelIndex < controlledIndex);
   assert.ok(controlledIndex < controlledPanelIndex);
+  assert.ok(controlledPanelIndex < controllerIndex);
+  assert.ok(controllerIndex < panelIndex);
+});
+
+test('entering remote-control settings resets the shared content scroller to the top', () => {
+  assert.ok(settings.includes('const settingsContentRef = useRef(null);'));
+  assert.match(
+    settings,
+    /useLayoutEffect\(\(\) => \{[\s\S]*?activeSection !== 'remote'[\s\S]*?settingsContentRef\.current\.scrollTop = 0;[\s\S]*?\}, \[activeSection\]\);/,
+  );
+  assert.ok(settings.includes('<main ref={settingsContentRef} data-testid="settings-content"'));
 });
 
 test('connection is integrated into the remote-control page instead of a detached dialog', () => {
@@ -138,7 +147,7 @@ test('connection is integrated into the remote-control page instead of a detache
 test('connected remote output renders in the ordinary ChatView timeline', () => {
   assert.ok(chatView.includes('chat-transcript-projection.mjs'));
   assert.ok(chatView.includes('const projectedRemoteChatItems = useMemo('));
-  assert.ok(chatView.includes('const displayChatItems = remoteChatActive ? projectedRemoteChatItems : chatItems;'));
+  assert.ok(chatView.includes('const displayChatItems = remoteTranscriptActive ? projectedRemoteChatItems : chatItems;'));
   assert.ok(chatView.includes('data-testid="chat-remote-status"'));
   assert.ok(chatView.includes('data-testid="chat-remote-status-banner"'));
   assert.ok(chatView.includes('remoteSessionReady'));
@@ -215,4 +224,9 @@ test('the controlled device projects an admitted task into its main chat view', 
   assert.ok(chatView.includes('data-testid="chat-controlled-task-banner"'));
   assert.ok(chatView.includes('controlledActiveTasks[0].text'));
   assert.ok(chatView.includes('taskStatusKey(controlledActiveTasks[0].status)'));
+  assert.ok(chatView.includes('const remoteTranscriptActive = remoteChatActive || controlledChatActive'));
+  assert.ok(chatView.includes('bs ? bs.controlledTasks : []'));
+  assert.ok(chatView.includes('bridge.desktopRemoteControl.controlledTaskSend(controlledSession.sessionId, outgoing)'));
+  assert.ok(bridge.includes('function controlledTaskSend(sessionId, text)'));
+  assert.ok(bridge.includes('logic.applyControlledTaskEvent(current()'));
 });
