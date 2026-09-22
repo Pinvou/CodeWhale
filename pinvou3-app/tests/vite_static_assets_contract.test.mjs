@@ -8,12 +8,35 @@ import {
   localClassicScriptPaths,
   resolveContainedRuntimePath,
 } from '../scripts/vite-runtime-assets.mjs';
+import { classicStartupBundlePaths } from '../vite.config.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = path.join(appRoot, 'src');
 const distRoot = path.join(appRoot, 'dist');
 const distIndexPath = path.join(distRoot, 'index.html');
 const webDistIndexPath = path.resolve(appRoot, '../remote-control-relay/web/dist/index.html');
+
+function assertStartupBundles({ built, expectedPlatform, outputRoot, sourceIndex, webBuild }) {
+  const startup = built.filter(relative => relative.startsWith('startup/'));
+  assert.ok(startup.length > 0, `${expectedPlatform} index must load classic startup bundles`);
+  const unbundledCount = webBuild ? 3 : 2;
+  assert.ok(startup.length + unbundledCount <= 10, `${expectedPlatform} classic startup scripts exceed the request budget`);
+  for (const relative of startup) {
+    assert.match(
+      relative,
+      new RegExp(`^startup/pinvou-${expectedPlatform}-classic-\\d+-[a-f0-9]{8}\\.js$`, 'u'),
+    );
+    assert.ok(
+      fs.statSync(resolveContainedRuntimePath(outputRoot, relative)).isFile(),
+      `missing ${expectedPlatform} startup bundle: ${relative}`,
+    );
+  }
+  const bundledSources = classicStartupBundlePaths(webBuild, sourceIndex);
+  assert.ok(
+    bundledSources.every(relative => !built.includes(relative)),
+    `${expectedPlatform} index must not retain source tags replaced by startup bundles`,
+  );
+}
 
 test('classic runtime script parser recognizes only real HTML attributes', () => {
   const html = `
@@ -98,14 +121,11 @@ test('Vite build contains every local classic runtime script referenced by index
   // list rather than an exact copy. New references must still come from the
   // shared source manifest.
   assert.deepEqual(
-    built.filter((relative) => !expected.includes(relative)),
+    built.filter((relative) => !expected.includes(relative) && !relative.startsWith('startup/')),
     [],
     'built index introduced classic runtime references absent from source index',
   );
-  assert.ok(
-    built.some((relative) => relative.startsWith('platform/tauri/')),
-    'desktop index must keep the tauri bridge scripts',
-  );
+  assertStartupBundles({ built, expectedPlatform: 'desktop', outputRoot: distRoot, sourceIndex, webBuild: false });
   for (const prefix of ['platform/web/']) {
     assert.ok(
       built.every((relative) => !relative.startsWith(prefix)),
@@ -149,7 +169,7 @@ test('web build index strips tauri-only bridge scripts', {
       : relative));
 
   assert.deepEqual(
-    built.filter((relative) => !expected.includes(relative)),
+    built.filter((relative) => !expected.includes(relative) && !relative.startsWith('startup/')),
     [],
     'web index introduced classic runtime references absent from source index',
   );
@@ -157,9 +177,14 @@ test('web build index strips tauri-only bridge scripts', {
     built.every((relative) => !relative.startsWith('platform/tauri/')),
     `web index must not reference platform/tauri/ scripts: ${built.filter((relative) => relative.startsWith('platform/tauri/')).join(', ')}`,
   );
-  for (const relative of ['platform/web/bootstrap.js', 'platform/web/bridge.js', 'shared/bridge-messages.js']) {
-    assert.ok(built.includes(relative), `web index must keep ${relative}`);
-  }
+  assertStartupBundles({
+    built,
+    expectedPlatform: 'web',
+    outputRoot: path.dirname(webDistIndexPath),
+    sourceIndex,
+    webBuild: true,
+  });
+  assert.ok(built.includes('platform/web/bootstrap.js'), 'web bootstrap must retain document.currentScript semantics');
   assert.equal(
     webIndex.includes('window.PinvouPlatform = Object.freeze({ kind: "desktop", isWeb: false })'),
     false,

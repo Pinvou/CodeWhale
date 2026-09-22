@@ -142,7 +142,11 @@ function propertyName(member) {
   return null;
 }
 
-function auditSource(label, code, { sourceType = 'module', isPolyfillScript = false } = {}) {
+function auditSource(label, code, {
+  sourceType = 'module',
+  isPolyfillScript = false,
+  syntaxOnly = false,
+} = {}) {
   const violations = [];
   const suppressed = suppressedLines(code);
   let ast;
@@ -182,6 +186,11 @@ function auditSource(label, code, { sourceType = 'module', isPolyfillScript = fa
       }
       return;
     }
+    // Generated classic bundles are minified from the static sources audited
+    // above. Their source-level guarded-API markers are intentionally removed
+    // by minification, so this layer verifies emitted syntax and regex support;
+    // the source layer remains authoritative for API-baseline exceptions.
+    if (syntaxOnly) return;
     const callee = calleeOf(node);
     if (!callee) return;
     if (callee.kind === 'global') {
@@ -312,6 +321,18 @@ export function runAudit({ distDir = distRoot } = {}) {
       violations.push(...auditSource(`dist:${name}`, readFileSync(join(assetsDir, name), 'utf8')));
     }
     violations.push(...auditDistCss(assetsDir));
+  }
+
+  const classicStartupDir = join(distDir, 'startup');
+  if (existsSync(classicStartupDir)) {
+    for (const name of readdirSync(classicStartupDir)) {
+      if (!name.endsWith('.js')) continue;
+      violations.push(...auditSource(
+        `dist:startup/${name}`,
+        readFileSync(join(classicStartupDir, name), 'utf8'),
+        { sourceType: 'script', syntaxOnly: true },
+      ));
+    }
   }
 
   return violations;
