@@ -47,3 +47,11 @@ test('busy does not revive a tail that already has a terminal timestamp', () => 
   const completed = [{ id: 'completed', status: 'completed', completedAt: 1 }];
   assert.equal(splitConversationLiveTail(completed, true, true).historyTurns, completed);
 });
+
+test('an empty busy conversation has no live tail', () => {
+  assert.deepEqual(splitConversationLiveTail([], true, true), {
+    historyTurns: [],
+    liveTurn: null,
+    liveTurnIndex: null,
+  });
+});

@@ -2549,6 +2549,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           <div ref={scrollRef} data-testid="chat-scroll"
             style={{
               ...responsiveGutterStyle,
+              overflowAnchor: 'none',
               ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
             }}
             className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar flex flex-col pt-20 max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>

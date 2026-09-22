@@ -43,6 +43,7 @@ function PerformanceTimeline() {
       ref={scrollElementRef}
       style={{ height: 800, overflowY: 'auto', overflowAnchor: 'none' }}
     >
+      <div data-testid="timeline-header" style={{ height: 96 }} />
       <ConversationTimeline
         turns={visibleTurns}
         sessionId="performance-session"
@@ -98,6 +99,30 @@ function renderedTurnIndexes() {
 }
 
 window.__PINVOU_TIMELINE_PERFORMANCE__ = {
+  runInitialLongMount() {
+    const container = document.createElement('div');
+    document.body.append(container);
+    const initialRoot = createRoot(container);
+    const initialScrollRef = { current: null };
+    const initialFollowRef = { current: true };
+    flushSync(() => initialRoot.render(
+      <div ref={initialScrollRef} style={{ height: 800, overflowY: 'auto', overflowAnchor: 'none' }}>
+        <ConversationTimeline
+          turns={turns(1000)}
+          sessionId="initial-long-session"
+          scrollElementRef={initialScrollRef}
+          followOutputRef={initialFollowRef}
+        />
+      </div>,
+    ));
+    const result = {
+      virtualized: Boolean(container.querySelector('[data-conversation-virtual-timeline]')),
+      nodes: container.querySelectorAll('*').length,
+    };
+    flushSync(() => initialRoot.unmount());
+    container.remove();
+    return result;
+  },
   async run(count) {
     flushSync(() => updateTurns([]));
     scrollElementRef.current.scrollTop = 0;
@@ -153,6 +178,7 @@ window.__PINVOU_TIMELINE_PERFORMANCE__ = {
       bottomIndexes,
       bottomDistanceAfterMount,
       measuredGap,
+      scrollMargin: Number(host.querySelector('[data-conversation-virtual-timeline]')?.dataset.conversationScrollMargin || 0),
     };
   },
   async runCompletionMigration() {

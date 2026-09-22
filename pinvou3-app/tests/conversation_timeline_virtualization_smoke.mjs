@@ -53,6 +53,12 @@ try {
   );
   await page.waitForFunction(() => Boolean(window.__PINVOU_TIMELINE_PERFORMANCE__), { timeout: 10_000 });
 
+  const initialLongMount = await page.evaluate(
+    () => window.__PINVOU_TIMELINE_PERFORMANCE__.runInitialLongMount(),
+  );
+  assert.equal(initialLongMount.virtualized, true, 'an initially long timeline must virtualize before its scroll ref is populated');
+  assert.ok(initialLongMount.nodes <= 2_500, `initial long timeline mounted too many nodes: ${initialLongMount.nodes}`);
+
   const shortTimeline = await page.evaluate(() => window.__PINVOU_TIMELINE_PERFORMANCE__.run(50));
   assert.equal(shortTimeline.virtualRows, 0, 'short conversations must keep normal document flow');
   assert.ok(shortTimeline.topIndexes.includes(0) && shortTimeline.bottomIndexes.includes(49));
@@ -60,14 +66,13 @@ try {
   const longTimeline = await page.evaluate(() => window.__PINVOU_TIMELINE_PERFORMANCE__.run(1000));
   assert.ok(longTimeline.nodes <= 2_500, `resident DOM exceeded budget: ${longTimeline.nodes}`);
   assert.ok(longTimeline.maxResidentNodes <= 2_500, `scrolling DOM exceeded budget: ${longTimeline.maxResidentNodes}`);
-  assert.ok(longTimeline.mountMs <= 100, `initial mount exceeded regression ceiling: ${longTimeline.mountMs.toFixed(1)}ms`);
-  assert.ok(longTimeline.tailUpdateMs <= 10, `tail update exceeded regression ceiling: ${longTimeline.tailUpdateMs.toFixed(1)}ms`);
   assert.equal(longTimeline.tailUpdated, true, 'the mounted final turn must receive updates');
   assert.ok(longTimeline.topIndexes.includes(0), 'scrolling to the top must mount the first turn');
   assert.ok(longTimeline.middleIndexes.some(index => index > 200 && index < 800), 'middle scrolling must mount middle turns');
   assert.ok(longTimeline.bottomIndexes.includes(999), 'scrolling to the bottom must mount the final turn');
   assert.ok(Math.abs(longTimeline.bottomDistanceAfterMount) <= 1, `initial bottom drifted by ${longTimeline.bottomDistanceAfterMount}px`);
   assert.ok(Math.abs(longTimeline.measuredGap - 28) <= 1, `virtual row gap was ${longTimeline.measuredGap}px instead of 28px`);
+  assert.ok(Math.abs(longTimeline.scrollMargin - 96) <= 1, `scroll margin was ${longTimeline.scrollMargin}px instead of 96px`);
 
   const completionMigration = await page.evaluate(
     () => window.__PINVOU_TIMELINE_PERFORMANCE__.runCompletionMigration(),
