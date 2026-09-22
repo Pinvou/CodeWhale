@@ -43,7 +43,10 @@ use uuid::Uuid;
 /// Per-tool dispatch budget for the headless runtime. 30 minutes: tools
 /// legitimately run long (builds, test suites, MCP-backed calls), and this
 /// wrapper is a runaway backstop, not an expected duration — the previous
-/// 300s value cut off healthy in-flight tool work.
+/// 300s value cut off healthy in-flight tool work. Part of the 1800s family
+/// (TUI client envelope, sub-agent tool timeout, MCP execute timeout, and
+/// the mirrors in app-server and the MCP stdio proxy) that comments keep in
+/// sync; there is no shared constant across the crates yet.
 fn tool_dispatch_timeout() -> Duration {
     if cfg!(test) {
         Duration::from_millis(50)
