@@ -805,6 +805,26 @@ fn dispatch_inbound_frame(
     let Ok((lease, capabilities)) = manager.live_runtime_context() else {
         return;
     };
+    if frame.get("type").and_then(Value::as_str) == Some("error") {
+        let relay_code = frame
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid_message");
+        log_controller_event("runtime_relay_error", relay_code);
+        match sessions.fail_pending_capability_for_lease(
+            &lease,
+            "capability_snapshot_unavailable",
+        ) {
+            Ok(projection) => {
+                log_controller_event("capability_snapshot_failed", "relay_rejected");
+                (sinks.on_session)(&projection);
+            }
+            Err(error) => {
+                log_controller_event("capability_error_rejected", error.code);
+            }
+        }
+        return;
+    }
     // Relay 按冻结协议把 B 的挑战作为顶层明文控制帧转发给 A。它不是业务
     // `encrypted_frame`，但必须先通过角色、租约和能力绑定校验，随后才生成由
     // A/B 会话密钥保护的直接存活证明。此前该分支位于 encrypted_frame 解密后，
@@ -2431,8 +2451,86 @@ mod tests {
         assert!(journal_events.is_empty());
     }
 
-    /// E2E-06 回归：Relay 转发的是顶层明文挑战，不是 encrypted_frame。A 必须先
-    /// 校验它的 B 角色与活租约绑定，再回传只有配对会话密钥才能生成的 AEAD 证明。
+    /// 连接后的 Relay 错误必须立即结束唯一待处理的能力请求，不能退化成前端等待超时。
+    #[test]
+    fn connected_relay_error_fails_the_unique_pending_capability_request() {
+        let fixture = pairing_fixture(RELAY_KEY_ID);
+        let lease = lease_context(&fixture.reservation);
+        let capabilities = vec!["encrypted_frames_v1".to_owned(), "task_v1".to_owned()];
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: capabilities.clone(),
+                },
+            )
+            .unwrap();
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease, &capabilities)
+            .unwrap();
+        let request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+        let business = ControllingLaneState::default();
+        let mut projections = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |projection: &ControllingSessionProjection| {
+            projections.push(projection.clone())
+        };
+        let mut on_task = |_: Value| {};
+        let mut on_journal = |_: &JournalEvent| {};
+        let mut on_snapshot = |_: &JournalSnapshot| {};
+        let mut on_liveness = |_: Value| {};
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        let mut journal = JournalExpectations::default();
+        let mut liveness = LivenessExpectations::default();
+        dispatch_inbound_frame(
+            &manager,
+            &sessions,
+            &business,
+            &mut journal,
+            &mut liveness,
+            &json!({
+                "v": 1,
+                "type": "error",
+                "request_id": "request-invalid",
+                "code": "invalid_message",
+                "message": "invalid message",
+            })
+            .to_string(),
+            &mut sinks,
+        );
+        drop(sinks);
+
+        assert_eq!(projections.len(), 1);
+        assert_eq!(
+            projections[0].capability_request_id.as_deref(),
+            Some(request.request_id.as_str())
+        );
+        assert_eq!(
+            projections[0].capability_error.as_deref(),
+            Some("capability_snapshot_unavailable")
+        );
+    }
+
+    /// E2E-06：Relay 顶层存活挑战必须经租约校验并由 A 返回加密证明。
     #[tokio::test]
     async fn top_level_liveness_challenge_produces_direct_encrypted_proof() {
         let PairingFixture {

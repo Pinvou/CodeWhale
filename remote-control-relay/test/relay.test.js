@@ -1159,7 +1159,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
       handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"),
       key_algorithm: "x25519",
-      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1"],
     }));
     const registered = await registeredPromise;
     if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
@@ -1179,7 +1179,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       pairing_code: pairingCode,
       handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"),
       key_algorithm: "x25519",
-      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1"],
     }));
     const [reserved, controlledReserved] = await Promise.all([reservedA, reservedB]);
     assert.equal(controlledReserved.transcript_hash, reserved.transcript_hash);
@@ -1274,6 +1274,38 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     const [controllerJoined, desktopJoined] = await Promise.all([joinedA, joinedB]);
     assert.equal(controllerJoined.controller_lease_id, desktopJoined.controller_lease_id);
     assert.notEqual(controllerJoined.resume_token_b64, desktopJoined.resume_token_b64);
+
+    const leaseContext = {
+      connection_id: controllerJoined.connection_id,
+      controller_lease_id: controllerJoined.controller_lease_id,
+      lease_epoch: controllerJoined.lease_epoch,
+      relay_epoch: controllerJoined.relay_epoch,
+      remote_control_generation: controllerJoined.remote_control_generation,
+    };
+    const capabilityRequest = {
+      v: 1,
+      type: "encrypted_frame",
+      ...leaseContext,
+      frame_sequence: "1",
+      direction: "a_to_b",
+      payload_kind: "capability_snapshot_request",
+      ciphertext_b64: "AQID",
+      ciphertext_bytes: "3",
+    };
+    const requestAtDesktop = nextMessage(desktop.ws, "encrypted_frame", 10_000);
+    controller.send(JSON.stringify(capabilityRequest));
+    assert.deepEqual(await requestAtDesktop, capabilityRequest);
+
+    const capabilityResponse = {
+      ...capabilityRequest,
+      frame_sequence: "1",
+      direction: "b_to_a",
+      payload_kind: "capability_snapshot",
+      ciphertext_b64: "BAUG",
+    };
+    const responseAtController = nextMessage(controller, "encrypted_frame", 10_000);
+    desktop.ws.send(JSON.stringify(capabilityResponse));
+    assert.deepEqual(await responseAtController, capabilityResponse);
 
     const web = await openSocket(isolated.wsUrl);
     sockets.push(web);

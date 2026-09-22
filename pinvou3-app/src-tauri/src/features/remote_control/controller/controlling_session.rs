@@ -321,6 +321,39 @@ impl ControllingSessionManager {
         Ok(intent.projection())
     }
 
+    /// Relay 在已连接阶段拒绝业务帧时，外层错误帧不携带加密载荷里的 request_id。
+    /// 只有当前租约恰好存在一个待处理能力会话时才允许关联；并发会话保持原状，
+    /// 避免把传输层错误误投影到错误的会话。
+    pub(crate) fn fail_pending_capability_for_lease(
+        &self,
+        lease: &LeaseContext,
+        code: &str,
+    ) -> Result<ControllingSessionProjection> {
+        let mut intents = self.intents.lock();
+        let mut matching = intents.iter_mut().filter(|intent| {
+            &intent.lease == lease && !intent.pending_capability_requests.is_empty()
+        });
+        let intent = matching
+            .next()
+            .ok_or_else(|| SessionError::new("capability_response_unexpected"))?;
+        if matching.next().is_some() {
+            return Err(SessionError::new("capability_response_ambiguous"));
+        }
+        let request_id = intent
+            .pending_capability_requests
+            .last()
+            .cloned()
+            .ok_or_else(|| SessionError::new("capability_response_unexpected"))?;
+        intent.pending_capability_requests.clear();
+        intent.capability_revision = None;
+        intent.capability_valid_for_ms = None;
+        intent.capability_error = Some(code.to_owned());
+        intent.last_capability_request_id = Some(request_id);
+        intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
+        intent.workspace_ids.clear();
+        Ok(intent.projection())
+    }
+
     /// 当前租约上的会话引用（心跳/恢复等按租约定位的场景使用）。
     pub(crate) fn session_ref_for_lease(&self, lease: &LeaseContext) -> Option<String> {
         self.intents
@@ -840,6 +873,54 @@ mod tests {
         assert_eq!(failed.session_ref, first.session_ref);
         assert_eq!(failed.capability_error.as_deref(), Some("capability_snapshot_unavailable"));
         assert_eq!(failed.capability_revision, None);
+    }
+
+    #[test]
+    fn relay_failure_is_only_associated_when_one_capability_session_is_pending() {
+        let sessions = ControllingSessionManager::default();
+        let first = sessions
+            .open(Some("session-ref-first"), "First", "chat", &lease(), &capabilities())
+            .unwrap();
+        let first_request = sessions
+            .capability_request(&first.session_ref, &lease())
+            .unwrap();
+        let failed = sessions
+            .fail_pending_capability_for_lease(&lease(), "capability_snapshot_unavailable")
+            .unwrap();
+        assert_eq!(failed.session_ref, first.session_ref);
+        assert_eq!(failed.capability_request_id, Some(first_request.request_id));
+        assert_eq!(
+            failed.capability_error.as_deref(),
+            Some("capability_snapshot_unavailable")
+        );
+
+        let second = sessions
+            .open(Some("session-ref-second"), "Second", "chat", &lease(), &capabilities())
+            .unwrap();
+        sessions
+            .capability_request(&first.session_ref, &lease())
+            .unwrap();
+        sessions
+            .capability_request(&second.session_ref, &lease())
+            .unwrap();
+        assert_eq!(
+            sessions
+                .fail_pending_capability_for_lease(
+                    &lease(),
+                    "capability_snapshot_unavailable",
+                )
+                .unwrap_err()
+                .code,
+            "capability_response_ambiguous"
+        );
+        assert_eq!(
+            sessions.state(&first.session_ref, &lease()).unwrap().capability_error,
+            None
+        );
+        assert_eq!(
+            sessions.state(&second.session_ref, &lease()).unwrap().capability_error,
+            None
+        );
     }
 
     #[test]
