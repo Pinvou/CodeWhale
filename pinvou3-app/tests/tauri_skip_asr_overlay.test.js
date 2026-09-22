@@ -8,8 +8,18 @@
 // requested_arch == host_arch），交叉构建必须跳过。跳过之后那个文件不存在，所以要用
 // 一份摘掉它的配置**顶替**整个 overlay。开关 PINVOU3_SKIP_LINUX_ASR=1，默认不跳。
 //
-// 「顶替而不是深合并」这一条要钉住：深合并删不掉键，那个备不出来的文件照样留在
-// resources 声明里，于是跳过开关等于没开——而报错要等到二十分钟后的 bundle 阶段。
+// 下面钉的是**当前实现（顶替整个 overlay）的可观察行为**，不是"只有顶替才对"。
+// Tauri 的 --config 是 JSON Merge Patch 语义、null 能删继承键（见 effective-config.js
+// 的说明；stage-resources.ps1 在 NSIS 那条链路上就是这么摘资源声明的），所以"追加一层
+// 把那条键置 null"同样能达到目的——原先这里写「深合并删不掉键」是错的。
+//
+// 之所以仍选顶替：null 只删得掉你显式写出来的那条键，哪天架构 overlay 多声明一个同样
+// 备不出来的资源，null 层会静默漏掉它，失败又推迟回二十分钟后的 bundle 阶段；顶替是从
+// overlay 自己的键里过滤，漏不掉。
+//
+// 真正不许松的是这条性质：**开关打开后，备不出来的那个文件不得再出现在任何一层生效的
+// resources 声明里**。哪天改成 null 删键，下面两条断言（overlay 变内联、文件路径不得
+// 并存）该按新形态改写，但那条性质本身不许变。
 const assert = require("node:assert");
 const test = require("node:test");
 

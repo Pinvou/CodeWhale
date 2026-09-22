@@ -360,7 +360,12 @@ function prepareCodexBridge({
 } = {}) {
   if (platform !== "linux" && platform !== "darwin") return false;
   const script = path.join(APP_ROOT, "scripts", "prepare-codex-bridge-runtime.sh");
-  // node 的 arch 记法 -> uname -m 的记法。脚本按 uname -m 分派。
+  // node 的 arch 记法 -> Rust target 三元组的 machine 记法（`--target` 里的那一段）。
+  //
+  // 注意这跟 `uname -m` **不是**一回事：macOS 的 `uname -m` 返回 arm64，而三元组
+  // 写的是 aarch64（aarch64-apple-darwin）。脚本的目标词表两个词都认
+  //（`Darwin-aarch64|Darwin-arm64`，与 Linux 那条的双词表一致），这里就不再按 OS
+  // 维护第二张映射表。tests/tauri_effective_config.test.js 钉住了这条对应关系。
   const machine = { arm64: "aarch64", x64: "x86_64" }[targetArch];
   const result = spawn(script, [], {
     cwd: APP_ROOT,

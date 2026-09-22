@@ -35,6 +35,20 @@ CLAUDE_ACP_PACKAGE="@agentclientprotocol/claude-agent-acp"
 CLAUDE_SDK_VERSION="0.3.232"
 BRIDGE_PACKAGE_DIR="$SCRIPT_DIR/codex-bridge-runtime"
 
+# 从 manifest.json 里读一个字符串字段（读不到/文件不存在时输出空串并返回 1）。
+#
+# 两段式，不用反向引用：先砍掉 `"<key>": "` 之前的一切，再砍掉右引号之后的。
+# sed 的反向引用穿过多层引号太容易被吃掉，而且吃掉之后是**静默**取到空串——
+# 那会让调用方的比对永远判失败，退化成每次都重建，且没人看得出来。
+manifest_field() {
+  local manifest="$1"
+  local key="$2"
+  [ -s "$manifest" ] || return 1
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"//p" "$manifest" \
+    | head -n 1 \
+    | sed 's/".*//'
+}
+
 bridge_runtime_valid() {
   local root="$1"
   local node
@@ -61,13 +75,11 @@ bridge_runtime_valid() {
   # 用 manifest.json 里已有的 arch 字段，不另造标记文件：它本来就记着这个值
   # （见文件末尾生成 manifest 那段），多一个标记就多一处会不同步的地方。
   # darwin 打的是 universal（两个架构都在包里），不参与这个比对。
-  if [ -n "${NODE_CPU:-}" ] && [ "$OS_NAME" != "Darwin" ] && [ -s "$root/manifest.json" ]; then
-    local recorded
-    # 两段式，不用反向引用：先砍掉 `"arch": "` 之前的一切，再砍掉右引号之后的。
-    # sed 的反向引用穿过 heredoc/多层引号太容易被吃掉，而且吃掉之后是**静默**
-    # 取到空串——那会让这个检查永远判失败，退化成每次都重建，且没人看得出来。
-    recorded="$(sed -n 's/.*"arch"[[:space:]]*:[[:space:]]*"//p' "$root/manifest.json" | head -n 1 | sed 's/".*//')"
-    [ "$recorded" = "$NODE_CPU" ] || return 1
+  #
+  # manifest 读不出来（缺失或字段对不上）一律判无效：宁可多重建一次，也不能拿
+  # 一份来路不明的产物当 ready。
+  if [ -n "${NODE_CPU:-}" ] && [ "$OS_NAME" != "Darwin" ]; then
+    [ "$(manifest_field "$root/manifest.json" arch)" = "$NODE_CPU" ] || return 1
   fi
   case "$OS_NAME-$(uname -m)" in
     Linux-x86_64|Linux-aarch64|Linux-arm64)
@@ -90,15 +102,41 @@ bridge_runtime_valid() {
       ;;
   esac
 
-  # 下面两处检查跑的是**纯 JS**（ACP 包的 --version、读 package.json），拿哪个
-  # 解释器跑都一样。交叉构建时用宿主那份 node——包里那份是目标架构的，在这台
-  # 机器上根本执行不了（ENOEXEC），照原样跑只会把一份好产物判成坏的。
-  local runner="$node"
-  if [ -n "${NPM_NODE_ROOT:-}" ] && [ -x "$NPM_NODE_ROOT/bin/node" ]; then
-    runner="$NPM_NODE_ROOT/bin/node"
-  fi
   [ -x "$node" ] && [ -s "$npm_cli" ] && [ -s "$entry" ] && [ -s "$package_json" ] \
     && [ -s "$claude_entry" ] && [ -s "$claude_package_json" ] || return 1
+
+  # 下面两处检查跑的是**纯 JS**（ACP 包的 --version、读 package.json），拿哪个
+  # 解释器跑都一样，但解释器本身得能在**这台机器**上执行：
+  # - 宿主那份 node 已就位（下载之后的两次调用）：用它，最稳。
+  # - 还没就位但不交叉：包里那份就是宿主架构的，跑得起来。macOS 打的是
+  #   universal，上面的 case 已按 uname -m 挑了宿主那一份，同样跑得起来。
+  # - 还没就位且是交叉（脚本开头那次快路径调用）：包里那份是目标架构的，一跑
+  #   就 ENOEXEC。这里留空，改走下面不执行二进制的那条。
+  local runner=""
+  if [ -n "${NPM_NODE_ROOT:-}" ] && [ -x "$NPM_NODE_ROOT/bin/node" ]; then
+    runner="$NPM_NODE_ROOT/bin/node"
+  elif [ "$OS_NAME" = "Darwin" ] || [ "${NODE_TARGET:-}" = "${HOST_NODE_TARGET:-}" ]; then
+    runner="$node"
+  fi
+
+  if [ -z "$runner" ]; then
+    # 交叉构建的快路径：改成拿 manifest 里记着的版本跟脚本常量比对，不执行任何
+    # 二进制。原先这里必然回落到包里那份目标架构的 node，`--version` 直接
+    # ENOEXEC，于是「already ready」在交叉模式下是条**死分支**——本地第二次起的
+    # 每次交叉构建都白付一趟「下两份 tarball + 校 sha256 + npm ci」。
+    #
+    # 这样不会把坏产物误判成 ready：manifest.json 是整个构建最后才落盘的——先
+    # npm ci、剪掉平台原生二进制，再写 manifest，再跑一遍**会执行**的完整校验，
+    # 最后才把 node / acp / manifest 依次 mv 进 OUT_DIR（manifest 是三次 mv 里的
+    # 最后一次）。所以 OUT_DIR 里躺着一份版本对得上的 manifest，本身就是「这份
+    # 产物当时通过了执行校验，且三次 mv 都做完了」的凭证。
+    [ "$(manifest_field "$root/manifest.json" codex_acp_version)" = "$CODEX_ACP_VERSION" ] \
+      || return 1
+    [ "$(manifest_field "$root/manifest.json" claude_acp_version)" = "$CLAUDE_ACP_VERSION" ] \
+      || return 1
+    return 0
+  fi
+
   version_output="$(
     env CODEX_PATH="$(command -v codex || true)" \
       "$runner" "$entry" --version 2>/dev/null
@@ -140,10 +178,15 @@ node_target_for() {
 }
 
 HOST_NODE_TARGET="$(node_target_for "$HOST_MACHINE")" || {
-  echo "当前 Bridge 构建脚本仅支持 Linux/macOS x64/arm64（宿主 $HOST_MACHINE）" >&2
+  echo "Bridge 备料不认识这个宿主：$OS_NAME-$HOST_MACHINE（只认 x86_64、aarch64/arm64）" >&2
   exit 1
 }
 
+# 目标 machine 名的词表要比 `uname -m` 宽：PINVOU3_BRIDGE_TARGET_ARCH 是从 JS 侧
+# 按 Rust target 三元组注入的，三元组里 macOS 的 arm64 写作 **aarch64**
+#（aarch64-apple-darwin，run-mac-verify.sh 和 mac-build.yml 装的就是它），而
+# macOS 自己的 `uname -m` 返回 arm64。两个词都得认，否则 darwin 宿主上手工单架构
+# 构建会落到 `*)` 硬失败——跟 Linux 那条本来就写成双词表是同一个道理。
 case "$OS_NAME-$TARGET_MACHINE" in
   Linux-x86_64)
     NODE_OS="linux"
@@ -163,14 +206,14 @@ case "$OS_NAME-$TARGET_MACHINE" in
     NODE_TARGET="darwin-x64"
     NODE_TARGETS=("darwin-arm64" "darwin-x64")
     ;;
-  Darwin-arm64)
+  Darwin-aarch64|Darwin-arm64)
     NODE_OS="darwin"
     NODE_CPU="arm64"
     NODE_TARGET="darwin-arm64"
     NODE_TARGETS=("darwin-arm64" "darwin-x64")
     ;;
   *)
-    echo "当前 Bridge 构建脚本仅支持 Linux/macOS x64/arm64（目标 $TARGET_MACHINE）" >&2
+    echo "Bridge 备料不认识这个目标：$OS_NAME-$TARGET_MACHINE（只认 x86_64、aarch64/arm64）" >&2
     exit 1
     ;;
 esac

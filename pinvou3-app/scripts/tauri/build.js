@@ -271,6 +271,22 @@ function usesValidatedNsisStaging(args) {
   });
 }
 
+/** `--target` 三元组的机器段 → node 的 arch 记法。 */
+const TARGET_MACHINE_ARCHITECTURES = {
+  aarch64: "arm64",
+  amd64: "x64",
+  arm64: "arm64",
+  x86_64: "x64",
+};
+
+/**
+ * 明确允许回落宿主架构的三元组。
+ *
+ * `universal-apple-darwin` 一次编出 x86_64 与 aarch64 两份再合成通用二进制，
+ * 本来就没有单一「目标架构」可言，回落宿主架构才是对的，不能当成「不认识」拒绝。
+ */
+const HOST_FALLBACK_TARGET_TRIPLES = new Set(["universal-apple-darwin"]);
+
 /**
  * 从 `--target <三元组>` 解析出目标架构，按 node 的 arch 记法返回。
  *
@@ -280,20 +296,48 @@ function usesValidatedNsisStaging(args) {
  *
  * 没传 --target 时返回 null，调用方回退到 process.arch，原行为不变。
  *
+ * 机器段**不认识**时（`riscv64gc-…`、`armv7-…`）不能也回 null：闸门对
+ * `!targetArch` 是直接放行的，overlay、ASR、共享知识库服务会全部回落宿主架构，
+ * 产出的正是闸门要防的那种「主程序是目标架构、侧车全是宿主架构」的静默错包，
+ * 只是换了个入口进来。所以这种情况硬失败——宁可现在失败，不要静默错包。
+ *
+ * 两个例外仍然回落，因为它们根本不是「交叉构建到未知架构」：
+ *   - 三元组在 `HOST_FALLBACK_TARGET_TRIPLES` 里（通用二进制没有单一目标架构）；
+ *   - 宿主自己的 arch 就不在表里（比如在 riscv64 机器上原生构建
+ *     `riscv64gc-unknown-linux-gnu`），这时我们无从判断是不是交叉，不该越权拦。
+ * 同理只在 Linux 宿主上拦：这套「按宿主架构备料」的侧车只存在于 Linux 打包路径。
+ *
  * @param {string[]} args 传给 tauri 的完整参数。
- * @returns {string|null} "arm64" / "x64"，无法判定时 null。
+ * @param {object} [options] 宿主平台与宿主架构，用来判断是不是真的在交叉构建。
+ * @returns {string|null} "arm64" / "x64"；无法判定且允许回落时 null。
+ * @throws {Error} Linux 宿主确实在交叉构建，而机器段不在映射表里。
  */
-function targetArchitecture(args) {
+function targetArchitecture(
+  args,
+  { platform = process.platform, hostArch = process.arch } = {},
+) {
   let triple = null;
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === "--target" && i + 1 < args.length) triple = args[i + 1];
     else if (args[i].startsWith("--target=")) triple = args[i].slice("--target=".length);
   }
   if (!triple) return null;
+  if (HOST_FALLBACK_TARGET_TRIPLES.has(triple)) return null;
   const machine = triple.split("-")[0];
-  if (machine === "aarch64" || machine === "arm64") return "arm64";
-  if (machine === "x86_64" || machine === "amd64") return "x64";
-  return null;
+  const architecture = TARGET_MACHINE_ARCHITECTURES[machine];
+  if (architecture) return architecture;
+  const hostIsKnown = Object.values(TARGET_MACHINE_ARCHITECTURES).includes(hostArch);
+  if (platform !== "linux" || !hostIsKnown) return null;
+  throw new Error(
+    `无法从 --target ${triple} 判定目标架构：机器段「${machine}」不在架构映射表里。`
+      + `宿主是 ${hostArch}，回落宿主架构会挑错 overlay，并让语音识别运行时和共享`
+      + `知识库服务按宿主架构备料，产出「主程序是目标架构、侧车全是宿主架构」的`
+      + `静默错包，所以这里直接拒绝。要支持这个架构：把「${machine}」加进 `
+      + `scripts/tauri/build.js 的 TARGET_MACHINE_ARCHITECTURES，并在 `
+      + `scripts/tauri/platform-config.js 的 ARCHITECTURE_CONFIG_NAMES 和 `
+      + `src-tauri/config/platforms/linux/ 下补齐对应的架构 overlay；若它是通用`
+      + `二进制那类没有单一目标架构的三元组，则加进 HOST_FALLBACK_TARGET_TRIPLES。`,
+  );
 }
 
 /**
@@ -302,8 +346,19 @@ function targetArchitecture(args) {
  * 跳过构建之后 `target/linux-asr-runtime/<arch>/sense-voice-main` 不存在，而架构
  * overlay 里声明了它，`writeEffectiveArtifacts` 会以「安装包资源不存在」终止。
  *
- * 为什么是顶替而不是再叠一层：overlay 是**深合并**的，后面再加一个只含其余资源的
- * `bundle.resources` 盖不掉前面已经声明的那条，ASR 那行会原样留下。
+ * 为什么是顶替而不是再叠一层：overlay 走的是 JSON Merge Patch，**null 是能删键的**
+ * （见 `effective-config.js` 的 `mergeConfig`；NSIS 那条链路的 `stage-resources.ps1`
+ * 就在生产里靠它摘掉已暂存的资源声明）。所以「叠一层 `{资源键: null}`」确实是条走得
+ * 通的路，写起来也短得多，这里不选它的理由是它**删得不全**：
+ *   - 叠 null 要求精确写出被删的键。平台层的 `knowledge-host/` 是个静态串还好说；
+ *     架构层是 `target/linux-asr-runtime/<机器段>/sense-voice-main`，机器段
+ *     （aarch64 / x86_64）跟 node 的 arch 记法不是一回事，得在这里再拼一次。
+ *   - 更要紧的是它只删得掉**写出来的那一条**。哪天架构 overlay 里多声明一个同样
+ *     备不出来的 ASR 文件，null 层会静默漏掉它，而漏掉的代价是构建跑到二十分钟后的
+ *     bundle 阶段才报「安装包资源不存在」——正是这个开关要消灭的那种迟到失败。
+ * 顶替则是从 overlay 文件**自己的键**里过滤，overlay 改了摘除跟着改，漏不掉。代价是
+ * marker 用子串匹配、比精确键宽：这是有意的取舍，宁可多摘一条备不出来的资源，也不要
+ * 漏摘一条。
  *
  * 为什么不直接改那个纳入版本控制的配置文件：那样每次交叉构建都要「改了记得还原」，
  * 而且 `tests/tauri_platform_layout.test.js` 会一直是红的。构建期的临时差异就该
@@ -408,13 +463,16 @@ function prepareTauriArgs(
     architecture = process.arch,
     stageRuntime = stageWindowsRuntime,
     additionalConfigs = [],
-    // 两个跳过开关从参数进来，函数体里不直读 process.env。
+    // 两个跳过开关正常是**从参数进来**的：`main()` 在入口一次性把 env 读成布尔，
+    // 闸门、备料和这里的 overlay 摘除全用同一份结论。
     //
-    // 这不是洁癖：同一个变量原先在这里和 main() 里各读一次，两处**永远有可能
-    // 读出两种结论**——比如中途有人改了环境，或者以后哪次重构把读取位置挪了。
-    // 而这两处一旦不一致，表现是「资源声明摘掉了但东西照样构建」或者反过来
+    // 这不是洁癖：同一个变量要是在这里和 main() 里各读一次，两处**永远有可能读出
+    // 两种结论**——中途有人改了环境，或者以后哪次重构把读取位置挪到了会动 env 的
+    // 步骤后面。两处一旦不一致，表现是「资源声明摘掉了但东西照样构建」或者反过来
     // 「东西没构建但声明还在」，后者直接让 bundle 报「安装包资源不存在」。
-    // 本文件其余 env 读取一律集中在入口注入（见 :59-66、:409-416），这里补齐。
+    //
+    // 默认值只兜底不经 main() 的调用方（测试、别的脚本直接 require 本模块），
+    // 让它们不必自己拼开关；真实构建路径上这两个默认值不会被求值。
     skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1",
     skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1",
   } = {},
@@ -450,8 +508,13 @@ function prepareTauriArgs(
       : platformConfig,
   ];
   if (platform === "linux") automaticConfigs.push(linuxStartupWindowConfigSpec());
-  // 交叉构建时 overlay 必须跟 --target 走，不能跟宿主架构走。
-  const effectiveArchitecture = targetArchitecture(prepared) || architecture;
+  // 交叉构建时 overlay 必须跟 --target 走，不能跟宿主架构走。宿主平台/架构一并传
+  // 进去：`targetArchitecture` 要靠它判断「机器段不认识」到底是交叉构建（拒绝）
+  // 还是原生构建（回落）。
+  const effectiveArchitecture = targetArchitecture(prepared, {
+    platform,
+    hostArch: architecture,
+  }) || architecture;
   const architectureConfig = platformArchitectureConfigPath(platform, effectiveArchitecture);
   if (architectureConfig) {
     automaticConfigs.push(
@@ -616,6 +679,11 @@ async function main() {
 
   const isDev = args.includes("dev");
   const hasTauriBuildCommand = tauriCommandIndex(args) >= 0;
+  // 两个跳过开关在整条流程里**只在这里读一次**：闸门、备料和 overlay 摘除
+  // （`prepareTauriArgs`）都收这同一份布尔，中间隔着多少 await 都不会读出第二种
+  // 结论。不一致的代价是包静默地错，见 `prepareTauriArgs` 的参数注释。
+  const skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1";
+  const skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1";
   const additionalConfigs = [];
   if (hasTauriBuildCommand && process.platform === "win32") {
     await ensureWindowsRustToolchain();
@@ -656,10 +724,10 @@ async function main() {
     // 要求 requested_arch == host_arch，产物还链接宿主 glibc），交叉构建时这一步
     // 必然失败。给一个显式开关跳过它——跳过后必须同时把 overlay 里的资源声明摘掉，
     // 否则 bundle 会找不到文件。
-    const targetArch = targetArchitecture(args);
     const hostArch = process.arch;
-    const skipLinuxAsr = process.env.PINVOU3_SKIP_LINUX_ASR === "1";
-    const skipKnowledgeHost = process.env.PINVOU3_SKIP_KNOWLEDGE_HOST === "1";
+    // 机器段不认识时这里会直接抛（见 `targetArchitecture`），不会漏进闸门——
+    // 闸门对 `!targetArch` 是放行的，回 null 等于给未知架构开了条静默后门。
+    const targetArch = targetArchitecture(args);
 
     // 交叉构建的一致性闸门：宁可现在就失败，也不要产出一个静默错架构的包。
     const violations = crossBuildViolations({
@@ -696,6 +764,10 @@ async function main() {
   const preparedArgs = prepareTauriArgs(args, {
     additionalConfigs,
     stageRuntime: () => windowsRuntime,
+    // 显式传上面算好的那份，而不是让 prepareTauriArgs 再读一次 env：两次读取之间
+    // 隔着若干 await，摘声明和跳过备料必须是同一个结论。
+    skipLinuxAsr,
+    skipKnowledgeHost,
   });
   if (hasTauriBuildCommand) {
     const artifacts = writeEffectiveArtifacts(configSpecs(preparedArgs));

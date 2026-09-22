@@ -340,6 +340,110 @@ assert.equal(
   "Linux 不应准备 Windows Codex Bridge",
 );
 
+// ---- 交叉构建：targetArch -> PINVOU3_BRIDGE_TARGET_ARCH 的映射与注入 ----
+//
+// 这条链是交叉构建备料的核心机制：build.js 从 `--target` 解析出 node 记法的
+// targetArch，codex-bridge.js 把它映射成 machine 名注入环境变量，备料脚本按这个
+// 词挑 Node 官方发行包。映射写反或丢键都不会让构建失败，只会**静默**备错架构的
+// 料，所以这里必须逐项钉死。
+function capturedBridgeSpawn(options) {
+  let captured = null;
+  prepareCodexBridge({
+    ...options,
+    spawn: (command, args, spawnOptions) => {
+      captured = { command, args, options: spawnOptions };
+      return { status: 0 };
+    },
+  });
+  return captured;
+}
+
+const bridgeEnvFixture = { PINVOU_TEST_ENV: "kept" };
+const hostBridgeSpawn = capturedBridgeSpawn({
+  platform: "linux",
+  env: bridgeEnvFixture,
+});
+assert.equal(
+  hostBridgeSpawn.options.env,
+  bridgeEnvFixture,
+  "非交叉构建必须原样透传环境，让备料脚本回落到 uname -m",
+);
+assert.equal(
+  hostBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH,
+  undefined,
+  "不传 targetArch 时不能注入目标架构",
+);
+
+const injectedBridgeMachines = new Set();
+for (const [targetArch, machine] of [
+  ["arm64", "aarch64"],
+  ["x64", "x86_64"],
+]) {
+  for (const platform of ["linux", "darwin"]) {
+    const crossBridgeSpawn = capturedBridgeSpawn({
+      platform,
+      targetArch,
+      env: bridgeEnvFixture,
+    });
+    assert.equal(
+      crossBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH,
+      machine,
+      `${platform} 上交叉到 ${targetArch} 必须注入 ${machine}`,
+    );
+    assert.equal(
+      crossBridgeSpawn.options.env.PINVOU_TEST_ENV,
+      "kept",
+      "注入目标架构不能把其余环境变量丢掉",
+    );
+    injectedBridgeMachines.add(crossBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH);
+  }
+}
+assert.equal(
+  bridgeEnvFixture.PINVOU3_BRIDGE_TARGET_ARCH,
+  undefined,
+  "注入必须复制一份环境，不能就地污染调用方的 env",
+);
+assert.equal(
+  capturedBridgeSpawn({
+    platform: "linux",
+    targetArch: "riscv64",
+    env: bridgeEnvFixture,
+  }).options.env,
+  bridgeEnvFixture,
+  "映射表里没有的记法只能回落到宿主行为，不能注入一个备料脚本不认识的词",
+);
+
+// 注入的词必须落在备料脚本的目标词表里，两个 OS 都要。
+//
+// 这是 Darwin 别名那条回归的钉子：三元组里 macOS 的 arm64 写作 aarch64
+//（aarch64-apple-darwin），而 macOS 的 `uname -m` 返回 arm64。脚本只收
+// `Darwin-arm64` 时，darwin 宿主上手工单架构构建会落到 `*)` 硬失败——CI 只用
+// universal-apple-darwin（不注入），所以这个洞当时没被任何用例照到。
+const bridgeScriptSource = fs.readFileSync(
+  path.join(APP_ROOT, "scripts", "prepare-codex-bridge-runtime.sh"),
+  "utf8",
+);
+const bridgeTargetDispatch = bridgeScriptSource.match(
+  /case "\$OS_NAME-\$TARGET_MACHINE" in([\s\S]*?)\nesac/u,
+)?.[1];
+assert.ok(
+  bridgeTargetDispatch,
+  "备料脚本必须保留按 $OS_NAME-$TARGET_MACHINE 分派的目标词表",
+);
+const acceptedBridgeTargets = new Set(
+  (bridgeTargetDispatch.match(/^[ \t]*[A-Za-z0-9_|-]+\)/gmu) ?? []).flatMap((label) =>
+    label.trim().slice(0, -1).split("|"),
+  ),
+);
+for (const machine of injectedBridgeMachines) {
+  for (const osName of ["Linux", "Darwin"]) {
+    assert.ok(
+      acceptedBridgeTargets.has(`${osName}-${machine}`),
+      `备料脚本的目标词表必须认得 ${osName}-${machine}，否则交叉构建会落到 *) 硬失败`,
+    );
+  }
+}
+
 assert.throws(() => requireWrapper({}), /禁止绕过平台 overlay/);
 assert.doesNotThrow(() => requireWrapper({ [WRAPPER_ENV]: "1" }));
 
@@ -520,6 +624,14 @@ assert.ok(
 );
 // 交叉构建要能显式跳过 ASR（SenseVoice 只能在目标架构上原生构建）。
 assert.match(buildSource, /skipLinuxAsr/u, "the ASR step must stay skippable for cross builds");
+// 上面那组用例只证明「给了 targetArch 就会注入正确的词」；这条补上另一头的接线：
+// 解析出来的目标架构确实被交给了 Bridge 备料。断得松（只要求同一次调用里出现
+// targetArch），等价重构不会误伤，而整条链断掉会红。
+assert.match(
+  buildSource,
+  /prepareCodexBridge\([^)]*targetArch/u,
+  "Bridge 必须按解析出的目标架构备料，否则交叉构建会静默备一份宿主架构的料",
+);
 const preparedBrowserPlatforms = [];
 for (const platform of ["win32", "darwin", "linux"]) {
   const result = prepareChromeDevtoolsMcpForPlatform({
