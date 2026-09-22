@@ -550,7 +550,9 @@ const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
 // ends on turn interrupt or runtime shutdown instead (mirrors the engine-side
 // approval wait, which excludes approval time from the turn wall clock).
 // Dynamic (client-executed) tools legitimately run long, so their result wait
-// is generous; it still ends on turn interrupt.
+// is generous (part of the 1800s family that comments keep in sync: the TUI
+// client envelope, the sub-agent tool timeout, the MCP execute timeout); it
+// still ends on turn interrupt.
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[cfg(test)]
@@ -6826,6 +6828,53 @@ impl RuntimeThreadManager {
             true
         };
 
+        // The dead monitor owned this turn's pending approval wait, so no
+        // code path is left to resolve it. Settle this turn's approvals the
+        // same way the interrupt exit does (deny + interrupted) so external
+        // clients clear the pending UI and the pending map cannot leak the
+        // entry; the evicted engine below is cancelled, which resolves the
+        // engine side of the wait.
+        let stranded_approval_ids: Vec<String> = {
+            let map = self.pending_approvals.lock();
+            map.iter()
+                .filter(|(_, entry)| {
+                    entry.thread_id == thread_id && entry.request.turn_id == turn_id
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for approval_id in stranded_approval_ids {
+            // The MutexGuard must drop before the await below (it is not
+            // Send, and this settlement runs inside the spawned turn task).
+            let entry = self.pending_approvals.lock().remove(&approval_id);
+            if entry.is_none() {
+                continue;
+            }
+            // The receiver died with the monitor, so the send cannot
+            // deliver; the removal and the event below are the contract.
+            let _ = entry
+                .unwrap()
+                .sender
+                .send(ExternalApprovalDecision::Deny { remember: false });
+            if let Err(err) = self
+                .emit_event(
+                    thread_id,
+                    Some(turn_id),
+                    None,
+                    "approval.decided",
+                    json!({
+                        "approval_id": approval_id,
+                        "decision": "deny",
+                        "remember": false,
+                        "interrupted": true,
+                    }),
+                )
+                .await
+            {
+                tracing::error!("Failed to emit approval resolution after monitor failure: {err}");
+            }
+        }
+
         // A terminal record is the externally visible lifecycle boundary.
         // Keep snapshots outside that boundary until its terminal receipt and
         // active-claim cleanup are also ordered. The dedupe scan may yield to
@@ -9345,6 +9394,25 @@ impl RuntimeThreadManager {
                                 }
                             }
                         }
+                    };
+                    let wakeup = match wakeup {
+                        ApprovalWakeup::Interrupted => {
+                            self.cancel_pending_approval(&id);
+                            // Last-chance rescue for the delivery race:
+                            // `deliver_external_approval` removes the map
+                            // entry before sending, so a decision can land
+                            // in the oneshot after both checks above saw
+                            // `Empty`. That decision was made by the user
+                            // and must resolve the approval as one, not be
+                            // reported as an interrupted deny. A send that
+                            // still lands after this check finds a dropped
+                            // receiver and reports not-delivered.
+                            match rx.try_recv() {
+                                Ok(decision) => ApprovalWakeup::Decision(Ok(decision)),
+                                Err(_) => ApprovalWakeup::Interrupted,
+                            }
+                        }
+                        other => other,
                     };
                     match wakeup {
                         ApprovalWakeup::Decision(Ok(ExternalApprovalDecision::Allow {
