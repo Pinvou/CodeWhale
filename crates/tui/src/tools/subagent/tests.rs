@@ -4199,11 +4199,144 @@ async fn agent_roster_never_lists_ids_that_spawn_a_different_profile() {
         "profile": "expert",
         "write_authority": "read_only"
     }))
-    .expect("host profile request parses");
+    .expect("tolerant spelling request parses");
     let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_roster)
         .expect("tolerant spelling must resolve")
         .expect("host member is returned");
     assert_eq!(resolved.id, "Expert");
+}
+
+#[tokio::test]
+async fn agent_roster_listing_and_spawn_agree_on_conflatable_config_ids() {
+    // The wiring-level half of the collapse invariant. The `action=roster`
+    // listing reads the engine-installed roster (`config.fleet_roster`, built
+    // by `FleetRoster::load` whose per-layer merge is last-wins), while
+    // `refresh_spawn_route_sources` rebuilds the spawn roster from session
+    // config via `FleetRoster::from_host_config` (first-wins collapse). The
+    // earlier regressions constructed BOTH sides from `from_host_config`, so
+    // they could not see the pairing; this test builds the listing side the
+    // way the engine does — through `load` — and drives the spawn side through
+    // the real refresh, asserting the listed row is the member the spawn path
+    // actually resolves (same id, same prompt). Personal and plugin layers are
+    // out of scope here: CODEWHALE_HOME is isolated so only the config layer
+    // contributes host profiles.
+    let tmp = tempdir().expect("tempdir");
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    for (id, description, instructions) in [
+        (
+            "Expert",
+            "Senior localization reviewer",
+            "You are the senior localization reviewer.",
+        ),
+        (
+            "expert",
+            "Junior localization reviewer",
+            "You are the junior localization reviewer.",
+        ),
+        (
+            "scout-aid",
+            "Fleet scout helper",
+            "You assist the scout posture.",
+        ),
+    ] {
+        fleet.profiles.insert(
+            id.to_string(),
+            codewhale_config::FleetProfile {
+                slot: codewhale_config::FleetSlot::Custom(id.to_string()),
+                role: codewhale_config::FleetRole {
+                    name: id.to_string(),
+                    description: Some(description.to_string()),
+                    instructions: Some(instructions.to_string()),
+                },
+                ..codewhale_config::FleetProfile::default()
+            },
+        );
+    }
+
+    // Listing side: the engine-installed roster, built by `FleetRoster::load`
+    // — the exact constructor `load_effective_roster` (fleet/identity.rs)
+    // installs when no v2 Fleet is selected. CODEWHALE_HOME is isolated so
+    // ambient personal profiles cannot shadow the config layer under test.
+    let _env_lock = crate::test_support::lock_test_env();
+    let home = tempdir().expect("isolated CODEWHALE_HOME");
+    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let engine_roster = FleetRoster::load(&fleet, tmp.path());
+    let mut runtime = stub_runtime();
+    runtime.host_agent_profiles = std::sync::Arc::new(engine_roster);
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(tmp.path().to_path_buf(), 1),
+        runtime.clone(),
+    );
+    let result = tool
+        .execute(json!({"action": "roster"}), &ToolContext::new(tmp.path()))
+        .await
+        .expect("roster action");
+    let payload: Value = serde_json::from_str(&result.content).expect("roster JSON");
+
+    // Exactly one row for the conflated id family: the last-wins merge in
+    // `load` must never surface both byte-order variants (`Expert` sorts
+    // before `expert`, so the first-wins collapse keeps `Expert`).
+    assert_eq!(payload["host_profile_count"], json!(2));
+    assert_eq!(payload["host_profiles_truncated"], json!(false));
+    let listed: Vec<&str> = payload["host_profiles"]
+        .as_array()
+        .expect("host_profiles array")
+        .iter()
+        .map(|profile| profile["member_id"].as_str().expect("member id"))
+        .collect();
+    assert_eq!(listed, vec!["Expert", "scout-aid"], "{listed:?}");
+    let listed_description = payload["host_profiles"][0]["description"]
+        .as_str()
+        .expect("listed description");
+    assert_eq!(listed_description, "Senior localization reviewer");
+
+    // Spawn side: refresh the runtime the way every spawn does, so the
+    // resolution below runs against the `from_host_config` roster rebuilt
+    // from session config — not the engine-installed one.
+    let mut config = (*runtime.api_config.clone().expect("stub config")).clone();
+    config.fleet = Some(fleet);
+    runtime.api_config = Some(std::sync::Arc::new(config));
+    refresh_spawn_route_sources(&mut runtime);
+
+    // The listed id — and every tolerant spelling of it — must land on the
+    // member with the SAME prompt the listing displayed.
+    for profile_id in ["Expert", "expert", "EXPERT"] {
+        let mut request = parse_spawn_request(&json!({
+            "prompt": "review the change",
+            "profile": profile_id,
+            "write_authority": "read_only"
+        }))
+        .expect("host profile request parses");
+        let resolved =
+            resolve_spawn_role_with_host_profiles(&mut request, &runtime.host_agent_profiles)
+                .expect("listed id must resolve at spawn")
+                .expect("host member is returned");
+        assert_eq!(
+            resolved.id, "Expert",
+            "profile {profile_id:?} must resolve to the listed member"
+        );
+        assert_eq!(
+            resolved.description.as_deref().map(str::trim),
+            Some(listed_description),
+            "spawn must land on the prompt the listing advertised"
+        );
+        assert!(
+            request
+                .prompt
+                .contains("You are the senior localization reviewer."),
+            "the senior profile's instructions must be the overlay applied: {}",
+            request.prompt
+        );
+    }
+}
+
+#[test]
+fn roster_host_profile_listing_cap_is_pinned_at_48() {
+    // Copy-truth pin: the app-side roster contract teaches a 48-row
+    // host-profile listing cap, while the cap constant lives here privately
+    // (`ROSTER_HOST_PROFILE_LIMIT`). Bumping one without the other must fail
+    // this test, in the same style as `subagent_runtime_default_max_depth_is_three`.
+    assert_eq!(ROSTER_HOST_PROFILE_LIMIT, 48);
 }
 
 #[tokio::test]
