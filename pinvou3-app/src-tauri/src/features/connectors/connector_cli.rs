@@ -420,11 +420,15 @@ pub fn drain_for_url<R: std::io::Read + Send + 'static>(
     tx: mpsc::Sender<String>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        // 必须是 `map_while(Result::ok)` 而不是 `flatten()`:后者把读错误当成一个
-        // 「跳过」的元素,读完继续轮询同一个已经出错的管道。`map_while` 遇到首个
-        // Err 即结束迭代,线程随之退出——`drain_for_url_stops_after_read_error`
-        // 钉的就是这条语义。
-        for line in BufReader::new(r).lines().map_while(Result::ok) {
+        for line in BufReader::new(r).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    // 管道读取错误通常不可恢复；继续迭代可能反复返回 Err 并空转。
+                    log::warn!("[{}] 授权输出读取失败，停止排空：{error}", ctx.cli_bin);
+                    break;
+                }
+            };
             if let Some(u) = ctx.extract_url(&line) {
                 let _ = tx.send(u);
             }
