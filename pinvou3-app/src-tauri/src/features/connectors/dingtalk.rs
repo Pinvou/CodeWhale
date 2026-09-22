@@ -145,7 +145,15 @@ fn drain_for_auth_event<R: std::io::Read + Send + 'static>(
     tx: mpsc::Sender<AuthEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for line in std::io::BufRead::lines(std::io::BufReader::new(r)).flatten() {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(r)) {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    // 管道读取错误通常不可恢复；继续迭代可能反复返回 Err 并空转。
+                    log::warn!("[dingtalk] 授权输出读取失败，停止排空：{error}");
+                    break;
+                }
+            };
             if let Some(safe_line) = safe_auth_log_line(&line) {
                 let _ = tx.send(AuthEvent::Line(safe_line));
             }
