@@ -2199,14 +2199,15 @@ impl McpConnection {
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => return self.finish_guarded_error(error).await,
-            Err(error) => {
+            Err(_error) => {
                 // A timed-out write can linger as a partial line; the
                 // connection must not be reused (see the budget comment
-                // above).
+                // above). tokio's Elapsed display adds no information, so
+                // the message carries the budget instead.
                 self.state = ConnectionState::Disconnected;
                 return self
                     .finish_guarded_error(anyhow::anyhow!(
-                        "MCP method '{}' on server '{}' timed out sending after {}s: {error}",
+                        "MCP method '{}' on server '{}' timed out sending after {}s",
                         method,
                         self.name,
                         timeout_secs
