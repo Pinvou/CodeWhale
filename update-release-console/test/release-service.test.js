@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -129,4 +129,37 @@ test("初始化要求有效 publicRoot/latest.json 并清理自有陈旧临时�
   await writeFile(service.stagingDir, "not-a-directory");
   await assert.rejects(service.initialize());
   assert.deepEqual(service.getHealthStatus(), { status: "not_ready" });
+});
+
+test("初始化拒绝非公开权限和符号链接清单", {
+  skip: process.platform === "win32" ? "Windows 不提供稳定的 Unix 权限语义" : false,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-console-manifest-mode-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const publicRoot = join(root, "public");
+  const stateRoot = join(root, "state");
+  const manifestPath = join(publicRoot, "latest.json");
+  const symlinkTarget = join(root, "manifest-target.json");
+  const config = {
+    publicRoot,
+    stateRoot,
+    publicBaseUrl: "https://updates.example.test/pinvou3",
+    onlineVerifyTimeoutMs: 5000,
+  };
+  await mkdir(publicRoot);
+  await writeFile(manifestPath, "{}\n");
+  await chmod(manifestPath, 0o600);
+  await assert.rejects(
+    new ReleaseService(config).initialize(),
+    (error) => error.code === "not_ready" && /0644/u.test(error.message),
+  );
+
+  await rm(manifestPath);
+  await writeFile(symlinkTarget, "{}\n");
+  await chmod(symlinkTarget, 0o644);
+  await symlink(symlinkTarget, manifestPath);
+  await assert.rejects(
+    new ReleaseService(config).initialize(),
+    (error) => error.code === "not_ready" && /实际普通文件/u.test(error.message),
+  );
 });

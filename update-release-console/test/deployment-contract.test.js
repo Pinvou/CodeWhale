@@ -36,6 +36,8 @@ test("发布复制和目录持久化契约不依赖跨挂载 rename", async () =
   const implementation = await source("src/release-service.js");
   assert.match(implementation, /\.pinvou3-release-\$\{randomUUID\(\)\}\.tmp/u);
   assert.match(implementation, /createWriteStream\(temporaryPath, \{ flags: "wx"/u);
+  assert.match(implementation, /await handle\.chmod\(mode\)/u);
+  assert.match(implementation, /await requirePublicFile\(this\.manifestPath, "latest\.json"\)/u);
   assert.match(implementation, /await syncFile\(temporaryPath\)/u);
   assert.match(implementation, /await rename\(temporaryPath, destinationPath\)/u);
   assert.match(implementation, /await syncDirectory\(publicDirectory\)/u);

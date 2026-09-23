@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthFailureLimiter, createAppServer } from "../src/server.js";
@@ -96,7 +96,9 @@ async function startFixture(t, options = {}) {
   };
   await mkdir(publicRoot, { recursive: true });
   await writeFile(join(publicRoot, "pinvou3_0.10.3_x64-setup.exe"), previousInstaller);
-  await writeFile(join(publicRoot, "latest.json"), `${JSON.stringify(initialManifest, null, 2)}\n`);
+  const manifestPath = join(publicRoot, "latest.json");
+  await writeFile(manifestPath, `${JSON.stringify(initialManifest, null, 2)}\n`);
+  await chmod(manifestPath, 0o644);
   const onlineVerifications = [];
   const service = new ReleaseService(config, {
     onlineVerifier: options.onlineVerifier || (async (url, expected) => {
@@ -120,7 +122,12 @@ async function startFixture(t, options = {}) {
 }
 
 test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
+  const previousUmask = process.platform === "win32" ? null : process.umask(0o077);
+  if (previousUmask !== null) t.after(() => process.umask(previousUmask));
   const { baseUrl, service, initialManifest, onlineVerifications } = await startFixture(t);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(service.manifestPath)).mode & 0o777, 0o644);
+  }
   const pageResponse = await fetch(baseUrl);
   const page = await pageResponse.text();
   assert.equal(pageResponse.status, 200);
@@ -152,6 +159,9 @@ test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
   assert.match(draft.entry.notes, /第二行更新说明/u);
   assert.equal(draft.preview_manifest.platforms["linux-x86_64"].marker, "keep-linux");
   assert.deepEqual(JSON.parse(await readFile(service.manifestPath, "utf8")), initialManifest);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(service.draftPath)).mode & 0o777, 0o600);
+  }
 
   const changedManifest = JSON.parse(await readFile(service.manifestPath, "utf8"));
   changedManifest.platforms["macos-universal"].marker = "mac-changed-after-draft";
@@ -168,6 +178,15 @@ test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
   assert.equal(onlineManifest.platforms["linux-x86_64"].marker, "keep-linux");
   assert.equal(onlineManifest.platforms["macos-universal"].marker, "mac-changed-after-draft");
   assert.deepEqual(await readFile(join(service.config.publicRoot, draft.file_name)), installer);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(service.manifestPath)).mode & 0o777, 0o644);
+    assert.equal(
+      (await stat(join(service.config.publicRoot, draft.file_name))).mode & 0o777,
+      0o644,
+    );
+    const [historyName] = await readdir(service.historyDir);
+    assert.equal((await stat(join(service.historyDir, historyName))).mode & 0o777, 0o600);
+  }
   assert.equal(await service.getDraft(), null);
   assert.deepEqual(onlineVerifications, [{
     url: "https://updates.example.test/pinvou3/pinvou3_0.10.4_x64-setup.exe",
@@ -190,6 +209,9 @@ test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
   assert.match(audit, /"action":"release_published"/u);
   assert.match(audit, /"action":"release_rolled_back"/u);
   assert.doesNotMatch(audit, new RegExp(TOKEN, "u"));
+  if (process.platform !== "win32") {
+    assert.equal((await stat(service.auditPath)).mode & 0o777, 0o600);
+  }
 });
 
 test("healthz 使用初始化缓存且不会按请求创建写探针", async (t) => {

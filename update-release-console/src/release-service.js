@@ -116,6 +116,11 @@ async function atomicWriteJson(path, value, mode = 0o600) {
   const handle = await open(temporaryPath, "wx", mode);
   try {
     await handle.writeFile(contents, "utf8");
+    // open(2) applies the process umask to `mode`. The production service runs
+    // with UMask=0077, so public manifests requested as 0644 would otherwise
+    // become 0600 and Nginx could not read them. fchmod applies the final mode
+    // explicitly while keeping private state files at the default 0600.
+    await handle.chmod(mode);
     await handle.sync();
   } finally {
     await handle.close();
@@ -290,6 +295,21 @@ async function requireDirectory(path, label) {
   }
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new AppError(503, "not_ready", `${label} 必须是实际目录`);
+  }
+}
+
+async function requirePublicFile(path, label) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    throw new AppError(503, "not_ready", `${label} 不可访问：${error.message}`);
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new AppError(503, "not_ready", `${label} 必须是实际普通文件`);
+  }
+  if (process.platform !== "win32" && (metadata.mode & 0o777) !== 0o644) {
+    throw new AppError(503, "not_ready", `${label} 权限必须为 0644`);
   }
 }
 
@@ -507,6 +527,7 @@ export class ReleaseService {
       [this.historyDir, "historyDir"],
     ];
     for (const [path, label] of directories) await requireDirectory(path, label);
+    await requirePublicFile(this.manifestPath, "latest.json");
     await this.readManifest();
     for (const [path, label] of directories) await verifyWritableDirectory(path, label);
   }

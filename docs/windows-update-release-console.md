@@ -29,6 +29,9 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
   与 Nginx 相同的本地文件系统；不要把第一阶段部署成多副本。
 - `latest.json` 的临时文件与正式文件位于同一目录，Linux 本地文件系统上的 `rename(2)`
   提供原子替换。NFS/对象存储不属于第一阶段支持范围。
+- 服务可以在 `UMask=0077` 下运行；私有草稿、审计和历史文件保持 `0600`，公开
+  `latest.json` 和安装器在原子替换前显式设为 `0644`，不依赖进程 umask。启动时如果
+  已有清单不是权限为 `0644` 的实际普通文件，服务将失败关闭而不会自动将其公开。
 
 建议再通过 VPN、固定出口 IP 或 Nginx `allow`/`deny` 限制管理页访问来源。管理令牌应由
 密码管理系统分发并定期轮换，不应提交到仓库。
@@ -65,7 +68,8 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
 
 ## Docker Compose 部署
 
-1. 确认 `/var/www/pinvou3/latest.json` 是当前线上清单，且运行容器的 UID 对该目录有写权限。
+1. 确认 `/var/www/pinvou3/latest.json` 是经过复核的当前线上清单、是权限为 `0644` 的实际普通文件，
+   且运行容器的 UID 对该目录有写权限。不得为了通过启动门禁而将未经复核的清单直接改为公开可读。
 2. 生成令牌并写入不进 Git 的 `update-release-console/deploy/.env`：
 
    ```bash
@@ -82,7 +86,8 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
    ```
 
 4. 将 [`nginx-location.conf`](../update-release-console/deploy/nginx-location.conf) 加入
-   `pinvou.com` HTTPS server block，执行 `nginx -t` 后 reload。
+   `pinvou.com` HTTPS server block，执行 `nginx -t` 后 reload，再用
+   `curl -fsS https://pinvou.com/pinvou3/latest.json >/dev/null` 验证公网清单可读。
 5. 打开 `https://pinvou.com/pinvou3/release-console/`，输入管理令牌。
 
 如果服务器不是 `pinvou.com`，先同步修改 Compose 中的 `PINVOU_UPDATE_PUBLIC_BASE_URL` 和
