@@ -275,41 +275,49 @@ impl SnapshotRepo {
         // `open_existing` and re-init — `git init` is idempotent.
         let needs_init = !git_dir.exists() || !git_dir.join("HEAD").exists();
         if needs_init {
-            // First-init size guard. Skipping this on subsequent opens
-            // is intentional: paying a workspace walk on every snapshot
-            // would defeat the purpose of the cap, and a workspace
-            // that fit on first init is allowed to grow within the
-            // existing repo's `MAX_SNAPSHOT_SIZE_MB` budget. Users on
-            // workspaces that grew past the cap mid-session get the
-            // existing aggressive-pruning path in `snapshot()`.
-            let sized = {
-                let work_tree = work_tree.clone();
-                run_bounded_fs(
-                    "first-init workspace size walk",
-                    SIZE_WALK_TIMEOUT,
-                    move || estimate_workspace_size_bounded(&work_tree, cap_bytes),
-                )
-            };
-            if let Err(err) = sized {
-                // Preserve the TimedOut kind: the turn pipeline's
-                // degraded-snapshots notice gates on it, so re-wrapping as
-                // `io::Error::other` would swallow the user-visible wedge
-                // warning into the tracing log.
-                return Err(io::Error::new(
-                    err.kind(),
-                    format!("first-init workspace scan failed: {err}"),
-                ));
-            }
-            if sized.unwrap().is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "workspace too large for snapshots (over {} GB of non-excluded content or > {} entries): {}\n  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) if you want snapshots on this workspace.",
-                        cap_bytes / (1024 * 1024 * 1024),
-                        SIZE_WALK_MAX_ENTRIES,
-                        work_tree.display()
-                    ),
-                ));
+            // First-init size guard. `cap_bytes == 0` disables the gate
+            // entirely (the documented `[snapshots] max_workspace_gb = 0`
+            // opt-out), so the walk — and its timeout with it — is skipped
+            // too: a workspace too large to walk within SIZE_WALK_TIMEOUT
+            // must still be able to snapshot once the user opted out, and
+            // `needs_init` staying true would otherwise re-pay the failing
+            // walk on every snapshot attempt. Skipping the walk on
+            // subsequent capped opens is intentional: paying a workspace
+            // walk on every snapshot would defeat the purpose of the cap,
+            // and a workspace that fit on first init is allowed to grow
+            // within the existing repo's `MAX_SNAPSHOT_SIZE_MB` budget.
+            // Users on workspaces that grew past the cap mid-session get
+            // the existing aggressive-pruning path in `snapshot()`.
+            if cap_bytes > 0 {
+                let sized = {
+                    let work_tree = work_tree.clone();
+                    run_bounded_fs(
+                        "first-init workspace size walk",
+                        SIZE_WALK_TIMEOUT,
+                        move || estimate_workspace_size_bounded(&work_tree, cap_bytes),
+                    )
+                };
+                if let Err(err) = sized {
+                    // Preserve the TimedOut kind: the turn pipeline's
+                    // degraded-snapshots notice gates on it, so re-wrapping
+                    // as `io::Error::other` would swallow the user-visible
+                    // wedge warning into the tracing log.
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!("first-init workspace scan failed: {err}"),
+                    ));
+                }
+                if sized.unwrap().is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "workspace too large for snapshots (over {} GB of non-excluded content or > {} entries): {}\n  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) if you want snapshots on this workspace.",
+                            cap_bytes / (1024 * 1024 * 1024),
+                            SIZE_WALK_MAX_ENTRIES,
+                            work_tree.display()
+                        ),
+                    ));
+                }
             }
             let parent = git_dir.parent().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "snapshot dir has no parent")
@@ -330,8 +338,13 @@ impl SnapshotRepo {
                 .arg(parent)
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE");
-            let init = run_bounded_git(&mut init_cmd, "init")
-                .map_err(|e| io_other(format!("failed to run git init: {e}")))?;
+            let init = run_bounded_git(&mut init_cmd, "init").map_err(|e| {
+                // Preserve the TimedOut kind, same contract as the size-walk
+                // re-wrap above: the turn pipeline's degraded-snapshots
+                // notice gates on it, so flattening it to `io::Error::other`
+                // would hide the wedge warning in the tracing log.
+                io::Error::new(e.kind(), format!("failed to run git init: {e}"))
+            })?;
             if !init.status.success() {
                 return Err(io_other(format!(
                     "git init failed: {}",
@@ -1276,6 +1289,24 @@ fn drain_git_pipe<R>(
 /// exactly like the wedged git would. Killing without git's own cleanup
 /// leaves a fresh `index.lock` behind; `open_or_init` clears it once it is
 /// older than [`STALE_INDEX_LOCK_AGE`].
+/// Keep the last `limit` characters (the diagnostics closest to the
+/// wedge), prefixed with `…`, character-boundary safe by construction.
+fn git_stderr_tail(all: &str, limit: usize) -> String {
+    if all.chars().count() > limit {
+        let tail: String = all
+            .chars()
+            .rev()
+            .take(limit)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("…{tail}")
+    } else {
+        all.to_string()
+    }
+}
+
 fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Result<Output> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1350,21 +1381,7 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
                 String::from_utf8_lossy(&stderr_buf.lock().map(|b| b.clone()).unwrap_or_default())
                     .trim()
                     .to_string();
-            let stderr_tail = if stderr_all.chars().count() > 500 {
-                // Keep the last 500 characters (the diagnostics closest to
-                // the wedge), character-boundary safe by construction.
-                let tail: String = stderr_all
-                    .chars()
-                    .rev()
-                    .take(500)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                format!("…{tail}")
-            } else {
-                stderr_all
-            };
+            let stderr_tail = git_stderr_tail(&stderr_all, 500);
             let detail = if stderr_tail.is_empty() {
                 format!(
                     "git {subcommand} timed out after {}s",
@@ -1447,6 +1464,44 @@ fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> io::Result<Output
 
 fn io_other(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
+}
+
+#[cfg(test)]
+mod git_stderr_tail_tests {
+    use super::git_stderr_tail;
+
+    #[test]
+    fn short_output_passes_through_trimmed_by_the_caller() {
+        assert_eq!(
+            git_stderr_tail("fatal: bad object", 500),
+            "fatal: bad object"
+        );
+    }
+
+    #[test]
+    fn empty_output_stays_empty() {
+        assert_eq!(git_stderr_tail("", 500), "");
+    }
+
+    #[test]
+    fn long_output_keeps_the_last_500_characters_with_an_ellipsis() {
+        let all = format!("head{}tail", "x".repeat(600));
+        let tail = git_stderr_tail(&all, 500);
+        assert!(tail.starts_with('…'));
+        assert_eq!(tail.chars().count(), 501);
+        assert!(tail.ends_with("tail"));
+        assert!(!tail.contains("head"));
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_character() {
+        // 300 CJK characters = 900 bytes; keep the last 100 characters.
+        let all = "漢".repeat(300);
+        let tail = git_stderr_tail(&all, 100);
+        assert_eq!(tail.chars().count(), 101);
+        assert!(tail.starts_with('…'));
+        assert!(tail.chars().skip(1).all(|c| c == '漢'));
+    }
 }
 
 #[cfg(all(test, unix))]
