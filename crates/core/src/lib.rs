@@ -44,11 +44,11 @@ use uuid::Uuid;
 /// legitimately run long (builds, test suites, MCP-backed calls), and this
 /// wrapper is a runaway backstop, not an expected duration — the previous
 /// 300s value cut off healthy in-flight tool work. Part of the 1800s family
-/// (TUI client envelope, vision request envelope, dynamic-tool result wait,
-/// sub-agent tool timeout, MCP execute timeout, and the mirrors in
-/// app-server and the MCP stdio proxy) that comments keep in sync; this
-/// comment anchors the family roster — there is no shared constant across
-/// the crates yet.
+/// (TUI client envelope, vision request envelope, model stream cap
+/// `STREAM_MAX_DURATION_SECS`, dynamic-tool result wait, sub-agent tool
+/// timeout, MCP execute timeout, and the mirrors in app-server and the MCP
+/// stdio proxy) that comments keep in sync; this comment anchors the family
+/// roster — there is no shared constant across the crates yet.
 fn tool_dispatch_timeout() -> Duration {
     if cfg!(test) {
         Duration::from_millis(50)

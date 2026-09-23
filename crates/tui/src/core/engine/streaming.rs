@@ -40,6 +40,9 @@ pub(super) const STREAM_MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 /// 30 min in v0.6.6 after long-reasoning turns hit the old cap. Codex defaults to a
 /// per-chunk idle of 300s with no wall-clock cap; we keep both layers but
 /// give the wall-clock a generous window so it never fires in practice.
+/// Same value and generation as the 1800s family roster anchored at
+/// `core::tool_dispatch_timeout` (crates/core/src/lib.rs); listed there so
+/// a family-wide bump cannot silently leave this cap behind.
 pub(super) const STREAM_MAX_DURATION_SECS: u64 = 1800; // 30 minutes (was 300s; #103/#1)
 /// Hard cap on consecutive recoverable stream errors before we surface a turn
 /// failure. Bumped 3 → 5 in v0.6.7 along with the HTTP/2 keepalive defaults
