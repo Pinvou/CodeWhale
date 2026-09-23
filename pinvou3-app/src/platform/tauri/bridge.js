@@ -1830,7 +1830,30 @@
   }
   function subscribeStateSlices(domains, fn) {
     subscriptionStateSlices(domains);
-    return subscribe(function () { return subscriptionStateSlices(domains); }, fn);
+    // 每轮都重新取各域切片:切片身份由 subscriptionStateValue 的结构化
+    // 比较保证(内容不变 ⟺ 引用不变),因此组合对象只在任一订阅域切片
+    // 身份变化时才需要重建。无关域的 publication 复用上次组合对象,让
+    // React 借 Object.is 跳过无关渲染;回调仍每轮通知都触发,与单域订
+    // 阅的契约一致。与 web 端 domain-adapter 的 stablePick 语义互为镜像。
+    var lastSlices = new Array(domains.length);
+    var lastResult = null;
+    return subscribe(function () {
+      var changed = !lastResult;
+      var slices = new Array(domains.length);
+      for (var i = 0; i < domains.length; i++) {
+        slices[i] = subscriptionStateSlice(domains[i]);
+        if (slices[i] !== lastSlices[i]) changed = true;
+      }
+      if (changed) {
+        var result = {};
+        for (var j = 0; j < slices.length; j++) {
+          Object.assign(result, slices[j]);
+        }
+        lastSlices = slices;
+        lastResult = Object.freeze(result);
+      }
+      return lastResult;
+    }, fn);
   }
 
   var scheduledFeature = installBridgeFeature("scheduled", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addSystemItem: addSystemItem, rememberScheduledRunOwner: rememberScheduledRunOwner, isScheduledRunTerminal: isScheduledRunTerminal, purgeSessionBuffer: purgeSessionBuffer, createNewSession: createNewSession, prefillComposer: prefillComposer, sessionStates: sessionStates });
