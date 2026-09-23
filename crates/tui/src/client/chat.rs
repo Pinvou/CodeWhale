@@ -6727,6 +6727,188 @@ mod image_block_wire_tests {
     }
 
     #[test]
+    fn forkguard_restored_summary_pasted_after_tool_result_survives_restore() {
+        // Restore-path twin of
+        // `forkguard_full_summary_header_pasted_after_tool_result_is_not_relocated`:
+        // with a real provenance carrier earlier in the history, a later user
+        // turn that pastes the whole summary header must survive restore
+        // verbatim, and the authoritative checkpoint must land at the real
+        // carrier's index — not at the pasted turn's.
+        let pasted =
+            crate::compaction::build_compaction_summary_block_text("Please analyze this text", "");
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Run the tool"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+        ]))
+        .unwrap();
+        messages.push(crate::compaction::compaction_checkpoint_message(
+            &crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+            ),
+        ));
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: pasted.clone(),
+                cache_control: None,
+            }],
+        });
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        let wire_before: Vec<_> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+
+        let projected = crate::runtime_handoff::project_messages_for_restore(&messages);
+        let carrier_index = projected
+            .iter()
+            .position(crate::compaction::is_generated_compaction_checkpoint)
+            .expect("projected history keeps the provenance-stamped carrier");
+        let restored = crate::compaction::restore_compaction_checkpoint(
+            projected,
+            Some(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+            )),
+        );
+
+        assert_eq!(
+            restored.len(),
+            messages.len(),
+            "restore must not drop the pasted turn: {restored:?}"
+        );
+        assert!(
+            restored.iter().any(|message| {
+                matches!(
+                    message.content.as_slice(),
+                    [ContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    }] if text == &pasted
+                )
+            }),
+            "the pasted full summary must survive restore verbatim: {restored:?}"
+        );
+        let checkpoints: Vec<usize> = restored
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| crate::compaction::is_generated_compaction_checkpoint(message))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            checkpoints,
+            vec![carrier_index],
+            "exactly one provenance-stamped checkpoint remains, at the real carrier's index: \
+             {restored:?}"
+        );
+
+        let restored_wire = build_chat_messages(None, &restored, "gpt-4o");
+        let roles_after: Vec<_> = restored_wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles_after, wire_before, "wire roles are unchanged");
+        assert_eq!(
+            restored_wire.last().unwrap()["content"].as_str().unwrap(),
+            pasted,
+            "the pasted turn keeps its content on the wire"
+        );
+    }
+
+    #[test]
+    fn forkguard_restored_summary_pasted_before_the_carrier_does_not_steal_the_anchor() {
+        // Mirror order of
+        // `forkguard_restored_summary_pasted_after_tool_result_survives_restore`:
+        // the pasted full summary precedes the real provenance carrier — the
+        // order in which the pre-fix loose anchor landed on the pasted turn's
+        // index. Restore must anchor at the real carrier's index, replace the
+        // carrier with the authoritative summary there, and keep the pasted
+        // turn verbatim. The carrier and the checkpoint argument carry
+        // different summary texts so the assertions cannot pass by leaving
+        // the original carrier untouched.
+        let pasted =
+            crate::compaction::build_compaction_summary_block_text("Please analyze this text", "");
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Run the tool"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+        ]))
+        .unwrap();
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: pasted.clone(),
+                cache_control: None,
+            }],
+        });
+        messages.push(crate::compaction::compaction_checkpoint_message(
+            &crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+            ),
+        ));
+        let wire = build_chat_messages(None, &messages, "gpt-4o");
+        let wire_before: Vec<_> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+
+        let projected = crate::runtime_handoff::project_messages_for_restore(&messages);
+        let carrier_index = projected
+            .iter()
+            .position(crate::compaction::is_generated_compaction_checkpoint)
+            .expect("projected history keeps the provenance-stamped carrier");
+        let authoritative = crate::models::SystemPrompt::Text(
+            crate::compaction::build_compaction_summary_block_text("Authoritative summary", ""),
+        );
+        let restored =
+            crate::compaction::restore_compaction_checkpoint(projected, Some(&authoritative));
+
+        assert_eq!(
+            restored.len(),
+            messages.len(),
+            "restore must not drop the pasted turn: {restored:?}"
+        );
+        assert!(
+            restored.iter().any(|message| {
+                matches!(
+                    message.content.as_slice(),
+                    [ContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    }] if text == &pasted
+                )
+            }),
+            "the pasted full summary must survive restore verbatim: {restored:?}"
+        );
+        let checkpoints: Vec<usize> = restored
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| crate::compaction::is_generated_compaction_checkpoint(message))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            checkpoints,
+            vec![carrier_index],
+            "exactly one provenance-stamped checkpoint remains, at the real carrier's index: \
+             {restored:?}"
+        );
+        assert!(
+            matches!(
+                restored[carrier_index].content.as_slice(),
+                [ContentBlock::Text { text, .. }, _] if text.contains("Authoritative summary")
+            ),
+            "the authoritative summary replaces the carrier at its index: {restored:?}"
+        );
+
+        let restored_wire = build_chat_messages(None, &restored, "gpt-4o");
+        let roles_after: Vec<_> = restored_wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles_after, wire_before, "wire roles are unchanged");
+    }
+
+    #[test]
     fn prune_only_topology_merges_with_its_prompt_on_wire() {
         let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
             {"role":"user","content":[{"type":"text","text":"Run the suite"}]},

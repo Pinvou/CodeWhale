@@ -301,12 +301,32 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// its position relative to later turns, and repair a pre-placement-fix
 /// Agent-topology sidecar. Both steps exist so the first request after a
 /// restore is wire-legal for strict paired chat templates.
+///
+/// The anchor and the deletion prefer the provenance-stamped carrier: its
+/// second text block is engine-written, so a pasted user turn that merely
+/// starts with the summary header can neither steal the insertion position
+/// nor be deleted as the carrier. The loose predicate applies only when no
+/// stamped carrier exists — a structural condition, not a session age: it
+/// covers saves from before the provenance block and equally histories that
+/// never compacted. There a pasted header is indistinguishable from a real
+/// bare carrier on content alone (or there is no carrier to anchor on at
+/// all), so the historical replace-in-place applies and a pasted header can
+/// still be dropped. The same loose predicate also backs the keep/recompaction
+/// filters in `compaction/last_round.rs` — same recognition family,
+/// explicitly out of scope here.
 pub(crate) fn restore_compaction_checkpoint(
     mut messages: Vec<Message>,
     checkpoint: Option<&SystemPrompt>,
 ) -> Vec<Message> {
-    let checkpoint_index = messages.iter().position(is_compaction_checkpoint_message);
-    messages.retain(|message| !is_compaction_checkpoint_message(message));
+    let provenance_anchor = messages.iter().position(is_generated_compaction_checkpoint);
+    let carrier: fn(&Message) -> bool = if provenance_anchor.is_some() {
+        is_generated_compaction_checkpoint
+    } else {
+        is_compaction_checkpoint_message
+    };
+    let checkpoint_index =
+        provenance_anchor.or_else(|| messages.iter().position(is_compaction_checkpoint_message));
+    messages.retain(|message| !carrier(message));
     if let Some(checkpoint) = checkpoint {
         let index = checkpoint_index.unwrap_or(messages.len());
         messages.insert(index, compaction_checkpoint_message(checkpoint));
