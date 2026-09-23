@@ -19,7 +19,7 @@
 //!   constitution stays advisory prose and never reaches this module.
 
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -265,8 +265,9 @@ fn push_normalized(
             "" | "." => {}
             ".." => {
                 // A `..` that pops above the root escapes the workspace; keep
-                // an explicit marker so it can never match a workspace-relative
-                // glob, and the ordinary approval/sandbox gates still govern it.
+                // an explicit marker so this spelling tail can never match a
+                // workspace-relative glob. Where the write actually lands is
+                // judged separately below from the clamped execution candidate.
                 if parts.pop().is_none() {
                     parts.push("..".to_string());
                 }
@@ -285,27 +286,30 @@ fn push_normalized(
     } else {
         workspace.join(raw_path)
     };
-    if let Some(candidate) = normalize_lexical_components(&candidate) {
-        if let Ok(tail) = candidate
-            .strip_prefix(root)
-            .or_else(|_| candidate.strip_prefix(root_canonical))
-        {
-            let tail = tail.to_string_lossy().replace('\\', "/");
-            if !tail.is_empty() {
-                targets.push(tail);
-            }
+    // The normalizer clamps a `..` at the filesystem root exactly like
+    // execution, so an overshoot spelling still yields the landing path the
+    // write tools would admit — judging it is what closes the overshoot
+    // bypass into an attached root.
+    let candidate = normalize_lexical_components(&candidate);
+    if let Ok(tail) = candidate
+        .strip_prefix(root)
+        .or_else(|_| candidate.strip_prefix(root_canonical))
+    {
+        let tail = tail.to_string_lossy().replace('\\', "/");
+        if !tail.is_empty() {
+            targets.push(tail);
         }
-        // Then symlink reality: resolve the deepest existing ancestor and
-        // judge the resolved path against the canonical root, so an interior
-        // symlink hop into this root (or a root reached through one) cannot
-        // spell its way past the law.
-        if let Some(resolved) = resolve_deepest_existing(&candidate)
-            && let Ok(tail) = resolved.strip_prefix(root_canonical)
-        {
-            let tail = tail.to_string_lossy().replace('\\', "/");
-            if !tail.is_empty() {
-                targets.push(tail);
-            }
+    }
+    // Then symlink reality: resolve the deepest existing ancestor and
+    // judge the resolved path against the canonical root, so an interior
+    // symlink hop into this root (or a root reached through one) cannot
+    // spell its way past the law.
+    if let Some(resolved) = resolve_deepest_existing(&candidate)
+        && let Ok(tail) = resolved.strip_prefix(root_canonical)
+    {
+        let tail = tail.to_string_lossy().replace('\\', "/");
+        if !tail.is_empty() {
+            targets.push(tail);
         }
     }
     let normalized = parts.join("/");
@@ -314,25 +318,16 @@ fn push_normalized(
     }
 }
 
-/// Lexically collapse CurDir and ParentDir components of `path` (what the
-/// write tools' `resolve_path` normalizes a joined candidate to), using
-/// component operations so the result is platform-correct. `None` when a
-/// `..` escapes above the filesystem root: there is no sane tail to judge
-/// against any root, and the ordinary gates govern the call.
-fn normalize_lexical_components(path: &Path) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    return None;
-                }
-            }
-            component => out.push(component.as_os_str()),
-        }
-    }
-    Some(out)
+/// Lexically collapse CurDir and ParentDir components of `path` into the
+/// candidate the write actually lands on. This IS the normalizer execution
+/// applies to a joined candidate (`tools::spec::normalize_path`, called by
+/// `ToolContext::resolve_path`), reused so the law can never drift from the
+/// gate: a `..` at the filesystem root (or a Windows drive root) CLAMPS, it
+/// does not fail, so `/w/x/../../../att/vendor/lib.rs` judges as
+/// `/att/vendor/lib.rs` — the landing path execution admits. A `..` a
+/// relative spelling cannot pop is kept, again matching execution.
+fn normalize_lexical_components(path: &Path) -> PathBuf {
+    crate::tools::spec::normalize_path(path)
 }
 
 /// Canonicalize the deepest existing ancestor of `candidate` and re-append
@@ -891,6 +886,76 @@ mod tests {
             );
         };
         assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn absolute_dotdot_overshoot_into_an_attached_root_is_held() {
+        // Sibling of the two-`..` pin above, with one `..` MORE than the
+        // spelling is deep: the collapse overshoots the filesystem root.
+        // Execution's `normalize_path` CLAMPS the extra `..` at the root, so
+        // `/w/x/../../../att/vendor/lib.rs` lands on `/att/vendor/lib.rs` and
+        // the attached repo's law must hold it; a strict collapse that bails
+        // on the overshoot judges no landing path and silently admits the
+        // write in every posture (a confirmed block-class bypass).
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        // Pop `x` plus every primary component, then overshoot once more
+        // (RootDir/Prefix components are not popped, so the count is exact on
+        // Unix and one over on Windows — extra `..`s clamp harmlessly). Then
+        // re-descend the attached root's own components from the root.
+        let dots = vec![".."; primary.path().components().count() + 1].join("/");
+        let attached_tail = attached
+            .path()
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let spelling = format!(
+            "{}/x/{dots}/{attached_tail}/vendor/lib.rs",
+            primary.path().display()
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": spelling, "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the attached root's law to hold a `..`-overshoot target (clamps to {attached_tail}/vendor/lib.rs), got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn lexical_normalize_clamps_parent_dir_at_the_filesystem_root() {
+        // The landing normalizer is execution's own `normalize_path`: a `..`
+        // at the filesystem root clamps instead of failing, so the overshoot
+        // spelling judges as the path execution would admit.
+        assert_eq!(
+            normalize_lexical_components(Path::new("/w/x/../../../att/vendor/lib.rs")),
+            PathBuf::from("/att/vendor/lib.rs")
+        );
+        assert_eq!(
+            normalize_lexical_components(Path::new("/a/..")),
+            PathBuf::from("/")
+        );
+        // A `..` a relative spelling cannot pop is kept, matching execution.
+        assert_eq!(
+            normalize_lexical_components(Path::new("a/../../b")),
+            PathBuf::from("../b")
+        );
     }
 
     #[test]

@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Ruta",
   "StatusLabelDirectory": "Directori",
   "StatusLabelWorkspaceRoots": "Carpetes accessibles",
+  "WorkspaceSwitchBusy": "L'workspace no ha canviat (l'estat de treball o el runtime està ocupat; espera i torna a provar /cd)",
   "WorkspaceSwitchPersistFailed": "Ha fallat la persistència del canvi d'workspace: {error}; l'actor de persistència tampoc no està disponible",
   "WorkspaceSwitchSaveFailedActorQueued": "El desat directe del canvi d'workspace ha fallat ({error}); l'actor de persistència conserva la instantània posterior al canvi",
   "WorkspaceSwitchPersistedActorUnavailable": "El canvi d'workspace s'ha desat, però l'actor de persistència no està disponible; el proper desat automàtic el torna a escriure",

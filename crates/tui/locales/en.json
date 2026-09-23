@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Route",
   "StatusLabelDirectory": "Directory",
   "StatusLabelWorkspaceRoots": "Accessible folders",
+  "WorkspaceSwitchBusy": "Workspace unchanged (Work state or runtime work busy; wait, then try /cd again)",
   "WorkspaceSwitchPersistFailed": "Failed to persist workspace switch: {error}; the persistence actor is also unavailable",
   "WorkspaceSwitchSaveFailedActorQueued": "Direct workspace-switch save failed ({error}); the persistence actor holds the post-switch snapshot",
   "WorkspaceSwitchPersistedActorUnavailable": "Workspace switch persisted, but the persistence actor is unavailable; the next autosave re-persists it",

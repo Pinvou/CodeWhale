@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "रूट",
   "StatusLabelDirectory": "डायरेक्टरी",
   "StatusLabelWorkspaceRoots": "सुलभ फ़ोल्डर",
+  "WorkspaceSwitchBusy": "वर्कस्पेस अपरिवर्तित (कार्य स्थिति या रनटाइम कार्य व्यस्त है; प्रतीक्षा करें, फिर /cd दोबारा आज़माएँ)",
   "WorkspaceSwitchPersistFailed": "वर्कस्पेस बदलना परसिस्ट करने में विफल: {error}; परसिस्टेंस एक्टर भी अनुपलब्ध है",
   "WorkspaceSwitchSaveFailedActorQueued": "वर्कस्पेस बदलने की सीधी सहेजगी विफल हुई ({error}); परसिस्टेंस एक्टर बदलाव के बाद का स्नैपशॉट रखता है",
   "WorkspaceSwitchPersistedActorUnavailable": "वर्कस्पेस बदलना सहेजा गया, परंतु परसिस्टेंस एक्टर अनुपलब्ध है; अगला ऑटोसेव इसे फिर से लिखेगा",

@@ -1829,7 +1829,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // project-level config — `--no-project-config` opts the layer out for
     // every roster read in this process.
     crate::fleet::roster::set_project_agent_profiles_enabled(!cli.no_project_config);
-    let workspace = resolve_workspace(&cli);
+    let workspace = resolve_workspace(&cli)?;
     let mut plugin_discovery = None;
     let mut plugin_registry = None;
     let (cli, command) = prepare_cli_startup(
@@ -2223,7 +2223,7 @@ async fn run_async_main_dispatch(
                         )
                     }
                 };
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 if args.context_json {
                     run_doctor_context_json(&config, &workspace)
                 } else if args.json {
@@ -2267,7 +2267,7 @@ async fn run_async_main_dispatch(
             Commands::SessionDiagnostics(args) => run_session_diagnostics(args),
             Commands::Setup(args) => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 run_setup(&config, &workspace, args, plugin_registry.as_ref())
             }
             Commands::RemoteSetup(args) => remote_setup::run_remote_setup(args),
@@ -2481,7 +2481,7 @@ async fn run_async_main_dispatch(
             }
             Commands::Fleet(args) => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 run_fleet_command(&workspace, &config, args).await
             }
             Commands::WorkflowTool(args) => {
@@ -2513,7 +2513,7 @@ async fn run_async_main_dispatch(
             Commands::Scorecard(args) => run_scorecard(args),
             Commands::Mcp { command } => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 run_mcp_command(&config, &workspace, command, plugin_registry.as_ref()).await
             }
             Commands::Features(command) => {
@@ -2524,7 +2524,7 @@ async fn run_async_main_dispatch(
                 // Identity derivation is structural: credential-bearing
                 // environment values never enter this path.
                 let config = load_structural_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 integrations::cli::run(&config, &workspace, command)
             }
             Commands::Sandbox(args) => run_sandbox_command(args),
@@ -2587,7 +2587,7 @@ async fn run_async_main_dispatch(
             }
             Commands::Resume { session_id, last } => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 let resume_id = resolve_session_id(session_id, last, &workspace)?;
                 run_interactive(
                     &cli,
@@ -2601,7 +2601,7 @@ async fn run_async_main_dispatch(
             }
             Commands::Fork { session_id, last } => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 let new_session_id = fork_session(&config, session_id, last, &workspace)?;
                 run_interactive(
                     &cli,
@@ -2636,7 +2636,7 @@ async fn run_async_main_dispatch(
     // snapshots are preserved for explicit resume, but never auto-attached.
     let mut startup_notice = None;
     let resume_session_id = if cli.continue_session {
-        let workspace = resolve_workspace(&cli);
+        let workspace = resolve_workspace(&cli)?;
         resolve_continue_session_id(
             &workspace,
             io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -2644,7 +2644,7 @@ async fn run_async_main_dispatch(
     } else if let Some(id) = cli.resume.clone() {
         Some(id)
     } else if !cli.fresh {
-        let workspace = resolve_workspace(&cli);
+        let workspace = resolve_workspace(&cli)?;
         preserve_interrupted_checkpoint_for_explicit_resume(&workspace);
         // Opt-in auto-resume (#2934). Off by default, so the historical
         // "plain `codewhale` starts fresh" behaviour is unchanged unless the
@@ -8092,10 +8092,29 @@ fn init_project() -> Result<()> {
     Ok(())
 }
 
-fn resolve_workspace(cli: &Cli) -> PathBuf {
-    cli.workspace
+fn resolve_workspace(cli: &Cli) -> Result<PathBuf> {
+    let workspace = cli
+        .workspace
         .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // An empty `--workspace ""` would persist a vacuous primary root
+    // (`starts_with("")` contains every path); reject it like the runtime
+    // thread guard does.
+    if workspace.as_os_str().is_empty() {
+        bail!("workspace must not be empty");
+    }
+    if workspace.is_absolute() {
+        return Ok(workspace);
+    }
+    // A relative workspace reaches boundary_roots() as a root whose
+    // normalized form is empty ("." carries no components), which contains
+    // every path; resolve it against the process cwd at intake, the same
+    // rule checked_workspace_path applies to MCP config paths.
+    Ok(crate::mcp::normalize_path_components(
+        &std::env::current_dir()
+            .context("failed to resolve current directory for workspace")?
+            .join(workspace),
+    ))
 }
 
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
@@ -8784,7 +8803,7 @@ async fn run_pr(
 
     let prompt = format_pr_prompt(number, &view, &diff);
     let resume_session_id = if cli.continue_session {
-        let workspace = resolve_workspace(cli);
+        let workspace = resolve_workspace(cli)?;
         latest_session_id_for_workspace(&workspace).ok().flatten()
     } else {
         cli.resume.clone()
@@ -11820,7 +11839,7 @@ async fn run_workflow_tool_command_inner(
         bail!("workflow-tool accepts only action=run");
     }
 
-    let workspace = resolve_workspace(cli);
+    let workspace = resolve_workspace(cli)?;
     let mut config = load_config_from_cli(cli)?;
     merge_user_workspace_config(&mut config, cli.config.clone(), &workspace);
     if let Ok(env_url) =
@@ -16756,6 +16775,30 @@ api_key = "test-only-key"
         };
 
         assert!(args.continue_session);
+    }
+
+    #[test]
+    fn workspace_flag_rejects_empty_path() {
+        // clap's PathBuf parser rejects an empty `--workspace ""` before it
+        // reaches resolve_workspace; pin that contract so a parser change
+        // cannot re-open the vacuous-containment lane (`starts_with("")` is
+        // true for every path). resolve_workspace additionally hard-rejects
+        // an empty value itself, so the slot stays fail-closed however the
+        // Cli is built.
+        let err = Cli::try_parse_from(["codewhale", "--workspace", "", "exec", "probe"])
+            .expect_err("empty workspace must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn workspace_flag_resolves_relative_against_process_cwd() {
+        // A relative spelling resolves to absolute at intake: its normalized
+        // form would otherwise be the vacuous containment root ("." carries
+        // no components), so the CLI must not hand it downstream as-is.
+        let cli = parse_cli(&["codewhale", "--workspace", ".", "exec", "probe"]);
+        let resolved = resolve_workspace(&cli).expect("relative workspace resolves");
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, std::env::current_dir().expect("process cwd"));
     }
 
     #[test]

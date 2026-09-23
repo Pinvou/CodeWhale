@@ -65,17 +65,22 @@ pub enum InitialHistory {
     },
 }
 
-/// Normalizes a workspace root set: `cwd` is always a member and the primary
-/// root at position 0, followed by `roots` in their original order with
-/// duplicates removed. An empty `roots` degenerates to `[cwd]`.
+/// Normalizes a workspace root set: `cwd` is the primary root at position 0,
+/// followed by `roots` in their original order with duplicates removed. An
+/// empty `roots` degenerates to `[cwd]`.
 ///
 /// Entries that are empty or relative are dropped, not normalized: every
 /// containment check downstream is `Path::starts_with`-shaped, where an empty
 /// root contains *every* path and a relative root is meaningless against the
 /// absolute candidates the boundary checks resolve. The `cwd` argument is
-/// trusted (it carries its own intake validation); only `roots` entries are
-/// filtered. This is the single chokepoint every consumer routes through, so
-/// intake validation lives here rather than at each protocol surface.
+/// filtered by the same rule, and there the filter fails closed: an empty or
+/// relative cwd cannot head a root set (its normalized form is the vacuous
+/// root), so the whole set collapses to empty and the thread has no writable
+/// roots at all. Intake surfaces reject an empty cwd/workspace outright; this
+/// filter is the last line for values that bypass a surface (legacy or
+/// hand-edited records). This is the single chokepoint every consumer routes
+/// through, so intake validation lives here rather than at each protocol
+/// surface.
 ///
 /// Deduplication is lexical, not filesystem-aware: two spellings of the same
 /// directory (a symlinked `/var/x` beside its `/private/var/x` target) both
@@ -83,6 +88,9 @@ pub enum InitialHistory {
 /// for exactly that reason; a future canonicalizing intake would remove the
 /// residue, at the cost of filesystem access on every normalization.
 pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
+    if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+        return Vec::new();
+    }
     let mut normalized = vec![cwd.to_path_buf()];
     for root in roots {
         if root.as_os_str().is_empty() || !root.is_absolute() {
@@ -99,13 +107,20 @@ pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> 
 /// codex semantics: an explicit root set replaces the whole set (`Some([])`
 /// clears back to the bare cwd); an explicit cwd alone takes over the
 /// primary slot while additional roots are preserved; neither falls back to
-/// the persisted values.
+/// the persisted values. An explicit empty cwd is rejected, not defaulted:
+/// persisting it would null containment on every later resume, the same
+/// poison the intake filter drops from the roots list.
 fn resolve_resume_roots(
     persisted_cwd: &Path,
     persisted_roots: &[PathBuf],
     params_cwd: Option<&PathBuf>,
     params_roots: Option<&[PathBuf]>,
-) -> (PathBuf, Vec<PathBuf>) {
+) -> Result<(PathBuf, Vec<PathBuf>)> {
+    if let Some(cwd) = params_cwd
+        && cwd.as_os_str().is_empty()
+    {
+        return Err(anyhow!("cwd must not be empty"));
+    }
     if let Some(roots) = params_roots {
         let cwd = params_cwd
             .cloned()
@@ -113,7 +128,7 @@ fn resolve_resume_roots(
         // An explicit set replaces the persisted one wholesale — including
         // the explicit empty set, which clears back to the bare cwd.
         let roots = normalize_workspace_roots(&cwd, roots);
-        return (cwd, roots);
+        return Ok((cwd, roots));
     }
     if let Some(new_cwd) = params_cwd {
         let additional: Vec<PathBuf> = persisted_roots
@@ -122,10 +137,10 @@ fn resolve_resume_roots(
             .cloned()
             .collect();
         let roots = normalize_workspace_roots(new_cwd, &additional);
-        return (new_cwd.clone(), roots);
+        return Ok((new_cwd.clone(), roots));
     }
     let roots = normalize_workspace_roots(persisted_cwd, persisted_roots);
-    (persisted_cwd.to_path_buf(), roots)
+    Ok((persisted_cwd.to_path_buf(), roots))
 }
 
 /// Result of spawning or resuming a thread.
@@ -691,7 +706,7 @@ impl ThreadManager {
                 &thread.workspace_roots,
                 params.cwd.as_ref(),
                 params.workspace_roots.as_deref(),
-            );
+            )?;
             thread.cwd = cwd;
             thread.workspace_roots = workspace_roots;
             // Write the override back to both the cache and the persisted row.
@@ -743,7 +758,7 @@ impl ThreadManager {
             &thread.workspace_roots,
             params.cwd.as_ref(),
             params.workspace_roots.as_deref(),
-        );
+        )?;
         thread.cwd = cwd;
         thread.workspace_roots = workspace_roots;
         self.persist_thread(&thread, None)?;
@@ -796,6 +811,14 @@ impl ThreadManager {
     /// accessible roots. A fork without a `cwd` stays anchored at the
     /// parent's cwd.
     pub fn fork_thread(&mut self, params: &ThreadForkParams) -> Result<Option<NewThread>> {
+        // An explicit empty cwd would persist a vacuous primary root
+        // (`starts_with("")` is true for every path); reject it like the
+        // resume lane does instead of poisoning the fork durably.
+        if let Some(cwd) = params.cwd.as_ref()
+            && cwd.as_os_str().is_empty()
+        {
+            return Err(anyhow!("cwd must not be empty"));
+        }
         let parent = self.store.get_thread(&params.thread_id)?;
         let Some(parent) = parent else {
             return Ok(None);
@@ -1168,6 +1191,13 @@ impl Runtime {
                 Ok(response)
             }
             ThreadRequest::Start(params) => {
+                // Same empty-cwd rejection as resume/fork: an explicit `""`
+                // would otherwise persist a vacuous primary root.
+                if let Some(cwd) = params.cwd.as_ref()
+                    && cwd.as_os_str().is_empty()
+                {
+                    return Err(anyhow!("cwd must not be empty"));
+                }
                 let cwd = params.cwd.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
@@ -3524,11 +3554,14 @@ mod tests {
             "an empty entry would contain every path under starts_with, and a \
              relative entry is meaningless against absolute candidates"
         );
-        // The cwd argument itself is trusted and never filtered.
-        assert_eq!(
-            normalize_workspace_roots(Path::new(""), &[]),
-            vec![PathBuf::from("")]
-        );
+        // The cwd argument is filtered by the same rule, and there the
+        // filter fails closed: an empty or relative cwd cannot head a root
+        // set (its normalized form is the vacuous root `starts_with("")`
+        // accepts every path under), so the whole set collapses to empty
+        // rather than passing the poison through to boundary_roots().
+        assert!(normalize_workspace_roots(Path::new(""), &[]).is_empty());
+        assert!(normalize_workspace_roots(Path::new(""), &[PathBuf::from("/repo/lib")]).is_empty());
+        assert!(normalize_workspace_roots(Path::new("relative/dir"), &[]).is_empty());
     }
 
     #[test]
@@ -3972,6 +4005,80 @@ mod tests {
             vec![PathBuf::from("/repo/main")],
             "Some([]) is an explicit clear, distinct from None (inherit)"
         );
+    }
+
+    #[test]
+    fn resume_with_empty_cwd_is_rejected() {
+        // Regression pin: a stdio resume carrying `cwd: ""` used to persist
+        // the empty string into the primary slot, where boundary_roots()
+        // turns it into the vacuous containment root on every later resume.
+        let store = temp_core_state("resume-empty-cwd");
+        let mut metadata = test_thread_metadata("thread-empty-cwd");
+        metadata.cwd = PathBuf::from("/persisted");
+        metadata.workspace_roots = vec![PathBuf::from("/persisted")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-empty-cwd");
+        params.cwd = Some(PathBuf::from(""));
+
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("empty cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("cwd must not be empty"),
+            "unexpected error: {err:#}"
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-empty-cwd")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.cwd,
+            PathBuf::from("/persisted"),
+            "a rejected resume must not touch the persisted root set"
+        );
+    }
+
+    #[test]
+    fn fork_with_empty_cwd_is_rejected() {
+        let mut manager = seed_multi_root_parent("fork-empty-cwd");
+        let mut params = fork_params("thread-parent");
+        params.cwd = Some(PathBuf::from(""));
+
+        let err = manager
+            .fork_thread(&params)
+            .expect_err("empty cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("cwd must not be empty"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn spawn_thread_with_empty_cwd_persists_no_roots() {
+        // Fail closed at the chokepoint: a thread whose cwd slot is empty
+        // gets an empty root set, so boundary_roots() holds nothing and
+        // every containment check denies — never the vacuous `[""]`.
+        let store = temp_core_state("spawn-empty-cwd");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from(""),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        assert!(spawned.thread.workspace_roots.is_empty());
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert!(persisted.workspace_roots.is_empty());
     }
 
     #[tokio::test]

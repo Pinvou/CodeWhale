@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Rota",
   "StatusLabelDirectory": "Diretório",
   "StatusLabelWorkspaceRoots": "Pastas acessíveis",
+  "WorkspaceSwitchBusy": "Workspace inalterado (estado de Trabalho ou execução ativa ocupada; aguarde e tente /cd novamente)",
   "WorkspaceSwitchPersistFailed": "Falha ao persistir a mudança de workspace: {error}; o ator de persistência também está indisponível",
   "WorkspaceSwitchSaveFailedActorQueued": "O salvamento direto da mudança de workspace falhou ({error}); o ator de persistência mantém o snapshot pós-mudança",
   "WorkspaceSwitchPersistedActorUnavailable": "A mudança de workspace foi salva, mas o ator de persistência está indisponível; o próximo salvamento automático a regrava",

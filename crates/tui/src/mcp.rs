@@ -4864,7 +4864,7 @@ fn resolve_project_mcp_cwd(workspace: &Path, cwd: Option<&Path>) -> Result<PathB
     Ok(resolved)
 }
 
-fn normalize_path_components(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path_components(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

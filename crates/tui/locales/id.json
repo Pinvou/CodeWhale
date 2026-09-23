@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Rute",
   "StatusLabelDirectory": "Direktori",
   "StatusLabelWorkspaceRoots": "Folder yang dapat diakses",
+  "WorkspaceSwitchBusy": "Workspace tidak berubah (status Work atau pekerjaan runtime sibuk; tunggu, lalu coba /cd lagi)",
   "WorkspaceSwitchPersistFailed": "Gagal mempersistenkan perubahan workspace: {error}; actor persistensi juga tidak tersedia",
   "WorkspaceSwitchSaveFailedActorQueued": "Penyimpanan langsung perubahan workspace gagal ({error}); actor persistensi menyimpan snapshot setelah perubahan",
   "WorkspaceSwitchPersistedActorUnavailable": "Perubahan workspace disimpan, tetapi actor persistensi tidak tersedia; penyimpanan otomatis berikutnya akan menulisnya ulang",

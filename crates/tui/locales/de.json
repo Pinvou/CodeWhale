@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Route",
   "StatusLabelDirectory": "Verzeichnis",
   "StatusLabelWorkspaceRoots": "Zugängliche Ordner",
+  "WorkspaceSwitchBusy": "Arbeitsbereich unverändert (Work-State oder Laufzeitarbeit beschäftigt; warten, dann /cd erneut versuchen)",
   "WorkspaceSwitchPersistFailed": "Das Persistieren des Arbeitsbereichswechsels ist fehlgeschlagen: {error}; der Persistenz-Aktor ist ebenfalls nicht verfügbar",
   "WorkspaceSwitchSaveFailedActorQueued": "Das direkte Speichern des Arbeitsbereichswechsels schlug fehl ({error}); der Persistenz-Aktor hält den Snapshot nach dem Wechsel",
   "WorkspaceSwitchPersistedActorUnavailable": "Der Arbeitsbereichswechsel wurde gespeichert, aber der Persistenz-Aktor ist nicht verfügbar; das nächste Autosave schreibt ihn erneut",

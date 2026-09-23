@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Маршрут",
   "StatusLabelDirectory": "Каталог",
   "StatusLabelWorkspaceRoots": "Доступные папки",
+  "WorkspaceSwitchBusy": "Рабочее пространство не изменено (состояние Work или фоновая работа заняты; подождите и повторите /cd)",
   "WorkspaceSwitchPersistFailed": "Не удалось сохранить смену рабочего пространства: {error}; субъект персистентности также недоступен",
   "WorkspaceSwitchSaveFailedActorQueued": "Прямое сохранение смены рабочего пространства не удалось ({error}); субъект персистентности хранит снимок после смены",
   "WorkspaceSwitchPersistedActorUnavailable": "Смена рабочего пространства сохранена, но субъект персистентности недоступен; следующее автосохранение запишет её заново",

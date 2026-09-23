@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "経路",
   "StatusLabelDirectory": "ディレクトリ",
   "StatusLabelWorkspaceRoots": "アクセス可能なフォルダ",
+  "WorkspaceSwitchBusy": "ワークスペースは変更されていません（Work 状態またはランタイム処理が実行中です。待ってから /cd を再実行してください）",
   "WorkspaceSwitchPersistFailed": "ワークスペース切り替えの永続化に失敗しました: {error}。永続化アクターも利用できません",
   "WorkspaceSwitchSaveFailedActorQueued": "ワークスペース切り替えの直接保存に失敗しました（{error}）。永続化アクターが切り替え後のスナップショットを保持しています",
   "WorkspaceSwitchPersistedActorUnavailable": "ワークスペース切り替えは保存されましたが、永続化アクターが利用できません。次の自動保存で再保存されます",

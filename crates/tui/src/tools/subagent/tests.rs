@@ -20199,7 +20199,9 @@ async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
 /// parent's attached roots must not re-widen the resumed child. Both
 /// enforcement surfaces (`ToolContext::boundary_roots` and the gate's
 /// per-turn sandbox policy) materialize from the child's
-/// `(workspace, workspace_roots)` pair.
+/// `(workspace, workspace_roots)` pair — and the exec lane's cloned
+/// `elevated_sandbox_policy` must be re-derived from that pair too, or the
+/// parent's attached roots would stay writable through the policy override.
 #[tokio::test]
 async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root() {
     let tmp = tempdir().unwrap();
@@ -20241,9 +20243,20 @@ async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root()
     };
     let mut runtime = stub_runtime();
     runtime.manager = Arc::clone(&manager);
-    // Multi-root parent: its primary workspace plus an attached root.
+    // Multi-root parent: its primary workspace plus an attached root, with
+    // the exec-lane policy built over that full set (as the engine builds it
+    // for the parent's turn).
     runtime.context.workspace = parent_workspace.clone();
     runtime.context.workspace_roots = vec![parent_workspace.clone(), attached_root.clone()];
+    runtime.context.elevated_sandbox_policy = Some(crate::sandbox::SandboxPolicy::WorkspaceWrite {
+        writable_roots: codewhale_core::normalize_workspace_roots(
+            &parent_workspace,
+            &runtime.context.workspace_roots,
+        ),
+        network_access: false,
+        exclude_tmpdir: false,
+        exclude_slash_tmp: false,
+    });
 
     let resumed = {
         let mut guard = manager.write().await;
@@ -20264,8 +20277,25 @@ async fn resume_of_isolated_worktree_child_keeps_the_worktree_as_its_only_root()
     let boundary = codewhale_core::normalize_workspace_roots(&worktree, child_roots);
     assert_eq!(
         boundary,
-        vec![worktree],
+        vec![worktree.clone()],
         "the resumed child's boundary materializes as the worktree alone"
+    );
+    let child_policy = guard
+        .spawned_sandbox_policies
+        .get(&resumed.agent_id)
+        .expect("the spawn seam captured the resumed child's sandbox policy")
+        .as_ref()
+        .expect("the resumed child inherited the parent's exec-lane policy");
+    assert_eq!(
+        child_policy,
+        &crate::sandbox::SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![worktree],
+            network_access: false,
+            exclude_tmpdir: false,
+            exclude_slash_tmp: false,
+        },
+        "the exec lane's writable set must be re-derived from the cleared \
+         root set — the parent's attached root must not stay writable"
     );
 }
 
@@ -20325,6 +20355,15 @@ async fn claim_less_resume_of_a_recorded_worktree_child_stays_isolated() {
     runtime.manager = Arc::clone(&manager);
     runtime.context.workspace = parent_workspace.clone();
     runtime.context.workspace_roots = vec![parent_workspace.clone(), attached_root.clone()];
+    runtime.context.elevated_sandbox_policy = Some(crate::sandbox::SandboxPolicy::WorkspaceWrite {
+        writable_roots: codewhale_core::normalize_workspace_roots(
+            &parent_workspace,
+            &runtime.context.workspace_roots,
+        ),
+        network_access: false,
+        exclude_tmpdir: false,
+        exclude_slash_tmp: false,
+    });
 
     let resumed = {
         let mut guard = manager.write().await;
@@ -20342,6 +20381,71 @@ async fn claim_less_resume_of_a_recorded_worktree_child_stays_isolated() {
         child_roots.is_empty(),
         "a claim-less worktree child must not inherit the caller's root set: {child_roots:?}"
     );
+    let child_policy = guard
+        .spawned_sandbox_policies
+        .get(&resumed.agent_id)
+        .expect("the spawn seam captured the resumed child's sandbox policy")
+        .as_ref()
+        .expect("the resumed child inherited the parent's exec-lane policy");
+    assert_eq!(
+        child_policy,
+        &crate::sandbox::SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![worktree],
+            network_access: false,
+            exclude_tmpdir: false,
+            exclude_slash_tmp: false,
+        },
+        "a claim-less worktree child must not inherit the caller's writable roots"
+    );
+}
+
+/// The rebuild idiom shared by both worktree clear sites: after the roots set
+/// is cleared, the WorkspaceWrite face of the cloned policy re-derives from
+/// the child's `(workspace, workspace_roots)` pair — the worktree alone — and
+/// postures that carry no root set pass through untouched.
+#[test]
+fn rederive_sandbox_policy_roots_confines_the_exec_lane_to_the_cleared_set() {
+    let tmp = tempdir().unwrap();
+    let parent_workspace = tmp.path().join("parent");
+    let attached_root = tmp.path().join("attached");
+    let worktree = tmp.path().join("worktree");
+    for dir in [&parent_workspace, &attached_root, &worktree] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    // The shape a worktree clear site leaves behind: the child's workspace is
+    // the worktree, the roots set is cleared, and the policy is still the one
+    // cloned from the parent over the parent's full root set.
+    let mut context = ToolContext::new(worktree.clone());
+    context.workspace_roots = Vec::new();
+    context.elevated_sandbox_policy = Some(crate::sandbox::SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![parent_workspace, attached_root],
+        network_access: true,
+        exclude_tmpdir: false,
+        exclude_slash_tmp: false,
+    });
+    rederive_sandbox_policy_roots(&mut context);
+    assert_eq!(
+        context.elevated_sandbox_policy,
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![worktree],
+            network_access: true,
+            exclude_tmpdir: false,
+            exclude_slash_tmp: false,
+        }),
+        "the parent's attached roots must not survive the re-derivation"
+    );
+
+    // Root-less postures have no writable set to re-derive and pass through.
+    for policy in [
+        crate::sandbox::SandboxPolicy::ReadOnly,
+        crate::sandbox::SandboxPolicy::DangerFullAccess,
+    ] {
+        let mut context = ToolContext::new(tmp.path().join("child"));
+        context.elevated_sandbox_policy = Some(policy.clone());
+        rederive_sandbox_policy_roots(&mut context);
+        assert_eq!(context.elevated_sandbox_policy, Some(policy));
+    }
 }
 
 #[test]

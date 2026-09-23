@@ -5427,6 +5427,12 @@ impl RuntimeThreadManager {
             .filter(|m| !m.trim().is_empty())
             .unwrap_or(default_model);
         let workspace = req.workspace.unwrap_or_else(|| self.workspace.clone());
+        // Same guard as update_thread: an empty workspace persists a vacuous
+        // primary root (`starts_with("")` contains every path), so reject it
+        // at intake instead of defaulting it silently.
+        if workspace.as_os_str().is_empty() {
+            bail!("workspace must not be empty");
+        }
         let requested_mode = req
             .mode
             .filter(|m| !m.trim().is_empty())

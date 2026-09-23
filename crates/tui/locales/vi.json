@@ -1752,6 +1752,7 @@
   "StatusLabelRoute": "Tuyến",
   "StatusLabelDirectory": "Thư mục",
   "StatusLabelWorkspaceRoots": "Thư mục có thể truy cập",
+  "WorkspaceSwitchBusy": "Workspace không đổi (trạng thái Công việc hoặc tác vụ thời gian chạy đang bận; hãy chờ rồi thử lại /cd)",
   "WorkspaceSwitchPersistFailed": "Không thể lưu việc chuyển workspace: {error}; actor lưu trữ cũng không khả dụng",
   "WorkspaceSwitchSaveFailedActorQueued": "Lưu trực tiếp việc chuyển workspace thất bại ({error}); actor lưu trữ đang giữ snapshot sau chuyển",
   "WorkspaceSwitchPersistedActorUnavailable": "Đã lưu việc chuyển workspace, nhưng actor lưu trữ không khả dụng; lần tự lưu kế tiếp sẽ ghi lại",

@@ -1502,11 +1502,19 @@ impl AcpServer {
     }
 
     fn new_session(&mut self, params: Value) -> std::result::Result<Value, AcpError> {
-        let cwd = params
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.default_cwd.clone());
+        // An explicit empty cwd would build the tool registry over the
+        // vacuous containment root (`starts_with("")` accepts every path);
+        // reject it rather than falling back to the default, so a client
+        // typo cannot silently re-anchor the session.
+        let cwd = match params.get("cwd").and_then(Value::as_str) {
+            Some("") => {
+                return Err(AcpError::invalid_params(
+                    "session/new cwd must not be empty",
+                ));
+            }
+            Some(raw) => PathBuf::from(raw),
+            None => self.default_cwd.clone(),
+        };
         let session_id = format!("codewhale-{}", uuid::Uuid::new_v4());
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
@@ -1588,6 +1596,14 @@ impl AcpServer {
             })?;
 
         let cwd = saved.metadata.workspace.clone();
+        if cwd.as_os_str().is_empty() {
+            // A legacy or hand-edited record with an empty workspace would
+            // arm the vacuous containment root for every tool call in the
+            // rehydrated session; refuse to load it.
+            return Err(AcpError::invalid_params(format!(
+                "session {session_id} has an empty workspace"
+            )));
+        }
         let workspace_roots = saved.metadata.workspace_roots.clone();
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
@@ -2789,6 +2805,80 @@ mod tests {
         assert!(
             writable.contains(&attached_canonical),
             "the attached root must be writable in the ACP turn environment: {writable:?}"
+        );
+    }
+
+    #[test]
+    fn session_new_rejects_empty_cwd() {
+        // Regression pin: `session/new` with `cwd: ""` used to build the
+        // tool registry over the vacuous containment root
+        // (`starts_with("")` accepts every path).
+        let workspace = tempfile::tempdir().unwrap();
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let err = server
+            .new_session(json!({"cwd": ""}))
+            .expect_err("empty cwd must be rejected");
+        assert_eq!(err.code, -32602);
+    }
+
+    // Same big-stack wrapper as
+    // session_list_and_load_reach_the_durable_codewhale_sessions.
+    #[test]
+    fn session_load_rejects_empty_workspace() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_load_rejects_empty_workspace_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_load_rejects_empty_workspace_body() {
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        // A legacy or hand-edited record with an empty workspace must not be
+        // rehydrated: its tool registry would arm the vacuous containment
+        // root for every tool call.
+        let saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "corrupt record".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &PathBuf::new(),
+            0,
+            None,
+        );
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let workspace = home.path().join("workspace");
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+        let err = server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect_err("empty saved workspace must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(
+            !server.sessions.contains_key(&saved_id),
+            "a rejected load must not register the session"
         );
     }
 

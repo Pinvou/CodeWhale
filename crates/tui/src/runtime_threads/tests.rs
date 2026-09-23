@@ -5987,6 +5987,32 @@ async fn update_thread_roots_preserves_session_and_turn_context() -> Result<()> 
 }
 
 #[tokio::test]
+async fn create_thread_workspace_rejects_empty_path() -> Result<()> {
+    // Regression pin: POST /v1/threads with `"workspace": ""` used to persist
+    // the empty string as the primary root, where boundary_roots() turns it
+    // into the vacuous containment root (`starts_with("")` is true for every
+    // path) — the same poison update_thread already rejects.
+    let manager = test_manager(test_runtime_dir())?;
+    let err = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(PathBuf::new()),
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await
+        .expect_err("empty workspace must be rejected");
+    assert!(format!("{err:#}").contains("workspace must not be empty"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_workspace_rejects_empty_path() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager

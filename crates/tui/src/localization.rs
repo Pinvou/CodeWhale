@@ -1580,6 +1580,7 @@ pub enum MessageId {
     // Multi-root workspace disclosure and /cd persistence receipts.
     WorkspaceRootsNotice,
     WorkspaceRootsRemainder,
+    WorkspaceSwitchBusy,
     WorkspaceSwitchPersistedActorUnavailable,
     WorkspaceSwitchSaveFailedActorQueued,
     WorkspaceSwitchPersistFailed,
@@ -3710,6 +3711,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::StatusPointers,
     MessageId::WorkspaceRootsNotice,
     MessageId::WorkspaceRootsRemainder,
+    MessageId::WorkspaceSwitchBusy,
     MessageId::WorkspaceSwitchPersistedActorUnavailable,
     MessageId::WorkspaceSwitchSaveFailedActorQueued,
     MessageId::WorkspaceSwitchPersistFailed,

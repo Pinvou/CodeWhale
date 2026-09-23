@@ -3329,6 +3329,12 @@ pub(crate) fn apply_loaded_session_with_goal(
             "runtime work is active; wait for the current turn, maintenance, and background tasks to finish, or cancel that specific work before switching sessions".to_string(),
         );
     }
+    if session.metadata.workspace.as_os_str().is_empty() {
+        // A legacy or hand-edited record with an empty workspace would seed
+        // the vacuous containment root (`starts_with("")` accepts every
+        // path); refuse the restore like any other invalid saved state.
+        return Err("saved session workspace must not be empty".to_string());
+    }
     if let Some(goal) = goal {
         goal.validate()
             .map_err(|error| format!("saved session goal is invalid: {error}"))?;

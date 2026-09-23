@@ -3353,6 +3353,12 @@ pub struct SubAgentManager {
     /// and the gate's sandbox policy both materialize from this set.
     #[cfg(test)]
     spawned_workspace_roots: HashMap<String, Vec<PathBuf>>,
+    /// Test/observability: the exec-lane sandbox policy each spawned child
+    /// was launched with, keyed by child agent id. The policy is cloned from
+    /// the parent, so a worktree child must re-derive it from its cleared
+    /// root set or the parent's attached roots stay writable.
+    #[cfg(test)]
+    spawned_sandbox_policies: HashMap<String, Option<crate::sandbox::SandboxPolicy>>,
     /// Agent ids whose handle-store entries should be evicted on the next async
     /// drain. Populated by `cleanup()` when an agent record is retired; drained
     /// by async callers that hold the `HandleStore` lock (#3885).
@@ -3477,6 +3483,8 @@ impl SubAgentManager {
             woken_agents: HashMap::new(),
             #[cfg(test)]
             spawned_workspace_roots: HashMap::new(),
+            #[cfg(test)]
+            spawned_sandbox_policies: HashMap::new(),
             pending_handle_evictions: Vec::new(),
             resume_targets: HashMap::new(),
             child_approvals: HashMap::new(),
@@ -5943,8 +5951,10 @@ impl SubAgentManager {
             // child's boundary is the worktree alone, so the parent's
             // attached roots do not carry over into the resumed child
             // (neither `boundary_roots` nor the gate's sandbox policy may
-            // resolve or write outside the worktree).
+            // resolve or write outside the worktree). Re-derive the cloned
+            // sandbox policy as well — the exec lane consumes it verbatim.
             runtime.context.workspace_roots = Vec::new();
+            rederive_sandbox_policy_roots(&mut runtime.context);
         }
         let options = SubAgentSpawnOptions {
             name: None, // the old session name stays owned by the terminal record
@@ -6762,6 +6772,11 @@ impl SubAgentManager {
         #[cfg(test)]
         self.spawned_workspace_roots
             .insert(agent_id.clone(), runtime.context.workspace_roots.clone());
+        #[cfg(test)]
+        self.spawned_sandbox_policies.insert(
+            agent_id.clone(),
+            runtime.context.elevated_sandbox_policy.clone(),
+        );
         let task = SubAgentTask {
             manager_handle,
             runtime,
@@ -9259,6 +9274,24 @@ async fn wait_result_payload(
     Ok(tool_result)
 }
 
+/// Re-derive the exec lane's writable roots after a worktree clear site
+/// resets `context.workspace_roots`. A child runtime clones the parent's
+/// context wholesale — including `elevated_sandbox_policy`, which the engine
+/// built over the parent's full root set — so without this rebuild the exec
+/// lane (`shell.rs` policy override → `WorkspaceWrite::get_writable_roots`)
+/// would still treat the parent's attached roots as writable while the file
+/// lane's `boundary_roots` no longer resolves there. Only the WorkspaceWrite
+/// face carries a root set to re-derive; the other postures hold none.
+fn rederive_sandbox_policy_roots(context: &mut ToolContext) {
+    let cleared =
+        codewhale_core::normalize_workspace_roots(&context.workspace, &context.workspace_roots);
+    if let Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) =
+        context.elevated_sandbox_policy.as_mut()
+    {
+        *writable_roots = cleared;
+    }
+}
+
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
@@ -9372,8 +9405,11 @@ async fn spawn_subagent_from_input(
             // A worktree child is an isolation boundary, not a wider
             // session: its boundary is the worktree alone, so the parent's
             // attached roots do not carry over (at base a worktree child
-            // could only resolve inside its worktree).
+            // could only resolve inside its worktree). The cloned sandbox
+            // policy must be re-derived too — it was built over the parent's
+            // full root set, and the exec lane consumes it verbatim.
             child_runtime.context.workspace_roots = Vec::new();
+            rederive_sandbox_policy_roots(&mut child_runtime.context);
         }
         // An explicit `cwd:` swap without a worktree is non-isolating and
         // keeps the parent's root set (disclosed in the PR description).

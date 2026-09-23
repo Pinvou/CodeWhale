@@ -658,6 +658,28 @@ pub(crate) fn workspace_roots_notice(
     )
 }
 
+/// The `/cd` persistence receipt, typed so the closing-status classifier can
+/// tell a degraded success from a real failure instead of treating any
+/// receipt as an error (round-17: the actor-unavailable arm used to promote
+/// to a sticky Error toast even though the direct save had landed).
+#[derive(Debug)]
+enum WorkspaceSwitchReceipt {
+    /// The direct save landed; only the actor enqueue failed and the next
+    /// autosave re-persists the snapshot. A warning note, not an error.
+    Degraded(String),
+    /// The swap is not durably recorded (save failed, or the snapshot itself
+    /// could not be built). The user must see this as a failure.
+    Failure(String),
+}
+
+impl WorkspaceSwitchReceipt {
+    fn text(&self) -> &str {
+        match self {
+            Self::Degraded(text) | Self::Failure(text) => text,
+        }
+    }
+}
+
 /// Persist the post-switch snapshot through both durability paths and
 /// return exactly what happened. The direct save is the immediate disk
 /// authority; the actor enqueue heals the reorder window (a queued
@@ -670,7 +692,7 @@ fn persist_workspace_switch_snapshot(
     locale: crate::localization::Locale,
     manager: &SessionManager,
     snapshot: crate::session_manager::SavedSession,
-) -> Option<String> {
+) -> Option<WorkspaceSwitchReceipt> {
     let save_error = manager.save_session(&snapshot).err();
     // The direct save bypasses the persistence actor, so a pre-`/cd`
     // snapshot already queued there (an autosave that fired moments ago)
@@ -690,23 +712,24 @@ fn persist_workspace_switch_snapshot(
 /// outcomes: a save error plus an unavailable actor means NEITHER path
 /// persisted the swap, and the message must say so — a "persisted" claim
 /// there would hide a restart resurrecting the pre-switch workspace/root
-/// set.
+/// set. A landed save with a dead actor is a degraded success (`Degraded`),
+/// not a failure.
 fn workspace_switch_persistence_message(
     locale: crate::localization::Locale,
     save_error: Option<String>,
     queued: bool,
-) -> Option<String> {
-    let message: Option<String> = match (&save_error, queued) {
+) -> Option<WorkspaceSwitchReceipt> {
+    let message: Option<WorkspaceSwitchReceipt> = match (&save_error, queued) {
         (None, true) => None,
-        (None, false) => {
-            Some(tr(locale, MessageId::WorkspaceSwitchPersistedActorUnavailable).into_owned())
-        }
-        (Some(error), true) => Some(
+        (None, false) => Some(WorkspaceSwitchReceipt::Degraded(
+            tr(locale, MessageId::WorkspaceSwitchPersistedActorUnavailable).into_owned(),
+        )),
+        (Some(error), true) => Some(WorkspaceSwitchReceipt::Failure(
             tr(locale, MessageId::WorkspaceSwitchSaveFailedActorQueued).replace("{error}", error),
-        ),
-        (Some(error), false) => {
-            Some(tr(locale, MessageId::WorkspaceSwitchPersistFailed).replace("{error}", error))
-        }
+        )),
+        (Some(error), false) => Some(WorkspaceSwitchReceipt::Failure(
+            tr(locale, MessageId::WorkspaceSwitchPersistFailed).replace("{error}", error),
+        )),
     };
     message
 }
@@ -719,10 +742,8 @@ pub(crate) async fn switch_workspace(
     workspace: PathBuf,
 ) {
     if let Some(message) = workspace_switch_blocked_message(app) {
-        app.status_message = Some(message.to_string());
-        app.add_message(HistoryCell::System {
-            content: message.to_string(),
-        });
+        app.status_message = Some(message.clone());
+        app.add_message(HistoryCell::System { content: message });
         return;
     }
 
@@ -785,10 +806,12 @@ pub(crate) async fn switch_workspace(
 /// The `/cd` transition guard, aligned with `/clear`: an idle compaction or
 /// a queued task blocks the switch just like a running request, because the
 /// switch persists the new root set and shuts the engine down — mid-compaction
-/// that loses the compaction result.
-fn workspace_switch_blocked_message(app: &App) -> Option<&'static str> {
+/// that loses the compaction result. Like `/clear`'s busy message, the wording
+/// is generic ("runtime work busy") and localized: naming "a request" would
+/// misdescribe the compaction/purge/queued-task legs (round-17).
+fn workspace_switch_blocked_message(app: &App) -> Option<String> {
     app.session_transition_blocked()
-        .then_some("Cannot switch workspace while a request is running.")
+        .then(|| tr(app.ui_locale, MessageId::WorkspaceSwitchBusy).into_owned())
 }
 
 /// The closing `/cd` status line: the persistence receipt (when any) is
@@ -801,19 +824,33 @@ fn workspace_switch_closing_status(workspace: &Path, receipt: Option<String>) ->
     }
 }
 
-/// Set the closing `/cd` status line and, when the persistence receipt
-/// discloses a failure, promote it as a sticky error with a typed level. The
-/// `status_message` -> toast sync classifies by sniffing English keywords, so
-/// a localized receipt would otherwise degrade to an ephemeral Info toast.
-/// Marking the line as seen keeps that sync from re-adding the same text as a
-/// second, misclassified toast.
-fn apply_workspace_switch_closing_status(app: &mut App, workspace: &Path, receipt: Option<String>) {
-    let failed = receipt.is_some();
-    let closing = workspace_switch_closing_status(workspace, receipt);
+/// Set the closing `/cd` status line and surface the persistence receipt at
+/// the severity it actually is: a real failure promotes to a sticky error
+/// with a typed level, while a degraded success (save landed, actor down) is
+/// a typed warning toast. The `status_message` -> toast sync classifies by
+/// sniffing English keywords, so a localized receipt would otherwise degrade
+/// to an ephemeral Info toast. Marking the line as seen keeps that sync from
+/// re-adding the same text as a second, misclassified toast.
+fn apply_workspace_switch_closing_status(
+    app: &mut App,
+    workspace: &Path,
+    receipt: Option<WorkspaceSwitchReceipt>,
+) {
+    let closing = workspace_switch_closing_status(
+        workspace,
+        receipt.as_ref().map(|receipt| receipt.text().to_string()),
+    );
     app.status_message = Some(closing.clone());
-    if failed {
-        app.set_sticky_status(closing.clone(), StatusToastLevel::Error, None);
-        app.last_status_message_seen = Some(closing);
+    match receipt {
+        Some(WorkspaceSwitchReceipt::Failure(_)) => {
+            app.set_sticky_status(closing.clone(), StatusToastLevel::Error, None);
+            app.last_status_message_seen = Some(closing);
+        }
+        Some(WorkspaceSwitchReceipt::Degraded(_)) => {
+            app.push_status_toast(closing.clone(), StatusToastLevel::Warning, Some(8_000));
+            app.last_status_message_seen = Some(closing);
+        }
+        None => {}
     }
 }
 
@@ -822,7 +859,7 @@ fn apply_workspace_switch_closing_status(app: &mut App, workspace: &Path, receip
 /// `build_session_snapshot` would mint AND durably save an empty
 /// "New Session" orphan on every bare-prompt `/cd` (round-14 M-3), so the
 /// step is skipped entirely there.
-fn persist_workspace_switch_receipt(app: &mut App) -> Option<String> {
+fn persist_workspace_switch_receipt(app: &mut App) -> Option<WorkspaceSwitchReceipt> {
     // Only an existing session has a record to swap: with no current
     // session, `build_session_snapshot` would mint AND durably save an empty
     // "New Session" orphan on every bare-prompt `/cd` (round-14 M-3).
@@ -830,15 +867,15 @@ fn persist_workspace_switch_receipt(app: &mut App) -> Option<String> {
     match SessionManager::default_location() {
         Ok(manager) => match crate::tui::ui::frame::build_session_snapshot(app, &manager) {
             Ok(snapshot) => persist_workspace_switch_snapshot(app.ui_locale, &manager, snapshot),
-            Err(err) => Some(
+            Err(err) => Some(WorkspaceSwitchReceipt::Failure(
                 tr(app.ui_locale, MessageId::WorkspaceSwitchSnapshotFailed)
                     .replace("{error}", &err.to_string()),
-            ),
+            )),
         },
-        Err(err) => Some(
+        Err(err) => Some(WorkspaceSwitchReceipt::Failure(
             tr(app.ui_locale, MessageId::WorkspaceSwitchSessionsDirFailed)
                 .replace("{error}", &err.to_string()),
-        ),
+        )),
     }
 }
 
@@ -1387,6 +1424,7 @@ mod workspace_switch_persistence_tests {
 
     fn message_for(save_error: Option<String>, queued: bool) -> Option<String> {
         workspace_switch_persistence_message(crate::localization::Locale::En, save_error, queued)
+            .map(|receipt| receipt.text().to_string())
     }
 
     /// The round-13 blocker: when the direct save AND the actor enqueue both
@@ -1435,6 +1473,38 @@ mod workspace_switch_persistence_tests {
         assert_eq!(message_for(None, true), None);
     }
 
+    /// Round-17: the receipt is typed by outcome — the actor-unavailable leg
+    /// is a degraded success (the direct save landed), only save/snapshot
+    /// failures are `Failure`. The classifier keys off this type, not off
+    /// "is there a receipt".
+    #[test]
+    fn receipt_type_distinguishes_degraded_success_from_failure() {
+        assert!(matches!(
+            workspace_switch_persistence_message(crate::localization::Locale::En, None, false),
+            Some(WorkspaceSwitchReceipt::Degraded(_))
+        ));
+        assert!(matches!(
+            workspace_switch_persistence_message(
+                crate::localization::Locale::En,
+                Some("disk full".to_string()),
+                true,
+            ),
+            Some(WorkspaceSwitchReceipt::Failure(_))
+        ));
+        assert!(matches!(
+            workspace_switch_persistence_message(
+                crate::localization::Locale::En,
+                Some("disk full".to_string()),
+                false,
+            ),
+            Some(WorkspaceSwitchReceipt::Failure(_))
+        ));
+        assert!(
+            workspace_switch_persistence_message(crate::localization::Locale::En, None, true)
+                .is_none()
+        );
+    }
+
     /// The receipt is user-visible prose: a non-English locale renders its
     /// own pack, never the English template.
     #[test]
@@ -1445,6 +1515,7 @@ mod workspace_switch_persistence_tests {
             false,
         )
         .expect("receipt");
+        let message = message.text();
         assert!(message.contains("永続化"), "{message}");
         assert!(
             !message.contains("Failed to persist workspace switch"),
@@ -1478,7 +1549,9 @@ mod workspace_switch_persistence_tests {
     /// Round-15: the failure receipt must surface as a sticky Error toast via
     /// its typed level, in every locale — the keyword classifier only sniffs
     /// English, so a localized receipt would otherwise degrade to an
-    /// ephemeral Info toast.
+    /// ephemeral Info toast. Round-17: the classification is by receipt TYPE,
+    /// so the degraded-success arm (save landed, actor down) must NOT promote
+    /// as a sticky Error — it is a warning toast.
     #[test]
     fn failure_receipt_promotes_as_typed_sticky_error_in_any_locale() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1491,7 +1564,11 @@ mod workspace_switch_persistence_tests {
             MessageId::WorkspaceSwitchPersistFailed,
         )
         .replace("{error}", "disk full");
-        apply_workspace_switch_closing_status(&mut app, Path::new("/tmp/ws"), Some(receipt));
+        apply_workspace_switch_closing_status(
+            &mut app,
+            Path::new("/tmp/ws"),
+            Some(WorkspaceSwitchReceipt::Failure(receipt)),
+        );
         let sticky = app.sticky_status.as_ref().expect("sticky error toast");
         assert_eq!(sticky.level, StatusToastLevel::Error);
         assert!(
@@ -1501,6 +1578,38 @@ mod workspace_switch_persistence_tests {
         assert_eq!(
             app.last_status_message_seen, app.status_message,
             "the typed promotion replaces the keyword-classified re-toast"
+        );
+
+        // The degraded-success arm: the direct save landed and only the
+        // actor enqueue failed, so a sticky Error would cry failure over a
+        // persisted switch. It surfaces as a typed Warning toast instead.
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        let note = tr(
+            crate::localization::Locale::Ja,
+            MessageId::WorkspaceSwitchPersistedActorUnavailable,
+        )
+        .into_owned();
+        apply_workspace_switch_closing_status(
+            &mut app,
+            Path::new("/tmp/ws"),
+            Some(WorkspaceSwitchReceipt::Degraded(note)),
+        );
+        assert!(
+            app.sticky_status.is_none(),
+            "a degraded success must not promote as a sticky error: {:?}",
+            app.sticky_status
+        );
+        let toast = app
+            .status_toasts
+            .back()
+            .expect("a degraded success still raises a toast");
+        assert_eq!(toast.level, StatusToastLevel::Warning);
+        assert_eq!(
+            app.last_status_message_seen, app.status_message,
+            "the typed toast replaces the keyword-classified re-toast"
         );
 
         let mut app = App::new(
@@ -1533,6 +1642,38 @@ mod workspace_switch_persistence_tests {
         assert!(workspace_switch_blocked_message(&app).is_none());
     }
 
+    /// Round-17: the blocked message is localized prose that names the real
+    /// blocker class. The old hardcoded literal blamed "a request running"
+    /// on every leg — including idle compaction, where no request is running.
+    #[test]
+    fn cd_blocked_message_is_localized_and_names_no_running_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        app.is_compacting = true;
+
+        let message = workspace_switch_blocked_message(&app).expect("blocked");
+        assert_eq!(
+            message,
+            tr(
+                crate::localization::Locale::En,
+                MessageId::WorkspaceSwitchBusy,
+            ),
+            "the message comes from the locale pack, not a literal"
+        );
+        assert!(
+            !message.to_ascii_lowercase().contains("request"),
+            "an idle compaction must not be told a request is running: {message}"
+        );
+
+        app.ui_locale = crate::localization::Locale::Ja;
+        let message = workspace_switch_blocked_message(&app).expect("blocked");
+        assert!(message.contains("ワークスペース"), "{message}");
+        assert!(!message.contains("Workspace unchanged"), "{message}");
+    }
+
     /// M-3: a bare-prompt `/cd` has no session record to swap; the persist
     /// step must not mint (and durably save) an empty "New Session" orphan.
     #[test]
@@ -1543,7 +1684,7 @@ mod workspace_switch_persistence_tests {
         assert!(app.current_session_id.is_none(), "fresh TUI has no session");
 
         let receipt = persist_workspace_switch_receipt(&mut app);
-        assert_eq!(receipt, None, "no session, no receipt, no disk write");
+        assert!(receipt.is_none(), "no session, no receipt, no disk write");
         assert!(
             app.current_session_id.is_none() && app.current_session_metadata.is_none(),
             "the persist step must not mint a session on a bare /cd"

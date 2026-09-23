@@ -17684,6 +17684,25 @@ fn legacy_session_without_work_state_clears_previous_todo_on_load() {
 }
 
 #[test]
+fn empty_workspace_session_restore_is_rejected_and_leaves_current_session_intact() {
+    // Regression pin: a legacy or hand-edited record with `workspace: ""`
+    // used to resume unchallenged, seeding the vacuous containment root
+    // (`starts_with("")` accepts every path) into the restored session.
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("user", "current conversation"));
+    app.current_session_id = Some("current-session".to_string());
+    let mut session = saved_session_with_messages(vec![text_message("user", "legacy")]);
+    session.metadata.workspace = PathBuf::new();
+
+    let err = apply_loaded_session(&mut app, &mut Config::default(), &session).unwrap_err();
+
+    assert!(err.contains("workspace must not be empty"), "{err}");
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.current_session_id.as_deref(), Some("current-session"));
+}
+
+#[test]
 fn contended_work_restore_leaves_current_session_wholly_unchanged() {
     let mut app = create_test_app();
     app.api_messages
