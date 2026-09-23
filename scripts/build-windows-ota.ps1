@@ -1,3 +1,5 @@
+# 旧 OTA 兼容工具：仅用于向仍使用 H3C 双层 ZIP 协议的客户端发布一次桥接版本。
+# 桥接版本及后续正式版本必须改用 latest.json 静态更新流程；不得再把本脚本作为常规发布入口。
 # 由私有 Windows 发布流水线在构建机上调用(仓库内无 CI 引用属预期)。
 # 输入产物名与 release-packages.yml 的 tauri nsis 默认名
 # pinvou3_<version>_x64-setup.exe 一致。

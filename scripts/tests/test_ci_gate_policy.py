@@ -194,6 +194,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "frontend",
             "relay",
             "team_relay_hub",
+            "update_release_console",
             "acp_runtime",
             "windows_codex",
             "windows_runtime",
@@ -215,6 +216,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("Merge Queue 基础检查失败", required_gate)
         for job in (
             "team-relay-hub-test",
+            "update-release-console-test",
             "backflow-portability",
             "release-contract-test",
             "windows-runtime-test",
@@ -236,6 +238,48 @@ class CiGatePolicyTests(unittest.TestCase):
             "--registry=https://registry.npmjs.org --audit-level=high",
             hub_job,
         )
+
+        console_job = self.workflow.split(
+            "\n  update-release-console-test:", maxsplit=1
+        )[1].split("\n  release-contract-test:", maxsplit=1)[0]
+        self.assertIn(
+            "needs.changes.outputs.update_release_console == 'true'",
+            console_job,
+        )
+        self.assertIn("npm --prefix update-release-console ci", console_job)
+        self.assertIn("npm --prefix update-release-console test", console_job)
+        self.assertIn('node-version: ["20", "24"]', console_job)
+        self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
+        self.assertIn(
+            "npm --prefix update-release-console audit "
+            "--registry=https://registry.npmjs.org --audit-level=high",
+            console_job,
+        )
+        self.assertIn(
+            "docker build --file update-release-console/Dockerfile "
+            "update-release-console",
+            console_job,
+        )
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "config --quiet",
+            console_job,
+        )
+        self.assertIn("nginx:1.27-alpine nginx -t", console_job)
+        self.assertIn("/var/www/pinvou3/latest.json", console_job)
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "up --detach --build",
+            console_job,
+        )
+        self.assertIn("release-console/healthz", console_job)
+        self.assertIn("release-console/api/status", console_job)
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "down --volumes --remove-orphans",
+            console_job,
+        )
+        self.assertIn("always() && matrix.node-version == '20'", console_job)
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
         portability = self.workflow.split(
@@ -943,10 +987,14 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RUST_CACHE", windows_rust_test)
         self.assertIn("WINDOWS_RUST_TIMING", windows_rust_test)
 
-        # Node/npm were inherited from a retired JS-contract step. The remaining
-        # Rust build scripts and six filtered regressions do not consume node_modules.
+        # The static updater contract is dependency-free and uses the runner's
+        # preinstalled Node. Rust checks still must not install frontend dependencies.
         self.assertNotIn("actions/setup-node", windows_rust_test)
         self.assertNotIn("npm --prefix pinvou3-app ci", windows_rust_test)
+        self.assertIn(
+            "npm --prefix pinvou3-app run test:windows-static-updater",
+            windows_rust_test,
+        )
 
         self.assertIn(
             "defaults:\n      run:\n        shell: bash",
@@ -959,6 +1007,13 @@ class CiGatePolicyTests(unittest.TestCase):
         regression = windows_rust_test.split(
             "- name: Windows 原子替换状态机回归", maxsplit=1
         )[1]
+        # Cut at the next job boundary: the round-17 macos-rust-check leg
+        # legitimately runs `cargo test` (computer_use unit tests) and sits
+        # between the regression step and the previous extraction boundary —
+        # this assertion only guards the Windows regression against
+        # re-invoking cargo, which would re-link the exe and lose the
+        # embedded Common-Controls manifest.
+        regression = regression.split("\n  macos-rust-check:", maxsplit=1)[0]
         self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
@@ -973,6 +1028,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "artifact_writes_never_expose_partial_utf8_to_concurrent_readers",
             "artifact_public_read_",
             "features::memory::tests::topic_migration_",
+            "features::updater::platform::windows::tests::",
         ):
             self.assertEqual(regression.count(filter_name), 1)
         self.assertIn("running [1-9][0-9]* tests?", regression)
@@ -1002,6 +1058,33 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("--all-targets --features dev-tools", windows_rust_test)
         self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
         self.assertNotIn("--lib --no-run --features dev-tools", windows_rust_test)
+
+    def test_windows_release_powershell_scripts_route_to_native_static_contract(self):
+        changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  backflow-portability:", maxsplit=1
+        )[0]
+        route = changes.split("            windows_static_updater:", maxsplit=1)[1].split(
+            "            backflow_infra:", maxsplit=1
+        )[0]
+        paths = _extract_quoted_paths(route)
+        for script in (
+            "scripts/prepare-windows-release.ps1",
+            "scripts/verify-windows-release-online.ps1",
+        ):
+            self.assertTrue(_matches_paths_filter(script, paths), script)
+
+        job = self.pr_workflow.split(
+            "\n  windows-static-updater-contract:", maxsplit=1
+        )[1].split("\n  windows-rust-test:", maxsplit=1)[0]
+        self.assertIn("runs-on: windows-latest", job)
+        self.assertIn("needs.changes.outputs.windows_static_updater == 'true'", job)
+        self.assertIn("npm --prefix pinvou3-app run test:windows-static-updater", job)
+        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("- windows-static-updater-contract", required_gate)
+        self.assertIn(
+            '"windows-static-updater-contract:$WINDOWS_STATIC_UPDATER_RESULT"',
+            required_gate,
+        )
 
     def test_windows_policy_condition_truth_table_and_required_result(self):
         windows_job = self.pr_workflow.split(
@@ -1103,6 +1186,21 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RUST_REQUIRED_BY_POLICY", required_gate)
         self.assertIn('"$WINDOWS_RUST_RESULT" != success', required_gate)
         self.assertIn("回流策略 $BACKFLOW_MODE 要求完整 Windows Rust", required_gate)
+    def test_macos_rust_check_is_wired_into_required_gate(self):
+        # Review finding: the new native macOS leg must satisfy the same
+        # three-wiring rule as windows-rust-test (needs entry, env backfill,
+        # summary-loop entry) -- otherwise removing the job keeps CI green
+        # while the gate silently degrades.
+        job_body = self.pr_workflow.split("\n  macos-rust-check:", maxsplit=1)[1]
+        job = re.split(r"\n  [a-zA-Z]", job_body, maxsplit=1)[0]
+        self.assertIn("needs: changes", job)
+        self.assertIn("MACOS_RUST_CHECK_RESULT", self.pr_workflow)
+        required_gate = self.pr_workflow.split(
+            "\n  required-gate:", maxsplit=1
+        )[1]
+        self.assertIn("- macos-rust-check", required_gate)
+        self.assertIn("MACOS_RUST_CHECK_RESULT", required_gate)
+        self.assertIn('"macos-rust-check:$MACOS_RUST_CHECK_RESULT"', required_gate)
 
     def test_windows_browser_wrapper_lifecycle_runs_in_required_native_job(self):
         changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(

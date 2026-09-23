@@ -30,6 +30,9 @@ name: PR Check
 #   区分纯版本、普通跨平台 Rust 和 Windows 高风险；Merge Queue 不重复，main 保留
 #   累计原生验证。
 # - windows-rustup-repair-test:相关 PR 在隔离目录破坏工具链并验证下载源回退与重装。
+# - macos-rust-check:macOS 原生编译检查(check 不链接,无签名/打包),与
+#   windows-rust-test 同门禁口径;Linux 跑不出平台专属类型错误(computer-use
+#   的 ScreenCaptureKit 等平台后端需要原生腿)。
 # - windows-codex-runtime-test:相关 PR 在 Windows 原生验证 browser-wrapper 生命周期、
 #   准备 Node + ACP Bridge，并核对安装包资源。
 # - backflow-portability:可信回流 PR/Queue 在 Windows、macOS、Linux 并行运行
@@ -158,10 +161,12 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
+      update_release_console: ${{ steps.filter.outputs.update_release_console }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
       windows_codex: ${{ steps.filter.outputs.windows_codex }}
       windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
       windows_rustup_repair: ${{ steps.filter.outputs.windows_rustup_repair }}
+      windows_static_updater: ${{ steps.filter.outputs.windows_static_updater }}
       backflow_infra: ${{ steps.filter.outputs.backflow_infra }}
       trusted_backflow: ${{ steps.pr-rust-policy.outputs.trusted_backflow || steps.queue-rust-policy.outputs.trusted_backflow || 'false' }}
       backflow_mode: ${{ steps.pr-rust-policy.outputs.backflow_mode || steps.queue-rust-policy.outputs.backflow_mode || 'full' }}
@@ -198,6 +203,7 @@ jobs:
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - '**/build.rs'
+              - 'scripts/ci-libpipewire-build.sh'
               - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
@@ -349,6 +355,12 @@ jobs:
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
               - '.github/workflows/pr-check.yml'
+            update_release_console:
+              - 'update-release-console/**'
+              - 'deploy/nginx-pinvou3-updates.conf'
+              - 'docs/windows-static-update-release.md'
+              - 'docs/windows-update-release-console.md'
+              - '.github/workflows/pr-check.yml'
             acp_runtime:
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
               - 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'
@@ -400,6 +412,12 @@ jobs:
               - 'pinvou3-app/tests/windows_rustup_repair_smoke.ps1'
               - 'pinvou3-app/src-tauri/rust-toolchain.toml'
               - 'pinvou3-app/package.json'
+            windows_static_updater:
+              - 'scripts/prepare-windows-release.ps1'
+              - 'scripts/verify-windows-release-online.ps1'
+              - 'pinvou3-app/tests/windows_static_update_contract.test.js'
+              - 'pinvou3-app/package.json'
+              - '.github/workflows/pr-check.yml'
             backflow_infra:
               - '.agents/skills/community-backflow/**'
               - '.github/workflows/community-backflow-automation.yml'
@@ -722,6 +740,75 @@ jobs:
       - name: Hub 依赖审计
         run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
 
+  update-release-console-test:
+    name: update-release-console-test (Node ${{ matrix.node-version }})
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "24"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: update-release-console/package-lock.json
+
+      - name: 安装发布台依赖
+        run: npm --prefix update-release-console ci --prefer-offline --no-audit
+
+      - name: 发布台测试
+        run: npm --prefix update-release-console test
+
+      - name: 发布台依赖审计
+        run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
+
+      - name: 发布台容器与 Compose 配置校验
+        if: ${{ matrix.node-version == '20' }}
+        env:
+          PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+        run: |
+          docker build --file update-release-console/Dockerfile update-release-console
+          docker compose --file update-release-console/deploy/compose.yaml config --quiet
+          docker run --rm \
+            -v "$PWD/update-release-console/deploy/nginx-test.conf:/etc/nginx/nginx.conf:ro" \
+            -v "$PWD/update-release-console/deploy/nginx-location.conf:/etc/nginx/pinvou3-release-location.conf:ro" \
+            nginx:1.27-alpine nginx -t
+          sudo mkdir -p /var/www/pinvou3
+          printf '%s\n' '{"platforms":{"linux-x86_64":{"version":"0.10.4"},"macos-universal":{"version":"0.10.4"}}}' \
+            | sudo tee /var/www/pinvou3/latest.json >/dev/null
+          sudo chown -R 1000:1000 /var/www/pinvou3
+          docker compose --file update-release-console/deploy/compose.yaml up --detach --build
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:8792/pinvou3/release-console/healthz; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker compose --file update-release-console/deploy/compose.yaml logs
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer $PINVOU_UPDATE_ADMIN_TOKEN" \
+            http://127.0.0.1:8792/pinvou3/release-console/api/status
+
+      - name: 清理发布台容器
+        if: ${{ always() && matrix.node-version == '20' }}
+        env:
+          PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
+        run: docker compose --file update-release-console/deploy/compose.yaml down --volumes --remove-orphans
+
   release-contract-test:
     name: release-contract-test
     needs: changes
@@ -888,11 +975,21 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
+            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
             build-essential pkg-config cmake
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
           sudo apt-get autoremove -y --purge
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
+
+      # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs SPA
+      # static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers lack
+      # (libspa-sys bindgens against system headers at build time). Build the upstream
+      # 1.0.7 headers+lib into /usr/local so pkg-config resolves the prefix; idempotent,
+      # no runner-image drift. See scripts/ci-libpipewire-build.sh for the full rationale.
+      - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
+        run: bash scripts/ci-libpipewire-build.sh
 
       # Clippy hard gate (no continue-on-error): lint config lives in the
       # Cargo.toml [lints] table, never CLI -W/-D (avoids divergence from
@@ -1072,6 +1169,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
+            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev \
             build-essential pkg-config cmake lld \
             time
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
@@ -1090,6 +1188,13 @@ jobs:
             : > "$d/$f"
           done
 
+      # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs SPA
+      # static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers lack
+      # (libspa-sys bindgens against system headers at build time). Build the upstream
+      # 1.0.7 headers+lib into /usr/local so pkg-config resolves the prefix; idempotent,
+      # no runner-image drift. See scripts/ci-libpipewire-build.sh for the full rationale.
+      - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
+        run: bash scripts/ci-libpipewire-build.sh
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -1325,12 +1430,22 @@ jobs:
           # libwebkit2gtk-4.1-dev 硬依赖链传递安装,librsvg2-dev 构建不需要
           # (Cargo 无 rsvg crate)——不得回填(守卫见 test_ci_gate_policy
           # 的 apt 冗余包断言)。libssl-dev 必须保留(链接系统 OpenSSL)。
+          # Package list audited per-package on 2026-09-15: gtk/soup/x11 are installed
+          # transitively via webkit-dev — that transitive set is what covers the pure-Rust
+          # x11/xkbcommon/xcb crates the computer_use capture stack builds against
+          # (libxkbcommon-dev via libgtk-3-dev, libxcb1-dev via libx11-dev; enigo's X11
+          # input path is pure-Rust x11rb and needs no C XTest/XInput headers); librsvg2-dev
+          # is not needed for the build; libssl-dev (openssl-sys is not vendored)
+          # and appindicator (tray) must be kept.
+          # pipewire/drm/gbm/egl are the computer_use capture-backends headers the
+          # webkit-dev chain does not pull in.
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
             build-essential pkg-config cmake \
-            time
+            time \
+            libpipewire-0.3-dev libdrm-dev libgbm-dev libegl-dev
           # 孤儿依赖、apt 缓存包与索引清单不留在构建盘上(单盘 runner 磁盘紧张)。
           sudo apt-get autoremove -y --purge
           sudo apt-get clean
@@ -1343,6 +1458,13 @@ jobs:
           for f in config.json model.onnx tokenizer.json tokenizer_config.json special_tokens_map.json; do
             : > "$d/$f"
           done
+      # pipewire-rs 0.10 (computer_use Wayland capture, direct + via xcap) needs SPA
+      # static inline helpers that ubuntu-22.04's libpipewire 0.3.48 headers lack
+      # (libspa-sys bindgens against system headers at build time). Build the upstream
+      # 1.0.7 headers+lib into /usr/local so pkg-config resolves the prefix; idempotent,
+      # no runner-image drift. See scripts/ci-libpipewire-build.sh for the full rationale.
+      - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
+        run: bash scripts/ci-libpipewire-build.sh
 
       # rustfmt is required by the `cargo fmt --check` step below (minimal
       # profile otherwise).
@@ -1407,6 +1529,24 @@ jobs:
         if: github.event_name == 'push'
         working-directory: pinvou-cli
         run: cargo test -p adapter-gaia --features test-support --locked --no-run
+
+  windows-static-updater-contract:
+    name: windows-static-updater-contract
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Windows 静态更新契约
+        run: npm --prefix pinvou3-app run test:windows-static-updater
 
   windows-rust-test:
     name: windows-rust-test (${{ matrix.phase }})
@@ -1545,13 +1685,18 @@ jobs:
       # debug profile tauri's generate_context! uses devUrl, dist/ is never
       # packaged, and build.rs only depends on tauri-build/cc (verified on
       # macOS in 2026-08: cargo check --all-targets passes after moving
-      # node_modules away). So node/npm setup is dropped, saving 3-5 minutes
-      # per run.
+      # node_modules away). The regression leg uses the runner's preinstalled
+      # Node only for a dependency-free static updater contract, so setup-node
+      # and npm ci remain unnecessary.
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: pinvou3-app/src-tauri
+          # This job compiles the CodeWhale Windows-only regression target as
+          # well as the application workspace. Cache both target directories.
+          workspaces: |
+            pinvou3-app/src-tauri
+            CodeWhale
           # Both legs restore the established namespace on their isolated runners.
           # Only regression/main may save, so parallelization adds neither a new
           # cache namespace nor a second writer racing the existing 10GB cache.
@@ -1683,6 +1828,31 @@ jobs:
         shell: pwsh
         run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
 
+      # Parent application jobs do not execute a dependency crate's lib tests;
+      # this Windows leg explicitly runs the CodeWhale shell regressions. Assert
+      # that every filter still matches so a rename cannot become a silent pass.
+      - name: CodeWhale Windows PowerShell regressions
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tested fallback chooses pwsh.exe only when SHELL is absent.
+          # Make that runner assumption explicit and deterministic.
+          unset SHELL
+          cd CodeWhale
+          for filter in forkguard_powershell forkguard_windows_shell_text; do
+            log="/tmp/codewhale_windows_${filter}.log"
+            cargo test -p codewhale-tui --lib --locked "$filter" -- --test-threads=1 2>&1 | tee "$log"
+            grep -qE 'running [1-9][0-9]* tests?' "$log" || {
+              echo "FAIL: CodeWhale filter '$filter' matched zero tests" >&2
+              exit 1
+            }
+          done
+
+      - name: Windows 静态更新契约
+        if: ${{ matrix.phase == 'regression' }}
+        run: npm --prefix pinvou3-app run test:windows-static-updater
+
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
@@ -1713,10 +1883,12 @@ jobs:
             'run_with_timeout_reaps_and_stays_bounded' \
             'reap_killed_child_' \
             'features::browser::platform::windows::tests::' \
+            'features::updater::platform::windows::tests::' \
             'features::monitor::platform::windows_cpu::tests::' \
             'features::monitor::platform::windows_memory::tests::' \
             'features::monitor::platform::windows_gpu::tests::' \
-            'features::remote_control::platform::windows::tests::'; do
+            'features::remote_control::platform::windows::tests::' \
+            'features::computer_use::platform::windows::tests::'; do
             index=$((index+1))
             started=$SECONDS
             "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
@@ -1756,6 +1928,113 @@ jobs:
 
       - name: 隔离工具链损坏修复与下载源回退
         run: npm --prefix pinvou3-app run test:windows-rustup-repair
+
+  macos-rust-check:
+    name: macos-rust-check
+    needs: changes
+    # Native macOS compile coverage plus computer_use test execution for ready
+    # high-risk/explicit PRs and main; same gate as windows-rust-test. Type
+    # errors in platform-specific code (e.g. computer_use/platform/macos.rs)
+    # are only caught by a native cargo check; the Linux leg (ubuntu) never
+    # compiles the macOS target. Round-17: this leg also RUNS the
+    # computer_use unit tests — macOS-only tests previously executed on no CI
+    # leg at all (check does not run tests; the Windows leg runs Windows
+    # filters; the Linux leg runs Linux tests), leaving macOS runtime behavior
+    # author-machine-only. The Merge Queue does not repeat this leg; the Linux
+    # rust-test verifies the combined tree; check does not link, so no
+    # signing/packaging/frontend artifacts are needed (same as windows-rust-test: verified
+    # empirically on macOS in 2026-08 that cargo check --all-targets does not depend on
+    # node_modules, hence no node/npm install).
+    if: >-
+      ${{
+        !cancelled() &&
+        (
+          github.event_name == 'push' ||
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.draft == false &&
+            (
+            needs.changes.outputs.rust_full == 'true' ||
+              needs.changes.outputs.cli_rust == 'true' ||
+              (
+                needs.changes.outputs.rust_code == 'true' &&
+                contains(github.event.pull_request.labels.*.name, 'ci:full-rust')
+              )
+            )
+          )
+        )
+      }}
+    runs-on: macos-15
+    # A cold check build is slow (macOS runners slower still); same cap as windows-rust-test
+    # (180: the 90-minute cap was once killed at the link phase on the Windows leg, see
+    # that job), so a hang does not burn runner minutes for long.
+    timeout-minutes: 180
+    env:
+      # Same as mac-build: inject the sh stack wrapper per platform (the rustc/LLVM stack
+      # overflow from codewhale-tui's O2 build has actually been triggered on macOS, see
+      # the rustc-stack-wrapper header comment).
+      # Must use the ${{ github.workspace }} absolute path so Cargo does not double-join
+      # the per-process cwd when resolving it.
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Init CodeWhale submodule
+        run: git submodule update --init --recursive -- CodeWhale
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same as rust-test/windows-rust-test: set the toolchain pinned by
+      # src-tauri/rust-toolchain.toml as default, so cargo invoked from the repo root via
+      # --manifest-path uses the same pinned version as locally (the file is the single
+      # source of truth; the version number is not re-hardcoded in the workflow).
+      - name: Align rust-toolchain.toml pinned toolchain
+        working-directory: pinvou3-app/src-tauri
+        run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
+
+      # bge-m3 is a gitignored large asset (559MB); a clean CI checkout does not have it.
+      # Same as mac-build and the Linux rust-test: create empty placeholder files to pass
+      # tauri-build's resource validation.
+      - name: bge-m3 placeholder (satisfies tauri-build resource check)
+        run: |
+          d=pinvou3-app/src-tauri/resources/bge-m3
+          mkdir -p "$d"
+          for f in config.json model.onnx tokenizer.json tokenizer_config.json special_tokens_map.json; do
+            : > "$d/$f"
+          done
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinvou3-app/src-tauri
+          # Separate key: macOS artifacts are not interchangeable with Linux/Windows; do not
+          # share with the sibling legs.
+          shared-key: macos-rust-check
+          # Save only on main (the sole source of warm cache); the PR side is read-only and
+          # does not eat the 10GB quota.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: macOS Rust all-targets check
+        run: >-
+          cargo check --manifest-path pinvou3-app/src-tauri/Cargo.toml
+          --all-targets --features dev-tools --locked
+
+      # Round-17: execute the computer_use unit tests on this leg — macOS-only
+      # tests (macos.rs, screen_capture_kit.rs) ran on no CI leg before. The
+      # 0-match guard keeps a test rename from silently skipping the suite.
+      - name: macOS computer_use unit tests
+        run: |
+          set -euo pipefail
+          cd pinvou3-app/src-tauri
+          cargo test --lib --features benchmark-hooks --locked computer_use -- --test-threads=1 2>&1 | tee /tmp/macos_computer_use.log
+          grep -qE 'running [1-9][0-9]* tests?' /tmp/macos_computer_use.log || {
+            echo "FAIL: the computer_use filter matched 0 tests (silent no-op guard)" >&2
+            exit 1
+          }
 
   windows-codex-runtime-test:
     name: windows-codex-runtime-test
@@ -1837,12 +2116,15 @@ jobs:
       - frontend-test
       - relay-test
       - team-relay-hub-test
+      - update-release-console-test
       - release-contract-test
       - knowledge-rust
       - rust-lint
       - rust-test
       - cli-test
       - windows-rust-test
+      - macos-rust-check
+      - windows-static-updater-contract
       - macos-codex-runtime-test
       - windows-codex-runtime-test
       - windows-runtime-test
@@ -1868,12 +2150,15 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
+          UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
           KNOWLEDGE_RUST_RESULT: ${{ needs.knowledge-rust.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_RESULT: ${{ needs.rust-test.result }}
           CLI_TEST_RESULT: ${{ needs.cli-test.result }}
           WINDOWS_RUST_RESULT: ${{ needs.windows-rust-test.result }}
+          MACOS_RUST_CHECK_RESULT: ${{ needs.macos-rust-check.result }}
+          WINDOWS_STATIC_UPDATER_RESULT: ${{ needs.windows-static-updater-contract.result }}
           MACOS_CODEX_RESULT: ${{ needs.macos-codex-runtime-test.result }}
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
@@ -1904,12 +2189,15 @@ jobs:
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
+            "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
             "knowledge-rust:$KNOWLEDGE_RUST_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
             "rust-test:$RUST_RESULT" \
             "cli-test:$CLI_TEST_RESULT" \
             "windows-rust-test:$WINDOWS_RUST_RESULT" \
+            "macos-rust-check:$MACOS_RUST_CHECK_RESULT" \
+            "windows-static-updater-contract:$WINDOWS_STATIC_UPDATER_RESULT" \
             "macos-codex-runtime-test:$MACOS_CODEX_RESULT" \
             "windows-codex-runtime-test:$WINDOWS_CODEX_RESULT" \
             "windows-runtime-test:$WINDOWS_RUNTIME_RESULT" \

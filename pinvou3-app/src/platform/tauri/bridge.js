@@ -266,6 +266,24 @@
     activeModelId: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
     superPermEnabled: false,
+    // Computer use (screenshot + keyboard/mouse control) authorization state. enabled is
+    // the global switch (off by default);
+    // granted/stopped/sessionId/grantRequest/confirmRequest describe the current active
+    // session's authorization and pending requests, maintained by bridge/computer_use.js.
+    computerUse: {
+      enabled: false,
+      granted: false,
+      stopped: false,
+      // Whether this OS has a computer_use backend at all (from
+      // computer_use_get_status.platform_supported); lets settings disable the
+      // toggle instead of letting users enable something that cannot work.
+      // Defaults false (fail closed): on an unsupported OS the toggle must
+      // not render enabled until the first get_status corrects the slice.
+      platformSupported: false,
+      sessionId: null,
+      grantRequest: null,
+      confirmRequest: null,
+    },
     modeState: { mode: "yolo" },
     // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
     // lane 未显式选过；缺省 code→plan、work→yolo）。草稿态 chip 显示与切换的
@@ -1618,6 +1636,7 @@
     llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
+    computerUse: ["computerUse"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
@@ -2625,6 +2644,7 @@
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
+  var computerUseFeature = installBridgeFeature("computer_use", { state: state, notify: notify, invoke: invoke, listen: listen });
   async function pickFiles() {
     if (!dialogOpen) return [];
     var selected = await dialogOpen({ multiple: true });
@@ -3014,6 +3034,17 @@
     multiAgent: {
       listSubagentTranscripts: listMultiAgentSubagents,
       readSubagentTranscript: readMultiAgentSubagent,
+    },
+    computerUse: {
+      getStatus: computerUseFeature.getStatus,
+      refreshStatus: computerUseFeature.refreshStatus,
+      grant: computerUseFeature.grant,
+      revoke: computerUseFeature.revoke,
+      stop: computerUseFeature.stop,
+      confirm: computerUseFeature.confirm,
+      deny: computerUseFeature.deny,
+      setEnabled: computerUseFeature.setEnabled,
+      requestPermissions: computerUseFeature.requestPermissions,
     },
     files: {
       pickFiles,

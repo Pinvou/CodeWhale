@@ -22,6 +22,7 @@ import { RightDockPanel, useRightDockOcclusion } from '../../components/layout/R
 import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard, cardBtnCls } from '../tools/tool-renderers.jsx';
 import { annotateAgentSpawnGroups } from '../multiagent/spawn-aggregation.mjs';
 import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
+import { ComputerUseBanner, ComputerUseDialogs } from '../computer-use/ComputerUseConsent.jsx';
 import {
   ConversationActivityIndicator,
   ConversationTimeline,
@@ -174,6 +175,11 @@ function createSceneViewId() {
   window.crypto.getRandomValues(bytes);
   return `scene-view-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
 }
+
+// Computer use (screenshot + keyboard/mouse control) is a desktop-only capability: on Web
+// can() is always false, so the consent banner/dialogs render not at all and tool cards
+// fall back to the default card.
+const COMPUTER_USE_ENABLED = can('computerUse');
 
 // Enter-to-submit guard (shared by the main input, queued-message edit, and in-bubble edit):
 // Shift+Enter still inserts a newline; Enter during IME composition confirms the candidate text
@@ -813,6 +819,42 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const activeSessionId = bs ? bs.activeSessionId : null;
       const activeSessionIdRef = useRef(activeSessionId);
       activeSessionIdRef.current = activeSessionId;
+      const computerUseCopy = t.uiComputerUse;
+      const computerUseSlice = (bs && bs.computerUse) || null;
+      // Fetch the authoritative computer-use state on session mount/switch: the banner and
+      // consent dialogs apply only to the active session; pending requests of background
+      // sessions are parked per session on the bridge side and resurface with this refresh
+      // when switching back. Before issuing the IPC, refreshStatus synchronously calls
+      // clearSessionRequests to drop pending dialogs left by the previous session (a pure
+      // state operation), so during the async refresh window the old session's consent
+      // dialogs are no longer clickable.
+      useEffect(() => {
+        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
+        bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
+        // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
+        // refresh or a backgrounded window), the banner would drift from the real
+        // authorization state — this periodic refreshStatus reconciles with the backend,
+        // recovering missed grant/stop events so the banner realigns (a pure recovery
+        // mechanism; it does not change the authorization's own lifecycle).
+        // Skip polling while there is no last-known state yet (nothing has
+        // published a slice) or the last known state is disabled: a null
+        // slice used to still fire an empty round-trip every 30s, and a
+        // disabled feature has nothing to reconcile (the mount refresh above
+        // covers cold start; re-enabling goes through setEnabled, which
+        // re-reads the authoritative state directly and cannot miss the
+        // state flip).
+        const reconciler = setInterval(() => {
+          try {
+            const snapshot = bridge.state.get("computerUse");
+            const slice = snapshot && snapshot.computerUse;
+            if (!slice || slice.enabled === false) return;
+          } catch {
+            /* state.get unavailable: keep polling */
+          }
+          bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
+        }, 30_000);
+        return () => clearInterval(reconciler);
+      }, [activeSessionId]);
       const busy = bs ? bs.busy : false;
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
       // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
@@ -2549,6 +2591,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           <div ref={scrollRef} data-testid="chat-scroll"
             style={{
               ...responsiveGutterStyle,
+              overflowAnchor: 'none',
               ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
             }}
             className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar flex flex-col pt-20 max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>
@@ -2600,9 +2643,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
             {hasMessages && (
               <div ref={conversationContentRef} className="max-w-[800px] w-full min-w-0 mx-auto space-y-4">
+                {/* Keep this explicit 16px value aligned with space-y-4 so
+                    crossing the virtualization threshold does not change spacing. */}
                 <ConversationTimeline
                     turns={conversationProjection.turns}
                     sessionId={activeSessionId}
+                    scrollElementRef={scrollRef}
+                    busy={busy}
+                    turnGapPx={16}
+                    followOutputRef={autoScrollRef}
                     onRetry={(turn) => {
                       if (!busy && turn.userText && bridge.available) {
                         bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });
@@ -2666,6 +2715,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               onToggleShortcut={handleVoiceIntroToggleShortcut}
             />
           )}
+          {COMPUTER_USE_ENABLED && (
+            <ComputerUseDialogs slice={computerUseSlice} copy={computerUseCopy} />
+          )}
           {/* Floating Input Area */}
           <div
             ref={composerWrapRef}
@@ -2674,6 +2726,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             style={responsiveGutterStyle}
           >
             <div className="max-w-[800px] w-full mx-auto">
+              {COMPUTER_USE_ENABLED && (
+                <ComputerUseBanner slice={computerUseSlice} copy={computerUseCopy} />
+              )}
               {!scheduledRunContext && !conversationStarted && (
                 <HomeModeSwitcher
                   mode={pinvouMode}
