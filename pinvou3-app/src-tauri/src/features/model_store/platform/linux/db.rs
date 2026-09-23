@@ -967,7 +967,7 @@ pub fn list_api_keys_for_card(card_id: &str) -> rusqlite::Result<Vec<ApiKeyRecor
 ///
 /// # 目前零调用点
 ///
-/// 没有 service 包装、没有 `#[tauri::command]`、没有按钮：单独吊销这条能力
+/// 没有 service 包装、`app/commands/` 里没有对应的命令入口、没有按钮：单独吊销这条能力
 /// **在界面上还不存在**，唯一能让存量 key 失效的动作是把整张卡片移出模型库
 /// （`delete_store_model` 在同一个事务里连 `api_keys` 一起删）。「仅卸载」
 /// 走的是 `mark_uninstalled`，key 原样留着照样能用。
