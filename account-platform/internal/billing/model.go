@@ -60,7 +60,6 @@ type Product struct {
 	InvoiceProductName     string   `json:"invoice_product_name"`
 	Currency               string   `json:"currency"`
 	Channels               []string `json:"channels"`
-	QRScanApps             []string `json:"qr_scan_apps,omitempty"`
 	CatalogVersion         int64    `json:"catalog_version"`
 	AvailabilityStatus     string   `json:"availability_status"`
 	AvailabilityReasonCode string   `json:"availability_reason_code,omitempty"`

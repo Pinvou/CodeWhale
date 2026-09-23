@@ -33,7 +33,7 @@ func TestCapabilitiesRejectInvalidQRScanApps(t *testing.T) {
 	if !valid.Valid() {
 		t.Fatal("valid QR scan applications were rejected")
 	}
-	for _, apps := range [][]string{{"ALIPAY", "ALIPAY"}, {"BAD-APP"}, {""}} {
+	for _, apps := range [][]string{{"ALIPAY", "ALIPAY"}, {"ALIPAY", "alipay"}, {"alipay"}, {" ALIPAY "}, {"BAD-APP"}, {""}} {
 		candidate := valid
 		candidate.QRScanApps = apps
 		if candidate.Valid() {

@@ -4,7 +4,7 @@ import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../compone
 import { formatPoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
-import { hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus, paymentScanPrompt } from './order-view.js';
+import { effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus, paymentScanPrompt } from './order-view.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -147,11 +147,12 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
   const selectedAvailable = selected?.availability_status === 'AVAILABLE';
   const allPaused = products.length > 0 && !products.some((product) => product.availability_status === 'AVAILABLE');
   const channels = selectedAvailable && selected?.channels?.length ? selected.channels : fallbackChannels;
+  const effectiveChannel = effectivePaymentChannel(channels, channel);
   const remainingSeconds = orderRemainingSeconds(order, now);
   const paid = paidOrderStates.has(order?.status);
   const displayStatus = orderSummaryStatus(order);
   const canScan = isPayablePaymentOrder(order, now);
-  const scanApps = products.find((product) => product.product_id === order?.product_id)?.qr_scan_apps || [];
+  const scanApps = order?.qr_scan_apps || [];
   const inactiveHint = copy.orderNoLongerPayable;
 
   useEffect(() => {
@@ -159,8 +160,8 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
   }, [products, selectedAvailable]);
 
   useEffect(() => {
-    if (channels.length && !channels.includes(channel)) setChannel(channels[0]);
-  }, [channel, channels]);
+    if (channel !== effectiveChannel) setChannel(effectiveChannel);
+  }, [channel, effectiveChannel]);
 
   useEffect(() => {
     if (!canScan) return undefined;
@@ -308,7 +309,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
       {hasSelectablePaymentChannels(channels) && (
         <label className="block">
           <span className={`mb-1.5 block px-1 text-[11px] font-medium ${mutedText}`}>{copy.paymentMethod}</span>
-          <select value={channel} onChange={(event) => setChannel(event.target.value)} className={`h-9 w-full rounded-xl border px-3 text-[12px] outline-none ${controlTheme}`}>
+          <select value={effectiveChannel} onChange={(event) => setChannel(event.target.value)} className={`h-9 w-full rounded-xl border px-3 text-[12px] outline-none ${controlTheme}`}>
             {channels.map((item) => (
               <option key={item} value={item}>
                 {copy.channels[item] || item}
@@ -317,7 +318,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
           </select>
         </label>
       )}
-      <button type="button" disabled={busy || !selectedAvailable} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">
+      <button type="button" disabled={busy || !selectedAvailable || !effectiveChannel} onClick={() => onCreate(productId, effectiveChannel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">
         {busy && <RefreshCw size={13} className="animate-spin" />}
         {copy.createRecharge}
       </button>

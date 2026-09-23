@@ -99,8 +99,8 @@ func (c Capabilities) Valid() bool {
 	}
 	seen = map[string]bool{}
 	for _, app := range c.QRScanApps {
-		app = strings.ToUpper(strings.TrimSpace(app))
-		if !validCapabilityCode(app) || seen[app] {
+		normalized := strings.ToUpper(strings.TrimSpace(app))
+		if app != normalized || !validCapabilityCode(app) || seen[app] {
 			return false
 		}
 		seen[app] = true

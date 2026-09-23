@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
+import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { clearInvitationAcceptanceRetries, invitationAcceptanceMayBeCommitted, invitationRecoveryScope, readInvitationAcceptanceRetries, writeInvitationAcceptanceRetries } from './invitation-recovery.js';
@@ -1922,9 +1922,10 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   }, [productId, products]);
   const selectedProduct = products.find((item) => item.product_id === productId && item.availability_status === 'AVAILABLE');
   const availableChannels = selectedProduct?.channels || [];
+  const effectiveChannel = effectivePaymentChannel(availableChannels, channel);
   useEffect(() => {
-    if (!availableChannels.includes(channel)) setChannel(availableChannels[0] || '');
-  }, [channel, productId, availableChannels.join('|')]);
+    if (channel !== effectiveChannel) setChannel(effectiveChannel);
+  }, [channel, effectiveChannel]);
   useEffect(() => {
     if (!memberId && members[0]) setMemberId(members[0].user_id);
   }, [memberId, members]);
@@ -1938,7 +1939,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const selectedMember = members.find((item) => item.user_id === memberId);
   const amountMicrocredits = Math.round(Number(amount) * MICROCREDITS_PER_POINT);
   const activePayment = isPayablePaymentOrder(order, now);
-  const paymentScanApps = products.find((product) => product.product_id === order?.product_id)?.qr_scan_apps || [];
+  const paymentScanApps = order?.qr_scan_apps || [];
   const remainingSeconds = paymentOrderRemainingSeconds(order, now);
   useEffect(() => {
     setNow(Date.now());
@@ -1949,7 +1950,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
     if (paymentDialogOpen && !activePayment) setPaymentDialogOpen(false);
   }, [paymentDialogOpen, activePayment]);
   const purchaseAndOpenPayment = async () => {
-    if (await onPurchase(productId, channel)) setPaymentDialogOpen(true);
+    if (await onPurchase(productId, effectiveChannel)) setPaymentDialogOpen(true);
   };
   if (!canPurchase && !canAllocate && !canReadQuota) return null;
   return (
@@ -1968,7 +1969,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
               ))}
             </select>
             {hasSelectablePaymentChannels(availableChannels) && (
-              <select value={channel} aria-label={copy.paymentMethod} onChange={(event) => setChannel(event.target.value)}>
+              <select value={effectiveChannel} aria-label={copy.paymentMethod} onChange={(event) => setChannel(event.target.value)}>
                 {availableChannels.map((item) => (
                   <option key={item} value={item}>
                     {copy.channels[item] || item}
@@ -1976,7 +1977,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
                 ))}
               </select>
             )}
-            <button className="ap-primary" disabled={busy || !selectedProduct || !channel} onClick={purchaseAndOpenPayment}>
+            <button className="ap-primary" disabled={busy || !selectedProduct || !effectiveChannel} onClick={purchaseAndOpenPayment}>
               {copy.purchaseForOrganization}
             </button>
           </div>
@@ -2101,6 +2102,7 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
   const selectedAvailable = selected?.availability_status === 'AVAILABLE';
   const allPaused = products.length > 0 && !products.some((item) => item.availability_status === 'AVAILABLE');
   const availableChannels = selectedAvailable ? selected?.channels || [] : [];
+  const effectiveChannel = effectivePaymentChannel(availableChannels, channel);
   if (allPaused) {
     billingUnavailable = true;
     copy = { ...copy, billingUnavailable: copy.paymentChannelMaintenance };
@@ -2114,8 +2116,8 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
         },
   );
   useEffect(() => {
-    if (!availableChannels.includes(channel)) setChannel(availableChannels[0] || '');
-  }, [channel, productId, availableChannels.join('|')]);
+    if (channel !== effectiveChannel) setChannel(effectiveChannel);
+  }, [channel, effectiveChannel]);
   useEffect(() => {
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -2123,13 +2125,13 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
   }, []);
   const pendingOrders = payablePaymentOrders(orders, now);
   const activePayment = isPayablePaymentOrder(order, now);
-  const paymentScanApps = products.find((product) => product.product_id === order?.product_id)?.qr_scan_apps || [];
+  const paymentScanApps = order?.qr_scan_apps || [];
   const remainingSeconds = paymentOrderRemainingSeconds(order, now);
   useEffect(() => {
     if (paymentDialogOpen && !activePayment) setPaymentDialogOpen(false);
   }, [paymentDialogOpen, activePayment]);
   const createAndOpenPayment = async () => {
-    if (await onRecharge(productId, channel)) setPaymentDialogOpen(true);
+    if (await onRecharge(productId, effectiveChannel)) setPaymentDialogOpen(true);
   };
   const activateAndOpenPayment = async (orderId) => {
     if (await onActivateRecharge(orderId)) setPaymentDialogOpen(true);
@@ -2170,7 +2172,7 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
         </div>
         <div className="ap-inline">
           {hasSelectablePaymentChannels(availableChannels) && (
-            <select value={channel} aria-label={copy.paymentMethod} disabled={!canRecharge} title={!canRecharge ? copy.permissionDenied : undefined} onChange={(event) => setChannel(event.target.value)}>
+            <select value={effectiveChannel} aria-label={copy.paymentMethod} disabled={!canRecharge} title={!canRecharge ? copy.permissionDenied : undefined} onChange={(event) => setChannel(event.target.value)}>
               {availableChannels.map((item) => (
                 <option key={item} value={item}>
                   {copy.channels[item] || item}
@@ -2178,7 +2180,7 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
               ))}
             </select>
           )}
-          <button className="ap-primary" disabled={busy || !canRecharge || billingUnavailable || !selected || !channel} title={!canRecharge ? copy.permissionDenied : undefined} onClick={createAndOpenPayment}>
+          <button className="ap-primary" disabled={busy || !canRecharge || billingUnavailable || !selected || !effectiveChannel} title={!canRecharge ? copy.permissionDenied : undefined} onClick={createAndOpenPayment}>
             {copy.createRecharge}
           </button>
         </div>

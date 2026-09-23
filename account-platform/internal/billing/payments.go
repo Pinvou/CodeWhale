@@ -38,6 +38,7 @@ type PaymentOrder struct {
 	CloseStatus                  string     `json:"close_status"`
 	PaymentURL                   string     `json:"payment_url,omitempty"`
 	QRData                       string     `json:"qr_data,omitempty"`
+	QRScanApps                   []string   `json:"qr_scan_apps,omitempty"`
 	PrimaryProviderTransactionID *string    `json:"primary_provider_transaction_id,omitempty"`
 	ExpiresAt                    time.Time  `json:"expires_at"`
 	PaidAt                       *time.Time `json:"paid_at,omitempty"`
@@ -197,7 +198,6 @@ func (p *PaymentCoordinator) filterProducts(products []Product, externalProducts
 			if len(product.Channels) == 0 {
 				continue
 			}
-			product.QRScanApps = append([]string(nil), capabilities.QRScanApps...)
 			filtered = append(filtered, product)
 		}
 	}
@@ -408,14 +408,15 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, ErrConflict
 	}
 	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
+	capabilities := p.Capabilities()
 	providerPayableUntil := now.Add(p.payableWindow())
 	lateReviewBoundaryAt := now.Add(72 * time.Hour)
-	finalArchiveEligibleAt := providerPayableUntil.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", CloseStatus: "OPEN", ExpiresAt: now.Add(p.payableWindow()), Mobile: mobile, ProviderSKU: external.SKU, ProviderID: p.Capabilities().ProviderID, ProviderVersion: p.Capabilities().Version, ProviderPayableUntil: providerPayableUntil, LateReviewBoundaryAt: lateReviewBoundaryAt, FinalArchiveEligibleAt: finalArchiveEligibleAt, ArchiveStatus: "ACTIVE"}
+	finalArchiveEligibleAt := providerPayableUntil.Add(time.Duration(capabilities.MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", CloseStatus: "OPEN", ExpiresAt: now.Add(p.payableWindow()), Mobile: mobile, ProviderSKU: external.SKU, ProviderID: capabilities.ProviderID, ProviderVersion: capabilities.Version, QRScanApps: append([]string(nil), capabilities.QRScanApps...), ProviderPayableUntil: providerPayableUntil, LateReviewBoundaryAt: lateReviewBoundaryAt, FinalArchiveEligibleAt: finalArchiveEligibleAt, ArchiveStatus: "ACTIVE"}
 	snapshot, _ := json.Marshal(product)
 	mappingSnapshot, _ := json.Marshal(external)
-	capabilitySnapshot, _ := json.Marshal(p.Capabilities())
-	payerMappingSnapshot, _ := json.Marshal(map[string]any{"payer_user_id": requesterID, "provider_id": p.Capabilities().ProviderID, "provider_version": p.Capabilities().Version, "commerce_customer_required": p.Capabilities().CommerceCustomerRequired, "status": map[bool]string{true: "READY", false: "NOT_REQUIRED"}[p.Capabilities().CommerceCustomerRequired]})
+	capabilitySnapshot, _ := json.Marshal(capabilities)
+	payerMappingSnapshot, _ := json.Marshal(map[string]any{"payer_user_id": requesterID, "provider_id": capabilities.ProviderID, "provider_version": capabilities.Version, "commerce_customer_required": capabilities.CommerceCustomerRequired, "status": map[bool]string{true: "READY", false: "NOT_REQUIRED"}[capabilities.CommerceCustomerRequired]})
 	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,payer_commerce_mapping_snapshot,beneficiary_organization_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,created_at,updated_at,mobile_e164,provider_sku,provider_id,provider_version,product_mapping_id,product_mapping_snapshot,provider_capability_snapshot) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'CREATED','PENDING',$13,$14,$15,$16,$17,$17,NULLIF($18,''),NULLIF($19,''),$20,$21,$22,$23,$24)`, order.ID, order.MerchantOrderNo, requesterID, payerMappingSnapshot, beneficiaryOrganizationID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, providerPayableUntil, lateReviewBoundaryAt, finalArchiveEligibleAt, now, mobile, external.SKU, p.Capabilities().ProviderID, p.Capabilities().Version, external.MappingID, mappingSnapshot, capabilitySnapshot)
 	if err != nil {
 		return PaymentOrder{}, false, err
@@ -481,7 +482,11 @@ SELECT mapping.id,mapping.mapping_version,mapping.provider_id,mapping.provider_v
 
 func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string, now time.Time, includeExpired bool) (PaymentOrder, error) {
 	var order PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') AND close_status='OPEN' AND ($6 OR expires_at>$5) ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel, now, includeExpired).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.CloseStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderID, &order.ProviderVersion)
+	var capabilitySnapshot []byte
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version,COALESCE(provider_capability_snapshot,'{}'::jsonb) FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') AND close_status='OPEN' AND ($6 OR expires_at>$5) ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel, now, includeExpired).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.CloseStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderID, &order.ProviderVersion, &capabilitySnapshot)
+	if err == nil {
+		err = applyPaymentCapabilitySnapshot(&order, capabilitySnapshot)
+	}
 	return order, err
 }
 

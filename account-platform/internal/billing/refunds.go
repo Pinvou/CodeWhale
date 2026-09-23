@@ -56,14 +56,18 @@ func (p *PaymentCoordinator) GetOrder(ctx context.Context, orderID, requesterID 
 }
 
 func (p *PaymentCoordinator) RecentOrder(ctx context.Context, requesterID, walletID uuid.UUID) (*PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version
+	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version,COALESCE(provider_capability_snapshot,'{}'::jsonb)
 		FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 ORDER BY created_at DESC LIMIT 1`
 	var order PaymentOrder
-	err := p.repository.pool.QueryRow(ctx, query, requesterID, walletID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.CloseStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderID, &order.ProviderVersion)
+	var capabilitySnapshot []byte
+	err := p.repository.pool.QueryRow(ctx, query, requesterID, walletID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.CloseStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderID, &order.ProviderVersion, &capabilitySnapshot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := applyPaymentCapabilitySnapshot(&order, capabilitySnapshot); err != nil {
 		return nil, err
 	}
 	maskClosedPaymentInstructions(&order)
@@ -597,13 +601,45 @@ func refundMerchantOrder(ctx context.Context, database queryable, orderID uuid.U
 }
 
 func getPaymentOrderByID(ctx context.Context, database queryable, orderID uuid.UUID, lock bool) (PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,COALESCE(provider_sku,''),provider_id,provider_version FROM payment_orders WHERE id=$1`
+	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,close_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,COALESCE(provider_sku,''),provider_id,provider_version,COALESCE(provider_capability_snapshot,'{}'::jsonb) FROM payment_orders WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var order PaymentOrder
-	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.CloseStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderSKU, &order.ProviderID, &order.ProviderVersion)
+	var capabilitySnapshot []byte
+	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.CloseStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderSKU, &order.ProviderID, &order.ProviderVersion, &capabilitySnapshot)
+	if err == nil {
+		err = applyPaymentCapabilitySnapshot(&order, capabilitySnapshot)
+	}
 	return order, err
+}
+
+func applyPaymentCapabilitySnapshot(order *PaymentOrder, snapshot []byte) error {
+	var capabilities struct {
+		QRScanApps []string `json:"qr_scan_apps"`
+	}
+	if len(snapshot) == 0 {
+		order.QRScanApps = nil
+		return nil
+	}
+	if err := json.Unmarshal(snapshot, &capabilities); err != nil {
+		return fmt.Errorf("decode payment capability snapshot: %w", err)
+	}
+	normalized := make([]string, 0, len(capabilities.QRScanApps))
+	seen := make(map[string]bool, len(capabilities.QRScanApps))
+	for _, app := range capabilities.QRScanApps {
+		app = strings.ToUpper(strings.TrimSpace(app))
+		if !validPaymentChannel(app) {
+			order.QRScanApps = nil
+			return nil
+		}
+		if !seen[app] {
+			normalized = append(normalized, app)
+			seen[app] = true
+		}
+	}
+	order.QRScanApps = normalized
+	return nil
 }
 
 func getRefundByIdempotency(ctx context.Context, database queryable, key string, lock bool) (Refund, error) {

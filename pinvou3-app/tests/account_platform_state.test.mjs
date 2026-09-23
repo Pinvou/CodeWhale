@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
-import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
+import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -1268,19 +1268,32 @@ test('recharge only shows a payment-channel selector when the backend offers a r
   assert.equal(hasSelectablePaymentChannels(['ALIPAY']), false);
   assert.equal(hasSelectablePaymentChannels(['alipay', ' ALIPAY ']), false);
   assert.equal(hasSelectablePaymentChannels(['ALIPAY', 'WECHAT']), true);
+  assert.equal(effectivePaymentChannel(['WECHAT'], 'ALIPAY'), 'WECHAT');
+  assert.equal(effectivePaymentChannel(['ALIPAY', 'WECHAT'], 'wechat'), 'WECHAT');
+  assert.equal(effectivePaymentChannel([], 'ALIPAY'), '');
   assert.match(popover, /hasSelectablePaymentChannels\(channels\) &&/);
+  assert.match(popover, /onCreate\(productId, effectiveChannel\)/);
   assert.equal((view.match(/hasSelectablePaymentChannels\(availableChannels\) &&/g) || []).length, 2);
+  assert.match(view, /onPurchase\(productId, effectiveChannel\)/);
+  assert.match(view, /onRecharge\(productId, effectiveChannel\)/);
 });
 
-test('QR scan instructions come from provider capabilities instead of accounting channels', async () => {
+test('QR scan instructions come from the order capability snapshot instead of current products or accounting channels', async () => {
   const provider = await readFile(new URL('../../account-platform/internal/platform/h3cpayment/provider.go', import.meta.url), 'utf8');
   const billing = await readFile(new URL('../../account-platform/internal/billing/payments.go', import.meta.url), 'utf8');
+  const orderReader = await readFile(new URL('../../account-platform/internal/billing/refunds.go', import.meta.url), 'utf8');
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   assert.equal(paymentScanPrompt(accountPlatformCopy.zh, ['ALIPAY', 'WECHAT']), '支持以下应用扫码：支付宝、微信支付');
   assert.equal(paymentScanPrompt(accountPlatformCopy.en, []), accountPlatformCopy.en.scanToPay);
   assert.match(provider, /QRScanApps:\s*\[\]string\{"ALIPAY", "WECHAT"\}/);
-  assert.match(billing, /product\.QRScanApps = append\(\[\]string\(nil\), capabilities\.QRScanApps\.\.\.\)/);
+  assert.match(billing, /QRScanApps:\s*append\(\[\]string\(nil\), capabilities\.QRScanApps\.\.\.\)/);
+  assert.match(orderReader, /provider_capability_snapshot/);
+  assert.match(orderReader, /applyPaymentCapabilitySnapshot/);
+  assert.match(popover, /const scanApps = order\?\.qr_scan_apps \|\| \[\]/);
+  assert.match(view, /const paymentScanApps = order\?\.qr_scan_apps \|\| \[\]/);
+  assert.doesNotMatch(popover, /products\.find\(\(product\) => product\.product_id === order\?\.product_id\)\?\.qr_scan_apps/);
+  assert.doesNotMatch(view, /products\.find\(\(product\) => product\.product_id === order\?\.product_id\)\?\.qr_scan_apps/);
   assert.match(popover, /paymentScanPrompt\(copy, scanApps\)/);
   assert.match(view, /paymentScanPrompt\(copy, scanApps\)/);
   assert.doesNotMatch(popover, /h3c_mall|provider_id/);
@@ -1628,7 +1641,7 @@ test('organization purchases open the shared payment dialog and refresh organiza
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   const organizationEntitlements = view.slice(view.indexOf('function OrganizationEntitlements'), view.indexOf('function EntitlementSummary'));
   assert.match(view, /<PortalMyOrganization[\s\S]*qrData=\{qrData\}/);
-  assert.match(organizationEntitlements, /if \(await onPurchase\(productId, channel\)\) setPaymentDialogOpen\(true\)/);
+  assert.match(organizationEntitlements, /if \(await onPurchase\(productId, effectiveChannel\)\) setPaymentDialogOpen\(true\)/);
   assert.match(organizationEntitlements, /paymentDialogOpen && activePayment && <PaymentQRCodeDialog/);
   assert.match(view, /client\.organizationBalance\(activeOrganizationId\)/);
   assert.match(view, /client\.organizationEntitlementPackages\(activeOrganizationId\)/);

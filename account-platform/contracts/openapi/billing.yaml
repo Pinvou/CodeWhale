@@ -1114,12 +1114,6 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/PaymentChannel"
-        qr_scan_apps:
-          type: array
-          uniqueItems: true
-          items:
-            $ref: "#/components/schemas/PaymentScanApp"
-          description: Provider-declared applications that can scan the QR instruction for this available product.
         availability_status:
           type: string
           enum: [AVAILABLE, PROVIDER_PAUSED, PRODUCT_PAUSED]
@@ -1179,6 +1173,12 @@ components:
           format: int64
         channel:
           $ref: "#/components/schemas/PaymentChannel"
+        qr_scan_apps:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/PaymentScanApp"
+          description: Applications guaranteed by the Provider capability snapshot frozen for this order. Omitted for legacy snapshots or when the Provider made no guarantee.
         qr_content:
           type: [string, "null"]
           maxLength: 2048

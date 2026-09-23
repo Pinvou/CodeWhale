@@ -50,8 +50,30 @@ func TestFilterProductsAllowsFrozenPrices(t *testing.T) {
 	coordinator := &PaymentCoordinator{provider: catalogProvider{}}
 	mappings := map[string]ExternalProduct{"PLAN_STANDARD": testExternalProduct("0502AJ0Q", 9900)}
 	products := []Product{{ProductID: "PLAN_STANDARD", AmountFen: 9900, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "FROZEN"}}
-	if got := coordinator.filterProducts(products, mappings); len(got) != 1 || len(got[0].QRScanApps) != 2 || got[0].QRScanApps[0] != "ALIPAY" || got[0].QRScanApps[1] != "WECHAT" {
+	if got := coordinator.filterProducts(products, mappings); len(got) != 1 {
 		t.Fatalf("frozen catalog was rejected: %#v", got)
+	}
+}
+
+func TestPaymentCapabilitySnapshotRestoresOrderQRScanApps(t *testing.T) {
+	var order PaymentOrder
+	if err := applyPaymentCapabilitySnapshot(&order, []byte(`{"qr_scan_apps":["ALIPAY","WECHAT"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(order.QRScanApps) != 2 || order.QRScanApps[0] != "ALIPAY" || order.QRScanApps[1] != "WECHAT" {
+		t.Fatalf("order did not restore its frozen QR scan applications: %#v", order.QRScanApps)
+	}
+	if err := applyPaymentCapabilitySnapshot(&order, []byte(`{}`)); err != nil || len(order.QRScanApps) != 0 {
+		t.Fatalf("legacy capability snapshot did not fall back safely: apps=%#v err=%v", order.QRScanApps, err)
+	}
+	if err := applyPaymentCapabilitySnapshot(&order, []byte(`{"qr_scan_apps":[" alipay ","ALIPAY","wechat"]}`)); err != nil || len(order.QRScanApps) != 2 || order.QRScanApps[0] != "ALIPAY" || order.QRScanApps[1] != "WECHAT" {
+		t.Fatalf("legacy QR scan applications were not normalized and deduplicated: apps=%#v err=%v", order.QRScanApps, err)
+	}
+	if err := applyPaymentCapabilitySnapshot(&order, []byte(`{"qr_scan_apps":["ALIPAY","BAD-APP"]}`)); err != nil || len(order.QRScanApps) != 0 {
+		t.Fatalf("invalid optional QR scan applications did not fall back safely: apps=%#v err=%v", order.QRScanApps, err)
+	}
+	if err := applyPaymentCapabilitySnapshot(&order, []byte(`{"qr_scan_apps":`)); err == nil {
+		t.Fatal("invalid capability snapshot was accepted")
 	}
 }
 

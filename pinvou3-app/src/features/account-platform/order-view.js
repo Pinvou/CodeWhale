@@ -34,6 +34,17 @@ export function hasSelectablePaymentChannels(channels = []) {
 }
 
 /**
+ * @param {unknown} channels
+ * @param {unknown} selectedChannel
+ */
+export function effectivePaymentChannel(channels = [], selectedChannel = '') {
+  if (!Array.isArray(channels)) return '';
+  const available = [...new Set(channels.map((channel) => String(channel || '').trim().toUpperCase()).filter(Boolean))];
+  const selected = String(selectedChannel || '').trim().toUpperCase();
+  return available.includes(selected) ? selected : available[0] || '';
+}
+
+/**
  * @param {{ scanToPay?: string, scanToPayWithApps?: (apps: string[]) => string, channels?: Record<string, string> }} copy
  * @param {unknown} scanApps
  */

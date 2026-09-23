@@ -955,7 +955,7 @@ RECEIVABLE_OPEN -> RESOLVED
 - 回调原文作为受限证据嵌入规范化通知，和查询证据使用相同支付流水归并与权益履约函数；回调/查询并发、重复和乱序均不得重复创建流水、权益包或账本分录。
 - Profile 映射后的成功、处理中、关闭和复核状态遵循相同证据优先级；未知新状态必须保存原文并进入复核，不得静默丢弃或猜测终态。
 - 回调不替代服务端主动查询。回调缺失、认证失败、处理延迟或状态不确定时继续按 PAY-19 查询；查询先收敛后到达的回调只补充证据，不能重复履约。
-- 新华三是首个 Provider Profile，固定声明 `notification_supported=true`：查询和回调共享同一原生订单映射；`PAID` 映射为成功，`PENDING/PROCESSING/WAIT_PAY` 只追加处理中证据，`PAY_CLOSED` 只有在权威终态能力允许时才能关闭，`FAILED` 及未知状态进入人工复核。对外渠道规范为 `ALIPAY`、币种为 `CNY`；商城内部 `payChannel` 只作为原文证据，不覆盖本地渠道。新华三 Profile 通过通用 `qr_scan_apps` 能力声明同一二维码支持支付宝与微信扫码，客户端只消费该能力，不得按 Provider 名称或记账渠道推断。商城时间同时兼容 RFC 3339、Asia/Shanghai `yyyy-MM-dd HH:mm:ss` 和文档中的 Unix 秒/毫秒。
+- 新华三是首个 Provider Profile，固定声明 `notification_supported=true`：查询和回调共享同一原生订单映射；`PAID` 映射为成功，`PENDING/PROCESSING/WAIT_PAY` 只追加处理中证据，`PAY_CLOSED` 只有在权威终态能力允许时才能关闭，`FAILED` 及未知状态进入人工复核。对外渠道规范为 `ALIPAY`、币种为 `CNY`；商城内部 `payChannel` 只作为原文证据，不覆盖本地渠道。新华三 Profile 通过通用 `qr_scan_apps` 能力声明同一二维码支持支付宝与微信扫码；能力随订单冻结，客户端只消费订单返回的快照值，不得按当前商品、Provider 名称或记账渠道推断。商城时间同时兼容 RFC 3339、Asia/Shanghai `yyyy-MM-dd HH:mm:ss` 和文档中的 Unix 秒/毫秒。
 - `[PAY-43]` 所有商城金额以十进制元读取并精确换算为分，不经二进制浮点。`PAID` 的 `paidAmt` 必须为正，并与非空 `needPayAmt`、`skuAmt` 一致；再与本地订单冻结金额校验，任一不一致只保留原文并进入人工复核。
 - 商城账单、主动关单和退款接口仍不属于当前新华三 Profile；普通退款继续按 PAY-31 关闭。
 
