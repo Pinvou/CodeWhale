@@ -26,6 +26,8 @@ pub struct RuntimeModelRequest {
 ///
 /// 凭据只保存在内存中，不参与序列化；`Debug` 固定脱敏，避免 bridge 或测试日志
 /// 意外输出明文。存在时它是本次引擎配置的最终凭据，优先于环境变量和本地凭据库。
+/// The Community default preparation path is always passthrough (`credential` stays None; see
+/// engine_pool's `prepare_runtime_model`); the field is reserved for the enterprise seam.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeModelCredential {
     api_key: String,
@@ -69,13 +71,6 @@ impl PreparedRuntimeModel {
             credential: None,
             revision: None,
         }
-    }
-
-    /// 判断当前准备结果是否要求替换已有引擎。
-    ///
-    /// 比较覆盖模型路由、运行时凭据和显式 revision；调用方无需读取或记录密钥。
-    pub fn requires_rebuild_from(&self, previous: &Self) -> bool {
-        self != previous
     }
 }
 
@@ -175,42 +170,34 @@ mod tests {
 
     #[test]
     fn runtime_credential_debug_output_is_redacted() {
-        let credential =
-            RuntimeModelCredential::api_key("runtime-secret").expect("runtime credential");
-        let rendered = format!("{credential:?}");
+        let rendered = format!("{:?}", credential("runtime-secret"));
         assert!(rendered.contains("[REDACTED]"));
         assert!(!rendered.contains("runtime-secret"));
-        assert!(RuntimeModelCredential::api_key("  ").is_err());
     }
 
     #[test]
     fn revision_change_requires_engine_rebuild() {
+        // EnginePool's rebuild decision (PreparedRuntimeState::requires_rebuild_from)
+        // is whole-struct equality: any change to revision or the runtime credential counts as requiring teardown and rebuild.
         let previous = PreparedRuntimeModel {
             model: model(),
-            credential: Some(
-                RuntimeModelCredential::api_key("runtime-secret").expect("runtime credential"),
-            ),
+            credential: Some(credential("runtime-secret")),
             revision: Some("revision-1".to_string()),
         };
         let unchanged = previous.clone();
         let rotated = PreparedRuntimeModel {
             model: model(),
-            credential: Some(
-                RuntimeModelCredential::api_key("runtime-secret").expect("runtime credential"),
-            ),
+            credential: Some(credential("runtime-secret")),
             revision: Some("revision-2".to_string()),
         };
         let rotated_credential = PreparedRuntimeModel {
             model: model(),
-            credential: Some(
-                RuntimeModelCredential::api_key("runtime-secret-2")
-                    .expect("rotated runtime credential"),
-            ),
+            credential: Some(credential("runtime-secret-2")),
             revision: Some("revision-1".to_string()),
         };
 
-        assert!(!unchanged.requires_rebuild_from(&previous));
-        assert!(rotated.requires_rebuild_from(&previous));
-        assert!(rotated_credential.requires_rebuild_from(&previous));
+        assert!(unchanged == previous);
+        assert!(rotated != previous);
+        assert!(rotated_credential != previous);
     }
 }

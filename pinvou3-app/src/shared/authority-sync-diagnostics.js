@@ -304,7 +304,6 @@
   root.PinvouAuthoritySyncDiagnostics = Object.freeze({
     record: record,
     flush: flush,
-    connectionSnapshot: connectionSnapshot,
     pendingCount: function () { return queue.length; },
   });
   // 恢复条数在本次 record 入队前度量，此刻 queue.length 即恢复规模。

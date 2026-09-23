@@ -179,7 +179,8 @@ export function ConversationStatusBadge({ status, copy }) {
   );
 }
 
-export function ConversationActivityIndicator({
+// Internal-only: the only consumer is LiveConversationActivityIndicator below.
+function ConversationActivityIndicator({
   turn,
   now,
   onRequestAttention,

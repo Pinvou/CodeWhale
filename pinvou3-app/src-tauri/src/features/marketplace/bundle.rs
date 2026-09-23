@@ -179,7 +179,8 @@ pub struct ConfigFieldSpec {
 }
 
 /// 包形态（内容现算，不落存储）。优先级定死（修复方案 V2）：
-/// cli 非空 → Cli > servers+skills 均非空 → Bundle > servers 非空 → Mcp > skills 非空 → Skill。
+/// servers+skills 均非空 → Bundle > servers 非空 → Mcp > skills 非空 → Skill
+/// （CLI 连接器不经内容推导：由内置常量表 `BUILTIN_CLI_BUNDLES` 在注册表直接注册）。
 /// 注：旧 `Spanner` 变体已删除——脚本可执行能力并入 skill 包，通过 SKILL.md frontmatter
 /// `tools[]` + `runtime` 段声明，由 skill_marketplace::install 后置 hook 注册。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +261,24 @@ pub struct BundleInfo {
     pub display_description: Option<String>,
 }
 
+/// Per-package-id install-state read (§3.2 truth-source inversion): takes `(installed, degraded)` from the
+/// BundleStore record snapshot the caller read in bulk once; a missing record = not installed.
+/// `records` being `None` (store read failure) → `None`, and the caller applies its own fallback policy.
+/// `list_bundles` and `MarketplaceManager::list_tools` share this same read, keeping the
+/// readiness card's and the tool card's installed/degraded semantics consistent.
+pub(crate) fn store_state(
+    records: Option<&[store::BundleRecord]>,
+    id: &str,
+) -> Option<(bool, Option<String>)> {
+    records.map(|records| {
+        records
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (r.installed, r.degraded.clone()))
+            .unwrap_or((false, None))
+    })
+}
+
 /// 注册表：从现有源汇总包清单。只读；安装/门禁/投影迁移见后续步骤。
 pub struct BundleRegistry {
     mcp_manager: MarketplaceManager,
@@ -303,20 +322,11 @@ impl BundleRegistry {
                 None
             }
         };
-        // 返回 Some((installed, degraded))；store 不可用 → None（调用方走回退值）。
-        let store_state = |id: &str| -> Option<(bool, Option<String>)> {
-            store_records.as_ref().map(|records| {
-                records
-                    .iter()
-                    .find(|r| r.id == id)
-                    .map(|r| (r.installed, r.degraded.clone()))
-                    .unwrap_or((false, None))
-            })
-        };
+        let store_records = store_records.as_deref();
 
         // 1) MCP 源（含组合包；凭据项从 manifest config_fields/secret_env 收敛）
         for tool in self.mcp_manager.available_tools() {
-            let (installed, degraded) = store_state(&tool.id)
+            let (installed, degraded) = store_state(store_records, &tool.id)
                 .unwrap_or_else(|| (installed_mcp_ids.contains(&tool.id), None));
             // 修复方案 V5：companion 认领是「随包」语义——包本体已装才认领技能；
             // 存量已单装技能的包未装时，技能保留独立纯技能包形态（不强制认领，
@@ -337,16 +347,16 @@ impl BundleRegistry {
                 || !tool.servers.is_empty();
             // 上传来源的包：用户自定义展示名/说明（bundles.json extra）覆盖
             // manifest 的 name/description；空/缺 key 回退 manifest 现状。
-            let upload_record = store_records.as_ref().and_then(|records| {
+            let upload_record = store_records.and_then(|records| {
                 records
                     .iter()
                     .find(|r| r.id == tool.id)
                     .filter(|r| matches!(r.source, store::BundleSource::Upload(_)))
             });
-            let display_name =
-                upload_record.and_then(|r| store::display_override(r, store::EXTRA_DISPLAY_NAME));
-            let display_description = upload_record
-                .and_then(|r| store::display_override(r, store::EXTRA_DISPLAY_DESCRIPTION));
+            let (display_name, display_description) = match upload_record {
+                Some(record) => store::apply_display_override(record, None, None),
+                None => (None, None),
+            };
             out.push(BundleInfo {
                 id: tool.id.clone(),
                 name: display_name.clone().unwrap_or_else(|| tool.name.clone()),
@@ -392,7 +402,8 @@ impl BundleRegistry {
             if out.iter().any(|b| b.id == skill.id) {
                 continue;
             }
-            let (installed, degraded) = store_state(&skill.id).unwrap_or((skill.installed, None));
+            let (installed, degraded) =
+                store_state(store_records, &skill.id).unwrap_or((skill.installed, None));
             out.push(BundleInfo {
                 id: skill.id.clone(),
                 name: skill.title.clone(),
@@ -422,7 +433,8 @@ impl BundleRegistry {
             if !skill.user_uploaded {
                 continue;
             }
-            let (installed, degraded) = store_state(&skill.id).unwrap_or((true, None));
+            let (installed, degraded) =
+                store_state(store_records, &skill.id).unwrap_or((true, None));
             // name/description 已在 list_skills 应用 extra 展示覆盖；覆盖原值透传
             // 给前端编辑弹窗预填。
             out.push(BundleInfo {
@@ -456,7 +468,7 @@ impl BundleRegistry {
         //    由此成为「连接器 → 配套技能」的单一真相源，供 companion 联动排除
         //    与技能解包门控取数。
         for (id, name, bin, skill_dirs, desc) in BUILTIN_CLI_BUNDLES {
-            let (installed, degraded) = store_state(id).unwrap_or((false, None));
+            let (installed, degraded) = store_state(store_records, id).unwrap_or((false, None));
             // version 功能事实：lock 表钉住版本（tmeet 走 npm 无 lock 条目 → 空，
             // 前端 overlay 保留自报版本展示）
             let version = crate::platform::connector_lock::artifact_pin(bin)
@@ -559,19 +571,17 @@ impl BundleRegistry {
 }
 
 /// 纯函数：由内容推导包形态（修复方案 V2 优先级定死 + V7 空包报错）。
-/// 优先级：cli 非空 → Cli > mcp+skills 组合 → Bundle > mcp 非空 → Mcp
-/// > skills 非空 → Skill；全空 → Err（空包 schema 层拦截）。
+/// 优先级：mcp+skills 组合 → Bundle > mcp 非空 → Mcp > skills 非空 → Skill；
+/// 全空 → Err（空包 schema 层拦截）。
 ///
 /// 注：旧 spanners 参数已删除——脚本可执行能力通过 skill 包的 SKILL.md frontmatter
-/// `tools[]` 段声明，不影响 kind 推导。
+/// `tools[]` 段声明，不影响 kind 推导。CLI 连接器不经内容推导：由内置常量表
+/// `BUILTIN_CLI_BUNDLES` 在注册表直接注册（Cli 形态）。
 pub fn derive_bundle_kind(
     mcp_servers: &[String],
     skills: &[String],
-    cli: &[String],
 ) -> Result<BundleKind, InvalidBundle> {
-    if !cli.is_empty() {
-        Ok(BundleKind::Cli)
-    } else if !mcp_servers.is_empty() && !skills.is_empty() {
+    if !mcp_servers.is_empty() && !skills.is_empty() {
         Ok(BundleKind::Bundle)
     } else if !mcp_servers.is_empty() {
         Ok(BundleKind::Mcp)
@@ -700,21 +710,8 @@ pub fn readiness_for(bundle: &BundleInfo, credential_has: impl Fn(&str) -> bool)
         BundleKind::Cli => {
             unreachable!("CLI bundle readiness is dispatched by the command layer")
         }
-        BundleKind::Mcp | BundleKind::Bundle => {
+        BundleKind::Mcp | BundleKind::Bundle | BundleKind::Skill => {
             // 本地免凭据（无必填凭据）恒 Ready；有必填凭据则查系统凭据
-            let missing: Vec<&str> = bundle
-                .credentials
-                .iter()
-                .filter(|c| c.required && !credential_has(&c.key))
-                .map(|c| c.key.as_str())
-                .collect();
-            if missing.is_empty() {
-                Readiness::Ready
-            } else {
-                Readiness::NotReady("missing_credentials")
-            }
-        }
-        BundleKind::Skill => {
             let missing: Vec<&str> = bundle
                 .credentials
                 .iter()
@@ -826,29 +823,14 @@ mod tests {
     fn derives_bundle_kind_by_content() {
         let mcp = |id: &str| id.to_string();
         // V7：空包报错，不默认归 Skill
-        assert_eq!(derive_bundle_kind(&[], &[], &[]), Err(InvalidBundle));
-        // V2 优先级：cli 恒赢 > Bundle > Mcp > Skill
+        assert_eq!(derive_bundle_kind(&[], &[]), Err(InvalidBundle));
+        // V2 优先级：Bundle > Mcp > Skill（CLI kind 由内置常量表直接注册，不经内容推导）
+        assert_eq!(derive_bundle_kind(&[mcp("a")], &[]), Ok(BundleKind::Mcp));
         assert_eq!(
-            derive_bundle_kind(&[mcp("a")], &[], &[]),
-            Ok(BundleKind::Mcp)
-        );
-        assert_eq!(
-            derive_bundle_kind(&[mcp("a")], &[mcp("s")], &[]),
+            derive_bundle_kind(&[mcp("a")], &[mcp("s")]),
             Ok(BundleKind::Bundle)
         );
-        assert_eq!(
-            derive_bundle_kind(&[], &[mcp("s")], &[]),
-            Ok(BundleKind::Skill)
-        );
-        assert_eq!(
-            derive_bundle_kind(&[], &[], &[mcp("feishu")]),
-            Ok(BundleKind::Cli)
-        );
-        // 即使有 servers+skills，cli 非空仍归 Cli
-        assert_eq!(
-            derive_bundle_kind(&[mcp("a")], &[mcp("s")], &[mcp("feishu")]),
-            Ok(BundleKind::Cli)
-        );
+        assert_eq!(derive_bundle_kind(&[], &[mcp("s")]), Ok(BundleKind::Skill));
     }
 
     #[test]

@@ -600,11 +600,10 @@ pub async fn organize_memory(
         Some(sid) => pool.fresh_bridge_for(&sid).await.map_err(|error| {
             // The `fresh_bridge_for` error chain can carry endpoint/credential
             // probing details; pass it through `redact_secret` before returning
-            // to the frontend, same policy as `sanitize_command_error` in
-            // settings.rs.
-            format!(
-                "organize memory: resolve bridge for {sid}: {}",
-                crate::platform::credential_store::redact_secret(&format!("{error:#}"))
+            // to the frontend (shared `sanitize_command_error` policy).
+            sanitize_command_error(
+                &format!("organize memory: resolve bridge for {sid}"),
+                format!("{error:#}"),
             )
         })?,
         None => {

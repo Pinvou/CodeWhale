@@ -1314,9 +1314,9 @@ pub async fn web_access_list_codex_acp_sessions(
 
 #[tauri::command]
 pub async fn web_access_list_acp_agents(
-    acp_pool: State<'_, AcpPool>,
+    _acp_pool: State<'_, AcpPool>,
 ) -> Result<Vec<crate::features::codex_acp::AcpAgentDescriptor>, String> {
-    let outcome = super::codex::list_acp_agents_for_pool(&acp_pool).await;
+    let outcome = super::codex::list_acp_agents_for_pool().await;
     web_acp_result(WebAcpOperation::ListAgents, outcome)
 }
 

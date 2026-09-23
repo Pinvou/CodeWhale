@@ -195,9 +195,7 @@
       exportFormat: artifactExportFormat(path),
     } }).catch(function () {});
   }
-  function downloadArtifact(path, sessionId) {
-    return openArtifactExternal(path, sessionId);
-  }
+  const downloadArtifact = openArtifactExternal;
 
   // ── 附件 ────────────────────────────────────────────────────────
   async function addAttachmentByPath(path) {
