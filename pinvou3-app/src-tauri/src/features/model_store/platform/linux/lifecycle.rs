@@ -2470,12 +2470,17 @@ fn endpoint_url_is_loopback(url: &str) -> bool {
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_string))
         .is_some_and(|host| {
-            // IPv6 的 host_str 带方括号（`[::1]`），不是裸的 `::1`，直接 parse 会失败；
+            // IPv6 的 host_str 带方括号（`[::1]`），不是裸的 `::1`，直接 parse 会失败。
+            let host = host.trim_start_matches('[').trim_end_matches(']');
             // 末尾那个点是 FQDN 的合法写法（`localhost.`），不剥掉就绕过去了。
-            let host = host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim_end_matches('.');
+            //
+            // **只剥一个**：合法的 FQDN 最多带一个结尾点，`localhost..` 不是合法写法。
+            // 这里原先用 `trim_end_matches('.')` 剥光全部结尾点，而 JS 侧
+            // `pinvou-model-link.js` 的 `isLocalGatewayUrl` 只剥一个——于是
+            // `http://localhost../v1` 会被 Rust 判 true（存得进库）、被 JS 判 false
+            // （接不上，也走不到清理那条路）。方向虽在安全侧，但两把尺子不一样这件事
+            // 本身迟早要咬人，统一成严格的那一把。
+            let host = host.strip_suffix('.').unwrap_or(host);
             host.eq_ignore_ascii_case("localhost")
                 || host
                     .parse::<std::net::IpAddr>()
@@ -3670,6 +3675,7 @@ echo '权重就绪'
             "http://127.255.255.254:8000/v1",
             "http://localhost:11434/v1",
             // 大小写和 FQDN 末尾的点都是合法写法，不能靠它们绕过去。
+            // 注意只有**一个**点算合法；两个点的那条在下面的「该拒」组里。
             "http://LocalHost:11434/v1",
             "http://localhost.:11434/v1",
             "http://[::1]:8000/v1",
@@ -3694,6 +3700,9 @@ echo '权重就绪'
             "http://0.0.0.0:8000/v1",
             // IPv4-mapped IPv6 不是回环，别被里面那几个 127 骗了。
             "http://[::ffff:127.0.0.1]:8000/v1",
+            // 两个结尾点不是合法的 FQDN 写法。这条曾经 Rust 判 true、JS 判 false
+            // （Rust 剥光全部结尾点，JS 只剥一个），两把尺子对不上——现在都只剥一个。
+            "http://localhost../v1",
             // 压根不是 URL / 空串：解析不出主机就按不安全处理。
             "not a url",
             "",

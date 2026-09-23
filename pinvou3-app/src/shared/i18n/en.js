@@ -370,7 +370,7 @@ export const dictEn = {
           dualNoticeDownload:'Downloading only needs this device — no direct cable and no secondary machine required.',
           dualNoticeDeploy:'Deploying asks once for the secondary machine’s management IP, username, and password. Networking, package push, pairing, weight distribution, and startup are then fully automatic.',
           weightVerifyTitle:'Weight integrity: no per-file checksum',
-          weightVerifyNone:'This card calls the download finished as soon as every file is present. It never compares them against official checksums, and the model revision is not pinned — so a copy that was swapped out on the download source would go unnoticed here.',
+          weightVerifyNone:'This card calls the download finished as soon as every file is present. It never compares them against official checksums, so a copy that was swapped out on the download source would go unnoticed here.',
           weightVerifyManifest:'This card does check every file against a checksum, but that checksum comes from the same place as the weights. It catches a corrupted transfer or a later edit; it cannot catch a source that was already bad.',
           weightVerifyAdvice:'This does not mean the card is compromised — every built-in card comes from the research team. To be safer: download over a network you trust, don’t point the mirror setting at an unfamiliar address, and if the weights were copied from someone else’s USB drive, download them again instead.',
           libraryEmpty:'No models downloaded yet — take a look at the marketplace',

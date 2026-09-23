@@ -453,8 +453,10 @@ pub fn test_cards() -> Vec<TestCard> {
                 // 校验过。**但从 U 盘拷权重那条路更弱**，而且卡片脚本自己把话说明白了
                 // （download_model.sh:122-136）：没有随附 model-manifest.json 时，只能拿
                 // 现有文件算出一份清单，「它记录的是当前磁盘上是什么，不构成校验」。
-                // 一张卡只能声明一个档位，按两条路里弱的那条算，所以是 Manifest 不是
-                // Sha256sums。
+                // 一张卡只能声明一个档位。**别把这里读成「声明弱路的档位」**——
+                // 弱路（无清单的 U 盘）严格说落的是 None。这个档位真正的来由是：
+                // 弱路的存在**排除了** Sha256sums（做不到逐文件比对官方摘要），
+                // 而联网那条路按定义本就是 Manifest，于是两条路的上界就是 Manifest。
                 weight_verification: WeightVerification::Manifest,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
@@ -840,6 +842,80 @@ mod tests {
                 !body.contains("sha256sum"),
                 "{id} 的 download_model.sh 里出现了 sha256sum：如果是真的补上了逐文件\
                  校验，请把档位一并改掉，并修正这条测试"
+            );
+        }
+    }
+
+    /// 许可未清权的卡。**这不是备忘，是闸门的一半**——另一半在
+    /// `THIRD_PARTY_NOTICES.md` 的 open item 段落里，两边必须对得上。
+    ///
+    /// 为什么不写进发版清单：清单靠人记得去读。这两个包的情况是「作者没说过按什么
+    /// 条款给我们用」，而它随 `.deb` 分发——这种事一旦漏过一次发版，就没有第二个
+    /// 环节会拦住它。写成测试之后，它只会在被解决时消失，不会在被遗忘时消失。
+    const CARDS_WITH_UNRESOLVED_LICENCE: &[&str] =
+        &["minimax-h3-int8-single", "qwen38-27b-sglang0519"];
+
+    /// 厂商交付包要么自带许可声明，要么挂在 open item 上。
+    ///
+    /// 判据是 `assets` 空不空：空的那两张（`ornith15-bf16`、`qwen38-27b-nvfp4-mtp`）
+    /// 只下发我们自己写的入口脚本，没有 vendor 任何第三方内容，不存在清权问题；
+    /// 非空的才是把别人的文件逐字节放进了本仓库。
+    ///
+    /// 四个方向都要红，少一个这道闸门就会漏：
+    ///   - 新卡带了交付包、没有许可、也没登记 → 漏登记
+    ///   - 登记在案的卡补上了许可文件，但没人回来删这条 → 名单越挂越长，最后没人信
+    ///   - 名单里的 id 对不上任何一张真卡 → 改名/删卡之后名单变成一句空话
+    ///   - `THIRD_PARTY_NOTICES.md` 里不再提这个 id → 对外那份说明和代码里这份脱节
+    #[test]
+    fn vendored_packages_either_carry_a_licence_or_stay_declared() {
+        const NOTICES: &str = include_str!("../../../../../../../THIRD_PARTY_NOTICES.md");
+
+        // 只认包内自带的声明文件。上游 tarball 里那份不算——它是运行时下到设备上的，
+        // 不随我们分发，清权要清的是"我们仓库里这些字节"。
+        fn carries_licence(card: &TestCard) -> bool {
+            card.assets.keys().any(|k| {
+                let name = k.rsplit('/').next().unwrap_or(k).to_ascii_uppercase();
+                name.starts_with("LICENSE") || name.starts_with("LICENCE")
+                    || name.starts_with("COPYING")
+            })
+        }
+
+        let cards = test_cards();
+        for card in &cards {
+            let id = card.summary.id.as_str();
+            let declared = CARDS_WITH_UNRESOLVED_LICENCE.contains(&id);
+            if card.assets.is_empty() {
+                assert!(
+                    !declared,
+                    "{id} 没有 vendor 任何第三方内容（assets 为空），不该挂在未清权名单上"
+                );
+                continue;
+            }
+            match (carries_licence(card), declared) {
+                (true, false) | (false, true) => {}
+                (false, false) => panic!(
+                    "{id} 带着交付包却没有许可声明，也没登记在 \
+                     CARDS_WITH_UNRESOLVED_LICENCE 里。要么把作者给的许可文件放进包内，\
+                     要么把它加进名单并同步写进 THIRD_PARTY_NOTICES.md 的 open item。"
+                ),
+                (true, true) => panic!(
+                    "{id} 已经带上许可声明了，但还挂在 CARDS_WITH_UNRESOLVED_LICENCE \
+                     名单上。把它从名单和 THIRD_PARTY_NOTICES.md 的 open item 里一起删掉——\
+                     名单留着过期条目，下一个人就不会再认真看它。"
+                ),
+            }
+        }
+
+        for id in CARDS_WITH_UNRESOLVED_LICENCE {
+            assert!(
+                cards.iter().any(|c| c.summary.id == *id),
+                "未清权名单里的 {id} 对不上任何一张内置卡。卡改名或下架时，\
+                 这条名单和 THIRD_PARTY_NOTICES.md 都要跟着改。"
+            );
+            assert!(
+                NOTICES.contains(id),
+                "THIRD_PARTY_NOTICES.md 里找不到 {id}。对外那份说明是给读者看的，\
+                 代码里这份是给 CI 看的，两份说的必须是同一件事。"
             );
         }
     }

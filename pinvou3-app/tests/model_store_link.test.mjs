@@ -208,6 +208,9 @@ test('isLocalGatewayUrl：整个 127/8 都算回环，但别放宽一分', () =>
     // 子域名骗局：以 localhost / 127.0.0.1 开头，主机却是别人的
     'http://localhost.evil.example.com/v1',
     'http://127.0.0.1.evil.example.com/v1',
+    // 两个结尾点不是合法的 FQDN 写法。这条曾经 Rust 判 true、JS 判 false
+    // （Rust 剥光全部结尾点，JS 只剥一个），两把尺子对不上——现在都只剥一个。
+    'http://localhost../v1',
     // 私网段已经是"另一台机器"，对话内容就出本机了
     'http://10.0.0.5:8000/v1',
     'http://172.16.0.5:8000/v1',

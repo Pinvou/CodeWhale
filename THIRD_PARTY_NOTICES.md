@@ -64,12 +64,27 @@ Vendored script attribution:
   The other two cards, Ornith-1.5-35B-A3B (`ornith15-bf16`) and the
   Qwen3.8-27B NVFP4 + MTP card (`qwen38-27b-nvfp4-mtp`), ship entry scripts only
   and vendor no upstream sources, so they are not listed in the table above.
-- Open item: the MiniMax-H3 and Qwen3.8-27B × SGLang packages carry no license
+- Open item — unresolved card licences: the MiniMax-H3 (`minimax-h3-int8-single`)
+  and Qwen3.8-27B × SGLang (`qwen38-27b-sglang0519`) packages carry no licence
   file of their own. For MiniMax-H3, `SOURCE_LOCKS.json` pins what gets loaded but
   says nothing about terms, and the ComfyUI archive it points at is GPL-3.0
-  upstream. The license column above therefore records what is verifiable rather
+  upstream. The licence column above therefore records what is verifiable rather
   than an assumption; both need confirming with the card authors before these
   packages ship outside internal validation.
+
+  Note what is and is not at stake here. Neither package vendors any upstream
+  source: both are a handful of shell scripts plus a 750-byte `SOURCE_LOCKS.json`
+  of hashes and revisions (136 KB and 98 KB respectively). The GPL-3.0 ComfyUI
+  archive is fetched onto the user's device at install time — it is not
+  redistributed by us. What is unresolved is narrower: the card authors' own
+  scripts are vendored byte-for-byte into this repository and shipped in the
+  `.deb`, and no terms have been stated for them.
+
+  **This paragraph is load-bearing.** The card ids above are asserted by
+  `test_store_data.rs::vendored_packages_either_carry_a_licence_or_stay_declared`,
+  which fails if a package gains a licence file without this list shrinking, if a
+  new package arrives without one, or if an id here stops matching a real card.
+  Do not reword the ids out of it — resolve the item instead.
 - Tailwind CSS: Copyright (c) Tailwind Labs, Inc.
 - Material Icon Theme: Copyright (c) 2025 Material Extensions. The glyphs
   were exported from the
