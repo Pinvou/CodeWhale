@@ -16,11 +16,11 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "9038e5fceb3a18e2506697887b4e301b5e438999634e8dd52434a549ccf3f274";
+export const CONTROLLER_CONTRACT_SHA256 = "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
-  "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1",
+  "task_v1", "temporary_model_package_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1",
 ]);
 
 export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
@@ -581,6 +581,10 @@ export function validateControllerRuntimePayload(input, senderRole, runtimeConte
   enforceNegotiatedPayload(shape.type, runtimeContext);
   const lease = requireRuntimeLease(runtimeContext);
   const payload = validateControllerPayload(input, senderRole, lease);
+  if (payload.type === "task_submit" && payload.model_source === "controller_temporary"
+      && !runtimeContext.negotiated_capabilities.includes("temporary_model_package_v1")) {
+    fail("unsupported_capability", "temporary_model_package_v1");
+  }
   return payload;
 }
 
@@ -646,6 +650,7 @@ function validateTaskSubmit(payload) {
   if (input.workspace_id !== undefined) identifier(input.workspace_id, "input.workspace_id");
   if (input.text.length === 0 && input.attachment_ids.length === 0) fail("invalid_field", "payload.input");
   if (payload.model_source === "controller_temporary") {
+    if (payload.mode === "code") fail("invalid_field", "payload.model_source");
     if (!Object.hasOwn(payload, "temporary_model_package")) fail("missing_field", "payload.temporary_model_package");
     validateTemporaryModelPackage(payload.temporary_model_package, payload);
   } else if (Object.hasOwn(payload, "temporary_model_package")) {

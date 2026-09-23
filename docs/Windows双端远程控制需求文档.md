@@ -2,9 +2,9 @@
 
 > 文档状态：需求确认稿
 >
-> 文档版本：1.6
+> 文档版本：1.7
 >
-> 更新日期：2026-09-22
+> 更新日期：2026-09-23
 >
 > 适用范围：Pinvou Agent Windows 桌面端、Remote Control Relay、模型与任务执行链路
 >
@@ -19,6 +19,7 @@
 | 1.4 | 2026-09-15 | 固化 Finished receipt 编码与测试向量、角色隔离 liveness、恢复后存活确认门、tombstone 多密钥轮换及安全回滚下限 |
 | 1.5 | 2026-09-15 | 增加 A→B 端到端加密 liveness 主路径，并以保守跨时钟公式约束 Relay attestation 的 30 秒总预算 |
 | 1.6 | 2026-09-22 | 明确 A、B 均可向同一个 B 权威 Session 输入消息，并统一任务接纳、执行状态、journal 投影和精确会话关联 |
+| 1.7 | 2026-09-23 | 固化临时模型规范数字编码、视觉兜底注入、任务接纳与凭据安装原子性、HTTPS/DNS 预校验、客户端能力兼容及最终出站目标未固定的已知风险 |
 
 ## 1. 背景
 
@@ -398,10 +399,11 @@ React UI
 | RC-M-008 | B 必须在内存中使用临时模型配置，并在任务终态后主动释放，连接终止时兜底清理 | P0 |
 | RC-M-009 | A 模型调用失败时不得自动回退到 B 模型，必须向两端返回明确错误 | P0 |
 | RC-M-010 | A 本机 loopback、Unix socket 或 B 不可访问的本地模型不得作为可传输模型 | P0 |
-| RC-M-011 | B 必须复用模型 endpoint 安全校验，禁止通过自定义 base URL 访问不允许的本机或内网目标 | P0 |
+| RC-M-011 | B 必须在临时模型执行准备阶段复用模型 endpoint 安全校验；显式本机/内网地址在模型包安装前拒绝，预解析结果包含非公网地址、无结果或超时时，已接纳任务必须在首次模型调用前以明确 `failed` 终态结束；最终请求目标漂移按 10.5 节作为已知风险保留 | P0 |
 | RC-M-012 | 错误信息和诊断必须经过凭证脱敏后才能同步给 A 或写日志 | P0 |
 | RC-M-013 | v1 模型包出现未知字段、未知枚举、缺少必填字段、无效字段组合或无法解析的视觉兜底引用时，B 必须拒绝整个任务，不得忽略或猜测 | P0 |
 | RC-M-014 | `credential_ref`、OAuth、Cookie、订阅登录、设备绑定令牌和网页登录态不得进入模型包；只能发送本次任务使用的 API Key secret | P0 |
+| RC-M-015 | `controller_temporary` 首版只允许普通对话模式；代码模式仍由 ACP 执行器选择模型，在临时模型尚未接入 ACP 前，A、Relay 和 B 都必须拒绝 `mode=code + controller_temporary`，不得静默改用 B 模型 | P0 |
 
 #### 7.6.1 `temporary_model_package/v1` 精确模型
 
@@ -414,7 +416,7 @@ React UI
   binding: {                                           // 必填
     connection_id: string,
     controller_lease_id: string,
-    lease_epoch: uint64,
+    lease_epoch: canonical decimal string,             // 十进制、无前导零
     task_id: string
   },
   primary: RouteV1,                                    // 必填
@@ -434,14 +436,16 @@ RouteV1 = {
   vendor?: "anthropic" | "deepseek" | "doubao" | "gemini" | "glm" | "kimi" |
            "mimo" | "minimax" | "openai" | "qwen" | "tencent" | "xai",
   endpoint_mode?: "full_chat_completions",
-  context_window_tokens?: uint32,
-  max_output_tokens?: uint32,
+  context_window_tokens?: canonical decimal string,    // uint32 范围、无前导零
+  max_output_tokens?: canonical decimal string,        // uint32 范围、无前导零
   reasoning_effort?: "off" | "low" | "medium" | "high" | "max" | "auto",
   image_capability_override: "pinvou" | "enabled" | "disabled"
 }
 ```
 
 `SensitiveString` 是非空 UTF-8 API Key，只能在已认证加密帧的敏感序列化路径出现，默认 `Debug`、普通日志和错误序列化必须脱敏。`RouteV1` 的字符串长度、URL 长度、数值上限和模型包总字节数必须由协议常量限定；`vision_fallback` 只允许一层，不得再次引用视觉模型。即使 `preset` 枚举中存在 `local_vllm`，RC-M-010/011 的可传输判定仍会拒绝 loopback、本机 socket、私网或 B 无法安全访问的 endpoint。所有枚举都按这里列出的 v1 值闭集校验，新增 vendor、endpoint mode 或 reasoning 档位必须提升包版本或完成显式能力协商，不能按任意字符串透传。
+
+规范数字一律按上面的 canonical decimal string 编码；发送 JSON number 或接收时猜测两种编码均不属于 v1。A 只有在双方能力快照都包含 `temporary_model_package_v1` 时才可展示并发送“我的模型”；不具备该能力的旧客户端必须失败关闭或隐藏入口。该能力首次随桌面端 0.10.1 的同批 A/B 升级交付，不能把仅包含旧数字编码实现的中间构建与新版混用。
 
 `SavedModel` 到 v1 包的映射固定如下：
 
@@ -755,10 +759,11 @@ Relay 必须以 B endpoint 的 `interactive_slot_revision` 串行化所有 Web j
 
 ### 10.5 SSRF 与远程执行边界
 
-- B 对 A 临时模型的 base URL 必须执行与本机模型配置一致或更严格的 scheme、host 和重定向校验。
+- B 对 A 临时模型的 base URL 必须执行与本机模型配置一致或更严格的 scheme 和 host 校验；v1 仅允许 HTTPS。
 - 默认拒绝 file、ftp、data 等非批准协议及带内嵌用户凭证的 URL。
 - 公网模型配置不得借 B 访问 loopback、link-local、云元数据地址或未经允许的私有网络目标。
-- DNS 解析和重定向后的最终目标必须再次校验，防止 DNS rebinding 和跨域重定向绕过。
+- B 在临时模型第一次实际调用前解析主模型和视觉模型的全部 DNS 地址；任一结果不是公网地址即拒绝，解析超时或无结果也必须失败关闭。该地址快照只用于 App 层执行准备校验，不注入 CodeWhale 的最终 HTTP 客户端。由于 DNS 解析是异步执行准备的一部分，任务可以先发布 `admitted`、`running`，随后在调用模型前以 endpoint 错误进入 `failed`；该失败必须正常写入权威 Session、同步到双端并清理临时凭据。
+- **已知风险（首版接受）**：最终模型请求由 CodeWhale 自行创建的 HTTP 客户端发送，可能再次解析 DNS、使用进程/系统代理或跟随服务端重定向。因此 App 层预校验不能彻底阻断 DNS rebinding、代理绕行和重定向后的目标变化。首版不为远程控制修改 CodeWhale 底座；发布说明、安全评审和运维风险清单必须保留此项，不得宣称已消除该类 SSRF 风险。
 - A 的审批不能扩大 B 进程本身没有的 OS 权限。
 - B 本地停止远控优先级高于 A 的任务、审批和重连请求。
 
@@ -1045,7 +1050,7 @@ A 禁止持久化：
 - A 拒绝、超时、断线、任务取消和租约变化均导致 B 拒绝该权限请求。
 - 首个有效决定唯一生效；同值重试幂等，迟到、冲突、伪造、重放、篡改或跨租约审批响应不能生效。
 - 在受信 Relay 遵循协议的假设下，Relay 转发日志、存储快照和被动网络抓包无法解密测试 Prompt、API Key、附件和输出；验收报告必须同时记录恶意 Relay 主动 MITM 不在首版保证内。
-- 不安全 base URL、重定向和内网目标被 B 拒绝。
+- 非 HTTPS、URL 中内嵌凭据和显式本机/内网 base URL 在安装前被 B 拒绝；DNS 预解析到非公网地址、无结果或超时时，已接纳任务在首次模型调用前按 `admitted → running → failed` 收口；最终请求阶段的 DNS 重绑定、系统代理和重定向目标变化按 10.5 节作为已知风险验收。
 - B 本地“立即断开”在 Relay 或 A 无响应时仍能生效。
 
 ### 17.4 同步与恢复
@@ -1085,7 +1090,7 @@ A 禁止持久化：
 - 提前 receipt、损坏 Finished、仅一方 receipt、sender 自收、错 role/socket、错 pairing/reservation/transcript/generation、secret 重放和握手超时均不建租约；共同派生 key 不能替代 receipt；
 - `code_wrap_keypair` 与 `handshake_keypair_b` 独立生成、用途/类型隔离、公钥替换和跨用途复用拒绝；
 - `temporary_model_package/v1` 精确 allowlist、全部 `SavedModel` 字段映射/排除、主模型/视觉兜底凭证绑定、未知字段拒绝和全终态清理；
-- base URL、重定向、DNS 和内网目标安全策略；
+- base URL、DNS 预校验、内网目标拒绝、执行准备失败的 `admitted → running → failed` 状态序列，以及未固定最终出站目标的已知风险记录；
 - 权限请求租约绑定、A 唯一授权、首个决定、同值幂等、迟到/冲突决定、B stop 与 A Allow 竞态、超时、拒绝和重放；
 - `encrypted_controller_liveness_a` 的 A→B AEAD 绑定、challenge 一次性、Relay 盲转发、篡改/跨租约/重放拒绝，以及与 transport liveness 的 key/epoch/sequence 域隔离；
 - 直接路径 `30000 - RTT - 1000` 与 attestation `min(remaining_ttl, 30000 - age) - RTT - 1000` 公式边界；覆盖 age=5000/RTT=5000 得 19000 ms、超界拒绝、已安装新 epoch/sequence 替换旧 deadline、未知 epoch 拒绝、同序号只收紧和旧序号拒绝；
@@ -1217,7 +1222,7 @@ python scripts/architecture-guard.py
 | 单方或伪造握手完成 | 未确认对端即创建租约 | 发送方独立 32 字节 receipt secret、唯一长度前缀 commitment、角色 Finished key、相反角色认证 socket 回传及原子建租约 |
 | code-wrap 与握手密钥复用 | 跨协议攻击扩大密钥暴露影响 | 两套 CSPRNG keypair、类型/用途隔离、互不派生及跨用途替换测试 |
 | A 临时 Key 落盘 | 凭证长期泄露 | 任务级内存上下文、统一清理、日志脱敏和哨兵扫描 |
-| 恶意模型 endpoint | SSRF、访问 B 内网 | URL/DNS/重定向复核和私网目标限制 |
+| 恶意模型 endpoint | SSRF、访问 B 内网 | App 层限制 HTTPS、拒绝内嵌凭据并预解析全部 DNS 地址，发现非公网地址即拒绝；CodeWhale 最终请求仍可能二次解析、使用代理或跟随重定向，此残余风险由首版明确接受并持续登记 |
 | Web 与桌面主控互相顶替 | 会话泄露或控制权劫持 | 共享交互槽位与 revision CAS，跨类型忙碌即拒绝；仅 Web-to-Web 保留既有接管语义 |
 | 旧 Web 在桌面占用时持续重连 | Relay 负载上升 | 接受既有 `desktop_offline` 指数退避，利用 ±20% jitter，并实施每 IP/endpoint/全局限频和廉价前置拒绝 |
 | 断线重试重复任务 | 重复调用模型或工具副作用 | 稳定请求 ID、持久幂等台账和结果未知状态 |
@@ -1270,7 +1275,7 @@ python scripts/architecture-guard.py
 
 1. 第 17 节所有 P0 验收项通过并留有可复现证据。
 2. 第 18 节协议、集成、Windows 双设备和既有 WebUI 回归测试通过。
-3. 独立安全评审确认不存在未认证连接、Relay 明文、Key 落盘、审批绕过和 SSRF 高危问题。
+3. 独立安全评审确认不存在未认证连接、Relay 明文、Key 落盘和审批绕过；SSRF 评审必须明确记录 10.5 节已接受的最终出站目标漂移风险，除此之外不得遗留未登记的高危问题。
 4. A、B、Relay 的异常和回滚路径经过演练。
 5. 新增 UI 完成中文、英文和日文文案及可访问性验收。
 6. 生产部署文档、配置、监控、告警和回滚步骤齐备。

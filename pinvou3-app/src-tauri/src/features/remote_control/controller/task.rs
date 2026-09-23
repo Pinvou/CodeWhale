@@ -1419,6 +1419,21 @@ impl RemoteTaskService {
         payload: &Value,
         now_b: u64,
     ) -> Result<AdmissionOutcome> {
+        self.submit_bound_with_admission(live, payload, now_b, |_| Ok(()))
+    }
+
+    /// Admit a bound task and finish its task-scoped resource installation in
+    /// the same lifecycle transaction. Stop/refresh takes the same lock, so it
+    /// cannot run cleanup between ledger admission and resource installation.
+    /// If installation fails, the admitted record is made terminal before the
+    /// lock is released and the normal cleanup hooks run immediately.
+    pub(crate) fn submit_bound_with_admission(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+        install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
+    ) -> Result<AdmissionOutcome> {
         let request = RemoteTaskRequest::from_payload(payload)?;
         let _guard = self.session_open_lock.lock();
         if !self
@@ -1429,6 +1444,15 @@ impl RemoteTaskService {
         }
         let outcome = self.ledger.admit(live, &request, now_b)?;
         if let AdmissionOutcome::Admitted(ticket) = &outcome {
+            if let Err(code) = install(ticket) {
+                let _ = self.finish(
+                    &ticket.record.task_id,
+                    RemoteTaskTerminal::Failed,
+                    Some(code.to_owned()),
+                    now_b,
+                );
+                return Err(error(code));
+            }
             self.publish(&ticket.record);
         }
         Ok(outcome)
@@ -2334,7 +2358,9 @@ mod tests {
             ]
         );
 
-        // A failing executor still reaches a terminal state and a cleanup.
+        // A failing executor, including a temporary-model preparation/DNS
+        // failure before the first model call, still follows the observable
+        // admitted -> running -> failed sequence and reaches cleanup.
         let failing_executor = RecordingExecutor::failing();
         let (failing_service, failing_hooks) = service(failing_executor.clone());
         let ticket = admitted(
@@ -2352,6 +2378,20 @@ mod tests {
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Failed);
         assert_eq!(record.terminal_reason.as_deref(), Some("executor_error"));
+        let failing_statuses: Vec<String> = failing_hooks
+            .events
+            .lock()
+            .iter()
+            .map(|event| event.status.clone())
+            .collect();
+        assert_eq!(
+            failing_statuses,
+            vec![
+                TASK_STATUS_ADMITTED.to_owned(),
+                TASK_STATUS_RUNNING.to_owned(),
+                TASK_STATUS_FAILED.to_owned()
+            ]
+        );
         assert_eq!(
             failing_service
                 .ledger()
@@ -2675,6 +2715,84 @@ mod tests {
             "session-0003"
         );
         assert_eq!(sessions.created.lock().len(), 3);
+    }
+
+    #[test]
+    fn bound_admission_installs_resources_before_racing_lifecycle_cleanup() {
+        #[derive(Default)]
+        struct InstallationOrderScope {
+            installed: AtomicBool,
+            cleanup_saw_installed: AtomicBool,
+        }
+
+        impl RemoteTaskModelScope for InstallationOrderScope {
+            fn release_task_credentials(&self, _task_id: &str) {
+                self.cleanup_saw_installed
+                    .store(self.installed.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        }
+
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        assert_eq!(
+            service
+                .ensure_remote_session("remote-session-race", "Remote", false, "generation-0001",)
+                .unwrap(),
+            "session-0001"
+        );
+        let scope = Arc::new(InstallationOrderScope::default());
+        service.hooks().set_model_scope(scope.clone());
+        let body = payload(
+            "session-0001",
+            "task-install-race",
+            "client-install-race",
+            &digest(9),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let submit_service = service.clone();
+        let install_scope = scope.clone();
+        let submit = std::thread::spawn(move || {
+            submit_service.submit_bound_with_admission(
+                &context("generation-0001"),
+                &body,
+                1_000,
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    install_scope.installed.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+
+        let (cleanup_started_tx, cleanup_started_rx) = std::sync::mpsc::channel();
+        let cleanup_service = service.clone();
+        let cleanup = std::thread::spawn(move || {
+            cleanup_started_tx.send(()).unwrap();
+            cleanup_service.interrupt_generation_and_clear_sessions(
+                "generation-0001",
+                "remote_control_stopped",
+                1_001,
+            )
+        });
+        cleanup_started_rx.recv().unwrap();
+        std::thread::yield_now();
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            submit.join().unwrap(),
+            Ok(AdmissionOutcome::Admitted(_))
+        ));
+        assert_eq!(cleanup.join().unwrap().len(), 1);
+        assert!(scope.cleanup_saw_installed.load(Ordering::SeqCst));
+        assert_eq!(
+            service.status("task-install-race").unwrap().state,
+            RemoteTaskState::Interrupted
+        );
     }
 
     #[test]

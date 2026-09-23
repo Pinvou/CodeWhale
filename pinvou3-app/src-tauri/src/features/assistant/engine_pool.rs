@@ -56,6 +56,36 @@ use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, Session
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
 use crate::platform::prefs::{SavedModel, UserPrefs};
 
+/// Fully isolated model override used by one controller task. Credentials are
+/// extracted immediately and the model copies retained by the bridge are
+/// scrubbed before Debug output can observe them.
+pub(crate) struct RemoteRuntimeModelBundle {
+    primary: SavedModel,
+    primary_credential: RuntimeModelCredential,
+    vision: Option<SavedModel>,
+    vision_credential: Option<RuntimeModelCredential>,
+}
+
+impl RemoteRuntimeModelBundle {
+    pub(crate) fn new(mut primary: SavedModel, mut vision: Option<SavedModel>) -> Result<Self> {
+        let primary_credential = RuntimeModelCredential::api_key(primary.api_key.clone())?;
+        primary.api_key.clear();
+        let vision_credential = vision
+            .as_ref()
+            .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
+            .transpose()?;
+        if let Some(model) = vision.as_mut() {
+            model.api_key.clear();
+        }
+        Ok(Self {
+            primary,
+            primary_credential,
+            vision,
+            vision_credential,
+        })
+    }
+}
+
 /// Engine 空闲回收阈值：engine 是进程内 task（非子进程），但每个都占一份通道、
 /// 工具集与注水后的对话上下文，池无上限、内存随会话数线性涨。空闲超过该时长
 /// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
@@ -1114,9 +1144,11 @@ impl EnginePool {
         scheduled_unattended: bool,
         explicit_model_override: Option<SavedModel>,
         explicit_credential: Option<RuntimeModelCredential>,
+        remote_bundle: Option<RemoteRuntimeModelBundle>,
     ) -> Result<(Pinvou3Bridge, PreparedRuntimeModel, bool)> {
         let mut bridge = self.bridge.clone();
         bridge.prefs = UserPrefs::load();
+        let runtime_route_locked = remote_bundle.is_some();
         let scheduled_profile = self.store.scheduled_profile(session_id);
         // 与命令层 chat.rs 的 is_scheduled 同口径(scheduled_profile 存在即算):
         // scheduled 会话图片固定走 image_analyze 硬规则,即使带 interactive
@@ -1125,6 +1157,15 @@ impl EnginePool {
         let interactive_model_override = self.store.session_model_override(session_id);
         let pins_scheduled_model = scheduled_profile.is_some()
             && (scheduled_unattended || interactive_model_override.is_none());
+        let (explicit_model_override, explicit_credential) = match remote_bundle {
+            Some(bundle) => {
+                bridge.runtime_route_locked = true;
+                bridge.runtime_vision_model = bundle.vision;
+                bridge.runtime_vision_credential = bundle.vision_credential;
+                (Some(bundle.primary), Some(bundle.primary_credential))
+            }
+            None => (explicit_model_override, explicit_credential),
+        };
         bridge.session_model = resolve_runtime_model_override(explicit_model_override, || {
             resolve_spawn_model(
                 &bridge.prefs.advanced.saved_models,
@@ -1136,26 +1177,19 @@ impl EnginePool {
         let selected = bridge
             .effective_model_owned()
             .context("No effective model is available for runtime preparation")?;
-        let selected_id = selected.id.clone();
         let mut prepared = self
             .runtime_model_provider
             .prepare(RuntimeModelRequest {
                 session_id: session_id.to_string(),
-                model: selected,
+                model: selected.clone(),
                 scheduled_unattended,
             })
             .await?;
         if let Some(credential) = explicit_credential {
             prepared.credential = Some(credential);
-            prepared.revision = Some(format!("task-scoped-{selected_id}"));
+            prepared.revision = Some(format!("task-scoped-{}", selected.id));
         }
-        if prepared.model.id != selected_id {
-            bail!(
-                "Runtime model provider changed model identity from '{}' to '{}'",
-                selected_id,
-                prepared.model.id
-            );
-        }
+        validate_prepared_runtime_route(&selected, &prepared, runtime_route_locked)?;
         Ok((bridge, prepared, pins_scheduled_model))
     }
 
@@ -1176,7 +1210,10 @@ impl EnginePool {
         // on /v1/models without credentials, and misclassifying it as a
         // generic endpoint loses default-off thinking and the vLLM tiers
         // (inference itself still succeeds with the configured key).
-        if bridge.provider() == "openai" && base_url_uses_local_or_private(&bridge.base_url()) {
+        if !bridge.runtime_route_is_locked()
+            && bridge.provider() == "openai"
+            && base_url_uses_local_or_private(&bridge.base_url())
+        {
             let api_key = bridge.api_key();
             bridge.probed_local_kind = Some(
                 crate::core::model_endpoint::probe_local_server_kind(
@@ -1197,7 +1234,7 @@ impl EnginePool {
         // value; cloud providers are not probed. OpenAI-compatible endpoints
         // detected as vLLM take the same path (provider() maps them to
         // "vllm").
-        if bridge.provider() == "vllm" {
+        if !bridge.runtime_route_is_locked() && bridge.provider() == "vllm" {
             // The served-name probe carries the same inference-same-origin
             // credential (authenticated vLLM 401s on /v1/models; on probe
             // failure the configured model name is kept).
@@ -1229,7 +1266,7 @@ impl EnginePool {
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
         let (bridge, prepared, pins_scheduled_model) = self
-            .prepare_runtime_model(session_id, scheduled_unattended, eval_model, None)
+            .prepare_runtime_model(session_id, scheduled_unattended, eval_model, None, None)
             .await?;
         Ok(self
             .finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model)
@@ -1244,7 +1281,7 @@ impl EnginePool {
         let eval_model = self.eval_model_snapshots.for_session(session_id);
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
-        self.get_or_spawn_with_policy(session_id, false, eval_model, None)
+        self.get_or_spawn_with_policy(session_id, false, eval_model, None, None)
             .await
     }
 
@@ -1257,6 +1294,7 @@ impl EnginePool {
         scheduled_unattended: bool,
         explicit_model_override: Option<SavedModel>,
         explicit_credential: Option<RuntimeModelCredential>,
+        remote_bundle: Option<RemoteRuntimeModelBundle>,
     ) -> Result<AppEngine> {
         let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
         let _runtime = runtime_lock.lock().await;
@@ -1266,6 +1304,7 @@ impl EnginePool {
                 scheduled_unattended,
                 explicit_model_override,
                 explicit_credential,
+                remote_bundle,
             )
             .await?;
         let model_update_revision = self.model_update_revisions.current(&prepared.model.id);
@@ -1974,7 +2013,7 @@ impl EnginePool {
         &self,
         session_id: &str,
         content: String,
-        model_override: Option<SavedModel>,
+        model_override: Option<RemoteRuntimeModelBundle>,
     ) -> Result<()> {
         let reservation = self.reserve_turn(session_id)?;
         let display_message = user_display_message(content.clone());
@@ -1986,6 +2025,7 @@ impl EnginePool {
             false,
             None,
             reservation,
+            None,
             model_override,
         )
         .await
@@ -2061,6 +2101,7 @@ impl EnginePool {
             expert_snapshot,
             reservation,
             None,
+            None,
         )
         .await
     }
@@ -2076,6 +2117,7 @@ impl EnginePool {
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         mut reservation: TurnReservation,
         model_override: Option<SavedModel>,
+        remote_bundle: Option<RemoteRuntimeModelBundle>,
     ) -> Result<()> {
         let baseline_revision = reservation
             .base_transcript_revision()
@@ -2124,17 +2166,23 @@ impl EnginePool {
             .as_ref()
             .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
             .transpose()?;
-        self.get_or_spawn_with_policy(session_id, false, model_override, explicit_credential)
-            .await?
-            .send_reserved_user_message(
-                content,
-                mode,
-                persona_reminder,
-                restrict_tools,
-                expert_snapshot,
-                reservation,
-            )
-            .await
+        self.get_or_spawn_with_policy(
+            session_id,
+            false,
+            model_override,
+            explicit_credential,
+            remote_bundle,
+        )
+        .await?
+        .send_reserved_user_message(
+            content,
+            mode,
+            persona_reminder,
+            restrict_tools,
+            expert_snapshot,
+            reservation,
+        )
+        .await
     }
 
     /// Execute the initial turn for a pre-created scheduled session and wait
@@ -2198,7 +2246,7 @@ impl EnginePool {
             // fresh session, so nothing propagates to the next run.
             self.evict_locked(session_id).await;
             let engine = match self
-                .get_or_spawn_with_policy(session_id, true, None, None)
+                .get_or_spawn_with_policy(session_id, true, None, None, None)
                 .await
             {
                 Ok(engine) => engine,
@@ -2883,6 +2931,24 @@ where
     }
 }
 
+fn validate_prepared_runtime_route(
+    selected: &SavedModel,
+    prepared: &PreparedRuntimeModel,
+    route_locked: bool,
+) -> Result<()> {
+    if prepared.model.id != selected.id {
+        bail!(
+            "Runtime model provider changed model identity from '{}' to '{}'",
+            selected.id,
+            prepared.model.id
+        );
+    }
+    if route_locked && prepared.model != *selected {
+        bail!("Runtime model provider changed a locked runtime route");
+    }
+    Ok(())
+}
+
 async fn prepare_draft_runtime_model(
     provider: &dyn RuntimeModelProvider,
     model: SavedModel,
@@ -2981,7 +3047,7 @@ mod scheduled_model_tests {
         identity_for_saved_model, quiesce_engine_before_reclaim, resolve_eval_model_selection_from,
         resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
         scheduled_profile_after_turn_gate, should_still_reap_after_snapshot, should_sync_session,
-        user_display_message,
+        user_display_message, validate_prepared_runtime_route,
     };
     use crate::features::assistant::runtime_model::PreparedRuntimeModel;
     use crate::features::sessions::{ScheduledRunMode, ScheduledRunProfile, SessionStore};
@@ -3285,6 +3351,17 @@ mod scheduled_model_tests {
             has_secret: false,
             credential_action: None::<CredentialEditAction>,
         }
+    }
+
+    #[test]
+    fn locked_runtime_route_rejects_provider_route_rewrite() {
+        let selected = model("runtime-model", "controller-model");
+        let mut rewritten = selected.clone();
+        rewritten.base_url = "https://controlled.invalid/v1".to_string();
+        let prepared = PreparedRuntimeModel::unchanged(rewritten);
+
+        assert!(validate_prepared_runtime_route(&selected, &prepared, true).is_err());
+        assert!(validate_prepared_runtime_route(&selected, &prepared, false).is_ok());
     }
 
     #[test]

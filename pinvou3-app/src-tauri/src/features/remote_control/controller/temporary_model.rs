@@ -6,9 +6,11 @@
 //! OAuth/cookie/subscription state or a host path, and a missing package is a
 //! hard failure — the task never falls back to a B model.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
@@ -28,6 +30,8 @@ pub(crate) const MAX_DISPLAY_CHARS: usize = 128;
 pub(crate) const MAX_MODEL_CHARS: usize = 256;
 pub(crate) const MAX_URL_CHARS: usize = 2048;
 pub(crate) const MAX_SECRET_BYTES: usize = 4096;
+const MAX_LIVE_MODEL_PACKAGES: usize = 64;
+const RUNTIME_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PRESETS: &[&str] = &[
     "local_vllm",
@@ -170,7 +174,7 @@ impl fmt::Debug for ExportRoute {
 }
 
 impl ExportRoute {
-    fn to_runtime_model(&self, task_id: &str) -> Result<SavedModel> {
+    fn to_runtime_model(&self, runtime_id: String) -> Result<SavedModel> {
         let preset = match self.preset.as_str() {
             "local_vllm" => ModelPreset::LocalVllm,
             "deepseek" => ModelPreset::Deepseek,
@@ -194,7 +198,7 @@ impl ExportRoute {
             _ => return Err(error("model_image_override_unsupported")),
         };
         Ok(SavedModel {
-            id: format!("remote-temporary-{task_id}"),
+            id: runtime_id,
             name: self.display_name.clone(),
             alias: None,
             preset,
@@ -629,14 +633,16 @@ fn credential_secret(value: &Value, label: &'static str) -> Result<SensitiveStri
 
 /// Rejects endpoints B must never call on behalf of A: loopback, private,
 /// link-local (including the cloud metadata address) and unresolved local
-/// names. Redirects are handled by the transport, which must not follow them
-/// across hosts.
+/// names. The app cannot bind this validation to CodeWhale's final transport;
+/// DNS rebinding, process proxies and redirect target drift remain documented
+/// residual risks for the first release.
 pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
     if base_url.len() > MAX_URL_CHARS {
         return Err(error("model_endpoint_invalid"));
     }
     validate_controller_base_url(base_url, "temporary_model_package.base_url")
         .map_err(|_| error("model_endpoint_invalid"))?;
+    let is_https = base_url.starts_with("https://");
     let rest = base_url
         .strip_prefix("https://")
         .or_else(|| base_url.strip_prefix("http://"))
@@ -667,29 +673,100 @@ pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
             return Err(error("model_endpoint_private"));
         }
     }
+    if !is_https {
+        return Err(error("model_endpoint_insecure"));
+    }
     Ok(())
 }
 
 fn is_globally_routable(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
-            let octets = address.octets();
+            let [a, b, c, _] = address.octets();
             !(address.is_loopback()
                 || address.is_private()
                 || address.is_link_local()
                 || address.is_broadcast()
                 || address.is_documentation()
+                || address.is_multicast()
                 || address.is_unspecified()
-                || octets[0] == 0
-                || octets[0] >= 224)
+                || a == 0
+                || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 88 && c == 99))
         }
         IpAddr::V6(address) => {
-            !(address.is_loopback()
-                || address.is_unspecified()
-                || address.is_unique_local()
-                || address.is_unicast_link_local())
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return is_globally_routable(IpAddr::V4(mapped));
+            }
+            let segments = address.segments();
+            // Fail closed to the currently allocated global-unicast space.
+            // This rejects loopback/unspecified/ULA/link-local/multicast as
+            // well as site-local, NAT64 and IPv4-translated special ranges.
+            if segments[0] & 0xe000 != 0x2000 {
+                return false;
+            }
+            // IANA special-purpose blocks inside 2000::/3: protocol
+            // assignments (including Teredo/ORCHID/benchmark), documentation,
+            // 6to4 and the former 6bone/documentation allocations.
+            !((segments[0] == 0x2001 && segments[1] <= 0x01ff)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || segments[0] == 0x2002
+                || segments[0] == 0x3ffe
+                || segments[0] == 0x3fff)
         }
     }
+}
+
+fn validate_runtime_addresses(mut addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| !is_globally_routable(address.ip()))
+    {
+        return Err(error("model_endpoint_private"));
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+/// Fully prepared in-memory route bundle for one remote task. Both routes and
+/// both credentials remain task-scoped and are never persisted.
+pub(crate) struct TemporaryRuntimeModels {
+    pub(crate) primary: SavedModel,
+    pub(crate) vision: Option<SavedModel>,
+}
+
+/// Performs the app-owned execution-preparation check for a temporary endpoint. The
+/// validated address snapshot is intentionally not injected into CodeWhale:
+/// the accepted residual risk is that the HTTP client may resolve the host
+/// again, honor a process proxy, or follow a redirect before inference.
+async fn validate_runtime_endpoint(base_url: &str) -> Result<()> {
+    let url = reqwest::Url::parse(base_url).map_err(|_| error("model_endpoint_invalid"))?;
+    if url.scheme() != "https" {
+        return Err(error("model_endpoint_insecure"));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| error("model_endpoint_invalid"))?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| error("model_endpoint_invalid"))?;
+    let addresses = tokio::time::timeout(
+        RUNTIME_DNS_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| error("model_endpoint_unresolved"))?
+    .map_err(|_| error("model_endpoint_unresolved"))?
+    .collect::<Vec<_>>();
+    validate_runtime_addresses(addresses)?;
+    Ok(())
 }
 
 /// A-side export decision for one saved model.
@@ -807,7 +884,7 @@ fn image_override_str(value: ImageCapabilityOverride) -> &'static str {
 /// releases it on every task terminal path.
 #[derive(Default)]
 pub(crate) struct TemporaryModelStore {
-    installed: Mutex<Option<InstalledPackage>>,
+    installed: Mutex<BTreeMap<String, InstalledPackage>>,
 }
 
 struct InstalledPackage {
@@ -825,30 +902,24 @@ impl TemporaryModelStore {
     ) -> Result<()> {
         package.validate_for_task(live, task_id)?;
         let mut installed = self.installed.lock();
-        if let Some(existing) = installed.as_ref() {
-            if existing.package.binding.task_id == task_id {
-                // A retry of the same task replaces its own package.
-                *installed = Some(InstalledPackage {
-                    package,
-                    installed_at_ms: now_b,
-                });
-                return Ok(());
-            }
-            return Err(error("model_task_already_active"));
+        if !installed.contains_key(task_id) && installed.len() >= MAX_LIVE_MODEL_PACKAGES {
+            return Err(error("model_package_capacity"));
         }
-        *installed = Some(InstalledPackage {
-            package,
-            installed_at_ms: now_b,
-        });
+        installed.insert(
+            task_id.to_owned(),
+            InstalledPackage {
+                package,
+                installed_at_ms: now_b,
+            },
+        );
         Ok(())
     }
 
     pub(crate) fn redacted_route(&self, task_id: &str, live: &LeaseContext) -> Result<Value> {
         let installed = self.installed.lock();
         let package = installed
-            .as_ref()
+            .get(task_id)
             .map(|installed| &installed.package)
-            .filter(|package| package.binding.task_id == task_id)
             .ok_or_else(|| error("model_package_missing"))?;
         package.validate_for_task(live, task_id)?;
         Ok(package.to_redacted_value())
@@ -864,9 +935,8 @@ impl TemporaryModelStore {
     ) -> Result<R> {
         let installed = self.installed.lock();
         let package = installed
-            .as_ref()
+            .get(task_id)
             .map(|installed| &installed.package)
-            .filter(|package| package.binding.task_id == task_id)
             .ok_or_else(|| error("model_package_missing"))?;
         package.validate_for_task(live, task_id)?;
         Ok(use_route(
@@ -877,61 +947,64 @@ impl TemporaryModelStore {
 
     /// Materializes the task-scoped route for an EnginePool turn. The model is
     /// returned only to the in-process executor and is never persisted.
-    pub(crate) fn runtime_model_for_task(
+    pub(crate) async fn runtime_models_for_task(
         &self,
         task_id: &str,
         live: &LeaseContext,
-    ) -> Result<SavedModel> {
-        self.with_credentials(task_id, live, |primary, _| {
-            primary.to_runtime_model(task_id)
-        })?
+    ) -> Result<TemporaryRuntimeModels> {
+        let primary_id = format!("remote-temporary-{task_id}-primary");
+        let vision_id = format!("remote-temporary-{task_id}-vision");
+        let (mut primary, vision) =
+            self.with_credentials(task_id, live, |primary, vision| {
+                Ok::<_, TemporaryModelError>((
+                    primary.to_runtime_model(primary_id)?,
+                    vision
+                        .map(|route| route.to_runtime_model(vision_id.clone()))
+                        .transpose()?,
+                ))
+            })??;
+        primary.vision_model_id = vision.as_ref().map(|model| model.id.clone());
+        validate_runtime_endpoint(&primary.base_url).await?;
+        if let Some(model) = vision.as_ref() {
+            validate_runtime_endpoint(&model.base_url).await?;
+        }
+        Ok(TemporaryRuntimeModels { primary, vision })
     }
 
     pub(crate) fn installed_at_ms(&self) -> Option<u64> {
         self.installed
             .lock()
-            .as_ref()
+            .values()
+            .next()
             .map(|installed| installed.installed_at_ms)
     }
 
     pub(crate) fn active_task(&self) -> Option<String> {
-        self.installed
-            .lock()
-            .as_ref()
-            .map(|installed| installed.package.binding.task_id.clone())
+        self.installed.lock().keys().next().cloned()
+    }
+
+    pub(crate) fn contains_task(&self, task_id: &str) -> bool {
+        self.installed.lock().contains_key(task_id)
     }
 
     /// Idempotent release; returns `true` when a package was actually dropped.
     pub(crate) fn clear_task(&self, task_id: &str) -> bool {
-        let mut installed = self.installed.lock();
-        if installed
-            .as_ref()
-            .is_some_and(|existing| existing.package.binding.task_id == task_id)
-        {
-            *installed = None;
-            return true;
-        }
-        false
+        self.installed.lock().remove(task_id).is_some()
     }
 
     pub(crate) fn clear_for_connection(&self, connection_id: &str) -> bool {
         let mut installed = self.installed.lock();
-        if installed
-            .as_ref()
-            .is_some_and(|existing| existing.package.binding.connection_id == connection_id)
-        {
-            *installed = None;
-            return true;
-        }
-        false
+        let before = installed.len();
+        installed.retain(|_, existing| existing.package.binding.connection_id != connection_id);
+        installed.len() != before
     }
 
     pub(crate) fn clear_all(&self) {
-        *self.installed.lock() = None;
+        self.installed.lock().clear();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.installed.lock().is_none()
+        self.installed.lock().is_empty()
     }
 }
 
@@ -1193,6 +1266,12 @@ mod tests {
             "http://172.16.5.5/v1",
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]:8000/v1",
+            "https://[fec0::1]/v1",
+            "https://[64:ff9b::c000:0201]/v1",
+            "https://[::ffff:192.0.2.1]/v1",
+            "https://[2001::1]/v1",
+            "https://[2002:c000:0201::1]/v1",
+            "https://[3fff::1]/v1",
             "http://vllm.internal/v1",
             "https://user:pass@api.deepseek.com/v1",
         ] {
@@ -1203,6 +1282,30 @@ mod tests {
         }
         assert!(validate_export_target("https://api.deepseek.com/v1").is_ok());
         assert!(validate_export_target("https://8.8.8.8/v1").is_ok());
+    }
+
+    #[test]
+    fn resolved_dns_addresses_reject_any_special_purpose_ipv6_result() {
+        let public: SocketAddr = "[2606:4700:4700::1111]:443".parse().unwrap();
+        let site_local: SocketAddr = "[fec0::1]:443".parse().unwrap();
+        let nat64: SocketAddr = "[64:ff9b::c000:0201]:443".parse().unwrap();
+
+        assert_eq!(
+            validate_runtime_addresses(vec![public, site_local])
+                .unwrap_err()
+                .code,
+            "model_endpoint_private"
+        );
+        assert_eq!(
+            validate_runtime_addresses(vec![nat64]).unwrap_err().code,
+            "model_endpoint_private"
+        );
+        assert_eq!(
+            validate_runtime_addresses(vec![public, public])
+                .unwrap()
+                .as_slice(),
+            [public]
+        );
     }
 
     #[test]
@@ -1301,18 +1404,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn store_is_task_scoped_and_releases_idempotently() {
+    #[tokio::test]
+    async fn store_is_task_scoped_and_releases_idempotently() {
         let store = TemporaryModelStore::default();
+        let mut first_package = package("sk-value");
+        first_package.primary.base_url = "https://8.8.8.8/v1".into();
         store
-            .install(package("sk-value"), &lease(), "task-0001", 1_000)
+            .install(first_package, &lease(), "task-0001", 1_000)
             .unwrap();
         assert_eq!(store.active_task().as_deref(), Some("task-0001"));
         assert!(store.redacted_route("task-0001", &lease()).is_ok());
-        let runtime_model = store.runtime_model_for_task("task-0001", &lease()).unwrap();
-        assert_eq!(runtime_model.model, "deepseek-chat");
-        assert_eq!(runtime_model.api_key, "sk-value");
-        assert!(runtime_model.id.contains("task-0001"));
+        let runtime_models = store
+            .runtime_models_for_task("task-0001", &lease())
+            .await
+            .unwrap();
+        assert_eq!(runtime_models.primary.model, "deepseek-chat");
+        assert_eq!(runtime_models.primary.api_key, "sk-value");
+        assert!(runtime_models.primary.id.contains("task-0001"));
         assert_eq!(
             store
                 .redacted_route("task-0002", &lease())
@@ -1329,17 +1437,13 @@ mod tests {
 
         let mut other = package("sk-other");
         other.binding.task_id = "task-0002".into();
-        assert_eq!(
-            store
-                .install(other, &lease(), "task-0002", 1_100)
-                .unwrap_err()
-                .code,
-            "model_task_already_active"
-        );
+        store.install(other, &lease(), "task-0002", 1_100).unwrap();
+        assert!(store.contains_task("task-0001"));
+        assert!(store.contains_task("task-0002"));
 
         assert!(store.clear_task("task-0001"));
         assert!(!store.clear_task("task-0001"));
-        assert!(store.is_empty());
+        assert!(!store.is_empty());
         assert_eq!(
             store
                 .redacted_route("task-0001", &lease())
@@ -1347,6 +1451,8 @@ mod tests {
                 .code,
             "model_package_missing"
         );
+        assert!(store.clear_task("task-0002"));
+        assert!(store.is_empty());
     }
 
     #[test]

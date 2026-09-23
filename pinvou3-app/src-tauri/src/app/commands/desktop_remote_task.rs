@@ -29,9 +29,8 @@ use crate::features::remote_control::controller::protocol::{
 use crate::features::remote_control::controller::task::RemoteTaskEvent;
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
-    RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger, RemoteTaskService,
-    RemoteTaskTerminal, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,
-    TASK_MODEL_SOURCE_TEMPORARY,
+    RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT,
+    TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
 };
 use crate::features::remote_control::controller::temporary_model::{
     SharedTemporaryModelStore, TemporaryModelPackageV1,
@@ -328,10 +327,10 @@ fn temporary_model_gate(
     if model_source != TASK_MODEL_SOURCE_TEMPORARY {
         return Ok(());
     }
-    match store.active_task() {
-        Some(active) if active == task_id => Ok(()),
-        _ => Err("model_package_missing".to_owned()),
-    }
+    store
+        .contains_task(task_id)
+        .then_some(())
+        .ok_or_else(|| "model_package_missing".to_owned())
 }
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
@@ -683,6 +682,9 @@ fn admit_and_dispatch(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
+    if mode == TASK_MODE_CODE && model_source == TASK_MODEL_SOURCE_TEMPORARY {
+        return Err("task_model_source_unsupported".to_owned());
+    }
     crate::features::remote_control::controller::relay_runtime::log_controlled_event(
         "task_model_source_received",
         &model_source,
@@ -725,7 +727,14 @@ fn admit_and_dispatch(
         }
     }
     let outcome = service
-        .submit_bound(lease, validated, now_b)
+        .submit_bound_with_admission(lease, validated, now_b, |ticket| {
+            if let Some(package) = temporary_package {
+                models
+                    .install(package, lease, &ticket.record.task_id, now_b)
+                    .map_err(|error| error.code)?;
+            }
+            Ok(())
+        })
         .map_err(|error| error.code.to_owned())?;
     match outcome {
         AdmissionOutcome::Replay(record) => service
@@ -733,17 +742,7 @@ fn admit_and_dispatch(
             .map_err(|error| error.code.to_owned()),
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
-            if let Some(package) = temporary_package {
-                if let Err(error) = models.install(package, lease, &task_id, now_b) {
-                    let code = error.code.to_owned();
-                    let _ = service.complete(
-                        &task_id,
-                        RemoteTaskTerminal::Failed,
-                        Some(code.clone()),
-                        now_b,
-                    );
-                    return Err(code);
-                }
+            if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 temporary_model_gate(&model_source, &task_id, models)?;
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                     "task_temporary_model_installed",

@@ -236,6 +236,7 @@ test("task submission carries bounded input, exact statuses and the full tempora
   assert.deepEqual(TASK_STATUSES, ["admitted", "running", "waiting_permission", "succeeded", "failed", "cancelled", "interrupted", "result_unknown"]);
   assert.deepEqual(validateControllerPayload(fixture.task_submit_vectors.controlled, "A", LEASE), fixture.task_submit_vectors.controlled);
   assert.deepEqual(validateControllerPayload(fixture.task_submit_vectors.temporary, "A", LEASE), fixture.task_submit_vectors.temporary);
+  assertProtocolError("invalid_field", () => validateControllerPayload({ ...fixture.task_submit_vectors.temporary, mode: "code" }, "A", LEASE));
   const status = validPayload("task_status");
   for (const task_status of TASK_STATUSES) validateControllerPayload({ ...status, task_status }, "B", LEASE);
   assertProtocolError("invalid_enum", () => validateControllerPayload({ ...status, task_status: "completed" }, "B", LEASE));
@@ -331,6 +332,16 @@ test("capability and signed pairing transcript vectors are canonical and tamper 
   assertProtocolError("unsupported_capability", () => validateControllerRuntimePayload(validPayload("task_submit"), "A", onlyPairing));
   assertProtocolError("unsupported_capability", () => validateControllerRuntimeMessage(validMessage("encrypted_frame", "A"), "A", onlyPairing));
   validateControllerRuntimePayload(validPayload("task_submit"), "A", { lease: LEASE, negotiated_capabilities: ["task_v1"] });
+  assertProtocolError("unsupported_capability", () => validateControllerRuntimePayload(
+    fixture.task_submit_vectors.temporary,
+    "A",
+    { lease: LEASE, negotiated_capabilities: ["task_v1"] },
+  ), undefined, "temporary_model_package_v1");
+  validateControllerRuntimePayload(
+    fixture.task_submit_vectors.temporary,
+    "A",
+    { lease: LEASE, negotiated_capabilities: ["task_v1", "temporary_model_package_v1"] },
+  );
 });
 
 test("runtime validation requires negotiated outer and inner capabilities", () => {

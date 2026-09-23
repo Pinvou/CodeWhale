@@ -410,6 +410,14 @@ impl ControllingSessionManager {
         if intent.capability_revision.is_none() {
             return Err(SessionError::new("capability_snapshot_required"));
         }
+        if model_source == MODEL_SOURCE_TEMPORARY
+            && !intent
+                .negotiated_capabilities
+                .iter()
+                .any(|capability| capability == "temporary_model_package_v1")
+        {
+            return Err(SessionError::new("temporary_model_capability_required"));
+        }
         if intent.tasks.len() >= MAX_TRACKED_TASKS {
             return Err(SessionError::new("task_capacity"));
         }
@@ -744,6 +752,7 @@ mod tests {
             "encrypted_frames_v1".to_owned(),
             "pairing_v1".to_owned(),
             "task_v1".to_owned(),
+            "temporary_model_package_v1".to_owned(),
         ]
     }
 
@@ -1148,6 +1157,37 @@ mod tests {
                 .unwrap_err()
                 .code,
             "capability_not_negotiated"
+        );
+
+        let legacy = ControllingSessionManager::default();
+        let session = legacy
+            .open(
+                None,
+                "Legacy",
+                "chat",
+                &lease(),
+                &[
+                    "encrypted_frames_v1".into(),
+                    "pairing_v1".into(),
+                    "task_v1".into(),
+                ],
+            )
+            .unwrap();
+        legacy
+            .apply_capability_snapshot(&session.session_ref, &snapshot(1), &lease())
+            .unwrap();
+        assert_eq!(
+            legacy
+                .task_intent_with_model(
+                    &session.session_ref,
+                    "use my model",
+                    &lease(),
+                    MODEL_SOURCE_TEMPORARY,
+                    |_| panic!("package must not be built without negotiated capability"),
+                )
+                .unwrap_err()
+                .code,
+            "temporary_model_capability_required"
         );
     }
 

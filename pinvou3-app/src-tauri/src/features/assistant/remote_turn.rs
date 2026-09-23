@@ -18,7 +18,7 @@ use crate::features::remote_control::controller::task::{
 };
 use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
 
-use super::engine_pool::EnginePool;
+use super::engine_pool::{EnginePool, RemoteRuntimeModelBundle};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BUSY_GRACE: Duration = Duration::from_secs(5);
@@ -115,11 +115,17 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
     ) -> std::result::Result<(), String> {
         let model_override = match model_source {
             TASK_MODEL_SOURCE_CONTROLLED => None,
-            TASK_MODEL_SOURCE_TEMPORARY => Some(
-                self.models
-                    .runtime_model_for_task(task_id, lease)
-                    .map_err(|error| error.code.to_owned())?,
-            ),
+            TASK_MODEL_SOURCE_TEMPORARY => {
+                let models = self
+                    .models
+                    .runtime_models_for_task(task_id, lease)
+                    .await
+                    .map_err(|error| error.code.to_owned())?;
+                Some(
+                    RemoteRuntimeModelBundle::new(models.primary, models.vision)
+                        .map_err(|_| "model_runtime_invalid".to_owned())?,
+                )
+            }
             _ => return Err("task_model_source_invalid".to_owned()),
         };
         self.pool
@@ -198,9 +204,20 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
         cancel: CancellationToken,
     ) -> std::result::Result<Option<String>, String> {
         let result = async {
-            self.engine
-                .send_user_message(session_id, task_id, model_source, lease, content)
-                .await?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    self.engine.cancel_turn(session_id).await;
+                    return Err(TASK_CANCELLED_CODE.to_owned());
+                }
+                result = self.engine.send_user_message(
+                    session_id,
+                    task_id,
+                    model_source,
+                    lease,
+                    content,
+                ) => result?,
+            }
             self.wait_for_terminal(session_id, &cancel).await?;
             // 轮次结束后读回最后一条 assistant 文本作为正文（读取失败不阻塞终态）。
             Ok(self.transcript.last_assistant_text(session_id))
@@ -231,6 +248,8 @@ mod tests {
         flips: AtomicUsize,
         cancelled: Mutex<Vec<String>>,
         completes_after_first_poll: bool,
+        send_started: Option<Arc<tokio::sync::Notify>>,
+        send_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl FakeEngine {
@@ -261,6 +280,12 @@ mod tests {
             _lease: &LeaseContext,
             content: String,
         ) -> std::result::Result<(), String> {
+            if let Some(started) = self.send_started.as_ref() {
+                started.notify_one();
+            }
+            if let Some(release) = self.send_release.as_ref() {
+                release.notified().await;
+            }
             self.sent.lock().unwrap().push(content);
             self.sources.lock().unwrap().push(model_source.to_owned());
             self.active.store(true, Ordering::SeqCst);
@@ -361,6 +386,41 @@ mod tests {
         });
         assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE);
         assert_eq!(fake.cancelled.lock().unwrap().as_slice(), ["session-0001"]);
+    }
+
+    #[test]
+    fn cancellation_drops_a_pending_model_prepare_before_turn_submission() {
+        let send_started = Arc::new(tokio::sync::Notify::new());
+        let send_release = Arc::new(tokio::sync::Notify::new());
+        let fake = Arc::new(FakeEngine {
+            send_started: Some(send_started.clone()),
+            send_release: Some(send_release),
+            ..FakeEngine::default()
+        });
+        let port = EnginePoolChatTurnPort::new(fake.clone(), Arc::new(FakeTranscript(None)));
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        let result = runtime().block_on(async move {
+            let task = tokio::spawn(async move {
+                port.run_chat_turn(
+                    "session-0001",
+                    "task-0001",
+                    TASK_MODEL_SOURCE_TEMPORARY,
+                    &lease(),
+                    "must-not-send".into(),
+                    cancel,
+                )
+                .await
+            });
+            send_started.notified().await;
+            trigger.cancel();
+            task.await.unwrap()
+        });
+
+        assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE);
+        assert!(fake.sent.lock().unwrap().is_empty());
+        assert_eq!(fake.cancelled.lock().unwrap().as_slice(), ["session-0001"]);
+        assert_eq!(fake.released.lock().unwrap().as_slice(), ["session-0001"]);
     }
 
     #[test]
