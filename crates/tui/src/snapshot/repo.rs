@@ -214,15 +214,11 @@ impl SnapshotRepo {
     /// availability without paying the first-init size walk or surprising the
     /// user by creating a side repo from a view action.
     pub fn open_existing(workspace: &Path) -> io::Result<Option<Self>> {
-        // Read-only availability surface: a wedged mount reads as "no
-        // snapshots" rather than hanging the UI or erroring the caller.
-        let work_tree = match canonicalize_bounded(workspace, WORKSPACE_PROBE_TIMEOUT) {
-            Ok(work_tree) => work_tree,
-            Err(err) => {
-                tracing::warn!(target: "snapshot", "snapshot availability probe failed: {err}");
-                return Ok(None);
-            }
-        };
+        // Read-only availability surface: a wedged mount must not hang the
+        // UI, but it must not read as "no snapshots" either — both callers
+        // have an `Err` arm that reports the reason ("could not be
+        // opened"), so surface the probe failure instead of swallowing it.
+        let work_tree = canonicalize_bounded(workspace, WORKSPACE_PROBE_TIMEOUT)?;
         let git_dir = snapshot_git_dir(&work_tree);
         if !git_dir.exists() || !git_dir.join("HEAD").exists() {
             return Ok(None);
@@ -295,9 +291,14 @@ impl SnapshotRepo {
                 )
             };
             if let Err(err) = sized {
-                return Err(io::Error::other(format!(
-                    "first-init workspace scan failed: {err}"
-                )));
+                // Preserve the TimedOut kind: the turn pipeline's
+                // degraded-snapshots notice gates on it, so re-wrapping as
+                // `io::Error::other` would swallow the user-visible wedge
+                // warning into the tracing log.
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("first-init workspace scan failed: {err}"),
+                ));
             }
             if sized.unwrap().is_none() {
                 return Err(io::Error::new(
@@ -1379,9 +1380,11 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
         }
         // The wait itself failed (only `try_wait`/poll hard errors reach
         // here). Cancel and join before propagating so this exit leaves no
-        // reader threads behind either.
+        // reader threads behind either; the std child has no kill_on_drop,
+        // so also signal it explicitly instead of leaking it on drop.
         Err(e) => {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = child.kill();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
             return Err(e);
@@ -1811,6 +1814,35 @@ mod tests {
 
         let after = SnapshotRepo::open_existing(&workspace).expect("open existing");
         assert!(after.is_some());
+    }
+
+    #[test]
+    fn open_or_init_recovers_a_side_repo_left_without_a_head() {
+        // A timed-out `git init` can stop between creating the side repo
+        // directory and writing HEAD. The directory-existence predicate used
+        // to skip init forever, failing every later snapshot with "not a git
+        // repository"; the readiness predicate must see the missing HEAD and
+        // re-init (git init is idempotent).
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = scoped_home(tmp.path());
+
+        let git_dir = snapshot_git_dir(&workspace);
+        std::fs::create_dir_all(git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+
+        let repo = SnapshotRepo::open_or_init(&workspace)
+            .expect("open_or_init must heal a HEAD-less side repo");
+        std::fs::write(repo.work_tree().join("a.txt"), b"alpha").unwrap();
+        let id = repo
+            .snapshot("pre-turn:1")
+            .expect("snapshot must work after the healing re-init");
+        assert_eq!(id.as_str().len(), 40);
+
+        // And the healed repo reopens as ready.
+        let reopened = SnapshotRepo::open_existing(&workspace).expect("open existing");
+        assert!(reopened.is_some());
     }
 
     #[test]

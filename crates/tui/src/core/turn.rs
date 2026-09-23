@@ -495,6 +495,10 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
     // (raise the cap or set 0 to disable the size gate).
     let hint = if size_gated {
         "  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in."
+    } else if message.contains("the filesystem appears wedged") {
+        // Bounded pre-git probes (workspace path resolution, first-init
+        // size walk): no git ran yet, so there is no index.lock to wait out.
+        "  the workspace filesystem did not answer in time (wedged NFS/FUSE mount?); snapshots retry once it responds."
     } else {
         "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
     };
