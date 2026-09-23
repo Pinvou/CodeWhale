@@ -759,6 +759,7 @@ function healthSummary() {
   const values = [...endpoints.values()];
   return {
     ok: true,
+    desktop_controller_enabled: Boolean(controllerRuntime),
     endpoint_count: values.length,
     // Keep the aggregate-only key consumed by the current deployment probe.
     room_count: values.length,
@@ -1198,6 +1199,14 @@ wss.on("connection", (ws, req) => {
     }
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
       send(ws, { v: 2, type: "error", code: "bad_message", message: "bad message" });
+      return;
+    }
+    if (msg.v === 1 && CONTROLLER_TYPES.has(msg.type) && !controllerRuntime) {
+      rejectSocket(
+        ws,
+        "desktop_controller_unavailable",
+        "desktop controller is unavailable",
+      );
       return;
     }
     if (msg.v === 1 && controllerRuntime && CONTROLLER_TYPES.has(msg.type)) {

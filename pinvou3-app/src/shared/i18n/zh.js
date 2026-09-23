@@ -1980,6 +1980,7 @@ dictZh["controlledDevice"] = {
   noAllowControl: "出于安全原因，本机不能批准远程操作。",
   unsupported: "当前系统暂不支持桌面远程控制。",
   errorGeneric: "操作失败，请稍后重试。",
+  errorRelayUnavailable: "远程控制服务暂未启用桌面控制，请稍后重试或联系服务管理员。",
   workspaceAuthorize: "添加工作区",
   workspaceAuthorized: "已授权",
   workspaceUnauthorized: "未授权",

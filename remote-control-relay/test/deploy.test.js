@@ -26,6 +26,14 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /cp -a "\$remote_dir\/web\/dist" "\$backup\/web-dist"/);
   assert.match(source, /mv "\$web_stage" "\$remote_dir\/web\/dist"/);
   assert.match(source, /PINVOU_CONFIRM_PRODUCTION_DEPLOY/);
+  assert.match(source, /desktop_controller_enabled !== true/);
+  assert.match(source, /40-controller\.conf/);
+  assert.match(source, /EnvironmentFile=%s/);
+  assert.match(source, /pinvou-remote-relay-controller\.env/);
+  assert.match(source, /scripts\/deploy-controller-preflight\.mjs/);
+  assert.match(source, /scripts\/controller-route-smoke\.mjs/);
+  assert.match(source, /controller-v1 路由烟测失败/);
+  assert.equal((source.match(/backup\/code-js\/\*\.js/g) || []).length, 2);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
   assert.doesNotMatch(source, /nginx -t|systemctl reload nginx/);
 });

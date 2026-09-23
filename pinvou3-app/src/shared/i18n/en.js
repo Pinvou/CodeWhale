@@ -2012,6 +2012,7 @@ dictEn["controlledDevice"] = {
   noAllowControl: "This device cannot approve remote operations.",
   unsupported: "Desktop remote control is not supported on this system.",
   errorGeneric: "The operation failed. Please try again.",
+  errorRelayUnavailable: "The remote service has not enabled desktop control. Try again later or contact the service administrator.",
   workspaceAuthorize: "Add workspace",
   workspaceAuthorized: "Authorized",
   workspaceUnauthorized: "Not authorized",

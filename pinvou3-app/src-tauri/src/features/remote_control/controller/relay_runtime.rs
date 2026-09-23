@@ -339,6 +339,19 @@ pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
                         .and_then(Value::as_str)
                         .unwrap_or("relay_error");
                     log_controlled_event("registration_rejected", code);
+                    // The shared Relay uses v2 for its outer Web-access lane and
+                    // controller-v1 for desktop control. A v2 version rejection
+                    // for our v1 registration means the controller dispatcher is
+                    // not enabled on that Relay; surface the deployment fault
+                    // instead of collapsing it into a generic registration error.
+                    if message.get("v").and_then(Value::as_u64) == Some(2)
+                        && matches!(
+                            code,
+                            "unsupported_protocol_version" | "desktop_controller_unavailable"
+                        )
+                    {
+                        return Err("desktop_controller_relay_unavailable".to_owned());
+                    }
                 }
                 return registration_from_response(code_wrap, request, &message)
                     .map(|registration| RegistrationStep::Registered(Box::new(registration)));
@@ -1999,6 +2012,35 @@ mod tests {
             "relay failures must stay bounded: {error}"
         );
         assert!(!error.contains(' '));
+    }
+
+    #[test]
+    fn disabled_controller_lane_has_a_specific_bounded_error() {
+        let (request, receiver) = registration_request_fixture();
+        for relay_code in [
+            "unsupported_protocol_version",
+            "desktop_controller_unavailable",
+        ] {
+            let mut port = FakePort::new(
+                vec![json!({
+                    "v": 2,
+                    "type": "error",
+                    "code": relay_code,
+                    "message": "desktop controller is unavailable",
+                })],
+                false,
+            );
+            assert_eq!(
+                block_on(next_registration_step(
+                    &mut port,
+                    &request,
+                    &receiver,
+                    Duration::from_millis(500),
+                ))
+                .unwrap_err(),
+                "desktop_controller_relay_unavailable"
+            );
+        }
     }
 
     fn keys() -> (CodeWrapKeyPair, CodeWrapKeyPair) {

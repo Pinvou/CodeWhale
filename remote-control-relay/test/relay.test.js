@@ -14,6 +14,7 @@ import {
   parseSealedCodeV1,
   receiptCommitmentHex,
 } from "../protocol-controller.js";
+import { smokeControllerRoute } from "../scripts/controller-route-smoke.mjs";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 
@@ -360,6 +361,7 @@ test("healthz exposes aggregate endpoint counters and no identifiers", async () 
   const health = await response.json();
   assert.deepEqual(Object.keys(health).sort(), [
     "connected_endpoint_count",
+    "desktop_controller_enabled",
     "desktop_offline_count",
     "desktop_open_count",
     "endpoint_count",
@@ -369,7 +371,28 @@ test("healthz exposes aggregate endpoint counters and no identifiers", async () 
     "web_client_open_count",
     "ws_connection_count",
   ]);
+  assert.equal(health.desktop_controller_enabled, false);
   assert.equal(JSON.stringify(health).includes("token"), false);
+});
+
+test("controller v1 fails with a specific error when its runtime is disabled", async (t) => {
+  const socket = await openSocket();
+  t.after(() => closeSocket(socket));
+  const unavailable = nextMessage(socket, "error");
+  socket.send(JSON.stringify({
+    v: 1,
+    type: "desktop_pairing_register",
+    request_id: "request-controller-disabled",
+    registration_request_id: "registration-controller-disabled",
+    endpoint_id: "endpoint-controller-disabled",
+    remote_control_generation: "generation-controller-disabled",
+    code_wrap_public_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    handshake_public_key_b64: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    key_algorithm: "x25519",
+    capabilities: ["pairing_v1"],
+  }));
+  assert.equal((await unavailable).code, "desktop_controller_unavailable");
+  await waitForClose(socket);
 });
 
 test("stats and telemetry keep their dedicated top-level paths", async () => {
@@ -1138,6 +1161,9 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
   });
   const sockets = [];
   try {
+    const controllerHealth = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(controllerHealth.desktop_controller_enabled, true);
+    await smokeControllerRoute(isolated.wsUrl);
     const endpointId = "endpoint-controller-e2e";
     const accessToken = "controller-access-token-0000000000000001";
     const desktopSecret = "controller-desktop-secret-000000000001";

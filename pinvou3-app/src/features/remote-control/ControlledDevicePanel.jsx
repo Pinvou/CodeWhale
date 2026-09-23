@@ -53,6 +53,12 @@ function statusKey(status) {
   }
 }
 
+function controlledErrorKey(code) {
+  return code === 'desktop_controller_relay_unavailable'
+    ? 'errorRelayUnavailable'
+    : 'errorGeneric';
+}
+
 /** 进行中的状态：只有这些状态才允许刷新；开关负责开启或关闭被控。 */
 const ACTIVE_STATUSES = [
   'reserving',
@@ -143,6 +149,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   const workspaces = Array.isArray(device.workspaces) ? device.workspaces : [];
   const tasks = Array.isArray(bs && bs.controlledTasks) ? bs.controlledTasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown'].includes(task.status)) : [];
   const permissions = Array.isArray(bs && bs.remotePermissions) ? bs.remotePermissions : [];
+  const visibleError = error || (status === 'error' ? device.lastError : null);
 
   return (
     <section className="settings-section" aria-labelledby="controlled-device-title">
@@ -251,9 +258,9 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
 
       <p className="settings-hint">{copy.readOnlyNotice}</p>
 
-      {(error || (status === 'error' && device.lastError)) && (
+      {visibleError && (
         <p className="settings-error" role="alert">
-          {copy.errorGeneric}
+          {copy[controlledErrorKey(visibleError)] || copy.errorGeneric}
           {/* 有界错误码直接透出：面板只显示通用文案时，用户与支持两端都无法定位 */}
           {(error || device.lastError) && (
             <span className="settings-error-code"> ({String(error || device.lastError)})</span>

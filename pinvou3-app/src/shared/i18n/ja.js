@@ -2012,6 +2012,7 @@ dictJa["controlledDevice"] = {
   noAllowControl: "この端末から遠隔操作を承認することはできません。",
   unsupported: "このシステムではデスクトップ遠隔操作を利用できません。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
+  errorRelayUnavailable: "リモートサービスでデスクトップ操作が有効になっていません。時間をおいて再試行するか、サービス管理者に連絡してください。",
   workspaceAuthorize: "ワークスペースを追加",
   workspaceAuthorized: "許可済み",
   workspaceUnauthorized: "未許可",
