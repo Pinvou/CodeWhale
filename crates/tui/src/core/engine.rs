@@ -8002,11 +8002,31 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
         return None;
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
+    // The exec lane resolves a `cwd:`/`working_dir:` operand through the
+    // roots-aware `ToolContext::resolve_path` and executes there, so the
+    // approval context must judge the same effective cwd: an allow rule
+    // scoped to the primary repo must not auto-approve the same command
+    // redirected into an attached root. The join mirrors execution
+    // (absolute as-is, relative onto the primary root) and stays lexical,
+    // matching `normalize_workspace_roots`.
+    let effective_cwd = ["cwd", "working_dir"]
+        .iter()
+        .find_map(|name| tool_input.get(name).and_then(Value::as_str))
+        .map(|dir| {
+            let raw = Path::new(dir);
+            let joined = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                workspace.join(raw)
+            };
+            crate::tools::spec::normalize_path(&joined)
+        });
     tool_ask_rule_decision_for_context(
         exec_policy_engine,
         policy_tool_name,
         command,
         None,
+        effective_cwd.as_deref().unwrap_or(workspace),
         workspace,
         workspace_roots,
         approval_mode,
@@ -8052,6 +8072,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             "",
             None,
             workspace,
+            workspace,
             workspace_roots,
             approval_mode,
         );
@@ -8065,6 +8086,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             policy_tool_name,
             "",
             Some(&path),
+            workspace,
             workspace,
             workspace_roots,
             approval_mode,
@@ -8094,11 +8116,12 @@ fn tool_ask_rule_decision_for_context(
     tool_name: &str,
     command: &str,
     path: Option<&str>,
+    cwd: &Path,
     workspace: &Path,
     workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
-    let cwd = workspace.to_string_lossy();
+    let judged_cwd = cwd.to_string_lossy();
     let ask_for_approval = match approval_mode {
         crate::tui::approval::ApprovalMode::Never => AskForApproval::Never,
         crate::tui::approval::ApprovalMode::Auto
@@ -8108,15 +8131,17 @@ fn tool_ask_rule_decision_for_context(
     let decision = exec_policy_engine
         .check(ExecPolicyContext {
             command,
-            cwd: cwd.as_ref(),
+            cwd: judged_cwd.as_ref(),
             tool: Some(tool_name),
             path,
             ask_for_approval,
             sandbox_mode: None,
-            workspace_roots: codewhale_core::normalize_workspace_roots(workspace, workspace_roots)
-                .into_iter()
-                .skip(1)
-                .collect(),
+            // `check` prepends the judged cwd itself and dedupes, so pass the
+            // full normalized session set (primary included): ask/deny scope
+            // matching keeps spanning every declared root even when the
+            // judged cwd differs from the session primary (an exec `cwd:`
+            // operand), while allow rules stay narrowed to the judged cwd.
+            workspace_roots: codewhale_core::normalize_workspace_roots(workspace, workspace_roots),
         })
         .ok()?;
     if !decision.allow {

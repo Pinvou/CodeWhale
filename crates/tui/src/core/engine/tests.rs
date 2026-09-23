@@ -9581,6 +9581,145 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
 }
 
 #[test]
+fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
+    // B15-3 regression pin: the normal exec lane resolves a `cwd:` operand
+    // into any declared root and executes there, so the approval context
+    // must judge the resolved effective cwd. A grant scoped to the primary
+    // repo must not auto-approve the same command redirected into an
+    // attached root — a different repository the grant never named.
+    let rule = codewhale_execpolicy::ToolAskRule::exec_shell("git push")
+        .into_exact_workspace_allow("/repo");
+    let config = EngineConfig {
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+    let roots = [PathBuf::from("/shared")];
+
+    // Control: inside the scoped repo the grant still auto-approves, with
+    // the attached root declared.
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &config,
+            "exec_shell",
+            &json!({"command": "git push"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        Some(ToolAskRuleDecision::Allow)
+    );
+    // A relative `cwd:` resolves against the primary root (execution
+    // semantics), so it keeps the grant.
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &config,
+            "exec_shell",
+            &json!({"command": "git push", "cwd": "."}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        Some(ToolAskRuleDecision::Allow)
+    );
+    // Redirected into the attached root, the /repo-scoped grant must not
+    // auto-approve.
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &config,
+            "exec_shell",
+            &json!({"command": "git push", "cwd": "/shared"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        None,
+        "a /repo-scoped allow must not auto-approve execution under an attached root"
+    );
+
+    // The scope match is honest in both directions: a grant scoped to the
+    // attached root fires exactly when execution lands there.
+    let attached_rule = codewhale_execpolicy::ToolAskRule::exec_shell("git push")
+        .into_exact_workspace_allow("/shared");
+    let attached_config = EngineConfig {
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![attached_rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &attached_config,
+            "exec_shell",
+            &json!({"command": "git push", "cwd": "/shared"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        Some(ToolAskRuleDecision::Allow)
+    );
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &attached_config,
+            "exec_shell",
+            &json!({"command": "git push"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        None
+    );
+}
+
+#[test]
+fn exec_shell_attached_root_scoped_deny_reaches_rule_decision() {
+    // Pin for the engine-level exec-policy glue: the declared root set must
+    // reach the typed-rule decision. Every other engine-level caller passes
+    // `&[]`, so a glue mutation dropping the set only shows up as an
+    // attached-root-dependent outcome flipping.
+    let rule = codewhale_execpolicy::ToolAskRule {
+        tool: "exec_shell".into(),
+        command: Some("git push".into()),
+        command_exact: false,
+        path: None,
+        workspace: Some("/shared".into()),
+        action: codewhale_execpolicy::PermissionAction::Deny,
+    };
+    let config = EngineConfig {
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+
+    let decision = exec_shell_ask_rule_decision(
+        &config,
+        "exec_shell",
+        &json!({"command": "git push origin main"}),
+        Path::new("/repo"),
+        &[PathBuf::from("/shared")],
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(
+        matches!(decision, Some(ToolAskRuleDecision::Block(_))),
+        "a deny rule scoped to an attached root must reach the decision: {decision:?}"
+    );
+
+    // Control: with the historical empty root set the /shared-scoped deny
+    // does not reach the call.
+    let decision = exec_shell_ask_rule_decision(
+        &config,
+        "exec_shell",
+        &json!({"command": "git push origin main"}),
+        Path::new("/repo"),
+        &[],
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert_eq!(decision, None);
+}
+
+#[test]
 fn file_ask_scenario() {
     // Scenario consolidation of: file_ask_rule_decision_prompts_for_matching_read_path, file_ask_rule_decision_prompts_for_absolute_workspace_path, file_ask_rule_decision_blocks_matching_read_path_when_approval_is_never, file_ask_rule_decision_ignores_unmatched_path
     // from file_ask_rule_decision_prompts_for_matching_read_path
@@ -13072,6 +13211,62 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
     .await;
 
     assert!(!target.exists(), "repo-law block must prevent the write");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn full_access_repo_law_holds_writes_under_attached_roots() {
+    // Round-15 pin at the turn-loop layer: `run_turn` must forward the
+    // session root set to `repo_law_plan_decision`. A `&[]` mutation at the
+    // turn-loop call site leaves the attached root's constitution unloaded,
+    // so the write below would execute with every repo-law unit test (one
+    // layer down) still green.
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let attached = tempdir().expect("attached root");
+    let law_dir = attached.path().join(".codewhale");
+    fs::create_dir_all(&law_dir).expect("create law directory");
+    fs::write(
+        law_dir.join("constitution.json"),
+        r#"{
+            "protected_invariants": [{
+                "text": "Shared root notes need human review",
+                "paths": ["SHARED.md"]
+            }]
+        }"#,
+    )
+    .expect("write repo law fixture");
+    let target = attached.path().join("SHARED.md");
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        workspace_roots: vec![attached.path().to_path_buf()],
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let tool_input = json!({
+        "action": "write",
+        "path": target.to_string_lossy(),
+        "content": "must not be written\n"
+    });
+
+    assert_full_access_model_tool_batch_is_blocked(
+        engine_config,
+        vec![("File", tool_input)],
+        &[(
+            "File",
+            "Repository law blocked tool 'File' in Full Access: Repo law holds this write: \"Shared root notes need human review\"",
+        )],
+        "Repository law blocked tool 'File' in Full Access: Repo law holds this write:",
+    )
+    .await;
+
+    assert!(
+        !target.exists(),
+        "repo-law block must prevent the write under the attached root"
+    );
 }
 
 #[tokio::test]

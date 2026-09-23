@@ -1088,21 +1088,21 @@ pub(crate) async fn handle_view_events(
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with network access enabled"),
                         });
-                        let policy = option.to_policy(&app.workspace);
+                        let policy = option.to_policy(&app.workspace, &app.workspace_roots);
                         let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
                     }
                     ElevationOption::WithWriteAccess(_) => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with write access enabled"),
                         });
-                        let policy = option.to_policy(&app.workspace);
+                        let policy = option.to_policy(&app.workspace, &app.workspace_roots);
                         let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
                     }
                     ElevationOption::FullAccess => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with full access (no sandbox)"),
                         });
-                        let policy = option.to_policy(&app.workspace);
+                        let policy = option.to_policy(&app.workspace, &app.workspace_roots);
                         let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
                     }
                 }
@@ -1168,8 +1168,14 @@ pub(crate) async fn handle_view_events(
                         // and the respawned engine plus every re-sync read
                         // this field. Without it, switching sessions either
                         // leaks the previous session's set into this one or
-                        // silently strips this session's persisted set.
-                        app.workspace_roots = session.metadata.workspace_roots.clone();
+                        // silently strips this session's persisted set. The
+                        // seed routes through the same normalize the writers
+                        // use, so a legacy or hand-edited record cannot seed
+                        // an entry the intake filter would have dropped.
+                        app.workspace_roots = codewhale_core::normalize_workspace_roots(
+                            &app.workspace,
+                            &session.metadata.workspace_roots,
+                        );
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;

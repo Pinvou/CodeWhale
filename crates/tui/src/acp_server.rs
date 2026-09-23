@@ -4177,6 +4177,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn acp_admission_repo_law_judges_attached_roots() {
+        // Round-15 pin at the ACP admission layer:
+        // `prepare_acp_tool_admission` must forward the registry's root set
+        // to `repo_law_plan_decision`. A `&[]` mutation at that call site
+        // unloads the attached root's constitution, so the hold below
+        // vanishes with every repo-law unit test (one layer down) still
+        // green.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attached = tempfile::tempdir().expect("attached root");
+        let law_dir = attached.path().join(".codewhale");
+        std::fs::create_dir_all(&law_dir).unwrap();
+        std::fs::write(
+            law_dir.join("constitution.json"),
+            r#"{
+                "protected_invariants": [
+                    { "text": "Never rewrite the shared wire", "paths": ["wire.rs"], "action": "block" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let config = Config {
+            allow_shell: Some(true),
+            ..Config::default()
+        };
+        let registry =
+            build_acp_tool_registry(&config, dir.path(), &[attached.path().to_path_buf()], true);
+        let target = attached.path().join("wire.rs");
+        let call = pending_call(
+            "File",
+            json!({"action": "write", "path": target.to_string_lossy(), "content": "new"}),
+        );
+        let (_, admission) = prepare_acp_tool_admission(&config, &registry, &call).unwrap();
+        assert!(matches!(
+            admission,
+            AcpToolAdmission::Block(reason) if reason.contains("Never rewrite the shared wire")
+        ));
+    }
+
     #[tokio::test]
     async fn acp_read_runs_without_permission_but_reports_pending_before_in_progress() {
         let (dir, registry) = workspace_registry();

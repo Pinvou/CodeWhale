@@ -69,6 +69,14 @@ pub enum InitialHistory {
 /// root at position 0, followed by `roots` in their original order with
 /// duplicates removed. An empty `roots` degenerates to `[cwd]`.
 ///
+/// Entries that are empty or relative are dropped, not normalized: every
+/// containment check downstream is `Path::starts_with`-shaped, where an empty
+/// root contains *every* path and a relative root is meaningless against the
+/// absolute candidates the boundary checks resolve. The `cwd` argument is
+/// trusted (it carries its own intake validation); only `roots` entries are
+/// filtered. This is the single chokepoint every consumer routes through, so
+/// intake validation lives here rather than at each protocol surface.
+///
 /// Deduplication is lexical, not filesystem-aware: two spellings of the same
 /// directory (a symlinked `/var/x` beside its `/private/var/x` target) both
 /// survive here. Callers that enumerate writable roots canonicalize per root
@@ -77,6 +85,9 @@ pub enum InitialHistory {
 pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut normalized = vec![cwd.to_path_buf()];
     for root in roots {
+        if root.as_os_str().is_empty() || !root.is_absolute() {
+            continue;
+        }
         if !normalized.contains(root) {
             normalized.push(root.clone());
         }
@@ -694,7 +705,19 @@ impl ThreadManager {
             // with a read+write for no state change.
             if params.cwd.is_some() || params.workspace_roots.is_some() {
                 thread.updated_at = chrono::Utc::now().timestamp();
-                self.persist_thread(&thread, None)?;
+                // Targeted write, not persist_thread: the cache snapshot is
+                // stale in every column another process may have written, and
+                // the upsert's preserving arms cover only policy and the
+                // archive stamp — a full upsert would let the stale snapshot
+                // revert concurrent updates to the passthrough columns (even
+                // resurrecting a concurrently archived thread). The override
+                // owns exactly cwd, the root set, and the recency stamp.
+                self.store.update_thread_root_set(
+                    &thread.id,
+                    &thread.cwd,
+                    &thread.workspace_roots,
+                    thread.updated_at,
+                )?;
             }
             self.running_threads
                 .insert(params.thread_id.clone(), thread.clone());
@@ -3485,6 +3508,64 @@ mod tests {
     }
 
     #[test]
+    fn normalize_workspace_roots_drops_empty_and_relative_entries() {
+        let cwd = Path::new("/repo/main");
+        assert_eq!(
+            normalize_workspace_roots(
+                cwd,
+                &[
+                    PathBuf::from(""),
+                    PathBuf::from("relative/dir"),
+                    PathBuf::from("~/home-dir"),
+                    PathBuf::from("/repo/lib"),
+                ],
+            ),
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")],
+            "an empty entry would contain every path under starts_with, and a \
+             relative entry is meaningless against absolute candidates"
+        );
+        // The cwd argument itself is trusted and never filtered.
+        assert_eq!(
+            normalize_workspace_roots(Path::new(""), &[]),
+            vec![PathBuf::from("")]
+        );
+    }
+
+    #[test]
+    fn spawn_thread_with_empty_root_persists_only_the_cwd() {
+        // Regression pin: an empty-string root accepted at intake used to
+        // reach the persisted set and then boundary_roots(), where
+        // Path::starts_with("") is true for every path — read_file's
+        // containment check passed for arbitrary filesystem reads.
+        let store = temp_core_state("spawn-empty-root");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[PathBuf::from("")],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        assert_eq!(
+            spawned.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main")]
+        );
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![PathBuf::from("/repo/main")],
+            "the poison entry must not reach the persisted root set"
+        );
+    }
+
+    #[test]
     fn spawn_thread_with_workspace_roots_persists_normalized_set() {
         let store = temp_core_state("spawn-roots");
         let mut manager = ThreadManager::new(store);
@@ -3635,6 +3716,77 @@ mod tests {
             vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
             "a history-carrying resume must not reinstate the pre-override set"
         );
+    }
+
+    #[test]
+    fn cached_resume_override_writeback_cannot_clobber_concurrent_row_updates() {
+        // Cross-process race pin: the cached-resume override writeback used
+        // to route through the full upsert, whose preserving arms cover only
+        // policy and the archive stamp — the stale cache snapshot reverted
+        // every other passthrough column, even resurrecting a concurrently
+        // archived thread.
+        let store = temp_core_state("resume-roots-writeback-stale");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // A concurrent process attaches a policy and archives the thread;
+        // the in-process cache still carries the pre-archive snapshot.
+        manager
+            .state_store()
+            .upsert_thread(&ThreadMetadata {
+                sandbox_policy: Some("workspace-write".to_string()),
+                approval_mode: Some("on-request".to_string()),
+                ..manager
+                    .state_store()
+                    .get_thread(&thread_id)
+                    .expect("read thread")
+                    .expect("thread persisted")
+            })
+            .expect("attach policy");
+        manager
+            .state_store()
+            .mark_archived(&thread_id)
+            .expect("archive thread");
+
+        // The override writeback must land the roots without touching the
+        // concurrently written columns.
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            "the override still owns the root set"
+        );
+        assert!(
+            persisted.archived,
+            "a concurrently archived thread must not be resurrected"
+        );
+        assert!(persisted.archived_at.is_some());
+        assert_eq!(persisted.sandbox_policy.as_deref(), Some("workspace-write"));
+        assert_eq!(persisted.approval_mode.as_deref(), Some("on-request"));
     }
 
     #[test]

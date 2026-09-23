@@ -818,6 +818,40 @@ impl StateStore {
         Ok(())
     }
 
+    /// Update only the location columns of a thread row: `cwd`,
+    /// `workspace_roots`, and the `updated_at` recency stamp.
+    ///
+    /// This is the cached-resume override writeback's write path. That
+    /// caller's payload comes from the in-process running-thread cache, which
+    /// is stale in every column another process may have written since the
+    /// cache entry was stamped. Routing the override through the full upsert
+    /// let that snapshot revert concurrent updates far beyond the override's
+    /// ownership — the upsert's preserving arms cover only the policy fields
+    /// and the archive stamp, while `archived`, `status`, `preview`, `title`,
+    /// and `rollout_path` are plain `excluded.*` passthrough (a stale cache
+    /// could even resurrect a concurrently archived thread). A narrow UPDATE
+    /// writes exactly the columns the override owns and nothing else.
+    pub fn update_thread_root_set(
+        &self,
+        id: &str,
+        cwd: &Path,
+        workspace_roots: &[PathBuf],
+        updated_at: i64,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE threads SET cwd = ?2, workspace_roots = ?3, updated_at = ?4 WHERE id = ?1",
+            params![
+                id,
+                cwd.display().to_string(),
+                workspace_roots_to_json(workspace_roots),
+                updated_at,
+            ],
+        )
+        .context("failed to update thread root set")?;
+        Ok(())
+    }
+
     /// Retrieve a single thread by its ID.
     ///
     /// Returns `None` if no thread with the given ID exists.
@@ -2139,7 +2173,22 @@ fn workspace_roots_from_json(raw: Option<String>) -> Vec<PathBuf> {
     // (the TUI does); headless hosts without one still get the safe fallback
     // but no log line.
     match serde_json::from_str::<Vec<PathBuf>>(&value) {
-        Ok(roots) => roots,
+        Ok(roots) => {
+            // The reader stays tolerant (normalization at intake and at seed
+            // drops these), but a poisoned row — written by an older build or
+            // hand-edited — must not be invisible: an empty entry contains
+            // every path under starts_with, a relative one is dead weight.
+            if roots
+                .iter()
+                .any(|root| root.as_os_str().is_empty() || !root.is_absolute())
+            {
+                tracing::warn!(
+                    target: "codewhale_state",
+                    "workspace_roots on threads row holds an empty or relative entry; normalization drops it"
+                );
+            }
+            roots
+        }
         Err(error) => {
             tracing::warn!(
                 target: "codewhale_state",
@@ -2459,6 +2508,53 @@ mod tests {
             row.archived_at, None,
             "a concurrently cleared stamp stays cleared"
         );
+    }
+
+    #[test]
+    fn update_thread_root_set_touches_only_cwd_roots_and_updated_at() {
+        // The cached-resume override writeback's write path: its payload is a
+        // stale in-process snapshot, so the targeted UPDATE must move exactly
+        // the columns the override owns and leave every other column — a
+        // newer policy, the archive flag and stamp, preview, status — to the
+        // row's own authority.
+        let store = temp_state_store("root-set-targeted-update");
+        let mut seeded = test_thread("thread-1");
+        seeded.sandbox_policy = Some("workspace-write".to_string());
+        seeded.approval_mode = Some("on-request".to_string());
+        seeded.archived = true;
+        seeded.archived_at = Some(1_234);
+        seeded.preview = "concurrent preview".to_string();
+        store.upsert_thread(&seeded).expect("seed thread");
+
+        store
+            .update_thread_root_set(
+                "thread-1",
+                Path::new("/repo/main"),
+                &[PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+                9_999,
+            )
+            .expect("targeted update");
+
+        let row = store
+            .get_thread("thread-1")
+            .expect("read thread")
+            .expect("thread exists");
+        assert_eq!(row.cwd, PathBuf::from("/repo/main"));
+        assert_eq!(
+            row.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+        assert_eq!(row.updated_at, 9_999);
+        assert_eq!(row.sandbox_policy, seeded.sandbox_policy);
+        assert_eq!(row.approval_mode, seeded.approval_mode);
+        assert!(
+            row.archived,
+            "the archive flag is not the override's column"
+        );
+        assert_eq!(row.archived_at, Some(1_234));
+        assert_eq!(row.preview, "concurrent preview");
+        assert_eq!(row.status, seeded.status);
+        assert_eq!(row.created_at, seeded.created_at);
     }
 
     #[test]

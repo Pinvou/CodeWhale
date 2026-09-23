@@ -793,7 +793,19 @@ pub(super) async fn save_current_session(
                     snapshot.model_provider_id.as_deref(),
                 );
                 updated.metadata.mode = Some(snapshot.mode.clone());
-                updated.metadata.workspace_roots = snapshot.workspace_roots.clone();
+                // The paired set travels with the workspace it belongs to,
+                // exactly as in `/rename` and `/fork`: a PATCH may have moved
+                // the thread since this session was last saved, and stamping
+                // only the roots would persist `workspace: <abandoned>` next
+                // to a set led by the new directory — a later resume-thread
+                // then re-admits the abandoned directory as a writable
+                // primary root. Both fields come from the same snapshot,
+                // re-normalized so the pair is consistent by construction.
+                updated.metadata.workspace = snapshot.workspace.clone();
+                updated.metadata.workspace_roots = codewhale_core::normalize_workspace_roots(
+                    &snapshot.workspace,
+                    &snapshot.workspace_roots,
+                );
                 updated
             }
             Err(e) => {

@@ -718,11 +718,10 @@ pub(crate) async fn switch_workspace(
     config: &Config,
     workspace: PathBuf,
 ) {
-    if app.is_loading {
-        app.status_message =
-            Some("Cannot switch workspace while a request is running.".to_string());
+    if let Some(message) = workspace_switch_blocked_message(app) {
+        app.status_message = Some(message.to_string());
         app.add_message(HistoryCell::System {
-            content: "Cannot switch workspace while a request is running.".to_string(),
+            content: message.to_string(),
         });
         return;
     }
@@ -780,7 +779,16 @@ pub(crate) async fn switch_workspace(
     // The receipt rides the closing line instead of being assigned earlier:
     // an unconditional "Workspace: X" assignment after the persist block used
     // to clobber every failure receipt it exists to disclose (round-14 M-1).
-    app.status_message = Some(workspace_switch_closing_status(&workspace, persist_receipt));
+    apply_workspace_switch_closing_status(app, &workspace, persist_receipt);
+}
+
+/// The `/cd` transition guard, aligned with `/clear`: an idle compaction or
+/// a queued task blocks the switch just like a running request, because the
+/// switch persists the new root set and shuts the engine down — mid-compaction
+/// that loses the compaction result.
+fn workspace_switch_blocked_message(app: &App) -> Option<&'static str> {
+    app.session_transition_blocked()
+        .then_some("Cannot switch workspace while a request is running.")
 }
 
 /// The closing `/cd` status line: the persistence receipt (when any) is
@@ -790,6 +798,22 @@ fn workspace_switch_closing_status(workspace: &Path, receipt: Option<String>) ->
     match receipt {
         Some(receipt) => format!("Workspace: {} — {receipt}", workspace.display()),
         None => format!("Workspace: {}", workspace.display()),
+    }
+}
+
+/// Set the closing `/cd` status line and, when the persistence receipt
+/// discloses a failure, promote it as a sticky error with a typed level. The
+/// `status_message` -> toast sync classifies by sniffing English keywords, so
+/// a localized receipt would otherwise degrade to an ephemeral Info toast.
+/// Marking the line as seen keeps that sync from re-adding the same text as a
+/// second, misclassified toast.
+fn apply_workspace_switch_closing_status(app: &mut App, workspace: &Path, receipt: Option<String>) {
+    let failed = receipt.is_some();
+    let closing = workspace_switch_closing_status(workspace, receipt);
+    app.status_message = Some(closing.clone());
+    if failed {
+        app.set_sticky_status(closing.clone(), StatusToastLevel::Error, None);
+        app.last_status_message_seen = Some(closing);
     }
 }
 
@@ -1449,6 +1473,64 @@ mod workspace_switch_persistence_tests {
             with_receipt.contains("Failed to persist workspace switch"),
             "the receipt must survive the closing line: {with_receipt}"
         );
+    }
+
+    /// Round-15: the failure receipt must surface as a sticky Error toast via
+    /// its typed level, in every locale — the keyword classifier only sniffs
+    /// English, so a localized receipt would otherwise degrade to an
+    /// ephemeral Info toast.
+    #[test]
+    fn failure_receipt_promotes_as_typed_sticky_error_in_any_locale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        let receipt = tr(
+            crate::localization::Locale::Ja,
+            MessageId::WorkspaceSwitchPersistFailed,
+        )
+        .replace("{error}", "disk full");
+        apply_workspace_switch_closing_status(&mut app, Path::new("/tmp/ws"), Some(receipt));
+        let sticky = app.sticky_status.as_ref().expect("sticky error toast");
+        assert_eq!(sticky.level, StatusToastLevel::Error);
+        assert!(
+            sticky.ttl_ms.is_some(),
+            "sticky errors stay TTL-capped, not permanent chrome"
+        );
+        assert_eq!(
+            app.last_status_message_seen, app.status_message,
+            "the typed promotion replaces the keyword-classified re-toast"
+        );
+
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        apply_workspace_switch_closing_status(&mut app, Path::new("/tmp/ws"), None);
+        assert!(
+            app.sticky_status.is_none(),
+            "a plain success stays an untyped status line"
+        );
+    }
+
+    /// Round-15: `/cd` shares the `/clear` transition guard — an idle
+    /// compaction (no request running) must block the switch, because the
+    /// switch persists the new root set and shuts the engine down
+    /// mid-compaction, losing the result.
+    #[test]
+    fn cd_guard_blocks_idle_compaction_like_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = App::new(
+            crate::test_support::test_tui_options(dir.path()),
+            &Config::default(),
+        );
+        app.is_compacting = true;
+        assert!(!app.is_loading, "idle compaction: no request running");
+        assert!(workspace_switch_blocked_message(&app).is_some());
+
+        app.is_compacting = false;
+        assert!(workspace_switch_blocked_message(&app).is_none());
     }
 
     /// M-3: a bare-prompt `/cd` has no session record to swap; the persist

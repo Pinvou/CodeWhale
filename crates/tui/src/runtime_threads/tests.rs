@@ -5861,6 +5861,75 @@ async fn update_thread_roots_evicts_idle_engine() -> Result<()> {
 }
 
 #[tokio::test]
+async fn update_thread_explicit_empty_roots_clears_to_primary_and_evicts_engine() -> Result<()> {
+    // Round-15 pin for the explicit-clear leg: PATCH `workspace_roots: []`
+    // is not "no change" — it clears the set back to the bare primary root,
+    // evicts the cached engine, and a later parameterless resume must not
+    // resurrect the cleared roots.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-roots-clear");
+    let shared = std::env::temp_dir().join("codewhale-runtime-roots-clear-shared");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            model: None,
+            workspace: Some(workspace.clone()),
+            workspace_roots: vec![shared.clone()],
+            mode: None,
+            allow_shell: None,
+            trust_mode: None,
+            auto_approve: None,
+            archived: false,
+            system_prompt: None,
+            task_id: None,
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(thread.workspace_roots, vec![workspace.clone(), shared]);
+
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+
+    let updated = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace_roots: Some(Vec::new()),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+
+    // The explicit empty set clears back to the bare primary root and the
+    // cleared set is the persisted set.
+    assert_eq!(updated.workspace_roots, vec![workspace.clone()]);
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        vec![workspace.clone()],
+    );
+
+    // Clearing roots is a roots change: the stale multi-root engine is
+    // evicted from the cache and the LRU, and told to shut down.
+    {
+        let active = manager.active.lock().await;
+        assert!(
+            !active.engines.contains_key(&thread.id),
+            "an explicit-empty roots clear must evict the stale cached engine"
+        );
+        assert!(!active.lru.iter().any(|id| id == &thread.id));
+    }
+    match tokio::time::timeout(Duration::from_secs(1), rx_op.recv()).await {
+        Ok(Some(Op::Shutdown)) => {}
+        other => panic!("expected cached engine shutdown, got {other:?}"),
+    }
+
+    // A parameterless resume reloads the persisted (cleared) set — the old
+    // multi-root set must not resurrect.
+    let resumed = manager.resume_thread(&thread.id).await?;
+    assert_eq!(resumed.workspace_roots, vec![workspace.clone()]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_roots_preserves_session_and_turn_context() -> Result<()> {
     // Review #484 round-9 must-fix 2: a roots-bearing resume must re-shape
     // the SAME runtime thread (PATCH primitive), preserving session_id and

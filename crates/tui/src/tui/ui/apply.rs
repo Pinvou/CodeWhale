@@ -1215,8 +1215,14 @@ pub(crate) async fn apply_command_result(
                 // (no multi-root UI): seed the app state only after every
                 // fallible restore step has succeeded, so a failed load
                 // cannot leave the *current* session's engine inheriting a
-                // foreign root set through the next routine re-sync.
-                app.workspace_roots = session.metadata.workspace_roots.clone();
+                // foreign root set through the next routine re-sync. The seed
+                // routes through the same normalize the writers use, so a
+                // legacy or hand-edited record cannot seed an entry the
+                // intake filter would have dropped.
+                app.workspace_roots = codewhale_core::normalize_workspace_roots(
+                    &app.workspace,
+                    &session.metadata.workspace_roots,
+                );
                 sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                 if respawn {
                     let _ = engine_handle.send(Op::Shutdown).await;

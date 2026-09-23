@@ -108,6 +108,28 @@ fn test_tool_context_resolve_path_allows_additional_workspace_roots() {
 }
 
 #[test]
+fn test_tool_context_resolve_path_empty_string_root_stays_fail_closed() {
+    // Regression pin: an empty-string root accepted at intake used to reach
+    // boundary_roots() as ("", "") — Path::starts_with("") is true for every
+    // path, so both containment checks passed and read_file (approval Auto,
+    // no prompt in any posture) could read arbitrary filesystem paths.
+    let workspace = tempdir().expect("workspace tempdir");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![PathBuf::from("")]);
+
+    let escape = ctx.resolve_path("/etc/passwd");
+    assert!(
+        matches!(escape, Err(ToolError::PathEscape { .. })),
+        "an empty-string declared root must not null containment"
+    );
+    // The primary root still works: the filter drops the poison entry, not
+    // the set.
+    let inside = workspace.path().join("ok.txt");
+    std::fs::write(&inside, "ok").expect("write");
+    assert!(ctx.resolve_path(inside.to_string_lossy().as_ref()).is_ok());
+}
+
+#[test]
 fn forkguard_workspace_roots_resolve_path_spans_attached_roots() {
     let workspace = tempdir().expect("workspace tempdir");
     let attached = tempdir().expect("attached root tempdir");
@@ -144,6 +166,31 @@ fn forkguard_workspace_roots_resolve_path_spans_attached_roots() {
         single_root.resolve_path(attached.path().join("lib.rs").to_string_lossy().as_ref()),
         Err(ToolError::PathEscape { .. })
     ));
+}
+
+#[test]
+fn forkguard_workspace_roots_relative_target_resolves_against_primary_root() {
+    // Execution-layer pin: a relative target joins onto the PRIMARY root
+    // even when attached roots exist (ToolContext::resolve_path), never
+    // onto an attached root that happens to carry the same name. The
+    // approval layers rely on exactly this join.
+    let workspace = tempdir().expect("workspace tempdir");
+    let attached = tempdir().expect("attached root tempdir");
+    std::fs::write(workspace.path().join("note.txt"), "primary").expect("write");
+    std::fs::write(attached.path().join("note.txt"), "attached").expect("write");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![attached.path().to_path_buf()]);
+
+    let resolved = ctx.resolve_path("note.txt").expect("resolve");
+    assert_eq!(
+        resolved,
+        workspace
+            .path()
+            .join("note.txt")
+            .canonicalize()
+            .expect("canonical"),
+        "a relative target must resolve against the primary root"
+    );
 }
 
 #[cfg(unix)]

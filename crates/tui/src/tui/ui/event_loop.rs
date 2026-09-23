@@ -589,8 +589,14 @@ pub async fn run_tui(
                             // The engine below is built and synced from App
                             // state: without this seed, a multi-root session
                             // resumed from the CLI runs single-root for the
-                            // whole process lifetime.
-                            app.workspace_roots = saved.metadata.workspace_roots.clone();
+                            // whole process lifetime. The seed routes through
+                            // the same normalize the writers use, so a legacy
+                            // or hand-edited record cannot seed an entry the
+                            // intake filter would have dropped.
+                            app.workspace_roots = codewhale_core::normalize_workspace_roots(
+                                &app.workspace,
+                                &saved.metadata.workspace_roots,
+                            );
                             // Name the inherited set in the transcript: the
                             // roots arrived from another host and no header
                             // chrome reports them.

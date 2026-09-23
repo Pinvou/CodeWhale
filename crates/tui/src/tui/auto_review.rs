@@ -1104,6 +1104,46 @@ mod tests {
     }
 
     #[test]
+    fn write_targets_bounded_spans_attached_workspace_roots() {
+        // Pin for the bounded-write plumbing: the declared root set must
+        // reach the carve-out check. Every other caller here passes
+        // `None, &[]`, so a mutation dropping the set inside the context
+        // builder only shows up as an attached-root-dependent outcome.
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let attached = tempfile::tempdir().expect("attached root tempdir");
+        std::fs::create_dir(workspace.path().join(".git")).expect("git marker");
+        std::fs::create_dir(attached.path().join(".git")).expect("git marker");
+        let target = attached.path().join("src/a.rs");
+
+        let ctx = AutoReviewContext::from_tool_call(
+            "write_file",
+            &json!({ "path": target.to_string_lossy() }),
+            RunOrigin::Interactive,
+            ApprovalMode::Auto,
+            true,
+            Some(workspace.path()),
+            &[attached.path().to_path_buf()],
+        );
+        assert!(
+            ctx.write_targets_bounded,
+            "a write target under an attached git root is bounded only while the root set reaches the carve-out"
+        );
+
+        // Control: the same call with the historical empty root set is not
+        // bounded.
+        let ctx = AutoReviewContext::from_tool_call(
+            "write_file",
+            &json!({ "path": target.to_string_lossy() }),
+            RunOrigin::Interactive,
+            ApprovalMode::Auto,
+            true,
+            Some(workspace.path()),
+            &[],
+        );
+        assert!(!ctx.write_targets_bounded);
+    }
+
+    #[test]
     fn safety_floor_holds_publish_before_allow_rules() {
         let policy = AutoReviewPolicy {
             allow_rules: vec![

@@ -4466,6 +4466,103 @@ async fn saved_sessions_carry_thread_workspace_roots_through_save_and_resave() -
 }
 
 #[tokio::test]
+async fn session_resave_after_workspace_move_keeps_workspace_and_roots_paired() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("deepseek-session-move-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let w1 = root.join("w1");
+    let w2 = root.join("w2");
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "deepseek-v4-pro",
+            "workspace": w1,
+            "workspace_roots": ["/shared"]
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"]
+        .as_str()
+        .context("missing thread id")?
+        .to_string();
+
+    runtime_threads
+        .seed_thread_from_messages(
+            &thread_id,
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Save me at w1, then move me.".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        )
+        .await?;
+
+    // Save at w1, then move the thread to w2. The PATCH evicts the engine,
+    // so the re-save snapshots a fresh engine built from the moved thread.
+    let resp = client
+        .post(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "thread_id": thread_id }))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let saved: serde_json::Value = resp.json().await?;
+    let session_handle = saved["session_id"]
+        .as_str()
+        .context("missing session id")?
+        .to_string();
+
+    let patched: serde_json::Value = client
+        .patch(format!("http://{addr}/v1/threads/{thread_id}"))
+        .json(&json!({ "workspace": w2 }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(patched["workspace"], json!(w2));
+    assert_eq!(patched["workspace_roots"], json!([w2, "/shared"]));
+
+    client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({
+            "thread_id": thread_id,
+            "session_id": session_handle
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // The persisted pair must be internally consistent: `workspace` is w2
+    // and the abandoned w1 is nowhere in the root set, or a later
+    // resume-thread would re-admit w1 as a writable primary root.
+    let session_manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    let resaved = session_manager.load_session_by_prefix(&session_handle)?;
+    assert_eq!(
+        resaved.metadata.workspace, w2,
+        "re-save must stamp the moved workspace beside the roots"
+    );
+    assert_eq!(
+        serde_json::to_value(&resaved.metadata.workspace_roots)?,
+        json!([w2, "/shared"]),
+        "re-save must not leave the abandoned w1 in the persisted root set"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_create_from_completed_thread_saves_messages() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-thread-session-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");
@@ -4775,12 +4872,12 @@ fn patch_undo_helper_restores_only_the_bound_session() -> Result<()> {
     repo.snapshot_with_session("pre-turn:foreign", Some("session-foreign"))?;
     fs::write(&file, "current-after")?;
 
-    let restored = patch_undo_workspace_files(&workspace, Some("session-current"));
+    let restored = patch_undo_workspace_files(&workspace, &[], Some("session-current"));
     assert!(restored.files_restored, "{:?}", restored.summary);
     assert_eq!(fs::read_to_string(&file)?, "current-before");
 
     fs::write(&file, "must-stay")?;
-    let unbound = patch_undo_workspace_files(&workspace, None);
+    let unbound = patch_undo_workspace_files(&workspace, &[], None);
     assert!(!unbound.files_restored);
     assert_eq!(fs::read_to_string(&file)?, "must-stay");
     Ok(())
