@@ -31,8 +31,9 @@ pub struct ImageAnalyzeTool {
 /// (the same 30-minute budget as non-streaming model requests) is the sole
 /// total bound; a stalled connection errors out through it instead of
 /// hanging. The envelope is shared across retry attempts, not per attempt:
-/// an attempt that fails slowly consumes its share of the one budget, and
-/// retries only fire for fast failures (connect errors, quick 5xx).
+/// an attempt that fails slowly consumes its share of the one budget, so
+/// only retries of fast failures (connect errors, quick 5xx) fit before
+/// the shared envelope expires.
 const VISION_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
 
 fn vision_request_envelope() -> Duration {
@@ -776,6 +777,15 @@ mod tests {
             .execute(json!({"image_path": "sample.png"}), &ctx)
             .await
             .expect_err("a provider that never answers must hit the envelope");
+        // The variant matters, not just the text: both this Timeout variant
+        // and the pre-fix execution_failed form render "timed out after",
+        // so a text-only assertion would not catch a classification
+        // regression (the variant drives the error taxonomy, telemetry, and
+        // the wire `ToolCallError::Timeout` shape).
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "envelope timeout must classify as ToolError::Timeout; got {err:?}"
+        );
         assert!(
             err.to_string().contains("timed out after"),
             "envelope timeout must be reported as such; got {err}"

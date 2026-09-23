@@ -515,6 +515,20 @@ mod tests {
     }
 
     #[test]
+    fn sub_query_timeout_floors_at_one_second() {
+        // `0` would build a tokio timeout that fires immediately and kill
+        // every child query, so the setter must floor the budget at 1s.
+        let client: Arc<dyn RlmLlmClient> = Arc::new(HangingChildClient);
+        let bridge =
+            RlmBridge::new(client, "child-model".to_string(), 1).with_sub_query_timeout_secs(0);
+        assert_eq!(
+            bridge.sub_query_timeout,
+            Duration::from_secs(1),
+            "a zero budget must be floored at one second"
+        );
+    }
+
+    #[test]
     fn batch_guard_allows_non_empty_batches_at_the_cap() {
         assert!(batch_guard(MAX_BATCH, Some("independent")).is_none());
     }

@@ -4563,6 +4563,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn envelope_exceed_probes_recovery_once_degraded() {
+        // A provider that wedges past the whole envelope must not leave
+        // connection health stale: once the failure threshold has degraded
+        // the connection, the envelope exit probes /models so health
+        // recovers without waiting for the next real request. One exceed
+        // alone stays under the threshold and must not probe (the
+        // Healthy-state short-circuit), so this drives exactly two.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(2000);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "model": "deepseek-v4-pro",
+                        "choices": [
+                            { "message": { "role": "assistant", "content": "late" } }
+                        ]
+                    }))
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client(&server.uri(), server.uri());
+        let make_request = || MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "envelope".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+
+        for _ in 0..2 {
+            let err = client
+                .create_message(make_request())
+                .await
+                .expect_err("a provider that never answers must hit the envelope");
+            assert!(
+                err.to_string().to_lowercase().contains("timed out"),
+                "envelope timeout must be reported as such; got {err:#}"
+            );
+        }
+
+        // verify() enforces the expectations above: exactly two stalled
+        // requests and exactly one /models recovery probe.
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn stream_open_retry_path_sets_no_total_deadline() {
         // The injected budget is process-global; serialize against other
         // tests (which may issue non-streaming requests with their own

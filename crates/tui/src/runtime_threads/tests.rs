@@ -9970,6 +9970,50 @@ async fn approval_wait_ends_when_the_runtime_shuts_down() -> Result<()> {
 }
 
 #[tokio::test]
+async fn settle_claimed_turn_failure_publishes_stranded_approvals() -> Result<()> {
+    // The dead monitor owned this turn's pending-approval wait, so the
+    // settlement must resolve it the way the interrupt exit does: publish
+    // deny+interrupted so clients clear the pending UI, clear the pending
+    // map so the entry cannot leak, and push the deny through the decision
+    // channel so no late reader can still observe it as unresolved.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let receiver =
+        manager.register_pending_approval_for_thread_for_test(&thread.id, "tool_stranded");
+    assert_eq!(manager.pending_approvals_count(), 1);
+
+    // The register helper pins the entry's turn to "test-turn".
+    manager
+        .settle_claimed_turn_failure(&thread.id, "test-turn", "forced monitor failure")
+        .await;
+
+    assert_eq!(
+        manager.pending_approvals_count(),
+        0,
+        "stranded approval must not leak in the pending map"
+    );
+    let decision = receiver.await.expect("decision channel must resolve");
+    assert!(
+        matches!(decision, ExternalApprovalDecision::Deny { remember: false }),
+        "settlement must deny through the decision channel; got {decision:?}"
+    );
+    let events = manager.events_since(&thread.id, None)?;
+    assert!(
+        events.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_stranded")
+                && event.payload.get("decision").and_then(Value::as_str) == Some("deny")
+                && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
+        }),
+        "monitor-death settlement should emit approval.decided with interrupted=true"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn approval_decision_queued_before_shutdown_is_honored_not_interrupted() -> Result<()> {
     // The wait's select favors the cancel token, but a decision already
     // queued at that instant is a choice the user actually made: the
