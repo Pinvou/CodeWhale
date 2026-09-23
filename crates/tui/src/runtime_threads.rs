@@ -6834,26 +6834,31 @@ impl RuntimeThreadManager {
         // clients clear the pending UI and the pending map cannot leak the
         // entry; the evicted engine below is cancelled, which resolves the
         // engine side of the wait.
-        let stranded_approval_ids: Vec<String> = {
-            let map = self.pending_approvals.lock();
+        let stranded_approvals: Vec<(String, PendingApprovalEntry)> = {
+            // Collect and remove under one lock hold: a concurrent
+            // `deliver_external_approval` must not be able to slip between
+            // the scan and the removal — post-monitor-death its send fails
+            // on the dead receiver, so an entry it steals between the two
+            // steps would be left with no resolution event at all. If
+            // delivery wins the removal entirely (before the scan), its
+            // send still cannot deliver and nothing is published for that
+            // id; that narrow residual is accepted — the turn has already
+            // failed and the pending map cannot leak either way.
+            let mut map = self.pending_approvals.lock();
             map.iter()
                 .filter(|(_, entry)| {
                     entry.thread_id == thread_id && entry.request.turn_id == turn_id
                 })
                 .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|id| map.remove(&id).map(|entry| (id, entry)))
                 .collect()
         };
-        for approval_id in stranded_approval_ids {
-            // The MutexGuard must drop before the await below (it is not
-            // Send, and this settlement runs inside the spawned turn task).
-            let entry = self.pending_approvals.lock().remove(&approval_id);
-            if entry.is_none() {
-                continue;
-            }
+        for (approval_id, entry) in stranded_approvals {
             // The receiver died with the monitor, so the send cannot
             // deliver; the removal and the event below are the contract.
             let _ = entry
-                .unwrap()
                 .sender
                 .send(ExternalApprovalDecision::Deny { remember: false });
             if let Err(err) = self
@@ -9404,21 +9409,20 @@ impl RuntimeThreadManager {
                             // in the oneshot after both checks above saw
                             // `Empty`. That decision was made by the user
                             // and must resolve the approval as one, not be
-                            // reported as an interrupted deny. A send that
-                            // still lands after this check finds a dropped
-                            // receiver and reports not-delivered.
+                            // reported as an interrupted deny. Close the
+                            // receiver first: a send racing this check now
+                            // fails immediately and reports not-delivered,
+                            // while a value that landed before the close is
+                            // still readable below — so a decision is either
+                            // rescued here or never promised, never
+                            // delivered-then-discarded.
+                            rx.close();
                             match rx.try_recv() {
                                 Ok(decision) => ApprovalWakeup::Decision(Ok(decision)),
                                 Err(_) => {
-                                    // The arms below never read `rx` again.
-                                    // Drop it now so the promise above is
-                                    // literally true: a decision whose send
-                                    // lands after this point fails on the
-                                    // dropped receiver and reports
-                                    // not-delivered, instead of promising a
-                                    // delivery this loop overrides with the
-                                    // interrupted deny.
-                                    drop(rx);
+                                    // The arms below never read `rx` again;
+                                    // dropping it changes nothing the close
+                                    // above has not already guaranteed.
                                     ApprovalWakeup::Interrupted
                                 }
                             }

@@ -10014,6 +10014,42 @@ async fn settle_claimed_turn_failure_publishes_stranded_approvals() -> Result<()
 }
 
 #[tokio::test]
+async fn settle_claimed_turn_failure_publishes_when_the_decision_receiver_is_gone() -> Result<()> {
+    // In production the dead monitor takes the oneshot receiver with it, so
+    // the settlement's deny send cannot deliver anything. The resolution
+    // event is then the only signal clients ever see for the approval, and
+    // it must fire even though the channel send failed. This also pins the
+    // settlement's collect-and-remove step being atomic per scanned id:
+    // whatever removes the entry (settlement or a racing delivery), the
+    // publish happens once and only once.
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let receiver =
+        manager.register_pending_approval_for_thread_for_test(&thread.id, "tool_dead_rx");
+    drop(receiver);
+
+    manager
+        .settle_claimed_turn_failure(&thread.id, "test-turn", "forced monitor failure")
+        .await;
+
+    assert_eq!(manager.pending_approvals_count(), 0);
+    let events = manager.events_since(&thread.id, None)?;
+    assert!(
+        events.iter().any(|event| {
+            event.event == "approval.decided"
+                && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_dead_rx")
+                && event.payload.get("decision").and_then(Value::as_str) == Some("deny")
+                && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
+        }),
+        "settlement must publish approval.decided even when the deny cannot deliver"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn approval_decision_queued_before_shutdown_is_honored_not_interrupted() -> Result<()> {
     // The wait's select favors the cancel token, but a decision already
     // queued at that instant is a choice the user actually made: the
