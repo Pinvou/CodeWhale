@@ -142,6 +142,11 @@ struct ToolCallRequest {
     call: ToolCall,
     #[serde(default)]
     cwd: Option<PathBuf>,
+    /// Session root set for the exec-policy context: attached-root ask and
+    /// deny rules only fire when the caller declares the set it recorded at
+    /// thread/start (review round-9, must-fix 1). Empty = single-root.
+    #[serde(default)]
+    workspace_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +203,13 @@ struct RuntimeBridge {
     auth_token: Option<String>,
     child: Option<Child>,
     thread_map: HashMap<String, String>,
+    /// The workspace root set each mapped runtime thread was created with,
+    /// keyed by the stdio thread id. A roots-bearing resume updates the
+    /// record and the hint without touching the mapped thread, so the bridge
+    /// must notice the disagreement and re-map — otherwise every later
+    /// bridged turn keeps running the set the old thread was built with
+    /// while `thread/read` reports the new one.
+    thread_roots: HashMap<String, Vec<PathBuf>>,
     last_seq_by_thread: HashMap<String, u64>,
 }
 
@@ -205,6 +217,10 @@ struct RuntimeBridge {
 struct RuntimeThreadHint {
     model: Option<String>,
     workspace: Option<PathBuf>,
+    /// Accessible roots declared on the stdio thread record. The hint is the
+    /// only carrier between that record and the runtime thread every bridged
+    /// turn actually executes on.
+    workspace_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,9 +670,31 @@ async fn thread_handler(State(state): State<AppState>, Json(req): Json<ThreadReq
             Err(err) => http_error_from_jsonrpc(err).into_response(),
         };
     }
+    // The HTTP face feeds the same hint map the stdio dispatch feeds: a
+    // start/resume/fork that declares `workspace_roots` must land in the
+    // hint cache, or the turn-executing runtime thread is created
+    // single-root and the attached-root ask/deny rules never fire
+    // (review round-9, must-fix 1). The `missing` guard mirrors the stdio
+    // named arms: a not-found resume/fork answers 404 and never touches
+    // the cache, or its null fields would clobber the cached hint.
+    let should_record_hint = matches!(
+        &req,
+        ThreadRequest::Create { .. }
+            | ThreadRequest::Start(_)
+            | ThreadRequest::Resume(_)
+            | ThreadRequest::Fork(_)
+    );
     let mut runtime = state.runtime.write().await;
     match runtime.handle_thread(req).await {
-        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Ok(res) => {
+            if should_record_hint {
+                if let Err(err) = ensure_thread_found(&res) {
+                    return http_error_from_jsonrpc(err).into_response();
+                }
+                record_stdio_thread_hint(&state, &res).await;
+            }
+            (StatusCode::OK, Json(res)).into_response()
+        }
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ThreadResponse {
@@ -714,7 +752,10 @@ async fn tool_handler(
     // read guard: they run concurrently with each other and with status
     // reads instead of serializing every request behind one Mutex.
     let runtime = state.runtime.read().await;
-    match runtime.invoke_tool(req.call, approval_mode, &cwd).await {
+    match runtime
+        .invoke_tool(req.call, approval_mode, &cwd, &req.workspace_roots)
+        .await
+    {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1333,6 +1374,15 @@ async fn record_stdio_thread_hint(state: &AppState, response: &ThreadResponse) {
         RuntimeThreadHint {
             model: response.model.clone(),
             workspace: response.cwd.clone(),
+            // A `thread/start` declaring `workspace_roots` stores the full set
+            // on the parent record; the turn-executing runtime thread is
+            // created from this hint, so dropping the set here would deny or
+            // prompt writes under attached roots while `thread/read` still
+            // reports them.
+            workspace_roots: response
+                .thread
+                .as_ref()
+                .map_or_else(Vec::new, |thread| thread.workspace_roots.clone()),
         },
     );
 }
@@ -1440,6 +1490,7 @@ impl RuntimeBridge {
             auth_token: Some(auth_token),
             child: Some(child),
             thread_map: HashMap::new(),
+            thread_roots: HashMap::new(),
             last_seq_by_thread: HashMap::new(),
         };
         bridge.wait_until_ready().await?;
@@ -1534,14 +1585,50 @@ impl RuntimeBridge {
         hint: Option<RuntimeThreadHint>,
     ) -> Result<String> {
         if let Some(runtime_thread_id) = self.thread_map.get(stdio_thread_id) {
+            let roots_changed = hint.as_ref().is_some_and(|hint| {
+                self.thread_roots
+                    .get(stdio_thread_id)
+                    .is_some_and(|mapped| *mapped != hint.workspace_roots)
+            });
+            if !roots_changed {
+                return Ok(runtime_thread_id.clone());
+            }
+            // The hint now declares a different root set than the mapped
+            // runtime thread was created with (a roots-bearing resume after
+            // the first bridged turn). Re-shape the SAME runtime thread via
+            // the PATCH primitive instead of creating a fresh one: PATCH
+            // preserves session_id and the accumulated turns (the model's
+            // context), evicts the cached engine, and re-normalizes the set
+            // with the thread's workspace as the primary root. Re-creating
+            // the thread would run the next turn with correct roots but a
+            // blank memory, and strand the old thread unarchived in the
+            // store (review round-9, must-fix 2).
+            let hint = hint.expect("a root-set change implies a hint");
+            let body = json!({
+                "workspace": hint.workspace,
+                "workspace_roots": hint.workspace_roots,
+            });
+            let _record = self
+                .request_json(
+                    self.authed(
+                        self.client
+                            .patch(format!("{}/v1/threads/{runtime_thread_id}", self.base_url)),
+                    )
+                    .json(&body),
+                )
+                .await?;
+            self.thread_roots
+                .insert(stdio_thread_id.to_string(), hint.workspace_roots.clone());
             return Ok(runtime_thread_id.clone());
         }
         let hint = hint.unwrap_or_default();
+        let roots = hint.workspace_roots.clone();
         let runtime_thread_id = self
-            .create_runtime_thread(hint.model, hint.workspace)
+            .create_runtime_thread(hint.model, hint.workspace, hint.workspace_roots)
             .await?;
         self.thread_map
             .insert(stdio_thread_id.to_string(), runtime_thread_id.clone());
+        self.thread_roots.insert(stdio_thread_id.to_string(), roots);
         Ok(runtime_thread_id)
     }
 
@@ -1551,22 +1638,32 @@ impl RuntimeBridge {
         if let Some(runtime_thread_id) = self.thread_map.remove(stdio_thread_id) {
             self.last_seq_by_thread.remove(&runtime_thread_id);
         }
+        self.thread_roots.remove(stdio_thread_id);
     }
 
     async fn create_runtime_thread(
         &mut self,
         model: Option<String>,
         workspace: Option<PathBuf>,
+        workspace_roots: Vec<PathBuf>,
     ) -> Result<String> {
+        let mut body = json!({
+            "model": model,
+            "workspace": workspace,
+            "mode": "agent",
+            "archived": false,
+        });
+        if !workspace_roots.is_empty() {
+            // Every bridged turn runs on this runtime thread, not on the
+            // stdio record that declared the roots, so the set has to travel
+            // with the create request. An empty set stays off the wire: it
+            // degenerates to the workspace root on the runtime side.
+            body["workspace_roots"] = json!(workspace_roots);
+        }
         let record = self
             .request_json(
                 self.authed(self.client.post(format!("{}/v1/threads", self.base_url)))
-                    .json(&json!({
-                        "model": model,
-                        "workspace": workspace,
-                        "mode": "agent",
-                        "archived": false,
-                    })),
+                    .json(&body),
             )
             .await?;
         let thread_id = extract_runtime_thread_id(&record)?.to_string();
@@ -1819,6 +1916,7 @@ impl RuntimeBridge {
             auth_token: None,
             child: None,
             thread_map: HashMap::new(),
+            thread_roots: HashMap::new(),
             last_seq_by_thread: HashMap::new(),
         }
     }
@@ -2039,7 +2137,12 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                     | ThreadRequest::Fork(_)
             );
             let response = handle_thread_request(state, request).await?;
+            // The envelope arm shares the named arms' guard: a `missing`
+            // resume/fork must fail and must not record — recording its null
+            // model/workspace would clobber the cached hint, and the next
+            // bridged turn would PATCH the live thread down to single-root.
             if should_record_hint {
+                ensure_thread_found(&response)?;
                 record_stdio_thread_hint(state, &response).await;
             }
             StdioDispatchResult {
@@ -2528,6 +2631,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::extract::{Path as AxumPath, Query};
     use axum::http::header;
+    use axum::routing::patch;
     use codewhale_protocol::AppRequest;
     use std::collections::HashMap;
     use std::fs;
@@ -2694,6 +2798,7 @@ mod tests {
                 path: None,
                 ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .expect("policy check");
 
@@ -2730,6 +2835,7 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .expect("policy check");
             assert!(decision.matched_rule.is_none());
@@ -2776,6 +2882,7 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .expect("policy check");
             assert!(decision.allow);
@@ -2825,6 +2932,7 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .expect("policy check");
             assert!(decision.matched_rule.is_none());
@@ -2843,6 +2951,7 @@ mod tests {
             auth_token: None,
             child: None,
             thread_map: HashMap::from([("stdio-1".to_string(), "runtime-1".to_string())]),
+            thread_roots: HashMap::new(),
             last_seq_by_thread: HashMap::new(),
         }))
     }
@@ -3209,6 +3318,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_thread_start_records_the_declared_roots_in_the_hint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+
+        let started = dispatch_stdio_request(
+            &state,
+            "thread/start",
+            json!({
+                "cwd": "/tmp/codewhale-primary",
+                "workspace_roots": ["/tmp/codewhale-shared"]
+            }),
+        )
+        .await
+        .expect("start thread");
+        let thread_id = started.result["thread_id"]
+            .as_str()
+            .expect("thread id")
+            .to_string();
+
+        let hints = state.stdio_thread_hints.lock().await;
+        let hint = hints.get(&thread_id).expect("hint recorded");
+        assert_eq!(
+            hint.workspace_roots,
+            vec![
+                PathBuf::from("/tmp/codewhale-primary"),
+                PathBuf::from("/tmp/codewhale-shared")
+            ],
+            "the hint is the only way the declared set reaches the runtime thread"
+        );
+        assert_eq!(
+            hint.workspace.as_deref(),
+            Some(Path::new("/tmp/codewhale-primary"))
+        );
+    }
+
+    #[tokio::test]
     async fn stdio_resume_of_missing_thread_fails_without_clobbering_the_hint() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
@@ -3225,6 +3372,7 @@ mod tests {
                 RuntimeThreadHint {
                     model: Some("deepseek-v4-pro".to_string()),
                     workspace: Some(workspace.clone()),
+                    ..RuntimeThreadHint::default()
                 },
             );
         }
@@ -3252,6 +3400,80 @@ mod tests {
         let hint = hints.get("ghost-thread").expect("cached hint survives");
         assert_eq!(hint.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(hint.workspace.as_deref(), Some(workspace.as_path()));
+    }
+
+    /// The generic `thread/request` envelope and the HTTP `/thread` face share
+    /// the named arms' guard: a `missing` resume/fork must fail with the named
+    /// not-found error on every surface, and none of them may record the
+    /// response's null fields over the cached hint (same clobber chain as
+    /// #5171 — the next bridged turn would PATCH the live thread down to
+    /// single-root).
+    #[tokio::test]
+    async fn missing_resume_never_clobbers_the_hint_on_any_face() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+
+        let workspace = tmp.path().join("ws");
+        {
+            let mut hints = state.stdio_thread_hints.lock().await;
+            hints.insert(
+                "ghost-thread".to_string(),
+                RuntimeThreadHint {
+                    model: Some("deepseek-v4-pro".to_string()),
+                    workspace: Some(workspace.clone()),
+                    workspace_roots: vec![workspace.clone(), tmp.path().join("attached")],
+                },
+            );
+        }
+
+        // Generic stdio envelope arm.
+        let err = dispatch_stdio_request(
+            &state,
+            "thread/request",
+            json!({ "kind": "resume", "thread_id": "ghost-thread" }),
+        )
+        .await
+        .expect_err("an envelope resume of a missing thread must fail like the named arm");
+        assert_eq!(err.code, -32004);
+
+        // HTTP face: 404 with the named error, hint untouched.
+        let app = app_router(state.clone(), &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/thread")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &json!({ "kind": "resume", "thread_id": "ghost-thread" }),
+                        )
+                        .expect("request json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_body_json(response).await;
+        assert!(
+            format!("{body}").contains("thread_not_found"),
+            "the HTTP error names the not-found cause: {body}"
+        );
+
+        let hints = state.stdio_thread_hints.lock().await;
+        let hint = hints
+            .get("ghost-thread")
+            .expect("cached hint survives both faces");
+        assert_eq!(hint.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(hint.workspace.as_deref(), Some(workspace.as_path()));
+        assert_eq!(
+            hint.workspace_roots,
+            vec![workspace.clone(), tmp.path().join("attached")],
+            "the attached root set survives — a wipe here is what collapses the next turn to single-root"
+        );
     }
 
     fn sse_frame(event: &str, payload: Value) -> String {
@@ -3557,6 +3779,13 @@ mod tests {
         async fn create_thread(Json(body): Json<Value>) -> Json<Value> {
             assert_eq!(body["model"], "deepseek-v4");
             assert_eq!(body["workspace"], "/tmp/codewhale-stdio");
+            // A multi-root stdio thread must create a multi-root runtime
+            // thread: this is the only place the declared set can reach the
+            // thread every bridged turn executes on.
+            assert_eq!(
+                body["workspace_roots"],
+                json!(["/tmp/codewhale-stdio", "/tmp/codewhale-shared"])
+            );
             Json(json!({
                 "id": "thr_runtime",
                 "model": body["model"].clone(),
@@ -3583,6 +3812,10 @@ mod tests {
                 Some(RuntimeThreadHint {
                     model: Some("deepseek-v4".to_string()),
                     workspace: Some(PathBuf::from("/tmp/codewhale-stdio")),
+                    workspace_roots: vec![
+                        PathBuf::from("/tmp/codewhale-stdio"),
+                        PathBuf::from("/tmp/codewhale-shared"),
+                    ],
                 }),
             )
             .await
@@ -3594,6 +3827,183 @@ mod tests {
         assert_eq!(
             bridge.thread_map.get("legacy_thread").map(String::as_str),
             Some("thr_runtime")
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_runtime_bridge_omits_an_empty_root_set() {
+        async fn create_thread(Json(body): Json<Value>) -> Json<Value> {
+            assert!(
+                body.get("workspace_roots").is_none(),
+                "a single-root hint must keep the historical frame: {body}"
+            );
+            Json(json!({ "id": "thr_single" }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let app = Router::new().route("/v1/threads", post(create_thread));
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test runtime");
+        });
+
+        let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+        let runtime_id = bridge
+            .ensure_runtime_thread(
+                "single_root_thread",
+                Some(RuntimeThreadHint {
+                    model: Some("deepseek-v4".to_string()),
+                    workspace: Some(PathBuf::from("/tmp/codewhale-single")),
+                    workspace_roots: Vec::new(),
+                }),
+            )
+            .await
+            .expect("runtime thread");
+        server.abort();
+        let _ = server.await;
+
+        assert_eq!(runtime_id, "thr_single");
+    }
+
+    /// Round-9 M-B: a roots-bearing `thread/resume` after the first bridged
+    /// turn updates the stdio record and the hint, but the already-mapped
+    /// runtime thread was created with the old set. The bridge must reshape
+    /// the SAME runtime thread in place via PATCH (session id and turns
+    /// survive) so later turns execute the declared set; an unchanged hint
+    /// must keep the existing mapping.
+    #[tokio::test]
+    async fn stdio_runtime_bridge_remaps_when_the_hint_root_set_changes() {
+        let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = Arc::clone(&bodies);
+        async fn create_thread(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let ordinal = {
+                let mut bodies = captured.lock().await;
+                bodies.push(body.clone());
+                bodies.len()
+            };
+            Json(json!({ "id": format!("thr_runtime_{ordinal}") }))
+        }
+        // Patches land in the same capture, tagged: the roots-changed resume
+        // must re-shape the SAME runtime thread instead of creating a fresh
+        // one.
+        async fn patch_thread(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+            axum::extract::Path(id): axum::extract::Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            let mut bodies = captured.lock().await;
+            let mut record = json!({ "patch": true });
+            record["id"] = json!(id);
+            // A live PATCH preserves the thread's accumulated turns — that is
+            // the context-continuity guarantee under test.
+            record["turns"] = json!([{ "input": "earlier", "output": "earlier" }]);
+            record["workspace_roots"] = body["workspace_roots"].clone();
+            bodies.push(record.clone());
+            Json(record)
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let app = Router::new()
+            .route("/v1/threads", post(create_thread))
+            .route("/v1/threads/{id}", patch(patch_thread))
+            .with_state(captured);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test runtime");
+        });
+
+        let hint = |roots: &[&str]| RuntimeThreadHint {
+            model: None,
+            workspace: Some(PathBuf::from("/tmp/codewhale-primary")),
+            workspace_roots: roots.iter().map(PathBuf::from).collect(),
+        };
+        let mut bridge = RuntimeBridge::from_base_url_for_test(format!("http://{addr}"));
+        let first = bridge
+            .ensure_runtime_thread(
+                "thr_stdio",
+                Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r1"])),
+            )
+            .await
+            .expect("initial runtime thread");
+        assert_eq!(first, "thr_runtime_1");
+
+        // An unchanged hint keeps the mapped thread: no second create.
+        let same = bridge
+            .ensure_runtime_thread(
+                "thr_stdio",
+                Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r1"])),
+            )
+            .await
+            .expect("unchanged hint keeps the mapping");
+        assert_eq!(same, "thr_runtime_1");
+        assert_eq!(
+            bridge.thread_map.get("thr_stdio").map(String::as_str),
+            Some("thr_runtime_1")
+        );
+
+        // A roots-bearing resume changed the declared set: the bridge must
+        // re-shape the SAME runtime thread via PATCH (context continuity)
+        // instead of creating a fresh one.
+        let remapped = bridge
+            .ensure_runtime_thread(
+                "thr_stdio",
+                Some(hint(&["/tmp/codewhale-primary", "/tmp/codewhale-r2"])),
+            )
+            .await
+            .expect("changed roots re-shape the runtime thread");
+        assert_eq!(remapped, "thr_runtime_1", "the runtime thread is kept");
+        assert_eq!(
+            bridge.thread_map.get("thr_stdio").map(String::as_str),
+            Some("thr_runtime_1")
+        );
+        assert_eq!(
+            bridge.thread_roots.get("thr_stdio"),
+            Some(&vec![
+                PathBuf::from("/tmp/codewhale-primary"),
+                PathBuf::from("/tmp/codewhale-r2")
+            ]),
+            "the mapped root set carries the resumed roots"
+        );
+        server.abort();
+        let _ = server.await;
+
+        let bodies = bodies.lock().await;
+        assert_eq!(bodies.len(), 2, "one create plus one PATCH");
+        assert_eq!(
+            bodies[0]["workspace_roots"],
+            json!(["/tmp/codewhale-primary", "/tmp/codewhale-r1"])
+        );
+        assert_eq!(
+            bodies[1]["patch"],
+            json!(true),
+            "the roots change re-shapes via PATCH"
+        );
+        assert_eq!(
+            bodies[1]["id"],
+            json!("thr_runtime_1"),
+            "the PATCH lands on the same runtime thread"
+        );
+        assert_eq!(
+            bodies[1]["workspace_roots"],
+            json!(["/tmp/codewhale-primary", "/tmp/codewhale-r2"]),
+            "the PATCH carries the resumed root set"
+        );
+        assert_eq!(
+            bodies[1]["turns"].as_array().map(Vec::len),
+            Some(1),
+            "context continuity: the patched thread keeps its turns"
         );
     }
 

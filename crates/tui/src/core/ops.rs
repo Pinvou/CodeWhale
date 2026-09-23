@@ -181,6 +181,9 @@ pub struct SessionSnapshot {
     /// Exact non-secret configured provider key.
     pub model_provider_id: Option<String>,
     pub workspace: PathBuf,
+    /// Workspace roots currently materialized for the session; `workspace`
+    /// is the primary root at position 0.
+    pub workspace_roots: Vec<PathBuf>,
     pub system_prompt: Option<SystemPrompt>,
     pub mode: String,
 }
@@ -471,6 +474,7 @@ pub enum Op {
         system_prompt_override: bool,
         model: String,
         workspace: PathBuf,
+        workspace_roots: Vec<PathBuf>,
         mode: AppMode,
     },
 

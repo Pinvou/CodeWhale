@@ -358,6 +358,10 @@ pub enum Op {
         system_prompt_override: bool,
         model: String,
         workspace: PathBuf,
+        /// Additional workspace roots synced with the session; `workspace`
+        /// stays the primary root. Absent on legacy payloads (single root).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        workspace_roots: Vec<PathBuf>,
         #[serde(default = "default_mode")]
         mode: String,
     },
@@ -654,6 +658,7 @@ mod tests {
                 system_prompt_override: false,
                 model: "m".into(),
                 workspace: PathBuf::from("/ws"),
+                workspace_roots: Vec::new(),
                 mode: "agent".into(),
             },
             Op::CompactContext {
@@ -704,6 +709,52 @@ mod tests {
                 "engine_schedule_id must never be settable from the wire"
             ),
             other => panic!("expected ContinueGoal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_session_workspace_roots_ride_the_wire_only_when_present() {
+        let op = |roots: Vec<PathBuf>| Op::SyncSession {
+            engine_session_id: Some("s".into()),
+            messages: vec![],
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "m".into(),
+            workspace: PathBuf::from("/ws"),
+            workspace_roots: roots,
+            mode: "agent".into(),
+        };
+
+        // An empty set stays off the wire: a single-root host's frame is the
+        // legacy shape, and a `skip_serializing_if` regression would leak the
+        // key into every sync.
+        let empty = serde_json::to_value(op(Vec::new())).unwrap();
+        assert!(
+            empty.get("workspace_roots").is_none(),
+            "empty roots must stay off the wire: {empty}"
+        );
+
+        // A non-empty set is carried and round-trips.
+        let multi_roots = vec![PathBuf::from("/ws"), PathBuf::from("/shared")];
+        let multi = serde_json::to_value(op(multi_roots.clone())).unwrap();
+        assert_eq!(multi["workspace_roots"], json!(["/ws", "/shared"]));
+        let back: Op = serde_json::from_value(multi).unwrap();
+        assert_eq!(back, op(multi_roots));
+
+        // A legacy payload without the key decodes to an empty set.
+        let legacy: Op = serde_json::from_value(json!({
+            "kind": "sync_session",
+            "messages": [],
+            "model": "m",
+            "workspace": "/ws",
+            "mode": "agent"
+        }))
+        .unwrap();
+        match legacy {
+            Op::SyncSession {
+                workspace_roots, ..
+            } => assert!(workspace_roots.is_empty()),
+            other => panic!("expected SyncSession, got {other:?}"),
         }
     }
 

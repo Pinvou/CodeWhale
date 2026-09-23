@@ -8666,6 +8666,7 @@ fn auto_review_plan_decision(
         approval_mode,
         workspace_trusted,
         workspace,
+        &[],
     );
     auto_review_plan_decision_for_context(policy, &context)
 }
@@ -9013,6 +9014,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
             ask.1,
             ask.2,
             workspace,
+            &[],
             tool,
             input,
             ApprovalRequirement::Suggest,
@@ -9073,6 +9075,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
                 approval_mode,
                 auto_approve,
                 workspace,
+                &[],
                 "write_file",
                 &json!({"path": "src/main.rs"}),
                 ApprovalRequirement::Suggest,
@@ -9087,9 +9090,54 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
         ask.1,
         ask.2,
         workspace,
+        &[],
         "write_file",
         &json!({"path": "src/main.rs"}),
         ApprovalRequirement::Required,
+    ));
+}
+
+#[test]
+fn workspace_write_carve_out_judges_the_raw_spelling_on_the_real_pipeline() {
+    // The gate must judge exactly what execution resolves: the engine's path
+    // collector passes the tool input through untrimmed, and
+    // `ToolContext::resolve_path` branches on the raw spelling. A
+    // leading-whitespace absolute-looking target is a *relative* path to the
+    // write tools (joined onto the primary), so a trimmed judgment would let
+    // it qualify through an attached git root modal-free while the write
+    // lands inside the non-git primary tree — fail-open where base was
+    // fail-closed.
+    let primary = tempdir().expect("non-git primary");
+    let attached = tempdir().expect("attached dir");
+    std::fs::create_dir(attached.path().join(".git")).expect("git marker");
+    let ask = (
+        crate::tui::app::AppMode::Agent,
+        crate::tui::approval::ApprovalMode::Suggest,
+        false,
+    );
+    let carve_out = |input: &serde_json::Value| {
+        workspace_write_carve_out_applies(
+            ask.0,
+            ask.1,
+            ask.2,
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            input,
+            ApprovalRequirement::Suggest,
+        )
+    };
+
+    let whitespace_prefixed = format!(" {}", attached.path().join("src/main.rs").display());
+    assert!(
+        !carve_out(&json!({"path": whitespace_prefixed})),
+        "the raw pipeline must keep the modal for a whitespace-prefixed target"
+    );
+
+    // The trimmed spelling stays qualified on the same pipeline: trimming
+    // decides nothing but emptiness anywhere on this path.
+    assert!(carve_out(
+        &json!({"path": attached.path().join("src/main.rs")})
     ));
 }
 
@@ -9417,6 +9465,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9440,6 +9489,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Never,
         );
 
@@ -9462,6 +9512,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "git status"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9481,6 +9532,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         "Bash",
         &json!({"action": "run", "command": "cargo test --workspace"}),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Auto,
     );
 
@@ -9509,6 +9561,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         Some(ToolAskRuleDecision::Allow)
@@ -9519,6 +9572,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         None
@@ -9529,10 +9583,150 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/other"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         None
     );
+}
+
+#[test]
+fn exec_shell_scoped_allow_rule_does_not_follow_cwd_into_attached_root() {
+    // B15-3 regression pin: the normal exec lane resolves a `cwd:` operand
+    // into any declared root and executes there, so the approval context
+    // must judge the resolved effective cwd. A grant scoped to the primary
+    // repo must not auto-approve the same command redirected into an
+    // attached root — a different repository the grant never named.
+    let rule = codewhale_execpolicy::ToolAskRule::exec_shell("git push")
+        .into_exact_workspace_allow("/repo");
+    let config = EngineConfig {
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+    let roots = [PathBuf::from("/shared")];
+
+    // Control: inside the scoped repo the grant still auto-approves, with
+    // the attached root declared.
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &config,
+            "exec_shell",
+            &json!({"command": "git push"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        Some(ToolAskRuleDecision::Allow)
+    );
+    // A relative `cwd:` resolves against the primary root (execution
+    // semantics), so it keeps the grant.
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &config,
+            "exec_shell",
+            &json!({"command": "git push", "cwd": "."}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        Some(ToolAskRuleDecision::Allow)
+    );
+    // Redirected into the attached root, the /repo-scoped grant must not
+    // auto-approve.
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &config,
+            "exec_shell",
+            &json!({"command": "git push", "cwd": "/shared"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        None,
+        "a /repo-scoped allow must not auto-approve execution under an attached root"
+    );
+
+    // The scope match is honest in both directions: a grant scoped to the
+    // attached root fires exactly when execution lands there.
+    let attached_rule = codewhale_execpolicy::ToolAskRule::exec_shell("git push")
+        .into_exact_workspace_allow("/shared");
+    let attached_config = EngineConfig {
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![attached_rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &attached_config,
+            "exec_shell",
+            &json!({"command": "git push", "cwd": "/shared"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        Some(ToolAskRuleDecision::Allow)
+    );
+    assert_eq!(
+        exec_shell_ask_rule_decision(
+            &attached_config,
+            "exec_shell",
+            &json!({"command": "git push"}),
+            Path::new("/repo"),
+            &roots,
+            crate::tui::approval::ApprovalMode::Suggest,
+        ),
+        None
+    );
+}
+
+#[test]
+fn exec_shell_attached_root_scoped_deny_reaches_rule_decision() {
+    // Pin for the engine-level exec-policy glue: the declared root set must
+    // reach the typed-rule decision. Every other engine-level caller passes
+    // `&[]`, so a glue mutation dropping the set only shows up as an
+    // attached-root-dependent outcome flipping.
+    let rule = codewhale_execpolicy::ToolAskRule {
+        tool: "exec_shell".into(),
+        command: Some("git push".into()),
+        command_exact: false,
+        path: None,
+        workspace: Some("/shared".into()),
+        action: codewhale_execpolicy::PermissionAction::Deny,
+    };
+    let config = EngineConfig {
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]),
+        ..EngineConfig::default()
+    };
+
+    let decision = exec_shell_ask_rule_decision(
+        &config,
+        "exec_shell",
+        &json!({"command": "git push origin main"}),
+        Path::new("/repo"),
+        &[PathBuf::from("/shared")],
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(
+        matches!(decision, Some(ToolAskRuleDecision::Block(_))),
+        "a deny rule scoped to an attached root must reach the decision: {decision:?}"
+    );
+
+    // Control: with the historical empty root set the /shared-scoped deny
+    // does not reach the call.
+    let decision = exec_shell_ask_rule_decision(
+        &config,
+        "exec_shell",
+        &json!({"command": "git push origin main"}),
+        Path::new("/repo"),
+        &[],
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert_eq!(decision, None);
 }
 
 #[test]
@@ -9550,6 +9744,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9573,6 +9768,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "/repo/secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9596,6 +9792,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Never,
         );
 
@@ -9618,6 +9815,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "docs/readme.md"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9637,6 +9835,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         "File",
         &json!({"action": "write", "path": "src/lib.rs", "content": "new\n"}),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Auto,
     );
 
@@ -9674,6 +9873,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
@@ -9688,6 +9888,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(partially_allowed, None);
@@ -13249,6 +13450,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             "write_file",
             &tool_input,
             workspace.path(),
+            &[],
             crate::tui::approval::ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
@@ -13267,6 +13469,62 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
     .await;
 
     assert!(!target.exists(), "repo-law block must prevent the write");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn full_access_repo_law_holds_writes_under_attached_roots() {
+    // Round-15 pin at the turn-loop layer: `run_turn` must forward the
+    // session root set to `repo_law_plan_decision`. A `&[]` mutation at the
+    // turn-loop call site leaves the attached root's constitution unloaded,
+    // so the write below would execute with every repo-law unit test (one
+    // layer down) still green.
+    let _lock = lock_test_env();
+    let workspace = tempdir().expect("tempdir");
+    let attached = tempdir().expect("attached root");
+    let law_dir = attached.path().join(".codewhale");
+    fs::create_dir_all(&law_dir).expect("create law directory");
+    fs::write(
+        law_dir.join("constitution.json"),
+        r#"{
+            "protected_invariants": [{
+                "text": "Shared root notes need human review",
+                "paths": ["SHARED.md"]
+            }]
+        }"#,
+    )
+    .expect("write repo law fixture");
+    let target = attached.path().join("SHARED.md");
+    let engine_config = EngineConfig {
+        model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+        workspace: workspace.path().to_path_buf(),
+        workspace_roots: vec![attached.path().to_path_buf()],
+        mcp_config_path: workspace.path().join("mcp.json"),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..EngineConfig::default()
+    };
+    let tool_input = json!({
+        "action": "write",
+        "path": target.to_string_lossy(),
+        "content": "must not be written\n"
+    });
+
+    assert_full_access_model_tool_batch_is_blocked(
+        engine_config,
+        vec![("File", tool_input)],
+        &[(
+            "File",
+            "Repository law blocked tool 'File' in Full Access: Repo law holds this write: \"Shared root notes need human review\"",
+        )],
+        "Repository law blocked tool 'File' in Full Access: Repo law holds this write:",
+    )
+    .await;
+
+    assert!(
+        !target.exists(),
+        "repo-law block must prevent the write under the attached root"
+    );
 }
 
 #[tokio::test]
@@ -13542,6 +13800,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             "exec_shell",
             &tool_input,
             workspace.path(),
+            &[],
             crate::tui::approval::ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
@@ -14914,6 +15173,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
             ApprovalMode::Suggest,
             None,
             &workspace,
+            &[],
             SandboxNetworkAccess::Restricted,
         ),
         SandboxPolicy::ReadOnly
@@ -14925,6 +15185,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         ApprovalMode::Suggest,
         None,
         &workspace,
+        &[],
         SandboxNetworkAccess::Restricted,
     ) {
         SandboxPolicy::WorkspaceWrite {
@@ -14947,6 +15208,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         ApprovalMode::Suggest,
         None,
         &workspace,
+        &[],
         SandboxNetworkAccess::Allowed,
     ) {
         SandboxPolicy::WorkspaceWrite { network_access, .. } => {
@@ -14965,6 +15227,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
             ApprovalMode::Bypass,
             None,
             &workspace,
+            &[],
             SandboxNetworkAccess::Restricted,
         ),
         SandboxPolicy::DangerFullAccess
@@ -15832,6 +16095,7 @@ async fn sync_session_restores_current_mode() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Plan,
         })
         .await
@@ -15910,6 +16174,7 @@ async fn sync_session_without_prompt_repins_full_system_prompt_on_next_turn() {
             system_prompt_override: false,
             model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
             workspace: workspace.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -15991,6 +16256,7 @@ async fn sync_session_same_id_does_not_finalize_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16011,6 +16277,7 @@ async fn sync_session_same_id_does_not_finalize_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16052,6 +16319,7 @@ async fn sync_session_different_id_finalizes_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16075,6 +16343,7 @@ async fn sync_session_different_id_finalizes_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16141,6 +16410,7 @@ async fn sync_session_migrates_one_checkpoint_and_strips_its_system_carrier() {
                 system_prompt_override: true,
                 model: "deepseek-v4-pro".to_string(),
                 workspace: tmp.path().to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: AppMode::Agent,
             })
             .await
@@ -16224,6 +16494,7 @@ async fn sync_session_projects_persisted_subagent_handoff_for_headless_restore()
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16287,6 +16558,107 @@ async fn session_snapshot_omits_id_for_legacy_root_custom_route() {
 
     assert_eq!(snapshot.model_provider, "custom");
     assert_eq!(snapshot.model_provider_id, None);
+    run.abort();
+}
+
+#[test]
+fn tool_context_for_turn_materializes_session_workspace_roots() {
+    let tmp = tempdir().expect("tempdir");
+    let shared = tempdir().expect("shared root");
+    let expected = vec![tmp.path().to_path_buf(), shared.path().to_path_buf()];
+
+    let mut config = deterministic_engine_config(tmp.path());
+    config.workspace_roots = vec![shared.path().to_path_buf()];
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let ctx = engine.build_tool_context(AppMode::Agent, false);
+    assert_eq!(ctx.workspace_roots, expected);
+    match &ctx.elevated_sandbox_policy {
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) => {
+            assert_eq!(writable_roots, &expected);
+        }
+        other => panic!("agent turn must carry a workspace-write policy: {other:?}"),
+    }
+
+    // No configured roots: the session degenerates to the primary root and
+    // the materialized policy is byte-identical to the historical shape.
+    let (engine, _handle) =
+        Engine::new(deterministic_engine_config(tmp.path()), &Config::default());
+    let ctx = engine.build_tool_context(AppMode::Agent, false);
+    assert_eq!(ctx.workspace_roots, vec![tmp.path().to_path_buf()]);
+    match &ctx.elevated_sandbox_policy {
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) => {
+            assert_eq!(writable_roots, &vec![tmp.path().to_path_buf()]);
+        }
+        other => panic!("agent turn must carry a workspace-write policy: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sync_session_replaces_workspace_roots_for_the_next_turn() {
+    let tmp = tempdir().expect("tempdir");
+    let shared = tempdir().expect("shared root");
+    let (engine, handle) = Engine::new(deterministic_engine_config(tmp.path()), &Config::default());
+    let run = tokio::spawn(engine.run());
+
+    // A roots-only sync (same primary workspace) swaps the materialized set.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("roots-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: vec![shared.path().to_path_buf()],
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.workspace_roots,
+        vec![tmp.path().to_path_buf(), shared.path().to_path_buf()],
+        "next turn must materialize the replaced root set"
+    );
+
+    // A later sync with no roots configured falls back to the primary root.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("roots-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session without roots");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(snapshot.workspace_roots, vec![tmp.path().to_path_buf()]);
+
     run.abort();
 }
 
@@ -16359,6 +16731,7 @@ async fn edit_last_turn_preserves_current_mode() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16516,6 +16889,7 @@ async fn edit_last_turn_cuts_at_user_prompt_before_tool_results() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16629,6 +17003,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -16732,6 +17107,7 @@ async fn edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -18287,6 +18663,100 @@ fn working_set_reaches_model_as_turn_metadata() {
     assert!(text.starts_with("<turn_meta>\n"));
     assert!(text.contains(WORKING_SET_SUMMARY_MARKER));
     assert!(text.contains("src/lib.rs"));
+}
+
+fn turn_meta_text(engine: &mut Engine, input: &str) -> String {
+    let user_msg = engine.user_text_message_with_turn_metadata(input.to_string());
+    user_msg
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } if text.starts_with("<turn_meta>") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("turn metadata block")
+}
+
+#[test]
+fn forkguard_workspace_roots_turn_meta_lists_attached_roots() {
+    let tmp = tempdir().expect("tempdir");
+    let shared_a = tempdir().expect("shared a");
+    let shared_b = tempdir().expect("shared b");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        workspace_roots: vec![shared_a.path().to_path_buf(), shared_b.path().to_path_buf()],
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let first = turn_meta_text(&mut engine, "one");
+    let expected_line = format!(
+        "Accessible folders: {}, {}",
+        shared_a.path().display(),
+        shared_b.path().display()
+    );
+    assert!(first.contains(&expected_line), "{first}");
+    // The line sits immediately after the workspace line (the model reads the
+    // primary root there and the attached roots here).
+    let workspace_pos = first.find("Current workspace:").expect("workspace line");
+    let folders_pos = first.find("Accessible folders:").expect("folders line");
+    assert!(folders_pos > workspace_pos);
+    assert!(
+        !first[workspace_pos..folders_pos].contains("Current permission posture:"),
+        "the folders line must precede the posture lines: {first}"
+    );
+    // A stable root set renders the line byte-identically every turn.
+    let second = turn_meta_text(&mut engine, "two");
+    assert_eq!(
+        first
+            .lines()
+            .find(|line| line.starts_with("Accessible folders:")),
+        second
+            .lines()
+            .find(|line| line.starts_with("Accessible folders:")),
+    );
+}
+
+#[test]
+fn turn_meta_omits_accessible_folders_for_single_root() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let text = turn_meta_text(&mut engine, "hello");
+    assert!(
+        !text.contains("Accessible folders:"),
+        "single-root sessions keep the historical block byte shape: {text}"
+    );
+}
+
+#[test]
+fn turn_meta_accessible_folders_truncates_long_root_sets() {
+    let tmp = tempdir().expect("tempdir");
+    let roots: Vec<PathBuf> = (0..7)
+        .map(|index| tmp.path().join(format!("root-{index}")))
+        .collect();
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        workspace_roots: roots.clone(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let text = turn_meta_text(&mut engine, "hello");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Accessible folders:"))
+        .expect("folders line");
+    // At most five attached roots listed, the rest folded into a count.
+    assert!(line.contains("root-0") && line.contains("root-4"), "{line}");
+    assert!(!line.contains("root-5"), "{line}");
+    assert!(line.ends_with("… (+2 more)"), "{line}");
 }
 
 #[test]
@@ -24856,6 +25326,7 @@ async fn forkguard_workspace_sync_invalidates_in_flight_boot() {
             system_prompt_override: false,
             model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
             workspace: workspace_b.path().to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: AppMode::Agent,
         })
         .await
@@ -25053,7 +25524,7 @@ async fn forkguard_reload_injects_recovery_notice_exactly_once() {
         let briefed = snapshot
             .messages
             .iter()
-            .any(|message| crate::runtime_handoff::is_mcp_boot_failure_briefing_message(message));
+            .any(crate::runtime_handoff::is_mcp_boot_failure_briefing_message);
         if briefed {
             break;
         }

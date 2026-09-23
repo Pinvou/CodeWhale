@@ -194,6 +194,7 @@ impl<'a> AutoReviewContext<'a> {
         approval_mode: ApprovalMode,
         workspace_trusted: bool,
         workspace: Option<&std::path::Path>,
+        workspace_roots: &[std::path::PathBuf],
     ) -> Self {
         let category = get_tool_category_for_call(tool_name, params);
         let risk = classify_risk(tool_name, category, params);
@@ -212,7 +213,9 @@ impl<'a> AutoReviewContext<'a> {
                 .zip(file_write_target_paths(tool_name, params))
                 .is_some_and(|(workspace, paths)| {
                     crate::core::authority::paths_within_workspace_write_carve_out(
-                        workspace, &paths,
+                        workspace,
+                        workspace_roots,
+                        &paths,
                     )
                 }),
         }
@@ -386,10 +389,12 @@ fn file_write_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>
     let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     Some(match canonical {
         "write_file" | "edit_file" => vec![
+            // Raw spelling, untrimmed: the carve-out must judge exactly the
+            // path execution resolves (`ToolContext::resolve_path` joins the
+            // raw string onto the workspace).
             input
                 .get("path")
                 .and_then(Value::as_str)
-                .map(str::trim)
                 .filter(|path| !path.is_empty())
                 .map(str::to_string)?,
         ],
@@ -1024,7 +1029,15 @@ mod tests {
         run_origin: RunOrigin,
         approval_mode: ApprovalMode,
     ) -> AutoReviewContext<'_> {
-        AutoReviewContext::from_tool_call(tool_name, &params, run_origin, approval_mode, true, None)
+        AutoReviewContext::from_tool_call(
+            tool_name,
+            &params,
+            run_origin,
+            approval_mode,
+            true,
+            None,
+            &[],
+        )
     }
 
     fn assert_safety_gate(decision: &AutoReviewDecision) {
@@ -1081,12 +1094,53 @@ mod tests {
             ApprovalMode::Auto,
             true,
             None,
+            &[],
         );
 
         let decision = policy.evaluate(&ctx);
 
         assert_eq!(decision.action, AutoReviewAction::Block);
         assert_eq!(decision.rule_id.as_deref(), Some("no-rm"));
+    }
+
+    #[test]
+    fn write_targets_bounded_spans_attached_workspace_roots() {
+        // Pin for the bounded-write plumbing: the declared root set must
+        // reach the carve-out check. Every other caller here passes
+        // `None, &[]`, so a mutation dropping the set inside the context
+        // builder only shows up as an attached-root-dependent outcome.
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let attached = tempfile::tempdir().expect("attached root tempdir");
+        std::fs::create_dir(workspace.path().join(".git")).expect("git marker");
+        std::fs::create_dir(attached.path().join(".git")).expect("git marker");
+        let target = attached.path().join("src/a.rs");
+
+        let ctx = AutoReviewContext::from_tool_call(
+            "write_file",
+            &json!({ "path": target.to_string_lossy() }),
+            RunOrigin::Interactive,
+            ApprovalMode::Auto,
+            true,
+            Some(workspace.path()),
+            &[attached.path().to_path_buf()],
+        );
+        assert!(
+            ctx.write_targets_bounded,
+            "a write target under an attached git root is bounded only while the root set reaches the carve-out"
+        );
+
+        // Control: the same call with the historical empty root set is not
+        // bounded.
+        let ctx = AutoReviewContext::from_tool_call(
+            "write_file",
+            &json!({ "path": target.to_string_lossy() }),
+            RunOrigin::Interactive,
+            ApprovalMode::Auto,
+            true,
+            Some(workspace.path()),
+            &[],
+        );
+        assert!(!ctx.write_targets_bounded);
     }
 
     #[test]
@@ -1508,6 +1562,7 @@ mod tests {
             ApprovalMode::Suggest,
             true,
             None,
+            &[],
         );
         let decision = policy.evaluate(&ctx);
 
@@ -1563,6 +1618,7 @@ mod tests {
                 ApprovalMode::Auto,
                 true,
                 None,
+                &[],
             );
             assert_eq!(context.tool_name, tool_name);
             assert_eq!(context.category, category, "{tool_name}");
@@ -1630,6 +1686,7 @@ mod tests {
             ApprovalMode::Auto,
             true,
             None,
+            &[],
         );
         let text = build_reviewer_context(
             &ctx,

@@ -1830,7 +1830,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     // project-level config — `--no-project-config` opts the layer out for
     // every roster read in this process.
     crate::fleet::roster::set_project_agent_profiles_enabled(!cli.no_project_config);
-    let workspace = resolve_workspace(&cli);
+    let workspace = resolve_workspace(&cli)?;
     let mut plugin_discovery = None;
     let mut plugin_registry = None;
     let (cli, command) = prepare_cli_startup(
@@ -2224,7 +2224,7 @@ async fn run_async_main_dispatch(
                         )
                     }
                 };
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 if args.context_json {
                     run_doctor_context_json(&config, &workspace)
                 } else if args.json {
@@ -2268,7 +2268,7 @@ async fn run_async_main_dispatch(
             Commands::SessionDiagnostics(args) => run_session_diagnostics(args),
             Commands::Setup(args) => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 run_setup(&config, &workspace, args, plugin_registry.as_ref())
             }
             Commands::RemoteSetup(args) => remote_setup::run_remote_setup(args),
@@ -2482,7 +2482,7 @@ async fn run_async_main_dispatch(
             }
             Commands::Fleet(args) => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 run_fleet_command(&workspace, &config, args).await
             }
             Commands::WorkflowTool(args) => {
@@ -2514,7 +2514,7 @@ async fn run_async_main_dispatch(
             Commands::Scorecard(args) => run_scorecard(args),
             Commands::Mcp { command } => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 run_mcp_command(&config, &workspace, command, plugin_registry.as_ref()).await
             }
             Commands::Features(command) => {
@@ -2525,7 +2525,7 @@ async fn run_async_main_dispatch(
                 // Identity derivation is structural: credential-bearing
                 // environment values never enter this path.
                 let config = load_structural_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 integrations::cli::run(&config, &workspace, command)
             }
             Commands::Sandbox(args) => run_sandbox_command(args),
@@ -2588,7 +2588,7 @@ async fn run_async_main_dispatch(
             }
             Commands::Resume { session_id, last } => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 let resume_id = resolve_session_id(session_id, last, &workspace)?;
                 run_interactive(
                     &cli,
@@ -2602,7 +2602,7 @@ async fn run_async_main_dispatch(
             }
             Commands::Fork { session_id, last } => {
                 let config = load_config_from_cli(&cli)?;
-                let workspace = resolve_workspace(&cli);
+                let workspace = resolve_workspace(&cli)?;
                 let new_session_id = fork_session(&config, session_id, last, &workspace)?;
                 run_interactive(
                     &cli,
@@ -2637,7 +2637,7 @@ async fn run_async_main_dispatch(
     // snapshots are preserved for explicit resume, but never auto-attached.
     let mut startup_notice = None;
     let resume_session_id = if cli.continue_session {
-        let workspace = resolve_workspace(&cli);
+        let workspace = resolve_workspace(&cli)?;
         resolve_continue_session_id(
             &workspace,
             io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -2645,7 +2645,7 @@ async fn run_async_main_dispatch(
     } else if let Some(id) = cli.resume.clone() {
         Some(id)
     } else if !cli.fresh {
-        let workspace = resolve_workspace(&cli);
+        let workspace = resolve_workspace(&cli)?;
         preserve_interrupted_checkpoint_for_explicit_resume(&workspace);
         // Opt-in auto-resume (#2934). Off by default, so the historical
         // "plain `codewhale` starts fresh" behaviour is unchanged unless the
@@ -8093,10 +8093,29 @@ fn init_project() -> Result<()> {
     Ok(())
 }
 
-fn resolve_workspace(cli: &Cli) -> PathBuf {
-    cli.workspace
+fn resolve_workspace(cli: &Cli) -> Result<PathBuf> {
+    let workspace = cli
+        .workspace
         .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // An empty `--workspace ""` would persist a vacuous primary root
+    // (`starts_with("")` contains every path); reject it like the runtime
+    // thread guard does.
+    if workspace.as_os_str().is_empty() {
+        bail!("workspace must not be empty");
+    }
+    if workspace.is_absolute() {
+        return Ok(workspace);
+    }
+    // A relative workspace reaches boundary_roots() as a root whose
+    // normalized form is empty ("." carries no components), which contains
+    // every path; resolve it against the process cwd at intake, the same
+    // rule checked_workspace_path applies to MCP config paths.
+    Ok(crate::mcp::normalize_path_components(
+        &std::env::current_dir()
+            .context("failed to resolve current directory for workspace")?
+            .join(workspace),
+    ))
 }
 
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
@@ -8401,6 +8420,12 @@ fn fork_session(
     );
     forked.metadata.copy_cost_from(&saved.metadata);
     forked.metadata.mark_forked_from(&saved.metadata);
+    // The fork continues the same conversation over the same accessible
+    // set: stamp the source's roots before the save. Without it the freshly
+    // constructed (empty) metadata persists, and the disk-authority
+    // lifecycle merge keeps re-erasing any later correction - the same
+    // sticky erasure the in-app `/fork` stamp prevents.
+    forked.metadata.workspace_roots = saved.metadata.workspace_roots.clone();
     manager.save_session(&forked)?;
 
     let source_title = saved.metadata.title.trim();
@@ -8779,7 +8804,7 @@ async fn run_pr(
 
     let prompt = format_pr_prompt(number, &view, &diff);
     let resume_session_id = if cli.continue_session {
-        let workspace = resolve_workspace(cli);
+        let workspace = resolve_workspace(cli)?;
         latest_session_id_for_workspace(&workspace).ok().flatten()
     } else {
         cli.resume.clone()
@@ -11815,7 +11840,7 @@ async fn run_workflow_tool_command_inner(
         bail!("workflow-tool accepts only action=run");
     }
 
-    let workspace = resolve_workspace(cli);
+    let workspace = resolve_workspace(cli)?;
     let mut config = load_config_from_cli(cli)?;
     merge_user_workspace_config(&mut config, cli.config.clone(), &workspace);
     if let Ok(env_url) =
@@ -12062,6 +12087,12 @@ async fn build_direct_workflow_tool(
     let allow_shell = yolo || config.allow_shell();
     let shell_policy = shell_policy_for_mode(mode, allow_shell);
     let trusted = crate::workspace_trust::WorkspaceTrust::load_for(workspace);
+    // Headless workflow contexts are single-root: the caller reaches this
+    // builder with a workspace path and no root set, so an attached-root write
+    // of a multi-root session is denied here rather than held. Enforcement
+    // only (no display surface), byte-identical to base, and the same
+    // disclosed gap `Runtime::invoke_tool` carries; wiring a session's roots
+    // through is a scheduled follow-up.
     let mut context = crate::tools::ToolContext::with_auto_approve(
         workspace.to_path_buf(),
         yolo,
@@ -12086,6 +12117,7 @@ async fn build_direct_workflow_tool(
         },
         config.sandbox_mode.as_deref(),
         workspace,
+        &[],
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
     ));
     let network_policy = config.network.clone().map(|network| {
@@ -12385,6 +12417,7 @@ fn persist_exec_session(
     model: &str,
     provider_route: PersistedProviderRoute<'_>,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     system_prompt: &Option<SystemPrompt>,
     session_id: Option<&str>,
     total_tokens: u64,
@@ -12428,6 +12461,7 @@ fn persist_exec_session(
         provider_route.kind,
         provider_route.id,
         workspace,
+        workspace_roots,
     );
     let id = saved.metadata.id.clone();
     manager
@@ -12442,12 +12476,14 @@ fn stamp_exec_session_metadata(
     model_provider_kind: &str,
     model_provider_id: Option<&str>,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
 ) {
     saved.metadata.model = model.to_string();
     saved
         .metadata
         .set_model_provider_route(model_provider_kind, model_provider_id);
     saved.metadata.workspace = workspace.to_path_buf();
+    saved.metadata.workspace_roots = workspace_roots.to_vec();
     saved.metadata.mode = Some("exec".to_string());
 }
 
@@ -16274,6 +16310,7 @@ api_key = "test-only-key"
             crate::config::ApiProvider::Custom.as_str(),
             Some("custom-b"),
             Path::new("/tmp/exec-resume"),
+            &[PathBuf::from("/tmp/exec-resume-shared")],
         );
 
         let mut next_config = custom_exec_config("custom-a");
@@ -16286,6 +16323,18 @@ api_key = "test-only-key"
             Some("custom-b")
         );
         assert_eq!(persisted.metadata.model, "model-b");
+        // The stamp must carry the root set, not only the primary: a resumed
+        // multi-root exec that dropped it would persist single-root and the
+        // next `exec --resume` would run degraded.
+        assert_eq!(
+            persisted.metadata.workspace_roots,
+            vec![PathBuf::from("/tmp/exec-resume-shared")],
+            "the exec stamp must write the root set it was given"
+        );
+        assert_eq!(
+            persisted.metadata.workspace,
+            PathBuf::from("/tmp/exec-resume")
+        );
         assert_eq!(next_config.provider.as_deref(), Some("custom-b"));
         assert_eq!(resumed_model, "model-b");
     }
@@ -16306,6 +16355,7 @@ api_key = "test-only-key"
             crate::config::ApiProvider::Custom.as_str(),
             None,
             Path::new("/tmp/exec-root"),
+            &[],
         );
 
         assert_eq!(saved.metadata.model_provider, "custom");
@@ -16726,6 +16776,30 @@ api_key = "test-only-key"
         };
 
         assert!(args.continue_session);
+    }
+
+    #[test]
+    fn workspace_flag_rejects_empty_path() {
+        // clap's PathBuf parser rejects an empty `--workspace ""` before it
+        // reaches resolve_workspace; pin that contract so a parser change
+        // cannot re-open the vacuous-containment lane (`starts_with("")` is
+        // true for every path). resolve_workspace additionally hard-rejects
+        // an empty value itself, so the slot stays fail-closed however the
+        // Cli is built.
+        let err = Cli::try_parse_from(["codewhale", "--workspace", "", "exec", "probe"])
+            .expect_err("empty workspace must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn workspace_flag_resolves_relative_against_process_cwd() {
+        // A relative spelling resolves to absolute at intake: its normalized
+        // form would otherwise be the vacuous containment root ("." carries
+        // no components), so the CLI must not hand it downstream as-is.
+        let cli = parse_cli(&["codewhale", "--workspace", ".", "exec", "probe"]);
+        let resolved = resolve_workspace(&cli).expect("relative workspace resolves");
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, std::env::current_dir().expect("process cwd"));
     }
 
     #[test]
@@ -19676,3 +19750,53 @@ mod telemetry_surface_tests;
 #[cfg(test)]
 #[path = "tests/telemetry_counters.rs"]
 mod telemetry_counter_tests;
+
+#[cfg(test)]
+mod fork_session_tests {
+    use super::*;
+    use crate::session_manager::SessionManager;
+    use crate::test_support::{EnvVarGuard, lock_test_env};
+
+    /// The CLI fork continues the same conversation over the same accessible
+    /// set: the source's roots must reach the persisted fork, or the
+    /// disk-authority lifecycle merge keeps re-erasing any later correction.
+    #[test]
+    fn fork_session_stamps_the_source_workspace_roots() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = EnvVarGuard::set("HOME", &home);
+
+        let workspace = tmp.path().join("workspace");
+        let shared = tmp.path().join("shared");
+        let manager = SessionManager::default_location().expect("default manager");
+        let mut source = create_saved_session(
+            &[crate::models::Message {
+                role: crate::models::Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "fork me with my roots".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-chat",
+            &workspace,
+            0,
+            None,
+        );
+        source.metadata.workspace_roots = vec![workspace.clone(), shared.clone()];
+        manager.save_session(&source).expect("save source");
+
+        let config = Config::default();
+        let forked_id = fork_session(&config, Some(source.metadata.id.clone()), false, &workspace)
+            .expect("fork session");
+
+        let forked = manager.load_session(&forked_id).expect("fork persisted");
+        assert_eq!(forked.metadata.workspace, workspace);
+        assert_eq!(
+            forked.metadata.workspace_roots,
+            vec![workspace, shared],
+            "the fork must persist the source's root set, not the freshly constructed empty one"
+        );
+    }
+}

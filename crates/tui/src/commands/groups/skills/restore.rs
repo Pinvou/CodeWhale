@@ -132,11 +132,20 @@ fn restore(group: &mut dyn CommandSkillGroupContext, arg: Option<&str>) -> Comma
         return CommandResult::error(err);
     }
 
-    CommandResult::message(format!(
-        "Restored snapshot #{n} ('{}', {}). Workspace files have been reverted; conversation history is unchanged.",
-        target.label,
-        short_sha(target.id.as_str()),
-    ))
+    CommandResult::message(if group.restore_covers_primary_only() {
+        format!(
+            "Restored snapshot #{n} ('{}', {}). {} Conversation history is unchanged.",
+            target.label,
+            short_sha(target.id.as_str()),
+            crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
+        )
+    } else {
+        format!(
+            "Restored snapshot #{n} ('{}', {}). Workspace files have been reverted; conversation history is unchanged.",
+            target.label,
+            short_sha(target.id.as_str()),
+        )
+    })
 }
 
 fn parse_list_arg(arg: &str) -> Result<Option<usize>, String> {
@@ -212,6 +221,7 @@ mod tests {
         snapshots: Result<Vec<SnapshotEntry>, String>,
         restore: Result<(), String>,
         approval: CommandApprovalState,
+        primary_only: bool,
     }
     impl FakeSkillGroup {
         fn new(snapshots: Vec<SnapshotEntry>) -> Self {
@@ -222,6 +232,7 @@ mod tests {
                     yolo: true,
                     trust_mode: false,
                 },
+                primary_only: false,
             }
         }
     }
@@ -286,6 +297,9 @@ mod tests {
         }
         fn restore_snapshot(&mut self, _id: &str) -> Result<(), String> {
             self.restore.clone()
+        }
+        fn restore_covers_primary_only(&self) -> bool {
+            self.primary_only
         }
         fn approval_state(&self) -> CommandApprovalState {
             self.approval
@@ -379,6 +393,34 @@ mod tests {
         let result = restore(&mut group, Some("2"));
         assert!(!result.is_error);
         assert!(result.message.unwrap().contains("Restored snapshot #2"));
+    }
+
+    #[test]
+    fn restore_with_attached_roots_names_rollback_boundary() {
+        // Snapshots are primary-bound: with attached roots the report must
+        // say only the primary workspace was reverted instead of claiming a
+        // full rollback (M15-3). Single-root wording stays byte-identical.
+        let mut group = FakeSkillGroup::new(vec![snap("pre-turn:1", "11111111", 1_700_000_000)]);
+        group.primary_only = true;
+        let result = restore(&mut group, Some("1"));
+        assert!(!result.is_error);
+        let msg = result.message.unwrap();
+        assert!(
+            msg.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+            "{msg}"
+        );
+        assert!(!msg.contains("Workspace files have been reverted"), "{msg}");
+
+        let mut single = FakeSkillGroup::new(vec![snap("pre-turn:1", "11111111", 1_700_000_000)]);
+        let single_msg = restore(&mut single, Some("1")).message.unwrap();
+        assert!(
+            single_msg.contains("Workspace files have been reverted"),
+            "{single_msg}"
+        );
+        assert!(
+            !single_msg.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+            "{single_msg}"
+        );
     }
 
     #[test]

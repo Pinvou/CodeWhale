@@ -51,6 +51,26 @@ pub use prune::{DEFAULT_MAX_AGE, prune_older_than};
 /// Maximum snapshots kept per workspace side-repo. Oldest are pruned
 /// after each new snapshot to cap disk usage (#1112).
 pub const DEFAULT_MAX_SNAPSHOTS: usize = 50;
+
+/// Honesty clause for revert/undo reports when the session root set extends
+/// beyond the primary workspace: the snapshot side-repo is rooted at the
+/// primary, so a restore rolls back only the primary while attached-root
+/// writes persist. Appended verbatim so single-root reports stay
+/// byte-identical (the clause is simply never added there).
+pub const ATTACHED_ROOTS_NOT_REVERTED_NOTE: &str =
+    "Only the primary workspace was reverted; attached workspace roots were not rolled back.";
+
+/// Whether a restore from the workspace snapshot repo covers only the
+/// primary root — true exactly when the normalized root set has entries
+/// beyond `workspace`. Revert/undo reports must carry
+/// [`ATTACHED_ROOTS_NOT_REVERTED_NOTE`] in that case instead of implying a
+/// full rollback.
+pub fn restore_covers_primary_only(
+    workspace: &std::path::Path,
+    workspace_roots: &[std::path::PathBuf],
+) -> bool {
+    codewhale_core::normalize_workspace_roots(workspace, workspace_roots).len() > 1
+}
 #[allow(unused_imports)]
 pub use repo::{
     DEFAULT_MAX_WORKSPACE_BYTES_FOR_SNAPSHOT, Snapshot, SnapshotId, SnapshotRepo,

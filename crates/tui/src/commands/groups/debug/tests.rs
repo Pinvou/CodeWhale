@@ -1308,6 +1308,110 @@ fn test_patch_undo_requests_session_resync_after_restore() {
 }
 
 #[test]
+fn test_patch_undo_with_attached_roots_names_rollback_boundary() {
+    // Snapshots are primary-bound (M15-3): with attached roots the /undo
+    // report and transcript cell must name the boundary instead of implying
+    // every accessible root was reverted. Single-root wording is untouched.
+    use crate::snapshot::SnapshotRepo;
+    use crate::test_support::lock_test_env;
+    use tempfile::tempdir;
+
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: crate::test_support::TestEnvLock,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: process-wide lock still held.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    fn scoped_home(home: &std::path::Path) -> HomeGuard {
+        let lock = lock_test_env();
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized by the global env lock.
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        HomeGuard { prev, _lock: lock }
+    }
+
+    let tmp = tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    let attached = tmp.path().join("attached");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&attached).unwrap();
+    let _guard = scoped_home(tmp.path());
+
+    let repo = SnapshotRepo::open_or_init(&workspace).unwrap();
+    std::fs::write(workspace.join("a.txt"), b"original").unwrap();
+    repo.snapshot_with_session("pre-turn:1", Some("test-session"))
+        .unwrap();
+    std::fs::write(workspace.join("a.txt"), b"modified").unwrap();
+
+    let mut app = create_test_app();
+    app.workspace = workspace.clone();
+    app.workspace_roots = vec![attached];
+    app.yolo = true;
+    app.current_session_id = Some("test-session".to_string());
+
+    let result = patch_undo(&mut app);
+
+    assert!(!result.is_error);
+    let message = result.message.expect("undo summary");
+    assert!(
+        message.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+        "{message}"
+    );
+    let cell = app
+        .history
+        .iter()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("transcript cell");
+    assert!(
+        cell.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+        "{cell}"
+    );
+    assert!(!cell.contains("/undo reverted workspace to"), "{cell}");
+
+    // Single-root report stays byte-identical: no boundary clause.
+    std::fs::write(workspace.join("a.txt"), b"again").unwrap();
+    let mut single = create_test_app();
+    single.workspace = workspace.clone();
+    single.yolo = true;
+    single.current_session_id = Some("test-session".to_string());
+    let single_result = patch_undo(&mut single);
+    assert!(!single_result.is_error);
+    let single_message = single_result.message.expect("undo summary");
+    assert!(
+        !single_message.contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+        "{single_message}"
+    );
+    let single_cell = single
+        .history
+        .iter()
+        .find_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("transcript cell");
+    assert!(
+        single_cell.contains("/undo reverted workspace to snapshot"),
+        "{single_cell}"
+    );
+}
+
+#[test]
 fn test_undo_legacy_chain_falls_back_to_conversation_only() {
     use crate::snapshot::SnapshotRepo;
     use crate::test_support::lock_test_env;

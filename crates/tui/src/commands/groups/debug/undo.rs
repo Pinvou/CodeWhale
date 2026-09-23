@@ -234,16 +234,26 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
         .unwrap_or(None);
 
     let short = &target.id.as_str()[..target.id.as_str().len().min(8)];
+    // The snapshot side-repo is rooted at the primary workspace: with
+    // attached roots in the session set, name the rollback boundary instead
+    // of implying every accessible root was reverted.
+    let primary_only =
+        crate::snapshot::restore_covers_primary_only(&app.workspace, &app.workspace_roots);
+    let boundary_note = if primary_only {
+        format!("\n{}", crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE)
+    } else {
+        String::new()
+    };
     let summary = match diff_stat {
         Some(ref stat) => {
             format!(
-                "Restored snapshot '{}' ({}). Files affected:\n{stat}",
+                "Restored snapshot '{}' ({}). Files affected:\n{stat}{boundary_note}",
                 target.label, short
             )
         }
         None => {
             format!(
-                "Restored snapshot '{}' ({}). No diff changes detected.",
+                "Restored snapshot '{}' ({}). No diff changes detected.{boundary_note}",
                 target.label, short
             )
         }
@@ -251,10 +261,19 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
 
     // Post a system cell so the reverted state is visible in the transcript.
     app.push_history_cell(HistoryCell::System {
-        content: format!(
-            "/undo reverted workspace to snapshot '{}' ({})",
-            target.label, short
-        ),
+        content: if primary_only {
+            format!(
+                "/undo reverted the primary workspace to snapshot '{}' ({}). {}",
+                target.label,
+                short,
+                crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE
+            )
+        } else {
+            format!(
+                "/undo reverted workspace to snapshot '{}' ({})",
+                target.label, short
+            )
+        },
     });
 
     CommandResult::with_message_and_action(
@@ -265,6 +284,7 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
             system_prompt: app.system_prompt.clone(),
             model: app.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: app.workspace_roots.clone(),
             mode: app.mode,
         },
     )

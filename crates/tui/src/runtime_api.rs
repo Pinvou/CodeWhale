@@ -4431,7 +4431,11 @@ async fn patch_undo_thread_turn(
         .get_thread(&id)
         .await
         .map_err(map_thread_err)?;
-    let patch_result = patch_undo_workspace_files(&thread.workspace, thread.session_id.as_deref());
+    let patch_result = patch_undo_workspace_files(
+        &thread.workspace,
+        &thread.workspace_roots,
+        thread.session_id.as_deref(),
+    );
 
     // Step 2: Remove the last conversation turn (undo_conversation).
     let (forked_thread, original_user_text) = state
@@ -4454,6 +4458,7 @@ async fn patch_undo_thread_turn(
 /// current workspace — same target selection as the TUI's `patch_undo`.
 fn patch_undo_workspace_files(
     workspace: &FsPath,
+    workspace_roots: &[std::path::PathBuf],
     current_session_id: Option<&str>,
 ) -> PatchUndoResult {
     let repo = match crate::snapshot::SnapshotRepo::open_or_init(workspace) {
@@ -4523,13 +4528,21 @@ fn patch_undo_workspace_files(
     });
 
     let short = &target.id.as_str()[..target.id.as_str().len().min(8)];
+    // Snapshots are primary-bound: with attached roots in the thread set,
+    // name the rollback boundary instead of implying a full revert.
+    let boundary_note = if crate::snapshot::restore_covers_primary_only(workspace, workspace_roots)
+    {
+        format!("\n{}", crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE)
+    } else {
+        String::new()
+    };
     let summary = match diff_stat {
         Some(ref stat) => format!(
-            "Restored snapshot '{}' ({}). Files affected:\n{stat}",
+            "Restored snapshot '{}' ({}). Files affected:\n{stat}{boundary_note}",
             target.label, short
         ),
         None => format!(
-            "Restored snapshot '{}' ({}). No diff changes detected.",
+            "Restored snapshot '{}' ({}). No diff changes detected.{boundary_note}",
             target.label, short
         ),
     };

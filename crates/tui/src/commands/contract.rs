@@ -1608,6 +1608,11 @@ impl CommandSkillGroupContext for SkillGroupAdapter<'_> {
             .map_err(|err| format!("Restore failed: {err}"))
     }
 
+    fn restore_covers_primary_only(&self) -> bool {
+        let app = self.host.app.borrow();
+        crate::snapshot::restore_covers_primary_only(&app.workspace, &app.workspace_roots)
+    }
+
     fn approval_state(&self) -> CommandApprovalState {
         let app = self.host.app.borrow();
         CommandApprovalState {

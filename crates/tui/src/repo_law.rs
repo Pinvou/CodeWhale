@@ -18,11 +18,12 @@
 //! - Only the repo-local constitution participates. The user-global
 //!   constitution stays advisory prose and never reaches this module.
 
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::project_context::{RepoLawAction, RepoLawRule, load_repo_law_rules};
+use crate::project_context::{RepoLawAction, load_repo_law_rules};
 use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
 /// Semantic write actions whose inputs name filesystem targets we can hold.
@@ -39,11 +40,25 @@ pub(crate) enum RepoLawPlanDecision {
     Block(String),
 }
 
-/// Evaluate the workspace's repo law against a proposed tool call. Returns
-/// `None` for tools without write targets, workspaces without enforceable
-/// law, and writes outside every protected glob.
+/// Evaluate the accessible roots' repo law against a proposed tool call.
+///
+/// `workspace_roots` carries the roots attached beside the primary; an empty
+/// set (a host that never materialized one) keeps exactly the single-root
+/// behavior. Each root is judged in its own namespace because the globs are
+/// workspace-relative and two roots can carry different laws, so a root's
+/// constitution holds the writes that land under it.
+///
+/// A *relative* target is judged against every root, not only the one
+/// execution will resolve it under: `push_normalized` keeps the relative tail
+/// per root, so an attached root's law can hold a write that execution would
+/// place under the primary. That direction is deliberate and fail-closed —
+/// the worst case is an extra prompt or block, never a missed hold — and
+/// `strongest_hold_wins_across_roots` pins it. Returns `None` for tools
+/// without write targets, roots without enforceable law, and writes outside
+/// every protected glob.
 pub(crate) fn repo_law_plan_decision(
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     tool_name: &str,
     tool_input: &Value,
 ) -> Option<RepoLawPlanDecision> {
@@ -57,39 +72,47 @@ pub(crate) fn repo_law_plan_decision(
     if !WRITE_POLICY_ACTIONS.contains(&policy_action) {
         return None;
     }
-    let targets = write_target_paths(workspace, tool_input);
-    if targets.is_empty() {
-        return None;
-    }
-    let rules = load_repo_law_rules(workspace);
-    if rules.is_empty() {
-        return None;
-    }
 
-    // Strongest action wins across all (rule, target) matches.
-    let mut hold: Option<(&RepoLawRule, &str)> = None;
-    for rule in &rules {
-        for target in &targets {
-            if rule.globs.is_match(target) {
-                let stronger = matches!(rule.action, RepoLawAction::Block) || hold.is_none();
-                let already_blocking = hold
-                    .as_ref()
-                    .is_some_and(|(held, _)| matches!(held.action, RepoLawAction::Block));
-                if stronger && !already_blocking {
-                    hold = Some((rule, target.as_str()));
+    // Strongest action wins across all (root, rule, target) matches. The
+    // reason is built where the match is found so the borrow does not have to
+    // outlive the per-root rule set.
+    let mut hold: Option<(bool, String)> = None;
+    for root in codewhale_core::normalize_workspace_roots(workspace, workspace_roots) {
+        // Canonicalize once per root with a raw fallback (the
+        // `ToolContext::boundary_roots` idiom): a root that does not resolve
+        // still judges raw spellings, so its constitution is never silently
+        // dropped.
+        let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let targets = write_target_paths(workspace, &root, &root_canonical, tool_input);
+        if targets.is_empty() {
+            continue;
+        }
+        let rules = load_repo_law_rules(&root);
+        for rule in &rules {
+            for target in &targets {
+                if !rule.globs.is_match(target) {
+                    continue;
+                }
+                let blocking = matches!(rule.action, RepoLawAction::Block);
+                let already_blocking = hold.as_ref().is_some_and(|(blocking, _)| *blocking);
+                if (blocking || hold.is_none()) && !already_blocking {
+                    hold = Some((
+                        blocking,
+                        format!(
+                            "Repo law holds this write: \"{}\" protects {} (matched {target}, .codewhale/constitution.json)",
+                            rule.text,
+                            rule.patterns.join(", ")
+                        ),
+                    ));
                 }
             }
         }
     }
-    let (rule, target) = hold?;
-    let protects = rule.patterns.join(", ");
-    let reason = format!(
-        "Repo law holds this write: \"{}\" protects {protects} (matched {target}, .codewhale/constitution.json)",
-        rule.text
-    );
-    Some(match rule.action {
-        RepoLawAction::Ask => RepoLawPlanDecision::ForcePrompt(reason),
-        RepoLawAction::Block => RepoLawPlanDecision::Block(reason),
+    let (blocking, reason) = hold?;
+    Some(if blocking {
+        RepoLawPlanDecision::Block(reason)
+    } else {
+        RepoLawPlanDecision::ForcePrompt(reason)
     })
 }
 
@@ -101,18 +124,27 @@ pub(crate) fn repo_law_plan_decision(
 /// tab-timestamp suffixes stripped, and `/dev/null` (deletion) falling back
 /// to the counterpart path. Missing any shape the tool honors is a hold
 /// bypass, so this deliberately over-collects candidate paths.
-fn write_target_paths(workspace: &Path, input: &Value) -> Vec<String> {
+///
+/// `workspace` is the primary root (what execution resolves relative targets
+/// against); `root` is the root whose law is being judged, with
+/// `root_canonical` its resolved spelling.
+fn write_target_paths(
+    workspace: &Path,
+    root: &Path,
+    root_canonical: &Path,
+    input: &Value,
+) -> Vec<String> {
     let mut targets = Vec::new();
     for key in ["path", "target", "destination", "file_path"] {
         if let Some(path) = input.get(key).and_then(Value::as_str) {
-            push_normalized(&mut targets, workspace, path);
+            push_normalized(&mut targets, workspace, root, root_canonical, path);
         }
     }
     match normalize_apply_patch_input(input) {
         Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
             for change in entries {
                 if let Some(path) = change.get("path").and_then(Value::as_str) {
-                    push_normalized(&mut targets, workspace, path);
+                    push_normalized(&mut targets, workspace, root, root_canonical, path);
                 }
             }
         }
@@ -120,25 +152,37 @@ fn write_target_paths(workspace: &Path, input: &Value) -> Vec<String> {
             let mut pending_old: Option<String> = None;
             for line in patch.lines() {
                 if let Some(rest) = line.strip_prefix("*** Update File: ") {
-                    push_normalized(&mut targets, workspace, rest.trim());
+                    push_normalized(&mut targets, workspace, root, root_canonical, rest.trim());
                 } else if let Some(rest) = line.strip_prefix("*** Add File: ") {
-                    push_normalized(&mut targets, workspace, rest.trim());
+                    push_normalized(&mut targets, workspace, root, root_canonical, rest.trim());
                 } else if let Some(rest) = line.strip_prefix("*** Delete File: ") {
-                    push_normalized(&mut targets, workspace, rest.trim());
+                    push_normalized(&mut targets, workspace, root, root_canonical, rest.trim());
                 } else if let Some(rest) = line.strip_prefix("--- ") {
                     // Old path: remember it so a `+++ /dev/null` deletion still
                     // holds the file being removed.
                     pending_old = diff_header_path(rest);
                     if let Some(ref p) = pending_old {
-                        push_normalized(&mut targets, workspace, p);
+                        push_normalized(&mut targets, workspace, root, root_canonical, p);
                     }
                 } else if let Some(rest) = line.strip_prefix("+++ ") {
                     match diff_header_path(rest) {
-                        Some(new_path) => push_normalized(&mut targets, workspace, &new_path),
+                        Some(new_path) => push_normalized(
+                            &mut targets,
+                            workspace,
+                            root,
+                            root_canonical,
+                            &new_path,
+                        ),
                         // `+++ /dev/null` → deletion; the target is the old path.
                         None => {
                             if let Some(old) = pending_old.take() {
-                                push_normalized(&mut targets, workspace, &old);
+                                push_normalized(
+                                    &mut targets,
+                                    workspace,
+                                    root,
+                                    root_canonical,
+                                    &old,
+                                );
                             }
                         }
                     }
@@ -167,20 +211,49 @@ fn diff_header_path(rest: &str) -> Option<String> {
     Some(stripped.to_string())
 }
 
-/// Normalize to a forward-slash, workspace-relative string so globs written
+/// Normalize to a forward-slash, root-relative string so globs written
 /// as `crates/x/**` match regardless of how the tool spelled the path. Crucially
 /// this collapses `.`/`..` path components the same way the write tools'
 /// `resolve_path` does, so an interior `crates/./protocol/x` or
 /// `x/../crates/protocol/x` cannot spell its way past a glob (a confirmed
 /// bypass before this).
-fn push_normalized(targets: &mut Vec<String>, workspace: &Path, raw: &str) {
+///
+/// `workspace` (primary) and `root` (the law being judged) differ for
+/// multi-root sessions. A relative spelling is judged against every root —
+/// keep the raw collapsed tail per root, so an attached root's law can hold
+/// a write that execution would place under the primary (fail-closed: an
+/// extra prompt or block at worst).
+///
+/// Spelling alone is not enough, because execution resolves writes
+/// canonically: `ToolContext::resolve_path` joins a relative spelling onto
+/// the primary (an absolute one stands), normalizes lexically, and then
+/// admits a candidate that canonicalizes into any boundary root with no
+/// containment re-check. So each root also judges where the write actually
+/// lands — the execution candidate collapsed lexically, then resolved through
+/// symlinks — stripped against both the raw and the canonical root spelling,
+/// the same dual check `carve_out_target_allowed` performs. Without that, a
+/// canonical spelling of a symlinked root, an interior symlink, or an
+/// absolute `..` collapse carries the write into a root whose anchored globs
+/// never fired — a block-class law bypass.
+fn push_normalized(
+    targets: &mut Vec<String>,
+    workspace: &Path,
+    root: &Path,
+    root_canonical: &Path,
+    raw: &str,
+) {
     let trimmed = raw.trim().replace('\\', "/");
     if trimmed.is_empty() {
         return;
     }
-    // Make workspace-relative when the tool gave an absolute path inside it.
+    // Make root-relative when the tool gave an absolute path inside the root,
+    // under either its raw or its canonical spelling (a root reached through
+    // a symlink still carries its law).
     let path = Path::new(&trimmed);
-    let relative = path.strip_prefix(workspace).unwrap_or(path);
+    let relative = path
+        .strip_prefix(root)
+        .or_else(|_| path.strip_prefix(root_canonical))
+        .unwrap_or(path);
 
     // Lexically collapse CurDir (`.`) and ParentDir (`..`) components, and
     // drop any leading root/empty component. An absolute path outside the
@@ -192,8 +265,9 @@ fn push_normalized(targets: &mut Vec<String>, workspace: &Path, raw: &str) {
             "" | "." => {}
             ".." => {
                 // A `..` that pops above the root escapes the workspace; keep
-                // an explicit marker so it can never match a workspace-relative
-                // glob, and the ordinary approval/sandbox gates still govern it.
+                // an explicit marker so this spelling tail can never match a
+                // workspace-relative glob. Where the write actually lands is
+                // judged separately below from the clamped execution candidate.
                 if parts.pop().is_none() {
                     parts.push("..".to_string());
                 }
@@ -201,9 +275,78 @@ fn push_normalized(targets: &mut Vec<String>, workspace: &Path, raw: &str) {
             other => parts.push(other.to_string()),
         }
     }
+    // Judge the execution-landing path against this root, under both its raw
+    // and its canonical spelling. Execution joins the *raw* spelling onto the
+    // primary (`ToolContext::resolve_path`), so derive the candidate from the
+    // raw string with component operations — splitting display strings is not
+    // a path operation and silently misparses Windows separators.
+    let raw_path = Path::new(raw);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        workspace.join(raw_path)
+    };
+    // The normalizer clamps a `..` at the filesystem root exactly like
+    // execution, so an overshoot spelling still yields the landing path the
+    // write tools would admit — judging it is what closes the overshoot
+    // bypass into an attached root.
+    let candidate = normalize_lexical_components(&candidate);
+    if let Ok(tail) = candidate
+        .strip_prefix(root)
+        .or_else(|_| candidate.strip_prefix(root_canonical))
+    {
+        let tail = tail.to_string_lossy().replace('\\', "/");
+        if !tail.is_empty() {
+            targets.push(tail);
+        }
+    }
+    // Then symlink reality: resolve the deepest existing ancestor and
+    // judge the resolved path against the canonical root, so an interior
+    // symlink hop into this root (or a root reached through one) cannot
+    // spell its way past the law.
+    if let Some(resolved) = resolve_deepest_existing(&candidate)
+        && let Ok(tail) = resolved.strip_prefix(root_canonical)
+    {
+        let tail = tail.to_string_lossy().replace('\\', "/");
+        if !tail.is_empty() {
+            targets.push(tail);
+        }
+    }
     let normalized = parts.join("/");
     if !normalized.is_empty() {
         targets.push(normalized);
+    }
+}
+
+/// Lexically collapse CurDir and ParentDir components of `path` into the
+/// candidate the write actually lands on. This IS the normalizer execution
+/// applies to a joined candidate (`tools::spec::normalize_path`, called by
+/// `ToolContext::resolve_path`), reused so the law can never drift from the
+/// gate: a `..` at the filesystem root (or a Windows drive root) CLAMPS, it
+/// does not fail, so `/w/x/../../../att/vendor/lib.rs` judges as
+/// `/att/vendor/lib.rs` — the landing path execution admits. A `..` a
+/// relative spelling cannot pop is kept, again matching execution.
+fn normalize_lexical_components(path: &Path) -> PathBuf {
+    crate::tools::spec::normalize_path(path)
+}
+
+/// Canonicalize the deepest existing ancestor of `candidate` and re-append
+/// the not-yet-existing tail, so write targets that do not exist yet still
+/// get a real-path check. Mirrors `core::authority::resolve_deepest_existing`
+/// (private there); `None` when no ancestor resolves.
+fn resolve_deepest_existing(candidate: &Path) -> Option<PathBuf> {
+    let mut ancestor = candidate;
+    let mut suffix: Vec<&OsStr> = Vec::new();
+    loop {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            let mut resolved = canonical;
+            for part in suffix.iter().rev() {
+                resolved.push(part);
+            }
+            return Some(resolved);
+        }
+        suffix.push(ancestor.file_name()?);
+        ancestor = ancestor.parent()?;
     }
 }
 
@@ -217,6 +360,16 @@ mod tests {
         let dir = workspace.join(".codewhale");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("constitution.json"), body).unwrap();
+    }
+
+    /// Single-root call, the shape every host without a materialized root set
+    /// uses.
+    fn decide(
+        workspace: &Path,
+        tool_name: &str,
+        tool_input: &Value,
+    ) -> Option<RepoLawPlanDecision> {
+        repo_law_plan_decision(workspace, &[], tool_name, tool_input)
     }
 
     const LAW: &str = r#"{
@@ -236,7 +389,7 @@ mod tests {
             r#"{"protected_invariants": ["Prose only, no paths."]}"#,
         );
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "src/main.rs", "content": "x"}),
@@ -249,7 +402,7 @@ mod tests {
     fn block_action_denies_protected_write() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": "crates/protocol/wire.rs", "content": "x"}),
@@ -266,7 +419,7 @@ mod tests {
     fn ask_action_force_prompts_and_names_the_law() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "edit_file",
             &json!({"path": "CHANGELOG.md", "old": "a", "new": "b"}),
@@ -285,7 +438,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
 
-        let blocked = repo_law_plan_decision(
+        let blocked = decide(
             tmp.path(),
             "File",
             &json!({
@@ -296,7 +449,7 @@ mod tests {
         );
         assert!(matches!(blocked, Some(RepoLawPlanDecision::Block(_))));
 
-        let held = repo_law_plan_decision(
+        let held = decide(
             tmp.path(),
             "File",
             &json!({
@@ -314,7 +467,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "src/main.rs", "content": "x"}),
@@ -322,7 +475,7 @@ mod tests {
             None
         );
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "read_file",
                 &json!({"path": "crates/protocol/wire.rs"}),
@@ -336,28 +489,28 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         // Canonical replace[].path shape.
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"replace": [{"path": "crates/protocol/msg.rs"}]}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
         // Legacy changes[].path shape must receive the same hold.
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"changes": [{"path": "crates/protocol/msg.rs"}]}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
         // unified diff shape
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"patch": "--- a/crates/protocol/msg.rs\n+++ b/crates/protocol/msg.rs\n@@\n"}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
         // codex envelope shape
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "apply_patch",
             &json!({"patch": "*** Begin Patch\n*** Update File: crates/protocol/msg.rs\n*** End Patch\n"}),
@@ -375,7 +528,7 @@ mod tests {
                 { "text": "never", "paths": ["docs/frozen/**"], "action": "block" }
             ]}"#,
         );
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": "docs/frozen/spec.md", "content": "x"}),
@@ -388,13 +541,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         let absolute = tmp.path().join("crates/protocol/wire.rs");
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": absolute.to_string_lossy(), "content": "x"}),
         );
         assert!(matches!(decision, Some(RepoLawPlanDecision::Block(_))));
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "write_file",
             &json!({"path": "./CHANGELOG.md", "content": "x"}),
@@ -410,7 +563,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), "{ not json");
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "crates/protocol/wire.rs", "content": "x"}),
@@ -424,7 +577,7 @@ mod tests {
             ]}"#,
         );
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "crates/protocol/wire.rs", "content": "x"}),
@@ -443,7 +596,7 @@ mod tests {
             "x/../crates/protocol/wire.rs",
             "./crates/protocol/wire.rs",
         ] {
-            let decision = repo_law_plan_decision(
+            let decision = decide(
                 tmp.path(),
                 "write_file",
                 &json!({ "path": path, "content": "x" }),
@@ -459,7 +612,7 @@ mod tests {
     fn fim_edit_is_gated_like_other_write_tools() {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
-        let decision = repo_law_plan_decision(
+        let decision = decide(
             tmp.path(),
             "fim_edit",
             &json!({ "path": "crates/protocol/wire.rs", "prefix": "a", "suffix": "b" }),
@@ -475,7 +628,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_law(tmp.path(), LAW);
         // no a/ or b/ prefix
-        let d = repo_law_plan_decision(
+        let d = decide(
             tmp.path(),
             "apply_patch",
             &json!({ "patch": "--- crates/protocol/wire.rs\n+++ crates/protocol/wire.rs\n@@\n" }),
@@ -485,7 +638,7 @@ mod tests {
             "no-prefix: {d:?}"
         );
         // deletion: +++ /dev/null, target is the old path
-        let d = repo_law_plan_decision(
+        let d = decide(
             tmp.path(),
             "apply_patch",
             &json!({ "patch": "--- a/crates/protocol/wire.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" }),
@@ -495,7 +648,7 @@ mod tests {
             "deletion: {d:?}"
         );
         // tab-timestamp suffix on the header
-        let d = repo_law_plan_decision(
+        let d = decide(
             tmp.path(),
             "apply_patch",
             &json!({ "patch": "--- a/x\t2026-01-01\n+++ b/crates/protocol/wire.rs\t2026-01-01 10:00:00\n@@\n" }),
@@ -510,12 +663,328 @@ mod tests {
     fn no_law_file_means_no_holds() {
         let tmp = TempDir::new().unwrap();
         assert_eq!(
-            repo_law_plan_decision(
+            decide(
                 tmp.path(),
                 "write_file",
                 &json!({"path": "anything.rs", "content": "x"}),
             ),
             None
         );
+    }
+
+    #[test]
+    fn attached_root_law_holds_writes_under_that_root() {
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(primary.path(), LAW);
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        let roots = vec![attached.path().to_path_buf()];
+
+        // Root-relative globs stay root-relative: the primary's
+        // `crates/protocol/**` must not fire on a same-shaped path under an
+        // attached root just because the tail happens to look alike.
+        assert_eq!(
+            repo_law_plan_decision(
+                primary.path(),
+                &roots,
+                "write_file",
+                &json!({
+                    "path": attached.path().join("crates/protocol/wire.rs"),
+                    "content": "x"
+                }),
+            ),
+            None
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &roots,
+            "write_file",
+            &json!({"path": attached.path().join("vendor/lib.rs"), "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!("expected the attached root's law to block, got {decision:?}");
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn strongest_hold_wins_across_roots() {
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            primary.path(),
+            r#"{"protected_invariants": [
+                { "text": "ask in primary", "paths": ["shared/**"] }
+            ]}"#,
+        );
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "block in attached", "paths": ["shared/**"], "action": "block" }
+            ]}"#,
+        );
+
+        // The same relative target matches an Ask in the primary and a Block
+        // in the attached root; law can only add holds, so the Block wins.
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "shared/lib.rs", "content": "x"}),
+        );
+        assert!(
+            matches!(decision, Some(RepoLawPlanDecision::Block(_))),
+            "{decision:?}"
+        );
+    }
+
+    #[test]
+    fn dotdot_spelled_relative_target_still_holds_in_the_attached_root() {
+        // A `..`-spelled relative target execution resolves into an attached
+        // root must not escape that root's anchored globs by spelling: the
+        // judged tail is the execution-resolved path under the containing
+        // root, not the raw `..` spelling (which never matched anything).
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        let spelling = format!(
+            "../{}/vendor/lib.rs",
+            attached.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": spelling, "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the attached root's law to hold a ..-spelled target, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+
+        // A `..`-spelled target that resolves outside every root stays
+        // unheld by anchored globs (the ordinary gates govern it).
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "../../elsewhere/lib.rs", "content": "x"}),
+        );
+        assert_eq!(decision, None, "an out-of-tree escape has no anchored hold");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_attached_root_law_holds_a_canonical_spelled_target() {
+        // The attached root is a symlink to the real repo. A target spelled
+        // with the real (canonical) path never strip-prefixes the raw root
+        // spelling, yet execution canonicalizes the write straight into the
+        // repo — the root's law must still hold it.
+        let primary = TempDir::new().unwrap();
+        let real = TempDir::new().unwrap();
+        write_law(
+            real.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        std::fs::create_dir(real.path().join("vendor")).unwrap();
+        let link_parent = TempDir::new().unwrap();
+        let linked = link_parent.path().join("linked");
+        std::os::unix::fs::symlink(real.path(), &linked).expect("symlink");
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[linked],
+            "write_file",
+            &json!({"path": real.path().join("vendor/lib.rs"), "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the symlinked root's law to hold a canonical-spelled target, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interior_symlink_target_lands_under_the_attached_roots_law() {
+        // A relative spelling through an interior symlink of the primary
+        // canonicalizes into the attached repo at execution; the judged tail
+        // must be the resolved path under that root, not the raw spelling
+        // (which matches none of its anchored globs).
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        std::fs::create_dir(attached.path().join("vendor")).unwrap();
+        std::os::unix::fs::symlink(attached.path(), primary.path().join("linked2"))
+            .expect("symlink");
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "linked2/vendor/lib.rs", "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the attached root's law to hold an interior-symlink target, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn absolute_dotdot_spelling_into_an_attached_root_is_held() {
+        // An absolute spelling whose `..` collapse lands inside an attached
+        // root: execution's lexical normalize pops the `..` and admits the
+        // write, so the attached root's anchored globs must judge the
+        // collapsed landing path, not the raw spelling.
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        let spelling = format!(
+            "{}/x/../../{}/vendor/lib.rs",
+            primary.path().display(),
+            attached.path().file_name().unwrap().to_string_lossy()
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": spelling, "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the attached root's law to hold an absolute `..`-spelled target, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn absolute_dotdot_overshoot_into_an_attached_root_is_held() {
+        // Sibling of the two-`..` pin above, with one `..` MORE than the
+        // spelling is deep: the collapse overshoots the filesystem root.
+        // Execution's `normalize_path` CLAMPS the extra `..` at the root, so
+        // `/w/x/../../../att/vendor/lib.rs` lands on `/att/vendor/lib.rs` and
+        // the attached repo's law must hold it; a strict collapse that bails
+        // on the overshoot judges no landing path and silently admits the
+        // write in every posture (a confirmed block-class bypass).
+        let primary = TempDir::new().unwrap();
+        let attached = TempDir::new().unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Vendored tree is read-only", "paths": ["vendor/**"], "action": "block" }
+            ]}"#,
+        );
+        // Pop `x` plus every primary component, then overshoot once more
+        // (RootDir/Prefix components are not popped, so the count is exact on
+        // Unix and one over on Windows — extra `..`s clamp harmlessly). Then
+        // re-descend the attached root's own components from the root.
+        let dots = vec![".."; primary.path().components().count() + 1].join("/");
+        let attached_tail = attached
+            .path()
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let spelling = format!(
+            "{}/x/{dots}/{attached_tail}/vendor/lib.rs",
+            primary.path().display()
+        );
+
+        let decision = repo_law_plan_decision(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": spelling, "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the attached root's law to hold a `..`-overshoot target (clamps to {attached_tail}/vendor/lib.rs), got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Vendored tree is read-only"), "{reason}");
+    }
+
+    #[test]
+    fn lexical_normalize_clamps_parent_dir_at_the_filesystem_root() {
+        // The landing normalizer is execution's own `normalize_path`: a `..`
+        // at the filesystem root clamps instead of failing, so the overshoot
+        // spelling judges as the path execution would admit.
+        assert_eq!(
+            normalize_lexical_components(Path::new("/w/x/../../../att/vendor/lib.rs")),
+            PathBuf::from("/att/vendor/lib.rs")
+        );
+        assert_eq!(
+            normalize_lexical_components(Path::new("/a/..")),
+            PathBuf::from("/")
+        );
+        // A `..` a relative spelling cannot pop is kept, matching execution.
+        assert_eq!(
+            normalize_lexical_components(Path::new("a/../../b")),
+            PathBuf::from("../b")
+        );
+    }
+
+    #[test]
+    fn relative_target_landing_under_an_ancestor_root_is_held() {
+        // The session cwd is a subdirectory of an attached root: execution
+        // joins a relative target onto the primary, landing INSIDE the
+        // attached root, whose anchored globs must judge the landing path —
+        // the raw tail alone (`x/y` against `sub/**`) never matches.
+        let attached = TempDir::new().unwrap();
+        let primary = attached.path().join("sub");
+        std::fs::create_dir_all(&primary).unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Sub tree is read-only", "paths": ["sub/**"], "action": "block" }
+            ]}"#,
+        );
+
+        let decision = repo_law_plan_decision(
+            &primary,
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "x/y", "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the ancestor root's law to hold a relative target landing inside it, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Sub tree is read-only"), "{reason}");
     }
 }

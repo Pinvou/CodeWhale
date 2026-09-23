@@ -1039,6 +1039,9 @@ mod tests {
         fn restore_snapshot(&mut self, _id: &str) -> Result<(), String> {
             self.restore.clone()
         }
+        fn restore_covers_primary_only(&self) -> bool {
+            unimplemented!("not used by skills tests")
+        }
         fn approval_state(&self) -> CommandApprovalState {
             self.approval
         }

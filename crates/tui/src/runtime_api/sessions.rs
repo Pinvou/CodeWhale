@@ -312,6 +312,7 @@ pub(super) async fn resume_session_thread(
             model_provider: Some(session.metadata.model_provider.clone()),
             model_provider_id: session.metadata.model_provider_id.clone(),
             workspace: Some(session.metadata.workspace.clone()),
+            workspace_roots: session.metadata.workspace_roots.clone(),
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,
@@ -418,6 +419,7 @@ pub(super) async fn create_session_from_thread(
         )?;
     }
     session.system_prompt = detail.thread.system_prompt.clone();
+    session.metadata.workspace_roots = detail.thread.workspace_roots.clone();
 
     if let Some(title) =
         session_title_override(req.title.as_deref(), detail.thread.title.as_deref())
@@ -737,6 +739,23 @@ pub(super) async fn save_current_session(
         }
     };
 
+    // A session open in this process's interactive surface is owned by that
+    // surface: its autosave rebuilds the document from live state (including
+    // the workspace root set) and would revert this write. Fail closed with
+    // a typed conflict — the same guard `rename_session` applies to external
+    // mutators — rather than let the two writers flip-flop with no
+    // arbitration. Refuse before touching the thread engine so the guard
+    // does not depend on the thread's state.
+    if let Some(ref session_id) = req.session_id
+        && crate::session_manager::is_live_session(session_id)
+    {
+        return Err(map_session_err(
+            session_id,
+            crate::session_manager::live_session_conflict(session_id),
+            "save",
+        ));
+    }
+
     // Get the engine handle (loads the thread into an engine if needed),
     // then request a session snapshot. This reuses the same code path as
     // TUI's `build_session_snapshot`: the engine holds the authoritative
@@ -774,6 +793,19 @@ pub(super) async fn save_current_session(
                     snapshot.model_provider_id.as_deref(),
                 );
                 updated.metadata.mode = Some(snapshot.mode.clone());
+                // The paired set travels with the workspace it belongs to,
+                // exactly as in `/rename` and `/fork`: a PATCH may have moved
+                // the thread since this session was last saved, and stamping
+                // only the roots would persist `workspace: <abandoned>` next
+                // to a set led by the new directory — a later resume-thread
+                // then re-admits the abandoned directory as a writable
+                // primary root. Both fields come from the same snapshot,
+                // re-normalized so the pair is consistent by construction.
+                updated.metadata.workspace = snapshot.workspace.clone();
+                updated.metadata.workspace_roots = codewhale_core::normalize_workspace_roots(
+                    &snapshot.workspace,
+                    &snapshot.workspace_roots,
+                );
                 updated
             }
             Err(e) => {
@@ -791,6 +823,7 @@ pub(super) async fn save_current_session(
                         &snapshot.model_provider,
                         snapshot.model_provider_id.as_deref(),
                     );
+                    session.metadata.workspace_roots = snapshot.workspace_roots.clone();
                     session
                 } else {
                     return Err(ApiError::internal(format!(
@@ -812,6 +845,7 @@ pub(super) async fn save_current_session(
             &snapshot.model_provider,
             snapshot.model_provider_id.as_deref(),
         );
+        session.metadata.workspace_roots = snapshot.workspace_roots.clone();
         session
     };
 

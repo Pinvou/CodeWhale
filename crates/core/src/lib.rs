@@ -67,6 +67,84 @@ pub enum InitialHistory {
     },
 }
 
+/// Normalizes a workspace root set: `cwd` is the primary root at position 0,
+/// followed by `roots` in their original order with duplicates removed. An
+/// empty `roots` degenerates to `[cwd]`.
+///
+/// Entries that are empty or relative are dropped, not normalized: every
+/// containment check downstream is `Path::starts_with`-shaped, where an empty
+/// root contains *every* path and a relative root is meaningless against the
+/// absolute candidates the boundary checks resolve. The `cwd` argument is
+/// filtered by the same rule, and there the filter fails closed: an empty or
+/// relative cwd cannot head a root set (its normalized form is the vacuous
+/// root), so the whole set collapses to empty and the thread has no writable
+/// roots at all. Intake surfaces reject an empty cwd/workspace outright; this
+/// filter is the last line for values that bypass a surface (legacy or
+/// hand-edited records). This is the single chokepoint every consumer routes
+/// through, so intake validation lives here rather than at each protocol
+/// surface.
+///
+/// Deduplication is lexical, not filesystem-aware: two spellings of the same
+/// directory (a symlinked `/var/x` beside its `/private/var/x` target) both
+/// survive here. Callers that enumerate writable roots canonicalize per root
+/// for exactly that reason; a future canonicalizing intake would remove the
+/// residue, at the cost of filesystem access on every normalization.
+pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
+    if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+        return Vec::new();
+    }
+    let mut normalized = vec![cwd.to_path_buf()];
+    for root in roots {
+        if root.as_os_str().is_empty() || !root.is_absolute() {
+            continue;
+        }
+        if !normalized.contains(root) {
+            normalized.push(root.clone());
+        }
+    }
+    normalized
+}
+
+/// Resolves the cwd and workspace roots for a resume request, aligned with
+/// codex semantics: an explicit root set replaces the whole set (`Some([])`
+/// clears back to the bare cwd); an explicit cwd alone takes over the
+/// primary slot while additional roots are preserved; neither falls back to
+/// the persisted values. An explicit empty cwd is rejected, not defaulted:
+/// persisting it would null containment on every later resume, the same
+/// poison the intake filter drops from the roots list.
+fn resolve_resume_roots(
+    persisted_cwd: &Path,
+    persisted_roots: &[PathBuf],
+    params_cwd: Option<&PathBuf>,
+    params_roots: Option<&[PathBuf]>,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
+    if let Some(cwd) = params_cwd
+        && cwd.as_os_str().is_empty()
+    {
+        return Err(anyhow!("cwd must not be empty"));
+    }
+    if let Some(roots) = params_roots {
+        let cwd = params_cwd
+            .cloned()
+            .unwrap_or_else(|| persisted_cwd.to_path_buf());
+        // An explicit set replaces the persisted one wholesale — including
+        // the explicit empty set, which clears back to the bare cwd.
+        let roots = normalize_workspace_roots(&cwd, roots);
+        return Ok((cwd, roots));
+    }
+    if let Some(new_cwd) = params_cwd {
+        let additional: Vec<PathBuf> = persisted_roots
+            .iter()
+            .filter(|root| root.as_path() != persisted_cwd)
+            .cloned()
+            .collect();
+        let roots = normalize_workspace_roots(new_cwd, &additional);
+        return Ok((new_cwd.clone(), roots));
+    }
+    let roots = normalize_workspace_roots(persisted_cwd, persisted_roots);
+    Ok((persisted_cwd.to_path_buf(), roots))
+}
+
 /// Result of spawning or resuming a thread.
 #[derive(Debug, Clone)]
 pub struct NewThread {
@@ -546,12 +624,14 @@ impl ThreadManager {
         &mut self,
         model_provider: String,
         cwd: PathBuf,
+        workspace_roots: &[PathBuf],
         initial_history: InitialHistory,
         persist_extended_history: bool,
     ) -> Result<NewThread> {
         let id = format!("thread-{}", Uuid::new_v4());
         let now = chrono::Utc::now().timestamp();
         let preview = preview_from_initial_history(&initial_history);
+        let workspace_roots = normalize_workspace_roots(&cwd, workspace_roots);
         let source = match initial_history {
             InitialHistory::New => SessionSource::Interactive,
             InitialHistory::Forked(_) => SessionSource::Fork,
@@ -567,6 +647,7 @@ impl ThreadManager {
             status: ThreadStatus::Running,
             path: None,
             cwd: cwd.clone(),
+            workspace_roots,
             cli_version: self.cli_version.clone(),
             source: match source {
                 SessionSource::Interactive => codewhale_protocol::SessionSource::Interactive,
@@ -617,16 +698,50 @@ impl ThreadManager {
     pub fn resume_thread_with_history(
         &mut self,
         params: &ThreadResumeParams,
-        fallback_cwd: &Path,
         model_provider: String,
     ) -> Result<Option<NewThread>> {
         if params.history.is_none()
-            && let Some(thread) = self.running_threads.get(&params.thread_id).cloned()
+            && let Some(mut thread) = self.running_threads.get(&params.thread_id).cloned()
         {
+            let (cwd, workspace_roots) = resolve_resume_roots(
+                &thread.cwd,
+                &thread.workspace_roots,
+                params.cwd.as_ref(),
+                params.workspace_roots.as_deref(),
+            )?;
+            thread.cwd = cwd;
+            thread.workspace_roots = workspace_roots;
+            // Write the override back to both the cache and the persisted row.
+            // The cache alone is not enough in-process: a later resume that
+            // carries history bypasses this branch entirely, re-reads the
+            // stored row, and would silently reinstate the pre-override set.
+            // Only an override pays that write: base neither persisted nor
+            // bumped `updated_at` on a parameterless cached resume, and doing
+            // it unconditionally reordered recency listings, refreshed
+            // archived threads to active timestamps, and taxed every resume
+            // with a read+write for no state change.
+            if params.cwd.is_some() || params.workspace_roots.is_some() {
+                thread.updated_at = chrono::Utc::now().timestamp();
+                // Targeted write, not persist_thread: the cache snapshot is
+                // stale in every column another process may have written, and
+                // the upsert's preserving arms cover only policy and the
+                // archive stamp — a full upsert would let the stale snapshot
+                // revert concurrent updates to the passthrough columns (even
+                // resurrecting a concurrently archived thread). The override
+                // owns exactly cwd, the root set, and the recency stamp.
+                self.store.update_thread_root_set(
+                    &thread.id,
+                    &thread.cwd,
+                    &thread.workspace_roots,
+                    thread.updated_at,
+                )?;
+            }
+            self.running_threads
+                .insert(params.thread_id.clone(), thread.clone());
             return Ok(Some(NewThread {
                 model: params.model.clone().unwrap_or_else(|| "auto".to_string()),
                 model_provider: params.model_provider.clone().unwrap_or(model_provider),
-                cwd: params.cwd.clone().unwrap_or_else(|| thread.cwd.clone()),
+                cwd: thread.cwd.clone(),
                 approval_policy: params.approval_policy.clone(),
                 sandbox: params.sandbox.clone(),
                 thread,
@@ -640,10 +755,14 @@ impl ThreadManager {
         let mut thread = to_protocol_thread(metadata);
         thread.status = ThreadStatus::Running;
         thread.updated_at = chrono::Utc::now().timestamp();
-        thread.cwd = params
-            .cwd
-            .clone()
-            .unwrap_or_else(|| fallback_cwd.to_path_buf());
+        let (cwd, workspace_roots) = resolve_resume_roots(
+            &thread.cwd,
+            &thread.workspace_roots,
+            params.cwd.as_ref(),
+            params.workspace_roots.as_deref(),
+        )?;
+        thread.cwd = cwd;
+        thread.workspace_roots = workspace_roots;
         self.persist_thread(&thread, None)?;
         self.running_threads
             .insert(thread.id.clone(), thread.clone());
@@ -689,26 +808,52 @@ impl ThreadManager {
         }))
     }
 
-    /// Forks an existing thread into a new one, inheriting the parent's provider.
-    pub fn fork_thread(
-        &mut self,
-        params: &ThreadForkParams,
-        fallback_cwd: &Path,
-    ) -> Result<Option<NewThread>> {
+    /// Forks an existing thread into a new one, inheriting the parent's
+    /// provider and — when the request does not carry a root set — its
+    /// accessible roots. A fork without a `cwd` stays anchored at the
+    /// parent's cwd.
+    pub fn fork_thread(&mut self, params: &ThreadForkParams) -> Result<Option<NewThread>> {
+        // An explicit empty cwd would persist a vacuous primary root
+        // (`starts_with("")` is true for every path); reject it like the
+        // resume lane does instead of poisoning the fork durably.
+        if let Some(cwd) = params.cwd.as_ref()
+            && cwd.as_os_str().is_empty()
+        {
+            return Err(anyhow!("cwd must not be empty"));
+        }
         let parent = self.store.get_thread(&params.thread_id)?;
         let Some(parent) = parent else {
             return Ok(None);
         };
         let parent_thread = to_protocol_thread(parent);
+        // `None` inherits the parent's set: the fork's cwd takes the primary
+        // slot and the parent's additional roots survive, the same
+        // primary-swap rule a cwd-only resume applies. A bare `thread/fork`
+        // is the historical shape, so reading an absent field as "no roots"
+        // would silently degrade a multi-root parent to `[cwd]`. `Some([])`
+        // stays an explicit clear.
+        let workspace_roots = match params.workspace_roots.as_deref() {
+            Some(roots) => roots.to_vec(),
+            None => parent_thread
+                .workspace_roots
+                .iter()
+                .filter(|root| root.as_path() != parent_thread.cwd)
+                .cloned()
+                .collect(),
+        };
         let new = self.spawn_thread_with_history(
             params
                 .model_provider
                 .clone()
                 .unwrap_or_else(|| parent_thread.model_provider.clone()),
+            // A bare `thread/fork` carries no cwd: anchor the fork at the
+            // parent's cwd, not the process cwd, so the parent's main
+            // directory stays the primary root of the set it inherits.
             params
                 .cwd
                 .clone()
-                .unwrap_or_else(|| fallback_cwd.to_path_buf()),
+                .unwrap_or_else(|| parent_thread.cwd.clone()),
+            &workspace_roots,
             InitialHistory::Forked(vec![json!({
                 "type": "fork",
                 "from_thread_id": parent_thread.id
@@ -865,38 +1010,40 @@ impl ThreadManager {
     }
 
     fn persist_thread(&self, thread: &Thread, rollout_path: Option<PathBuf>) -> Result<()> {
-        // This update payload carries no per-thread policy, so preserve any
-        // policy already stored for the thread rather than erasing it with
-        // NULLs on every persist/resume.
-        let existing = self.store.get_thread(&thread.id)?;
-        self.store.upsert_thread(&ThreadMetadata {
-            id: thread.id.clone(),
-            rollout_path,
-            preview: thread.preview.clone(),
-            ephemeral: thread.ephemeral,
-            model_provider: thread.model_provider.clone(),
-            created_at: thread.created_at,
-            updated_at: thread.updated_at,
-            status: to_persisted_status(&thread.status),
-            path: thread.path.clone(),
-            cwd: thread.cwd.clone(),
-            cli_version: thread.cli_version.clone(),
-            source: to_persisted_source(&thread.source),
-            name: thread.name.clone(),
-            sandbox_policy: existing
-                .as_ref()
-                .and_then(|metadata| metadata.sandbox_policy.clone()),
-            approval_mode: existing
-                .as_ref()
-                .and_then(|metadata| metadata.approval_mode.clone()),
-            archived: matches!(thread.status, ThreadStatus::Archived),
-            archived_at: None,
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
-            memory_mode: None,
-            current_leaf_id: None,
-        })
+        // This update payload carries no per-thread policy or archive
+        // timestamp, and the preserved values must survive concurrently
+        // applied clears: the state layer keeps them inside the upsert
+        // statement itself (policy fields while the payload carries none,
+        // the stamp only while the thread stays archived). A get-then-upsert
+        // here would resurrect a concurrently unarchived or detached record
+        // from a stale snapshot, and forced-Running resumes would ghost
+        // `archived=0` rows with a stamp set.
+        self.store
+            .upsert_thread_preserving_policy_and_archive(&ThreadMetadata {
+                id: thread.id.clone(),
+                rollout_path,
+                preview: thread.preview.clone(),
+                ephemeral: thread.ephemeral,
+                model_provider: thread.model_provider.clone(),
+                created_at: thread.created_at,
+                updated_at: thread.updated_at,
+                status: to_persisted_status(&thread.status),
+                path: thread.path.clone(),
+                cwd: thread.cwd.clone(),
+                workspace_roots: thread.workspace_roots.clone(),
+                cli_version: thread.cli_version.clone(),
+                source: to_persisted_source(&thread.source),
+                name: thread.name.clone(),
+                sandbox_policy: None,
+                approval_mode: None,
+                archived: matches!(thread.status, ThreadStatus::Archived),
+                archived_at: None,
+                git_sha: None,
+                git_branch: None,
+                git_origin_url: None,
+                memory_mode: None,
+                current_leaf_id: None,
+            })
     }
 }
 
@@ -1037,6 +1184,7 @@ impl Runtime {
                 let new = self.thread_manager.spawn_thread_with_history(
                     "deepseek".to_string(),
                     cwd,
+                    &[],
                     InitialHistory::New,
                     false,
                 )?;
@@ -1045,6 +1193,13 @@ impl Runtime {
                 Ok(response)
             }
             ThreadRequest::Start(params) => {
+                // Same empty-cwd rejection as resume/fork: an explicit `""`
+                // would otherwise persist a vacuous primary root.
+                if let Some(cwd) = params.cwd.as_ref()
+                    && cwd.as_os_str().is_empty()
+                {
+                    return Err(anyhow!("cwd must not be empty"));
+                }
                 let cwd = params.cwd.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
@@ -1054,6 +1209,7 @@ impl Runtime {
                         .clone()
                         .unwrap_or_else(|| "deepseek".to_string()),
                     cwd,
+                    &params.workspace_roots,
                     InitialHistory::New,
                     params.persist_extended_history,
                 )?;
@@ -1062,12 +1218,10 @@ impl Runtime {
                 Ok(response)
             }
             ThreadRequest::Resume(params) => {
-                let fallback_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                if let Some(new) = self.thread_manager.resume_thread_with_history(
-                    &params,
-                    &fallback_cwd,
-                    "deepseek".to_string(),
-                )? {
+                if let Some(new) = self
+                    .thread_manager
+                    .resume_thread_with_history(&params, "deepseek".to_string())?
+                {
                     let mut response = thread_response_from_new("resumed", new);
                     response.data = self.persisted_thread_data(&response.thread_id)?;
                     Ok(response)
@@ -1089,8 +1243,7 @@ impl Runtime {
                 }
             }
             ThreadRequest::Fork(params) => {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                if let Some(new) = self.thread_manager.fork_thread(&params, &cwd)? {
+                if let Some(new) = self.thread_manager.fork_thread(&params)? {
                     let mut response = thread_response_from_new("forked", new);
                     response.data = self.persisted_thread_data(&response.thread_id)?;
                     Ok(response)
@@ -1321,6 +1474,7 @@ impl Runtime {
         call: ToolCall,
         approval_mode: AskForApproval,
         cwd: &Path,
+        workspace_roots: &[PathBuf],
     ) -> Result<Value> {
         let fallback_cwd = cwd.display().to_string();
         let (command, policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
@@ -1336,6 +1490,10 @@ impl Runtime {
             path: policy_path.as_deref(),
             ask_for_approval: approval_mode,
             sandbox_mode: None,
+            // The caller supplies the session's root set (hint map on the
+            // app-server bridge); an empty slice keeps the byte-identical
+            // single-root posture for callers that have none.
+            workspace_roots: workspace_roots.to_vec(),
         })?;
         let precheck = policy_precheck_payload(&decision, &command, &policy_cwd, execution_kind);
         let response_id = format!("tool-{}", Uuid::new_v4());
@@ -1865,6 +2023,7 @@ fn to_protocol_thread(thread: ThreadMetadata) -> Thread {
         },
         path: thread.path,
         cwd: thread.cwd,
+        workspace_roots: thread.workspace_roots,
         cli_version: thread.cli_version,
         source: match thread.source {
             SessionSource::Interactive => codewhale_protocol::SessionSource::Interactive,
@@ -2234,6 +2393,7 @@ mod tests {
             status: PersistedThreadStatus::Running,
             path: None,
             cwd: PathBuf::from("/tmp/codewhale"),
+            workspace_roots: Vec::new(),
             cli_version: "0.0.0-test".to_string(),
             source: SessionSource::Interactive,
             name: None,
@@ -2987,6 +3147,7 @@ mod tests {
             .spawn_thread_with_history(
                 "deepseek".to_string(),
                 PathBuf::from("/tmp/codewhale"),
+                &[],
                 InitialHistory::New,
                 true,
             )
@@ -3005,16 +3166,13 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: None,
             persist_extended_history: false,
         };
 
         manager.archive_thread(&thread_id).expect("archive thread");
         let archived = manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume archived thread")
             .expect("thread in cache");
         assert_eq!(archived.thread.status, ThreadStatus::Archived);
@@ -3023,14 +3181,200 @@ mod tests {
             .unarchive_thread(&thread_id)
             .expect("unarchive thread");
         let restored = manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume unarchived thread")
             .expect("thread in cache");
         assert_eq!(restored.thread.status, ThreadStatus::Idle);
+    }
+
+    /// The cached-resume persist must not null the archive timestamp the
+    /// store recorded, the same way it already preserves the per-thread
+    /// policy fields.
+    #[test]
+    fn cached_resume_preserves_the_persisted_archive_timestamp() {
+        let store = temp_core_state("cached-resume-archived-at");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        manager.archive_thread(&thread_id).expect("archive thread");
+        let archived_at = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted")
+            .archived_at;
+        assert!(archived_at.is_some(), "archiving stamps archived_at");
+
+        let resumed = manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: None,
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume archived thread")
+            .expect("thread in cache");
+        assert_eq!(resumed.thread.status, ThreadStatus::Archived);
+        let persisted = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.archived_at, archived_at,
+            "a parameterless cached resume must not null the archive timestamp"
+        );
+    }
+
+    #[test]
+    fn parameterless_cached_resume_does_not_rewrite_the_row() {
+        // Base neither persisted nor bumped `updated_at` on a parameterless
+        // cached resume; the override writeback is gated the same way. Without
+        // the gate every parameterless resume reordered recency listings,
+        // refreshed archived rows to active timestamps, and paid a read+write
+        // for no state change.
+        let store = temp_core_state("cached-resume-no-writeback");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        let mut aged = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        aged.updated_at = 1_000;
+        manager
+            .state_store()
+            .upsert_thread(&aged)
+            .expect("age the stored row");
+
+        manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: None,
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume thread")
+            .expect("thread in cache");
+
+        let row = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            row.updated_at, 1_000,
+            "a parameterless cached resume must not rewrite the stored row"
+        );
+    }
+
+    #[test]
+    fn resumed_archived_thread_does_not_ghost_an_archive_stamp() {
+        // Resuming a persisted archived thread forces it back to Running.
+        // Persisting that reactivation must produce `archived=0` with no
+        // stamp — base never produced the `archived=0` + stamp-set pair, and
+        // unconditionally preserving the stored stamp recreated exactly that
+        // ghost.
+        let store = temp_core_state("resume-archived-no-ghost");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/tmp/codewhale"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+        manager.archive_thread(&thread_id).expect("archive thread");
+        assert!(
+            manager
+                .state_store()
+                .get_thread(&thread_id)
+                .expect("read thread")
+                .expect("thread persisted")
+                .archived_at
+                .is_some(),
+            "archiving stamps archived_at"
+        );
+
+        manager
+            .resume_thread_with_history(
+                &ThreadResumeParams {
+                    thread_id: thread_id.clone(),
+                    history: Some(Vec::new()),
+                    path: None,
+                    model: None,
+                    model_provider: None,
+                    cwd: None,
+                    approval_policy: None,
+                    sandbox: None,
+                    config: None,
+                    base_instructions: None,
+                    developer_instructions: None,
+                    personality: None,
+                    workspace_roots: None,
+                    persist_extended_history: false,
+                },
+                "deepseek".to_string(),
+            )
+            .expect("resume thread")
+            .expect("thread resumed");
+
+        let row = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert!(!row.archived, "the resume reactivates the thread");
+        assert_eq!(
+            row.archived_at, None,
+            "reactivation must not ghost an archive stamp"
+        );
     }
 
     #[test]
@@ -3048,6 +3392,7 @@ mod tests {
             .spawn_thread_with_history(
                 "deepseek".to_string(),
                 PathBuf::from("/tmp/codewhale"),
+                &[],
                 InitialHistory::Forked(history.clone()),
                 true,
             )
@@ -3075,17 +3420,14 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: None,
             persist_extended_history: false,
         };
 
         // Resuming twice with the same history must be idempotent.
         for _ in 0..2 {
             manager
-                .resume_thread_with_history(
-                    &resume_params,
-                    Path::new("/tmp/codewhale"),
-                    "deepseek".to_string(),
-                )
+                .resume_thread_with_history(&resume_params, "deepseek".to_string())
                 .expect("resume thread")
                 .expect("thread found");
         }
@@ -3103,11 +3445,7 @@ mod tests {
             ..resume_params
         };
         manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
         assert_eq!(message_count(&manager), 3);
@@ -3140,14 +3478,11 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: None,
             persist_extended_history: false,
         };
         manager
-            .resume_thread_with_history(
-                &resume_params,
-                Path::new("/tmp/codewhale"),
-                "deepseek".to_string(),
-            )
+            .resume_thread_with_history(&resume_params, "deepseek".to_string())
             .expect("resume thread")
             .expect("thread found");
 
@@ -3158,6 +3493,594 @@ mod tests {
             .expect("thread persisted");
         assert_eq!(persisted.sandbox_policy.as_deref(), Some("workspace-write"));
         assert_eq!(persisted.approval_mode.as_deref(), Some("on-request"));
+    }
+
+    // ── workspace roots ────────────────────────────────────────────────
+
+    fn resume_params(thread_id: &str) -> ThreadResumeParams {
+        ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            workspace_roots: None,
+            persist_extended_history: false,
+        }
+    }
+
+    #[test]
+    fn normalize_workspace_roots_puts_cwd_first_and_dedups() {
+        let cwd = Path::new("/repo/main");
+        assert_eq!(normalize_workspace_roots(cwd, &[]), vec![cwd.to_path_buf()]);
+        assert_eq!(
+            normalize_workspace_roots(
+                cwd,
+                &[
+                    PathBuf::from("/repo/lib"),
+                    PathBuf::from("/repo/main"),
+                    PathBuf::from("/repo/lib"),
+                    PathBuf::from("/repo/docs"),
+                ],
+            ),
+            vec![
+                PathBuf::from("/repo/main"),
+                PathBuf::from("/repo/lib"),
+                PathBuf::from("/repo/docs"),
+            ],
+            "cwd moves to the front and later roots dedup in original order"
+        );
+    }
+
+    #[test]
+    fn normalize_workspace_roots_drops_empty_and_relative_entries() {
+        let cwd = Path::new("/repo/main");
+        assert_eq!(
+            normalize_workspace_roots(
+                cwd,
+                &[
+                    PathBuf::from(""),
+                    PathBuf::from("relative/dir"),
+                    PathBuf::from("~/home-dir"),
+                    PathBuf::from("/repo/lib"),
+                ],
+            ),
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")],
+            "an empty entry would contain every path under starts_with, and a \
+             relative entry is meaningless against absolute candidates"
+        );
+        // The cwd argument is filtered by the same rule, and there the
+        // filter fails closed: an empty or relative cwd cannot head a root
+        // set (its normalized form is the vacuous root `starts_with("")`
+        // accepts every path under), so the whole set collapses to empty
+        // rather than passing the poison through to boundary_roots().
+        assert!(normalize_workspace_roots(Path::new(""), &[]).is_empty());
+        assert!(normalize_workspace_roots(Path::new(""), &[PathBuf::from("/repo/lib")]).is_empty());
+        assert!(normalize_workspace_roots(Path::new("relative/dir"), &[]).is_empty());
+    }
+
+    #[test]
+    fn spawn_thread_with_empty_root_persists_only_the_cwd() {
+        // Regression pin: an empty-string root accepted at intake used to
+        // reach the persisted set and then boundary_roots(), where
+        // Path::starts_with("") is true for every path — read_file's
+        // containment check passed for arbitrary filesystem reads.
+        let store = temp_core_state("spawn-empty-root");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[PathBuf::from("")],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        assert_eq!(
+            spawned.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main")]
+        );
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![PathBuf::from("/repo/main")],
+            "the poison entry must not reach the persisted root set"
+        );
+    }
+
+    #[test]
+    fn spawn_thread_with_workspace_roots_persists_normalized_set() {
+        let store = temp_core_state("spawn-roots");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[PathBuf::from("/repo/lib"), PathBuf::from("/repo/main")],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let expected = vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")];
+        assert_eq!(spawned.thread.workspace_roots, expected);
+        assert_eq!(spawned.thread.cwd, spawned.thread.workspace_roots[0]);
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(persisted.workspace_roots, expected);
+    }
+
+    #[test]
+    fn resume_with_workspace_roots_replaces_root_set() {
+        let store = temp_core_state("resume-roots-replace");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = PathBuf::from("/old");
+        metadata.workspace_roots = vec![PathBuf::from("/old"), PathBuf::from("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        // A fresh manager forces the persisted path.
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.workspace_roots = Some(vec![PathBuf::from("/new-a"), PathBuf::from("/new-b")]);
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+
+        // Explicit roots replace the whole set; the persisted cwd stays primary.
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/old"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![
+                PathBuf::from("/old"),
+                PathBuf::from("/new-a"),
+                PathBuf::from("/new-b"),
+            ]
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-roots")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(persisted.workspace_roots, resumed.thread.workspace_roots);
+    }
+
+    #[test]
+    fn resume_roots_override_writes_back_to_running_cache() {
+        let store = temp_core_state("resume-roots-writeback");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // Resume with an explicit set: the override lands on the returned
+        // thread and must be written back to the running-thread cache.
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        let first = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            first.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+
+        // A later parameterless resume reads the same cache entry: without
+        // the writeback it would resurrect the stale pre-override set.
+        let second = manager
+            .resume_thread_with_history(&resume_params(&thread_id), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            second.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            "the roots override must stick in the running-thread cache"
+        );
+    }
+
+    #[test]
+    fn resume_override_survives_a_later_history_carrying_resume() {
+        let store = temp_core_state("resume-roots-history-bypass");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // Prime the running cache, then take the cached history-free branch
+        // with an explicit roots override: that branch used to update the
+        // cache only.
+        let primed = manager
+            .resume_thread_with_history(&resume_params(&thread_id), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            primed.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main")]
+        );
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        let overridden = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            overridden.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+
+        // A history-carrying resume bypasses the running cache and reads the
+        // stored row, so a cache-only override is silently undone here.
+        let mut params = resume_params(&thread_id);
+        params.history = Some(vec![json!({"type": "message", "role": "user"})]);
+        let second = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            second.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            "a history-carrying resume must not reinstate the pre-override set"
+        );
+    }
+
+    #[test]
+    fn cached_resume_override_writeback_cannot_clobber_concurrent_row_updates() {
+        // Cross-process race pin: the cached-resume override writeback used
+        // to route through the full upsert, whose preserving arms cover only
+        // policy and the archive stamp — the stale cache snapshot reverted
+        // every other passthrough column, even resurrecting a concurrently
+        // archived thread.
+        let store = temp_core_state("resume-roots-writeback-stale");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // A concurrent process attaches a policy and archives the thread;
+        // the in-process cache still carries the pre-archive snapshot.
+        manager
+            .state_store()
+            .upsert_thread(&ThreadMetadata {
+                sandbox_policy: Some("workspace-write".to_string()),
+                approval_mode: Some("on-request".to_string()),
+                ..manager
+                    .state_store()
+                    .get_thread(&thread_id)
+                    .expect("read thread")
+                    .expect("thread persisted")
+            })
+            .expect("attach policy");
+        manager
+            .state_store()
+            .mark_archived(&thread_id)
+            .expect("archive thread");
+
+        // The override writeback must land the roots without touching the
+        // concurrently written columns.
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&thread_id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            "the override still owns the root set"
+        );
+        assert!(
+            persisted.archived,
+            "a concurrently archived thread must not be resurrected"
+        );
+        assert!(persisted.archived_at.is_some());
+        assert_eq!(persisted.sandbox_policy.as_deref(), Some("workspace-write"));
+        assert_eq!(persisted.approval_mode.as_deref(), Some("on-request"));
+    }
+
+    #[test]
+    fn resume_with_empty_roots_clears_back_to_bare_cwd() {
+        let store = temp_core_state("resume-roots-clear");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = PathBuf::from("/old");
+        metadata.workspace_roots = vec![PathBuf::from("/old"), PathBuf::from("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.workspace_roots = Some(Vec::new());
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/old"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/old")],
+            "Some([]) is an explicit clear, distinct from None (inherit)"
+        );
+    }
+
+    #[test]
+    fn resume_with_cwd_only_keeps_additional_roots() {
+        let store = temp_core_state("resume-roots-cwd-slot");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = PathBuf::from("/old");
+        metadata.workspace_roots = vec![
+            PathBuf::from("/old"),
+            PathBuf::from("/keep"),
+            PathBuf::from("/also"),
+        ];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-roots");
+        params.cwd = Some(PathBuf::from("/new"));
+        let resumed = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+
+        // The new cwd takes over the primary slot; the old cwd leaves the set
+        // while additional roots survive in order.
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/new"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![
+                PathBuf::from("/new"),
+                PathBuf::from("/keep"),
+                PathBuf::from("/also")
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_without_overrides_restores_persisted_cwd_and_roots() {
+        let store = temp_core_state("resume-roots-restore");
+        let mut metadata = test_thread_metadata("thread-roots");
+        metadata.cwd = PathBuf::from("/persisted");
+        metadata.workspace_roots = vec![PathBuf::from("/persisted"), PathBuf::from("/keep")];
+        store.upsert_thread(&metadata).expect("seed thread");
+
+        let mut manager = ThreadManager::new(store);
+        let resumed = manager
+            .resume_thread_with_history(&resume_params("thread-roots"), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+
+        // Regression: the persisted-path resume used to overwrite the cwd read
+        // back from the database with a current_dir fallback.
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/persisted"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/persisted"), PathBuf::from("/keep")]
+        );
+
+        // Legacy rows with no stored roots degenerate to [cwd].
+        let store = temp_core_state("resume-roots-legacy");
+        let mut metadata = test_thread_metadata("thread-legacy");
+        metadata.cwd = PathBuf::from("/persisted");
+        metadata.workspace_roots = Vec::new();
+        store.upsert_thread(&metadata).expect("seed legacy thread");
+        let mut manager = ThreadManager::new(store);
+        let resumed = manager
+            .resume_thread_with_history(&resume_params("thread-legacy"), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(resumed.thread.cwd, PathBuf::from("/persisted"));
+        assert_eq!(
+            resumed.thread.workspace_roots,
+            vec![PathBuf::from("/persisted")]
+        );
+    }
+
+    fn fork_params(thread_id: &str) -> ThreadForkParams {
+        ThreadForkParams {
+            thread_id: thread_id.to_string(),
+            path: None,
+            model: None,
+            model_provider: None,
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            workspace_roots: None,
+            persist_extended_history: false,
+        }
+    }
+
+    fn seed_multi_root_parent(name: &str) -> ThreadManager {
+        let store = temp_core_state(name);
+        let mut metadata = test_thread_metadata("thread-parent");
+        metadata.cwd = PathBuf::from("/repo/main");
+        metadata.workspace_roots = vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        ThreadManager::new(store)
+    }
+
+    #[test]
+    fn fork_without_roots_inherits_the_parent_set() {
+        let mut manager = seed_multi_root_parent("fork-roots-inherit");
+        let forked = manager
+            .fork_thread(&fork_params("thread-parent"))
+            .expect("fork thread")
+            .expect("parent found");
+
+        // The historical bare `thread/fork` shape: the parent record is the
+        // only source of the set, so an absent field must inherit it — and an
+        // absent cwd keeps the parent's cwd as primary rather than
+        // re-anchoring the set under the process cwd.
+        assert_eq!(forked.thread.cwd, PathBuf::from("/repo/main"));
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/lib")],
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread(&forked.thread.id)
+            .expect("read fork")
+            .expect("fork persisted");
+        assert_eq!(persisted.workspace_roots, forked.thread.workspace_roots);
+    }
+
+    #[test]
+    fn fork_with_cwd_only_swaps_primary_and_keeps_additional_roots() {
+        let mut manager = seed_multi_root_parent("fork-roots-cwd");
+        let mut params = fork_params("thread-parent");
+        params.cwd = Some(PathBuf::from("/repo/topic"));
+
+        let forked = manager
+            .fork_thread(&params)
+            .expect("fork thread")
+            .expect("parent found");
+
+        // Primary-swap semantics, matching a cwd-only resume: the parent's
+        // cwd leaves the set and its additional roots survive.
+        assert_eq!(forked.thread.cwd, PathBuf::from("/repo/topic"));
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/repo/topic"), PathBuf::from("/repo/lib")],
+        );
+    }
+
+    #[test]
+    fn fork_with_explicit_empty_roots_clears_to_the_bare_cwd() {
+        let mut manager = seed_multi_root_parent("fork-roots-clear");
+        let mut params = fork_params("thread-parent");
+        params.workspace_roots = Some(Vec::new());
+
+        let forked = manager
+            .fork_thread(&params)
+            .expect("fork thread")
+            .expect("parent found");
+
+        assert_eq!(
+            forked.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main")],
+            "Some([]) is an explicit clear, distinct from None (inherit)"
+        );
+    }
+
+    #[test]
+    fn resume_with_empty_cwd_is_rejected() {
+        // Regression pin: a stdio resume carrying `cwd: ""` used to persist
+        // the empty string into the primary slot, where boundary_roots()
+        // turns it into the vacuous containment root on every later resume.
+        let store = temp_core_state("resume-empty-cwd");
+        let mut metadata = test_thread_metadata("thread-empty-cwd");
+        metadata.cwd = PathBuf::from("/persisted");
+        metadata.workspace_roots = vec![PathBuf::from("/persisted")];
+        store.upsert_thread(&metadata).expect("seed thread");
+        let mut manager = ThreadManager::new(store);
+        let mut params = resume_params("thread-empty-cwd");
+        params.cwd = Some(PathBuf::from(""));
+
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("empty cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("cwd must not be empty"),
+            "unexpected error: {err:#}"
+        );
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-empty-cwd")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.cwd,
+            PathBuf::from("/persisted"),
+            "a rejected resume must not touch the persisted root set"
+        );
+    }
+
+    #[test]
+    fn fork_with_empty_cwd_is_rejected() {
+        let mut manager = seed_multi_root_parent("fork-empty-cwd");
+        let mut params = fork_params("thread-parent");
+        params.cwd = Some(PathBuf::from(""));
+
+        let err = manager
+            .fork_thread(&params)
+            .expect_err("empty cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("cwd must not be empty"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn spawn_thread_with_empty_cwd_persists_no_roots() {
+        // Fail closed at the chokepoint: a thread whose cwd slot is empty
+        // gets an empty root set, so boundary_roots() holds nothing and
+        // every containment check denies — never the vacuous `[""]`.
+        let store = temp_core_state("spawn-empty-cwd");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from(""),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        assert!(spawned.thread.workspace_roots.is_empty());
+
+        let persisted = manager
+            .state_store()
+            .get_thread(&spawned.thread.id)
+            .expect("read thread")
+            .expect("thread persisted");
+        assert!(persisted.workspace_roots.is_empty());
     }
 
     #[tokio::test]
@@ -3226,6 +4149,7 @@ mod tests {
                 },
                 AskForApproval::Never,
                 Path::new("/tmp/codewhale"),
+                &[],
             )
             .await
             .expect("invoke tool");
@@ -3255,6 +4179,7 @@ mod tests {
             .spawn_thread_with_history(
                 "deepseek".to_string(),
                 PathBuf::from("/tmp/codewhale"),
+                &[],
                 InitialHistory::New,
                 true,
             )

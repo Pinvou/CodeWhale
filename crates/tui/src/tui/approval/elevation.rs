@@ -57,13 +57,24 @@ impl ElevationOption {
         }
     }
 
-    /// Convert to a sandbox policy.
-    pub fn to_policy(&self, base_cwd: &Path) -> SandboxPolicy {
+    /// Convert to a sandbox policy. `workspace_roots` is the session's live
+    /// root set, materialized with the per-turn policy's
+    /// `normalize_workspace_roots` idiom: the retry must keep every attached
+    /// root writable, or a denied call that legitimately writes one would be
+    /// denied again and nudge the user toward Full Access.
+    pub fn to_policy(&self, base_cwd: &Path, workspace_roots: &[PathBuf]) -> SandboxPolicy {
         match self {
-            ElevationOption::WithNetwork => SandboxPolicy::workspace_with_network(),
+            ElevationOption::WithNetwork => SandboxPolicy::workspace_with_roots(
+                codewhale_core::normalize_workspace_roots(base_cwd, workspace_roots),
+                true,
+            ),
             ElevationOption::WithWriteAccess(paths) => {
                 let mut roots = paths.clone();
-                roots.push(base_cwd.to_path_buf());
+                for root in codewhale_core::normalize_workspace_roots(base_cwd, workspace_roots) {
+                    if !roots.contains(&root) {
+                        roots.push(root);
+                    }
+                }
                 SandboxPolicy::workspace_with_roots(roots, false)
             }
             ElevationOption::FullAccess => SandboxPolicy::DangerFullAccess,

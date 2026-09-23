@@ -115,6 +115,14 @@ pub(crate) fn rename_with_manager(
         .metadata
         .set_model_provider_route(app.api_provider.as_str(), app.provider_id_for_persistence());
     session.metadata.workspace.clone_from(&app.workspace);
+    // The paired set travels with the workspace it belongs to. Syncing only
+    // the primary would let a `/rename` after a `/cd` whose direct save
+    // failed rewrite `workspace: new` next to the stale pre-switch set —
+    // resurrecting the abandoned directory on the next resume.
+    session
+        .metadata
+        .workspace_roots
+        .clone_from(&app.workspace_roots);
     session.metadata.mode = Some(app.mode.as_setting().to_string());
     app.sync_cost_to_metadata(&mut session.metadata);
     session.metadata.title = new_title.to_string();
@@ -154,17 +162,23 @@ pub(crate) fn live_session_before_first_snapshot(
     if let Ok(Some(checkpoint)) = manager.load_session_checkpoint(session_id) {
         return Some(checkpoint);
     }
-    Some(
-        crate::session_manager::create_saved_session_with_id_and_mode(
-            session_id.to_string(),
-            &app.api_messages,
-            &app.model_selection_for_persistence(),
-            &app.workspace,
-            u64::from(app.session.total_tokens),
-            app.system_prompt.as_ref(),
-            Some(app.mode.as_setting()),
-        ),
-    )
+    let mut rebuilt = crate::session_manager::create_saved_session_with_id_and_mode(
+        session_id.to_string(),
+        &app.api_messages,
+        &app.model_selection_for_persistence(),
+        &app.workspace,
+        u64::from(app.session.total_tokens),
+        app.system_prompt.as_ref(),
+        Some(app.mode.as_setting()),
+    );
+    // The rebuilt document pairs `workspace` with the live root set, exactly
+    // like `build_session_snapshot`; a roots-blind rebuild would persist a
+    // workspace whose primary root is still the previous directory.
+    rebuilt
+        .metadata
+        .workspace_roots
+        .clone_from(&app.workspace_roots);
+    Some(rebuilt)
 }
 
 #[cfg(test)]
@@ -380,6 +394,69 @@ mod tests {
         let persisted = manager.load_session(session_id).unwrap();
         assert_eq!(persisted.metadata.title, "Earliest Rename");
         assert_eq!(persisted.messages.len(), 1);
+    }
+
+    #[test]
+    fn rename_stamps_the_live_workspace_roots() {
+        let tmp = TempDir::new().unwrap();
+        let manager = make_session_manager(&tmp);
+        let mut app = make_app(&tmp);
+        let new_workspace = tmp.path().join("after-cd");
+        let shared = tmp.path().join("shared");
+        let mut session = create_saved_session_with_mode(
+            &[],
+            "deepseek-v4-pro",
+            &tmp.path().join("before-cd"),
+            0,
+            None,
+            None,
+        );
+        session.metadata.id = "rename-roots".to_string();
+        // The disk record still carries the pre-`/cd` pair, the shape a
+        // failed direct save leaves behind.
+        session.metadata.workspace_roots = vec![tmp.path().join("before-cd"), shared.clone()];
+        manager.save_session(&session).unwrap();
+
+        app.current_session_id = Some("rename-roots".to_string());
+        app.workspace = new_workspace.clone();
+        app.workspace_roots = vec![new_workspace.clone(), shared.clone()];
+
+        let result = rename_with_manager("Rooted Rename", "rename-roots", &manager, &mut app);
+        assert!(!result.is_error, "{result:?}");
+
+        let reloaded = manager.load_session("rename-roots").unwrap();
+        assert_eq!(reloaded.metadata.workspace, new_workspace);
+        assert_eq!(
+            reloaded.metadata.workspace_roots,
+            vec![new_workspace, shared],
+            "a /rename save must pair the new workspace with the live root set, \
+             or the abandoned directory re-enters on the next resume"
+        );
+    }
+
+    // Same stamp on the rebuild path: nothing persisted yet, so the document
+    // is constructed from in-memory App state and must carry the live set.
+    #[test]
+    fn rename_mid_first_turn_rebuild_stamps_the_live_workspace_roots() {
+        let tmp = TempDir::new().unwrap();
+        let manager = make_session_manager(&tmp);
+        let mut app = make_app(&tmp);
+
+        let session_id = "live-rebuild-roots";
+        let shared = tmp.path().join("shared");
+        app.current_session_id = Some(session_id.to_string());
+        app.api_messages = vec![user_message("turn one, nothing persisted yet")];
+        app.workspace_roots = vec![app.workspace.clone(), shared.clone()];
+
+        let result = rename_with_manager("Rebuilt Roots", session_id, &manager, &mut app);
+        assert!(!result.is_error, "{result:?}");
+
+        let persisted = manager.load_session(session_id).unwrap();
+        assert_eq!(
+            persisted.metadata.workspace_roots,
+            vec![app.workspace.clone(), shared],
+            "the rebuilt document must pair the workspace with the live root set"
+        );
     }
 
     fn user_message(text: &str) -> crate::models::Message {
