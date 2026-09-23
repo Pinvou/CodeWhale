@@ -680,7 +680,7 @@ func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limi
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT late.id,late.provider_id,late.provider_version FROM late_payment_review_cases late JOIN payment_orders payment ON payment.id=late.payment_order_id WHERE late.review_status='REVIEW_REQUIRED_LATE_PAYMENT' AND payment.final_archive_eligible_at<=now() AND (payment.last_successful_query_at IS NULL OR payment.last_successful_query_at<payment.final_archive_eligible_at OR payment.last_authoritative_unpaid_at IS NULL OR payment.last_authoritative_unpaid_at<payment.final_archive_eligible_at) ORDER BY payment.final_archive_eligible_at,late.id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT late.id,late.provider_id,late.provider_version FROM late_payment_review_cases late JOIN payment_orders payment ON payment.id=late.payment_order_id WHERE late.review_status='REVIEW_REQUIRED_LATE_PAYMENT' AND payment.final_archive_eligible_at<=now() AND NOT (payment.provider_capability_snapshot @> '{"authoritative_unpaid_terminal":false}'::jsonb) AND (payment.last_successful_query_at IS NULL OR payment.last_successful_query_at<payment.final_archive_eligible_at OR payment.last_authoritative_unpaid_at IS NULL OR payment.last_authoritative_unpaid_at<payment.final_archive_eligible_at) ORDER BY payment.final_archive_eligible_at,late.id LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -698,6 +698,9 @@ func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limi
 		items = append(items, item)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	count := 0
 	for _, item := range items {
 		tx, err := r.pool.Begin(ctx)
@@ -705,11 +708,11 @@ func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limi
 			return count, err
 		}
 		now := r.now()
-		reason := "archive deadline reached without a successful authoritative unpaid query"
+		reason := automaticArchiveBlindReason
 		nextReviewAt := now.Add(24 * time.Hour)
 		command, err := tx.Exec(ctx, `UPDATE late_payment_review_cases SET review_status='PROVIDER_BLIND',blind_reason=$2,next_review_at=$3,updated_at=$4 WHERE id=$1 AND review_status='REVIEW_REQUIRED_LATE_PAYMENT'`, item.id, reason, nextReviewAt, now)
 		if err == nil && command.RowsAffected() == 1 {
-			_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,reason_code,updated_at) VALUES($1,$2,FALSE,$3,'PROVIDER_BLIND',$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,reason_code='PROVIDER_BLIND',version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, item.providerID, item.providerVersion, reason, now)
+			_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,reason_code,updated_at) VALUES($1,$2,FALSE,$3,'PROVIDER_BLIND',$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,reason_code='PROVIDER_BLIND',version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at WHERE payment_provider_controls.new_orders_enabled OR payment_provider_controls.reason_code='PROVIDER_BLIND'`, item.providerID, item.providerVersion, reason, now)
 		}
 		if err == nil && command.RowsAffected() == 1 {
 			err = appendManualReviewEvent(ctx, tx, item.id, "PROVIDER_BLIND", nil, map[string]any{"reason": reason, "new_orders_enabled": false}, now)

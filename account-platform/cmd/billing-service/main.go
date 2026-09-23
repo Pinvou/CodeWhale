@@ -291,6 +291,7 @@ func main() {
 			reconciliationInterval = minimumQueryInterval
 		}
 		go observability.RunBackground(workerContext, "expired-payment-reconciliation", billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run)
+		go observability.RunBackground(workerContext, "archive-blind-recovery", billing.NewArchiveBlindRecoveryWorker(repository, payments, time.Minute).Run)
 	}
 	if payments.Capabilities().NotificationSupported {
 		go observability.RunBackground(workerContext, "payment-notification-inbox", billing.NewPaymentNotificationWorker(payments, 50*time.Millisecond).Run)
