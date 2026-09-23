@@ -1782,8 +1782,13 @@
 
   var notificationQueue = [];
   var notificationDispatching = false;
+  // React subscribes before lifecycle.init() finishes. The independent startup
+  // loaders therefore used to expose a succession of partial snapshots and
+  // re-render the root once per completed IPC. Keep their state ownership and
+  // parallelism, but publish the initialized state as one coherent revision.
+  var startupNotificationBatching = false;
   function notify() {
-    if (suppressNotify) return;
+    if (suppressNotify || startupNotificationBatching) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -2741,6 +2746,8 @@
     if (initPromise) return initPromise;
     initPromise = (async function () {
     startupMark("bridge:init_start");
+    startupNotificationBatching = true;
+    try {
     // Populate the global Scheduled unread summary without requiring the user
     // to visit the Scheduled page first. This stays off the startup critical path.
     if (!isDetachedWindow) {
@@ -2799,7 +2806,10 @@
     }
     startupMark("bridge:background_checks_started");
     if (!isDetachedWindow) refreshRemoteControlStatus(); // 权威主窗口独占桌面 Web 代理状态
-    notify();
+    } finally {
+      startupNotificationBatching = false;
+      notify();
+    }
     startupMark("bridge:init_done");
     if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
     })();
