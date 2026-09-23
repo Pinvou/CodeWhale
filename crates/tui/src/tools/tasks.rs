@@ -1330,11 +1330,13 @@ mod tests {
             tmp.path(),
         );
         let started = std::time::Instant::now();
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_millis(800), cmd.output()).await;
+        // 5s, not human-scale-tight: `build_gate_command` runs a login
+        // shell that sources the profile files, and a slow runner must not
+        // flake the spawn before `echo $$` lands.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await;
         assert!(outcome.is_err(), "sleep 60 must hit the gate deadline");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
+            started.elapsed() < std::time::Duration::from_secs(15),
             "the gate call must return at the deadline, not at the child's sleep"
         );
 
