@@ -540,6 +540,14 @@ impl ExecutionGuard {
 
     /// Mark the start of a human-paced wait (idempotent). Only the first
     /// begin of an unmatched begin/end pair takes effect.
+    ///
+    /// Windows merge rather than stack: the first begin sets the origin and
+    /// any end closes the whole window. That is sound because the engine
+    /// blocks inside a single prompt at a time — approval and user-input
+    /// waits are serial within a turn, and parallel batches exclude
+    /// interactive tools — so overlapping windows never reach this guard
+    /// today. If a future change lets nested prompts surface concurrently,
+    /// switch to paired (counted) windows first.
     fn begin_human_wait(&mut self, now: Instant) {
         if self.human_wait_since.is_none() {
             self.human_wait_since = Some(now);
@@ -2145,8 +2153,11 @@ impl TaskManager {
         // Liveness-only signals never mutate the record: short-circuit
         // before the state lock so a silent build's ~5 heartbeat ticks/s do
         // not take the manager-wide lock for a no-op, and so they do not
-        // mark the record dirty (which would defer the persistence of real
-        // mutations past the debounce window for the whole silent tool).
+        // mark the record dirty (a spurious dirty would only arm a redundant
+        // debounce flush). Note this does not change when real mutations
+        // persist: the run loop rebuilds the debounce timer on every event,
+        // so while a tool streams heartbeats the debounce stays starved and
+        // persistence waits for the stream to quiet either way.
         // The human-wait pair moves the supervisor's wall clock in lockstep
         // with the turn loop's own guard.
         match event {

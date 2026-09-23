@@ -532,8 +532,8 @@ fn default_connect_timeout() -> u64 {
 // jobs, agent-side work). The old 60s default returned "timed out" to the
 // model for healthy-but-slow tools, which then retried and compounded cost.
 // Per-server/global overrides still apply via `execute_timeout`. Part of
-// the 1800s family that comments keep in sync (TUI client envelope,
-// sub-agent tool timeout, engine dispatch backstop). Note the budget is
+// the 1800s family that comments keep in sync (roster anchored at the
+// core dispatch backstop's comment). Note the budget is
 // per leg: a barely-draining server can consume most of it on the send
 // leg and the read leg waits out its own budget, so a single call can
 // approach twice this value in the worst case.

@@ -44,8 +44,8 @@ pub const MAX_SUBAGENT_API_TIMEOUT_SECS: u64 = 3600;
 /// in-flight tools mid-run. The child's own wall-time budget remains the
 /// spend backstop, and the heartbeat floor (tool_timeout + 30s) follows this
 /// constant automatically. Part of the 1800s family that comments keep in
-/// sync (TUI client envelope, MCP execute timeout, engine dispatch
-/// backstop); "single source of truth" applies within the sub-agent family.
+/// sync (roster anchored at the core dispatch backstop's comment);
+/// "single source of truth" applies within the sub-agent family.
 /// In a background task the task `wall_time` backstop bounds the whole run
 /// and preempts this timeout when they coincide — documented trade-off.
 pub const DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS: u64 = 1800;
