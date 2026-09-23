@@ -1315,6 +1315,46 @@ mod tests {
     use super::*;
     use crate::tools::spec::ToolSpec;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_timeout_kills_the_child_instead_of_orphaning_it() {
+        // The gate runs under `tokio::time::timeout(cmd.output())`: the
+        // deadline drops the output future and the kill lands through
+        // `kill_on_drop`. Pin that the shell is actually dead afterwards —
+        // removing `kill_on_drop(true)` from `build_gate_command` must fail
+        // here, exactly like the interpreter tools' regression this mirrors.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("gate.pid");
+        let mut cmd = build_gate_command(
+            &format!("echo $$ > {}; sleep 60", pid_file.display()),
+            tmp.path(),
+        );
+        let started = std::time::Instant::now();
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_millis(800), cmd.output()).await;
+        assert!(outcome.is_err(), "sleep 60 must hit the gate deadline");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the gate call must return at the deadline, not at the child's sleep"
+        );
+
+        let pid_text = std::fs::read_to_string(&pid_file).expect("gate wrote its pid");
+        let pid: i32 = pid_text.trim().parse().expect("pid integer");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // kill(pid, 0) stays 0 for a zombie, so this only passes once
+            // the kill was sent AND the runtime reaped the orphan.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "gate child {pid} still alive after the timeout: kill_on_drop regressed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     #[test]
     fn durable_task_schema_requires_prompt() {
         let schema = TasksTool::alias("task_create", "create").input_schema();

@@ -493,14 +493,19 @@ mod tests {
         // The session's sub_query_timeout_secs was historically stored but
         // never read (the bridge always used its 120s const); this pins the
         // configured budget actually governing the deadline, including the
-        // timeout message naming the configured value.
+        // timeout message naming the configured value. The outer deadline
+        // keeps a regression back to the 120s const failing within seconds
+        // instead of hanging the suite for two minutes.
         let client: Arc<dyn RlmLlmClient> = Arc::new(HangingChildClient);
         let bridge = RlmBridge::new(Arc::clone(&client), "child-model".to_string(), 1)
             .with_sub_query_timeout_secs(1);
 
-        let response = bridge
-            .dispatch_llm("hang forever".to_string(), None, None, None)
-            .await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bridge.dispatch_llm("hang forever".to_string(), None, None, None),
+        )
+        .await
+        .expect("the configured budget must fire well within the outer deadline");
 
         let error = response.error.expect("hanging child must time out");
         assert!(
