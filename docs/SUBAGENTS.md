@@ -594,6 +594,14 @@ progress at step boundaries, not mid-tool, so a silent build or MCP call must
 not be cleaned up mid-run), so neither a configured long model request nor a
 long in-flight tool is cancelled before its own timeout can fire.
 
+Inside a durable task these budgets are additionally bounded by the task's
+`wall_time` (default 30 minutes, measured from task start): the wall clock
+pauses while a pending approval or user-input prompt waits on a human (with a
+24-hour fail-safe cap per prompt), but it otherwise wins over an in-flight
+sub-agent, so a maximal 1800-second tool started late in a task can still be
+interrupted by the task deadline. Raising `execute_timeout` or the tool
+budget above the remaining task wall has no effect inside a task.
+
 ## Lifecycle
 
 Each opened session produces a record that progresses through:
