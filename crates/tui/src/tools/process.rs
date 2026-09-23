@@ -13,8 +13,9 @@
 //!   far is returned with a note on stderr. On Unix, aborting drops our read
 //!   ends and hands the grandchild an EPIPE on its next write; on Windows
 //!   the aborted read lingers on a blocking-pool thread until the
-//!   grandchild closes the pipe, so the grandchild is not signalled (see the
-//!   PR-level disclosure for this platform);
+//!   grandchild closes the pipe, so the grandchild is not signalled — the
+//!   lingering read ends when the grandchild exits, which bounds the leak
+//!   by the grandchild's own lifetime;
 //! * the timeout path kills the child explicitly and reaps it before
 //!   returning, so there is no window where the tool has failed but the
 //!   interpreter is still running, and the kill is directly assertable in
@@ -115,11 +116,7 @@ pub(crate) async fn run_bounded_child(
                     // The one exit that isn't a timeout or a clean exit:
                     // abort the drains (and the stdin writer) before
                     // propagating so no pipe outlives the call here either.
-                    stdout_task.abort();
-                    stderr_task.abort();
-                    if let Some(writer) = &stdin_writer {
-                        writer.abort();
-                    }
+                    abort_drains(&mut stdout_task, &mut stderr_task, &stdin_writer);
                     return Err(ToolError::execution_failed(format!("{label}: {e}")));
                 }
             };
@@ -139,11 +136,7 @@ pub(crate) async fn run_bounded_child(
                 // EOF that only the grandchild can deliver. Aborting drops
                 // our read ends — the grandchild sees EPIPE on its next
                 // write — and the shared buffers keep what was captured.
-                stdout_task.abort();
-                stderr_task.abort();
-                if let Some(writer) = &stdin_writer {
-                    writer.abort();
-                }
+                abort_drains(&mut stdout_task, &mut stderr_task, &stdin_writer);
                 let mut stderr = snapshot(&stderr_buf);
                 if stderr.last() != Some(&b'\n') && !stderr.is_empty() {
                     stderr.push(b'\n');
@@ -169,11 +162,7 @@ pub(crate) async fn run_bounded_child(
             // grandchild that inherited the pipes keeps the write ends open
             // after the child dies, so read_to_end would never see EOF and
             // joining here would hang the caller past the budget.
-            stdout_task.abort();
-            stderr_task.abort();
-            if let Some(writer) = &stdin_writer {
-                writer.abort();
-            }
+            abort_drains(&mut stdout_task, &mut stderr_task, &stdin_writer);
             return Err(ToolError::Timeout {
                 seconds: budget.as_secs(),
             });
@@ -181,6 +170,23 @@ pub(crate) async fn run_bounded_child(
     };
 
     Ok(output)
+}
+
+/// Abort the drain tasks and the stdin writer. Every exit path that stops
+/// waiting on the child must call this: leaving a drain running would leak
+/// the read end past the call, and joining it would wait for EOF that only
+/// a pipe-inheriting grandchild can deliver. Kept in one place so a new
+/// exit path cannot forget the aborts (the wait-error path once did).
+fn abort_drains(
+    stdout_task: &mut tokio::task::JoinHandle<()>,
+    stderr_task: &mut tokio::task::JoinHandle<()>,
+    stdin_writer: &Option<tokio::task::JoinHandle<()>>,
+) {
+    stdout_task.abort();
+    stderr_task.abort();
+    if let Some(writer) = stdin_writer {
+        writer.abort();
+    }
 }
 
 async fn drain_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>, buf: Arc<Mutex<Vec<u8>>>) {
