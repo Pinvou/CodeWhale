@@ -187,15 +187,17 @@ func (p *PaymentCoordinator) FilterProducts(ctx context.Context, products []Prod
 
 func (p *PaymentCoordinator) filterProducts(products []Product, externalProducts map[string]ExternalProduct) []Product {
 	filtered := make([]Product, 0, len(products))
+	capabilities := p.Capabilities()
 	for _, product := range products {
 		if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
 			continue
 		}
 		if external, ok := externalProducts[product.ProductID]; ok && external.AmountFen == product.AmountFen && external.Currency == product.Currency {
-			product.Channels = intersectChannels(product.Channels, external.Channels, p.Capabilities().Channels)
+			product.Channels = intersectChannels(product.Channels, external.Channels, capabilities.Channels)
 			if len(product.Channels) == 0 {
 				continue
 			}
+			product.QRScanApps = append([]string(nil), capabilities.QRScanApps...)
 			filtered = append(filtered, product)
 		}
 	}

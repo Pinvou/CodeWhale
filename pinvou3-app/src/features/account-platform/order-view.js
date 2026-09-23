@@ -33,6 +33,17 @@ export function hasSelectablePaymentChannels(channels = []) {
   return uniqueChannels.size > 1;
 }
 
+/**
+ * @param {{ scanToPay?: string, scanToPayWithApps?: (apps: string[]) => string, channels?: Record<string, string> }} copy
+ * @param {unknown} scanApps
+ */
+export function paymentScanPrompt(copy, scanApps = []) {
+  if (!Array.isArray(scanApps) || typeof copy?.scanToPayWithApps !== 'function') return copy?.scanToPay || '';
+  const labels = [...new Set(scanApps.map((app) => String(app || '').trim().toUpperCase()).filter(Boolean))]
+    .map((app) => copy.channels?.[app] || app);
+  return labels.length ? copy.scanToPayWithApps(labels) : copy.scanToPay;
+}
+
 export function orderSummaryStatus(item) {
   if (['PAID', 'PAID_LATE'].includes(item?.status)) {
     if (item?.fulfillment_status !== 'CREDITED') return 'PROCESSING';

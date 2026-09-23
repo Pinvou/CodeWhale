@@ -36,7 +36,7 @@ func newTestProvider(t *testing.T, client mallClient) *Provider {
 
 func TestCapabilitiesAreVersionedAndSupplierSpecific(t *testing.T) {
 	capabilities := newTestProvider(t, &mallStub{}).Capabilities()
-	if !capabilities.Valid() || capabilities.ProviderID != "h3c_mall" || capabilities.Version == "" || !capabilities.CommerceCustomerRequired || !capabilities.SupportsChannel("ALIPAY") || !capabilities.NotificationSupported || capabilities.RefundSupported || capabilities.AuthoritativeUnpaidTerminal || capabilities.ReusePendingOrderAfterExpiry || capabilities.TestOnly {
+	if !capabilities.Valid() || capabilities.ProviderID != "h3c_mall" || capabilities.Version == "" || !capabilities.CommerceCustomerRequired || !capabilities.SupportsChannel("ALIPAY") || len(capabilities.QRScanApps) != 2 || capabilities.QRScanApps[0] != "ALIPAY" || capabilities.QRScanApps[1] != "WECHAT" || !capabilities.NotificationSupported || capabilities.RefundSupported || capabilities.AuthoritativeUnpaidTerminal || capabilities.ReusePendingOrderAfterExpiry || capabilities.TestOnly {
 		t.Fatalf("unexpected capabilities: %#v", capabilities)
 	}
 }

@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
-import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from '../src/features/account-platform/order-view.js';
+import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -1270,8 +1270,21 @@ test('recharge only shows a payment-channel selector when the backend offers a r
   assert.equal(hasSelectablePaymentChannels(['ALIPAY', 'WECHAT']), true);
   assert.match(popover, /hasSelectablePaymentChannels\(channels\) &&/);
   assert.equal((view.match(/hasSelectablePaymentChannels\(availableChannels\) &&/g) || []).length, 2);
-  assert.match(popover, /copy\.scanToPay/);
-  assert.match(view, /copy\.scanToPay/);
+});
+
+test('QR scan instructions come from provider capabilities instead of accounting channels', async () => {
+  const provider = await readFile(new URL('../../account-platform/internal/platform/h3cpayment/provider.go', import.meta.url), 'utf8');
+  const billing = await readFile(new URL('../../account-platform/internal/billing/payments.go', import.meta.url), 'utf8');
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.equal(paymentScanPrompt(accountPlatformCopy.zh, ['ALIPAY', 'WECHAT']), '支持以下应用扫码：支付宝、微信支付');
+  assert.equal(paymentScanPrompt(accountPlatformCopy.en, []), accountPlatformCopy.en.scanToPay);
+  assert.match(provider, /QRScanApps:\s*\[\]string\{"ALIPAY", "WECHAT"\}/);
+  assert.match(billing, /product\.QRScanApps = append\(\[\]string\(nil\), capabilities\.QRScanApps\.\.\.\)/);
+  assert.match(popover, /paymentScanPrompt\(copy, scanApps\)/);
+  assert.match(view, /paymentScanPrompt\(copy, scanApps\)/);
+  assert.doesNotMatch(popover, /h3c_mall|provider_id/);
+  assert.doesNotMatch(view, /h3c_mall/);
 });
 
 test('desktop account persists only refresh credentials and clears them on logout or auth failure', async () => {

@@ -28,6 +28,20 @@ func TestCapabilitiesRequireVersionedQueryableProvider(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesRejectInvalidQRScanApps(t *testing.T) {
+	valid := Capabilities{ProviderID: "provider", Version: "v1", Channels: []string{"CARD_PAY"}, QRScanApps: []string{"ALIPAY", "WECHAT"}}
+	if !valid.Valid() {
+		t.Fatal("valid QR scan applications were rejected")
+	}
+	for _, apps := range [][]string{{"ALIPAY", "ALIPAY"}, {"BAD-APP"}, {""}} {
+		candidate := valid
+		candidate.QRScanApps = apps
+		if candidate.Valid() {
+			t.Fatalf("invalid QR scan applications were accepted: %#v", apps)
+		}
+	}
+}
+
 func TestFormalCollectionRequiresEvidenceOrBoundedAuthoritativeHistory(t *testing.T) {
 	capabilities := Capabilities{NotificationSupported: true}
 	if !capabilities.FormalCollectionEligible(0) {

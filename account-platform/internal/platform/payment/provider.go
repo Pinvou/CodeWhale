@@ -63,6 +63,7 @@ type Capabilities struct {
 	ProviderID                     string   `json:"provider_id"`
 	Version                        string   `json:"version"`
 	Channels                       []string `json:"channels"`
+	QRScanApps                     []string `json:"qr_scan_apps,omitempty"`
 	OrderQuerySupported            bool     `json:"order_query_supported"`
 	OrderHistoryRetentionSeconds   int64    `json:"order_history_retention_seconds"`
 	MinimumQueryIntervalSeconds    int64    `json:"minimum_query_interval_seconds"`
@@ -91,12 +92,32 @@ func (c Capabilities) Valid() bool {
 	seen := map[string]bool{}
 	for _, channel := range c.Channels {
 		channel = strings.ToUpper(strings.TrimSpace(channel))
-		if channel == "" || seen[channel] {
+		if !validCapabilityCode(channel) || seen[channel] {
 			return false
 		}
 		seen[channel] = true
 	}
+	seen = map[string]bool{}
+	for _, app := range c.QRScanApps {
+		app = strings.ToUpper(strings.TrimSpace(app))
+		if !validCapabilityCode(app) || seen[app] {
+			return false
+		}
+		seen[app] = true
+	}
 	return (!c.OrderQuerySupported || c.MinimumQueryIntervalSeconds > 0) && (!c.RefundSupported || c.RefundIdempotencySupported)
+}
+
+func validCapabilityCode(value string) bool {
+	if value == "" || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character != '_' && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c Capabilities) SupportsChannel(channel string) bool {

@@ -12,7 +12,7 @@ import (
 type catalogProvider struct{}
 
 func (catalogProvider) Capabilities() payment.Capabilities {
-	return payment.Capabilities{ProviderID: "test", Version: "v1", Channels: []string{"ALIPAY"}}
+	return payment.Capabilities{ProviderID: "test", Version: "v1", Channels: []string{"ALIPAY"}, QRScanApps: []string{"ALIPAY", "WECHAT"}}
 }
 func (catalogProvider) Create(context.Context, payment.Order, string) (payment.ProviderOrder, error) {
 	return payment.ProviderOrder{}, payment.ErrUnsupported
@@ -50,7 +50,7 @@ func TestFilterProductsAllowsFrozenPrices(t *testing.T) {
 	coordinator := &PaymentCoordinator{provider: catalogProvider{}}
 	mappings := map[string]ExternalProduct{"PLAN_STANDARD": testExternalProduct("0502AJ0Q", 9900)}
 	products := []Product{{ProductID: "PLAN_STANDARD", AmountFen: 9900, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "FROZEN"}}
-	if got := coordinator.filterProducts(products, mappings); len(got) != 1 {
+	if got := coordinator.filterProducts(products, mappings); len(got) != 1 || len(got[0].QRScanApps) != 2 || got[0].QRScanApps[0] != "ALIPAY" || got[0].QRScanApps[1] != "WECHAT" {
 		t.Fatalf("frozen catalog was rejected: %#v", got)
 	}
 }

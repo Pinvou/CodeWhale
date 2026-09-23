@@ -4,7 +4,7 @@ import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../compone
 import { formatPoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
-import { hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus } from './order-view.js';
+import { hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus, paymentScanPrompt } from './order-view.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -151,6 +151,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
   const paid = paidOrderStates.has(order?.status);
   const displayStatus = orderSummaryStatus(order);
   const canScan = isPayablePaymentOrder(order, now);
+  const scanApps = products.find((product) => product.product_id === order?.product_id)?.qr_scan_apps || [];
   const inactiveHint = copy.orderNoLongerPayable;
 
   useEffect(() => {
@@ -242,7 +243,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
                   </div>
                 )}
               </div>
-              <div className="mt-3 text-center text-[13px] font-medium">{copy.scanToPay}</div>
+              <div className="mt-3 text-center text-[13px] font-medium">{paymentScanPrompt(copy, scanApps)}</div>
               <div className={`mt-1 text-center text-[11px] tabular-nums ${mutedText}`}>{remainingSeconds > 0 ? copy.countdown(formatCountdown(remainingSeconds)) : copy.orderStatuses.PENDING}</div>
             </>
           ) : (

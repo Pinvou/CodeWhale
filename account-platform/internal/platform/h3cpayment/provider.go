@@ -37,7 +37,7 @@ func New(client mallClient, resolver ProductResolver) (*Provider, error) {
 
 func (p *Provider) Capabilities() payment.Capabilities {
 	return payment.Capabilities{
-		ProviderID: "h3c_mall", Version: "h3c-mall-v1", Channels: []string{"ALIPAY"},
+		ProviderID: "h3c_mall", Version: "h3c-mall-v1", Channels: []string{"ALIPAY"}, QRScanApps: []string{"ALIPAY", "WECHAT"},
 		OrderQuerySupported: true, MinimumQueryIntervalSeconds: 2, NotificationSupported: true,
 		AuthoritativeUnpaidTerminal: false, ManualRepairSupported: true,
 		CommerceCustomerRequired: true, ReusePendingOrderAfterExpiry: false, ReviewLatePayment: true,

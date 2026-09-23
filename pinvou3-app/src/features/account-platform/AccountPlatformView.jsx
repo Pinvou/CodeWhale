@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
+import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { clearInvitationAcceptanceRetries, invitationAcceptanceMayBeCommitted, invitationRecoveryScope, readInvitationAcceptanceRetries, writeInvitationAcceptanceRetries } from './invitation-recovery.js';
@@ -1938,6 +1938,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const selectedMember = members.find((item) => item.user_id === memberId);
   const amountMicrocredits = Math.round(Number(amount) * MICROCREDITS_PER_POINT);
   const activePayment = isPayablePaymentOrder(order, now);
+  const paymentScanApps = products.find((product) => product.product_id === order?.product_id)?.qr_scan_apps || [];
   const remainingSeconds = paymentOrderRemainingSeconds(order, now);
   useEffect(() => {
     setNow(Date.now());
@@ -1986,7 +1987,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
           )}
         </article>
       )}
-      {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
+      {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} scanApps={paymentScanApps} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
       {canAllocate && (
         <article className="ap-card">
           <h3>{copy.allocateMemberQuota}</h3>
@@ -2122,6 +2123,7 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
   }, []);
   const pendingOrders = payablePaymentOrders(orders, now);
   const activePayment = isPayablePaymentOrder(order, now);
+  const paymentScanApps = products.find((product) => product.product_id === order?.product_id)?.qr_scan_apps || [];
   const remainingSeconds = paymentOrderRemainingSeconds(order, now);
   useEffect(() => {
     if (paymentDialogOpen && !activePayment) setPaymentDialogOpen(false);
@@ -2182,7 +2184,7 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
         </div>
         {pendingOrders.length > 0 && <PendingPaymentOrders copy={copy} orders={pendingOrders} now={now} busy={busy} onActivate={activateAndOpenPayment} />}
       </div>
-      {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
+      {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} scanApps={paymentScanApps} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
       <EntitlementSummary copy={copy} language={language} packages={packages} detailsUnavailable={detailsUnavailable} />
     </section>
   );
@@ -2274,7 +2276,7 @@ function PendingPaymentOrders({ copy, orders, now, busy, onActivate }) {
   );
 }
 
-function PaymentQRCodeDialog({ copy, order, qrData, remainingSeconds, onClose }) {
+function PaymentQRCodeDialog({ copy, order, qrData, scanApps, remainingSeconds, onClose }) {
   return (
     <Dialog title={copy.createRecharge} closeLabel={copy.closeDialog} onClose={onClose} className="ap-payment-dialog">
       <div className="ap-payment-dialog-body">
@@ -2290,7 +2292,7 @@ function PaymentQRCodeDialog({ copy, order, qrData, remainingSeconds, onClose })
         </div>
         <span className="ap-status">{copy.orderStatuses[order.status] || order.status}</span>
         <strong className="ap-payment-amount">¥{(order.amount_fen / 100).toFixed(2)}</strong>
-        <p>{copy.scanToPay}</p>
+        <p>{paymentScanPrompt(copy, scanApps)}</p>
         <small>{copy.countdown(formatPaymentCountdown(remainingSeconds))}</small>
       </div>
     </Dialog>
