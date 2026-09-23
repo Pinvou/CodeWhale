@@ -550,8 +550,8 @@ const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
 // ends on turn interrupt or runtime shutdown instead (mirrors the engine-side
 // approval wait, which excludes approval time from the turn wall clock).
 // Dynamic (client-executed) tools legitimately run long, so their result wait
-// is generous (part of the 1800s family that comments keep in sync: the TUI
-// client envelope, the sub-agent tool timeout, the MCP execute timeout); it
+// is generous (part of the 1800s family that comments keep in sync; the
+// roster is anchored at the core dispatch backstop's comment); it
 // still ends on turn interrupt.
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
@@ -9409,7 +9409,18 @@ impl RuntimeThreadManager {
                             // receiver and reports not-delivered.
                             match rx.try_recv() {
                                 Ok(decision) => ApprovalWakeup::Decision(Ok(decision)),
-                                Err(_) => ApprovalWakeup::Interrupted,
+                                Err(_) => {
+                                    // The arms below never read `rx` again.
+                                    // Drop it now so the promise above is
+                                    // literally true: a decision whose send
+                                    // lands after this point fails on the
+                                    // dropped receiver and reports
+                                    // not-delivered, instead of promising a
+                                    // delivery this loop overrides with the
+                                    // interrupted deny.
+                                    drop(rx);
+                                    ApprovalWakeup::Interrupted
+                                }
                             }
                         }
                         other => other,
