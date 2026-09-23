@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
-import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from '../src/features/account-platform/order-view.js';
+import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -1259,6 +1259,19 @@ test('desktop recharge completes inside the account popover without opening a we
   assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "products"\], None\)/);
   assert.match(backend, /\("token", &Method::POST, \["v1", "recharge", "orders"\], None\)/);
   assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "orders", id\], None\)[\s\S]{0,500}?=> safe_id\(id\)/);
+});
+
+test('recharge only shows a payment-channel selector when the backend offers a real choice', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.equal(hasSelectablePaymentChannels(), false);
+  assert.equal(hasSelectablePaymentChannels(['ALIPAY']), false);
+  assert.equal(hasSelectablePaymentChannels(['alipay', ' ALIPAY ']), false);
+  assert.equal(hasSelectablePaymentChannels(['ALIPAY', 'WECHAT']), true);
+  assert.match(popover, /hasSelectablePaymentChannels\(channels\) &&/);
+  assert.equal((view.match(/hasSelectablePaymentChannels\(availableChannels\) &&/g) || []).length, 2);
+  assert.match(popover, /copy\.scanToPay/);
+  assert.match(view, /copy\.scanToPay/);
 });
 
 test('desktop account persists only refresh credentials and clears them on logout or auth failure', async () => {

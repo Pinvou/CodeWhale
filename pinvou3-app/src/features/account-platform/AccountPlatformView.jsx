@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
+import { compactOrderID, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { clearInvitationAcceptanceRetries, invitationAcceptanceMayBeCommitted, invitationRecoveryScope, readInvitationAcceptanceRetries, writeInvitationAcceptanceRetries } from './invitation-recovery.js';
@@ -1966,13 +1966,15 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
                 </option>
               ))}
             </select>
-            <select value={channel} onChange={(event) => setChannel(event.target.value)}>
-              {availableChannels.map((item) => (
-                <option key={item} value={item}>
-                  {copy.channels[item] || item}
-                </option>
-              ))}
-            </select>
+            {hasSelectablePaymentChannels(availableChannels) && (
+              <select value={channel} aria-label={copy.paymentMethod} onChange={(event) => setChannel(event.target.value)}>
+                {availableChannels.map((item) => (
+                  <option key={item} value={item}>
+                    {copy.channels[item] || item}
+                  </option>
+                ))}
+              </select>
+            )}
             <button className="ap-primary" disabled={busy || !selectedProduct || !channel} onClick={purchaseAndOpenPayment}>
               {copy.purchaseForOrganization}
             </button>
@@ -2165,13 +2167,15 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
           ))}
         </div>
         <div className="ap-inline">
-          <select value={channel} disabled={!canRecharge} title={!canRecharge ? copy.permissionDenied : undefined} onChange={(event) => setChannel(event.target.value)}>
-            {availableChannels.map((item) => (
-              <option key={item} value={item}>
-                {copy.channels[item] || item}
-              </option>
-            ))}
-          </select>
+          {hasSelectablePaymentChannels(availableChannels) && (
+            <select value={channel} aria-label={copy.paymentMethod} disabled={!canRecharge} title={!canRecharge ? copy.permissionDenied : undefined} onChange={(event) => setChannel(event.target.value)}>
+              {availableChannels.map((item) => (
+                <option key={item} value={item}>
+                  {copy.channels[item] || item}
+                </option>
+              ))}
+            </select>
+          )}
           <button className="ap-primary" disabled={busy || !canRecharge || billingUnavailable || !selected || !channel} title={!canRecharge ? copy.permissionDenied : undefined} onClick={createAndOpenPayment}>
             {copy.createRecharge}
           </button>

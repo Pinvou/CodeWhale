@@ -26,6 +26,13 @@ export function paymentOrderRemainingSeconds(item, now = Date.now()) {
   return Math.max(0, Math.ceil((timestamp(item?.expires_at) - now) / 1000));
 }
 
+/** @param {unknown} channels */
+export function hasSelectablePaymentChannels(channels = []) {
+  if (!Array.isArray(channels)) return false;
+  const uniqueChannels = new Set(channels.map((channel) => String(channel || '').trim().toUpperCase()).filter(Boolean));
+  return uniqueChannels.size > 1;
+}
+
 export function orderSummaryStatus(item) {
   if (['PAID', 'PAID_LATE'].includes(item?.status)) {
     if (item?.fulfillment_status !== 'CREDITED') return 'PROCESSING';

@@ -4,7 +4,7 @@ import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../compone
 import { formatPoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
-import { isPayablePaymentOrder, orderSummaryStatus } from './order-view.js';
+import { hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus } from './order-view.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -304,16 +304,18 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
           ))}
         </div>
       </div>
-      <label className="block">
-        <span className={`mb-1.5 block px-1 text-[11px] font-medium ${mutedText}`}>{copy.paymentMethod}</span>
-        <select value={channel} onChange={(event) => setChannel(event.target.value)} className={`h-9 w-full rounded-xl border px-3 text-[12px] outline-none ${controlTheme}`}>
-          {channels.map((item) => (
-            <option key={item} value={item}>
-              {copy.channels[item] || item}
-            </option>
-          ))}
-        </select>
-      </label>
+      {hasSelectablePaymentChannels(channels) && (
+        <label className="block">
+          <span className={`mb-1.5 block px-1 text-[11px] font-medium ${mutedText}`}>{copy.paymentMethod}</span>
+          <select value={channel} onChange={(event) => setChannel(event.target.value)} className={`h-9 w-full rounded-xl border px-3 text-[12px] outline-none ${controlTheme}`}>
+            {channels.map((item) => (
+              <option key={item} value={item}>
+                {copy.channels[item] || item}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <button type="button" disabled={busy || !selectedAvailable} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">
         {busy && <RefreshCw size={13} className="animate-spin" />}
         {copy.createRecharge}
