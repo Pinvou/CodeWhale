@@ -9455,7 +9455,26 @@ impl RuntimeThreadManager {
                             let _ = engine.deny_tool_call(id).await;
                         }
                         ApprovalWakeup::Decision(Err(_recv_err)) => {
+                            // The decision channel closed without carrying a
+                            // decision (teardown raced the registration) —
+                            // a forced resolution, so it publishes like one
+                            // and the documented "every resolution is
+                            // published" contract stays literally true.
                             self.cancel_pending_approval(&id);
+                            self.emit_event(
+                                &thread_id,
+                                Some(&turn_id),
+                                None,
+                                "approval.decided",
+                                json!({
+                                    "approval_id": id,
+                                    "decision": "deny",
+                                    "remember": false,
+                                    "interrupted": true,
+                                }),
+                            )
+                            .await
+                            .ok();
                             let _ = engine.deny_tool_call(id).await;
                         }
                         ApprovalWakeup::Interrupted => {
