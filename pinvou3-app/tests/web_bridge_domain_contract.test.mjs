@@ -257,11 +257,20 @@ const settingsResult = () => {
   return result;
 };
 const unsubscribeSettings = api.state.subscribe('settings', snapshot => { settingsSnapshots.push(snapshot); });
+const settingsAndModelsSnapshots = [];
+const unsubscribeSettingsAndModels = api.state.subscribeMany(
+  ['settings', 'models'],
+  snapshot => { settingsAndModelsSnapshots.push(snapshot); },
+);
 invokeResponse = async command => command === 'web_access_update_settings' ? settingsResult() : null;
 assert.equal(await api.settings.saveSettings({ language: 'en' }), true);
 api.chat.prefillComposer('same-settings-revision');
 const firstSettings = settingsSnapshots[0];
 const repeatedSettings = settingsSnapshots[1];
+assert.equal(firstSettings, repeatedSettings,
+  'a chat-only publication must preserve an unrelated single-domain snapshot identity');
+assert.equal(settingsAndModelsSnapshots[0], settingsAndModelsSnapshots[1],
+  'a chat-only publication must preserve an unrelated multi-domain snapshot identity');
 assert.ok(Object.hasOwn(firstSettings.settings, '__proto__'));
 assert.equal(firstSettings.settings.__proto__.marker, 'own-value');
 assert.equal(Object.getPrototypeOf(firstSettings.settings), Object.getPrototypeOf(firstSettings));
@@ -280,6 +289,7 @@ assert.equal(changedSettings.settings['__proto__'].marker, 'own-value');
 assert.equal(Object.getPrototypeOf(changedSettings.settings).marker, undefined,
   'web copy-on-write updates must not route __proto__ through the prototype setter');
 unsubscribeSettings();
+unsubscribeSettingsAndModels();
 
 const memorySources = {
   profile: { available: true }, preferences: { available: true }, work_context: { available: true },

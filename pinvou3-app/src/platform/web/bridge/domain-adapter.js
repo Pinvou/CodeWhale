@@ -53,26 +53,28 @@
     return result;
   }
 
-  // Subscriber callbacks pick a fresh outer object on every
-  // notification: any state change anywhere (e.g. a streaming token)
-  // hands every domain subscriber a new reference and a full re-render.
-  // Cache the last (full, slice) per subscriber: when full keeps its
-  // reference, reuse the last slice to keep identity stable. Note this
-  // is whole-snapshot granularity (the web transport only reuses the
-  // same full reference when nothing at all changed), weaker than the
-  // desktop bridge's per-domain revision cache: a change in any domain
-  // still swaps the outer object of unchanged domains' slices (inner
-  // field references remain shared with flat subscribers; the identity
-  // sharing contract lives in the web_bridge_domain_contract test and
-  // is unaffected). full is rebuilt by the notifier per change, so the
-  // same full reference implies this domain's field set cannot have
-  // changed.
-  function stablePick() {
-    var lastFull = null;
+  // The Web transport structurally shares unchanged subtrees between its
+  // immutable snapshots. Compare only this domain's registered fields so a
+  // chat publication does not hand settings/models subscribers a fresh outer
+  // object and force an unrelated React render. Callbacks still run for every
+  // transport publication, matching the desktop bridge contract; React can
+  // bail out through the stable snapshot identity.
+  function stablePick(domainName) {
+    var names = fields[domainName];
+    if (!names) throw new Error("Unknown Tauri bridge state slice: " + domainName);
     var lastSlice = null;
-    return function (full, domainName) {
-      if (full === lastFull) return lastSlice;
-      lastFull = full;
+    return function (full) {
+      if (lastSlice) {
+        var isUnchanged = true;
+        for (var fieldIndex = 0; fieldIndex < names.length; fieldIndex++) {
+          var name = names[fieldIndex];
+          if (!Object.is(full[name], lastSlice[name])) {
+            isUnchanged = false;
+            break;
+          }
+        }
+        if (isUnchanged) return lastSlice;
+      }
       lastSlice = Object.freeze(pick(full, domainName));
       return lastSlice;
     };
@@ -92,32 +94,32 @@
 
   function subscribe(domainName, callback) {
     get(domainName);
-    var stable = stablePick();
+    var stable = stablePick(domainName);
     return flat.subscribe(function (full) {
-      callback(stable(full, domainName));
+      callback(stable(full));
     });
   }
 
   function subscribeMany(domains, callback) {
     getMany(domains);
-    // One stable cache per domain: the stablePick closure memoizes a
-    // single (lastFull,lastSlice) slot; sharing one instance across
-    // domains would make them overwrite each other.
     var stables = {};
-    domains.forEach(function (domainName) { stables[domainName] = stablePick(); });
-    // The combined outer object is likewise memoized on the full
-    // reference in a single slot: a React setState subscriber can only
-    // bail out on whole-object identity, and rebuilding the combined
-    // object every round would make even no-change notifications trigger
-    // full re-renders, cancelling out the inner slices' identity
-    // stability (see useBridge.js's subscribeMany for the consumer).
-    var lastFull = null;
+    domains.forEach(function (domainName) { stables[domainName] = stablePick(domainName); });
+    var lastSlices = [];
     var lastResult = null;
     return flat.subscribe(function (full) {
-      if (full !== lastFull) {
+      var hasChanged = !lastResult;
+      domains.forEach(function (domainName, index) {
+        var slice = stables[domainName](full);
+        if (slice !== lastSlices[index]) {
+          lastSlices[index] = slice;
+          hasChanged = true;
+        }
+      });
+      if (hasChanged) {
         var result = {};
-        domains.forEach(function (domainName) { Object.assign(result, stables[domainName](full, domainName)); });
-        lastFull = full;
+        for (var sliceIndex = 0; sliceIndex < lastSlices.length; sliceIndex++) {
+          Object.assign(result, lastSlices[sliceIndex]);
+        }
         lastResult = Object.freeze(result);
       }
       callback(lastResult);
