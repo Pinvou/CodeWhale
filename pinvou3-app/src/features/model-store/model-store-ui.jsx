@@ -11,6 +11,7 @@
 import { useEffect } from 'react';
 import { X } from '../../components/icons.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
+import { weightVerificationNotice } from './model-store-logic.js';
 
 const CARD_SURFACE = 'rounded-[20px] border border-[#E1E5EA] bg-white dark:border-[#2E3134] dark:bg-[#202124]';
 const TEXT_PRIMARY = 'text-[#1F1F1F] dark:text-[#E3E3E3]';
@@ -173,6 +174,35 @@ function MsRow({ label, children }) {
   );
 }
 
+/** 黄条的一套配色。跟 MsPill 的 warn 档、StoreCardDialog 里双机那条提示逐字相同——
+ *  同一个模块里"需要留意但不是错误"只该有一种长相。 */
+const NOTICE_WARN =
+  'rounded-[14px] bg-[#FEF7E0] px-3 py-2.5 text-[12px] leading-5 text-[#A15C07] dark:bg-[#3D3323] dark:text-[#FDD663]';
+
+/**
+ * 「这张卡的权重没有逐文件校验」提示条。达标的卡返回 null,不占地方。
+ *
+ * 为什么用黄条而不是红条/弹窗拦截:这是**知情权,不是警告**。内置卡都来自研究
+ * 团队,档位低说明的是"这条下载链路上少了一道防线",不是"这张卡有问题"。做成红
+ * 的或者做成一次确认,用户只会学到"点掉它"——而且会不敢用几张完全正常的卡。所以
+ * 视觉重量跟双机那条前提提示同级,文案里既说清后果,也说清"你可以怎么办"。
+ *
+ * 放在详情页而不是列表卡上:列表一屏十几张卡,每张都挂一条黄条就变成背景噪音,
+ * 反而没人读。详情页是用户主动打开、准备决定"下不下"的那一面。
+ * @returns {React.ReactElement|null} 提示条,达标时 null。
+ */
+function WeightVerifyNotice({ card, copy }) {
+  const notice = weightVerificationNotice(card);
+  if (!notice) return null;
+  return (
+    <div className={`mt-4 space-y-1.5 ${NOTICE_WARN}`} data-testid="model-store-weight-verify-notice">
+      <p className="font-medium">{copy.weightVerifyTitle}</p>
+      <p>{copy[notice.bodyKey]}</p>
+      <p>{copy.weightVerifyAdvice}</p>
+    </div>
+  );
+}
+
 /**
  * 轻提示。样式对齐导航层的 ArchiveToast:底部居中、暗色胶囊。
  * @returns {React.ReactElement|null} 提示。
@@ -210,4 +240,5 @@ export {
   MsDialogTitle,
   MsRow,
   MsToast,
+  WeightVerifyNotice,
 };

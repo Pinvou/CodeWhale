@@ -286,7 +286,44 @@ const BLANK_VALUES = [undefined, null, ''];
 const MERGEABLE_FIELDS = [
   'name', 'org', 'description', 'engine_name', 'engine_version',
   'quantization', 'size_bytes', 'deploy_topology',
+  // 档位只存在于商店卡片上，库记录（sqlite）里没有这一列。所以对已下载的模型，
+  // 它必须靠这次合并补进来；商店列表拉不到（离线、卡片已下架）时补不上，
+  // weightVerificationOf 会按 none 处理——多出一条黄条，而不是少一条。
+  'weight_verification',
 ];
+
+/**
+ * 这张卡的权重校验档位。
+ *
+ * 三档的含义见 Rust 侧 `store_client.rs` 的 `WeightVerification`：
+ * `sha256sums` 卡片自带摘要清单逐文件比对 / `manifest` 比对的摘要来自上游自己 /
+ * `none` 只查文件存不存在。
+ *
+ * **认不出来就是 `none`**——字段缺失、老后台没下发、将来出现的新档位名，全都落到
+ * 最不安全那一档。反过来（认不出来就当已校验）会让这条提示从上线第一天起只对
+ * "记得填的人"生效：漏填的卡跟达标卡长得一模一样，用户以为自己被保护着。
+ * @param {object|null} card - 商店卡片或合并后的模型。
+ * @returns {'none'|'manifest'|'sha256sums'} 档位。
+ */
+function weightVerificationOf(card) {
+  const raw = card?.weight_verification;
+  return raw === 'sha256sums' || raw === 'manifest' ? raw : 'none';
+}
+
+/**
+ * 这张卡要不要出「权重未逐文件校验」那条黄条，以及黄条正文用哪个文案键。
+ *
+ * 达标（`sha256sums`）返回 null——达标是常态，不该为此多一行字；剩下两档各有各的
+ * 说法，不能合并成一句"未校验"：`manifest` 其实校验过，只是参照物跟权重同源，
+ * 把它说成"没校验"是不实的，用户照着这句话去重下一遍也解决不了任何问题。
+ * @param {object|null} card - 商店卡片或合并后的模型。
+ * @returns {{bodyKey: string}|null} 黄条文案键，达标时 null。
+ */
+function weightVerificationNotice(card) {
+  const level = weightVerificationOf(card);
+  if (level === 'sha256sums') return null;
+  return { bodyKey: level === 'manifest' ? 'weightVerifyManifest' : 'weightVerifyNone' };
+}
 
 /**
  * 把「模型市场」和「我的模型」并成一份列表。
@@ -523,6 +560,8 @@ export {
   etaSeconds,
   storeGuideState,
   libraryStatusOf,
+  weightVerificationOf,
+  weightVerificationNotice,
   filterStoreCards,
   MODEL_STATES,
   mergeModels,

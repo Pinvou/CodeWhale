@@ -999,6 +999,9 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
       <ModelDetailDialog
         cardId={detailCardId}
+        // 只为了权重校验档位：那是卡片元数据，库记录（弹窗自己 fetch 的那份）里
+        // 没有这一列。找不到时传 null，弹窗会按最不安全那一档出提示。
+        card={mergedModels.find((m) => m.id === detailCardId) ?? null}
         copy={copy}
         theme={theme}
         // 接入前要拿它查重：同一个本地模型重复接入会在品悟的模型列表里多出

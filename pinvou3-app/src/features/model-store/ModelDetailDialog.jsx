@@ -20,6 +20,7 @@ import {
   TEXT_DANGER,
   TEXT_PRIMARY,
   TEXT_SECONDARY,
+  WeightVerifyNotice,
 } from './model-store-ui.jsx';
 
 const TITLE_ID = 'model-store-detail-title';
@@ -57,9 +58,14 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
 
 /**
  * 模型详情弹窗。
+ *
+ * `card` 是合并后的那张商店卡片，只为了拿权重校验档位。为什么不从 `detail` 里读:
+ * `fetchModelDetail` 回的是**库记录**(sqlite)，而档位是卡片元数据，库里没有这一
+ * 列。拿不到 card(商店列表还没拉回来、卡片已下架)时,`weightVerificationOf` 会
+ * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, savedModels }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [error, setError] = useState(null);
@@ -253,6 +259,10 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
             <MsRow label={copy.detailSize}>{formatBytes(record.size_bytes)}</MsRow>
             {record.endpoint_url ? <MsRow label={copy.detailEndpoint}>{record.endpoint_url}</MsRow> : null}
           </div>
+
+          {/* 紧跟在「这个模型是什么」那几行后面:权重完整性跟引擎、体积是同一类
+              事实,不是一条飘在页尾的免责声明。达标的卡这里什么都不长。 */}
+          <WeightVerifyNotice card={card} copy={copy} />
 
           <div className="mt-5">
             <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.runtimeTitle}</h3>

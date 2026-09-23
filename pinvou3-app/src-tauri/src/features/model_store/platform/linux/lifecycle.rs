@@ -1799,9 +1799,39 @@ impl ModelManager {
         // 这两行，告诉 LMM 这个模型对外怎么调用（给 API 网关转发用）。
         let mut endpoint_url = extract_marker(&output_lines, "LMM_ENDPOINT_URL=");
         let mut endpoint_model = extract_marker(&output_lines, "LMM_ENDPOINT_MODEL=");
+
+        // 标记行是「脚本 → 宿主」的约定通道，但**内容完全由卡片决定**，跟卡片正文
+        // 一样不可信。落库前必须断言它指向本机，因为这一行会被「在品悟里使用」原样
+        // 写成模型的 base_url：一张被篡改（或上游被投毒）的卡片只要打印一句
+        // `LMM_ENDPOINT_URL=http://<远程>/v1`，用户此后**每一句对话**都发去那台机器，
+        // 而界面上只会显示「已接入本地模型」。
+        //
+        // 更糟的是没有退路：清理侧（pinvou-model-link.js 的 findLinkedRows）只认回环
+        // base_url，非回环的那行卸载时根本匹配不到——卡片删了它还留着，且接入时会被
+        // 设为当前模型，所以留下的很可能正是默认模型。
+        //
+        // 非法就**丢掉标记、不打断启用**：服务这会儿已经真的起来了（上面 set_running
+        // 刚落库），为了一行标记把整个 enable 报成失败，用户只会去反复重启服务，一个
+        // 问题都解决不了。丢掉的代价是详情页少一行调用地址、「在品悟里使用」用不了，
+        // 都在安全的那一侧；而这句 warning 会进运行日志，排查时看得到。
+        if let Some(bad) = endpoint_url.take_if(|url| !endpoint_url_is_loopback(url.as_str())) {
+            on_progress(&format!(
+                "已忽略卡片报上来的对外地址（{bad}）：它不是本机回环地址。\
+                 模型商店只接受 127.0.0.0/8、localhost、::1；换成别的地址意味着\
+                 把对话内容发往那台机器，不会被接受。"
+            ));
+        }
+
         if endpoint_url.is_none() && rec.engine_name == "ollama" {
-            // 没有约定标记：走 Ollama 的默认约定（OpenAI 兼容接口，模型名就是
-            // ollama create 时用的名字）。
+            // 没有约定标记（或者标记刚被上面那条回环断言丢掉）：走 Ollama 的默认
+            // 约定（OpenAI 兼容接口，模型名就是 ollama create 时用的名字）。
+            //
+            // 这一支**刻意不受那条断言管**：`ollama_host` 来自本机 config.json
+            // （默认 127.0.0.1:11434，全仓没有任何界面/命令能改它），是部署这台
+            // 机器的人自己写的，跟「卡片脚本打印了什么」是两个信任级别——把运维
+            // 有意指向的地址也一并拒掉，属于拿安全检查去否决用户自己的配置。
+            // 真出现非回环的 ollama_host 时，接入侧（pinvou-model-link.js 的
+            // checkLinkable）仍然会拦住「在品悟里使用」，对话流量出不了本机。
             endpoint_url = Some(format!(
                 "{}/v1/chat/completions",
                 self.settings.ollama_host.trim_end_matches('/')
@@ -2415,27 +2445,113 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
     found
 }
 
+/// 卡片报上来的对外调用地址是不是指向**本机**。
+///
+/// 这把尺子在三个地方必须一模一样：入库（本函数）、接入（前端
+/// `pinvou-model-link.js` 的 `isLocalGatewayUrl`，「在品悟里使用」按钮）、
+/// 卸载清理（同文件的 `findLinkedRows`）。尺子不一致本身就是漏洞——宽的那一侧
+/// 放进来、窄的那一侧清不掉，正好凑出一行「存得进、接得上、删不掉」的死数据，
+/// 而它又恰好是会被设成当前模型的那一行。
+///
+/// 实现刻意跟 `features/assistant/platform/bridge.rs` 的 `base_url_uses_loopback`
+/// 逐字对齐（品悟判「这个端点算不算本机」用的就是它）。**没有直接 use 它**：
+/// model_store → assistant 会新增一条跨 feature 依赖边，而
+/// `scripts/architecture-guard.py` 盯着那张图（rust_cyclic_feature_dependencies），
+/// 何况那个函数是 assistant 的 `pub(crate)` 内部件。仓库既有做法就是「各自一份 +
+/// 注释互指」——`features/settings/model-catalog.js` 里 `baseUrlUsesLoopback` 开头
+/// 那句「对齐 Rust bridge.rs」是同一个写法。改这里请把那几处一起改。
+///
+/// 判据走 `IpAddr::is_loopback()` 而不是列举字面量：回环不止 `127.0.0.1`，整个
+/// `127.0.0.0/8` 都是（真机上 sglang/vllm 确实有绑到 `127.0.0.2` 的用法，只认
+/// 那一个字面量会把合法卡片一起拒掉）。反过来也别放宽到 RFC1918 私网段——
+/// 那已经是「另一台机器」，对话内容就出本机了。
+fn endpoint_url_is_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            // IPv6 的 host_str 带方括号（`[::1]`），不是裸的 `::1`，直接 parse 会失败；
+            // 末尾那个点是 FQDN 的合法写法（`localhost.`），不剥掉就绕过去了。
+            let host = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim_end_matches('.');
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
+}
+
 /// ollama 服务在不在。
 ///
 /// 只问「服务活着吗」，不问「哪个模型加载着」——后者会随空闲卸载来回变，
 /// 拿它纠正 running 会把正常的省显存行为报成故障（见 reconcile_running_status
 /// 里那段注释）。
 ///
-/// 超时跟同文件其余查询一致（5 秒）：拿不到就当**活着**，不是当死了。
-/// 这个函数的唯一用途是把 running 置成 false，而置错的代价是用户明明启用着
-/// 却被告知没启用；「问不出来」离「确定没在跑」还差得远，不该据此下结论。
+/// 超时跟同文件其余查询一致（5 秒）。失败分两类下结论，**不是一律当活着**：
+///
+/// - **确定性失败**（连接被拒 / 被重置）：那个端口后面根本没有在监听的进程，
+///   这台机器上的 ollama 模型一个都不可能在服务，判「死」。
+/// - **不确定失败**（超时、DNS 查不到、建不出客户端……）：判「活着」，不动
+///   running。置错的代价是用户明明启用着却被告知没启用，「问不出来」离「确定
+///   没在跑」还差得远。
+///
+/// 这个分界是补回来的，原来是 `Err(_) => true` 一刀切。一刀切的问题在于
+/// **连不上恰恰是「ollama 已经停了」的主场景**：服务停掉、机器重启过，探测拿到的
+/// 就是 ConnectionRefused，于是 `reconcile_running_status` 的 ollama 分支永远不
+/// 生效，库里的 running 永远停在 true。连带受害的是 service.rs 里「运行中不许
+/// 卸载」那条护栏——它读的就是这个 running，用户会被一直挡在「请先停用再卸载」
+/// 上，而那个服务早就没在跑了；点「停用」还得先把一个已经不存在的服务停一遍。
+///
+/// 判据本身抽成了 [`probe_failure_means_nothing_listening`]，可以直接喂错误链
+/// 单测，不用真发请求。
 fn ollama_alive(host: &str) -> bool {
     let url = format!("{}/api/tags", host.trim_end_matches('/'));
     let ok = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        // 这一探测必须直连。Cargo.toml 给 reqwest 开了 `system-proxy`，默认会读
+        // 系统代理设置，而 ollama_host 默认就是 127.0.0.1——本机地址走代理没有
+        // 任何意义，代理没起来时还会把「代理连不上」误报成「ollama 死了」，正好
+        // 撞在上面新加的确定性判据上。
+        .no_proxy()
         .build()
         .and_then(|c| c.get(&url).send())
         .map(|r| r.status().is_success());
     match ok {
         Ok(alive) => alive,
-        // 建不出客户端、连不上、超时：一律当活着，不动 running。
-        Err(_) => true,
+        Err(e) => !probe_failure_means_nothing_listening(&e),
     }
+}
+
+/// 一次 HTTP 探测的失败，是否**确定**说明「那个地址后面没有服务」。
+///
+/// 只认底层 IO 错误的 `ErrorKind`，不看错误文案：文案会随 reqwest/hyper 版本变，
+/// `ErrorKind` 是 std 的稳定契约。必须**沿着错误链往下挖**——reqwest 0.13 把
+/// `std::io::Error` 包在 hyper 的错误里，顶层那个 `reqwest::Error` 自己没有
+/// kind，只 downcast 顶层的话一条都命中不了（那等于悄悄退回成「永远返回活着」，
+/// 而且编译和类型都拦不住这种退化，所以单测里专门钉了一条多层嵌套的用例）。
+///
+/// 只收两种：
+/// - `ConnectionRefused`：内核直接回的 RST，那个端口上没有监听者，没有第二种解释。
+/// - `ConnectionReset`：覆盖中间隔着端口转发的情形（docker-proxy、systemd socket
+///   activation），转发层会先把 TCP 接下来、发现后端没人再断开，报上来的不是
+///   refused 而是 reset。
+///
+/// 刻意**不**收 `TimedOut` / `HostUnreachable` / DNS 失败：那些是「问不出来」，
+/// 网络抖一下、机器负载高一点都会出现，据此把 running 置 false 就是误纠。
+fn probe_failure_means_nothing_listening(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cursor = Some(err);
+    while let Some(current) = cursor {
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+            );
+        }
+        cursor = current.source();
+    }
+    false
 }
 
 fn docker_image_size(image: &str) -> u64 {
@@ -2530,6 +2646,9 @@ mod tests {
                 engine_name: "sglang".into(),
                 engine_version: None,
                 script_sha256: Default::default(),
+                // 这几个测试只看模型名/量化怎么被清洗，档位取什么都行；
+                // 用 Default 是为了跟「没声明 = 没校验」的缺省保持一致。
+                weight_verification: Default::default(),
             },
             source_repo_id: None,
             source_filename: None,
@@ -3418,5 +3537,171 @@ echo '权重就绪'
             rec.status, "deployed",
             "重下一遍不能把已部署的卡片退回「已下载」"
         );
+    }
+
+    /// 套一层的错误，专门用来验证「判据要沿错误链往下挖」。
+    ///
+    /// reqwest 0.13 的 `reqwest::Error` 自己没有 `ErrorKind`，真正的
+    /// `std::io::Error` 埋在 hyper 那一层下面。只 downcast 顶层的实现能通过
+    /// 「裸 io::Error」那几条用例，却在真机上一条都命中不了——等于悄悄退回成
+    /// 原来那个 `Err(_) => true`。所以嵌套这条用例必须单独钉。
+    #[derive(Debug)]
+    struct NestedError(Box<dyn std::error::Error + Send + Sync + 'static>);
+
+    impl std::fmt::Display for NestedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "nested: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for NestedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self.0.as_ref())
+        }
+    }
+
+    fn io_err(kind: std::io::ErrorKind) -> std::io::Error {
+        std::io::Error::new(kind, "boom")
+    }
+
+    #[test]
+    fn only_refused_or_reset_connections_prove_ollama_is_gone() {
+        use std::io::ErrorKind;
+
+        // 确定性失败：端口上没有监听者。这是「ollama 已经停了」的主场景，
+        // 判不出来的话 reconcile 的 ollama 分支等于不存在。
+        for kind in [ErrorKind::ConnectionRefused, ErrorKind::ConnectionReset] {
+            assert!(
+                probe_failure_means_nothing_listening(&io_err(kind)),
+                "{kind:?} 说明那个端口后面没有进程，必须判「服务不在」"
+            );
+        }
+
+        // 不确定失败：一律保守当活着。超时尤其不能判死——ollama 加载大模型时
+        // 整个进程就是会卡住不回，那时候它活得好好的。
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                !probe_failure_means_nothing_listening(&io_err(kind)),
+                "{kind:?} 只说明「问不出来」，据此把 running 置 false 就是误纠"
+            );
+        }
+
+        // 埋在错误链第二层/第三层，照样要挖出来——真机上的 reqwest 错误就长这样。
+        let one_deep = NestedError(Box::new(io_err(ErrorKind::ConnectionRefused)));
+        assert!(
+            probe_failure_means_nothing_listening(&one_deep),
+            "只 downcast 顶层的话，真机上的 reqwest 错误一条都命中不了"
+        );
+        let two_deep = NestedError(Box::new(NestedError(Box::new(io_err(
+            ErrorKind::ConnectionRefused,
+        )))));
+        assert!(probe_failure_means_nothing_listening(&two_deep));
+        assert!(!probe_failure_means_nothing_listening(&NestedError(
+            Box::new(io_err(ErrorKind::TimedOut))
+        )));
+
+        // 整条链里没有 io::Error（建不出客户端那类）：问不出来，当活着。
+        assert!(!probe_failure_means_nothing_listening(&AppError::new(
+            "建不出 HTTP 客户端"
+        )));
+    }
+
+    /// 端到端钉住「reqwest 的错误链里真的挖得到 io::Error」这件事。
+    ///
+    /// 上面那条纯函数用例证明不了这一点：它喂的是我们自己造的错误链，而真正会
+    /// 退化的地方恰恰是 reqwest/hyper 哪天换了包装方式。这里绑一个端口、拿到
+    /// 端口号之后立刻放掉，于是那个地址上确定没有监听者——不依赖外网，也不需要
+    /// 真的装了 ollama。
+    #[test]
+    fn ollama_alive_reports_dead_when_nothing_listens() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本机总能绑上");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert!(
+            !ollama_alive(&format!("http://127.0.0.1:{port}")),
+            "端口上没有任何进程，这正是「ollama 已经停了」的样子，必须判死"
+        );
+    }
+
+    /// 反向那一半：有人在监听并且好好回话时，绝不能判死。
+    ///
+    /// 只钉前一半的话，「无脑返回 false」也能让上面那条用例通过，而那正是最坏的
+    /// 退化——用户启用着的模型会被一路纠正成「未启用」。
+    #[test]
+    fn ollama_alive_reports_live_when_something_answers() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本机总能绑上");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            // 请求头读到哪算哪：我们只需要把连接接下来、回一个 200。
+            let mut buf = [0_u8; 1024];
+            let _ = socket.read(&mut buf);
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            let _ = socket.flush();
+        });
+
+        let alive = ollama_alive(&format!("http://127.0.0.1:{port}"));
+        let _ = server.join();
+        assert!(alive, "对面好端端地回了 200，不能判成服务不在");
+    }
+
+    /// 卡片打印的 `LMM_ENDPOINT_URL=` 内容完全不可信，而它会被原样写成品悟里
+    /// 那一行模型的 base_url。放进一个远程地址，用户此后每一句对话都发去那台
+    /// 机器，且卸载清理（findLinkedRows 只认回环）永远匹配不到那一行。
+    ///
+    /// 这把尺子跟前端 `pinvou-model-link.js` 的 `isLocalGatewayUrl` 必须一致，
+    /// 两边的用例也是照着对的。
+    #[test]
+    fn only_loopback_endpoints_are_accepted() {
+        for good in [
+            "http://127.0.0.1:30001/v1",
+            "http://127.0.0.1:30001/v1/chat/completions",
+            // 整个 127/8 都是回环，真机上 sglang/vllm 有绑到这些地址的用法。
+            "http://127.0.0.2:8000/v1",
+            "http://127.255.255.254:8000/v1",
+            "http://localhost:11434/v1",
+            // 大小写和 FQDN 末尾的点都是合法写法，不能靠它们绕过去。
+            "http://LocalHost:11434/v1",
+            "http://localhost.:11434/v1",
+            "http://[::1]:8000/v1",
+            "http://[0:0:0:0:0:0:0:1]:8000/v1",
+            "https://127.0.0.1:8443/v1",
+        ] {
+            assert!(endpoint_url_is_loopback(good), "{good} 是本机地址，该放行");
+        }
+
+        for bad in [
+            // 数据外泄面本体。
+            "http://203.0.113.7/v1",
+            "https://evil.example.com/v1",
+            // 私网/内网也不行：那已经是另一台机器，对话内容就出本机了。
+            "http://192.168.1.10:8000/v1",
+            "http://10.0.0.5:8000/v1",
+            // 子域名骗局：以 localhost / 127.0.0.1 开头，主机却是别人的。
+            "http://localhost.evil.example.com/v1",
+            "http://127.0.0.1.evil.example.com/v1",
+            // 0.0.0.0 不是回环（std 的 is_loopback 对它也是 false），它是
+            // 「监听所有网卡」，当成本机地址会把判据悄悄放宽一圈。
+            "http://0.0.0.0:8000/v1",
+            // IPv4-mapped IPv6 不是回环，别被里面那几个 127 骗了。
+            "http://[::ffff:127.0.0.1]:8000/v1",
+            // 压根不是 URL / 空串：解析不出主机就按不安全处理。
+            "not a url",
+            "",
+        ] {
+            assert!(
+                !endpoint_url_is_loopback(bad),
+                "{bad} 不指向本机，落库就等于把用户的对话导去别处"
+            );
+        }
     }
 }

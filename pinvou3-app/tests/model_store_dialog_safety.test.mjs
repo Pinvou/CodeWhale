@@ -21,6 +21,8 @@ const read = (...parts) => fs.readFileSync(path.join(ROOT, ...parts), 'utf8');
 
 const STORAGE_DIALOG = read('src', 'features', 'model-store', 'StorageSettingsDialog.jsx');
 const DETAIL_DIALOG = read('src', 'features', 'model-store', 'ModelDetailDialog.jsx');
+const CARD_DIALOG = read('src', 'features', 'model-store', 'StoreCardDialog.jsx');
+const STORE_UI = read('src', 'features', 'model-store', 'model-store-ui.jsx');
 const LANGS = ['zh', 'en', 'ja'];
 const DICTS = new Map(LANGS.map((lang) => [lang, read('src', 'shared', 'i18n', `${lang}.js`)]));
 
@@ -205,3 +207,74 @@ test('新增的两个文案键三语齐全', () => {
 // seed 脚本**（不在这两个 git 仓库里），仓库内置的那份只是测试商店用的旧副本，
 // 两者本来就不同步。拿仓库里的副本去推断线上行为，只会把文案又带回某一个方向的
 // 断言。上面那组「两边都不许断言」的约束不依赖任何一份脚本副本，才是稳的。
+
+
+// ——— 22. 权重校验档位：不达标的卡必须在详情页认得出来 ———
+//
+// 内置卡的权重完整性差着两个数量级：`qwen38-27b-sglang0519` 会拿卡片自带的
+// weights.sha256 把 23GB 逐个文件算一遍；`ornith15-bf16` / `qwen38-27b-nvfp4-mtp`
+// 的"下载完成"判据只是分片文件存不存在，revision 还是浮动的 main。在加这条黄条
+// 之前，两类卡在详情页长得一模一样——用户没有任何自我保护的依据。
+//
+// 判据落在纯逻辑里（weightVerificationOf / weightVerificationNotice，见
+// model_store_logic.test.mjs）；这里只钉"两个详情弹窗真的把它渲染出来了"，
+// 那是纯逻辑测不到、而且掉了也不会有人发现的一环。
+
+test('两个详情弹窗都渲染 WeightVerifyNotice', () => {
+  // 「我的模型」那个详情页：档位来自商店卡片，所以必须把 card 传进去。
+  // 传成 detail/record 的话永远是 undefined —— 于是每张卡都出黄条，等于没做。
+  assert.match(
+    DETAIL_DIALOG,
+    /<WeightVerifyNotice\s+card=\{card\}/,
+    'ModelDetailDialog 没把 card 传给 WeightVerifyNotice —— 库记录里没有档位这一列'
+  );
+  // 商店那个详情页更要紧：它是下载决策点。等下完几十 GB 再说就晚了。
+  assert.match(
+    CARD_DIALOG,
+    /<WeightVerifyNotice\s+card=\{card\}/,
+    'StoreCardDialog 不出这条提示的话，用户是在付出几十 GB 之后才知道的'
+  );
+});
+
+test('WeightVerifyNotice 对达标卡什么都不渲染，且用的是提示色不是危险色', () => {
+  assert.match(
+    STORE_UI,
+    /const notice = weightVerificationNotice\(card\);[\s\S]{0,40}?if \(!notice\) return null;/,
+    'WeightVerifyNotice 丢了"达标就不渲染"那一步 —— 每张卡都挂一条，黄条就成了背景噪音'
+  );
+  // 这是知情权不是恐吓：用户不该因为这条提示就不敢用几张完全正常的卡。
+  assert.match(STORE_UI, /#FEF7E0/, '黄条换掉了模块里既有的提示底色');
+  const start = STORE_UI.indexOf('function WeightVerifyNotice');
+  assert.ok(start >= 0, 'model-store-ui.jsx 里找不到 WeightVerifyNotice —— 改名了就把这条测试一起改');
+  assert.doesNotMatch(
+    STORE_UI.slice(start, STORE_UI.indexOf('function MsToast')),
+    /TEXT_DANGER|text-rose|#C5221F/,
+    '这条提示被做成了危险色。它说的是"这条下载链路上少了一道防线"，不是"这张卡有问题"'
+  );
+});
+
+test('黄条的三句话三语齐全，而且不止一句"未校验"', () => {
+  for (const key of ['weightVerifyTitle', 'weightVerifyNone', 'weightVerifyManifest', 'weightVerifyAdvice']) {
+    for (const lang of LANGS) {
+      assert.ok(
+        literal(DICTS.get(lang), key),
+        `${lang}.js 里缺 ${key} —— 缺的那一语会渲染成 undefined`
+      );
+    }
+  }
+  for (const lang of LANGS) {
+    const text = DICTS.get(lang);
+    // none 和 manifest 必须是两句不同的话：manifest 确实逐文件比对过摘要，
+    // 只是参照跟权重同源。把它也说成"没校验"是不实的。
+    assert.notEqual(
+      literal(text, 'weightVerifyNone'),
+      literal(text, 'weightVerifyManifest'),
+      `${lang}.js 把两档说成了同一句话`
+    );
+    // 只说"这意味着什么"不够，还得说"你可以怎么办"，否则留给用户的只有不安。
+    assert.ok(
+      literal(text, 'weightVerifyAdvice').length > 40,
+      `${lang}.js 的 weightVerifyAdvice 短得不像一条可操作的建议`
+    );
+  }
+});

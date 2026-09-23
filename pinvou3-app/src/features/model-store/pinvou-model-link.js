@@ -127,6 +127,19 @@ function isOpenAiChatEndpoint(url) {
  * （`{"loc":["body","prompt"],"msg":"Field required"}`），而品悟只会显示一句
  * 笼统的"当前模型服务不可用"——现象离原因很远，用户根本不会想到是模型类型不对。
  *
+ * 还必须确认这个地址**指向本机**。`endpoint_url` 的来源是卡片脚本打印的
+ * `LMM_ENDPOINT_URL=` 标记行——那是"脚本 → 宿主"的约定通道，**内容完全由卡片
+ * 决定**，跟卡片正文一样不可信。接入这一步会把它原样写成品悟那一行模型的
+ * `base_url`，所以一张被篡改（或上游被投毒）的卡片只要打印一句
+ * `LMM_ENDPOINT_URL=http://<远程>/v1`，用户此后**每一句对话**都发去那台机器，
+ * 而界面上只会显示"已接入本地模型"。而且没有退路：清理侧的 `findLinkedRows`
+ * 只匹配回环 `base_url`，那一行卸载时根本找不到，卡片删了它还留着——偏偏接入
+ * 时又会把它设为当前模型。
+ *
+ * Rust 侧（`lifecycle.rs` 的 `endpoint_url_is_loopback`）在**落库前**已经挡了
+ * 一道，这里是第二道：库里可能还存着老版本写进去的记录，而"接不接得进品悟"
+ * 才是真正决定对话流量去哪的那一步，断言必须落在这里。
+ *
  * 这个检查必须在**接入之前**做：接入那一步会顺手把它设为当前模型，等于把用户
  * 正在用的对话模型也一起换掉了。
  * @param {{record?: object}} detail 模型详情。
@@ -140,26 +153,57 @@ function checkLinkable(detail) {
   if (!isOpenAiChatEndpoint(record.endpoint_url)) {
     return { ok: false, reason: 'linkNotChatModel' };
   }
+  // 顺序有讲究：先答"是不是对话模型"再答"在不在本机"。两个都不满足时，
+  // 前者是用户真正该知道的那句（这张卡本来就用不了），后者更像是在说卡片坏了。
+  if (!isLocalGatewayUrl(record.endpoint_url)) {
+    return { ok: false, reason: 'linkNotLocalEndpoint' };
+  }
   return { ok: true };
 }
 
-/** 回环主机名的全部写法。IPv6 那个在这里是**去掉方括号后**的形态。 */
-const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1'];
-
 /**
- * base_url 是不是指向本机的 LMM 网关。
+ * base_url 是不是指向本机。
  *
- * 判回环地址而不是判具体端口：网关端口用户能在设置里改，改完之前接进去的那些行
- * 端口就对不上了，但它们**仍然**是指向本机 LMM 的行，卸载时同样要清掉。
+ * 判回环地址而不是判具体端口：端口由卡片脚本决定、换一版脚本就可能变，而它们
+ * **仍然**是指向本机模型的行，卸载时同样要清掉。
+ *
+ * 这把尺子在三个地方必须一模一样：入库（Rust `lifecycle.rs` 的
+ * `endpoint_url_is_loopback`）、接入（`checkLinkable`）、卸载清理
+ * （下面的 `findLinkedRows`）。尺子不一致本身就是漏洞——宽的那一侧放进来、
+ * 窄的那一侧清不掉，正好凑出一行"存得进、接得上、删不掉"的死数据，而它又
+ * 恰好是会被设成当前模型的那一行。改这里请把 Rust 那份一起改。
+ *
+ * 判据与 `features/settings/model-catalog.js` 的 `baseUrlUsesLoopback`、Rust
+ * `features/assistant/platform/bridge.rs` 的 `base_url_uses_loopback` 一致：
+ * `localhost` / `127.0.0.0/8` / `::1`。没有直接 import 前者是因为它没有导出，
+ * 而且那会给模型商店新添一条跨 feature 依赖；仓库既有做法就是"各自一份 +
+ * 注释互指"。
+ *
+ * 原来这里是 `['127.0.0.1', 'localhost', '::1']` 三个字面量。**整个
+ * 127.0.0.0/8 都是回环**，真机上 sglang/vllm 有绑到 `127.0.0.2` 的用法：
+ * 那种地址 Rust 侧放行、这里却判否，于是"接得进、清不掉"。
  * @param {unknown} baseUrl - 模型行的 base_url。
- * @returns {boolean} 是不是本机 LMM。
+ * @returns {boolean} 是不是本机地址。
  */
 function isLocalGatewayUrl(baseUrl) {
   if (typeof baseUrl !== 'string' || !baseUrl) return false;
   try {
     // IPv6 的 hostname 带方括号（`[::1]`），不是裸的 `::1`——直接比会漏掉。
-    const hostname = new URL(baseUrl).hostname.replaceAll(/^\[|\]$/g, '');
-    return LOOPBACK_HOSTS.includes(hostname);
+    const host = new URL(baseUrl).hostname
+      .replaceAll(/^\[|\]$/g, '')
+      // 末尾那个点是 FQDN 的合法写法（`localhost.`），不剥掉就能绕过去。
+      .replace(/\.$/, '');
+    if (host.toLowerCase() === 'localhost') return true;
+    // `new URL()` 会把 IPv6 归一成压缩形式，所以 `[0:0:0:0:0:0:0:1]` 到这里
+    // 已经是 `::1`。回环只有 `::1/128` 这一个地址，跟 Rust 的
+    // `IpAddr::is_loopback()` 对齐；`::ffff:127.x`（IPv4-mapped）不算。
+    if (host.includes(':')) return host === '::1';
+    // 同理，IPv4 的简写和十六进制写法（`127.1`、`0x7f.0.0.1`、`2130706433`）
+    // 也已经被 `new URL()` 归一成四段十进制，不必自己再解一遍。
+    const octets = host.split('.').map(Number);
+    return octets.length === 4
+      && octets.every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 255)
+      && octets[0] === 127;
   } catch {
     return false;
   }
@@ -186,6 +230,12 @@ function isLocalGatewayUrl(baseUrl) {
  *
  * 变长参数不只是图方便：它让**两侧只能用同一把尺子**。调用方少传一个名字，命中会
  * 变少但不会变错；若改成「清理侧自己拼条件」，两边迟早再次漂移。
+ *
+ * **非回环的那些行为什么仍然不清。** 现在入库（Rust `endpoint_url_is_loopback`）
+ * 和接入（`checkLinkable`）都断言了回环，所以往后不可能再有"我们写进去的、却指向
+ * 外面"的行——一行 base_url 在外面的记录，只可能是用户自己配的。而这个函数干的是
+ * **删除用户的模型配置**，删错不可撤销。为了一个构造不出来的场景去放宽匹配，换来
+ * 的是"同名模型被顺手删掉"这种真会发生的误伤，不划算。
  * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
  * @param {...(string|null|undefined)} names - 这个模型的全部标识（model_name / endpoint_model），空值自动忽略。
  * @returns {Array<object>} 需要清掉的行。

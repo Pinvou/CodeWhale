@@ -31,6 +31,56 @@ pub struct DeployProfile {
     pub description: Option<String>,
 }
 
+/// 这张卡把权重下下来之后，**凭什么说这份权重就是它声称的那份**。
+///
+/// 为什么要有这个字段：内置卡之间的完整性保障差着两个数量级，界面上却长得一模
+/// 一样。`ornith15-bf16` / `qwen38-27b-nvfp4-mtp` 的「下载完成」判据只是
+/// 「index.json 里列的分片文件都存在」——一个字节都没核对过，revision 还是浮动的
+/// `main`，默认经 hf-mirror；而 `qwen38-27b-sglang0519` 会拿卡片自带的
+/// `weights.sha256` 把 23GB 逐个文件算一遍。权重投毒的后果是输出被操纵，用户至少
+/// 有权知道自己站在哪一档上。
+///
+/// 三档的分界是**参照物从哪来**，不是「有没有跑过哈希」：
+///
+/// - `Sha256sums`：摘要清单**随卡片下发**（卡片本身走 https + 逐脚本哈希，见
+///   `StoreClient::get_json` 里那段理由），跟权重字节不同源。镜像站上的副本被换
+///   过时能当场发现。
+/// - `Manifest`：确实逐文件比对了摘要，但摘要是下载时从上游 Hub 自己要来的（或
+///   首次下载时锁进本地清单）。挡得住传输损坏和事后篡改，挡不住上游那一份本身
+///   就是坏的。deepseek 卡 `download_model.sh` 里那句自陈说的正是这件事：拿刚从
+///   这些文件算出来的哈希再去比对这些文件，永远相等。
+/// - `None`：只查文件存在 / 大小。
+///
+/// **缺省是 `None`**，理由见下面 `From<Option<String>>` 的注释。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", from = "Option<String>")]
+pub enum WeightVerification {
+    #[default]
+    None,
+    Manifest,
+    Sha256sums,
+}
+
+/// 只认这三个字面量，**其余一律落到 `None`**——字段缺失、`null`、以及未来某个后台
+/// 下发的、这个版本还不认识的新档位名。
+///
+/// 为什么不用 serde 的派生解析：派生出来的枚举遇到不认识的取值会**报错**，一张卡
+/// 的新字段能把整个商店列表打成「连不上」。而"解析失败就退回 `#[serde(default)]`"
+/// 这条路在别的字段上无所谓，在这个字段上等于「不认识的档位 = 不出警告」，正好把
+/// 警告关在最该出现的那一刻。
+///
+/// 所以这里是一条安全方向明确的单行道：不认识就是没校验，宁可多出一条黄条，
+/// 不可少出一条。
+impl From<Option<String>> for WeightVerification {
+    fn from(raw: Option<String>) -> Self {
+        match raw.as_deref() {
+            Some("sha256sums") => Self::Sha256sums,
+            Some("manifest") => Self::Manifest,
+            _ => Self::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreCardSummary {
     pub id: String,
@@ -55,6 +105,14 @@ pub struct StoreCardSummary {
     /// 老后台不下发时是空 map，比对逻辑会跳过。
     #[serde(default)]
     pub script_sha256: std::collections::BTreeMap<String, String>,
+    /// 权重完整性档位，界面据此对不达标的卡出提示条。
+    ///
+    /// 缺省 `None`（= 没校验）而不是「当作已校验」：老后台和忘了填这个字段的新卡
+    /// 都会被划进最不安全那一档，于是"漏填"的代价是多一条黄条，而不是**静默地**
+    /// 把一张没校验的卡摆成跟达标卡一模一样。反过来定缺省值的话，这个字段从上线
+    /// 第一天起就只对"记得填"的人生效，那等于没做。
+    #[serde(default)]
+    pub weight_verification: WeightVerification,
 }
 
 /// 卡片的部署拓扑。目前只区分单机和双机直连；多机以后再说，不预留半成品。
@@ -387,5 +445,50 @@ mod tests {
             assert_eq!(serde_json::to_string(&t).unwrap(), format!("\"{s}\""));
         }
         assert_eq!(DeployTopology::Dual.node_count(), 2);
+    }
+
+    /// 没声明 = 没校验。这条是整个功能的地基：如果字段缺失时按"已校验"处理，
+    /// 那么所有存量卡和将来忘了填的卡都会静默地不出警告，界面上的黄条就只对
+    /// "记得填的人"生效——那等于没做。
+    #[test]
+    fn cards_without_weight_verification_are_treated_as_unverified() {
+        let json = r#"{
+            "id": "old-card", "name": "老卡片", "engine_name": "vllm"
+        }"#;
+        let c: StoreCardSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(c.weight_verification, WeightVerification::None);
+        // null 跟"没有这个字段"是同一回事，别让它从旁边溜过去
+        let with_null = r#"{
+            "id": "old-card", "name": "老卡片", "engine_name": "vllm",
+            "weight_verification": null
+        }"#;
+        let c: StoreCardSummary = serde_json::from_str(with_null).unwrap();
+        assert_eq!(c.weight_verification, WeightVerification::None);
+    }
+
+    /// 认识的三档原样round-trip；**不认识的取值退到最不安全那一档，而不是报错**。
+    ///
+    /// 报错的后果比看上去严重：反序列化失败的是整张卡片，一张卡带了新档位名就能
+    /// 把整个商店列表打成"连不上"。
+    #[test]
+    fn weight_verification_round_trips_and_degrades_safely() {
+        for (s, t) in [
+            ("none", WeightVerification::None),
+            ("manifest", WeightVerification::Manifest),
+            ("sha256sums", WeightVerification::Sha256sums),
+        ] {
+            let parsed: WeightVerification = serde_json::from_str(&format!("\"{s}\"")).unwrap();
+            assert_eq!(parsed, t);
+            assert_eq!(serde_json::to_string(&t).unwrap(), format!("\"{s}\""));
+        }
+        for unknown in ["\"signed\"", "\"SHA256SUMS\"", "\"\""] {
+            let parsed: WeightVerification = serde_json::from_str(unknown).unwrap();
+            assert_eq!(
+                parsed,
+                WeightVerification::None,
+                "不认识的档位名 {unknown} 必须当成没校验：认不出来就说明这个版本\
+                 判断不了它的强度，不能替用户打包票"
+            );
+        }
     }
 }

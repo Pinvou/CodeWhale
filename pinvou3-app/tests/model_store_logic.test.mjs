@@ -18,6 +18,8 @@ import {
   libraryStatusOf,
   storeGuideState,
   missingFormFields,
+  weightVerificationNotice,
+  weightVerificationOf,
   parseProgressLine,
   parsePromptLine,
   progressPercent,
@@ -255,4 +257,55 @@ test('uninstallOptionsFor：只下载过、没部署过时只给「删除」', (
   assert.equal(uninstallOptionsFor({ status: 'downloaded' }), 'delete-only');
   assert.equal(uninstallOptionsFor({}), 'delete-only');
   assert.equal(uninstallOptionsFor(null), 'delete-only');
+});
+
+// ---------------------------------------------- 权重校验档位
+//
+// 这一档管的是「用户凭什么相信下下来的权重就是卡片声称的那份」。内置卡之间差着
+// 两个数量级（有的逐文件比官方 sha256，有的只查文件存不存在），而详情页在加这条
+// 黄条之前长得一模一样。
+//
+// 所以这里最要紧的不是三个取值分得清，而是**认不出来时落在哪一档**：落错方向的
+// 话，所有没声明的卡都会静默地被摆成"已校验"，这条提示从上线第一天起就只对
+// "记得填的人"生效。
+test('weightVerificationOf：认识的三档原样返回', () => {
+  assert.equal(weightVerificationOf({ weight_verification: 'sha256sums' }), 'sha256sums');
+  assert.equal(weightVerificationOf({ weight_verification: 'manifest' }), 'manifest');
+  assert.equal(weightVerificationOf({ weight_verification: 'none' }), 'none');
+});
+
+test('weightVerificationOf：字段缺失 / 认不出来一律按最不安全那一档', () => {
+  // 老后台不下发、卡片作者忘了填
+  assert.equal(weightVerificationOf({}), 'none');
+  assert.equal(weightVerificationOf({ weight_verification: null }), 'none');
+  // 商店列表还没拉回来、或这张卡已经下架
+  assert.equal(weightVerificationOf(null), 'none');
+  assert.equal(weightVerificationOf(undefined), 'none');
+  // 将来某个版本新增的档位名，这个版本判断不了它的强度，不能替用户打包票
+  assert.equal(weightVerificationOf({ weight_verification: 'signed' }), 'none');
+  // 大小写不算数：Rust 侧下发的就是 snake_case 小写，别在这儿自作主张放宽
+  assert.equal(weightVerificationOf({ weight_verification: 'SHA256SUMS' }), 'none');
+});
+
+test('weightVerificationNotice：达标卡不出黄条，不达标的两档各有各的说法', () => {
+  assert.equal(weightVerificationNotice({ weight_verification: 'sha256sums' }), null);
+  assert.deepEqual(
+    weightVerificationNotice({ weight_verification: 'manifest' }),
+    { bodyKey: 'weightVerifyManifest' }
+  );
+  assert.deepEqual(
+    weightVerificationNotice({ weight_verification: 'none' }),
+    { bodyKey: 'weightVerifyNone' }
+  );
+  // manifest 不能跟 none 合并成一句「未校验」：它确实逐文件比对过摘要，只是参照
+  // 跟权重同源。说成没校验是不实的，用户照着那句话重下一遍也解决不了任何问题。
+  assert.notDeepEqual(
+    weightVerificationNotice({ weight_verification: 'manifest' }),
+    weightVerificationNotice({ weight_verification: 'none' })
+  );
+});
+
+test('weightVerificationNotice：没声明的卡出黄条，而且出的是最狠那一句', () => {
+  assert.deepEqual(weightVerificationNotice({}), { bodyKey: 'weightVerifyNone' });
+  assert.deepEqual(weightVerificationNotice(null), { bodyKey: 'weightVerifyNone' });
 });

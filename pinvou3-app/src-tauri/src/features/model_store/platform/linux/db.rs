@@ -963,6 +963,37 @@ pub fn list_api_keys_for_card(card_id: &str) -> rusqlite::Result<Vec<ApiKeyRecor
     Ok(rows)
 }
 
+/// 按 id 吊销一把 key。
+///
+/// # 目前零调用点
+///
+/// 没有 service 包装、没有 `#[tauri::command]`、没有按钮：单独吊销这条能力
+/// **在界面上还不存在**，唯一能让存量 key 失效的动作是把整张卡片移出模型库
+/// （`delete_store_model` 在同一个事务里连 `api_keys` 一起删）。「仅卸载」
+/// 走的是 `mark_uninstalled`，key 原样留着照样能用。
+///
+/// 这个缺口曾经**是个真 bug，而且是文案层面的**：详情页 `keysHint` 三语都写着
+/// 「可以按调用方分发、单独吊销」，用户照着找吊销入口找不到，只能以为是自己没
+/// 看见——实际上他发出去的 key 永远收不回来。已经把三语文案改成如实描述
+/// （见 `src/shared/i18n/{zh,en,ja}.js` 的 `keysHint`）。**接线前不要把那句
+/// 文案改回去**：能力和承诺必须一起动。
+///
+/// # 接线之后才能解决的一个更窄的洞
+///
+/// `list_api_keys_for_card` 会把 `card_id IS NULL` 的**老全局 key**（card_id
+/// 改造之前生成的）一并列进详情页，可全仓两条 `DELETE FROM api_keys` 都够不着
+/// 它们：`delete_store_model` 删的是 `WHERE card_id = ?1`，而 SQL 里
+/// `NULL = 'xxx'` 恒不成立。也就是说这些 key 用户看得见、能复制、能拿去调用，
+/// 却连"把卡片整张删掉"都清不掉——本函数是它们唯一可能的出口。
+///
+/// 留着不删，是因为接线只差「service 包装 + 命令 + 详情页一个按钮（带二次确认，
+/// 删除不可逆）」这三步，而那三步动的是别人正在改的文件，不该塞进这个 PR。
+/// 下面的单测锁住它的语义——接上去的那天不用再从头验一遍「会不会把别的 key
+/// 一起删掉」。
+///
+/// 删干净了吗：干净。网关 key 只有 sqlite 这一份，不进密钥环
+/// （`config.rs` 那套 `codewhale_secrets` 存的是 HF token，跟这里无关），
+/// 所以删掉这一行就是删干净了，不会留下"库里没了、别处还认"的半吊子状态。
 pub fn delete_api_key(key_id: &str) -> rusqlite::Result<()> {
     let conn = connect()?;
     conn.execute("DELETE FROM api_keys WHERE id = ?1", params![key_id])?;
@@ -1304,6 +1335,54 @@ mod tests {
         delete_store_model("card-1").unwrap();
         assert!(get_store_model("card-1").unwrap().is_none());
         assert!(list_api_keys_for_card("card-1").unwrap().is_empty());
+    }
+
+    /// `delete_api_key` 还没接到命令和按钮上（见它自己的说明），所以这条测试是
+    /// 它目前**唯一**的使用者。锁的是「按 id 精确吊销」这个语义：
+    ///
+    /// - 只有点名的那一把没了，同一张卡下的兄弟 key 必须毫发无损。少写一次
+    ///   `WHERE id = ?1`（或者哪天有人顺手改成按 card_id 删）就是把用户发给
+    ///   所有调用方的 key 一次性全废掉，而这是不可逆的——发出去的那些再也收不回来。
+    /// - 吊销后 `find_api_key` 必须立刻打不中：网关认的是这条查询，库里没了但
+    ///   还能认证，等于吊销只是做做样子。
+    ///
+    /// 删不存在的 id 不算错误：调用方拿到的是界面上一份可能已经过期的列表，
+    /// 两个窗口各点一次删除时第二次必然落空。那时候应该什么都不发生，而不是
+    /// 弹一句用户看不懂的失败。
+    #[test]
+    fn delete_api_key_revokes_only_the_named_key() {
+        let _ctx = setup_temp_db();
+
+        let doomed = add_api_key("card-1", Some("给 A 应用的")).unwrap();
+        let survivor = add_api_key("card-1", Some("给 B 应用的")).unwrap();
+        // 另一张卡：别让"按 card_id 误删"这种写法从旁边溜过去。
+        let other_card = add_api_key("card-2", None).unwrap();
+
+        delete_api_key(&doomed.id).unwrap();
+
+        assert!(
+            find_api_key(&doomed.key_value).unwrap().is_none(),
+            "被吊销的 key 仍然能被网关认出来，等于没吊销"
+        );
+        assert!(
+            find_api_key(&survivor.key_value).unwrap().is_some(),
+            "同一张卡下的另一把 key 被连累删掉了"
+        );
+        assert!(
+            find_api_key(&other_card.key_value).unwrap().is_some(),
+            "别的卡片的 key 被连累删掉了"
+        );
+        let left: Vec<String> = list_api_keys_for_card("card-1")
+            .unwrap()
+            .into_iter()
+            .map(|k| k.id)
+            .collect();
+        assert_eq!(left, vec![survivor.id.clone()]);
+
+        // 幂等：重复吊销同一把，以及吊销一个压根不存在的 id，都不该报错。
+        delete_api_key(&doomed.id).unwrap();
+        delete_api_key("没有这把钥匙").unwrap();
+        assert_eq!(list_api_keys_for_card("card-1").unwrap().len(), 1);
     }
 
     #[test]

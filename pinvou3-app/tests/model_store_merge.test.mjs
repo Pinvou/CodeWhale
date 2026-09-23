@@ -10,6 +10,7 @@ import {
   filterModels,
   mergeModels,
   sortModels,
+  weightVerificationOf,
 } from '../src/features/model-store/model-store-logic.js';
 
 /** 商店卡片（未下载）：字段名是 id/name。 */
@@ -70,6 +71,24 @@ test('库记录缺的字段用商店那份补，已有的不覆盖', () => {
   const qwen = merged[0];
   assert.equal(qwen.description, '基于 SGLang v0.5.19 的单机部署包', '缺的要补');
   assert.equal(qwen.size_bytes, 111, '库记录已有的不许被商店覆盖');
+});
+
+test('权重校验档位从商店卡片补进已下载模型，商店拉不到时退回"没校验"', () => {
+  // 档位只存在于商店卡片上，库记录（sqlite）里没有这一列。已下载的模型要出这条
+  // 黄条，全靠这次合并把它补进来——漏了的话，"我的模型"里所有卡都会一直显示
+  // 未校验，反过来把真正该看的那两张淹掉。
+  const merged = mergeModels(
+    [{ ...STORE_QWEN, weight_verification: 'sha256sums' }],
+    { models: [LIB_QWEN_RUNNING] }
+  );
+  assert.equal(merged[0].weight_verification, 'sha256sums');
+  assert.equal(weightVerificationOf(merged[0]), 'sha256sums', '达标卡不该出黄条');
+
+  // 商店连不上 / 这张卡已下架：补不上就是补不上，此时必须落到最不安全那一档。
+  // 宁可对一张达标卡多说一句，也不能对一张没校验的卡一声不吭。
+  const offline = mergeModels([], { models: [LIB_QWEN_RUNNING] });
+  assert.equal(offline[0].weight_verification, undefined);
+  assert.equal(weightVerificationOf(offline[0]), 'none');
 });
 
 test('只在商店里的是 available，record 为 null', () => {

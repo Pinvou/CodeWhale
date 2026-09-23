@@ -377,6 +377,13 @@ export const dictZh = {
           dualNotice:'这是双机部署方案，需要两台设备用 QSFP 直连线接起来。下载和部署发生在哪台设备，哪台就是主机，另一台是从机。',
           dualNoticeDownload:'下载只需要当前这一台设备，不用接直连线、也不用从机在场。',
           dualNoticeDeploy:'点「部署」时会问一次从机的管理 IP、用户名和密码。之后配网、推包、配对、分发权重、启动全部自动完成，中途不需要再操作。',
+          // 权重校验档位的黄条（WeightVerifyNotice）。三句话各管一件事：这是什么、
+          // 意味着什么、你可以怎么办。只写一句「未校验」的话，用户既不知道风险在
+          // 哪儿，也不知道该做什么，剩下的只有不安。
+          weightVerifyTitle:'权重完整性：没有逐文件校验',
+          weightVerifyNone:'这张卡判断「下载完成」的依据只是文件都在，没有拿官方摘要逐个比对过，模型版本也没有锁死。如果下载源上的那份副本被换过，应用这边发现不了。',
+          weightVerifyManifest:'这张卡下载时逐个文件比对过摘要，但比对用的摘要跟权重来自同一处。它能发现传输损坏和事后被改动，发现不了来源那一份本身就是坏的。',
+          weightVerifyAdvice:'这不代表这张卡有问题——内置卡都由研究团队提供。想更稳妥：在可信网络下下载，不要在设置里填来路不明的镜像地址；权重如果是从别人的 U 盘拷来的，建议重新下载一次。',
           libraryEmpty:'还没有下载任何模型，去模型市场看看吧',
           statusRunning:'运行中', statusDeployed:'已部署', statusPending:'待部署',
           deploy:'部署', deploying:'部署中…', redeploy:'重新部署',
@@ -417,7 +424,15 @@ export const dictZh = {
           accessTitle:'供 Agent 应用接入', accessModelId:'模型 ID', accessApiUrl:'API 地址', accessApiKey:'API Key',
           accessGatewayOff:'API 网关未启用，启动后这里才会给出局域网可用的地址。',
           startGateway:'启动网关', gatewayStarted:'API 网关已启动',
-          keysEmpty:'还没有 Key，点「生成新的 Key」', keysHint:'可以生成多把 Key 按调用方分发、单独吊销。',
+          // 这句只许描述**此刻真能做到的事**。原文写的是「可以…单独吊销」，但这一栏
+          // 底下只有「生成新的 Key」一个按钮：db 层的 delete_api_key 全仓零调用点，
+          // 既没有命令也没有按钮（见 features/model_store/platform/linux/db.rs 那段说明）。
+          // 照着原文去找吊销入口的用户找不到，只会以为是自己没看见——而真相是他发出去的
+          // Key 永远收不回来。唯一能让存量 Key 失效的动作是把卡片整张移出模型库
+          // （uninstallPurge 或 forceRemoveEntry，两条都走 delete_store_model，
+          // 它在同一个事务里连 api_keys 一起删）；uninstallKeep 那条只是 mark_uninstalled，
+          // Key 原样留着照样能用。等 delete_api_key 接上命令和按钮，这句再改回去。
+          keysEmpty:'还没有 Key，点「生成新的 Key」', keysHint:'可以生成多把 Key 按调用方分发。暂不支持单独吊销：只有把这张卡片移出模型库（「删除（含权重）」或「强制从列表移除」）时，它名下的 Key 才会一并作废。',
           addKey:'生成新的 Key', keyCreated:'已生成新的 API Key',
           copy:'复制', copied:'已复制到剪贴板', copyFailed:'复制失败，请手动选中复制',
           notRunningHint:'这个模型当前未启用，Agent 现在调用会收到「模型未启用」。',
@@ -433,6 +448,7 @@ export const dictZh = {
           linkNoRecord: '还没有这个模型的信息，请稍后重试',
           linkNotRunning: '请先启用这个模型，启用后才能接进品悟',
           linkNotChatModel: '这个模型不是对话模型（它对外的不是 OpenAI 对话接口），不能作为品悟的对话模型使用；它仍可由外部程序按自己的接口调用',
+          linkNotLocalEndpoint: '这个模型报上来的调用地址不在本机，不能接入：接入后你的每一句对话都会被发往那台机器。请检查这张卡片的来源是否可信',
           linkNoModelName: '这个模型缺少模型名，无法接入',
           linkNoKey: '没能拿到 API Key',
           linkBridgeMissing: '当前环境不支持写入模型配置',

@@ -2,9 +2,20 @@
 //
 // 双机那段刻意写得长:它是「这张卡能不能装」的前提,用户在点下载之前就必须知道
 // 需要第二台设备和一根直连线,事后在部署阶段才发现等于白下几十 GB。
+//
+// 权重校验档位那条黄条同理,而且**这里比「我的模型」那个详情页更要紧**:它是下载
+// 决策点。等下完几十 GB 再告诉用户"这份权重没跟官方摘要比对过",他已经付出了代价。
 import { Download } from '../../components/icons.jsx';
 import { formatBytes } from './model-store-logic.js';
-import { MsButton, MsDialog, MsDialogTitle, MsPill, MsRow, TEXT_SECONDARY } from './model-store-ui.jsx';
+import {
+  MsButton,
+  MsDialog,
+  MsDialogTitle,
+  MsPill,
+  MsRow,
+  TEXT_SECONDARY,
+  WeightVerifyNotice,
+} from './model-store-ui.jsx';
 
 const TITLE_ID = 'model-store-card-title';
 
@@ -51,6 +62,8 @@ function StoreCardDialog({ card, copy, theme, onClose, onDownload, downloaded, d
               <p>{copy.dualNoticeDeploy}</p>
             </div>
           ) : null}
+
+          <WeightVerifyNotice card={card} copy={copy} />
 
           {card.description ? (
             <p className={`mt-4 whitespace-pre-wrap text-[12px] leading-5 ${TEXT_SECONDARY}`}>{card.description}</p>

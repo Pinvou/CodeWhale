@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use super::store_client::{DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary};
+use super::store_client::{
+    DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary, WeightVerification,
+};
 
 macro_rules! card_scripts {
     ($dir:literal) => {{
@@ -287,6 +289,13 @@ pub fn test_cards() -> Vec<TestCard> {
                 quantization: Some("NVFP4".into()),
                 engine_name: "sglang".into(),
                 engine_version: Some("v0.5.16-cu130".into()),
+                // 权重校验：**没有**。download_model.sh 的 _qwen_model_complete 只查
+                // index.json 里列的分片文件存不存在（download_model.sh:40-56），一个字节
+                // 都不核对；install_engine.sh 写进 .env 的是 HF_REVISION=main（:375、:456），
+                // 版本还是浮动的；下载走设置里的 HF_ENDPOINT（默认 hf-mirror）。
+                // 三件事叠起来 = 镜像站上的副本被换过，这条链路上没有任何一环会发现。
+                // 补 weights.sha256 并锁死 revision 之后，把这里改成 Sha256sums。
+                weight_verification: WeightVerification::None,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -329,6 +338,12 @@ pub fn test_cards() -> Vec<TestCard> {
                 quantization: Some("NVFP4".into()),
                 engine_name: "sglang".into(),
                 engine_version: Some("v0.5.19".into()),
+                // 权重校验：卡片自带 weights.sha256（随卡片下发，跟权重不同源），
+                // 下完逐个文件 sha256sum -c（download_model.sh:206-214，清单路径见
+                // common.sh:79）。清单只列了三个走 LFS 的大文件，但那是 23,437,581,813
+                // 字节 / 99.97% 的体量；剩下十个几 KB 的配置文件官方只给 git blob sha1，
+                // 由 lmm_model_complete 查存在（common.sh:85-99）。
+                weight_verification: WeightVerification::Sha256sums,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -364,6 +379,10 @@ pub fn test_cards() -> Vec<TestCard> {
                 quantization: Some("BF16".into()),
                 engine_name: "vllm".into(),
                 engine_version: Some("v0.27.1-aarch64".into()),
+                // 权重校验：**没有**。跟 qwen38-27b-nvfp4-mtp 是同一份写法——
+                // _ornith15_model_complete 只查分片文件存在（download_model.sh:34-50），
+                // install_engine.sh:116 是 HF_REVISION=main，下载经设置里的镜像站。
+                weight_verification: WeightVerification::None,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -399,6 +418,14 @@ pub fn test_cards() -> Vec<TestCard> {
                 quantization: Some("NVFP4".into()),
                 engine_name: "vllm".into(),
                 engine_version: Some("nightly-8a728663".into()),
+                // 权重校验：逐文件比对官方摘要，但**参照来自上游自己**。
+                // model_assets.py 首次下载时向 HF API 要一份文件清单（LFS 文件用
+                // sha256、其余用 git blob sha1），连同解析出来的 commit SHA 一起锁进
+                // model-source.json，之后每次都按它校验、对不上就重下
+                // （model_assets.py:106-133；锁文件格式校验在 :35-42）。
+                // revision 锁死、且固定走官方 Hub 不经镜像（download_model.sh:20-26），
+                // 但清单和权重同源，上游那一份本身是坏的时候发现不了。
+                weight_verification: WeightVerification::Manifest,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -421,6 +448,14 @@ pub fn test_cards() -> Vec<TestCard> {
                 quantization: Some("NVFP4".into()),
                 engine_name: "vllm".into(),
                 engine_version: Some("dspark-0.1.1".into()),
+                // 权重校验：联网下载这条路是 Manifest——REVISION 是写死的 commit
+                // （package/controller.py:26），snapshot_download 过程中按官方摘要逐文件
+                // 校验过。**但从 U 盘拷权重那条路更弱**，而且卡片脚本自己把话说明白了
+                // （download_model.sh:122-136）：没有随附 model-manifest.json 时，只能拿
+                // 现有文件算出一份清单，「它记录的是当前磁盘上是什么，不构成校验」。
+                // 一张卡只能声明一个档位，按两条路里弱的那条算，所以是 Manifest 不是
+                // Sha256sums。
+                weight_verification: WeightVerification::Manifest,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -461,6 +496,13 @@ pub fn test_cards() -> Vec<TestCard> {
                 quantization: Some("INT8 ConvRot（主模型）+ NVFP4 AWQ（文本编码器）".into()),
                 engine_name: "comfyui".into(),
                 engine_version: Some("0.35.0+torch2.13.0-cu130-aarch64".into()),
+                // 权重校验：厂商包自带 package/weights.sha256，六个文件一个不漏
+                // （主模型 / 文本编码器 / 两个 VAE / Turbo LoRA / 超分模型），下完
+                // sha256sum -c，对不上的**直接删掉**再非 0 退出
+                // （package/download_model.sh:25、:66-75）；deploy 之前还会再校一遍
+                // （package/deploy.sh:15）。三个来源仓库里两个锁了 commit SHA，
+                // 第三个（RealESRGAN）是 main，但它的内容同样被清单钉死了。
+                weight_verification: WeightVerification::Sha256sums,
                 // 测试商店的哈希在 get_card 时按脚本正文现算，列表阶段留空
                 script_sha256: Default::default(),
             },
@@ -719,6 +761,86 @@ mod tests {
                     script_type
                 );
             }
+        }
+    }
+
+    /// 声明的权重校验档位必须跟卡片里**真实存在的东西**对得上。
+    ///
+    /// 这条不是把上面那张表再抄一遍（那种测试只会在改表时一起被改掉）。它查的是
+    /// 两件可证伪的事：
+    ///   - 标了 `Sha256sums` 的卡，卡片自己得真的带着一份摘要清单，而且真的有一步
+    ///     去 `sha256sum -c` 它。光有清单没人校验，跟没有清单是一回事。
+    ///   - 标了 `None` 的卡，卡片里**不该**躺着一份没人用的清单——那种情况要么是
+    ///     档位标低了，要么是校验步骤掉了，两种都得有人看一眼。
+    #[test]
+    fn declared_weight_verification_matches_what_the_card_actually_ships() {
+        for card in test_cards() {
+            let id = &card.summary.id;
+            let manifest = card
+                .assets
+                .keys()
+                .find(|k| k.ends_with("weights.sha256"))
+                .copied();
+            // 校验这个动作可能写在我们的入口脚本里（sglang0519），也可能写在厂商
+            // 原件里由入口脚本转调（minimax），所以两边一起找。
+            let verifies = card
+                .scripts
+                .values()
+                .chain(card.assets.values())
+                .any(|body| body.contains("sha256sum -c"));
+            match card.summary.weight_verification {
+                WeightVerification::Sha256sums => {
+                    let path = manifest.unwrap_or_else(|| {
+                        panic!(
+                            "{id} 标了 sha256sums，但卡片里没有 weights.sha256。\
+                             清单必须随卡片下发才算这一档——从上游现要的摘要跟权重同源，\
+                             那是 manifest 档。"
+                        )
+                    });
+                    assert!(
+                        verifies,
+                        "{id} 带着 {path}，却没有任何一处 `sha256sum -c` 去用它。\
+                         放着不校验的清单等于没有清单，档位该降到 manifest 或 none。"
+                    );
+                }
+                WeightVerification::Manifest | WeightVerification::None => {
+                    assert!(
+                        manifest.is_none(),
+                        "{id} 里躺着一份 {} 却没声明 sha256sums。要么是档位标低了，\
+                         要么是校验那一步掉了——两种都得有人去看一眼，不能默认放过。",
+                        manifest.unwrap_or("weights.sha256")
+                    );
+                }
+            }
+        }
+    }
+
+    /// 这两张卡的「下载完成」判据只是文件存在性，必须一直是最不安全那一档。
+    ///
+    /// 单独钉出来是因为它们是评审点名的那两张，而**把档位从 `None` 改上去是一行
+    /// 的事**——改完这条测试不会红（上面那条只管"有清单就得校验"，管不了
+    /// "没清单却吹自己校验了"）。所以留一道专门的闸：真补上了 weights.sha256 或
+    /// 锁死了 revision，来这里连同注释一起改，别只改卡片那一行。
+    #[test]
+    fn existence_only_cards_stay_declared_as_unverified() {
+        for id in ["ornith15-bf16", "qwen38-27b-nvfp4-mtp"] {
+            let cards = test_cards();
+            let card = cards
+                .iter()
+                .find(|c| c.summary.id == id)
+                .unwrap_or_else(|| panic!("测试商店里没有 {id}"));
+            assert_eq!(
+                card.summary.weight_verification,
+                WeightVerification::None,
+                "{id} 的 download_model.sh 只查分片文件存不存在，revision 还是浮动的 \
+                 main，下载默认经镜像站——在这三件事里任何一件被修掉之前，它就是 none"
+            );
+            let body = script_content(card, "download_model").expect("download_model");
+            assert!(
+                !body.contains("sha256sum"),
+                "{id} 的 download_model.sh 里出现了 sha256sum：如果是真的补上了逐文件\
+                 校验，请把档位一并改掉，并修正这条测试"
+            );
         }
     }
 }

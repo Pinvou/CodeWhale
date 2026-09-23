@@ -179,3 +179,71 @@ test('isLocalGatewayUrl：认回环地址，不认局域网地址', () => {
     assert.equal(isLocalGatewayUrl(no), false, String(no));
   }
 });
+
+test('isLocalGatewayUrl：整个 127/8 都算回环，但别放宽一分', () => {
+  // 原来这里只认 '127.0.0.1' 一个字面量，而回环是整个 127.0.0.0/8——真机上
+  // sglang/vllm 有绑到 127.0.0.2 的用法。Rust 侧（endpoint_url_is_loopback，
+  // 走 IpAddr::is_loopback）放行那种地址，这里却判否，于是"接得进、清不掉"：
+  // 两处用的不是同一把尺子，中间那道缝就是一行删不掉的死数据。
+  for (const ok of [
+    'http://127.0.0.2:8000/v1',
+    'http://127.255.255.254:8000/v1',
+    // 大小写、FQDN 末尾的点：都是合法写法，不能靠它们绕过去
+    'http://LocalHost:11434/v1',
+    'http://localhost.:11434/v1',
+    // IPv6 的展开写法：new URL() 会归一成 ::1
+    'http://[0:0:0:0:0:0:0:1]:8000/v1',
+    // IPv4 的简写/十六进制/整数写法：同样由 new URL() 归一成四段十进制
+    'http://127.1:8000/v1',
+    'http://0x7f.0.0.1:8000/v1',
+  ]) {
+    assert.equal(isLocalGatewayUrl(ok), true, ok);
+  }
+  for (const no of [
+    // 0.0.0.0 是"监听所有网卡"，不是回环（Rust 的 is_loopback 对它也是 false）。
+    // 当成本机会把判据悄悄放宽一圈。
+    'http://0.0.0.0:8000/v1',
+    // IPv4-mapped IPv6 不是回环，别被里面那几个 127 骗了
+    'http://[::ffff:127.0.0.1]:8000/v1',
+    // 子域名骗局：以 localhost / 127.0.0.1 开头，主机却是别人的
+    'http://localhost.evil.example.com/v1',
+    'http://127.0.0.1.evil.example.com/v1',
+    // 私网段已经是"另一台机器"，对话内容就出本机了
+    'http://10.0.0.5:8000/v1',
+    'http://172.16.0.5:8000/v1',
+  ]) {
+    assert.equal(isLocalGatewayUrl(no), false, String(no));
+  }
+});
+
+test('endpoint_url 不指向本机的模型不许接入', () => {
+  // endpoint_url 的来源是卡片脚本打印的 LMM_ENDPOINT_URL= 标记行，内容**完全
+  // 由卡片决定**。接入会把它原样写成品悟那行模型的 base_url，所以一张被篡改的
+  // 卡片只要打印一句远程地址，用户此后每一句对话都发去那台机器，而界面上只
+  // 显示"已接入本地模型"。清理侧（findLinkedRows）只认回环，那行还永远删不掉。
+  //
+  // Rust 侧落库前已经挡了一道，这里是第二道：库里可能还存着老版本写进去的记录。
+  const remote = {
+    running: true,
+    model_name: 'qwen38-27b-nvfp4',
+    endpoint_url: 'https://evil.example.com/v1',
+  };
+  assert.equal(checkLinkable({ record: remote }).reason, 'linkNotLocalEndpoint');
+  assert.equal(checkLinkable({ record: remote }).ok, false);
+  // 局域网地址同样不行：那已经是另一台机器
+  assert.equal(
+    checkLinkable({ record: { ...remote, endpoint_url: 'http://192.0.2.10:8090/v1' } }).reason,
+    'linkNotLocalEndpoint'
+  );
+  // 本机的照常放行，别把这道闸修成"谁都进不来"
+  assert.equal(
+    checkLinkable({ record: { ...remote, endpoint_url: 'http://127.0.0.2:30001/v1' } }).ok,
+    true
+  );
+  // 两个条件都不满足时报"不是对话模型"：那才是用户真正该知道的那句
+  //（这张卡本来就用不了），说成地址不对更像是在说卡片坏了。
+  assert.equal(
+    checkLinkable({ record: { ...remote, endpoint_url: 'https://evil.example.com/generate' } }).reason,
+    'linkNotChatModel'
+  );
+});
