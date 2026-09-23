@@ -493,21 +493,69 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
     // One prominent notice per workspace process lifetime — silent disable is
     // the §2.7 failure mode. Opt-in remains `[snapshots] max_workspace_gb`
     // (raise the cap or set 0 to disable the size gate).
-    let hint = if size_gated {
-        "  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in."
-    } else if message.contains("the filesystem appears wedged") {
-        // Bounded pre-git probes (workspace path resolution, first-init
-        // size walk): no git ran yet, so there is no index.lock to wait out.
-        "  the workspace filesystem did not answer in time (wedged NFS/FUSE mount?); snapshots retry once it responds."
-    } else {
-        "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
-    };
+    let hint = snapshot_failure_hint(&message, size_gated);
     eprintln!(
         "warning: workspace snapshots/undo are failing for {}
   {message}
 {hint}",
         workspace.display()
     );
+}
+
+/// Route the failure to the remedy that actually applies. The probes are
+/// keyed on producer message text from `snapshot::repo` (the wedge marker in
+/// `run_bounded_fs` errors, the `git {sub} timed out` shape from
+/// `run_bounded_git`); `snapshot_failure_hint_tests` pins that coupling.
+fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
+    if size_gated {
+        "  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in."
+    } else if message.contains("the filesystem appears wedged") {
+        // Bounded pre-git probes (workspace path resolution, first-init
+        // size walk): no git ran yet, so there is no index.lock to wait out.
+        "  the workspace filesystem did not answer in time (wedged NFS/FUSE mount?); snapshots retry once it responds."
+    } else if message.contains("git init timed out") {
+        // A timed-out init leaves the side repo without a HEAD; the
+        // readiness predicate re-inits on the very next attempt, so there
+        // is no stale lock and no hour-long wait ahead.
+        "  the timed-out init left the snapshot side repo incomplete; snapshots re-init on the next attempt."
+    } else {
+        "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
+    }
+}
+
+#[cfg(test)]
+mod snapshot_failure_hint_tests {
+    use super::snapshot_failure_hint;
+
+    // The producers live in `snapshot::repo`; these assertions pin the
+    // message-text coupling so a reworded producer cannot silently reroute
+    // users to the wrong remedy.
+    #[test]
+    fn size_gated_failures_point_at_the_config_cap() {
+        let message = "workspace too large for snapshots (over 2 GB ...)";
+        assert!(snapshot_failure_hint(message, true).contains("max_workspace_gb"));
+    }
+
+    #[test]
+    fn bounded_probe_timeouts_get_the_wedged_filesystem_hint() {
+        let message = "first-init workspace size walk did not finish within 120s; \
+                       the filesystem appears wedged";
+        assert!(snapshot_failure_hint(message, false).contains("wedged NFS/FUSE mount?"));
+    }
+
+    #[test]
+    fn timed_out_git_init_gets_the_reinit_hint_not_the_stale_lock_hint() {
+        let message = "failed to run git init: git init timed out after 300s: …";
+        let hint = snapshot_failure_hint(message, false);
+        assert!(hint.contains("re-init on the next attempt"), "{hint}");
+        assert!(!hint.contains("index.lock"), "{hint}");
+    }
+
+    #[test]
+    fn other_git_timeouts_keep_the_stale_index_lock_hint() {
+        let message = "git commit timed out after 300s: …";
+        assert!(snapshot_failure_hint(message, false).contains("index.lock"));
+    }
 }
 
 #[cfg(test)]
