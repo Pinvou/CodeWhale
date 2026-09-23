@@ -467,8 +467,9 @@ impl ExecPolicyEngine {
                 // scoped rule is evaluated only against roots inside its
                 // scope; an Allow rule additionally keeps the primary-only
                 // narrowing on every filter (it widens auto-approval, so it
-                // may never reach into an attached root - exec always runs
-                // in the session cwd).
+                // may never reach into an attached root - exec is judged
+                // where it runs: the session cwd, or the resolved
+                // cwd:/working_dir: operand when the call redirects).
                 let candidate_idx: Vec<usize> = if rule.action == PermissionAction::Allow {
                     // An Allow rule keeps the primary-only narrowing on
                     // every filter regardless of whether it carries a

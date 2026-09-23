@@ -267,15 +267,17 @@ fn thread_dto_workspace_roots_default_for_legacy_payloads() {
     assert!(matches!(decoded.status, ThreadStatus::Idle));
 
     // An empty root set is omitted from the wire frame, matching the params'
-    // skip-if-empty convention: a single-root thread keeps the historical
-    // frame byte-identical.
+    // skip-if-empty convention: a thread decoded from a legacy payload keeps
+    // the historical frame byte-identical. (A thread CREATED by this build
+    // always carries at least [cwd] — intake normalization never yields an
+    // empty set — so omission happens only for pre-field rows.)
     let encoded_single_root =
         serde_json::to_string(&decoded).expect("serialize single-root thread");
     let frame: serde_json::Value =
         serde_json::from_str(&encoded_single_root).expect("single-root frame parses");
     assert!(
         frame.get("workspace_roots").is_none(),
-        "a single-root thread frame must omit the key entirely: {frame}"
+        "an empty root set must stay off the wire frame: {frame}"
     );
 
     let mut current = decoded;

@@ -892,4 +892,34 @@ mod tests {
         };
         assert!(reason.contains("Vendored tree is read-only"), "{reason}");
     }
+
+    #[test]
+    fn relative_target_landing_under_an_ancestor_root_is_held() {
+        // The session cwd is a subdirectory of an attached root: execution
+        // joins a relative target onto the primary, landing INSIDE the
+        // attached root, whose anchored globs must judge the landing path —
+        // the raw tail alone (`x/y` against `sub/**`) never matches.
+        let attached = TempDir::new().unwrap();
+        let primary = attached.path().join("sub");
+        std::fs::create_dir_all(&primary).unwrap();
+        write_law(
+            attached.path(),
+            r#"{"protected_invariants": [
+                { "text": "Sub tree is read-only", "paths": ["sub/**"], "action": "block" }
+            ]}"#,
+        );
+
+        let decision = repo_law_plan_decision(
+            &primary,
+            &[attached.path().to_path_buf()],
+            "write_file",
+            &json!({"path": "x/y", "content": "x"}),
+        );
+        let Some(RepoLawPlanDecision::Block(reason)) = decision else {
+            panic!(
+                "expected the ancestor root's law to hold a relative target landing inside it, got {decision:?}"
+            );
+        };
+        assert!(reason.contains("Sub tree is read-only"), "{reason}");
+    }
 }
