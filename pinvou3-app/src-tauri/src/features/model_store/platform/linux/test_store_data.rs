@@ -875,7 +875,8 @@ mod tests {
         fn carries_licence(card: &TestCard) -> bool {
             card.assets.keys().any(|k| {
                 let name = k.rsplit('/').next().unwrap_or(k).to_ascii_uppercase();
-                name.starts_with("LICENSE") || name.starts_with("LICENCE")
+                name.starts_with("LICENSE")
+                    || name.starts_with("LICENCE")
                     || name.starts_with("COPYING")
             })
         }
