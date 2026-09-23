@@ -6,69 +6,6 @@ export function isRemoteChatActive(connection) {
   return !!connection && connection.status === 'connected';
 }
 
-export function remoteChatItems(connection, transcript = [], tasks = []) {
-  if (!isRemoteChatActive(connection)) return [];
-  const sessionId = connection.sessionId ? String(connection.sessionId) : '';
-  const entries = (Array.isArray(transcript) ? transcript : []).filter(entry => (
-    entry
-    && (!sessionId || String(entry.sessionId || '') === sessionId)
-  ));
-  const journaledTaskIds = new Set(entries
-    .filter(entry => entry.role === 'user' && entry.taskId)
-    .map(entry => String(entry.taskId)));
-  const promptFallbacks = (Array.isArray(tasks) ? tasks : [])
-    .filter(task => (
-      task
-      && task.taskId
-      && task.text
-      && !journaledTaskIds.has(String(task.taskId))
-      && (!sessionId || !task.sessionId || String(task.sessionId) === sessionId)
-    ))
-    .map((task, index) => ({
-      sessionId: String(task.sessionId || sessionId || ''),
-      epoch: 'task-intent',
-      sequence: index + 1,
-      taskId: String(task.taskId),
-      role: 'user',
-      text: String(task.text),
-    }));
-
-  const items = [];
-  for (const entry of entries.concat(promptFallbacks)) {
-    const key = `${entry.sessionId || ''}:${entry.epoch || ''}`;
-    const text = String(entry.text || '');
-    if (!text) continue;
-    if (
-      entry.role === 'assistant'
-      && items.length
-      && items[items.length - 1].type === 'assistant'
-      && items[items.length - 1].remoteKey === key
-    ) {
-      // assistant_delta entries are ordered chunks of one remote turn.
-      const item = items[items.length - 1];
-      item.text += text;
-      item.streaming = true;
-      continue;
-    }
-    items.push({
-      id: entry.taskId && entry.epoch === 'task-intent'
-        ? `remote-task-${entry.taskId}`
-        : `remote-${key}:${entry.sequence || items.length}`,
-      type: entry.role === 'user' ? 'user' : 'assistant',
-      text,
-      remoteTaskId: entry.taskId ? String(entry.taskId) : null,
-      remote: true,
-      remoteKey: key,
-      streaming: entry.role === 'assistant',
-      createdAt: Number(entry.sequence || 0),
-    });
-  }
-
-  const last = items[items.length - 1];
-  if (last && last.type === 'assistant') last.streaming = false;
-  return items;
-}
-
 const CONTROLLED_TERMINAL = new Set([
   'succeeded',
   'failed',
@@ -76,6 +13,92 @@ const CONTROLLED_TERMINAL = new Set([
   'interrupted',
   'result_unknown',
 ]);
+
+export function remoteChatItems(connection, transcript = [], tasks = []) {
+  if (!isRemoteChatActive(connection)) return [];
+  const sessionId = connection.sessionId ? String(connection.sessionId) : '';
+  const entries = (Array.isArray(transcript) ? transcript : []).filter(entry => (
+    entry
+    && (!sessionId || String(entry.sessionId || '') === sessionId)
+  ));
+  const sessionTasks = (Array.isArray(tasks) ? tasks : []).filter(task => (
+    task
+    && task.taskId
+    && (!sessionId || !task.sessionId || String(task.sessionId) === sessionId)
+  ));
+  const runningTaskIds = new Set(sessionTasks
+    .filter(task => !CONTROLLED_TERMINAL.has(String(task.status || '')))
+    .map(task => String(task.taskId)));
+  const journaledTaskIds = new Set(entries
+    .filter(entry => entry.role === 'user' && entry.taskId)
+    .map(entry => String(entry.taskId)));
+  const promptFallbacks = sessionTasks
+    .filter(task => (
+      task.text
+      && !journaledTaskIds.has(String(task.taskId))
+    ))
+    .map(task => ({
+      sessionId: String(task.sessionId || sessionId || ''),
+      epoch: 'task-intent',
+      sequence: 0,
+      taskId: String(task.taskId),
+      role: 'user',
+      text: String(task.text),
+    }));
+
+  // A status acknowledgement can beat the authoritative user journal. Insert
+  // that fallback next to the same task's first event, never at the end of the
+  // whole transcript where it would split a later turn from its answer.
+  const orderedEntries = entries.slice();
+  for (const fallback of promptFallbacks) {
+    const taskIndex = orderedEntries.findIndex(entry => (
+      String(entry?.taskId || '') === fallback.taskId
+    ));
+    if (taskIndex >= 0) {
+      orderedEntries.splice(taskIndex, 0, fallback);
+    } else {
+      orderedEntries.push(fallback);
+    }
+  }
+
+  const items = [];
+  for (const entry of orderedEntries) {
+    const taskId = entry.taskId ? String(entry.taskId) : '';
+    const type = entry.role === 'user'
+      ? 'user'
+      : (entry.role === 'reasoning' ? 'reasoning' : 'assistant');
+    const key = `${entry.sessionId || ''}:${entry.epoch || ''}:${taskId}:${type}`;
+    const text = String(entry.text || '');
+    if (!text) continue;
+    if (
+      type !== 'user'
+      && items.length
+      && items[items.length - 1].type === type
+      && items[items.length - 1].remoteKey === key
+    ) {
+      // Text/reasoning deltas merge only inside the same task and content
+      // lane. Epoch alone is not a turn identity and previously joined two
+      // consecutive answers together.
+      const item = items[items.length - 1];
+      item.text += text;
+      item.streaming = !!taskId && runningTaskIds.has(taskId);
+      continue;
+    }
+    items.push({
+      id: entry.taskId && entry.epoch === 'task-intent'
+        ? `remote-task-${entry.taskId}`
+        : `remote-${key}:${entry.sequence || items.length}`,
+      type,
+      text,
+      remoteTaskId: taskId || null,
+      remote: true,
+      remoteKey: key,
+      streaming: type !== 'user' && !!taskId && runningTaskIds.has(taskId),
+      createdAt: Number(entry.sequence || 0),
+    });
+  }
+  return items;
+}
 
 const CONTROLLED_FAILURE = new Set([
   'failed',

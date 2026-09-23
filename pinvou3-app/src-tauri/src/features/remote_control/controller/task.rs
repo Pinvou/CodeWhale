@@ -1054,6 +1054,7 @@ pub(crate) trait RemoteChatTurnPort: Send + Sync {
         model_source: &str,
         lease: &LeaseContext,
         content: String,
+        events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<String>, String>;
 }
@@ -1128,7 +1129,15 @@ impl ControllerTaskExecutor for ChatTurnExecutor {
         );
         let reply = self
             .port
-            .run_chat_turn(&session_id, task_id, model_source, &lease, content, cancel)
+            .run_chat_turn(
+                &session_id,
+                task_id,
+                model_source,
+                &lease,
+                content,
+                Arc::clone(&events),
+                cancel,
+            )
             .await?;
         if let Some(reply) = reply.filter(|text| !text.trim().is_empty()) {
             events.emit_journal(
@@ -2539,6 +2548,7 @@ mod tests {
                 _model_source: &str,
                 _lease: &LeaseContext,
                 content: String,
+                _events: Arc<dyn ControllerTaskEventSink>,
                 _cancel: CancellationToken,
             ) -> std::result::Result<Option<String>, String> {
                 assert_eq!(content, "run the report");
@@ -2612,6 +2622,7 @@ mod tests {
                 _model_source: &str,
                 _lease: &LeaseContext,
                 _content: String,
+                _events: Arc<dyn ControllerTaskEventSink>,
                 _cancel: CancellationToken,
             ) -> std::result::Result<Option<String>, String> {
                 panic!("the chat port must not be reached for a code payload");

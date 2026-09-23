@@ -58,7 +58,52 @@ test('a queued task supplies its prompt until the authoritative user journal arr
     text: 'visible immediately',
   }], tasks);
   assert.equal(authoritative.length, 1, 'the journal must replace, not duplicate, the fallback');
-  assert.equal(authoritative[0].id, 'remote-session-1:e1:1');
+  assert.equal(authoritative[0].id, 'remote-session-1:e1:task-1:user:1');
+});
+
+test('consecutive remote turns keep independent reasoning, answers, and terminal rendering state', () => {
+  const entries = [
+    { sessionId: 'session-1', epoch: 'e1', sequence: 1, taskId: 'task-1', role: 'user', text: 'first' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 2, taskId: 'task-1', role: 'reasoning', text: 'think ' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 3, taskId: 'task-1', role: 'reasoning', text: 'one' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 4, taskId: 'task-1', role: 'assistant', text: '## Result 1' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 5, taskId: 'task-2', role: 'user', text: 'second' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 6, taskId: 'task-2', role: 'reasoning', text: 'think two' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 7, taskId: 'task-2', role: 'assistant', text: '| A | B |' },
+  ];
+  const tasks = [
+    { taskId: 'task-1', sessionId: 'session-1', status: 'succeeded', text: 'first' },
+    { taskId: 'task-2', sessionId: 'session-1', status: 'running', text: 'second' },
+  ];
+  const items = remoteChatItems(connection, entries, tasks);
+  assert.deepEqual(items.map(item => item.type), [
+    'user', 'reasoning', 'assistant', 'user', 'reasoning', 'assistant',
+  ]);
+  assert.equal(items[1].text, 'think one');
+  assert.equal(items[2].text, '## Result 1');
+  assert.equal(items[2].streaming, false, 'an earlier answer remains renderable after turn two starts');
+  assert.equal(items[4].streaming, true);
+  assert.equal(items[5].streaming, true);
+
+  const completed = remoteChatItems(connection, entries, [
+    tasks[0],
+    { ...tasks[1], status: 'succeeded' },
+  ]);
+  assert.equal(completed[5].streaming, false, 'terminal Markdown is rendered from text');
+});
+
+test('a prompt fallback is inserted before its task output instead of splitting another turn', () => {
+  const items = remoteChatItems(connection, [
+    { sessionId: 'session-1', epoch: 'e1', sequence: 1, taskId: 'task-1', role: 'user', text: 'first' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 2, taskId: 'task-1', role: 'assistant', text: 'first result' },
+    { sessionId: 'session-1', epoch: 'e1', sequence: 4, taskId: 'task-2', role: 'assistant', text: 'second result' },
+  ], [
+    { taskId: 'task-1', sessionId: 'session-1', status: 'succeeded', text: 'first' },
+    { taskId: 'task-2', sessionId: 'session-1', status: 'succeeded', text: 'second' },
+  ]);
+  assert.deepEqual(items.map(item => item.text), [
+    'first', 'first result', 'second', 'second result',
+  ]);
 });
 
 test('controlled-side projection accepts its local session task without an A-side session filter', () => {

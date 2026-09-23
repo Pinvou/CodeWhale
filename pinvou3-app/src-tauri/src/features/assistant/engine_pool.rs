@@ -2009,13 +2009,18 @@ impl EnginePool {
     /// Remote-control turn entry point with a task-scoped model override.
     /// The override participates in normal runtime preparation and engine
     /// rebuild checks but is never written to the session model sidecar.
-    pub(crate) async fn send_remote_user_message(
+    pub(crate) async fn send_remote_user_message<F>(
         &self,
         session_id: &str,
         content: String,
         model_override: Option<RemoteRuntimeModelBundle>,
-    ) -> Result<()> {
+        on_reserved: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u64) + Send,
+    {
         let reservation = self.reserve_turn(session_id)?;
+        on_reserved(reservation.generation());
         let display_message = user_display_message(content.clone());
         self.send_reserved_user_message_with_model_override(
             session_id,

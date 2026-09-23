@@ -881,8 +881,19 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         [bs && bs.controlledTasks, controlledSession.sessionId, t.remoteConversation],
       );
       const controlledSessionChatItems = useMemo(
-        () => mergeControlledTaskChatItems(projectedRemoteChatItems, projectedControlledTaskItems),
-        [projectedRemoteChatItems, projectedControlledTaskItems],
+        () => mergeControlledTaskChatItems(
+          activeSessionId && activeSessionId === controlledSession.sessionId
+            ? chatItems
+            : projectedRemoteChatItems,
+          projectedControlledTaskItems,
+        ),
+        [
+          activeSessionId,
+          controlledSession.sessionId,
+          chatItems,
+          projectedRemoteChatItems,
+          projectedControlledTaskItems,
+        ],
       );
       const displayChatItems = remoteChatActive
         ? projectedRemoteChatItems

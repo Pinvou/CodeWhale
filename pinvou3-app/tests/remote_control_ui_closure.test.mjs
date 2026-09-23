@@ -124,6 +124,33 @@ test('journal events project into a deduplicated transcript', () => {
   assert.equal(snapshot.transcript[0].text, 'after snapshot');
 });
 
+test('reasoning journal events remain a distinct transcript lane', () => {
+  let state = logic.createState();
+  state = logic.applyJournalEvent(state, {
+    event: {
+      eventId: 'reasoning-1',
+      epoch: 'epoch-1',
+      sequence: 1,
+      kind: 'reasoning',
+      sessionId: 'session-a',
+      taskId: 'task-1',
+      terminalStatus: null,
+      payload: { text: 'checking context' },
+    },
+  });
+  assert.equal(state.transcript.length, 1);
+  assert.equal(state.transcript[0].role, 'reasoning');
+  assert.equal(state.transcript[0].taskId, 'task-1');
+});
+
+test('the controlled chat keeps the native session timeline when that session is active', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.match(
+    chat,
+    /activeSessionId && activeSessionId === controlledSession\.sessionId[\s\S]*?\? chatItems[\s\S]*?: projectedRemoteChatItems/,
+  );
+});
+
 test('the bridge subscribes the journal stream and exposes the A-side commands', () => {
   const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
   assert.ok(bridge.includes('"desktop-remote-controller-journal"'));

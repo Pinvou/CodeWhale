@@ -14,9 +14,7 @@ use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
-use crate::features::assistant::remote_turn::{
-    EnginePoolChatEngine, EnginePoolChatTurnPort, StoreChatTranscript,
-};
+use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
@@ -255,7 +253,7 @@ pub(crate) struct DesktopRemoteTaskRuntime {
 
 impl DesktopRemoteTaskRuntime {
     pub(crate) fn new(
-        _app: AppHandle,
+        app: AppHandle,
         store: SessionStore,
         pool: EnginePool,
         acp_pool: AcpPool,
@@ -272,10 +270,11 @@ impl DesktopRemoteTaskRuntime {
         service.register_executor(
             TASK_MODE_CHAT,
             Arc::new(ChatTurnExecutor::new(Arc::new(
-                EnginePoolChatTurnPort::new(
-                    Arc::new(EnginePoolChatEngine::new(Arc::new(pool), temporary_models)),
-                    Arc::new(StoreChatTranscript::new(store)),
-                ),
+                EnginePoolChatTurnPort::new(Arc::new(EnginePoolChatEngine::new(
+                    app,
+                    Arc::new(pool),
+                    temporary_models,
+                ))),
             ))),
         );
         service.register_executor(

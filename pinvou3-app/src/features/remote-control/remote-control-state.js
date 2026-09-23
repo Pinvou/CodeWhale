@@ -424,12 +424,14 @@
     return applyJournalEventTo(state, envelope, "controlledTranscript");
   }
 
-  /** Only user/assistant text becomes a transcript entry; everything else
-   * keeps its existing task/status projection. */
+  /** User, assistant and reasoning text become transcript entries; everything
+   * else keeps its existing task/status projection. */
   function toTranscriptEntry(event) {
     if (!event || typeof event !== "object") return null;
     var kind = event.kind ? String(event.kind) : "";
-    var role = kind === "user_message" ? "user" : (kind === "assistant_delta" ? "assistant" : "");
+    var role = kind === "user_message"
+      ? "user"
+      : (kind === "assistant_delta" ? "assistant" : (kind === "reasoning" ? "reasoning" : ""));
     if (!role) return null;
     var text = event.payload && event.payload.text ? String(event.payload.text) : "";
     if (!text) return null;
