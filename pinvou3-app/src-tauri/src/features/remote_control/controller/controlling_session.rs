@@ -6,8 +6,9 @@
 //! payload（能力快照请求、任务提交、任务取消）与输入摘要。前端只提交 UI 级
 //! 字段（标题、正文、模式），不再拼装任何协议字段。
 //!
-//! 首版保守能力：仅开放 B 模型（`controlled_device`）的 `chat` 模式；代码
-//! 模式、临时模型、附件与成果在此处失败关闭，等对应任务按能力开关打开。
+//! 当前仅开放 `chat` 模式；模型来源支持 B 本机模型（`controlled_device`），以及
+//! 租约已协商 `temporary_model_package_v1` 时的 A 端临时模型。代码模式、附件与成果
+//! 在此处失败关闭，等对应任务按能力开关打开。
 //! 任何上下文不匹配（无连接、lease 变更、未取到能力快照）都失败关闭。
 
 use std::collections::BTreeMap;
@@ -80,6 +81,9 @@ pub(crate) struct ControllingSessionProjection {
     pub(crate) capability_valid_for_ms: Option<u64>,
     pub(crate) capability_error: Option<String>,
     pub(crate) capability_request_id: Option<String>,
+    /// Whether this lease negotiated the encrypted temporary-model package
+    /// family. Expose only the UI decision, never the full protocol transcript.
+    pub(crate) temporary_model_available: bool,
     pub(crate) modes: Vec<String>,
     pub(crate) workspace_count: usize,
     pub(crate) task_count: usize,
@@ -140,6 +144,10 @@ impl SessionIntent {
             capability_valid_for_ms: self.capability_valid_for_ms,
             capability_error: self.capability_error.clone(),
             capability_request_id: self.last_capability_request_id.clone(),
+            temporary_model_available: self
+                .negotiated_capabilities
+                .iter()
+                .any(|capability| capability == "temporary_model_package_v1"),
             modes: self.modes.clone(),
             workspace_count: self.workspace_ids.len(),
             task_count: self.tasks.len(),
@@ -792,7 +800,23 @@ mod tests {
         assert!(projection.session_id.starts_with("session-"));
         assert!(is_valid_identifier(&projection.session_id));
         assert_eq!(projection.capability_revision, None);
+        assert!(projection.temporary_model_available);
         assert_eq!(projection.modes, vec!["chat".to_owned()]);
+
+        let controlled_only = sessions
+            .open(
+                Some("session-ref-controlled-only"),
+                "Controlled only",
+                "chat",
+                &lease(),
+                &[
+                    "encrypted_frames_v1".into(),
+                    "pairing_v1".into(),
+                    "task_v1".into(),
+                ],
+            )
+            .unwrap();
+        assert!(!controlled_only.temporary_model_available);
 
         // 首版能力开关：代码模式、空标题与非法引用都失败关闭。
         assert_eq!(

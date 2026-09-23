@@ -41,11 +41,13 @@ test('the session projection carries the real remote session id into UI state', 
     connectionId: 'connection-1',
     leaseEpoch: '2',
     capabilityRevision: 4,
+    temporaryModelAvailable: true,
   });
   assert.equal(state.controllerConnection.sessionId, 'session-abc');
   assert.equal(state.controllerConnection.sessionRef, 'session-ref-1');
   assert.equal(state.controllerConnection.sessionMode, 'chat');
   assert.equal(state.controllerConnection.capabilityRevision, 4);
+  assert.equal(state.controllerConnection.temporaryModelAvailable, true);
 });
 
 test('foreign connections, older leases and terminal states never adopt a session', () => {
@@ -71,6 +73,28 @@ test('foreign connections, older leases and terminal states never adopt a sessio
   assert.equal(disconnected.controllerConnection.sessionId, null);
   assert.equal(disconnected.controllerConnection.sessionRef, null);
   assert.equal(disconnected.controllerConnection.capabilityRevision, null);
+  assert.equal(disconnected.controllerConnection.temporaryModelAvailable, false);
+});
+
+test('the bridge maps the lease-bound temporary-model decision without exposing credentials', () => {
+  const mapping = bridge.slice(
+    bridge.indexOf('function applyControllerSession'),
+    bridge.indexOf('function controllerListHistory'),
+  );
+  assert.ok(mapping.includes('temporaryModelAvailable: payload.temporaryModelAvailable === true'));
+  assert.ok(!/credential|apiKey|privateKey/.test(mapping));
+});
+
+test('an absent temporary-model projection fails closed for mixed client versions', () => {
+  const state = logic.applyControllerSession(connectedState(), {
+    sessionRef: 'session-ref-old-b',
+    sessionId: 'session-old-b',
+    mode: 'chat',
+    connectionId: 'connection-1',
+    leaseEpoch: '2',
+    capabilityRevision: 1,
+  });
+  assert.equal(state.controllerConnection.temporaryModelAvailable, false);
 });
 
 test('capability snapshots keep the revision and the negotiated modes', () => {
@@ -215,10 +239,12 @@ test('the encrypted send entry points only carry UI fields', () => {
     bridge.indexOf('function controllerTaskSend'),
     bridge.indexOf('function applyControllerSession'),
   );
-  assert.ok(send.includes('text: String(text || "")'));
+  assert.ok(send.includes('var visibleText = String(text || "").trim()'));
+  assert.ok(send.includes('text: visibleText'));
   assert.ok(send.includes('taskId: taskId'));
+  const invokePayload = send.slice(send.indexOf('return invoke('), send.indexOf('}).catch'));
   assert.ok(
-    !/input_digest|client_request_id|session_id|controller_lease_id/.test(send),
+    !/input_digest|client_request_id|session_id|controller_lease_id/.test(invokePayload),
     'the send path must not assemble protocol fields',
   );
 });

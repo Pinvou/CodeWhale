@@ -8,6 +8,16 @@ import { test } from "node:test";
 
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const deployScript = join(repoRoot, "scripts", "deploy-remote-relay.sh");
+const productionHardening = join(repoRoot, "remote-control-relay", "10-hardening.conf");
+
+test("production hardening keeps deployment-specific proxy addresses out of the repository", async () => {
+  const source = await readFile(productionHardening, "utf8");
+  assert.doesNotMatch(source, /PINVOU_REMOTE_(?:ALLOWED|TRUSTED)_PROXY_IPS=/);
+  const preflight = await readFile(join(repoRoot, "remote-control-relay", "scripts", "deploy-controller-preflight.mjs"), "utf8");
+  assert.match(preflight, /"PINVOU_REMOTE_ALLOWED_PROXY_IPS"/);
+  assert.match(preflight, /"PINVOU_REMOTE_TRUSTED_PROXY_IPS"/);
+  assert.match(preflight, /controller_env_proxy_ips_mismatch/);
+});
 
 test("production deploy builds and replaces the complete shared WebUI dist", async () => {
   const source = await readFile(deployScript, "utf8");
@@ -27,11 +37,18 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /mv "\$web_stage" "\$remote_dir\/web\/dist"/);
   assert.match(source, /PINVOU_CONFIRM_PRODUCTION_DEPLOY/);
   assert.match(source, /desktop_controller_enabled !== true/);
+  assert.match(source, /"\$health" 2>\/dev\/null/);
   assert.match(source, /40-controller\.conf/);
   assert.match(source, /EnvironmentFile=%s/);
   assert.match(source, /pinvou-remote-relay-controller\.env/);
   assert.match(source, /scripts\/deploy-controller-preflight\.mjs/);
+  assert.match(source, /controller_state_root="\/var\/lib\/pinvou-remote-relay"/);
+  assert.match(source, /controller_state_dir="\$controller_state_root\/state"/);
+  assert.match(source, /install -d -o root -g root -m 700 "\$controller_state_root"/);
+  assert.match(source, /install -d -o root -g root -m 700 "\$controller_state_dir"/);
   assert.match(source, /scripts\/controller-route-smoke\.mjs/);
+  assert.equal((source.match(/for _ in \$\(seq 1 30\); do/g) || []).length, 2);
+  assert.match(source, /if curl -fsS http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
   assert.match(source, /controller-v1 路由烟测失败/);
   assert.equal((source.match(/backup\/code-js\/\*\.js/g) || []).length, 2);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);

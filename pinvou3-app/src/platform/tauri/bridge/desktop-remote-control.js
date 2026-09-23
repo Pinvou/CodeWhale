@@ -681,6 +681,7 @@
         capabilityValidForMs: payload.capabilityValidForMs == null ? null : payload.capabilityValidForMs,
         capabilityError: payload.capabilityError || null,
         capabilityRequestId: payload.capabilityRequestId || null,
+        temporaryModelAvailable: payload.temporaryModelAvailable === true,
       }));
       return result;
     }

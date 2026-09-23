@@ -60,6 +60,7 @@ import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import { openControlledDeviceChatWithRetry } from '../features/remote-control/remote-control-logic.mjs';
+import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -1386,6 +1387,9 @@ const NAV_PREFETCH = {
       const [webAccessOpen, setWebAccessOpen] = useState(false);
       const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
       const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
+      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}`;
+      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
+      const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
       const controlledDeviceAutoOpenRef = useRef(null);
       const controlledDeviceAutoOpenInFlightRef = useRef(null);
@@ -1408,6 +1412,18 @@ const NAV_PREFETCH = {
       useEffect(() => {
         if (!remoteControllerConnected) setRemoteConnectionReady(false);
       }, [remoteControllerConnected]);
+      useEffect(() => {
+        const nextModelSource = modelSourceForLease(
+          remoteModelSource,
+          bs?.controllerConnection,
+          remoteModelLeaseKeyRef.current,
+          remoteModelLeaseKey,
+        );
+        remoteModelLeaseKeyRef.current = remoteModelLeaseKey;
+        if (nextModelSource !== remoteModelSource) {
+          setRemoteModelSource(nextModelSource);
+        }
+      }, [bs?.controllerConnection, remoteModelLeaseKey, remoteModelSource, remoteTemporaryModelAvailable]);
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');

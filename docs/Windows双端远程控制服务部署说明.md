@@ -45,7 +45,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 3. **注册库**：`enrollment-registry.js` 读取 `PINVOU_REMOTE_CONTROLLER_STATE_PATH`（不得与 legacy `PINVOU_REMOTE_STATE_PATH` 同路径）；迁移与覆盖率用 `scripts/enrollment-migrate.js` dry-run 取证（要求 100%）。
 4. **验收预检**：对每个公网入口运行 `scripts/enrollment-gateway-preflight.js`（校验健康标记、WebSocket upgrade 标记、匿名注册拒绝、Relay URL 为字面 loopback、OS 监听检查无通配绑定）。
 5. **回滚检查**：`scripts/check-enrollment-gated-v2-rollback.mjs` 退出码为 0 才允许启动旧 v2 二进制；裸 v2 回滚一律拒绝。
-6. **运行加固**：`10-hardening.conf` 作为服务单元加固基线；服务账号只读仓库、只写状态目录。
+6. **运行加固**：`10-hardening.conf` 只保存与环境无关的服务单元加固基线；服务账号只读仓库、只写状态目录。反向代理地址必须通过受权限保护的 controller 环境文件显式注入，`PINVOU_REMOTE_ALLOWED_PROXY_IPS` 与 `PINVOU_REMOTE_TRUSTED_PROXY_IPS` 必须是相同的合法 IP 集合，不得写入仓库模板。
 
 ### 2.2 必需配置（来自部署 secret 管理器，禁止入库/入日志）
 
@@ -56,9 +56,14 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | 连接码摘要 keyring（支持轮换，见发布文档第 7.3 节） |
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` / `PINVOU_REMOTE_STATE_PATH` | 新旧状态文件绝对路径，必须不同 |
+| `PINVOU_REMOTE_ALLOWED_PROXY_IPS` / `PINVOU_REMOTE_TRUSTED_PROXY_IPS` | 实际反向代理的 IPv4/IPv6 地址列表；两者必须显式配置且集合完全一致 |
 | 遥测（可选） | enrollment token / device pepper / admin password；未配置即禁用遥测（本机部署即此状态） |
 
 客户端侧必须 pin 同一份公钥（原始 32 字节 base64）：`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` + `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`；缺失会以 `relay_trust_unconfigured` 失败关闭。
+
+生产部署脚本会在通过 controller 环境文件预检后，以 `root:root`、`0700` 显式创建
+`/var/lib/pinvou-remote-relay/state`。状态存储本身不会创建缺失的父目录，这是为了保留
+软链接、所有权和目录替换检查的失败关闭语义；新服务器不得省略该目录准备步骤。
 
 ### 2.3 部署后的验收清单
 

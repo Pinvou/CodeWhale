@@ -20,6 +20,8 @@ PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-signing-key
 PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64=private-key-material
 PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controller-state.json
 PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json
+PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10
+PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10
 `;
 
 test("production controller environment requires the accepted deployment profile", () => {
@@ -39,6 +41,28 @@ test("production controller environment requires the accepted deployment profile
     () => parseControllerEnvironment(`${VALID_ENV}\nNODE_ENV=development\n`),
     /controller_env_duplicate_key/u,
   );
+});
+
+test("production controller environment requires matching literal proxy addresses", () => {
+  for (const replacement of [
+    ["PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_ALLOWED_PROXY_IPS="],
+    ["PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_ALLOWED_PROXY_IPS=proxy.internal"],
+  ]) {
+    assert.throws(
+      () => validateControllerEnvironment(parseControllerEnvironment(VALID_ENV.replace(...replacement))),
+      /controller_env_(?:required_value_missing|proxy_ips_invalid)/u,
+    );
+  }
+  assert.throws(
+    () => validateControllerEnvironment(parseControllerEnvironment(
+      VALID_ENV.replace("PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.11"),
+    )),
+    /controller_env_proxy_ips_mismatch/u,
+  );
+  const multiple = VALID_ENV
+    .replace("PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10,2001:db8::10")
+    .replace("PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10", "PINVOU_REMOTE_TRUSTED_PROXY_IPS=2001:db8::10,192.0.2.10");
+  assert.doesNotThrow(() => validateControllerEnvironment(parseControllerEnvironment(multiple)));
 });
 
 test("production controller environment rejects links, loose modes, and non-root owners", () => {

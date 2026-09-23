@@ -8,6 +8,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
 import { isTaskTerminal, taskStatusKey } from './remote-control-logic.mjs';
+import {
+  canUseControllerTemporaryModel,
+  normalizeRemoteModelSource,
+} from './remote-model-source.mjs';
 
 export default function RemoteConversationView({ t, bs, modelSource = 'controlled_device', onModelSourceChange }) {
   const copy = (t && t.remoteConversation) || {};
@@ -32,6 +36,8 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   );
   const modes = (capabilities && Array.isArray(capabilities.modes)) ? capabilities.modes : ['chat'];
   const activeTask = tasks.find((task) => !isTaskTerminal(task.status)) || null;
+  const temporaryModelAvailable = canUseControllerTemporaryModel(connection);
+  const effectiveModelSource = normalizeRemoteModelSource(modelSource, connection);
 
   useEffect(() => {
     if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return;
@@ -87,7 +93,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
     setError(null);
     try {
       // E2E-04：只传会话引用与正文；协议字段与输入摘要全部由 Rust 构造并加密。
-      await remote.controllerTaskSend(sessionRef, draft.trim(), modelSource);
+      await remote.controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource);
       setDraft('');
     } catch (failure) {
       setError((failure && failure.code) || 'errorGeneric');
@@ -145,12 +151,14 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
         </section>
       )}
 
-      {/* E2E-07 首版能力开关：A 临时模型（含模型导出列表）保持隐藏，模型来源固定为
-          B 本机模型；能力开放后再恢复选择器。 */}
+      {/* The controller model is offered only when this exact lease negotiated
+          the encrypted temporary-model package family. */}
       <fieldset className="mb-3 text-[11px]">
         <legend className="mb-1 opacity-70">{copy.modelPickerTitle}</legend>
-        <label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controlled_device'} onChange={() => onModelSourceChange?.('controlled_device')} />{copy.modelSourceDevice}</label>
-        <label className="inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controller_temporary'} onChange={() => onModelSourceChange?.('controller_temporary')} />{copy.modelSourceMine}</label>
+        <label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={effectiveModelSource === 'controlled_device'} onChange={() => onModelSourceChange?.('controlled_device')} />{copy.modelSourceDevice}</label>
+        {temporaryModelAvailable && (
+          <label className="inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={effectiveModelSource === 'controller_temporary'} onChange={() => onModelSourceChange?.('controller_temporary')} />{copy.modelSourceMine}</label>
+        )}
       </fieldset>
       {transcript.length === 0 && tasks.length === 0 && (
         <p className="text-[12px] opacity-70">{copy.empty}</p>

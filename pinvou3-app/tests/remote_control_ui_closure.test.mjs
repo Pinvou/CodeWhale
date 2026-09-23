@@ -160,6 +160,24 @@ test('controlled-side send failures are visible in the shared remote transcript 
   assert.match(chat, /current && current\.identity !== remoteSendIdentity \? null : current/);
 });
 
+test('temporary model capability mismatches have actionable localized feedback', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  const legacyView = read('features/remote-control/RemoteConversationView.jsx');
+  const main = read('app/main.jsx');
+  assert.ok(chat.includes("currentRemoteSendError === 'temporary_model_capability_required'"));
+  assert.ok(chat.includes('t.remoteConversation.temporaryModelCapabilityRequired'));
+  assert.ok(chat.includes('remoteTemporaryModelAvailable &&'));
+  assert.ok(chat.includes('controllerTaskSend(sessionRef, outgoing, effectiveRemoteModelSource)'));
+  assert.ok(legacyView.includes('temporaryModelAvailable &&'));
+  assert.ok(legacyView.includes('controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource)'));
+  assert.ok(main.includes('modelSourceForLease('));
+  assert.ok(main.includes('setRemoteModelSource(nextModelSource)'));
+  for (const locale of ['zh', 'en', 'ja']) {
+    const messages = read(`shared/i18n/${locale}.js`);
+    assert.ok(messages.includes('temporaryModelCapabilityRequired:'), `${locale} copy is required`);
+  }
+});
+
 test('bounded command failures keep their code for the UI copy', () => {
   const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
   assert.ok(bridge.includes('function asBoundedError'), 'bounded errors are restored');

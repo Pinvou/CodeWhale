@@ -2109,6 +2109,7 @@ dictJa["remoteConversation"] = {
   journalResync: "会話状態を再同期しました。",
   resultUnknownHint: "接続が切れたため、このタスクの完了有無を確認できません。",
   sessionBusy: "このリモートセッションではタスクを実行中です。メッセージは保持されているため、しばらくしてから再試行してください。",
+  temporaryModelCapabilityRequired: "相手側のバージョンは、あなたのモデルの使用にまだ対応していません。双方のクライアントを更新して再接続するか、被操作端末のモデルを使用してください。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
 };
 

@@ -53,6 +53,7 @@
       capabilityError: null,
       capabilityRequestId: null,
       capabilityValidForMs: null,
+      temporaryModelAvailable: false,
     };
   }
 
@@ -236,6 +237,7 @@
       capabilityError: current.capabilityError,
       capabilityRequestId: current.capabilityRequestId,
       capabilityValidForMs: current.capabilityValidForMs,
+      temporaryModelAvailable: current.temporaryModelAvailable === true,
     };
     if (CONTROLLER_TERMINAL[status]) {
       next.remoteCapabilities = null;
@@ -249,6 +251,7 @@
       next.controllerConnection.capabilityError = null;
       next.controllerConnection.capabilityRequestId = null;
       next.controllerConnection.capabilityValidForMs = null;
+      next.controllerConnection.temporaryModelAvailable = false;
     }
     next.revision = state.revision + 1;
     return next;
@@ -293,6 +296,7 @@
     next.controllerConnection.capabilityValidForMs = payload.capabilityValidForMs == null
       ? null
       : Number(payload.capabilityValidForMs);
+    next.controllerConnection.temporaryModelAvailable = payload.temporaryModelAvailable === true;
     next.controllerConnection.capabilityStatus = next.controllerConnection.capabilityError
       ? "error"
       : (revision != null ? "ready" : "idle");

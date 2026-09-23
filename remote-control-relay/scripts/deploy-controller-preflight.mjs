@@ -1,4 +1,5 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,8 @@ const REQUIRED_KEYS = Object.freeze([
   "PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64",
   "PINVOU_REMOTE_CONTROLLER_STATE_PATH",
   "PINVOU_REMOTE_STATE_PATH",
+  "PINVOU_REMOTE_ALLOWED_PROXY_IPS",
+  "PINVOU_REMOTE_TRUSTED_PROXY_IPS",
 ]);
 
 const EXACT_VALUES = Object.freeze({
@@ -57,6 +60,25 @@ export function validateControllerEnvironment(entries) {
   for (const [key, expected] of Object.entries(EXACT_VALUES)) {
     if (entries.get(key) !== expected) fail("controller_env_required_value_invalid");
   }
+  const allowed = parseProxyIps(entries.get("PINVOU_REMOTE_ALLOWED_PROXY_IPS"));
+  const trusted = parseProxyIps(entries.get("PINVOU_REMOTE_TRUSTED_PROXY_IPS"));
+  if (
+    allowed.size !== trusted.size
+    || [...allowed].some((address) => !trusted.has(address))
+  ) {
+    fail("controller_env_proxy_ips_mismatch");
+  }
+}
+
+function parseProxyIps(value) {
+  const addresses = String(value || "")
+    .split(",")
+    .map((address) => address.trim())
+    .filter(Boolean);
+  if (addresses.length === 0 || addresses.some((address) => isIP(address) === 0)) {
+    fail("controller_env_proxy_ips_invalid");
+  }
+  return new Set(addresses);
 }
 
 export function validateControllerEnvironmentMetadata({

@@ -2109,6 +2109,7 @@ dictEn["remoteConversation"] = {
   journalResync: "The conversation state was re-synced.",
   resultUnknownHint: "The connection dropped, so this task's outcome cannot be confirmed.",
   sessionBusy: "This remote session is running a task. Try again shortly; your message was kept.",
+  temporaryModelCapabilityRequired: "The other device does not support using your model yet. Update both clients and reconnect, or use the controlled device's model.",
   errorGeneric: "The operation failed. Please try again.",
 };
 

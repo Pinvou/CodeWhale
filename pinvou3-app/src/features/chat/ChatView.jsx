@@ -60,6 +60,10 @@ import {
   taskStatusKey,
 } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
+import {
+  canUseControllerTemporaryModel,
+  normalizeRemoteModelSource,
+} from '../remote-control/remote-model-source.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
 import {
@@ -899,6 +903,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const localBusy = bs ? bs.busy : false;
       const remoteLinkReady = !!(remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null
         && remoteConnection.capabilityStatus !== 'error');
+      const remoteTemporaryModelAvailable = canUseControllerTemporaryModel(remoteConnection);
+      const effectiveRemoteModelSource = normalizeRemoteModelSource(remoteModelSource, remoteConnection);
       const controlledLinkReady = !!(
         controlledChatActive
         && controlledSession.sessionId
@@ -1715,7 +1721,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           const sessionRef = remoteConnection.sessionRef;
           const sendIdentity = remoteSendIdentity;
           try {
-            await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, remoteModelSource);
+            await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, effectiveRemoteModelSource);
             setRemoteSendError(current => (
               current && current.identity === sendIdentity ? null : current
             ));
@@ -1806,7 +1812,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // composer (first-turn materialization abort, session switch);
         // restoring again would duplicate it.
         return dispatchResult;
-      }, [activeSessionId, controlledChatActive, controlledLinkReady, controlledSession.sessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteChatActive, remoteConnection, remoteLinkReady, remoteModelSource, remoteSendIdentity, t, visualPosterSceneActive]);
+      }, [activeSessionId, controlledChatActive, controlledLinkReady, controlledSession.sessionId, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteChatActive, remoteConnection, remoteLinkReady, remoteSendIdentity, t, visualPosterSceneActive]);
 
       // 断开重连或窗口重载后，进入 ChatView 时也要确保远程 session 可用；
       // sessionRef 是把普通输入框路由到远端的必要条件。
@@ -1896,7 +1902,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         : null;
       const remoteSendMessage = currentRemoteSendError === 'task_session_busy'
         ? t.remoteConversation.sessionBusy
-        : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null);
+        : (currentRemoteSendError === 'temporary_model_capability_required'
+          ? t.remoteConversation.temporaryModelCapabilityRequired
+          : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null));
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');
@@ -2502,18 +2510,24 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   <span
                     className={`text-[11px] ${remoteConnection.sessionRef ? 'opacity-80' : 'animate-pulse opacity-90'}`}
                   >
-                    {remoteConnection.sessionRef ? t.controllerConnection.modelSourceDevice : t.controllerConnection.remoteSessionPreparing}
+                    {remoteConnection.sessionRef
+                      ? (effectiveRemoteModelSource === 'controller_temporary'
+                        ? t.remoteConversation.modelSourceMine
+                        : t.controllerConnection.modelSourceDevice)
+                      : t.controllerConnection.remoteSessionPreparing}
                   </span>
                   <select
                     data-testid="chat-remote-model-source"
                     aria-label={t.remoteConversation.modelPickerTitle}
-                    value={remoteModelSource}
+                    value={effectiveRemoteModelSource}
                     onChange={(event) => onRemoteModelSourceChange?.(event.target.value)}
                     disabled={remoteSessionBusy || !remoteConnection.sessionRef}
                     className="max-w-[132px] rounded-full bg-transparent px-1 text-[12px] outline-none"
                   >
                     <option value="controlled_device">{t.remoteConversation.modelSourceDevice}</option>
-                    <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                    {remoteTemporaryModelAvailable && (
+                      <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                    )}
                   </select>
                 </div>
               )}
@@ -2583,13 +2597,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     <select
                       data-testid="chat-remote-model-source"
                       aria-label={t.remoteConversation.modelPickerTitle}
-                      value={remoteModelSource}
+                      value={effectiveRemoteModelSource}
                       onChange={(event) => onRemoteModelSourceChange?.(event.target.value)}
                       disabled={remoteSessionBusy || remoteCapabilityBusy || !remoteLinkReady}
                       className="min-w-0 max-w-[180px] rounded-full bg-white/80 px-2 py-1 text-[12px] outline-none dark:bg-[#1F2023]"
                     >
                       <option value="controlled_device">{t.remoteConversation.modelSourceDevice}</option>
-                      <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                      {remoteTemporaryModelAvailable && (
+                        <option value="controller_temporary">{t.remoteConversation.modelSourceMine}</option>
+                      )}
                     </select>
                   </div>
                 </div>

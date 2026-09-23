@@ -156,6 +156,8 @@ dropin_dir="/etc/systemd/system/${service}.d"
 dropin="$dropin_dir/10-hardening.conf"
 controller_dropin="$dropin_dir/40-controller.conf"
 controller_env="/etc/pinvou-remote-relay-controller.env"
+controller_state_root="/var/lib/pinvou-remote-relay"
+controller_state_dir="$controller_state_root/state"
 telemetry_data_dir="/var/lib/pinvou-telemetry"
 ipv4_db="$telemetry_data_dir/ip2region_v4.xdb"
 ipv6_db="$telemetry_data_dir/ip2region_v6.xdb"
@@ -174,6 +176,11 @@ node --check "$code_stage/scripts/controller-route-smoke.mjs"
 # Production desktop control is a required lane. The secret-bearing environment
 # file is provisioned out of band and must never be generated or printed here.
 node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"
+# The state store deliberately refuses to create missing ancestors. Provision
+# its dedicated root explicitly so a first deployment on a clean host can
+# start without weakening the store's symlink/ownership checks.
+install -d -o root -g root -m 700 "$controller_state_root"
+install -d -o root -g root -m 700 "$controller_state_dir"
 test -f "$code_stage/docs/schemas/behavior-telemetry-v1.schema.json"
 test -f "$code_stage/docs/schemas/behavior-telemetry-registries.json"
 mkdir -p "$remote_dir/web"
@@ -341,7 +348,7 @@ fi
 healthy=0
 for _ in $(seq 1 30); do
   health="$(curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz 2>/dev/null || true)"
-  if node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || h.desktop_controller_enabled !== true) process.exit(1)' "$health" \
+  if node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || h.desktop_controller_enabled !== true) process.exit(1)' "$health" 2>/dev/null \
     && curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
     healthy=1
     break
@@ -419,7 +426,15 @@ fi
 systemctl daemon-reload
 systemctl restart "$service"
 systemctl is-active --quiet "$service"
-curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+test "$healthy" = 1
 echo "已恢复备份：$backup"
 REMOTE
 }

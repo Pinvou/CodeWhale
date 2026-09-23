@@ -2077,6 +2077,7 @@ dictZh["remoteConversation"] = {
   journalResync: "已重新同步会话状态。",
   resultUnknownHint: "连接中断，无法确认该任务是否执行完成。",
   sessionBusy: "当前远程会话正在执行任务，请稍后重试；消息已保留。",
+  temporaryModelCapabilityRequired: "对方版本暂不支持使用你的模型。请升级双方客户端并重新连接，或改用被控端模型。",
   errorGeneric: "操作失败，请稍后重试。",
 };
 
