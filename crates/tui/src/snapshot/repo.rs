@@ -251,10 +251,17 @@ impl SnapshotRepo {
         // with the usual notice) instead of parking the turn pipeline here,
         // before the bounded git core ever runs.
         let work_tree = canonicalize_bounded(workspace, WORKSPACE_PROBE_TIMEOUT)?;
-        if let Some(reason) = unsafe_workspace_snapshot_reason(
+        // The safety classifier resolves the workspace again (and HOME, twice)
+        // with plain syscalls — an unbounded window between the probe that
+        // just succeeded and git, on the very mount the probe bounds. Run
+        // the whole check under the same bound so the open path degrades
+        // within one probe budget instead of parking there.
+        let reason = snapshot_safety_reason_bounded(
             &work_tree,
             crate::config::effective_home_dir().as_deref(),
-        ) {
+            WORKSPACE_PROBE_TIMEOUT,
+        )?;
+        if let Some(reason) = reason {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -1716,6 +1723,25 @@ pub(super) fn canonicalize_bounded(path: &Path, bound: Duration) -> io::Result<P
     Ok(resolved.unwrap_or_else(|_| path.to_path_buf()))
 }
 
+/// [`unsafe_workspace_snapshot_reason`] under [`run_bounded_fs`]. The
+/// classifier resolves the workspace a second time and HOME twice with
+/// plain syscalls; left inline those are another unbounded pre-git window
+/// on the mount the open path just bounded with its own probe. Keep the
+/// existing classification semantics untouched and put the whole check
+/// under one bound; the open path then degrades with the usual
+/// wedged-filesystem notice instead of parking between the probes and git.
+fn snapshot_safety_reason_bounded(
+    workspace: &Path,
+    home: Option<&Path>,
+    bound: Duration,
+) -> io::Result<Option<&'static str>> {
+    let owned_workspace = workspace.to_path_buf();
+    let owned_home = home.map(Path::to_path_buf);
+    run_bounded_fs("workspace safety classification", bound, move || {
+        unsafe_workspace_snapshot_reason(&owned_workspace, owned_home.as_deref())
+    })
+}
+
 fn normalize_path_for_safety(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -1869,6 +1895,53 @@ mod tests {
 
         let after = SnapshotRepo::open_existing(&workspace).expect("open existing");
         assert!(after.is_some());
+    }
+
+    #[test]
+    fn bounded_safety_classification_matches_the_inline_classifier() {
+        // The open path used to run the workspace/home re-canonicalization
+        // of `unsafe_workspace_snapshot_reason` inline — an unbounded
+        // pre-git window on a mount whose probes had just been bounded.
+        // The classifier now runs behind `snapshot_safety_reason_bounded`,
+        // which is a pass-through into `run_bounded_fs`: the timeout leg is
+        // pinned there (bounded_fs_probe_times_out…), since a genuinely
+        // wedged mount — the only shape whose canonicalize would outlast
+        // any test bound — cannot be induced in a unit test. What this test
+        // pins instead is the part that could silently regress on its own:
+        // the wrapper must classify exactly what the inline classifier it
+        // replaced would have, on every anchored classification, including
+        // the HOME/Desktop shapes the disabled-workspace tests rely on.
+        let tmp = tempdir().unwrap();
+        // ScopedHome already owns the process-wide env lock for the test's
+        // duration; taking lock_test_env() again in the same thread would
+        // deadlock on the non-reentrant mutex.
+        let _home = scoped_home(tmp.path());
+        let desktop = tmp.path().join("Desktop");
+        std::fs::create_dir_all(&desktop).unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        for (workspace, expected) in [
+            (tmp.path(), Some("home directory")),
+            (desktop.as_path(), Some("home collection directory")),
+            (elsewhere.as_path(), None),
+        ] {
+            assert_eq!(
+                unsafe_workspace_snapshot_reason(workspace, Some(tmp.path())),
+                expected,
+                "inline classifier baseline must hold for {workspace:?}"
+            );
+            assert_eq!(
+                snapshot_safety_reason_bounded(
+                    workspace,
+                    Some(tmp.path()),
+                    WORKSPACE_PROBE_TIMEOUT
+                )
+                .expect("the classifier completes well within the probe bound"),
+                expected,
+                "bounded classifier must agree with the inline one for {workspace:?}"
+            );
+        }
     }
 
     #[test]
