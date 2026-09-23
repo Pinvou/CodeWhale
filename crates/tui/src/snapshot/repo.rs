@@ -214,9 +214,15 @@ impl SnapshotRepo {
     /// availability without paying the first-init size walk or surprising the
     /// user by creating a side repo from a view action.
     pub fn open_existing(workspace: &Path) -> io::Result<Option<Self>> {
-        let work_tree = workspace
-            .canonicalize()
-            .unwrap_or_else(|_| workspace.to_path_buf());
+        // Read-only availability surface: a wedged mount reads as "no
+        // snapshots" rather than hanging the UI or erroring the caller.
+        let work_tree = match canonicalize_bounded(workspace, WORKSPACE_PROBE_TIMEOUT) {
+            Ok(work_tree) => work_tree,
+            Err(err) => {
+                tracing::warn!(target: "snapshot", "snapshot availability probe failed: {err}");
+                return Ok(None);
+            }
+        };
         let git_dir = snapshot_git_dir(&work_tree);
         if !git_dir.exists() || !git_dir.join("HEAD").exists() {
             return Ok(None);
@@ -245,9 +251,10 @@ impl SnapshotRepo {
     /// "workspace too large" reason. Subsequent calls (after the user
     /// shrinks the workspace or raises the cap via config) succeed.
     pub fn open_or_init_with_cap(workspace: &Path, cap_bytes: u64) -> io::Result<Self> {
-        let work_tree = workspace
-            .canonicalize()
-            .unwrap_or_else(|_| workspace.to_path_buf());
+        // A wedged workspace mount must fail the open (degrading snapshots
+        // with the usual notice) instead of parking the turn pipeline here,
+        // before the bounded git core ever runs.
+        let work_tree = canonicalize_bounded(workspace, WORKSPACE_PROBE_TIMEOUT)?;
         if let Some(reason) = unsafe_workspace_snapshot_reason(
             &work_tree,
             crate::config::effective_home_dir().as_deref(),
@@ -279,7 +286,20 @@ impl SnapshotRepo {
             // existing repo's `MAX_SNAPSHOT_SIZE_MB` budget. Users on
             // workspaces that grew past the cap mid-session get the
             // existing aggressive-pruning path in `snapshot()`.
-            if estimate_workspace_size_bounded(&work_tree, cap_bytes).is_none() {
+            let sized = {
+                let work_tree = work_tree.clone();
+                run_bounded_fs(
+                    "first-init workspace size walk",
+                    SIZE_WALK_TIMEOUT,
+                    move || estimate_workspace_size_bounded(&work_tree, cap_bytes),
+                )
+            };
+            if let Err(err) = sized {
+                return Err(io::Error::other(format!(
+                    "first-init workspace scan failed: {err}"
+                )));
+            }
+            if sized.unwrap().is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -561,7 +581,9 @@ impl SnapshotRepo {
         // deliberately not a `/undo` or `revert_turn` candidate label, so the
         // safety net never changes snapshot selection. Best-effort: a failed
         // safety snapshot must never block the restore the user asked for.
-        let target_short = &id.as_str()[..id.as_str().len().min(12)];
+        // ids are git-produced hex, so the byte slice is char-safe today;
+        // `get` keeps it panic-free if that ever changes.
+        let target_short = id.as_str().get(..12).unwrap_or(id.as_str());
         if let Err(e) = self.snapshot_with_session(&format!("pre-restore:{target_short}"), None) {
             tracing::warn!(
                 target: "snapshot",
@@ -1242,7 +1264,10 @@ fn drain_git_pipe<R>(
 /// pipes drained concurrently. Every git invocation in this module goes
 /// through here (or the thin [`run_git`] wrapper), so a wedged git —
 /// stalled NFS/FUSE, hung hook, uninterruptible kernel I/O — degrades the
-/// snapshot with an error instead of hanging the turn pipeline.
+/// snapshot with an error instead of hanging the turn pipeline. The
+/// pre-git blocking probes (`canonicalize`, the first-init size walk) are
+/// bounded the same way by [`run_bounded_fs`], so the whole snapshot open
+/// path degrades instead of hanging on the wedged mount.
 ///
 /// The timeout path kills the child and reaps it on a detached thread: on a
 /// hard-wedged mount git can sit in uninterruptible kernel I/O where even
@@ -1317,13 +1342,40 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
+            // The readers captured whatever the child managed to say before
+            // it wedged — hook and clean-filter diagnostics are exactly what
+            // explains a timeout, so surface the tail instead of losing it.
+            let stderr_all =
+                String::from_utf8_lossy(&stderr_buf.lock().map(|b| b.clone()).unwrap_or_default())
+                    .trim()
+                    .to_string();
+            let stderr_tail = if stderr_all.chars().count() > 500 {
+                // Keep the last 500 characters (the diagnostics closest to
+                // the wedge), character-boundary safe by construction.
+                let tail: String = stderr_all
+                    .chars()
+                    .rev()
+                    .take(500)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                format!("…{tail}")
+            } else {
+                stderr_all
+            };
+            let detail = if stderr_tail.is_empty() {
                 format!(
                     "git {subcommand} timed out after {}s",
                     GIT_COMMAND_TIMEOUT.as_secs()
-                ),
-            ));
+                )
+            } else {
+                format!(
+                    "git {subcommand} timed out after {}s: {stderr_tail}",
+                    GIT_COMMAND_TIMEOUT.as_secs()
+                )
+            };
+            return Err(io::Error::new(io::ErrorKind::TimedOut, detail));
         }
         // The wait itself failed (only `try_wait`/poll hard errors reach
         // here). Cancel and join before propagating so this exit leaves no
@@ -1564,6 +1616,48 @@ fn unsafe_workspace_snapshot_reason(workspace: &Path, home: Option<&Path>) -> Op
     None
 }
 
+/// Bounds for the blocking filesystem probes that run before the bounded
+/// git core. On a wedged NFS/FUSE workspace these plain calls would
+/// otherwise park the turn pipeline exactly where the git bounds cannot
+/// reach; on expiry the call errors out and the helper thread is abandoned
+/// (it ends when the mount does — the same contract as the detached git
+/// reap).
+pub(super) const WORKSPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const SIZE_WALK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run a blocking filesystem probe on a helper thread under a hard bound.
+pub(super) fn run_bounded_fs<T: Send + 'static>(
+    what: &'static str,
+    bound: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(bound).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "{what} did not finish within {}s; the filesystem appears wedged",
+                bound.as_secs()
+            ),
+        )
+    })
+}
+
+/// [`std::path::Path::canonicalize`] under [`run_bounded_fs`]. A fast
+/// canonicalize failure (missing path, permission) falls back to the
+/// unresolved path exactly like the inline calls this replaces; only a
+/// probe that exceeds the bound errors out.
+pub(super) fn canonicalize_bounded(path: &Path, bound: Duration) -> io::Result<PathBuf> {
+    let owned = path.to_path_buf();
+    let resolved = run_bounded_fs("workspace path resolution", bound, move || {
+        owned.canonicalize()
+    })?;
+    Ok(resolved.unwrap_or_else(|_| path.to_path_buf()))
+}
+
 fn normalize_path_for_safety(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -1599,6 +1693,31 @@ fn is_safe_relative_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_fs_probe_times_out_instead_of_parking_the_caller() {
+        // A probe that exceeds its bound errors out promptly (the abandoned
+        // helper thread ends whenever the underlying call returns); a fast
+        // probe delivers its value untouched.
+        let started = std::time::Instant::now();
+        let err = run_bounded_fs("wedged probe", Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(2));
+        })
+        .expect_err("a probe past its bound must time out");
+        assert!(
+            err.to_string().contains("did not finish within 0s"),
+            "the timeout must name the probe bound: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the caller must not wait out the underlying call"
+        );
+        assert_eq!(
+            run_bounded_fs("fast probe", Duration::from_secs(5), || 42usize).expect("fast probe"),
+            42
+        );
+    }
+
     use crate::test_support::lock_test_env;
     use std::fs::{File, FileTimes};
     use tempfile::tempdir;
