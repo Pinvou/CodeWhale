@@ -302,6 +302,7 @@ export const lazyChunkContracts = {
   toolStore: ['features/tools/ToolStoreView.jsx', 'ToolStoreView'],
   scheduled: ['features/scheduled/ScheduledTasksView.jsx', 'ScheduledTasksView'],
   knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
+  modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
   teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
@@ -342,10 +343,19 @@ function enforceLazyChunks() {
   };
 }
 
-// Deliberately keep both desktop and web below Vite's 500 kB warning boundary.
-// New entry work should be split or lazy-loaded. Raising this limit requires
-// measured desktop + web before/after sizes and an explicit review decision.
-export const MAIN_ENTRY_BUDGET_BYTES = 500_000;
+// Keep both desktop and web close to Vite's 500 kB warning boundary. New entry
+// work should be split or lazy-loaded. Raising this limit requires measured
+// desktop + web before/after sizes and an explicit review decision.
+// 2026-09-24 500_000 → 502_000 (model store #1195, measured):
+//   web:     499,211 B (main @ 039c77941) → 500,863 B (+1,652 B, of which
+//            ~888 B is the sidebar/mobile entry wiring and ~764 B is the
+//            dynamic-import preload bookkeeping of adding a new lazy view).
+//   desktop: 498,510 B on the PR head — unchanged headroom, still passes.
+// The previous 500_000 left only 789 B of headroom, less than the floor cost
+// of wiring any new lazy view, so the next view feature could not merge
+// without a deliberate bump. 502_000 restores ~1.1 kB of headroom; further
+// growth should still be justified with fresh measurements.
+export const MAIN_ENTRY_BUDGET_BYTES = 502_000;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (

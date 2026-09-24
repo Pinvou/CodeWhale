@@ -514,6 +514,12 @@ jobs:
           base_ref="${base_ref#refs/heads/}"
           python3 scripts/architecture-guard.py --base-ref "origin/$base_ref"
 
+      - name: 文档锚点门禁
+        # 文档里的「某文件的某符号」引用必须指得到真东西，并且不许把行号写回去。
+        # 行号漂掉之后不会有任何东西报错——读者点过去看到一行不相干的代码，只会
+        # 以为自己读错了。这道门禁就是那个「会报错的东西」。
+        run: python3 scripts/check-doc-anchors.py
+
       - name: 公开底座 gitlink 可达性
         # Fail closed: gitlink 必须等于公开维护分支头；过渡期（fork-policy 第 0 节豁免）
         # 内不可变 tag 钉在其收口 commit，rN 收口后恢复三方相等。

@@ -43,6 +43,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChatWorkspace',
     'artifactPreview',
     'uiToolStore',
+    'uiModelStore',
     'uiPet',
     'uiWebConnection',
     'uiConversation',
