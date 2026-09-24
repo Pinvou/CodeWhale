@@ -279,11 +279,7 @@ fn scheduled_history_archive_path() -> std::path::PathBuf {
     scheduled_automation_root().join("history-archive.json")
 }
 
-fn open_scheduled_automation_manager(root: PathBuf) -> Result<AutomationManager> {
-    AutomationManager::open(root)
-}
-
-pub fn scheduled_task_data_root() -> std::path::PathBuf {
+fn scheduled_task_data_root() -> std::path::PathBuf {
     crate::platform::paths::pinvou3_home().join("tasks")
 }
 
@@ -301,7 +297,7 @@ impl ScheduledTaskState {
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())?;
         let history_archive = ScheduledHistoryArchiveStore::open(scheduled_history_archive_path())?;
         let fallback_model = default_automation_model(Some(bridge));
-        let manager = open_scheduled_automation_manager(scheduled_automation_root())?;
+        let manager = AutomationManager::open(scheduled_automation_root())?;
         let allow_shell = bridge.allow_shell();
         let automations = Arc::new(tokio::sync::Mutex::new(manager));
         let task_cfg = TaskManagerConfig {
@@ -442,11 +438,13 @@ impl ScheduledTaskState {
                 return Err(format!("Failed to save scheduled task kind: {error:#}"));
             }
         }
-        Ok(map_scheduled_task_with_bindings(
+        Ok(map_scheduled_task_with_run_state(
             created,
-            Some(&self.model_bindings),
-            Some(&self.task_kinds),
-            Some(&self.ui_metadata),
+            false,
+            false,
+            &self.model_bindings,
+            &self.task_kinds,
+            &self.ui_metadata,
         ))
     }
 
@@ -457,14 +455,14 @@ impl ScheduledTaskState {
     ) -> Result<ScheduledTaskDto, String> {
         let _operation = self.lock_operation(&id).await;
         let manager = self.automations.lock().await;
-        let current = manager
+        let _current_exists = manager
             .get_automation(&id)
             .map_err(|err| format!("Failed to update scheduled task '{id}': {err}"))?;
         let requested_model_update = input.model.clone();
         let requested_model_id = input.model_id.clone();
         let requires_model_binding = requested_model_id.is_some();
         let updated = manager
-            .update_automation(&id, build_update_request(input, &current)?)
+            .update_automation(&id, build_update_request(input)?)
             .map_err(|err| format!("Failed to update scheduled task '{id}': {err}"))?;
         let updated = ensure_automation_workspace(&manager, updated)
             .map_err(|err| format!("Failed to update scheduled task workspace '{id}': {err:#}"))?;
@@ -827,11 +825,13 @@ impl ScheduledTaskState {
             // Build the DTO before clearing the kind: the delete receipt keeps the kind so
             // the frontend can render the template marker.
             let deleted = DeletedScheduledTaskDto {
-                task: map_scheduled_task_with_bindings(
+                task: map_scheduled_task_with_run_state(
                     deleted,
-                    Some(&self.model_bindings),
-                    Some(&self.task_kinds),
-                    Some(&self.ui_metadata),
+                    false,
+                    false,
+                    &self.model_bindings,
+                    &self.task_kinds,
+                    &self.ui_metadata,
                 ),
             };
             if let Err(error) = self.task_kinds.remove(id) {
@@ -1096,38 +1096,20 @@ async fn prune_scheduled_history(
     Ok(())
 }
 
-fn map_scheduled_task_with_bindings(
-    record: AutomationRecord,
-    model_bindings: Option<&ScheduledTaskModelBindingStore>,
-    task_kinds: Option<&ScheduledTaskKindStore>,
-    ui_metadata: Option<&ScheduledTaskUiMetadataStore>,
-) -> ScheduledTaskDto {
-    map_scheduled_task_with_run_state(
-        record,
-        false,
-        false,
-        model_bindings,
-        task_kinds,
-        ui_metadata,
-    )
-}
-
 fn map_scheduled_task_with_run_state(
     record: AutomationRecord,
     has_unread_runs: bool,
     is_running: bool,
-    model_bindings: Option<&ScheduledTaskModelBindingStore>,
-    task_kinds: Option<&ScheduledTaskKindStore>,
-    ui_metadata: Option<&ScheduledTaskUiMetadataStore>,
+    model_bindings: &ScheduledTaskModelBindingStore,
+    task_kinds: &ScheduledTaskKindStore,
+    ui_metadata: &ScheduledTaskUiMetadataStore,
 ) -> ScheduledTaskDto {
     let model_id = record
         .model
         .as_deref()
-        .and_then(|model| model_bindings.and_then(|store| store.model_id_for(&record.id, model)));
-    let kind = task_kinds.and_then(|store| store.kind_for(&record.id));
-    let (pinned, pinned_at) = ui_metadata
-        .map(|store| store.metadata_for(&record.id))
-        .unwrap_or((false, None));
+        .and_then(|model| model_bindings.model_id_for(&record.id, model));
+    let kind = task_kinds.kind_for(&record.id);
+    let (pinned, pinned_at) = ui_metadata.metadata_for(&record.id);
     ScheduledTaskDto {
         id: record.id,
         name: record.name,
@@ -1279,9 +1261,9 @@ fn map_scheduled_task_from_manager(
         record,
         has_unread_runs,
         is_running,
-        Some(model_bindings),
-        Some(task_kinds),
-        Some(ui_metadata),
+        model_bindings,
+        task_kinds,
+        ui_metadata,
     ))
 }
 
@@ -1405,7 +1387,6 @@ fn build_create_request(
 
 fn build_update_request(
     input: UpdateScheduledTaskInput,
-    _current: &AutomationRecord,
 ) -> Result<UpdateAutomationRequest, String> {
     let _ = (
         &input.cwds,
@@ -2416,8 +2397,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let automations: SharedAutomationManager = Arc::new(tokio::sync::Mutex::new(manager));
         let task_manager = TaskManager::start_with_executor(
             TaskManagerConfig {
@@ -2988,8 +2968,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3070,8 +3049,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3170,8 +3148,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3307,8 +3284,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3460,8 +3436,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3567,8 +3542,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3656,8 +3630,18 @@ mod tests {
 
     #[test]
     fn task_dto_does_not_expose_legacy_source_session_binding() {
+        let dir = temp_home();
+        // Empty stores: the DTO must render the same as when nothing is bound
+        // (kind null, no model id, not pinned).
+        let model_bindings =
+            ScheduledTaskModelBindingStore::open(dir.join("dto-model-bindings.json"))
+                .expect("model bindings");
+        let task_kinds =
+            ScheduledTaskKindStore::open(dir.join("dto-task-kinds.json")).expect("task kinds");
+        let ui_metadata = ScheduledTaskUiMetadataStore::open(dir.join("dto-ui-metadata.json"))
+            .expect("ui metadata");
         let now = chrono::Utc::now();
-        let dto = map_scheduled_task_with_bindings(
+        let dto = map_scheduled_task_with_run_state(
             AutomationRecord {
                 schema_version: 1,
                 id: "automation-1".to_string(),
@@ -3679,10 +3663,13 @@ mod tests {
                 next_run_at: None,
                 last_run_at: None,
             },
-            None,
-            None,
-            None,
+            false,
+            false,
+            &model_bindings,
+            &task_kinds,
+            &ui_metadata,
         );
+        let _ = std::fs::remove_dir_all(dir);
 
         let value = serde_json::to_value(dto).expect("serialize task dto");
         assert!(
@@ -3692,7 +3679,7 @@ mod tests {
         assert_eq!(
             value.get("kind"),
             Some(&serde_json::Value::Null),
-            "chat tasks serialize kind as null when no kind store is consulted"
+            "chat tasks serialize kind as null when the kind store has no entry"
         );
         assert_eq!(
             value.get("isRunning"),
@@ -3788,8 +3775,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3867,8 +3853,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4275,8 +4260,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4364,8 +4348,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let mut state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4461,8 +4444,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,

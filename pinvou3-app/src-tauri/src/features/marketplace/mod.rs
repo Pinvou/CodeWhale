@@ -428,8 +428,8 @@ fn tool_source_contract(source: &store::BundleSource) -> &'static str {
 
 // 对外 pub 面保持不变:类型从 types 子模块 re-export。
 pub use types::{
-    ConfigField, MarketplaceToolInfo, MarketplaceToolValidation, McpSecretMigrationResult,
-    RemoteOAuthConfig, RemoteServer, SecretEnv, SecretHeader, ToolManifest,
+    ConfigField, MarketplaceToolInfo, RemoteOAuthConfig, RemoteServer, SecretEnv, SecretHeader,
+    ToolManifest,
 };
 
 // PR #302 拆分后,这些函数已搬到 scope.rs;为保持 mod.rs 兼容面,在此 re-export。
@@ -877,6 +877,7 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         tool_id: &str,
         user_config: &std::collections::HashMap<String, String>,
         source: store::BundleSource,
+        // test seam: only install_with_python (cfg(test)) passes Some
         python_override: Option<&str>,
     ) -> Result<(), String> {
         let _transaction_guard = MARKETPLACE_TRANSACTION_LOCK
@@ -1106,16 +1107,12 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             let can_redeliver = mcp_catalog::spec_for(tool_id).is_some();
             if let Some(record) = upload_record {
                 if pkg_dir.exists() {
-                    let display_name = match &record.source {
-                        store::BundleSource::Upload(zip) => zip.clone(),
-                        _ => tool_id.to_string(),
-                    };
                     let kind = recycle_bin::package_kind(&pkg_dir);
-                    if let Err(e) = recycle_bin::RecycleBin::new().recycle_package(
+                    if let Err(e) = recycle_bin::recycle_upload_package(
+                        &recycle_bin::RecycleBin::new(),
                         tool_id,
+                        &record,
                         kind,
-                        &display_name,
-                        record.clone(),
                     ) {
                         // preflight 已过仍失败 = 极端 IO 异常（rename/清单写；目录已
                         // 由 recycle_package 回滚原位）。登记仅以本次所删为限回写；
@@ -1249,6 +1246,14 @@ impl<S: CredentialStore> MarketplaceManager<S> {
     /// `preserve_companion_skills`：跳过 companion 技能物理删除 —— 修复降级路径
     /// 上 Upload 整包回收失败（技能目录仍在盘上）时由调用方置位：宁可留下残留
     /// 技能卡，不把用户唯一副本的 skills 部分物理删除。
+    ///
+    /// Teardown policy twin: this is the **post-commit best-effort** companion
+    /// cleanup (runs only after the uninstall transaction commits; failures are
+    /// swallowed). The eager pre-uninstall, abort-on-failure twin lives in
+    /// `app/commands/marketplace.rs::uninstall_marketplace_tool_sync` (runs
+    /// before any supply-side teardown so a failed companion delete aborts the
+    /// whole uninstall). Keep the two policies distinct and the cross
+    /// references intact when touching either side.
     fn cleanup_uninstalled_tool_state(
         &self,
         tool_id: &str,
@@ -1303,18 +1308,13 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                     if matches!(record.source, store::BundleSource::Upload(_)) {
                         let pkg_dir = paths::bundles_root().join(tool_id);
                         if pkg_dir.exists() {
-                            let display_name = match &record.source {
-                                store::BundleSource::Upload(zip) => zip.clone(),
-                                _ => tool_id.to_string(),
-                            };
-                            if let Err(recycle_error) = recycle_bin::RecycleBin::new()
-                                .recycle_package(
-                                    tool_id,
-                                    recycle_bin::package_kind(&pkg_dir),
-                                    &display_name,
-                                    record.clone(),
-                                )
-                            {
+                            let kind = recycle_bin::package_kind(&pkg_dir);
+                            if let Err(recycle_error) = recycle_bin::recycle_upload_package(
+                                &recycle_bin::RecycleBin::new(),
+                                tool_id,
+                                &record,
+                                kind,
+                            ) {
                                 log::warn!(
                                     "[marketplace] 修复降级回收 Upload 包失败（{tool_id}），跳过 companion 物理清理以保留唯一副本: {recycle_error}"
                                 );
@@ -5413,8 +5413,7 @@ mod tests {
             config.insert("PATSNAP_API_KEY".to_string(), "valid-token".to_string());
 
             mgr.install("test-patsnap-validation", &config).unwrap();
-            let validation = mgr
-                .validate_remote_connection("test-patsnap-validation")
+            mgr.validate_remote_connection("test-patsnap-validation")
                 .await
                 .unwrap();
 
@@ -5442,8 +5441,6 @@ mod tests {
                 secrets::resolve_registered_secret("PINVOU3_MCP_SECRET_PATSNAP_API_KEY").as_deref(),
                 Some("valid-token")
             );
-            assert!(validation.tools.contains(&"patsnap_search".to_string()));
-            assert!(validation.tools.contains(&"patsnap_fetch".to_string()));
             let seen = mock.seen_methods.lock().unwrap().clone();
             assert!(seen.contains(&"initialize".to_string()));
             assert!(seen.contains(&"tools/list".to_string()));
@@ -5505,9 +5502,8 @@ mod tests {
             let store = MemoryCredentialStore::default();
             let mgr = MarketplaceManager::with_store(store.clone());
 
-            let result = mgr.migrate_mcp_plaintext_secrets().unwrap();
+            mgr.migrate_mcp_plaintext_secrets().unwrap();
 
-            assert_eq!(result.migrated_count, 1);
             let stored = store
                 .get(&mcp_secret_reference("weather", "env", "AMAP_KEY"))
                 .unwrap();
@@ -5519,6 +5515,12 @@ mod tests {
             )
             .unwrap();
             assert!(!content.contains(&secret));
+            // Migration observation (replacement for the old McpSecretMigrationResult count assertions): the AMAP_KEY key
+            // is removed from env wholesale, the keyless value is kept, and exactly one migration is persisted.
+            assert!(
+                !content.contains("AMAP_KEY"),
+                "migration should remove the AMAP_KEY key from env wholesale: {content}"
+            );
             assert!(content.contains("SAFE_VALUE"));
         });
     }
@@ -5546,15 +5548,19 @@ mod tests {
             let store = MemoryCredentialStore::default();
             let mgr = MarketplaceManager::with_store(store.clone());
 
-            let result = mgr.migrate_mcp_plaintext_secrets().unwrap();
+            mgr.migrate_mcp_plaintext_secrets().unwrap();
 
-            assert_eq!(result.migrated_count, 1);
             let stored = store
                 .get(&mcp_secret_reference("qcc", "header", "QCC_API_KEY"))
                 .unwrap();
             assert_eq!(stored.as_deref(), Some(secret.as_str()));
             let content = std::fs::read_to_string(&mcp_path).unwrap();
             assert!(!content.contains(&secret));
+            // Migration observation: the plaintext Authorization header is removed wholesale and rewritten to env-var wiring.
+            assert!(
+                !content.contains("Authorization"),
+                "migration should remove the plaintext Authorization header: {content}"
+            );
             assert!(
                 content.contains("\"bearer_token_env_var\": \"PINVOU3_MCP_SECRET_QCC_API_KEY\"")
             );
@@ -5591,9 +5597,10 @@ mod tests {
                 .unwrap();
             let mgr = MarketplaceManager::with_store(store.clone());
 
-            let result = mgr.migrate_mcp_plaintext_secrets().unwrap();
+            mgr.migrate_mcp_plaintext_secrets().unwrap();
 
-            assert_eq!(result.skipped_count, 1);
+            // Skip observation: the existing credential keeps its original value, the file plaintext is cleaned up and rewritten to
+            // env-var wiring (file plaintext cleared but the store not touched, i.e. the "skip override" branch).
             let stored = store
                 .get(&mcp_secret_reference("qcc", "header", "QCC_API_KEY"))
                 .unwrap();
@@ -5601,6 +5608,10 @@ mod tests {
             let content = std::fs::read_to_string(&mcp_path).unwrap();
             assert!(!content.contains(&old_secret));
             assert!(!content.contains(&kept_secret));
+            assert!(
+                !content.contains("Authorization"),
+                "skip-override migration should also clean the plaintext header: {content}"
+            );
             assert!(
                 content.contains("\"bearer_token_env_var\": \"PINVOU3_MCP_SECRET_QCC_API_KEY\"")
             );

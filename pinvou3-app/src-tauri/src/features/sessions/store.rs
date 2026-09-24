@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use deepseek_tui::artifacts::{ArtifactKind, ArtifactRecord};
 use deepseek_tui::models::Message;
 use deepseek_tui::session_manager::{
     SavedSession, SessionManager, SessionMetadata, create_saved_session_with_id_and_mode,
@@ -148,6 +147,10 @@ impl SessionStore {
         )
     }
 
+    /// Test-only boot over an isolated scheduled root (all callers are
+    /// `cfg(test)`). Mirrors [`Self::boot_for_process_startup`] by converging
+    /// the legacy binding table explicitly after the shared boot sequence.
+    #[cfg(test)]
     pub(crate) fn boot_with_scheduled_root(scheduled_root: PathBuf) -> Result<Self> {
         let store = Self::from_paths(
             paths::sessions_root(),
@@ -339,9 +342,6 @@ impl SessionStore {
 
     pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
-        if self.is_scheduled_session(&session.metadata.id)? {
-            return self.persist_then_reconcile(session, "committed save");
-        }
         self.persist_then_reconcile(session, "session save")
     }
 
@@ -694,27 +694,14 @@ impl SessionStore {
             .load_session_snapshot(id)
             .with_context(|| format!("load_session({id}) for artifact update"))?;
         let session_id = session.metadata.id.clone();
-        let now = Utc::now();
         session.artifacts = paths
             .into_iter()
             .enumerate()
             .map(|(idx, p)| {
-                let path = PathBuf::from(&p);
-                let byte_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                ArtifactRecord {
-                    id: format!("p3art_{session_id}_{idx}"),
-                    kind: ArtifactKind::ToolOutput,
-                    session_id: session_id.clone(),
-                    tool_call_id: format!("p3_{idx}"),
-                    tool_name: "write_file".into(),
-                    created_at: now,
-                    byte_size,
-                    preview: String::new(),
-                    storage_path: path,
-                }
+                super::retention::fabricated_tool_output_record(&session_id, idx, PathBuf::from(&p))
             })
             .collect();
-        session.metadata.updated_at = now;
+        session.metadata.updated_at = Utc::now();
         self.persist_then_reconcile(&session, "artifact update")?;
         Ok(())
     }

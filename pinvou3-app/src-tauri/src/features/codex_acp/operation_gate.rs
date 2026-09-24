@@ -177,6 +177,7 @@ impl AcpPool {
             json!({ "configId": config_id, "valueId": value_id }),
         );
         let info = runtime.info(
+            &self.agents,
             self.pending_permissions_for(session_id).await,
             self.pending_elicitations_for(session_id).await,
         );

@@ -199,7 +199,6 @@ pub struct FileHit {
     pub ext: Option<String>,
     pub size: u64,
     pub mtime: i64,
-    pub is_dir: bool,
 }
 
 /// 秒搜查询条件。`text` 为名/路径子串；其余为结构化过滤。
@@ -219,12 +218,6 @@ pub struct SearchQuery {
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub total_files: u64,
-    pub total_bytes: u64,
-    pub hashed: u64,
-    pub duplicate_groups: u64,
-    pub duplicate_files: u64,
-    /// 去重可回收字节 = Σ(组内冗余份数 × 单份大小)。
-    pub duplicate_wasted_bytes: u64,
 }
 
 /// 按扩展名的文件计数（文件管理「按类型浏览」用）。
@@ -386,7 +379,7 @@ impl Store {
         // value directly, avoiding a repeated unwrap.
         if let Some(t) = text.filter(|t| t.chars().count() >= 3) {
             sql.push_str(
-                "SELECT f.path, f.name, f.ext, f.size, f.mtime, f.is_dir \
+                "SELECT f.path, f.name, f.ext, f.size, f.mtime \
                  FROM files_fts JOIN files f ON f.id = files_fts.rowid \
                  WHERE f.status='indexed' AND f.is_dir=0 AND files_fts MATCH ?",
             );
@@ -394,7 +387,7 @@ impl Store {
             let t = t.replace('"', "\"\"");
             vals.push(Value::Text(format!("\"{t}\"")));
         } else {
-            sql.push_str("SELECT f.path, f.name, f.ext, f.size, f.mtime, f.is_dir FROM files f WHERE f.status='indexed' AND f.is_dir=0");
+            sql.push_str("SELECT f.path, f.name, f.ext, f.size, f.mtime FROM files f WHERE f.status='indexed' AND f.is_dir=0");
             if let Some(t) = text {
                 sql.push_str(" AND (f.name LIKE ? OR f.path LIKE ?)");
                 let like = format!("%{}%", escape_like(t));
@@ -438,7 +431,6 @@ impl Store {
                 ext: row.get(2)?,
                 size: row.get::<_, i64>(3)? as u64,
                 mtime: row.get(4)?,
-                is_dir: row.get::<_, i64>(5)? != 0,
             })
         })?;
         rows.collect()
@@ -447,41 +439,12 @@ impl Store {
     /// 索引概况 + 去重统计。
     pub fn stats(&self) -> rusqlite::Result<Stats> {
         let guard = self.read.lock();
-        let (total_files, total_bytes, hashed) = guard.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(size),0), \
-             COALESCE(SUM(CASE WHEN hash IS NOT NULL THEN 1 ELSE 0 END),0) \
-             FROM files WHERE status='indexed' AND is_dir=0",
+        let total_files = guard.query_row(
+            "SELECT COUNT(*) FROM files WHERE status='indexed' AND is_dir=0",
             [],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)? as u64,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)? as u64,
-                ))
-            },
+            |r| Ok(r.get::<_, i64>(0)? as u64),
         )?;
-        let (groups, dup_files, wasted) = guard.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(cnt),0), COALESCE(SUM((cnt-1)*size),0) FROM (\
-               SELECT size, COUNT(*) cnt FROM files \
-               WHERE status='indexed' AND is_dir=0 AND hash IS NOT NULL \
-               GROUP BY hash HAVING cnt>1)",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)? as u64,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)? as u64,
-                ))
-            },
-        )?;
-        Ok(Stats {
-            total_files,
-            total_bytes,
-            hashed,
-            duplicate_groups: groups,
-            duplicate_files: dup_files,
-            duplicate_wasted_bytes: wasted,
-        })
+        Ok(Stats { total_files })
     }
 
     /// 按扩展名分组计数（非目录、已索引），降序。
@@ -640,7 +603,6 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(hits.iter().all(|h| !h.is_dir), "search(FTS) 不应返回目录");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "项目文档.pdf");
         // 无 text 全量路径：同样排除目录
@@ -650,7 +612,6 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(all.iter().all(|h| !h.is_dir), "search(全量) 不应返回目录");
         assert_eq!(all.len(), 1);
     }
 

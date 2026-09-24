@@ -81,9 +81,8 @@ import {
   RewindConfirmDialog,
   RewindUndoChip,
   RewindUndoConfirmDialog,
-  useDialogEscapeKey,
 } from './RewindChip.jsx';
-import { useDialogFocusRestore } from '../../hooks/useDialogFocusRestore.js';
+import { ModalDialogShell } from './ModalDialogShell.jsx';
 import {
   ConversationActivityIndicator,
   ConversationMarkdown,
@@ -125,6 +124,7 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { buildUserInputAnswers, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
 import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
 import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
 import { notifyChatRoundCommitted } from '../tools/tool-events.js';
@@ -247,30 +247,20 @@ function BranchSelector({ copy, branches, disabled, busy, menuOpen, onToggle, on
 // not hide the dialog into the background. Mounted only while the dialog is
 // open (conditional rendering at the call site).
 function BranchDialogShell({ copy, busy, testid, labelledBy, initialFocusRef, onCancel, children }) {
-  const dialogRef = useRef(null);
-  useDialogFocusRestore(dialogRef, initialFocusRef);
-  useDialogEscapeKey(busy, onCancel);
-  return createPortal(
-    <div data-testid={testid} className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-      <button
-        type="button"
-        aria-label={copy.branchSwitchCancel}
-        className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
-        disabled={busy}
-        onClick={onCancel}
-      />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        tabIndex={-1}
-        className="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
-      >
-        {children}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <ModalDialogShell
+      testid={testid}
+      zIndexClass="z-[120]"
+      backdropLabel={copy.branchSwitchCancel}
+      backdropClass="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
+      panelClass="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
+      busy={busy}
+      initialFocusRef={initialFocusRef}
+      labelledBy={labelledBy}
+      onCancel={onCancel}
+    >
+      {children}
+    </ModalDialogShell>
   );
 }
 
@@ -537,41 +527,12 @@ const NATIVE_CHAT_EVENTS = [
   'chat:done',
 ];
 
-function isFreeTextPlaceholderOption(option) {
-  const label = String(option?.label || '').trim();
-  return /^(?:其他|其它|other)(?:\s*[\(（][^()（）]*[\)）])?$/i.test(label);
-}
-
 function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput, copy, conversationCopy }) {
-  const questions = (item.questions || []).map((question, index) => {
-    const allowOther = question.allow_free_text !== false;
-    return {
-      id: question.id || `question-${index + 1}`,
-      header: question.header || `Q${index + 1}`,
-      question: question.question || '',
-      options: (question.options || [])
-        .filter(option => !allowOther || !isFreeTextPlaceholderOption(option))
-        .map(option => ({
-          value: option.label,
-          label: option.label,
-          description: option.description || '',
-        })),
-      allowOther,
-      multiSelect: Boolean(question.multi_select),
-      required: !question.multi_select,
-    };
-  });
+  const questions = normalizeUserInputQuestions(item.questions);
   const actionable = !item.resolved;
 
   function submit(groups) {
-    const answers = groups.flatMap(group => group.answers.map(answer => ({
-      id: group.questionId,
-      label: answer.other ? (conversationCopy && conversationCopy.otherAnswer) || answer.label : answer.label,
-      value: String(answer.value),
-      // 保留 other 标记：QuestionChoiceCard 还原历史答案时据此把“其他”与预设选项区分开，
-      // 避免“其他值 == 预设 value”被误判为预设（评审 P2）。
-      other: answer.other,
-    })));
+    const answers = buildUserInputAnswers(groups, conversationCopy && conversationCopy.otherAnswer);
     onSubmitAnswers(item.toolCallId, answers);
   }
 
@@ -584,6 +545,7 @@ function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput,
       submitting={responding}
       submitLabel={copy.submit}
       cancelLabel={copy.cancel}
+      otherPlaceholder={conversationCopy && conversationCopy.otherAnswer}
       otherAnswerLabel={conversationCopy && conversationCopy.otherAnswer}
       inputPlaceholder={conversationCopy && conversationCopy.inputPlaceholder}
       statusText={!actionable

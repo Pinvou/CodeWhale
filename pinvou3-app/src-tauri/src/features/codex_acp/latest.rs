@@ -91,7 +91,6 @@ impl LatestVersionProbe {
             _ => None,
         };
         status.install_action = install_action_for(
-            backend,
             source,
             status.npm_available,
             official_script_supported(backend),
