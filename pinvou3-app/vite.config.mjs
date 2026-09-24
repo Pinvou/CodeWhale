@@ -302,6 +302,7 @@ export const lazyChunkContracts = {
   toolStore: ['features/tools/ToolStoreView.jsx', 'ToolStoreView'],
   scheduled: ['features/scheduled/ScheduledTasksView.jsx', 'ScheduledTasksView'],
   knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
+  modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
   teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
