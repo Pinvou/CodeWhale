@@ -12,10 +12,11 @@ const updaterSource = fs.readFileSync(
 );
 
 // Slim revival of the former updater_progress_state.test.mjs coverage: the
-// 200 ms progress-coalescing machinery it pinned was removed alongside the
-// `update:progress` event (the Rust backend never emitted it), but the
-// download/install state machine on the tauri updater domain still needs a
-// direct unit pin for its failure, cancel, and completion transitions.
+// 200 ms progress-coalescing machinery is no longer pinned here (it belongs
+// to the progress-event lane, not the download/install state machine), but
+// the download/install state machine on the tauri updater domain still
+// needs a direct unit pin for its failure, cancel, and completion
+// transitions.
 function loadUpdaterFeature(options = {}) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   vm.runInNewContext(updaterSource, { window: root });
@@ -31,6 +32,10 @@ function loadUpdaterFeature(options = {}) {
   };
   const notifications = [];
   const invokeCalls = [];
+  // Official 的 Linux/macOS 后端每 256KB 发一次 `update:progress`（见
+  // features/updater/platform/{linux,macos}.rs），前端工厂加载即订阅；这里
+  // 只记录订阅并给出可兑现的 unlisten，进度聚合路径不在本测试钉住范围。
+  const listenedEvents = [];
   const factory = root.__PINVOU_TAURI_BRIDGE_FEATURES__.updater;
   const updater = factory({
     state,
@@ -41,9 +46,13 @@ function loadUpdaterFeature(options = {}) {
       invokeCalls.push({ command, args });
       return options.invoke ? options.invoke(command, args) : Promise.resolve(null);
     },
+    listen(eventName) {
+      listenedEvents.push(eventName);
+      return Promise.resolve(() => {});
+    },
   });
 
-  return { updater, state, notifications, invokeCalls };
+  return { updater, state, notifications, invokeCalls, listenedEvents };
 }
 
 function deferred() {

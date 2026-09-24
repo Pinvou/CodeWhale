@@ -852,7 +852,15 @@ pub(super) fn sanitize_llm_memory_item(
         _ => "preference".to_string(),
     };
     let mut topic = clean_text(&raw.topic, 40);
-    let mut content = super::util::clean_candidate_sentence(&raw.content, 180);
+    // Per-store cap shared with the io write path (and the organize validator),
+    // matched by the pre-normalization kind: a candidate that passes here is
+    // stored verbatim instead of being silently truncated on write.
+    let content_cap = match kind.as_str() {
+        "preference" => io::PREFERENCE_TEXT_MAX_CHARS,
+        "work_context" => io::WORK_CONTEXT_TEXT_MAX_CHARS,
+        _ => io::TIMED_TEXT_MAX_CHARS,
+    };
+    let mut content = super::util::clean_candidate_sentence(&raw.content, content_cap);
     let _reason = clean_text(&raw.reason, 120);
     if content.is_empty() || looks_sensitive(&content) {
         return None;

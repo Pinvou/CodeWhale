@@ -111,6 +111,12 @@ mod tests {
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
 
+    /// Official 仍提供带非空校验的公开构造器（llmapi_hub / bridge 层使用）；
+    /// 测试统一经它构造，保持与生产路径一致。
+    fn credential(api_key: &str) -> RuntimeModelCredential {
+        RuntimeModelCredential::api_key(api_key).expect("runtime credential")
+    }
+
     fn model() -> SavedModel {
         SavedModel {
             id: "model-1".to_string(),
@@ -173,6 +179,8 @@ mod tests {
         let rendered = format!("{:?}", credential("runtime-secret"));
         assert!(rendered.contains("[REDACTED]"));
         assert!(!rendered.contains("runtime-secret"));
+        // Official 构造器带非空校验；空/空白 key 必须被拒绝。
+        assert!(RuntimeModelCredential::api_key("  ").is_err());
     }
 
     #[test]

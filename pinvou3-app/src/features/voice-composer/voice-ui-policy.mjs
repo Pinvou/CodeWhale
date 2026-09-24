@@ -93,6 +93,5 @@ export {
   voiceAsrBusyState,
   voiceAsrProgressPercent,
   voicePostprocessingLabel,
-  voiceAsrProgressPercent,
   voiceStatusLabel,
 };

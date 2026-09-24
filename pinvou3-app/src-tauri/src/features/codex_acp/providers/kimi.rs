@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn apply_without_key_writes_entry_without_api_key() {
-        let dir = writer_test_dir("kimi-writer-test");
+        let dir = tmp_dir();
         let writer = KimiConfigWriter::new(&dir);
         writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
         // Deleting the key (api_key=None) rewrites the entry from scratch, so
