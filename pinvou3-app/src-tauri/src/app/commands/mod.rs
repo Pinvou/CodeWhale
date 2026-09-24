@@ -32,6 +32,7 @@ pub(crate) mod knowledge;
 pub(crate) mod llmapi;
 pub(crate) mod marketplace;
 pub(crate) mod memory;
+pub(crate) mod model_store;
 pub(crate) mod monitor;
 pub(crate) mod multiagent;
 pub(crate) mod personas;
