@@ -38,6 +38,11 @@ const ARTIFACT_THRESHOLD: usize = 1200;
 const TASK_EVENT_CHANNEL_CAPACITY: usize = 256;
 const EVENT_CURSOR_BATCH: usize = 256;
 const EVENT_CATCHUP_POLL: Duration = Duration::from_millis(200);
+/// Backstop cadence while a human-paced wait is open. The journal
+/// subscription delivers the answer immediately, so this only bounds how
+/// long a dropped notification can hide one; it trades ~25x fewer journal
+/// reads over a long wait for at most this much staleness.
+const HUMAN_WAIT_POLL: Duration = Duration::from_secs(5);
 // v3 adds a provider pin; older executors must not silently ignore it.
 const CURRENT_TASK_SCHEMA_VERSION: u32 = 3;
 // Pinvou v0.9.0 persisted an additive v4 schema. Its additional fields are
@@ -325,6 +330,12 @@ pub struct TaskRecord {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    /// Set while the run is parked on a human decision. A `Running` task
+    /// holding a worker for hours is otherwise indistinguishable from one
+    /// that is working, because the human-wait exclusion suppresses both
+    /// the wall and idle watchdogs for as long as `human_wait_cap` allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_human_since: Option<DateTime<Utc>>,
     #[serde(default)]
     pub runtime_event_count: usize,
     /// Monotonic owner-lifecycle sequence used by Work Graph reconciliation.
@@ -631,19 +642,32 @@ impl ExecutionGuard {
             return GuardAction::Interrupt { reason };
         }
 
-        let mut wait = self
-            .limits
-            .wall_time
-            .saturating_sub(wall_elapsed)
-            .min(self.limits.idle_progress.saturating_sub(idle_elapsed));
-        if self.human_wait_since.is_some() {
-            // Both clocks are paused; wake at the fail-safe cadence.
-            wait = self.limits.human_wait_cap.saturating_sub(
-                now.saturating_duration_since(self.human_wait_since.unwrap_or(now)),
-            );
-        }
-        let wait = wait.min(EVENT_CATCHUP_POLL);
+        // While a human wait is open both clocks are paused, so the only
+        // deadline left is the fail-safe cap. Polling that at the catch-up
+        // cadence would re-read the journal five times a second for up to
+        // `human_wait_cap` (~432k reads at the 24h default) to watch a clock
+        // that cannot fire for hours. The journal subscription still wakes
+        // the loop the moment the prompt is answered, so the poll here is
+        // only a missed-notification backstop and can be far coarser.
+        let wait = match self.human_wait_since {
+            // Wake when the cap comes due or at the backstop cadence,
+            // whichever is sooner — never later than the cap itself, or a
+            // short cap would be honoured a whole backstop interval late.
+            Some(since) => self
+                .limits
+                .human_wait_cap
+                .saturating_sub(now.saturating_duration_since(since))
+                .min(HUMAN_WAIT_POLL),
+            None => self
+                .limits
+                .wall_time
+                .saturating_sub(wall_elapsed)
+                .min(self.limits.idle_progress.saturating_sub(idle_elapsed))
+                .min(EVENT_CATCHUP_POLL),
+        };
         GuardAction::Run {
+            // A saturated remaining budget must not collapse into a busy
+            // spin; the next evaluate() is what terminalizes it.
             wait: wait.max(Duration::from_millis(1)),
         }
     }
@@ -824,8 +848,11 @@ pub enum TaskExecutionEvent {
     },
     /// A human-paced wait (pending approval or user-input prompt) opened or
     /// closed, so the worker supervisor's wall clock can exclude it exactly
-    /// like the turn loop's own guard does. Supervisor-side signal only:
-    /// never persisted and never shown on the task timeline.
+    /// like the turn loop's own guard does. Unlike [`Self::ToolHeartbeat`]
+    /// these fire at most once per prompt, so both edges are recorded on the
+    /// task record: the exclusion can hold a worker for `human_wait_cap`,
+    /// and that has to be visible to whoever is wondering why the queue
+    /// stopped moving.
     HumanWaitStarted,
     HumanWaitEnded,
     ToolCompleted {
@@ -1601,6 +1628,7 @@ impl TaskManager {
             thread_id: None,
             turn_id: None,
             owner_session_id: req.owner_session_id,
+            awaiting_human_since: None,
             runtime_event_count: 0,
             lifecycle_seq: 1,
             checklist: TaskChecklistState::default(),
@@ -2288,8 +2316,34 @@ impl TaskManager {
             // Supervisor-side liveness only: recording it would put a
             // timeline entry behind every poll tick of a silent build.
             TaskExecutionEvent::ToolHeartbeat { .. } => {}
-            // Supervisor-side wall-clock signal only (see the variant doc).
-            TaskExecutionEvent::HumanWaitStarted | TaskExecutionEvent::HumanWaitEnded => {}
+            // Unlike the heartbeat, these fire at most once per prompt, and
+            // a parked task is otherwise indistinguishable from a working
+            // one for as long as `human_wait_cap` allows. Record both edges
+            // so the queue shows why a worker is held.
+            TaskExecutionEvent::HumanWaitStarted => {
+                task.awaiting_human_since = Some(Utc::now());
+                push_timeline_entry(
+                    task,
+                    TaskTimelineEntry {
+                        timestamp: Utc::now(),
+                        kind: "human_wait".to_string(),
+                        summary: "Waiting for a human decision (approval or input)".to_string(),
+                        detail_path: None,
+                    },
+                );
+            }
+            TaskExecutionEvent::HumanWaitEnded => {
+                task.awaiting_human_since = None;
+                push_timeline_entry(
+                    task,
+                    TaskTimelineEntry {
+                        timestamp: Utc::now(),
+                        kind: "human_wait".to_string(),
+                        summary: "Human decision received; execution resumed".to_string(),
+                        detail_path: None,
+                    },
+                );
+            }
             TaskExecutionEvent::ToolCompleted {
                 id,
                 name,
@@ -2411,6 +2465,9 @@ impl TaskManager {
         };
 
         let now = Utc::now();
+        // A run that ends while parked (fail-safe cap, cancel, shutdown)
+        // must not leave the marker set on a terminal record.
+        task.awaiting_human_since = None;
         if cancel.is_cancelled() && result.status == TaskStatus::Completed {
             result.status = TaskStatus::Canceled;
             result.result_text = None;
@@ -2740,6 +2797,8 @@ fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
                         });
                     }
                 }
+                // The wait belonged to the process that died with it.
+                task.awaiting_human_since = None;
                 push_timeline_entry(
                     &mut task,
                     TaskTimelineEntry {
@@ -2816,10 +2875,6 @@ fn execution_event_persist_urgent(event: &TaskExecutionEvent) -> bool {
             // rewrite the whole task record on every tick while holding the
             // manager-wide state lock.
             | TaskExecutionEvent::ToolHeartbeat { .. }
-            // Supervisor-side wall-clock signal for human waits (see the
-            // variant doc): carries no record state.
-            | TaskExecutionEvent::HumanWaitStarted
-            | TaskExecutionEvent::HumanWaitEnded
     )
 }
 
@@ -3339,6 +3394,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn human_wait_edges_are_recorded_on_the_task() -> Result<()> {
+        // The exclusion can hold one of only two default workers for
+        // `human_wait_cap` while the record still reads as an ordinary
+        // Running task. Both edges have to land on the record, and land
+        // promptly, so the queue can say *why* it stopped moving.
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("human wait visibility"))
+            .await?;
+
+        let outcome = manager
+            .apply_execution_event(&task.id, TaskExecutionEvent::HumanWaitStarted)
+            .await?;
+        assert!(
+            outcome.persisted,
+            "a park that can last hours must not wait for the debounce window"
+        );
+        let parked = manager.get_task(&task.id).await?;
+        assert!(
+            parked.awaiting_human_since.is_some(),
+            "a parked task must be marked"
+        );
+        assert!(
+            parked
+                .timeline
+                .iter()
+                .any(|entry| entry.kind == "human_wait" && entry.summary.contains("Waiting for")),
+            "the park must be on the timeline: {:?}",
+            parked.timeline
+        );
+
+        manager
+            .apply_execution_event(&task.id, TaskExecutionEvent::HumanWaitEnded)
+            .await?;
+        let resumed = manager.get_task(&task.id).await?;
+        assert!(
+            resumed.awaiting_human_since.is_none(),
+            "the marker must clear when the decision arrives"
+        );
+        assert_eq!(
+            resumed
+                .timeline
+                .iter()
+                .filter(|entry| entry.kind == "human_wait")
+                .count(),
+            2,
+            "both edges are recorded: {:?}",
+            resumed.timeline
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn forkguard_terminal_task_delete_refuses_active_and_is_idempotent() -> Result<()> {
         let root = tempfile::tempdir()?;
         let manager = TaskManager::start_with_executor(
@@ -3740,6 +3853,7 @@ mod tests {
             thread_id: Some("thr_stale".to_string()),
             turn_id: Some("turn_stale".to_string()),
             owner_session_id: Some("session-old".to_string()),
+            awaiting_human_since: None,
             runtime_event_count: 0,
             lifecycle_seq: 2,
             checklist: TaskChecklistState::default(),
@@ -4471,6 +4585,7 @@ mod tests {
             thread_id: None,
             turn_id: None,
             owner_session_id: None,
+            awaiting_human_since: None,
             runtime_event_count: 0,
             lifecycle_seq: 2,
             checklist: TaskChecklistState::default(),
@@ -4532,6 +4647,53 @@ mod tests {
                 assert_eq!(reason, TaskTerminalReason::CancelTimeout);
             }
             other => panic!("expected cancel timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_backs_off_the_poll_while_parked_on_a_human() {
+        // A parked wait suppresses both watchdogs, so the only deadline left
+        // is the fail-safe cap — and the journal subscription already wakes
+        // the loop when the answer arrives. Polling at the catch-up cadence
+        // here would re-read the journal ~5x/s for the whole cap (~432k
+        // reads at the 24h default) to watch a clock that cannot fire.
+        let start = Instant::now();
+        let limits = TaskExecutionLimits::default();
+        let mut guard = ExecutionGuard::new(limits, start);
+
+        match guard.evaluate(start, false, false) {
+            GuardAction::Run { wait } => assert_eq!(
+                wait, EVENT_CATCHUP_POLL,
+                "an unparked run keeps the catch-up cadence"
+            ),
+            other => panic!("expected a run, got {other:?}"),
+        }
+
+        guard.begin_human_wait(start);
+        match guard.evaluate(start, false, false) {
+            GuardAction::Run { wait } => assert_eq!(
+                wait, HUMAN_WAIT_POLL,
+                "a parked run must back off to the human-wait cadence"
+            ),
+            other => panic!("expected a run, got {other:?}"),
+        }
+
+        // The cap still fires, and the last stretch before it is not allowed
+        // to collapse into a busy spin either.
+        match guard.evaluate(start + limits.human_wait_cap, false, false) {
+            GuardAction::Interrupt { reason } => {
+                assert_eq!(reason, TaskTerminalReason::HumanWaitTimeout);
+            }
+            other => panic!("expected the fail-safe cap to fire, got {other:?}"),
+        }
+
+        guard.end_human_wait(start + Duration::from_secs(60));
+        match guard.evaluate(start + Duration::from_secs(60), false, false) {
+            GuardAction::Run { wait } => assert_eq!(
+                wait, EVENT_CATCHUP_POLL,
+                "closing the window restores the catch-up cadence"
+            ),
+            other => panic!("expected a run, got {other:?}"),
         }
     }
 
