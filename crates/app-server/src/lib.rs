@@ -1633,21 +1633,26 @@ impl RuntimeBridge {
         )
         .await?;
 
+        // Everything the interrupt needs is in scope on every surface, so
+        // build it unconditionally. The orphan rescue below must not be
+        // limited to the one surface that also exposes a manual
+        // `thread/interrupt`: HTTP `/thread` and `/prompt` turns have no
+        // client-reachable interrupt at all, so for them the rescue is the
+        // only thing between a dropped stream and a thread that rejects
+        // every later message with "already has an active turn".
+        let live_turn = InFlightTurn {
+            base_url: self.base_url.clone(),
+            auth_token: self.auth_token.clone(),
+            runtime_thread_id: thread_id.to_string(),
+            turn_id: turn_id.clone(),
+        };
         // Publish the turn only for the streaming window, and take it back
         // before any `?` below: a turn that has already finished must never
-        // look cancellable.
-        let registered_turn = if let Some((registry, key)) = registration.as_ref() {
-            let turn = InFlightTurn {
-                base_url: self.base_url.clone(),
-                auth_token: self.auth_token.clone(),
-                runtime_thread_id: thread_id.to_string(),
-                turn_id: turn_id.clone(),
-            };
-            registry.lock().await.insert(key.clone(), turn.clone());
-            Some(turn)
-        } else {
-            None
-        };
+        // look cancellable. Registration stays stdio-only because only that
+        // surface can ask for a cancel by thread id.
+        if let Some((registry, key)) = registration.as_ref() {
+            registry.lock().await.insert(key.clone(), live_turn.clone());
+        }
 
         let since_seq = self.last_seq_by_thread.get(thread_id).copied().unwrap_or(0);
         let stream_result = self
@@ -1673,9 +1678,7 @@ impl RuntimeBridge {
         let stream_result = match stream_result {
             Ok(result) => Ok(result),
             Err(stream_err) => {
-                if let Some(turn) = registered_turn.as_ref()
-                    && let Err(interrupt_err) = interrupt_in_flight_turn(turn).await
-                {
+                if let Err(interrupt_err) = interrupt_in_flight_turn(&live_turn).await {
                     tracing::warn!("best-effort interrupt after stream failure: {interrupt_err:?}");
                 }
                 Err(stream_err)
