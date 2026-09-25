@@ -475,8 +475,11 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
     // A timed-out git is killed mid-write and leaves a fresh side-repo
     // index.lock behind, so every snapshot fast-fails for about an hour.
     // That must reach the user's stderr, not just the tracing log — silent
-    // undo-history loss is the §2.7 failure mode.
-    if !size_gated && error.kind() != std::io::ErrorKind::TimedOut {
+    // undo-history loss is the §2.7 failure mode. A failed `git init` is the
+    // same class and worse: it repeats on every attempt with no ageing-out,
+    // and it carries `ErrorKind::Other`, so it needs its own arm here.
+    let init_failed = message.contains(crate::snapshot::repo::GIT_INIT_FAILED_MARKER);
+    if !size_gated && !init_failed && error.kind() != std::io::ErrorKind::TimedOut {
         return;
     }
     use std::collections::HashSet;
@@ -502,22 +505,28 @@ fn maybe_notify_snapshots_disabled_once(workspace: &Path, error: &std::io::Error
     );
 }
 
-/// Route the failure to the remedy that actually applies. The probes are
-/// keyed on producer message text from `snapshot::repo` (the wedge marker in
-/// `run_bounded_fs` errors, the `git {sub} timed out` shape from
-/// `run_bounded_git`); `snapshot_failure_hint_tests` pins that coupling.
+/// Route the failure to the remedy that actually applies. The needles come
+/// from `snapshot::repo` itself rather than from copies of its wording, so
+/// rewording a producer moves the router with it instead of silently
+/// sending users to the wrong remedy.
 fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
+    use crate::snapshot::repo::{GIT_INIT_FAILED_MARKER, WEDGED_FS_MARKER, git_timeout_marker};
     if size_gated {
         "  raise `[snapshots] max_workspace_gb` in config.toml (or set it to 0 to disable the cap) to opt in."
-    } else if message.contains("the filesystem appears wedged") {
+    } else if message.contains(WEDGED_FS_MARKER) {
         // Bounded pre-git probes (workspace path resolution, first-init
         // size walk): no git ran yet, so there is no index.lock to wait out.
         "  the workspace filesystem did not answer in time (wedged NFS/FUSE mount?); snapshots retry once it responds."
-    } else if message.contains("git init timed out") {
+    } else if message.contains(&git_timeout_marker("init")) {
         // A timed-out init leaves the side repo without a HEAD; the
         // readiness predicate re-inits on the very next attempt, so there
         // is no stale lock and no hour-long wait ahead.
         "  the timed-out init left the snapshot side repo incomplete; snapshots re-init on the next attempt."
+    } else if message.contains(GIT_INIT_FAILED_MARKER) {
+        // Unlike every other arm this one does not clear itself: git never
+        // ages a `config.lock` out, and the sweep only removes one that is
+        // already stale. Name the directory so the user can act.
+        "  the snapshot side repo under `~/.codewhale/snapshots` is half-initialized; remove that workspace's directory there to let snapshots re-init."
     } else {
         "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
     }
@@ -526,10 +535,11 @@ fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
 #[cfg(test)]
 mod snapshot_failure_hint_tests {
     use super::snapshot_failure_hint;
+    use crate::snapshot::repo::{GIT_INIT_FAILED_MARKER, WEDGED_FS_MARKER, git_timeout_marker};
 
-    // The producers live in `snapshot::repo`; these assertions pin the
-    // message-text coupling so a reworded producer cannot silently reroute
-    // users to the wrong remedy.
+    // Every probe string below is assembled from the markers `snapshot::repo`
+    // exports, not from a copy of its wording, so these really do pin the
+    // producer/router coupling rather than restating the router.
     #[test]
     fn size_gated_failures_point_at_the_config_cap() {
         let message = "workspace too large for snapshots (over 2 GB ...)";
@@ -538,23 +548,39 @@ mod snapshot_failure_hint_tests {
 
     #[test]
     fn bounded_probe_timeouts_get_the_wedged_filesystem_hint() {
-        let message = "first-init workspace size walk did not finish within 120s; \
-                       the filesystem appears wedged";
-        assert!(snapshot_failure_hint(message, false).contains("wedged NFS/FUSE mount?"));
+        let message = format!(
+            "first-init workspace size walk did not finish within 120s; {WEDGED_FS_MARKER}"
+        );
+        assert!(snapshot_failure_hint(&message, false).contains("wedged NFS/FUSE mount?"));
     }
 
     #[test]
     fn timed_out_git_init_gets_the_reinit_hint_not_the_stale_lock_hint() {
-        let message = "failed to run git init: git init timed out after 300s: …";
-        let hint = snapshot_failure_hint(message, false);
+        let message = format!(
+            "failed to run git init: {} after 300s: …",
+            git_timeout_marker("init")
+        );
+        let hint = snapshot_failure_hint(&message, false);
         assert!(hint.contains("re-init on the next attempt"), "{hint}");
         assert!(!hint.contains("index.lock"), "{hint}");
     }
 
     #[test]
     fn other_git_timeouts_keep_the_stale_index_lock_hint() {
-        let message = "git commit timed out after 300s: …";
-        assert!(snapshot_failure_hint(message, false).contains("index.lock"));
+        let message = format!("{} after 300s: …", git_timeout_marker("commit"));
+        assert!(snapshot_failure_hint(&message, false).contains("index.lock"));
+    }
+
+    // A non-zero-status `git init` repeats forever and carries
+    // `ErrorKind::Other`, so it needs both its own hint and its own arm in
+    // the notify gate — a stale-index.lock "retry in an hour" would be a lie.
+    #[test]
+    fn failed_git_init_gets_the_half_initialized_repo_hint() {
+        let message =
+            format!("{GIT_INIT_FAILED_MARKER}: error: could not lock config file .git/config");
+        let hint = snapshot_failure_hint(&message, false);
+        assert!(hint.contains("half-initialized"), "{hint}");
+        assert!(!hint.contains("ages out"), "{hint}");
     }
 }
 
