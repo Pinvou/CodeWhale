@@ -280,22 +280,28 @@ impl SnapshotRepo {
         // otherwise skip init forever and fail every later snapshot with
         // "not a git repository". Use the same readiness predicate as
         // `open_existing` and re-init — `git init` is idempotent.
-        let needs_init = !git_dir.exists() || !git_dir.join("HEAD").exists();
+        // `first_init` is "this workspace has no side repo at all";
+        // `needs_init` additionally covers a `.git` that exists but never
+        // reached a HEAD. The two are deliberately separate: the size guard
+        // is a *first*-init gate, and charging it to the repair path would
+        // re-pay a full workspace walk on every snapshot attempt for as long
+        // as the repair keeps failing.
+        let first_init = !git_dir.exists();
+        let needs_init = first_init || !git_dir.join("HEAD").exists();
         if needs_init {
-            // First-init size guard. `cap_bytes == 0` disables the gate
-            // entirely (the documented `[snapshots] max_workspace_gb = 0`
-            // opt-out), so the walk — and its timeout with it — is skipped
-            // too: a workspace too large to walk within SIZE_WALK_TIMEOUT
-            // must still be able to snapshot once the user opted out, and
-            // `needs_init` staying true would otherwise re-pay the failing
-            // walk on every snapshot attempt. Skipping the walk on
-            // subsequent capped opens is intentional: paying a workspace
-            // walk on every snapshot would defeat the purpose of the cap,
-            // and a workspace that fit on first init is allowed to grow
-            // within the existing repo's `MAX_SNAPSHOT_SIZE_MB` budget.
-            // Users on workspaces that grew past the cap mid-session get
-            // the existing aggressive-pruning path in `snapshot()`.
-            if cap_bytes > 0 {
+            // First-init size guard, on genuine first inits only.
+            // `cap_bytes == 0` disables the gate entirely (the documented
+            // `[snapshots] max_workspace_gb = 0` opt-out), so the walk — and
+            // its timeout with it — is skipped too: a workspace too large to
+            // walk within SIZE_WALK_TIMEOUT must still be able to snapshot
+            // once the user opted out. Skipping the walk on subsequent
+            // capped opens is intentional: paying a workspace walk on every
+            // snapshot would defeat the purpose of the cap, and a workspace
+            // that fit on first init is allowed to grow within the existing
+            // repo's `MAX_SNAPSHOT_SIZE_MB` budget. Users on workspaces that
+            // grew past the cap mid-session get the existing
+            // aggressive-pruning path in `snapshot()`.
+            if cap_bytes > 0 && first_init {
                 let sized = {
                     let work_tree = work_tree.clone();
                     run_bounded_fs(
@@ -330,6 +336,26 @@ impl SnapshotRepo {
                 io::Error::new(io::ErrorKind::InvalidInput, "snapshot dir has no parent")
             })?;
             std::fs::create_dir_all(parent)?;
+            // A killed `git init` writes `core.repositoryformatversion` under
+            // `.git/config.lock` *before* it creates HEAD, so the interrupted
+            // init that leaves us here is also the one that can leave that
+            // lock behind — and `git init` then fails with "could not lock
+            // config file" on every later attempt, making the HEAD repair
+            // above permanently ineffective. Nothing else can clear it: git
+            // never ages lockfiles out. Sweep it on the same staleness rule
+            // as `index.lock`, and before the init rather than after.
+            match clear_stale_lock(&git_dir.join("config.lock"), STALE_INDEX_LOCK_AGE) {
+                Ok(true) => tracing::warn!(
+                    target: "snapshot",
+                    "removed a stale config.lock from the snapshot side repo; a previous \
+                     git init was interrupted and left it behind"
+                ),
+                Ok(false) => {}
+                Err(err) => tracing::debug!(
+                    target: "snapshot",
+                    "failed to clear a stale snapshot config.lock: {err}"
+                ),
+            }
             // `git init` here uses the parent directory as the work tree
             // and stores metadata in `.git`. Every later command targets the
             // side repo through the GIT_DIR / GIT_WORK_TREE environment
@@ -353,9 +379,15 @@ impl SnapshotRepo {
                 io::Error::new(e.kind(), format!("failed to run git init: {e}"))
             })?;
             if !init.status.success() {
+                // Carries `GIT_INIT_FAILED_MARKER` so the turn pipeline
+                // surfaces it: this failure repeats on every attempt (a
+                // lock the sweep above could not clear because it is still
+                // fresh, a permission problem), which means undo history is
+                // off until the user acts. Reporting that only to tracing
+                // is the silent-disable failure mode.
                 return Err(io_other(format!(
-                    "git init failed: {}",
-                    String::from_utf8_lossy(&init.stderr).trim()
+                    "{GIT_INIT_FAILED_MARKER}: {}",
+                    git_stderr_tail(String::from_utf8_lossy(&init.stderr).trim(), 500)
                 )));
             }
 
@@ -1034,14 +1066,17 @@ fn cleanup_stale_pack_temps(git_dir: &Path, stale_age: Duration) -> io::Result<u
 /// whether a stale lock was removed. A fresh lock (any age below the bound)
 /// is left alone: it may belong to a git that is still running.
 fn clear_stale_index_lock(git_dir: &Path, stale_age: Duration) -> io::Result<bool> {
-    clear_stale_index_lock_in(&git_dir.join("index.lock"), stale_age, SystemTime::now())
+    clear_stale_lock(&git_dir.join("index.lock"), stale_age)
 }
 
-fn clear_stale_index_lock_in(
-    lock_path: &Path,
-    stale_age: Duration,
-    now: SystemTime,
-) -> io::Result<bool> {
+/// Same rule for any git lockfile. `config.lock` needs it too: an
+/// interrupted `git init` leaves one behind and git never ages it out, so
+/// without a sweep the side repo can never be repaired.
+fn clear_stale_lock(lock_path: &Path, stale_age: Duration) -> io::Result<bool> {
+    clear_stale_lock_in(lock_path, stale_age, SystemTime::now())
+}
+
+fn clear_stale_lock_in(lock_path: &Path, stale_age: Duration, now: SystemTime) -> io::Result<bool> {
     let Ok(metadata) = std::fs::metadata(lock_path) else {
         return Ok(false);
     };
@@ -1281,21 +1316,6 @@ fn drain_git_pipe<R>(
     }
 }
 
-/// Run a pre-configured git command under [`GIT_COMMAND_TIMEOUT`] with both
-/// pipes drained concurrently. Every git invocation in this module goes
-/// through here (or the thin [`run_git`] wrapper), so a wedged git —
-/// stalled NFS/FUSE, hung hook, uninterruptible kernel I/O — degrades the
-/// snapshot with an error instead of hanging the turn pipeline. The
-/// pre-git blocking probes (`canonicalize`, the first-init size walk) are
-/// bounded the same way by [`run_bounded_fs`], so the whole snapshot open
-/// path degrades instead of hanging on the wedged mount.
-///
-/// The timeout path kills the child and reaps it on a detached thread: on a
-/// hard-wedged mount git can sit in uninterruptible kernel I/O where even
-/// SIGKILL is deferred, and a blocking `wait()` would hang the pipeline
-/// exactly like the wedged git would. Killing without git's own cleanup
-/// leaves a fresh `index.lock` behind; `open_or_init` clears it once it is
-/// older than [`STALE_INDEX_LOCK_AGE`].
 /// Keep the last `limit` characters (the diagnostics closest to the
 /// wedge), prefixed with `…`, character-boundary safe by construction.
 fn git_stderr_tail(all: &str, limit: usize) -> String {
@@ -1314,6 +1334,21 @@ fn git_stderr_tail(all: &str, limit: usize) -> String {
     }
 }
 
+/// Run a pre-configured git command under [`GIT_COMMAND_TIMEOUT`] with both
+/// pipes drained concurrently. Every git invocation in this module goes
+/// through here (or the thin [`run_git`] wrapper), so a wedged git —
+/// stalled NFS/FUSE, hung hook, uninterruptible kernel I/O — degrades the
+/// snapshot with an error instead of hanging the turn pipeline. The
+/// pre-git blocking probes (`canonicalize`, the first-init size walk) are
+/// bounded the same way by [`run_bounded_fs`], so the whole snapshot open
+/// path degrades instead of hanging on the wedged mount.
+///
+/// The timeout path kills the child and reaps it on a detached thread: on a
+/// hard-wedged mount git can sit in uninterruptible kernel I/O where even
+/// SIGKILL is deferred, and a blocking `wait()` would hang the pipeline
+/// exactly like the wedged git would. Killing without git's own cleanup
+/// leaves a fresh `index.lock` behind; `open_or_init` clears it once it is
+/// older than [`STALE_INDEX_LOCK_AGE`].
 fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Result<Output> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1389,14 +1424,12 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
                     .trim()
                     .to_string();
             let stderr_tail = git_stderr_tail(&stderr_all, 500);
+            let marker = git_timeout_marker(subcommand);
             let detail = if stderr_tail.is_empty() {
-                format!(
-                    "git {subcommand} timed out after {}s",
-                    GIT_COMMAND_TIMEOUT.as_secs()
-                )
+                format!("{marker} after {}s", GIT_COMMAND_TIMEOUT.as_secs())
             } else {
                 format!(
-                    "git {subcommand} timed out after {}s: {stderr_tail}",
+                    "{marker} after {}s: {stderr_tail}",
                     GIT_COMMAND_TIMEOUT.as_secs()
                 )
             };
@@ -1571,7 +1604,25 @@ mod bounded_git_tests {
         // reader detached instead of joined would only end when the
         // unrelated grandchild exited, accumulating one thread per pipe per
         // call.
-        let baseline = LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed);
+        // Settle before sampling: a baseline captured while unrelated
+        // readers are still draining is *higher* than the true idle count,
+        // and the check below would then accept this test's own leaked
+        // readers as long as the transient ones went away. Wait for the
+        // counter to hold still, so the baseline is a real floor.
+        let baseline = {
+            let settle_by = std::time::Instant::now() + Duration::from_secs(5);
+            let mut last = LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed);
+            let mut stable = 0;
+            loop {
+                std::thread::sleep(Duration::from_millis(20));
+                let now = LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed);
+                stable = if now == last { stable + 1 } else { 0 };
+                last = now;
+                if stable >= 3 || std::time::Instant::now() >= settle_by {
+                    break last;
+                }
+            }
+        };
         for _ in 0..2 {
             let mut sh = std::process::Command::new("sh");
             sh.arg("-c")
@@ -1591,12 +1642,11 @@ mod bounded_git_tests {
             );
         }
         // This call's own readers must be gone. Other tests in this binary
-        // drive the same core concurrently, so compare against the baseline
-        // count captured before the loop instead of demanding a global zero:
-        // a reverted detach keeps this test's own four readers pinned on the
-        // `sleep 300` pipes for its whole 300s and fails here, while
-        // unrelated concurrent git calls only add transient readers that
-        // drain within milliseconds.
+        // drive the same core concurrently, so compare against the settled
+        // baseline instead of demanding a global zero: a reverted detach
+        // keeps this test's own four readers pinned on the `sleep 300` pipes
+        // for its whole 300s and fails here, while unrelated concurrent git
+        // calls only add transient readers that drain within milliseconds.
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while LIVE_GIT_PIPE_READERS.load(Ordering::Relaxed) > baseline {
             assert!(
@@ -1690,6 +1740,35 @@ fn unsafe_workspace_snapshot_reason(workspace: &Path, home: Option<&Path>) -> Op
 pub(super) const WORKSPACE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const SIZE_WALK_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Marker phrase every bounded-probe expiry carries. The turn pipeline
+/// routes its remedy hint on this exact text, so both sides read it from
+/// here: rewording it updates the producer, the router, and their tests
+/// together instead of silently sending users to the wrong remedy.
+pub(crate) const WEDGED_FS_MARKER: &str = "the filesystem appears wedged";
+
+/// Marker phrase a [`run_bounded_git`] expiry carries, per subcommand. Same
+/// contract as [`WEDGED_FS_MARKER`]: the hint router builds the needle from
+/// this function rather than hardcoding the shape.
+pub(crate) fn git_timeout_marker(subcommand: &str) -> String {
+    format!("git {subcommand} timed out")
+}
+
+/// Marker phrase a non-zero-status `git init` carries. A partially written
+/// side repo (a `config.lock` the sweep could not clear, a permission
+/// problem) fails here on every attempt, so this one has to reach the user
+/// rather than only the tracing log.
+pub(crate) const GIT_INIT_FAILED_MARKER: &str = "git init failed";
+
+/// Render a probe bound for humans without truncating sub-second values to
+/// a meaningless `0s`.
+fn render_bound(bound: Duration) -> String {
+    if bound < Duration::from_secs(1) {
+        format!("{}ms", bound.as_millis())
+    } else {
+        format!("{}s", bound.as_secs())
+    }
+}
+
 /// Run a blocking filesystem probe on a helper thread under a hard bound.
 pub(super) fn run_bounded_fs<T: Send + 'static>(
     what: &'static str,
@@ -1697,17 +1776,29 @@ pub(super) fn run_bounded_fs<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<T> {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    rx.recv_timeout(bound).map_err(|_| {
-        io::Error::new(
+    // `Builder::spawn` rather than `thread::spawn`: this helper deliberately
+    // abandons a thread per expiry, so thread exhaustion is the one failure
+    // it is most likely to meet, and `thread::spawn` answers that by
+    // panicking the caller it exists to protect.
+    std::thread::Builder::new()
+        .name("snapshot-fs-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })?;
+    rx.recv_timeout(bound).map_err(|err| match err {
+        std::sync::mpsc::RecvTimeoutError::Timeout => io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
-                "{what} did not finish within {}s; the filesystem appears wedged",
-                bound.as_secs()
+                "{what} did not finish within {}; {WEDGED_FS_MARKER}",
+                render_bound(bound)
             ),
-        )
+        ),
+        // The probe panicked and dropped the sender unsent. Reporting that
+        // as a wedged mount would be a lie (it returns instantly, and the
+        // mount is fine) and would route the user to the wrong remedy.
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            io::Error::other(format!("{what} panicked before it could report a result"))
+        }
     })
 }
 
@@ -1788,9 +1879,14 @@ mod tests {
             std::thread::sleep(Duration::from_secs(2));
         })
         .expect_err("a probe past its bound must time out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         assert!(
-            err.to_string().contains("did not finish within 0s"),
-            "the timeout must name the probe bound: {err}"
+            err.to_string().contains("did not finish within 50ms"),
+            "the timeout must name the probe bound, not truncate it to 0s: {err}"
+        );
+        assert!(
+            err.to_string().contains(WEDGED_FS_MARKER),
+            "the wedge marker routes the user-facing remedy hint: {err}"
         );
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -1799,6 +1895,29 @@ mod tests {
         assert_eq!(
             run_bounded_fs("fast probe", Duration::from_secs(5), || 42usize).expect("fast probe"),
             42
+        );
+    }
+
+    #[test]
+    fn bounded_fs_probe_panic_is_not_reported_as_a_wedged_filesystem() {
+        // A panicking probe drops the sender unsent, which `recv_timeout`
+        // reports as `Disconnected`. Folding that into the timeout arm would
+        // return instantly with a `TimedOut` "filesystem appears wedged"
+        // error and route the user to the wrong remedy for a mount that is
+        // perfectly healthy.
+        let started = std::time::Instant::now();
+        let err = run_bounded_fs("panicking probe", Duration::from_secs(30), || {
+            panic!("probe blew up");
+        })
+        .expect_err("a panicking probe must surface as an error");
+        assert_ne!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            !err.to_string().contains(WEDGED_FS_MARKER),
+            "a panic must not claim the mount is wedged: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the panic must not be reported only after the bound"
         );
     }
 
@@ -1971,6 +2090,77 @@ mod tests {
         // And the healed repo reopens as ready.
         let reopened = SnapshotRepo::open_existing(&workspace).expect("open existing");
         assert!(reopened.is_some());
+    }
+
+    #[test]
+    fn open_or_init_clears_the_stale_config_lock_that_blocks_the_reinit() {
+        // The interrupted `git init` that leaves a HEAD-less side repo is
+        // also the one that can leave `.git/config.lock` behind: git writes
+        // `core.repositoryformatversion` under that lock *before* it creates
+        // HEAD. `git init` then fails with "could not lock config file" on
+        // every later attempt, so the HEAD repair above is permanently
+        // ineffective unless the stale lock is swept first. Git never ages
+        // lockfiles out, so nothing else would ever clear it.
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = scoped_home(tmp.path());
+
+        let git_dir = snapshot_git_dir(&workspace);
+        std::fs::create_dir_all(git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        let config_lock = git_dir.join("config.lock");
+        std::fs::write(&config_lock, b"").unwrap();
+        // Age it past the staleness bound; a fresh lock may belong to a git
+        // that is still running and is deliberately left alone.
+        let stale = SystemTime::now() - (STALE_INDEX_LOCK_AGE + Duration::from_secs(60));
+        File::options()
+            .write(true)
+            .open(&config_lock)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(stale))
+            .unwrap();
+
+        let repo = SnapshotRepo::open_or_init(&workspace)
+            .expect("a stale config.lock must not make the side repo unrepairable");
+        assert!(!config_lock.exists(), "the stale lock must be swept");
+        std::fs::write(repo.work_tree().join("a.txt"), b"alpha").unwrap();
+        assert_eq!(
+            repo.snapshot("pre-turn:1")
+                .expect("snapshot must work after the healing re-init")
+                .as_str()
+                .len(),
+            40
+        );
+    }
+
+    #[test]
+    fn a_fresh_config_lock_is_left_for_the_git_that_may_still_own_it() {
+        // The mirror of the sweep above: a lock younger than the staleness
+        // bound belongs to a concurrent git, so it stays and the init fails
+        // loudly rather than being raced.
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = scoped_home(tmp.path());
+
+        let git_dir = snapshot_git_dir(&workspace);
+        std::fs::create_dir_all(git_dir.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        let config_lock = git_dir.join("config.lock");
+        std::fs::write(&config_lock, b"").unwrap();
+
+        let err = match SnapshotRepo::open_or_init(&workspace) {
+            Err(err) => err,
+            Ok(_) => panic!("a fresh lock must not be stolen from a running git"),
+        };
+        assert!(config_lock.exists(), "a fresh lock must be left alone");
+        // And the failure has to be routable to the half-initialized-repo
+        // remedy, not swallowed: it repeats on every attempt.
+        assert!(
+            err.to_string().contains(GIT_INIT_FAILED_MARKER),
+            "the init failure must carry its routing marker: {err}"
+        );
     }
 
     #[test]
