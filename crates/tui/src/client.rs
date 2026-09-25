@@ -8400,6 +8400,11 @@ mod tests {
 
     #[tokio::test]
     async fn deepseek_anthropic_translate_uses_messages_endpoint() {
+        // The Anthropic dialect resolves its budget through the
+        // process-global `non_streaming_request_envelope()`, so this must
+        // hold the same lock the injecting tests take; otherwise a parallel
+        // `NonStreamingEnvelopeGuard` can cut this request off mid-flight.
+        let _env_lock = crate::test_support::lock_test_env();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -8527,6 +8532,9 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_anthropic_request_uses_messages_endpoint() {
+        // Same process-global envelope hazard as the DeepSeek sibling above,
+        // and its neighbour test injects a 1s budget.
+        let _env_lock = crate::test_support::lock_test_env();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/anthropic/v1/messages"))

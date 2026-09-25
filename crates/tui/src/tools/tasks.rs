@@ -1325,8 +1325,13 @@ mod tests {
         // here, exactly like the interpreter tools' regression this mirrors.
         let tmp = tempfile::tempdir().expect("tempdir");
         let pid_file = tmp.path().join("gate.pid");
+        // `exec` matters: without it the shell forks `sleep` as a grandchild,
+        // `$$` records the shell, and `kill_on_drop` (which signals only the
+        // direct child) would leave a 60s orphan behind on every run while
+        // the assertion below still passed. With `exec` the recorded pid *is*
+        // the process the gate must kill.
         let mut cmd = build_gate_command(
-            &format!("echo $$ > {}; sleep 60", pid_file.display()),
+            &format!("echo $$ > {}; exec sleep 60", pid_file.display()),
             tmp.path(),
         );
         let started = std::time::Instant::now();
