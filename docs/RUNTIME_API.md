@@ -1135,14 +1135,24 @@ Approval decisions wait for a human and have no wall-clock cap: a pending
 approval is resolved by a client decision, by interrupting the turn, or when
 the engine goes away. (Runtime shutdown can also resolve it via
 `RuntimeThreadManager::shutdown`, but no host invokes that API yet — it is
-exercised by tests until a host wires it into its exit path.) Every
-resolution is published as `approval.decided` so clients can clear pending
-UI. A resolution forced by an
+exercised by tests until a host wires it into its exit path.) Resolutions are
+published as `approval.decided` so clients can clear pending UI. A resolution
+forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
-actually made never carries `interrupted`. `approval.timeout` and the `timeout`
-field on `approval.decided` are legacy shapes produced only by journals written
-by older builds; current code never emits them.
+actually made never carries `interrupted`. `approval.decided` also carries
+`posture` when an execution-policy posture rather than a human forced the
+outcome; it is `null` for every other decision. `approval.timeout` and the
+`timeout` field on `approval.decided` are legacy shapes produced only by
+journals written by older builds; current code never emits them.
+
+One narrow exception to "resolutions are published": if a client decision is
+delivered in the same instant the turn's monitor dies, the delivery can remove
+the pending entry just before the failure sweep scans for it and then fail to
+hand the decision to a receiver that is already gone. That decision is reported
+as not delivered (HTTP 404) and no `approval.decided` is emitted for its id.
+Clients should therefore treat turn termination — not only `approval.decided` —
+as a reason to clear pending approval UI.
 
 ## Security boundary
 
