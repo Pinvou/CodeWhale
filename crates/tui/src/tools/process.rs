@@ -23,7 +23,10 @@
 //!
 //! `kill_on_drop(true)` remains set as the cancel-path backstop: when the
 //! whole tool future is dropped (turn interrupt), the owned child handle
-//! drops with it and the child is killed.
+//! drops with it and the child is killed. The drain tasks need their own
+//! backstop, because dropping a `JoinHandle` detaches rather than aborts —
+//! `DrainTasks` owns them and aborts in `Drop`, so the cancel path releases
+//! the pipe read ends like every other exit.
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -85,7 +88,7 @@ pub(crate) async fn run_bounded_child(
         .spawn()
         .map_err(|e| ToolError::execution_failed(format!("failed to spawn {label}: {e}")))?;
 
-    let mut stdin_writer = match (child.stdin.take(), stdin_input) {
+    let stdin_writer = match (child.stdin.take(), stdin_input) {
         (Some(mut stdin), Some(input_bytes)) => {
             use tokio::io::AsyncWriteExt as _;
             Some(tokio::spawn(async move {
@@ -105,18 +108,20 @@ pub(crate) async fn run_bounded_child(
     // still return what was captured instead of losing it with the task.
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-    let mut stdout_task = tokio::spawn(drain_pipe(stdout_pipe, Arc::clone(&stdout_buf)));
-    let mut stderr_task = tokio::spawn(drain_pipe(stderr_pipe, Arc::clone(&stderr_buf)));
+    let mut drains = DrainTasks {
+        stdout: tokio::spawn(drain_pipe(stdout_pipe, Arc::clone(&stdout_buf))),
+        stderr: tokio::spawn(drain_pipe(stderr_pipe, Arc::clone(&stderr_buf))),
+        stdin: stdin_writer,
+    };
 
     let output = match tokio::time::timeout(budget, child.wait()).await {
         Ok(status) => {
             let status = match status {
                 Ok(status) => status,
                 Err(e) => {
-                    // The one exit that isn't a timeout or a clean exit:
-                    // abort the drains (and the stdin writer) before
-                    // propagating so no pipe outlives the call here either.
-                    abort_drains(&mut stdout_task, &mut stderr_task, &stdin_writer);
+                    // The one exit that isn't a timeout or a clean exit.
+                    // `drains` aborts on drop, so this needs no explicit
+                    // call; returning is enough.
                     return Err(ToolError::execution_failed(format!("{label}: {e}")));
                 }
             };
@@ -124,19 +129,15 @@ pub(crate) async fn run_bounded_child(
             // arrived. The grace only bounds the grandchild case, where the
             // write ends live on in an inherited copy and read_to_end would
             // otherwise wait for that process to exit.
-            let drained = tokio::time::timeout(CHILD_PIPE_DRAIN_GRACE, async {
-                let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
-                if let Some(writer) = stdin_writer.as_mut() {
-                    let _ = writer.await;
-                }
-            })
-            .await;
+            let drained = tokio::time::timeout(CHILD_PIPE_DRAIN_GRACE, drains.join()).await;
             if drained.is_err() {
                 // Abort (don't join) the drain tasks: joining would wait for
                 // EOF that only the grandchild can deliver. Aborting drops
                 // our read ends — the grandchild sees EPIPE on its next
                 // write — and the shared buffers keep what was captured.
-                abort_drains(&mut stdout_task, &mut stderr_task, &stdin_writer);
+                // Explicit rather than left to the guard so the abort is
+                // ordered before the buffer snapshots below.
+                drains.abort();
                 let mut stderr = snapshot(&stderr_buf);
                 if stderr.last() != Some(&b'\n') && !stderr.is_empty() {
                     stderr.push(b'\n');
@@ -158,11 +159,10 @@ pub(crate) async fn run_bounded_child(
         Err(_elapsed) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            // Abort (don't join) the drain tasks and the stdin writer: a
+            // The drains are aborted by the guard on the way out: a
             // grandchild that inherited the pipes keeps the write ends open
             // after the child dies, so read_to_end would never see EOF and
             // joining here would hang the caller past the budget.
-            abort_drains(&mut stdout_task, &mut stderr_task, &stdin_writer);
             return Err(ToolError::Timeout {
                 seconds: budget.as_secs(),
             });
@@ -172,20 +172,45 @@ pub(crate) async fn run_bounded_child(
     Ok(output)
 }
 
-/// Abort the drain tasks and the stdin writer. Every exit path that stops
-/// waiting on the child must call this: leaving a drain running would leak
-/// the read end past the call, and joining it would wait for EOF that only
-/// a pipe-inheriting grandchild can deliver. Kept in one place so a new
-/// exit path cannot forget the aborts (the wait-error path once did).
-fn abort_drains(
-    stdout_task: &mut tokio::task::JoinHandle<()>,
-    stderr_task: &mut tokio::task::JoinHandle<()>,
-    stdin_writer: &Option<tokio::task::JoinHandle<()>>,
-) {
-    stdout_task.abort();
-    stderr_task.abort();
-    if let Some(writer) = stdin_writer {
-        writer.abort();
+/// Owns the drain tasks and the stdin writer so that *every* exit aborts
+/// them — including the one no function call can cover. Dropping a
+/// [`tokio::task::JoinHandle`] detaches its task rather than aborting it, so
+/// when the tool future is dropped on a turn interrupt the readers would
+/// otherwise keep the pipe read ends open for as long as a pipe-inheriting
+/// grandchild holds the write ends, which is exactly the leak
+/// [`run_bounded_child`]'s module doc describes. A `Drop` impl is the only
+/// construction that covers the cancel path; the explicit [`Self::abort`]
+/// exists so the grace-expiry exit can order the abort before it snapshots
+/// the buffers.
+struct DrainTasks {
+    stdout: tokio::task::JoinHandle<()>,
+    stderr: tokio::task::JoinHandle<()>,
+    stdin: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl DrainTasks {
+    fn abort(&self) {
+        self.stdout.abort();
+        self.stderr.abort();
+        if let Some(writer) = self.stdin.as_ref() {
+            writer.abort();
+        }
+    }
+
+    /// Wait for both readers to see EOF, then for the stdin writer. Only
+    /// safe under a timeout: EOF may be owed by a grandchild that outlives
+    /// the child.
+    async fn join(&mut self) {
+        let _ = tokio::join!(&mut self.stdout, &mut self.stderr);
+        if let Some(writer) = self.stdin.as_mut() {
+            let _ = writer.await;
+        }
+    }
+}
+
+impl Drop for DrainTasks {
+    fn drop(&mut self) {
+        self.abort();
     }
 }
 
@@ -222,6 +247,53 @@ pub(crate) fn stdin_json(input: &Value) -> Result<Vec<u8>, ToolError> {
 mod tests {
     #[cfg(unix)]
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_the_drain_guard_aborts_the_readers() {
+        // The cancel path (turn interrupt) drops the whole tool future
+        // rather than taking any exit inside `run_bounded_child`, and
+        // dropping a `JoinHandle` only detaches its task. Without the `Drop`
+        // impl the readers would keep the pipe read ends open for as long as
+        // a pipe-inheriting grandchild holds the write ends, so pin that a
+        // dropped guard really does abort them.
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let held = Arc::new(());
+        let make = |held: Arc<()>| {
+            tokio::spawn(async move {
+                let _held = held;
+                // Never completes on its own; only an abort ends this.
+                std::future::pending::<()>().await;
+            })
+        };
+        let guard = super::DrainTasks {
+            stdout: make(Arc::clone(&held)),
+            stderr: make(Arc::clone(&held)),
+            stdin: Some(make(Arc::clone(&held))),
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(
+            Arc::strong_count(&held),
+            4,
+            "all three readers must be live before the drop"
+        );
+
+        drop(guard);
+        // Aborted tasks release their captured state once the runtime
+        // reaps them.
+        for _ in 0..100 {
+            if Arc::strong_count(&held) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            Arc::strong_count(&held),
+            1,
+            "dropping the guard must abort every reader, not detach it"
+        );
+    }
 
     #[cfg(unix)]
     fn shell_command(script: &str) -> tokio::process::Command {
