@@ -710,7 +710,18 @@ async function expand(page) {
       cancelable: true,
       dataTransfer: dragData,
     }));
-    await new Promise(resolve => setTimeout(resolve, 80));
+    // Wait for a DEFINITE overlay state before reading the flag. While inactive
+    // the overlay still renders (invisible, aria-hidden), so a fixed timeout here
+    // raced the dragenter commit on slow runners and sampled the inactive-present
+    // form, which makes the withheld assertion vacuous. The two definite forms are
+    // the overlay removed from the DOM entirely (active committed, publication not
+    // yet acked) and aria-hidden=false (published), so a publication without an ack
+    // still fails the read below. The inactive-present tolerance is kept as the
+    // fallback for a runner slow enough to exhaust the wait deadline.
+    await window.__uiWait__(() => {
+      const overlay = document.querySelector('[data-testid="attachment-drop-overlay"]');
+      return !overlay || overlay.getAttribute('aria-hidden') === 'false';
+    });
     const attachmentDropBeforeHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]');
     const attachmentDropWithheldUntilHideAck = !attachmentDropBeforeHideAck
       || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false';
