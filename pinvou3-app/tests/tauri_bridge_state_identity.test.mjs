@@ -74,11 +74,6 @@ for (const relative of bridgeScripts) {
     { filename: relative },
   );
 }
-vm.runInContext(
-  fs.readFileSync(path.join(root, 'src/platform/tauri/bridge.js'), 'utf8'),
-  context,
-  { filename: 'platform/tauri/bridge.js' },
-);
 
 const api = windowObject.TauriBridge;
 assert.ok(api.available, 'desktop bridge must expose the real surface under a stubbed __TAURI__');
@@ -96,6 +91,7 @@ const unsubscribeSettings = api.state.subscribe('settings', snapshot => {
 api.chat.prefillComposer('draft-1');
 assert.equal(combinedSnapshots.length, 1, 'subscribeMany must deliver the first publication');
 assert.equal(settingsSnapshots.length, 1, 'subscribe must deliver the first publication');
+assert.ok(Object.isFrozen(combinedSnapshots[0]), 'the combined snapshot must be frozen');
 
 // 第二轮仍是 chat-only publication:回调必须照常触发(通知不丢),
 // 但无关域的身份必须稳定,让 React 能跳过无关渲染。
@@ -116,6 +112,7 @@ assert.notEqual(combinedSnapshots[1], combinedSnapshots[2],
   'a subscribed-domain change must rebuild the combined snapshot identity');
 assert.equal(combinedSnapshots[2].activeModelId, 'm1',
   'the rebuilt combined snapshot must carry the changed models value');
+assert.ok(Object.isFrozen(combinedSnapshots[2]), 'the rebuilt combined snapshot must be frozen');
 assert.equal(combinedSnapshots[2].settings, combinedSnapshots[1].settings,
   'the unchanged settings slice must keep its identity inside the rebuilt combined snapshot');
 
