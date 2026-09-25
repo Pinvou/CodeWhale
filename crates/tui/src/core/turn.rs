@@ -518,10 +518,10 @@ fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
         // size walk): no git ran yet, so there is no index.lock to wait out.
         "  the workspace filesystem did not answer in time (wedged NFS/FUSE mount?); snapshots retry once it responds."
     } else if message.contains(&git_timeout_marker("init")) {
-        // A timed-out init leaves the side repo without a HEAD; the
-        // readiness predicate re-inits on the very next attempt, so there
-        // is no stale lock and no hour-long wait ahead.
-        "  the timed-out init left the snapshot side repo incomplete; snapshots re-init on the next attempt."
+        // A timed-out init leaves the side repo incomplete; the readiness
+        // predicate re-inits it, but a lock the killed init left behind is
+        // fresh and blocks that until the stale-lock sweep may clear it.
+        "  the timed-out init left the snapshot side repo incomplete; snapshots re-init automatically once the filesystem responds (a lock the killed init left behind can delay that by up to an hour)."
     } else if message.contains(GIT_INIT_FAILED_MARKER) {
         // Unlike every other arm this one does not clear itself: git never
         // ages a `config.lock` out, and the sweep only removes one that is
@@ -561,7 +561,7 @@ mod snapshot_failure_hint_tests {
             git_timeout_marker("init")
         );
         let hint = snapshot_failure_hint(&message, false);
-        assert!(hint.contains("re-init on the next attempt"), "{hint}");
+        assert!(hint.contains("re-init automatically"), "{hint}");
         assert!(!hint.contains("index.lock"), "{hint}");
     }
 

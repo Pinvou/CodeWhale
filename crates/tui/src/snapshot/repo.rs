@@ -220,7 +220,7 @@ impl SnapshotRepo {
         // opened"), so surface the probe failure instead of swallowing it.
         let work_tree = canonicalize_bounded(workspace, WORKSPACE_PROBE_TIMEOUT)?;
         let git_dir = snapshot_git_dir(&work_tree);
-        if !git_dir.exists() || !git_dir.join("HEAD").exists() {
+        if !side_repo_is_ready(&git_dir) {
             return Ok(None);
         }
         Ok(Some(Self { git_dir, work_tree }))
@@ -274,20 +274,21 @@ impl SnapshotRepo {
         let _ = ensure_snapshot_dir(&work_tree)?;
         let git_dir = snapshot_git_dir(&work_tree);
 
-        // A timed-out `git init` can leave the directory created without a
-        // HEAD (git creates `.git` before writing the first refs, and on a
-        // wedged mount the kill lands wherever the stall was), which would
+        // A timed-out `git init` can leave `.git` half-written (git creates
+        // the directory before HEAD, and HEAD before `objects/`; on a wedged
+        // mount the kill lands wherever the stall was), which would
         // otherwise skip init forever and fail every later snapshot with
         // "not a git repository". Use the same readiness predicate as
-        // `open_existing` and re-init — `git init` is idempotent.
+        // `open_existing` and re-init — `git init` is idempotent and fills
+        // in whatever is missing.
         // `first_init` is "this workspace has no side repo at all";
-        // `needs_init` additionally covers a `.git` that exists but never
-        // reached a HEAD. The two are deliberately separate: the size guard
-        // is a *first*-init gate, and charging it to the repair path would
-        // re-pay a full workspace walk on every snapshot attempt for as long
-        // as the repair keeps failing.
+        // `needs_init` additionally covers a `.git` that exists but is not
+        // ready. The two are deliberately separate: the size guard is a
+        // *first*-init gate, and charging it to the repair path would re-pay
+        // a full workspace walk on every snapshot attempt for as long as the
+        // repair keeps failing.
         let first_init = !git_dir.exists();
-        let needs_init = first_init || !git_dir.join("HEAD").exists();
+        let needs_init = first_init || !side_repo_is_ready(&git_dir);
         if needs_init {
             // First-init size guard, on genuine first inits only.
             // `cap_bytes == 0` disables the gate entirely (the documented
@@ -336,25 +337,27 @@ impl SnapshotRepo {
                 io::Error::new(io::ErrorKind::InvalidInput, "snapshot dir has no parent")
             })?;
             std::fs::create_dir_all(parent)?;
-            // A killed `git init` writes `core.repositoryformatversion` under
-            // `.git/config.lock` *before* it creates HEAD, so the interrupted
-            // init that leaves us here is also the one that can leave that
-            // lock behind — and `git init` then fails with "could not lock
-            // config file" on every later attempt, making the HEAD repair
-            // above permanently ineffective. Nothing else can clear it: git
-            // never ages lockfiles out. Sweep it on the same staleness rule
-            // as `index.lock`, and before the init rather than after.
-            match clear_stale_lock(&git_dir.join("config.lock"), STALE_INDEX_LOCK_AGE) {
-                Ok(true) => tracing::warn!(
-                    target: "snapshot",
-                    "removed a stale config.lock from the snapshot side repo; a previous \
-                     git init was interrupted and left it behind"
-                ),
-                Ok(false) => {}
-                Err(err) => tracing::debug!(
-                    target: "snapshot",
-                    "failed to clear a stale snapshot config.lock: {err}"
-                ),
+            // A killed `git init` holds `.git/config.lock` while it writes
+            // `core.repositoryformatversion` and `.git/HEAD.lock` while it
+            // writes HEAD, so the interrupted init that leaves us here can
+            // leave either lock behind — and `git init` then fails on it on
+            // every later attempt, making the repair above permanently
+            // ineffective. Nothing else can clear them: git never ages
+            // lockfiles out. Sweep both on the same staleness rule as
+            // `index.lock`, before the init rather than after.
+            for lock in ["config.lock", "HEAD.lock"] {
+                match clear_stale_lock(&git_dir.join(lock), STALE_INDEX_LOCK_AGE) {
+                    Ok(true) => tracing::warn!(
+                        target: "snapshot",
+                        "removed a stale {lock} from the snapshot side repo; a previous \
+                         git init was interrupted and left it behind"
+                    ),
+                    Ok(false) => {}
+                    Err(err) => tracing::debug!(
+                        target: "snapshot",
+                        "failed to clear a stale snapshot {lock}: {err}"
+                    ),
+                }
             }
             // `git init` here uses the parent directory as the work tree
             // and stores metadata in `.git`. Every later command targets the
@@ -742,8 +745,22 @@ impl SnapshotRepo {
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let log = run_git(&self.git_dir, &self.work_tree, &arg_refs)?;
         if !log.status.success() {
-            // No commits yet → empty list.
-            return Ok(Vec::new());
+            // No commits yet → empty list. Anything else is a broken side
+            // repo, and reporting it as "no restore points" would hide the
+            // loss of undo history. `rev-parse --verify -q` exits 1 for an
+            // unborn HEAD and 128 when git cannot use the repository.
+            let head = run_git(
+                &self.git_dir,
+                &self.work_tree,
+                &["rev-parse", "--verify", "-q", "HEAD"],
+            )?;
+            if head.status.code() == Some(1) {
+                return Ok(Vec::new());
+            }
+            return Err(io_other(format!(
+                "git log failed: {}",
+                git_stderr_tail(String::from_utf8_lossy(&log.stderr).trim(), 500)
+            )));
         }
         let stdout = String::from_utf8_lossy(&log.stdout);
         let mut out = Vec::new();
@@ -1062,6 +1079,16 @@ fn cleanup_stale_pack_temps(git_dir: &Path, stale_age: Duration) -> io::Result<u
     cleanup_stale_pack_temps_in(&pack_dir, stale_age, SystemTime::now())
 }
 
+/// Whether an existing side repo is complete enough for git to treat it as
+/// a repository. HEAD alone is not enough: an interrupted `git init` writes
+/// HEAD before `objects/`, and git rejects a directory missing either
+/// `objects/` or `refs/` with "not a git repository".
+fn side_repo_is_ready(git_dir: &Path) -> bool {
+    git_dir.join("HEAD").is_file()
+        && git_dir.join("objects").is_dir()
+        && git_dir.join("refs").is_dir()
+}
+
 /// Remove `<git-dir>/index.lock` when it is older than `stale_age`. Returns
 /// whether a stale lock was removed. A fresh lock (any age below the bound)
 /// is left alone: it may belong to a git that is still running.
@@ -1069,9 +1096,9 @@ fn clear_stale_index_lock(git_dir: &Path, stale_age: Duration) -> io::Result<boo
     clear_stale_lock(&git_dir.join("index.lock"), stale_age)
 }
 
-/// Same rule for any git lockfile. `config.lock` needs it too: an
-/// interrupted `git init` leaves one behind and git never ages it out, so
-/// without a sweep the side repo can never be repaired.
+/// Same rule for any git lockfile. `config.lock` and `HEAD.lock` need it
+/// too: an interrupted `git init` can leave either behind and git never
+/// ages them out, so without a sweep the side repo can never be repaired.
 fn clear_stale_lock(lock_path: &Path, stale_age: Duration) -> io::Result<bool> {
     clear_stale_lock_in(lock_path, stale_age, SystemTime::now())
 }
@@ -2090,6 +2117,94 @@ mod tests {
         // And the healed repo reopens as ready.
         let reopened = SnapshotRepo::open_existing(&workspace).expect("open existing");
         assert!(reopened.is_some());
+    }
+
+    #[test]
+    fn open_or_init_recovers_a_side_repo_left_without_objects() {
+        // git writes HEAD before it creates `objects/`, so a kill between the
+        // two leaves a side repo that a HEAD-only predicate calls ready while
+        // every git command rejects it with "not a git repository".
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = scoped_home(tmp.path());
+
+        SnapshotRepo::open_or_init(&workspace).expect("first init");
+        let git_dir = snapshot_git_dir(&workspace);
+        std::fs::remove_dir_all(git_dir.join("objects")).unwrap();
+        assert!(
+            SnapshotRepo::open_existing(&workspace)
+                .expect("open existing")
+                .is_none(),
+            "a side repo without objects/ is not ready"
+        );
+
+        let repo = SnapshotRepo::open_or_init(&workspace)
+            .expect("open_or_init must heal a side repo without objects/");
+        std::fs::write(repo.work_tree().join("a.txt"), b"alpha").unwrap();
+        assert_eq!(
+            repo.snapshot("pre-turn:1")
+                .expect("snapshot must work after the healing re-init")
+                .as_str()
+                .len(),
+            40
+        );
+    }
+
+    #[test]
+    fn list_reports_a_broken_side_repo_instead_of_no_restore_points() {
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = scoped_home(tmp.path());
+
+        let repo = SnapshotRepo::open_or_init(&workspace).expect("init");
+        assert!(
+            repo.list(10)
+                .expect("an unborn HEAD lists empty")
+                .is_empty(),
+            "a fresh side repo has no restore points yet"
+        );
+        std::fs::remove_dir_all(snapshot_git_dir(&workspace).join("objects")).unwrap();
+        assert!(
+            repo.list(10).is_err(),
+            "a side repo git cannot open must not read as having no restore points"
+        );
+    }
+
+    #[test]
+    fn open_or_init_clears_the_stale_head_lock_that_blocks_the_reinit() {
+        // The HEAD write happens under `.git/HEAD.lock`; a kill there leaves
+        // the lock and no HEAD, and `git init` then fails with "cannot lock
+        // ref 'HEAD'" on every later attempt unless the stale lock is swept.
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = scoped_home(tmp.path());
+
+        let git_dir = snapshot_git_dir(&workspace);
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let head_lock = git_dir.join("HEAD.lock");
+        std::fs::write(&head_lock, b"").unwrap();
+        let stale = SystemTime::now() - (STALE_INDEX_LOCK_AGE + Duration::from_secs(60));
+        File::options()
+            .write(true)
+            .open(&head_lock)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(stale))
+            .unwrap();
+
+        let repo = SnapshotRepo::open_or_init(&workspace)
+            .expect("a stale HEAD.lock must not make the side repo unrepairable");
+        assert!(!head_lock.exists(), "the stale lock must be swept");
+        std::fs::write(repo.work_tree().join("a.txt"), b"alpha").unwrap();
+        assert_eq!(
+            repo.snapshot("pre-turn:1")
+                .expect("snapshot must work after the healing re-init")
+                .as_str()
+                .len(),
+            40
+        );
     }
 
     #[test]
