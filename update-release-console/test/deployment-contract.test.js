@@ -71,6 +71,8 @@ test("大文件上传显示进度并在连接中断后安全恢复", async () =>
   assert.match(page, /new XMLHttpRequest\(\)/u);
   assert.match(page, /request\.upload\.addEventListener\("progress"/u);
   assert.match(page, /request\.timeout = 60 \* 60 \* 1000/u);
+  assert.match(page, /error\.code = payload\.error/u);
+  assert.match(page, /error\.code === "draft_exists"/u);
   assert.match(page, /for \(let attempt = 1; attempt <= 2; attempt \+= 1\)/u);
   assert.match(page, /draftMatchesUpload\(state\.draft, form, file\)/u);
   assert.match(page, /安装器不再被构建或签名程序写入/u);

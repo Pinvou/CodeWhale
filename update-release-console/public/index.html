@@ -257,7 +257,11 @@
               resolve(payload);
               return;
             }
-            reject(new Error(payload.message || `请求失败 (${request.status})`));
+            const error = new Error(payload.message || `请求失败 (${request.status})`);
+            error.status = request.status;
+            error.code = payload.error;
+            error.retryable = [408, 502, 503, 504].includes(request.status);
+            reject(error);
           });
           request.addEventListener("error", () => reject(retryableUploadError("上传连接中断，正在自动确认并重试。")));
           request.addEventListener("timeout", () => reject(retryableUploadError("上传超时，正在自动确认并重试。")));
@@ -268,13 +272,27 @@
 
       function draftMatchesUpload(draft, form, file) {
         const values = new FormData(form);
+        const text = (name) => String(values.get(name) || "").trim();
+        const multiline = (value) => String(value || "").trim().replace(/\r\n?/gu, "\n");
         return Boolean(
           draft
-          && draft.entry?.version === String(values.get("version") || "").trim()
-          && draft.entry?.sha256 === String(values.get("expectedSha256") || "").trim().toLowerCase()
+          && draft.entry?.version === text("version")
+          && draft.entry?.sha256 === text("expectedSha256").toLowerCase()
           && draft.entry?.size === file.size
-          && draft.file_name === file.name,
+          && draft.file_name === file.name.normalize("NFC")
+          && draft.git_commit === text("gitCommit").toLowerCase()
+          && draft.operator === text("operator")
+          && multiline(draft.entry?.notes) === multiline(values.get("notes")),
         );
+      }
+
+      async function matchingDraftAfterRefresh(form, file) {
+        try {
+          await refresh();
+          return draftMatchesUpload(state.draft, form, file) ? state.draft : null;
+        } catch {
+          return null;
+        }
       }
 
       async function uploadWithRecovery(form) {
@@ -284,14 +302,12 @@
           try {
             return await uploadOnce(form, attempt);
           } catch (error) {
-            if (!error.retryable) throw error;
+            const resultUncertain = error.retryable || error.code === "draft_exists";
+            if (!resultUncertain) throw error;
             showBusy("上传连接中断，正在确认服务端是否已经生成草稿…");
-            try {
-              await refresh();
-              if (draftMatchesUpload(state.draft, form, file)) return state.draft;
-            } catch {
-              // The status check is best-effort; the upload retry below remains safe.
-            }
+            const matchingDraft = await matchingDraftAfterRefresh(form, file);
+            if (matchingDraft) return matchingDraft;
+            if (error.code === "draft_exists") throw error;
             if (attempt === 2) {
               throw new Error("上传连接连续中断。服务端未生成草稿；请确认安装器不再被构建或签名程序写入，重新选择文件后重试。");
             }
