@@ -1140,7 +1140,12 @@ resolution is published as `approval.decided` so clients can clear pending
 UI. A resolution forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
-actually made never carries `interrupted`. `approval.timeout` and the `timeout`
+actually made never carries `interrupted`. `approval.decided` also carries
+`posture` when an execution-policy posture rather than a human forced the
+outcome; it is `null` for every other decision. A decision posted to
+`/v1/approvals/{id}` either resolves the approval (and is published as that
+decision) or is rejected with 404 — it is never accepted and then replaced by
+an interrupted deny. `approval.timeout` and the `timeout`
 field on `approval.decided` are legacy shapes produced only by journals written
 by older builds; current code never emits them.
 

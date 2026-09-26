@@ -10015,13 +10015,10 @@ async fn settle_claimed_turn_failure_publishes_stranded_approvals() -> Result<()
 
 #[tokio::test]
 async fn settle_claimed_turn_failure_publishes_when_the_decision_receiver_is_gone() -> Result<()> {
-    // In production the dead monitor takes the oneshot receiver with it, so
-    // the settlement's deny send cannot deliver anything. The resolution
-    // event is then the only signal clients ever see for the approval, and
-    // it must fire even though the channel send failed. This also pins the
-    // settlement's collect-and-remove step being atomic per scanned id:
-    // whatever removes the entry (settlement or a racing delivery), the
-    // publish happens once and only once.
+    // In production the dead monitor takes the oneshot receiver with it. A
+    // client decision arriving after that must not take the entry (its send
+    // could not deliver, and nothing would ever publish a resolution); the
+    // settlement must then publish exactly one `approval.decided`.
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
         .create_thread(CreateThreadRequest::default())
@@ -10030,20 +10027,50 @@ async fn settle_claimed_turn_failure_publishes_when_the_decision_receiver_is_gon
         manager.register_pending_approval_for_thread_for_test(&thread.id, "tool_dead_rx");
     drop(receiver);
 
+    assert!(
+        !manager.deliver_external_approval(
+            "tool_dead_rx",
+            ExternalApprovalDecision::Allow { remember: false }
+        ),
+        "a decision for a dead waiter must report not delivered"
+    );
+    assert_eq!(
+        manager.pending_approvals_count(),
+        1,
+        "the entry must stay for the failure settlement"
+    );
+
     manager
         .settle_claimed_turn_failure(&thread.id, "test-turn", "forced monitor failure")
         .await;
 
     assert_eq!(manager.pending_approvals_count(), 0);
     let events = manager.events_since(&thread.id, None)?;
-    assert!(
-        events.iter().any(|event| {
+    let resolutions: Vec<_> = events
+        .iter()
+        .filter(|event| {
             event.event == "approval.decided"
                 && event.payload.get("approval_id").and_then(Value::as_str) == Some("tool_dead_rx")
-                && event.payload.get("decision").and_then(Value::as_str) == Some("deny")
-                && event.payload.get("interrupted").and_then(Value::as_bool) == Some(true)
-        }),
-        "settlement must publish approval.decided even when the deny cannot deliver"
+        })
+        .collect();
+    assert_eq!(
+        resolutions.len(),
+        1,
+        "exactly one resolution must be published"
+    );
+    assert_eq!(
+        resolutions[0]
+            .payload
+            .get("decision")
+            .and_then(Value::as_str),
+        Some("deny")
+    );
+    assert_eq!(
+        resolutions[0]
+            .payload
+            .get("interrupted")
+            .and_then(Value::as_bool),
+        Some(true)
     );
 
     Ok(())
@@ -12463,5 +12490,45 @@ fn restart_rebuild_skips_legacy_tool_items_without_identity() -> Result<()> {
     }
 
     let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+#[test]
+fn interrupt_rescue_honors_a_decision_sent_before_the_close() {
+    let (tx, mut rx) = oneshot::channel();
+    assert!(
+        tx.send(ExternalApprovalDecision::Allow { remember: false })
+            .is_ok()
+    );
+    assert!(matches!(
+        rescue_decision_after_interrupt(&mut rx),
+        Some(ExternalApprovalDecision::Allow { remember: false })
+    ));
+}
+
+#[test]
+fn interrupt_rescue_makes_a_later_send_report_not_delivered() {
+    let (tx, mut rx) = oneshot::channel();
+    assert!(rescue_decision_after_interrupt(&mut rx).is_none());
+    assert!(
+        tx.send(ExternalApprovalDecision::Allow { remember: false })
+            .is_err(),
+        "a decision racing the interrupt must fail rather than be accepted and discarded"
+    );
+}
+
+#[tokio::test]
+async fn a_waiter_never_removes_a_live_approval_that_reuses_its_id() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let _live = manager.register_pending_approval_for_thread_for_test(&thread.id, "call_0");
+    manager.cancel_closed_pending_approval("call_0");
+    assert_eq!(
+        manager.pending_approvals_count(),
+        1,
+        "an entry whose receiver is still listening belongs to a live waiter"
+    );
     Ok(())
 }
