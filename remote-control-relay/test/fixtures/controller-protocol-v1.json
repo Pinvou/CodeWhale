@@ -3,7 +3,7 @@
   "contract": {
     "id": "pinvou-desktop-controller/v1",
     "integer_wire_format": "canonical-u64-decimal-string",
-    "sha256": "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf"
+    "sha256": "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7"
   },
   "expected_capabilities": ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1", "task_v1", "temporary_model_package_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1"],
   "expected_error_codes": ["pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required", "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown", "capability_snapshot_unavailable"],
@@ -111,6 +111,13 @@
     "valid": ["https://api.openai.com/v1", "http://127.0.0.1:65535/v1?mode=test", "https://localhost/%E4%B8%AD"],
     "invalid": ["HTTPS://api.openai.com/v1", "https://API.openai.com/v1", "https://user@example.com/v1", "https://example.com:0/v1", "https://example.com:65536/v1", "https://[::1]/v1", "https://example.com/%2f", "https://example.com/%ZZ", "https://example.com/v1#fragment", "https://example.com\\v1", "https://-bad.example/v1"]
   },
+  "duplicate_raw_json_examples": [
+    {"name":"duplicate_version","target":"message","sender_role":"A","raw_json":"{\"v\":1,\"v\":2,\"type\":\"controller_capabilities\"}","expected_error":"invalid_json"},
+    {"name":"escaped_duplicate_version","target":"message","sender_role":"A","raw_json":"{\"v\":1,\"\\u0076\":1,\"type\":\"controller_capabilities\"}","expected_error":"invalid_json"},
+    {"name":"duplicate_type","target":"message","sender_role":"A","raw_json":"{\"v\":1,\"type\":\"controller_capabilities\",\"type\":\"controller_pairing_claim\"}","expected_error":"invalid_json"},
+    {"name":"duplicate_nested_binding","target":"payload","sender_role":"A","raw_json":"{\"v\":1,\"type\":\"task_submit\",\"temporary_model_package\":{\"binding\":{\"task_id\":\"first\",\"task_id\":\"second\"}}}","expected_error":"invalid_json"},
+    {"name":"duplicate_array_object_id","target":"payload","sender_role":"B","raw_json":"{\"v\":1,\"type\":\"artifact_index\",\"artifacts\":[{\"artifact_id\":\"first\",\"artifact_id\":\"second\"}]}","expected_error":"invalid_json"}
+  ],
   "invalid_wire_examples": [
     {"name":"missing_capabilities","target":"message","sender_role":"A","expected_error":"missing_field","value":{"v":1,"type":"controller_capabilities","request_id":"request-1","client_role":"desktop_controller","sender_role":"A","protocol_version":1}},
     {"name":"unknown_claim_field","target":"message","sender_role":"A","expected_error":"unknown_field","value":{"v":1,"type":"controller_pairing_claim","request_id":"request-1","claim_request_id":"claim-1","pairing_code":"2345678","handshake_public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","key_algorithm":"x25519","capabilities":[],"future":true}},

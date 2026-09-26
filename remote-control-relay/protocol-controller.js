@@ -16,7 +16,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
+export const CONTROLLER_CONTRACT_SHA256 = "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -397,11 +397,87 @@ function parseJson(input, maxBytes) {
   if (typeof input === "string") {
     const encodedBytes = Buffer.byteLength(input, "utf8");
     if (encodedBytes > maxBytes) fail("message_too_large", "json");
-    try { return { value: JSON.parse(input), encodedBytes }; } catch { fail("invalid_json", "json"); }
+    return { value: parseControllerWireJson(input), encodedBytes };
   }
   const encoded = JSON.stringify(input);
   if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > maxBytes) fail("message_too_large", "json");
   return { value: input, encodedBytes: Buffer.byteLength(encoded, "utf8") };
+}
+
+// JSON.parse silently keeps the last occurrence of an object key. Scan the raw
+// wire text first so escaped spellings of the same key are rejected as well.
+function parseWireJson(input, allowLegacyDuplicates) {
+  if (typeof input !== "string") fail("invalid_json", "json");
+  let cursor = 0;
+  const whitespace = () => { while (/\s/u.test(input[cursor] ?? "") && cursor < input.length) cursor += 1; };
+  const stringToken = () => {
+    const start = cursor++;
+    while (cursor < input.length) {
+      if (input[cursor] === "\\") { cursor += 2; continue; }
+      if (input[cursor++] === '"') {
+        try { return JSON.parse(input.slice(start, cursor)); } catch { fail("invalid_json", "json"); }
+      }
+    }
+    fail("invalid_json", "json");
+  };
+  const value = (depth) => {
+    if (depth > 128) fail("invalid_json", "json");
+    whitespace();
+    if (input[cursor] === '"') { stringToken(); return; }
+    if (input[cursor] === "{") {
+      cursor += 1;
+      const keys = new Set();
+      whitespace();
+      if (input[cursor] === "}") { cursor += 1; return; }
+      while (cursor < input.length) {
+        whitespace();
+        if (input[cursor] !== '"') fail("invalid_json", "json");
+        const key = stringToken();
+        // Legacy WebUI v2 has historically accepted duplicate fields, but a
+        // repeated version key must never switch a v1 frame into the v2 lane.
+        if (keys.has(key) && (!allowLegacyDuplicates || key === "v")) {
+          fail("invalid_json", "duplicate_field");
+        }
+        keys.add(key);
+        whitespace();
+        if (input[cursor++] !== ":") fail("invalid_json", "json");
+        value(depth + 1);
+        whitespace();
+        const delimiter = input[cursor++];
+        if (delimiter === "}") return;
+        if (delimiter !== ",") fail("invalid_json", "json");
+      }
+      fail("invalid_json", "json");
+    }
+    if (input[cursor] === "[") {
+      cursor += 1;
+      whitespace();
+      if (input[cursor] === "]") { cursor += 1; return; }
+      while (cursor < input.length) {
+        value(depth + 1);
+        whitespace();
+        const delimiter = input[cursor++];
+        if (delimiter === "]") return;
+        if (delimiter !== ",") fail("invalid_json", "json");
+      }
+      fail("invalid_json", "json");
+    }
+    const start = cursor;
+    while (cursor < input.length && !/[\s,}\]]/u.test(input[cursor])) cursor += 1;
+    if (start === cursor) fail("invalid_json", "json");
+  };
+  value(0);
+  whitespace();
+  if (cursor !== input.length) fail("invalid_json", "json");
+  try { return JSON.parse(input); } catch { fail("invalid_json", "json"); }
+}
+
+export function parseControllerWireJson(input) {
+  return parseWireJson(input, false);
+}
+
+export function parseLegacyWebWireJson(input) {
+  return parseWireJson(input, true);
 }
 
 function enforceRoleBindings(object, senderRole) {
@@ -992,6 +1068,7 @@ export function controllerContractManifest() {
     protocol_version: CONTROLLER_PROTOCOL_VERSION,
     subprotocol: CONTROLLER_SUBPROTOCOL,
     integer_wire_format: "canonical-u64-decimal-string",
+    json_object_keys: "unique-after-unescape",
     limits: {
       max_control_message_bytes: MAX_CONTROL_MESSAGE_BYTES,
       max_encrypted_frame_bytes: MAX_ENCRYPTED_FRAME_BYTES,
