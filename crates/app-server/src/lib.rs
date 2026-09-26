@@ -3586,12 +3586,15 @@ mod tests {
     /// A mock runtime that serves event-stream connections from a scripted
     /// list: connection N gets body N. A body that ends without
     /// `turn.completed` is a mid-turn drop. Counts interrupts so tests can
-    /// assert the resume path never reached for one.
+    /// assert the resume path never reached for one, and records the
+    /// `since_seq` cursor of every event-stream connection so the resume
+    /// arithmetic itself is observable, not just its side effects.
     #[derive(Clone)]
     struct ScriptedDropState {
         interrupts: Arc<std::sync::atomic::AtomicUsize>,
         connections: Arc<std::sync::atomic::AtomicUsize>,
         served: Arc<std::sync::Mutex<Vec<String>>>,
+        since_seq_requests: Arc<std::sync::Mutex<Vec<Option<u64>>>>,
     }
 
     async fn spawn_scripted_drop_runtime(
@@ -3600,11 +3603,13 @@ mod tests {
         String,
         Arc<std::sync::atomic::AtomicUsize>,
         Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<Option<u64>>>>,
         tokio::task::JoinHandle<()>,
     ) {
         let interrupts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let served = Arc::new(std::sync::Mutex::new(bodies));
+        let since_seq_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         async fn create_turn(AxumPath(_thread_id): AxumPath<String>) -> Json<Value> {
             Json(json!({ "turn": { "id": "turn_drop" } }))
@@ -3621,10 +3626,16 @@ mod tests {
         async fn thread_events(
             State(state): State<ScriptedDropState>,
             AxumPath(_thread_id): AxumPath<String>,
+            Query(query): Query<HashMap<String, String>>,
         ) -> ([(header::HeaderName, &'static str); 1], String) {
             state
                 .connections
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            state
+                .since_seq_requests
+                .lock()
+                .expect("since_seq log")
+                .push(query.get("since_seq").and_then(|v| v.parse().ok()));
             let body = {
                 let mut script = state.served.lock().expect("script");
                 if script.len() > 1 {
@@ -3644,6 +3655,7 @@ mod tests {
             interrupts: Arc::clone(&interrupts),
             connections: Arc::clone(&connections),
             served: Arc::clone(&served),
+            since_seq_requests: Arc::clone(&since_seq_requests),
         };
         let app = Router::new()
             .route("/v1/threads/{thread_id}/turns", post(create_turn))
@@ -3658,7 +3670,13 @@ mod tests {
                 .await
                 .expect("serve test runtime");
         });
-        (format!("http://{addr}"), interrupts, connections, server)
+        (
+            format!("http://{addr}"),
+            interrupts,
+            connections,
+            since_seq_requests,
+            server,
+        )
     }
 
     #[tokio::test]
@@ -3696,14 +3714,18 @@ mod tests {
             ]
             .concat(),
         ];
-        let (base_url, interrupts, connections, server) = spawn_scripted_drop_runtime(bodies).await;
+        let (base_url, interrupts, connections, since_seq_requests, server) =
+            spawn_scripted_drop_runtime(bodies).await;
         let mut bridge = RuntimeBridge::from_base_url_for_test(base_url);
         let (mut reader, mut writer) = tokio::io::duplex(4096);
 
-        let result = bridge
-            .message_thread("thr_drop", "go", &mut writer, None, None)
-            .await
-            .expect("the resumed turn completes");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            bridge.message_thread("thr_drop", "go", &mut writer, None, None),
+        )
+        .await
+        .expect("the resumed turn completes")
+        .expect("the resumed turn completes");
         drop(writer);
 
         let mut stdout = Vec::new();
@@ -3726,6 +3748,16 @@ mod tests {
             "a resumed stream must never reach for the interrupt"
         );
         assert_eq!(bridge.last_seq_by_thread.get("thr_drop"), Some(&3));
+        // The resume arithmetic itself: the initial connection opens from
+        // seq 0 (the URL always carries the cursor), and the reconnect must
+        // ask for exactly the last consumed seq — `since_seq` is exclusive,
+        // so seq 1 must be requested, never 0 (which would replay the
+        // dropped delta) or 2 (which would skip the second one).
+        assert_eq!(
+            *since_seq_requests.lock().expect("since_seq log"),
+            vec![Some(0), Some(1)],
+            "the reconnect cursor must be the last consumed seq (exclusive)"
+        );
 
         let deltas: Vec<String> = String::from_utf8(stdout)
             .expect("utf8")
@@ -3758,13 +3790,21 @@ mod tests {
             .concat()
         };
         let bodies = vec![drop_once(), drop_once(), drop_once()];
-        let (base_url, interrupts, connections, server) = spawn_scripted_drop_runtime(bodies).await;
+        let (base_url, interrupts, connections, since_seq_requests, server) =
+            spawn_scripted_drop_runtime(bodies).await;
         let mut bridge = RuntimeBridge::from_base_url_for_test(base_url);
         let (_reader, mut writer) = tokio::io::duplex(4096);
 
-        let result = bridge
-            .message_thread("thr_drop", "go", &mut writer, None, None)
-            .await;
+        // The exhaustion check is the only thing standing between this test
+        // and an infinite reconnect loop against the scripted server, so
+        // guard the whole turn with an outer deadline: a regression hangs
+        // the loop instead of failing the suite silently.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            bridge.message_thread("thr_drop", "go", &mut writer, None, None),
+        )
+        .await
+        .expect("the turn must settle, not loop forever");
         drop(writer);
         server.abort();
         let _ = server.await;
@@ -3774,6 +3814,11 @@ mod tests {
             connections.load(std::sync::atomic::Ordering::SeqCst),
             1 + 2,
             "first connection plus every resume attempt"
+        );
+        assert_eq!(
+            since_seq_requests.lock().expect("since_seq log").len(),
+            1 + 2,
+            "each connection (live or resume) requests the event stream once"
         );
         assert_eq!(
             interrupts.load(std::sync::atomic::Ordering::SeqCst),
@@ -3860,7 +3905,8 @@ mod tests {
             )]
             .concat(),
         ];
-        let (base_url, interrupts, connections, server) = spawn_scripted_drop_runtime(bodies).await;
+        let (base_url, interrupts, connections, since_seq_requests, server) =
+            spawn_scripted_drop_runtime(bodies).await;
         let mut bridge = RuntimeBridge::from_base_url_for_test(base_url);
 
         // A writer that is alive for `response_start` and dead before the
@@ -3884,6 +3930,11 @@ mod tests {
             connections.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "no resume may be attempted for a dead writer"
+        );
+        assert_eq!(
+            since_seq_requests.lock().expect("since_seq log").len(),
+            1,
+            "the live connection is the only event-stream request"
         );
         assert_eq!(
             interrupts.load(std::sync::atomic::Ordering::SeqCst),
