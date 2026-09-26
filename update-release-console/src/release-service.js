@@ -416,10 +416,8 @@ export async function receiveUpload(
     idleTimer = setTimeout(() => {
       idleError = new AppError(408, "upload_idle_timeout", "上传长时间没有数据进展，已终止并清理临时文件");
       request.unpipe(parser);
+      request.pause();
       parser.destroy(idleError);
-      // Stop accepting a request body that may otherwise remain half-open
-      // behind the reverse proxy. The client retries on the closed connection.
-      request.destroy();
     }, uploadIdleTimeoutMs);
   };
 
@@ -614,7 +612,6 @@ export class ReleaseService {
       this.config.maxUploadBytes,
       this.config.uploadIdleTimeoutMs,
     );
-    let draftSaved = false;
     try {
       const expectedFilename = `pinvou3_${upload.fields.version}_x64-setup.exe`;
       if (upload.filename !== expectedFilename) {
@@ -627,52 +624,57 @@ export class ReleaseService {
       await syncFile(upload.temporaryPath);
 
       return await this.withPublishLock(async () => {
-        if (await this.getDraft()) throw conflict("draft_exists", "已有待处理草稿，请先发布或取消");
-        const manifest = await this.readManifest();
-        const currentWindows = manifest.platforms?.[WINDOWS_PLATFORM] ?? null;
-        if (currentWindows?.version && compareVersions(upload.fields.version, currentWindows.version) <= 0) {
-          throw conflict("version_not_newer", `新版本必须高于当前 Windows 版本 ${currentWindows.version}`);
-        }
+        let draftSaved = false;
+        try {
+          if (await this.getDraft()) throw conflict("draft_exists", "已有待处理草稿，请先发布或取消");
+          const manifest = await this.readManifest();
+          const currentWindows = manifest.platforms?.[WINDOWS_PLATFORM] ?? null;
+          if (currentWindows?.version && compareVersions(upload.fields.version, currentWindows.version) <= 0) {
+            throw conflict("version_not_newer", `新版本必须高于当前 Windows 版本 ${currentWindows.version}`);
+          }
 
-        const preparedAt = this.now().toISOString();
-        const entry = {
-          version: upload.fields.version,
-          url: `${this.config.publicBaseUrl}/${expectedFilename}`,
-          format: "nsis",
-          sha256: upload.sha256,
-          size: upload.size,
-          restart_after_install: false,
-          notes: upload.fields.notes,
-          pub_date: preparedAt,
-        };
-        const draft = {
-          id: randomUUID(),
-          platform: WINDOWS_PLATFORM,
-          status: "draft",
-          prepared_at: preparedAt,
-          operator: upload.fields.operator,
-          git_commit: upload.fields.gitCommit,
-          file_name: expectedFilename,
-          staging_file: basename(upload.temporaryPath),
-          entry,
-          base_windows: jsonClone(currentWindows),
-          preview_manifest: mergeWindowsEntry(manifest, entry),
-        };
-        await atomicWriteJson(this.draftPath, draft);
-        draftSaved = true;
-        await this.audit("draft_created", {
-          remote_address: remoteAddress,
-          draft_id: draft.id,
-          operator: draft.operator,
-          version: entry.version,
-          sha256: entry.sha256,
-          size: entry.size,
-          git_commit: draft.git_commit,
-        });
-        return draft;
+          const preparedAt = this.now().toISOString();
+          const entry = {
+            version: upload.fields.version,
+            url: `${this.config.publicBaseUrl}/${expectedFilename}`,
+            format: "nsis",
+            sha256: upload.sha256,
+            size: upload.size,
+            restart_after_install: false,
+            notes: upload.fields.notes,
+            pub_date: preparedAt,
+          };
+          const draft = {
+            id: randomUUID(),
+            platform: WINDOWS_PLATFORM,
+            status: "draft",
+            prepared_at: preparedAt,
+            operator: upload.fields.operator,
+            git_commit: upload.fields.gitCommit,
+            file_name: expectedFilename,
+            staging_file: basename(upload.temporaryPath),
+            entry,
+            base_windows: jsonClone(currentWindows),
+            preview_manifest: mergeWindowsEntry(manifest, entry),
+          };
+          await atomicWriteJson(this.draftPath, draft);
+          draftSaved = true;
+          await this.audit("draft_created", {
+            remote_address: remoteAddress,
+            draft_id: draft.id,
+            operator: draft.operator,
+            version: entry.version,
+            sha256: entry.sha256,
+            size: entry.size,
+            git_commit: draft.git_commit,
+          });
+          return draft;
+        } catch (error) {
+          if (draftSaved) await rm(this.draftPath, { force: true });
+          throw error;
+        }
       });
     } catch (error) {
-      if (draftSaved) await rm(this.draftPath, { force: true });
       await rm(upload.temporaryPath, { force: true });
       throw error;
     }

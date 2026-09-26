@@ -48,7 +48,7 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 | `PINVOU_UPDATE_PORT` | 否 | 监听端口，默认 `8792` |
 | `PINVOU_UPDATE_CONSOLE_BASE_PATH` | 否 | 反代路径，默认 `/` |
 | `PINVOU_UPDATE_MAX_UPLOAD_BYTES` | 否 | 最大安装器字节数，默认 4 GiB |
-| `PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS` | 否 | 上传连续无数据进展的超时，默认 120000 毫秒 |
+| `PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS` | 否 | 上传连续无数据进展的超时，范围 1000–120000 毫秒，默认 120000；必须低于随附 Nginx 的 150 秒 |
 | `PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS` | 否 | HTTPS 回读超时，默认 15 分钟 |
 | `PINVOU_UPDATE_TRUSTED_PROXIES` | 否 | 可提供 `X-Real-IP` 的直接反向代理 IP/CIDR，逗号分隔；不配置时忽略该请求头 |
 | `PINVOU_UPDATE_AUTH_FAILURE_LIMIT` | 否 | 同一客户端在窗口内允许的认证失败次数，默认 5 |

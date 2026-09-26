@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -120,6 +121,46 @@ async function startFixture(t, options = {}) {
   });
   return { baseUrl, service, initialManifest, onlineVerifications };
 }
+
+test("真实 HTTP 闲置上传收到结构化 408 并关闭连接", async (t) => {
+  const { baseUrl, service } = await startFixture(t, {
+    config: { uploadIdleTimeoutMs: 50 },
+  });
+  const boundary = "pinvou-real-idle-timeout";
+  const result = await new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const request = httpRequest(new URL("api/releases/windows/upload", baseUrl), {
+      method: "POST",
+      headers: requestHeaders({
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Transfer-Encoding": "chunked",
+      }),
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        settled = true;
+        resolvePromise({
+          status: response.statusCode,
+          headers: response.headers,
+          payload: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+        });
+      });
+    });
+    request.on("error", (error) => {
+      if (!settled) rejectPromise(error);
+    });
+    request.write(
+      `--${boundary}\r\nContent-Disposition: form-data; name="installer"; filename="pinvou3_0.10.4_x64-setup.exe"\r\nContent-Type: application/octet-stream\r\n\r\npartial`,
+    );
+  });
+
+  assert.equal(result.status, 408);
+  assert.equal(result.headers.connection, "close");
+  assert.equal(result.payload.error, "upload_idle_timeout");
+  assert.deepEqual(await readdir(service.stagingDir), []);
+  assert.equal(await service.getDraft(), null);
+});
 
 test("上传、草稿、发布和回滚形成完整闭环", async (t) => {
   const previousUmask = process.platform === "win32" ? null : process.umask(0o077);

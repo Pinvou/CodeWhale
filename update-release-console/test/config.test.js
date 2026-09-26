@@ -37,6 +37,10 @@ test("上传无进展超时必须处于安全范围", () => {
     () => loadConfig(environment({ PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS: "999" })),
     /PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS/u,
   );
+  assert.throws(
+    () => loadConfig(environment({ PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS: "120001" })),
+    /PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS/u,
+  );
 });
 
 test("拒绝 HTTP 下载地址和公开目录内的状态目录", () => {

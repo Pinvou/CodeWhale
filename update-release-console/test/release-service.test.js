@@ -129,6 +129,62 @@ test("未完成上传不占发布锁，其他完整上传仍可生成草稿", as
   await assert.rejects(stat(service.lockPath), (error) => error.code === "ENOENT");
 });
 
+test("草稿审计失败时在发布锁内回滚草稿", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-draft-audit-failure-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const publicRoot = join(root, "public");
+  const stateRoot = join(root, "state");
+  await mkdir(publicRoot);
+  await writeFile(join(publicRoot, "latest.json"), "{}\n");
+  if (process.platform !== "win32") await chmod(join(publicRoot, "latest.json"), 0o644);
+  const service = new ReleaseService({
+    publicRoot,
+    stateRoot,
+    publicBaseUrl: "https://updates.example.test/pinvou3",
+    maxUploadBytes: 1024 * 1024,
+    uploadIdleTimeoutMs: 5000,
+    onlineVerifyTimeoutMs: 5000,
+  });
+  await service.initialize();
+
+  let auditStartedResolve;
+  let rejectAudit;
+  const auditStarted = new Promise((resolvePromise) => {
+    auditStartedResolve = resolvePromise;
+  });
+  const auditResult = new Promise((_resolvePromise, rejectPromise) => {
+    rejectAudit = () => rejectPromise(new Error("injected audit failure"));
+  });
+  service.audit = async () => {
+    auditStartedResolve();
+    return auditResult;
+  };
+
+  const installer = peFixture({ productVersion: "0.10.4.0" });
+  const upload = multipartRequest(installer, "0.10.4", "pinvou-audit-failure");
+  const creationResult = service.createDraft(upload.request, "192.0.2.1").then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  upload.request.end(upload.body);
+  await auditStarted;
+
+  const transientDraft = await service.getDraft();
+  assert.ok(transientDraft);
+  assert.ok(await stat(service.lockPath));
+  await assert.rejects(
+    service.cancelDraft(transientDraft.id, "并发操作员", "192.0.2.2"),
+    (error) => error.code === "publish_locked",
+  );
+
+  rejectAudit();
+  const creationOutcome = await creationResult;
+  assert.match(creationOutcome.error?.message || "", /injected audit failure/u);
+  assert.equal(await service.getDraft(), null);
+  assert.deepEqual(await readdir(service.stagingDir), []);
+  await assert.rejects(stat(service.lockPath), (error) => error.code === "ENOENT");
+});
+
 test("版本比较支持三段和四段数字版本", () => {
   assert.equal(compareVersions("0.10.5", "0.10.4"), 1);
   assert.equal(compareVersions("0.10.4.1", "0.10.4"), 1);
