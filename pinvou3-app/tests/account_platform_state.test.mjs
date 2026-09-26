@@ -1129,9 +1129,11 @@ test('desktop account entry uses the same monochrome round icon treatment as sid
 
 test('desktop sign-in renders inside the popover and never opens a browser', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const passwordInput = await readFile(new URL('../src/features/account-platform/PasswordInput.jsx', import.meta.url), 'utf8');
   const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
-  assert.match(popover, /type="password"/);
+  assert.match(passwordInput, /type="password"/);
+  assert.match(passwordInput, /data-password-reveal-output/);
   assert.match(popover, /'password', 'sms', 'register'/);
   assert.match(popover, /copy\.registrationUsername/);
   assert.match(popover, /client\.registerMobile\(account\.trim\(\), mobile\.trim\(\)/);
@@ -1140,7 +1142,7 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   assert.match(popover, /<SliderCaptcha/);
   assert.match(popover, /setSmsCooldown\(Math\.max\(1, Number\(result\.retry_after_seconds \|\| 60\)\)\)/);
   assert.match(popover, /smsCooldown > 0 \? copy\.resendCountdown\(smsCooldown\)/);
-  assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
+  assert.match(popover, /autoComplete=\{loginMode === 'password' \? 'current-password' : 'new-password'\}/);
   assert.match(popover, /await client\.loginSms\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\)\)/);
   assert.match(popover, /await client\.registerMobile/);
   assert.match(popover, /try \{\s*await client\.login\(registeredUsername, password\);\s*\} catch \{/);
@@ -1153,7 +1155,13 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
 
 test('desktop mobile registration confirms matching passwords before network requests', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const passwordInput = await readFile(new URL('../src/features/account-platform/PasswordInput.jsx', import.meta.url), 'utf8');
   assert.match(popover, /const \[passwordConfirmation, setPasswordConfirmation\] = useState\(''\)/);
+  assert.match(popover, /const \[credentialEpoch, setCredentialEpoch\] = useState\(0\)/);
+  assert.match(passwordInput, /type="password"/);
+  assert.match(popover, /showLabel=\{copy\.showPassword\}[\s\S]*?hideLabel=\{copy\.hidePassword\}/);
+  assert.match(popover, /showLabel=\{copy\.showPasswordConfirmation\}[\s\S]*?hideLabel=\{copy\.hidePasswordConfirmation\}/);
+  assert.match(passwordInput, /aria-pressed=\{revealed\}/);
   assert.match(popover, /if \(password !== passwordConfirmation\) return copy\.passwordMismatch/);
   assert.match(popover, /registrationInputError\(copy, account, mobile, password, passwordConfirmation\)/);
   assert.match(popover, /placeholder=\{copy\.confirmPassword\}[\s\S]*?value=\{passwordConfirmation\}|value=\{passwordConfirmation\}[\s\S]*?placeholder=\{copy\.confirmPassword\}/);
@@ -1162,6 +1170,12 @@ test('desktop mobile registration confirms matching passwords before network req
   assert.equal(accountPlatformCopy.zh.password, '密码（至少 8 位，含字母和数字）');
   assert.equal(accountPlatformCopy.zh.confirmPassword, '再次输入密码');
   assert.equal(accountPlatformCopy.zh.passwordMismatch, '两次输入的密码不一致。');
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.ok(accountPlatformCopy[language].showPassword);
+    assert.ok(accountPlatformCopy[language].hidePassword);
+    assert.ok(accountPlatformCopy[language].showPasswordConfirmation);
+    assert.ok(accountPlatformCopy[language].hidePasswordConfirmation);
+  }
 });
 
 test('desktop retains forgotten password while profile changes are Web-only', async () => {

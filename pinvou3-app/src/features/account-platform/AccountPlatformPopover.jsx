@@ -6,6 +6,7 @@ import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
 import { effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus, paymentScanPrompt } from './order-view.js';
 import { localizedAccountPlatformError } from './error-localization.js';
+import { PasswordInput } from './PasswordInput.jsx';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
@@ -341,6 +342,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirmation, setPasswordConfirmation] = useState('');
+  const [credentialEpoch, setCredentialEpoch] = useState(0);
   const [loginMode, setLoginMode] = useState('password');
   const [mobile, setMobile] = useState('');
   const [smsCode, setSmsCode] = useState('');
@@ -367,6 +369,12 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [rechargeError, setRechargeError] = useState('');
   const [rechargeNotice, setRechargeNotice] = useState('');
   const isDark = theme === 'dark';
+
+  useEffect(() => {
+    setPassword('');
+    setPasswordConfirmation('');
+    setCredentialEpoch((current) => current + 1);
+  }, [auth, loginMode, open]);
 
   const loadAccount = useCallback(async () => {
     requestRef.current.controller?.abort();
@@ -680,6 +688,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
   const submitLogin = async (event) => {
     event.preventDefault();
+    setCredentialEpoch((current) => current + 1);
     if (busy) return;
     if (loginMode === 'register') {
       const localError = registrationInputError(copy, account, mobile, password, passwordConfirmation);
@@ -891,7 +900,9 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
                 type="button"
                 onClick={() => {
                   setLoginMode(mode);
+                  setPassword('');
                   setPasswordConfirmation('');
+                  setCredentialEpoch((current) => current + 1);
                   resetSMSVerification();
                   invalidateRegistrationPrecheck();
                   setError('');
@@ -941,10 +952,10 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
             />
           )}
           {loginMode !== 'sms' && (
-            <input
+            <PasswordInput
               value={password}
-              onChange={(event) => {
-                setPassword(event.target.value);
+              onValueChange={(nextValue) => {
+                setPassword(nextValue);
                 invalidateRegistrationPrecheck();
                 setError('');
                 if (loginMode === 'register') resetSMSVerification();
@@ -954,17 +965,19 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               }}
               disabled={busy}
               placeholder={copy.password}
-              aria-label={copy.password}
-              type="password"
-              autoComplete={loginMode === 'register' ? 'new-password' : 'current-password'}
-              className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`}
+              ariaLabel={copy.password}
+              autoComplete={loginMode === 'password' ? 'current-password' : 'new-password'}
+              resetKey={`${auth}:${loginMode}:${open ? 'open' : 'closed'}:${credentialEpoch}:password`}
+              showLabel={copy.showPassword}
+              hideLabel={copy.hidePassword}
+              controlTheme={controlTheme}
             />
           )}
           {(loginMode === 'register' || loginMode === 'forgot') && (
-            <input
+            <PasswordInput
               value={passwordConfirmation}
-              onChange={(event) => {
-                setPasswordConfirmation(event.target.value);
+              onValueChange={(nextValue) => {
+                setPasswordConfirmation(nextValue);
                 invalidateRegistrationPrecheck();
                 setError('');
                 resetSMSVerification();
@@ -974,10 +987,12 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               }}
               disabled={busy}
               placeholder={copy.confirmPassword}
-              aria-label={copy.confirmPassword}
-              type="password"
+              ariaLabel={copy.confirmPassword}
               autoComplete="new-password"
-              className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`}
+              resetKey={`${auth}:${loginMode}:${open ? 'open' : 'closed'}:${credentialEpoch}:confirmation`}
+              showLabel={copy.showPasswordConfirmation}
+              hideLabel={copy.hidePasswordConfirmation}
+              controlTheme={controlTheme}
             />
           )}
           {loginMode === 'register' && registrationCheck === 'checking' && <div className={`text-[11px] ${mutedText}`}>{copy.registrationPrechecking}</div>}

@@ -636,6 +636,10 @@ jobs:
           test -n "$chrome"
           echo "CHROME=$chrome" >> "$GITHUB_ENV"
 
+      - name: Password reveal real-browser security gate
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: npm run test:password-input-browser
+
       - name: Ready PR 定向浏览器 smoke
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
         env:

@@ -125,6 +125,7 @@
     "test": "npm run test:node && npm run validate:pet-assets",
     "test:node": "node --test --test-concurrency=4",
     "test:ui-smoke": "node tests/ui_smoke.js",
+    "test:password-input-browser": "node tests/password_input_browser.smoke.mjs",
     "test:settings-ui": "node tests/settings_ui_smoke.js",
     "test:acp-providers-ui": "node tests/acp_providers_ui_smoke.js",
     "test:kb-smoke": "node tests/kb_smoke.js",
