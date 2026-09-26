@@ -59,19 +59,27 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
   const relayDir = join(repoRoot, "remote-control-relay");
   const root = await mkdtemp(join(relayDir, ".deploy-cold-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const archive = join(root, "relay-code.tar.gz");
   const stage = join(root, "stage");
   await mkdir(stage);
+  // Keep the archive on stdio and every tar path operand relative to `cwd`.
+  // GNU tar treats a Windows drive-letter archive (for example D:\\...) as a
+  // remote-shell target, and directly spawned MSYS tar does not translate an
+  // absolute `-C` operand. This remains a real compress/extract cold load and
+  // works consistently with GNU tar and the Windows BSD tar implementation.
   const packed = spawnSync("tar", [
-    "-czf", archive,
-    "-C", relayDir,
+    "-czf", "-",
+    "-C", "remote-control-relay",
     "server.js", "telemetry-service.js", "behavior-telemetry-schema.js",
-    "-C", repoRoot,
+    "-C", "..",
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",
-  ], { encoding: "utf8" });
-  assert.equal(packed.status, 0, packed.stderr);
-  const extracted = spawnSync("tar", ["-xzf", archive, "-C", stage], { encoding: "utf8" });
+  ], { cwd: repoRoot });
+  assert.equal(packed.status, 0, packed.stderr?.toString("utf8"));
+  const extracted = spawnSync("tar", ["-xzf", "-"], {
+    cwd: stage,
+    input: packed.stdout,
+    encoding: "utf8",
+  });
   assert.equal(extracted.status, 0, extracted.stderr);
   const loaded = spawnSync(process.execPath, [
     "--input-type=module",
