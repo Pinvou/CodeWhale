@@ -64,7 +64,10 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 认证失败限流按上述可信代理解析后的客户端 IP 计数，达到阈值返回 `429` 和
 `Retry-After`；成功认证会清除该 IP 的失败记录，TTL 与容量上限避免长期占用内存。
 Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 multipart
-字段、边界和请求头保留空间。
+字段、边界和请求头保留空间；`client_body_timeout`、`proxy_read_timeout` 和
+`proxy_send_timeout` 均设为 1 小时，避免端点安全扫描或较慢上行造成的大文件上传间歇。
+页面显示实时上传进度；连接中断时会先查询草稿状态，确认服务端尚未完成后自动重试一次，
+连续失败则要求重新选择已经停止写入的安装器，避免构建或签名程序仍在改写文件。
 
 ## Docker Compose 部署
 

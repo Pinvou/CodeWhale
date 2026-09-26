@@ -28,6 +28,7 @@ test("容器、Compose 与 Nginx 保持最小权限和可信代理契约", async
   assert.match(nginx, /proxy_set_header X-Real-IP \$remote_addr;/u);
   assert.match(nginx, /proxy_set_header X-Forwarded-For \$remote_addr;/u);
   assert.match(nginx, /client_max_body_size 4224m;/u);
+  assert.match(nginx, /client_body_timeout 1h;/u);
   assert.match(nginxWrapper, /include \/etc\/nginx\/pinvou3-release-location\.conf;/u);
   assert.match(nginxWrapper, /events \{\}/u);
 });
@@ -63,4 +64,14 @@ test("管理员令牌输入禁止浏览器自动填充", async () => {
     page,
     /id="tokenInput"[^>]*type="password"[^>]*autocomplete="off"[^>]*autocapitalize="none"[^>]*spellcheck="false"/u,
   );
+});
+
+test("大文件上传显示进度并在连接中断后安全恢复", async () => {
+  const page = await source("public/index.html");
+  assert.match(page, /new XMLHttpRequest\(\)/u);
+  assert.match(page, /request\.upload\.addEventListener\("progress"/u);
+  assert.match(page, /request\.timeout = 60 \* 60 \* 1000/u);
+  assert.match(page, /for \(let attempt = 1; attempt <= 2; attempt \+= 1\)/u);
+  assert.match(page, /draftMatchesUpload\(state\.draft, form, file\)/u);
+  assert.match(page, /安装器不再被构建或签名程序写入/u);
 });
