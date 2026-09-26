@@ -720,6 +720,8 @@ test('account balances convert internal microcredits to display points', () => {
   assert.equal(formatPoints(1, 'en'), '0.0001');
   assert.equal(formatPoints(0, 'en'), '0');
   assert.equal(formatPoints(null, 'en'), '—');
+  assert.equal(formatWholePoints(9_222, 'en'), '0');
+  assert.equal(formatWholePoints(19_222, 'en'), '1');
   assert.equal(formatWholePoints(7_969_994, 'en'), '796');
   assert.equal(formatUsagePoints(8_317, 'en'), '0.83');
   assert.equal(formatUsagePoints(10_000, 'en'), '1.00');
@@ -810,8 +812,9 @@ test('organization billing uses organization-scoped routes and reports only serv
   assert.ok(view.includes('setBillingDetailsUnavailable([7, 8, 9].some((index) => serviceRequestFailed(results[index])))'));
 });
 
-test('Web personal center shows whole-point balances and two-decimal model usage', async () => {
+test('personal surfaces show whole-point balances while Web model usage keeps two decimals', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   const portalCredits = view.match(/function PortalCreditsUsage[\s\S]*?function PortalOrdersInvoices/)?.[0] || '';
   const entitlementRow = view.match(/function EntitlementPackageRow[\s\S]*?function EntitlementPackageDetail/)?.[0] || '';
   assert.doesNotMatch(portalCredits, /creditsUsageLead/);
@@ -823,6 +826,9 @@ test('Web personal center shows whole-point balances and two-decimal model usage
   assert.doesNotMatch(view, /\bformatPoints\(/);
   assert.match(view, /const summaries = summarizeUsageRecords\(records\)/);
   assert.match(view, /formatUsagePoints\(record\.actual_microcredits \|\| 0, language\)/);
+  assert.match(popover, /import \{ formatWholePoints \} from '\.\/credit-units\.js'/);
+  assert.equal((popover.match(/formatWholePoints\(/g) || []).length, 4);
+  assert.doesNotMatch(popover, /\bformatPoints\(/);
 });
 
 test('Web personal center keeps the URL, selected tab, and browser history synchronized', async () => {

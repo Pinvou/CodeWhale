@@ -1,7 +1,7 @@
 import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../components/icons.jsx';
-import { formatPoints } from './credit-units.js';
+import { formatWholePoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
 import { effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus, paymentScanPrompt } from './order-view.js';
@@ -200,7 +200,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
           <CheckCircle2 size={38} className="text-[#10B981]" />
           <div className="mt-3 text-[15px] font-semibold">{copy.orderStatuses[order.status]}</div>
           <div className={`mt-1 text-[12px] leading-relaxed ${mutedText}`}>{notice || (error ? copy.paymentConfirmed : copy.paymentReceived)}</div>
-          <div className="mt-4 text-[24px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div>
+          <div className="mt-4 text-[24px] font-semibold tabular-nums">{formatWholePoints(balance?.available_microcredits, language)}</div>
           <div className={`text-[11px] ${mutedText}`}>{copy.balance}</div>
         </div>
         {error && (
@@ -296,7 +296,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
         <div className="flex items-end justify-between gap-3">
           <div>
             <div className={`text-[11px] ${mutedText}`}>{copy.balance}</div>
-            <div className="mt-0.5 text-[20px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div>
+            <div className="mt-0.5 text-[20px] font-semibold tabular-nums">{formatWholePoints(balance?.available_microcredits, language)}</div>
           </div>
           <div className={`text-[11px] ${mutedText}`}>{copy.points}</div>
         </div>
@@ -1096,10 +1096,10 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
                   </button>
                 </div>
                 <div className="mt-1 flex items-end justify-between gap-3">
-                  <div className="text-[22px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div>
+                  <div className="text-[22px] font-semibold tabular-nums">{formatWholePoints(balance?.available_microcredits, language)}</div>
                   <div className={`text-right text-[11px] ${mutedText}`}>
                     {copy.reservedCredits}
-                    <div className="mt-1 text-[13px] font-medium tabular-nums">{formatPoints(balance?.reserved_microcredits, language)}</div>
+                    <div className="mt-1 text-[13px] font-medium tabular-nums">{formatWholePoints(balance?.reserved_microcredits, language)}</div>
                   </div>
                 </div>
               </div>
