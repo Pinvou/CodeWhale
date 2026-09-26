@@ -8593,10 +8593,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_non_streaming_request_carries_the_envelope() {
+    async fn anthropic_non_streaming_request_carries_the_envelope_and_probes() {
         // The Anthropic dialect sends one direct request with no retry
         // loop; its total budget must match every other non-streaming
-        // completion and must actually cut off a stalled provider.
+        // completion and must actually cut off a stalled provider. The
+        // transport-level cutoff never reaches the status checks, so this
+        // arm must mark the failure and probe /models itself — otherwise
+        // connection health stays stale until the next request. One
+        // envelope exceed alone stays under the degradation threshold, so
+        // the health-marking is asserted indirectly: exactly one POST and
+        // one probe GET reach the server (verified via server.verify()).
         let _env_lock = crate::test_support::lock_test_env();
         let _envelope = NonStreamingEnvelopeGuard::millis(1000);
         let server = MockServer::start().await;
@@ -8616,41 +8622,59 @@ mod tests {
                     }))
                     .set_delay(Duration::from_millis(4000)),
             )
+            .expect(2)
+            .mount(&server)
+            .await;
+        // The recovery probe: the transport arm runs it immediately after
+        // marking the failure. Routing the client's base_url at the mock
+        // (the way the health-check tests do) puts the probe on
+        // `<mock>/anthropic/v1/models`, so the pin stays hermetic.
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .expect(1)
             .mount(&server)
             .await;
 
-        let mut client = minimax_anthropic_client_with_base_url(
-            crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string(),
-        );
+        let mut client =
+            minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
         client.test_messages_transport_base_url = Some(format!("{}/anthropic", server.uri()));
-        let err = client
-            .create_message(MessageRequest {
-                model: "MiniMax-M3".to_string(),
-                messages: vec![Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "hello".to_string(),
-                        cache_control: None,
-                    }],
+        let make_request = || MessageRequest {
+            model: "MiniMax-M3".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
                 }],
-                max_tokens: 32,
-                system: None,
-                tools: None,
-                tool_choice: None,
-                metadata: None,
-                thinking: None,
-                reasoning_effort: Some("off".to_string()),
-                stream: Some(false),
-                temperature: None,
-                top_p: None,
-            })
-            .await
-            .expect_err("a provider that answers past the envelope must be cut off");
-        let rendered = format!("{err:#}");
-        assert!(
-            rendered.contains("timed out"),
-            "the cutoff must surface as a timeout, not a generic failure: {rendered}"
-        );
+            }],
+            max_tokens: 32,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+        for _ in 0..2 {
+            let err = client
+                .create_message(make_request())
+                .await
+                .expect_err("a provider that answers past the envelope must be cut off");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("timed out"),
+                "the cutoff must surface as a timeout, not a generic failure: {rendered}"
+            );
+        }
+        // Enforces the expectations above: exactly two stalled POSTs (one
+        // alone stays under the degradation threshold) and — the point of
+        // this pin — exactly one /models recovery probe fired by the
+        // transport arm's own failure handling.
+        server.verify().await;
     }
 
     #[test]
