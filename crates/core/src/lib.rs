@@ -52,9 +52,10 @@ use uuid::Uuid;
 /// preset) that comments keep in sync; this comment anchors the family
 /// roster — there is no shared constant across the crates yet.
 ///
-/// `STREAM_MAX_DURATION_SECS` is the family's only configurable member: it
-/// is a default that user config may override within its own clamp, so a
-/// family-wide bump changes its default rather than its ceiling.
+/// Several family members are configurable defaults rather than constants
+/// (`STREAM_MAX_DURATION_SECS`, the MCP `execute_timeout`, and the sub-agent
+/// `default_wall_time_secs`): a family-wide bump changes their defaults, not
+/// their ceilings, and user overrides survive it.
 fn tool_dispatch_timeout() -> Duration {
     if cfg!(test) {
         Duration::from_millis(50)

@@ -160,7 +160,7 @@ max_concurrent = 20
 launch_concurrency = 20
 max_admitted = 200
 max_depth = 6
-# 调用不带预算时的每个子代理运行预算（角色默认：60/120 回合）。
+# 调用不带预算时的每个子代理运行预算（角色默认：所有角色的模型回合数不设上限，`WorkerRuntimeProfile::default_max_steps` 返回零）。
 default_max_steps = 120
 default_wall_time_secs = 1800
 token_budget = 100000
@@ -217,7 +217,7 @@ max_admitted = 12
 
 1. 调用上一个显式的、解析接受的 `max_steps` / `wall_time_secs`（重放兼容），
 2. 操作者默认 `[subagents] default_max_steps` 和 `[subagents] default_wall_time_secs`，
-3. Fleet 角色默认：读取为主的角色（scout/planner/reviewer/verifier/consultant）为 **60** 个模型回合，builder/worker/custom 为 **120**（`WorkerRuntimeProfile::default_max_steps`），墙钟默认 **1800 秒**。
+3. Fleet 角色默认：所有角色的模型回合数**不设上限**（`WorkerRuntimeProfile::default_max_steps` 返回零），墙钟默认 **1800 秒**。
 
 步数值钳制到 2000 回合的硬上限；墙钟值钳制到 1..=86400 秒。
 
