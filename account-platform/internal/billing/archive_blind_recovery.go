@@ -46,8 +46,12 @@ func NewArchiveBlindRecoveryWorker(store ArchiveBlindRecoveryStore, synchronizer
 		store:        store,
 		synchronizer: synchronizer,
 		interval:     interval,
-		batchSize:    20,
-		logger:       slog.Default().With("component", "archive-blind-recovery"),
+		// Recovery performs a real provider query before retracting each stale
+		// case. Keep the default batch at one so a deployment cannot turn a
+		// backlog into a provider-query burst; the periodic worker will converge
+		// the backlog one verified case at a time.
+		batchSize: 1,
+		logger:    slog.Default().With("component", "archive-blind-recovery"),
 	}
 }
 
