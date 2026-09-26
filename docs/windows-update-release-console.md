@@ -48,6 +48,7 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 | `PINVOU_UPDATE_PORT` | 否 | 监听端口，默认 `8792` |
 | `PINVOU_UPDATE_CONSOLE_BASE_PATH` | 否 | 反代路径，默认 `/` |
 | `PINVOU_UPDATE_MAX_UPLOAD_BYTES` | 否 | 最大安装器字节数，默认 4 GiB |
+| `PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS` | 否 | 上传连续无数据进展的超时，默认 120000 毫秒 |
 | `PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS` | 否 | HTTPS 回读超时，默认 15 分钟 |
 | `PINVOU_UPDATE_TRUSTED_PROXIES` | 否 | 可提供 `X-Real-IP` 的直接反向代理 IP/CIDR，逗号分隔；不配置时忽略该请求头 |
 | `PINVOU_UPDATE_AUTH_FAILURE_LIMIT` | 否 | 同一客户端在窗口内允许的认证失败次数，默认 5 |
@@ -64,8 +65,11 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 认证失败限流按上述可信代理解析后的客户端 IP 计数，达到阈值返回 `429` 和
 `Retry-After`；成功认证会清除该 IP 的失败记录，TTL 与容量上限避免长期占用内存。
 Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 multipart
-字段、边界和请求头保留空间；`client_body_timeout`、`proxy_read_timeout` 和
-`proxy_send_timeout` 均设为 1 小时，避免端点安全扫描或较慢上行造成的大文件上传间歇。
+字段、边界和请求头保留空间；`client_body_timeout` 是 150 秒无数据超时，应用自身默认在连续
+120 秒没有收到请求数据时终止连接并清理本次独立暂存文件。只要上传持续有数据，
+`server.requestTimeout`、`proxy_read_timeout` 和 `proxy_send_timeout` 仍允许最长 1 小时。
+上传正文接收和文件校验不持有发布锁，只有校验完成后的草稿一致性检查与落盘进入短临界区，
+因此单个半开连接不会阻塞后续上传、发布或回滚。
 页面显示实时上传进度；连接中断时会先查询草稿状态，确认服务端尚未完成后自动重试一次，
 连续失败则要求重新选择已经停止写入的安装器，避免构建或签名程序仍在改写文件。
 

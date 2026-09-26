@@ -370,7 +370,12 @@ function validateStoredDraft(draft) {
   return draft;
 }
 
-export async function receiveUpload(request, stagingDir, maxUploadBytes) {
+export async function receiveUpload(
+  request,
+  stagingDir,
+  maxUploadBytes,
+  uploadIdleTimeoutMs = 2 * 60 * 1000,
+) {
   const temporaryPath = join(stagingDir, `${randomUUID()}.upload`);
   let parser;
   try {
@@ -403,12 +408,31 @@ export async function receiveUpload(request, stagingDir, maxUploadBytes) {
   let tooLarge = false;
   let parseError;
   let aborted = false;
+  let idleError;
+  let idleTimer;
+
+  const resetIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleError = new AppError(408, "upload_idle_timeout", "上传长时间没有数据进展，已终止并清理临时文件");
+      request.unpipe(parser);
+      parser.destroy(idleError);
+      // Stop accepting a request body that may otherwise remain half-open
+      // behind the reverse proxy. The client retries on the closed connection.
+      request.destroy();
+    }, uploadIdleTimeoutMs);
+  };
 
   const abortHandler = () => {
+    if (idleError) return;
     aborted = true;
     parser.destroy(new Error("upload aborted"));
   };
+  const endHandler = () => clearTimeout(idleTimer);
   request.once("aborted", abortHandler);
+  request.once("end", endHandler);
+  request.on("data", resetIdleTimer);
+  resetIdleTimer();
   try {
     await new Promise((resolvePromise, rejectPromise) => {
       parser.on("field", (name, value, info) => {
@@ -470,13 +494,18 @@ export async function receiveUpload(request, stagingDir, maxUploadBytes) {
     }
     return { fields: safeUploadFields(fields), filename, temporaryPath, size, sha256: hash.digest("hex") };
   } catch (error) {
+    if (filePromise) await filePromise.catch(() => {});
     await rm(temporaryPath, { force: true });
+    if (idleError) throw idleError;
     if (aborted || request.aborted) {
       throw badRequest("upload_aborted", "上传已中断");
     }
     throw error;
   } finally {
+    clearTimeout(idleTimer);
     request.off("aborted", abortHandler);
+    request.off("end", endHandler);
+    request.off("data", resetIdleTimer);
   }
 }
 
@@ -575,12 +604,16 @@ export class ReleaseService {
   }
 
   async createDraft(request, remoteAddress) {
-    return this.withPublishLock(() => this.createDraftUnlocked(request, remoteAddress));
-  }
-
-  async createDraftUnlocked(request, remoteAddress) {
+    // Reject the common case before receiving a potentially multi-gigabyte
+    // body, then repeat the check under the lock after validation to close the
+    // race between concurrent uploaders.
     if (await this.getDraft()) throw conflict("draft_exists", "已有待处理草稿，请先发布或取消");
-    const upload = await receiveUpload(request, this.stagingDir, this.config.maxUploadBytes);
+    const upload = await receiveUpload(
+      request,
+      this.stagingDir,
+      this.config.maxUploadBytes,
+      this.config.uploadIdleTimeoutMs,
+    );
     let draftSaved = false;
     try {
       const expectedFilename = `pinvou3_${upload.fields.version}_x64-setup.exe`;
@@ -593,48 +626,51 @@ export class ReleaseService {
       await inspectPeInstaller(upload.temporaryPath, upload.fields.version);
       await syncFile(upload.temporaryPath);
 
-      const manifest = await this.readManifest();
-      const currentWindows = manifest.platforms?.[WINDOWS_PLATFORM] ?? null;
-      if (currentWindows?.version && compareVersions(upload.fields.version, currentWindows.version) <= 0) {
-        throw conflict("version_not_newer", `新版本必须高于当前 Windows 版本 ${currentWindows.version}`);
-      }
+      return await this.withPublishLock(async () => {
+        if (await this.getDraft()) throw conflict("draft_exists", "已有待处理草稿，请先发布或取消");
+        const manifest = await this.readManifest();
+        const currentWindows = manifest.platforms?.[WINDOWS_PLATFORM] ?? null;
+        if (currentWindows?.version && compareVersions(upload.fields.version, currentWindows.version) <= 0) {
+          throw conflict("version_not_newer", `新版本必须高于当前 Windows 版本 ${currentWindows.version}`);
+        }
 
-      const preparedAt = this.now().toISOString();
-      const entry = {
-        version: upload.fields.version,
-        url: `${this.config.publicBaseUrl}/${expectedFilename}`,
-        format: "nsis",
-        sha256: upload.sha256,
-        size: upload.size,
-        restart_after_install: false,
-        notes: upload.fields.notes,
-        pub_date: preparedAt,
-      };
-      const draft = {
-        id: randomUUID(),
-        platform: WINDOWS_PLATFORM,
-        status: "draft",
-        prepared_at: preparedAt,
-        operator: upload.fields.operator,
-        git_commit: upload.fields.gitCommit,
-        file_name: expectedFilename,
-        staging_file: basename(upload.temporaryPath),
-        entry,
-        base_windows: jsonClone(currentWindows),
-        preview_manifest: mergeWindowsEntry(manifest, entry),
-      };
-      await atomicWriteJson(this.draftPath, draft);
-      draftSaved = true;
-      await this.audit("draft_created", {
-        remote_address: remoteAddress,
-        draft_id: draft.id,
-        operator: draft.operator,
-        version: entry.version,
-        sha256: entry.sha256,
-        size: entry.size,
-        git_commit: draft.git_commit,
+        const preparedAt = this.now().toISOString();
+        const entry = {
+          version: upload.fields.version,
+          url: `${this.config.publicBaseUrl}/${expectedFilename}`,
+          format: "nsis",
+          sha256: upload.sha256,
+          size: upload.size,
+          restart_after_install: false,
+          notes: upload.fields.notes,
+          pub_date: preparedAt,
+        };
+        const draft = {
+          id: randomUUID(),
+          platform: WINDOWS_PLATFORM,
+          status: "draft",
+          prepared_at: preparedAt,
+          operator: upload.fields.operator,
+          git_commit: upload.fields.gitCommit,
+          file_name: expectedFilename,
+          staging_file: basename(upload.temporaryPath),
+          entry,
+          base_windows: jsonClone(currentWindows),
+          preview_manifest: mergeWindowsEntry(manifest, entry),
+        };
+        await atomicWriteJson(this.draftPath, draft);
+        draftSaved = true;
+        await this.audit("draft_created", {
+          remote_address: remoteAddress,
+          draft_id: draft.id,
+          operator: draft.operator,
+          version: entry.version,
+          sha256: entry.sha256,
+          size: entry.size,
+          git_commit: draft.git_commit,
+        });
+        return draft;
       });
-      return draft;
     } catch (error) {
       if (draftSaved) await rm(this.draftPath, { force: true });
       await rm(upload.temporaryPath, { force: true });
@@ -680,8 +716,11 @@ export class ReleaseService {
     try {
       return await callback();
     } finally {
-      await handle.close();
-      await rm(this.lockPath, { force: true });
+      try {
+        await handle.close();
+      } finally {
+        await rm(this.lockPath, { force: true });
+      }
     }
   }
 

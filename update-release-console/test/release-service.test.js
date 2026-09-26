@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,45 @@ import {
   receiveUpload,
   ReleaseService,
 } from "../src/release-service.js";
+import { peFixture } from "./pe-fixture.js";
+
+function multipartRequest(content, version = "0.10.4", boundary = `pinvou-${Date.now()}-${Math.random()}`) {
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  const fields = [
+    ["version", version],
+    ["gitCommit", "abcdef1234567890"],
+    ["expectedSha256", sha256],
+    ["notes", "fixture release"],
+    ["operator", "测试发布员"],
+  ];
+  const chunks = [];
+  for (const [name, value] of fields) {
+    chunks.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+    ));
+  }
+  chunks.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="installer"; filename="pinvou3_${version}_x64-setup.exe"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+  ));
+  chunks.push(content);
+  chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+  const body = Buffer.concat(chunks);
+  const request = new PassThrough();
+  request.headers = {
+    "content-type": `multipart/form-data; boundary=${boundary}`,
+    "content-length": String(body.length),
+  };
+  request.aborted = false;
+  return { body, request };
+}
+
+async function waitFor(check, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+}
 
 test("客户端中断 multipart 时返回 upload_aborted 并清理暂存文件", async (t) => {
   const stagingDir = await mkdtemp(join(tmpdir(), "pinvou-aborted-upload-"));
@@ -31,6 +70,63 @@ test("客户端中断 multipart 时返回 upload_aborted 并清理暂存文件",
     (error) => error.status === 400 && error.code === "upload_aborted",
   );
   assert.deepEqual(await readdir(stagingDir), []);
+});
+
+test("上传长时间无数据时返回 upload_idle_timeout 并清理暂存文件", async (t) => {
+  const stagingDir = await mkdtemp(join(tmpdir(), "pinvou-idle-upload-"));
+  t.after(() => rm(stagingDir, { recursive: true, force: true }));
+  const stalled = multipartRequest(Buffer.alloc(1024), "0.10.4", "pinvou-idle");
+  const receiving = receiveUpload(stalled.request, stagingDir, 1024 * 1024, 100);
+  stalled.request.write(stalled.body.subarray(0, stalled.body.length - 8));
+  await waitFor(async () => (await readdir(stagingDir)).length === 1);
+  await assert.rejects(
+    receiving,
+    (error) => error.status === 408 && error.code === "upload_idle_timeout",
+  );
+  assert.deepEqual(await readdir(stagingDir), []);
+});
+
+test("未完成上传不占发布锁，其他完整上传仍可生成草稿", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-unlocked-upload-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const publicRoot = join(root, "public");
+  const stateRoot = join(root, "state");
+  await mkdir(publicRoot);
+  await writeFile(join(publicRoot, "latest.json"), "{}\n");
+  if (process.platform !== "win32") await chmod(join(publicRoot, "latest.json"), 0o644);
+  const service = new ReleaseService({
+    publicRoot,
+    stateRoot,
+    publicBaseUrl: "https://updates.example.test/pinvou3",
+    maxUploadBytes: 1024 * 1024,
+    uploadIdleTimeoutMs: 5000,
+    onlineVerifyTimeoutMs: 5000,
+  });
+  await service.initialize();
+
+  const installer = peFixture({ productVersion: "0.10.4.0" });
+  const stalled = multipartRequest(installer, "0.10.4", "pinvou-stalled");
+  const stalledResult = service.createDraft(stalled.request, "192.0.2.1").then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  stalled.request.write(stalled.body.subarray(0, stalled.body.length - 8));
+  await waitFor(async () => (await readdir(service.stagingDir)).length === 1);
+  await assert.rejects(stat(service.lockPath), (error) => error.code === "ENOENT");
+
+  const complete = multipartRequest(installer, "0.10.4", "pinvou-complete");
+  const completedDraft = service.createDraft(complete.request, "192.0.2.2");
+  complete.request.end(complete.body);
+  const draft = await completedDraft;
+  assert.equal(draft.entry.version, "0.10.4");
+
+  stalled.request.aborted = true;
+  stalled.request.emit("aborted");
+  stalled.request.destroy();
+  const stalledOutcome = await stalledResult;
+  assert.equal(stalledOutcome.error?.code, "upload_aborted");
+  assert.equal((await readdir(service.stagingDir)).length, 1);
+  await assert.rejects(stat(service.lockPath), (error) => error.code === "ENOENT");
 });
 
 test("版本比较支持三段和四段数字版本", () => {

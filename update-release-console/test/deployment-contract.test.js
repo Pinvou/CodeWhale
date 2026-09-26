@@ -28,7 +28,7 @@ test("容器、Compose 与 Nginx 保持最小权限和可信代理契约", async
   assert.match(nginx, /proxy_set_header X-Real-IP \$remote_addr;/u);
   assert.match(nginx, /proxy_set_header X-Forwarded-For \$remote_addr;/u);
   assert.match(nginx, /client_max_body_size 4224m;/u);
-  assert.match(nginx, /client_body_timeout 1h;/u);
+  assert.match(nginx, /client_body_timeout 150s;/u);
   assert.match(nginxWrapper, /include \/etc\/nginx\/pinvou3-release-location\.conf;/u);
   assert.match(nginxWrapper, /events \{\}/u);
 });

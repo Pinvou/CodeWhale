@@ -25,6 +25,18 @@ test("配置默认只监听回环地址并规范化路径", () => {
   assert.equal(config.authBlockMs, 900_000);
   assert.equal(config.authLimiterTtlMs, 3_600_000);
   assert.equal(config.authLimiterMaxEntries, 10_000);
+  assert.equal(config.uploadIdleTimeoutMs, 120_000);
+});
+
+test("上传无进展超时必须处于安全范围", () => {
+  assert.equal(
+    loadConfig(environment({ PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS: "90000" })).uploadIdleTimeoutMs,
+    90_000,
+  );
+  assert.throws(
+    () => loadConfig(environment({ PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS: "999" })),
+    /PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS/u,
+  );
 });
 
 test("拒绝 HTTP 下载地址和公开目录内的状态目录", () => {
