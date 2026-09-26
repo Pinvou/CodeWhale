@@ -7,6 +7,7 @@ import { authorizationVersions, personalSurfaceAccess } from './authorization-ui
 import { effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderSummaryStatus, paymentScanPrompt } from './order-view.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { PasswordInput } from './PasswordInput.jsx';
+import { accountDisplayLabel } from './account-display-label.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
@@ -618,7 +619,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   if (!open) return null;
 
   const access = personalSurfaceAccess(me);
-  const displayName = me?.display_name || copy.user;
+  const displayName = accountDisplayLabel(me, copy.user);
   const panelPosition = collapsed ? 'left-full bottom-0 ml-3' : 'left-0 bottom-full mb-2';
   const panelTheme = isDark ? 'bg-[#202124]/95 border-white/10 text-[#E3E3E3]' : 'bg-white/95 border-black/10 text-[#1F1F1F]';
   const cardTheme = isDark ? 'bg-[#131314] border-white/10' : 'bg-[#F8FAFD] border-black/5';

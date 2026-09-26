@@ -12,6 +12,7 @@ import { PendingInvitations } from './pending-invitations.js';
 import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import { localizedAccountPlatformError } from './error-localization.js';
+import { accountDisplayLabel } from './account-display-label.js';
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -731,7 +732,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       </div>
     );
 
-  const userLabel = me?.display_name || copy.user;
+  const userLabel = accountDisplayLabel(me, copy.user);
   const identityLabel = activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal;
   const navigateSection = (key) => {
     setSection(key);
@@ -1691,7 +1692,7 @@ function Overview({ copy, language, me, organizations, balance, activeOrganizati
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
       {!embedded && <p className="ap-eyebrow">{copy.sections.overview}</p>}
-      <Heading>{copy.welcome(me?.display_name || copy.user)}</Heading>
+      <Heading>{copy.welcome(accountDisplayLabel(me, copy.user))}</Heading>
       <p className="ap-lead">{copy.overviewLead}</p>
       <div className="ap-context-card">
         <div>

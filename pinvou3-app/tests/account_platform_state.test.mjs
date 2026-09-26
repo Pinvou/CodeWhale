@@ -16,6 +16,7 @@ import { createFinanceDetailRecovery, financeCursorContext, financeDetailRouteIs
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformErrorCodes, localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
+import { accountDisplayLabel } from '../src/features/account-platform/account-display-label.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
 test('account platform errors prefer wrapped domain codes over generic bridge failures', () => {
@@ -55,6 +56,18 @@ test('account platform errors prefer wrapped domain codes over generic bridge fa
   const startedAt = performance.now();
   assert.deepEqual(accountPlatformErrorCodes('a'.repeat(20_000)), []);
   assert.ok(performance.now() - startedAt < 500, 'long unclassified errors must be parsed in bounded time');
+});
+
+test('personal account summaries prefer the current username over a stale display name', async () => {
+  assert.equal(accountDisplayLabel({ username: 'renamed-user', display_name: 'old-user' }, 'User'), 'renamed-user');
+  assert.equal(accountDisplayLabel({ username: '  ', display_name: 'Display Name' }, 'User'), 'Display Name');
+  assert.equal(accountDisplayLabel({}, 'User'), 'User');
+
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.match(view, /const userLabel = accountDisplayLabel\(me, copy\.user\)/);
+  assert.match(view, /copy\.welcome\(accountDisplayLabel\(me, copy\.user\)\)/);
+  assert.match(popover, /const displayName = accountDisplayLabel\(me, copy\.user\)/);
 });
 
 test('admin portal navigation groups and URL state remain deterministic', () => {
