@@ -47,7 +47,8 @@ func (s *Service) sendProfileMobileChallenge(w http.ResponseWriter, r *http.Requ
 		s.writeProfileError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusAccepted, map[string]any{"challenge_id": challenge.ID, "expires_at": challenge.ExpiresAt, "retry_after_seconds": 60})
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusAccepted, map[string]any{"challenge_id": challenge.ID, "delivery_status": challenge.Status, "expires_at": challenge.ExpiresAt, "retry_after_seconds": 60})
 }
 
 func (s *Service) completeProfileChange(w http.ResponseWriter, r *http.Request) {
@@ -63,9 +64,12 @@ func (s *Service) completeProfileChange(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
-	change, err := s.profiles.Complete(ctx, mustPrincipal(r.Context()), id, body.Code)
+	principal := mustPrincipal(r.Context())
+	change, err := s.profiles.Complete(ctx, principal, id, body.Code)
 	if err != nil {
-		if recovering, loadErr := s.profiles.store.ProfileChange(r.Context(), id, nil); loadErr == nil && (recovering.Status == "RETRY" || recovering.Status == "REPAIR_REQUIRED") {
+		if recovering, loadErr := s.profiles.store.ProfileChange(r.Context(), id, nil); loadErr == nil &&
+			recovering.IdentityIssuer == principal.Issuer && recovering.IdentitySubject == principal.Subject &&
+			(recovering.Status == "RETRY" || recovering.Status == "REPAIR_REQUIRED") {
 			w.Header().Set("Cache-Control", "no-store")
 			api.WriteJSON(w, http.StatusAccepted, recovering)
 			return
@@ -142,6 +146,8 @@ func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err 
 		status, code, message = http.StatusBadRequest, "MOBILE_INVALID", "the mobile number is invalid"
 	case errors.Is(err, ErrMobileAlreadyRegistered):
 		status, code, message = http.StatusConflict, "MOBILE_ALREADY_REGISTERED", "the mobile number is already registered"
+	case errors.Is(err, ErrCaptchaInvalid):
+		status, code, message = http.StatusBadRequest, "CAPTCHA_INVALID", "the slider verification is invalid or expired"
 	case errors.Is(err, ErrProfileChangeConflict), errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "PROFILE_CHANGE_CONFLICT", "another profile change or account update conflicts with this request"
 	case errors.Is(err, ErrProfileChangeVerificationRequired):
@@ -156,6 +162,8 @@ func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err 
 			retryAfter = max(1, int(math.Ceil(limited.RetryAfter.Seconds())))
 		}
 		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
+	case errors.Is(err, ErrSMSUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "SMS_UNAVAILABLE", "the SMS service is temporarily unavailable"
 	case errors.Is(err, ErrPasswordReferenceInvalid):
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired"
 	case errors.Is(err, ErrForbidden):

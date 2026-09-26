@@ -639,7 +639,7 @@ paths:
                 field: { type: string, enum: [USERNAME, MOBILE] }
                 value: { type: string }
       responses:
-        "201": { description: Recoverable profile change created }
+        "201": { description: "Recoverable profile change created, or the same unverified pending request returned after an uncertain response" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -647,15 +647,58 @@ paths:
     post:
       operationId: sendProfileMobileChallenge
       summary: Verify the reserved new mobile with a bound SMS challenge
+      description: The Account service persists the profile-request binding and dispatch-started fact before calling the provider. Repeated or concurrent calls observe the same challenge. SENT is durable provider success; SENDING means the one allowed delivery attempt is still in flight; UNCERTAIN means an at-most-once provider may have accepted the SMS but Account cannot prove the result, so the provider is never called again for that challenge. The client may submit a received code for UNCERTAIN, or wait for expiry before requesting a fresh challenge. A definite FAILED or expired delivery requires a fresh captcha. CAPTCHA_INVALID, PROFILE_CHANGE_CONFLICT, SMS_RATE_LIMITED, and SMS_UNAVAILABLE are stable error codes.
       parameters:
         - name: request_id
           in: path
           required: true
           schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [captcha_id, captcha_offset]
+              properties:
+                captcha_id: { type: string, format: uuid }
+                captcha_offset: { type: integer, minimum: 0 }
       responses:
-        "202": { description: Challenge sent }
+        "202":
+          description: Challenge delivery accepted; concurrent/recovery calls return the same challenge and its durable delivery state without a duplicate logical delivery effect
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [challenge_id, delivery_status, expires_at, retry_after_seconds]
+                properties:
+                  challenge_id: { type: string, format: uuid }
+                  delivery_status: { type: string, enum: [SENDING, UNCERTAIN, SENT] }
+                  expires_at: { type: string, format: date-time }
+                  retry_after_seconds: { type: integer, minimum: 1 }
+        "400":
+          description: Invalid or expired slider verification; stable code CAPTCHA_INVALID
+          content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "409":
+          description: Profile request, target, or durable delivery state conflicts; stable code PROFILE_CHANGE_CONFLICT
+          content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } }
+        "429":
+          description: SMS admission rate limit; stable code SMS_RATE_LIMITED
+          headers:
+            Retry-After:
+              required: true
+              description: Seconds until the caller may attempt a fresh SMS admission
+              schema: { type: integer, minimum: 1 }
+          content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } }
+        "503":
+          description: Provider delivery is temporarily unavailable; stable code SMS_UNAVAILABLE
+          content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } }
   /me/profile-change-requests/{request_id}/actions/complete:
     post:
       operationId: completeProfileChange

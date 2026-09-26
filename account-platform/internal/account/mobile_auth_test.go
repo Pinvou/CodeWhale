@@ -264,10 +264,22 @@ type smsProviderFake struct {
 	verifyCalls     int
 	verified        bool
 	verifyErr       error
+	retryPolicy     SMSDeliveryRetryPolicy
 }
 
 func (*smsProviderFake) Descriptor() SMSProviderDescriptor {
 	return SMSProviderDescriptor{ID: "fake", AdapterVersion: "v1"}
+}
+
+func (f *smsProviderFake) DeliveryRetryPolicy() SMSDeliveryRetryPolicy {
+	if f.retryPolicy == "" {
+		return SMSDeliveryIdempotent
+	}
+	return f.retryPolicy
+}
+
+func (*smsProviderFake) PrepareVerification(uuid.UUID) ([]byte, error) {
+	return []byte("verification"), nil
 }
 
 func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {

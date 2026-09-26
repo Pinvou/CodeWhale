@@ -30,9 +30,21 @@ const (
 
 type SMSProvider interface {
 	Descriptor() SMSProviderDescriptor
+	DeliveryRetryPolicy() SMSDeliveryRetryPolicy
+	PrepareVerification(uuid.UUID) ([]byte, error)
+	// SendCode is a one-shot side effect. Callers must never infer request
+	// idempotency from provider correlation fields and must not blindly retry an
+	// unknown outcome.
 	SendCode(context.Context, string, SMSPurpose, uuid.UUID) (SMSDelivery, error)
 	VerifyCode(context.Context, string, uuid.UUID, SMSVerificationData, string) (bool, error)
 }
+
+type SMSDeliveryRetryPolicy string
+
+const (
+	SMSDeliveryAtMostOnce SMSDeliveryRetryPolicy = "AT_MOST_ONCE"
+	SMSDeliveryIdempotent SMSDeliveryRetryPolicy = "IDEMPOTENT"
+)
 
 type SMSProviderDescriptor struct {
 	ID             string
@@ -48,6 +60,15 @@ type SMSDelivery struct {
 	MessageID        string
 	VerificationData []byte
 }
+
+// SMSDeliveryRejectedError is returned only when the provider response proves
+// that no SMS was accepted. Transport failures, timeouts, and malformed
+// responses are deliberately not classified as rejected because their effect
+// is unknown and must follow the provider's durable retry policy.
+type SMSDeliveryRejectedError struct{ Cause error }
+
+func (e *SMSDeliveryRejectedError) Error() string { return e.Cause.Error() }
+func (e *SMSDeliveryRejectedError) Unwrap() error { return e.Cause }
 
 type AliyunSMSConfig struct {
 	AccessKeyID      string
@@ -67,6 +88,8 @@ type AliyunSMSProvider struct {
 func (*AliyunSMSProvider) Descriptor() SMSProviderDescriptor {
 	return SMSProviderDescriptor{ID: "aliyun-managed", AdapterVersion: "v1"}
 }
+
+func (*AliyunSMSProvider) DeliveryRetryPolicy() SMSDeliveryRetryPolicy { return SMSDeliveryAtMostOnce }
 
 func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
 	config.AccessKeyID = strings.TrimSpace(config.AccessKeyID)
@@ -130,8 +153,11 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&body); err != nil {
 		return SMSDelivery{}, errors.New("Aliyun SMS returned an invalid response")
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" || !body.Success {
-		return SMSDelivery{}, fmt.Errorf("Aliyun SMS rejected the request: %s", sanitizeProviderCode(body.Code))
+	if response.StatusCode >= 200 && response.StatusCode < 300 && (body.Code != "OK" || !body.Success) {
+		return SMSDelivery{}, &SMSDeliveryRejectedError{Cause: fmt.Errorf("Aliyun SMS rejected the request: %s", sanitizeProviderCode(body.Code))}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return SMSDelivery{}, fmt.Errorf("Aliyun SMS returned HTTP %d", response.StatusCode)
 	}
 	if body.Model.BizID != "" {
 		return SMSDelivery{MessageID: body.Model.BizID}, nil
@@ -140,6 +166,10 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 		return SMSDelivery{MessageID: body.Model.RequestID}, nil
 	}
 	return SMSDelivery{MessageID: body.RequestID}, nil
+}
+
+func (*AliyunSMSProvider) PrepareVerification(uuid.UUID) ([]byte, error) {
+	return nil, nil
 }
 
 func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, challengeID uuid.UUID, verification SMSVerificationData, code string) (bool, error) {

@@ -18,6 +18,7 @@ import { createAccountSynchronizationQueue, resolveAccountSynchronization } from
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformErrorCodes, localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
 import { accountDisplayLabel } from '../src/features/account-platform/account-display-label.js';
+import { profileCaptchaSubmissionOffset } from '../src/features/account-platform/profile-captcha-state.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
 test('account platform errors prefer wrapped domain codes over generic bridge failures', () => {
@@ -1547,6 +1548,38 @@ test('releasing a mobile captcha slider verifies immediately and requests the SM
   }
   assert.match(popover, /onConfirm=\{\(\) => void sendSms\(\)\}/);
   assert.match(webView, /onConfirm=\{sendMobileCode\}/);
+});
+
+test('Web profile captcha submits the visible slider offset and keeps failures inside the verification dialog', async () => {
+  assert.equal(profileCaptchaSubmissionOffset(173, 0), 173);
+  assert.equal(profileCaptchaSubmissionOffset({ type: 'click' }, 149), 149);
+  assert.equal(profileCaptchaSubmissionOffset(undefined, 88), 88);
+  assert.equal(profileCaptchaSubmissionOffset(-1, 88), 0);
+  assert.equal(profileCaptchaSubmissionOffset(NaN, 88), 0);
+
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const openBlocks = [...view.matchAll(/const openMobileCaptcha = \(\) =>[\s\S]*?const sendMobileCode/g)].map((match) => match[0]);
+  const sendBlocks = [...view.matchAll(/const sendMobileCode = \(selectedOffset\) =>[\s\S]*?const completeMobile/g)].map((match) => match[0]);
+  assert.equal(openBlocks.length, 2);
+  assert.equal(sendBlocks.length, 2);
+  for (const block of openBlocks) {
+    assert.match(block, /createProfileSliderCaptcha\(mobile\.trim\(\)\)/);
+    assert.doesNotMatch(block, /createProfileChange/);
+  }
+  for (const block of sendBlocks) {
+    assert.match(block, /createProfileChange\('MOBILE', mobile\.trim\(\)\)/);
+    assert.match(block, /sendProfileMobileChallenge\(id, captcha\.captcha_id, profileCaptchaSubmissionOffset\(selectedOffset, captchaOffset\)\)/);
+    assert.match(block, /delivery\?\.delivery_status !== 'SENT'/);
+    assert.match(block, /smsDeliveryPending[\s\S]*?return;[\s\S]*?setChallengeSent\(true\)/);
+  }
+  assert.match(view, /function ProfileCaptcha\(\{ challenge, offset, busy, error = ''/);
+  assert.match(view, /<div role="alert" className="ap-alert error">\s*\{error\}/);
+  assert.match(view, /error=\{captchaError\}/);
+  assert.match(view, /SMS_UNAVAILABLE: copy\.smsUnavailable/);
+  assert.match(view, /delivery_status !== 'SENT'/);
+  assert.equal(typeof accountPlatformCopy.zh.smsDeliveryPending, 'string');
+  assert.equal(typeof accountPlatformCopy.en.smsDeliveryPending, 'string');
+  assert.equal(typeof accountPlatformCopy.ja.smsDeliveryPending, 'string');
 });
 
 test('desktop account popover does not expose the internal user id', async () => {

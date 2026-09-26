@@ -14,6 +14,7 @@ import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { accountDisplayLabel } from './account-display-label.js';
+import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -157,6 +158,7 @@ function localizedError(copy, reason) {
     MOBILE_ALREADY_REGISTERED: copy.mobileAlreadyRegistered,
     CAPTCHA_INVALID: copy.captchaInvalid,
     SMS_RATE_LIMITED: copy.smsRateLimited,
+    SMS_UNAVAILABLE: copy.smsUnavailable,
     SMS_CODE_INVALID: copy.mobileAuthFailed,
     PROFILE_CHANGE_CONFLICT: copy.profileChangeConflict,
     MOBILE_VERIFICATION_REQUIRED: copy.mobileVerificationRequired,
@@ -1275,6 +1277,7 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
   const [captcha, setCaptcha] = useState(null);
   const [captchaOffset, setCaptchaOffset] = useState(0);
   const [challengeSent, setChallengeSent] = useState(false);
+  const [deliveryUncertain, setDeliveryUncertain] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const usernameValid = /^[a-z][a-z0-9._-]{2,31}$/i.test(username.trim());
@@ -1302,21 +1305,34 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
   };
   const openMobileCaptcha = () =>
     void perform(async () => {
+      setCaptcha(await client.createProfileSliderCaptcha(mobile.trim()));
+      setCaptchaOffset(0);
+    });
+  const sendMobileCode = (selectedOffset) =>
+    void perform(async () => {
       let id = requestId;
       if (!id) {
         const created = await client.createProfileChange('MOBILE', mobile.trim());
         id = created.profile_change_request_id;
         setRequestId(id);
       }
-      setCaptcha(await client.createProfileSliderCaptcha(mobile.trim()));
-      setCaptchaOffset(0);
-    });
-  const sendMobileCode = () =>
-    void perform(async () => {
-      await client.sendProfileMobileChallenge(requestId, captcha.captcha_id, captchaOffset);
+      const delivery = await client.sendProfileMobileChallenge(id, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, captchaOffset));
+      if (delivery?.delivery_status === 'UNCERTAIN') {
+        setCaptcha(null);
+        setCaptchaOffset(0);
+        setDeliveryUncertain(true);
+        setChallengeSent(true);
+        setError(copy.smsDeliveryUncertain);
+        return;
+      }
+      if (delivery?.delivery_status !== 'SENT') {
+        setError(copy.smsDeliveryPending);
+        return;
+      }
       setCaptcha(null);
       setCaptchaOffset(0);
       setChallengeSent(true);
+      setDeliveryUncertain(false);
     });
   const completeMobile = (event) => {
     event.preventDefault();
@@ -1381,6 +1397,7 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
                 setMobile(event.target.value);
                 setRequestId('');
                 setChallengeSent(false);
+                setDeliveryUncertain(false);
                 setSmsCode('');
                 setCaptcha(null);
               }}
@@ -1402,6 +1419,7 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
                 </div>
               </Field>
               <p className="ap-field-hint">{copy.smsValidity}</p>
+              {deliveryUncertain && <p className="ap-field-hint error">{copy.smsDeliveryUncertain}</p>}
             </>
           )}
           <footer className="ap-dialog-actions">
@@ -1426,12 +1444,16 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
             challenge={captcha}
             offset={captchaOffset}
             busy={busy}
+            error={error}
             copy={copy}
             onOffset={setCaptchaOffset}
             onConfirm={sendMobileCode}
             onRefresh={openMobileCaptcha}
             onClose={() => {
-              if (!busy) setCaptcha(null);
+              if (!busy) {
+                setCaptcha(null);
+                setCaptchaOffset(0);
+              }
             }}
           />
         </div>
@@ -1440,7 +1462,7 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
   );
 }
 
-function ProfileCaptcha({ challenge, offset, busy, copy, onOffset, onConfirm, onRefresh, onClose }) {
+function ProfileCaptcha({ challenge, offset, busy, error = '', copy, onOffset, onConfirm, onRefresh, onClose }) {
   const [dragOffset, setDragOffset] = useState(null);
   const [dragging, setDragging] = useState(false);
   const width = Number(challenge?.width || 280);
@@ -1480,6 +1502,11 @@ function ProfileCaptcha({ challenge, offset, busy, copy, onOffset, onConfirm, on
           </button>
         </div>
       </header>
+      {error && (
+        <div role="alert" className="ap-alert error">
+          {error}
+        </div>
+      )}
       <div className="ap-captcha-image" style={{ aspectRatio: `${width}/${height}` }}>
         <img src={challenge.background_image} alt="" draggable="false" />
         <img
@@ -1523,14 +1550,18 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
   const [captcha, setCaptcha] = useState(null);
   const [captchaOffset, setCaptchaOffset] = useState(0);
   const [challengeSent, setChallengeSent] = useState(false);
+  const [deliveryUncertain, setDeliveryUncertain] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [captchaError, setCaptchaError] = useState('');
 
-  const perform = async (action) => {
+  const perform = async (action, { captchaScoped = false } = {}) => {
     setBusy(true);
+    if (captchaScoped) setCaptchaError('');
     try {
       await action();
     } catch (reason) {
-      onError(reason);
+      if (captchaScoped) setCaptchaError(localizedError(copy, reason));
+      else onError(reason);
     } finally {
       setBusy(false);
     }
@@ -1545,22 +1576,37 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
   };
   const openMobileCaptcha = () =>
     void perform(async () => {
+      setCaptcha(await client.createProfileSliderCaptcha(mobile.trim()));
+      setCaptchaOffset(0);
+      setCaptchaError('');
+    }, { captchaScoped: Boolean(captcha) });
+  const sendMobileCode = (selectedOffset) =>
+    void perform(async () => {
       let id = requestId;
       if (!id) {
         const created = await client.createProfileChange('MOBILE', mobile.trim());
         id = created.profile_change_request_id;
         setRequestId(id);
       }
-      setCaptcha(await client.createProfileSliderCaptcha(mobile.trim()));
-      setCaptchaOffset(0);
-    });
-  const sendMobileCode = () =>
-    void perform(async () => {
-      await client.sendProfileMobileChallenge(requestId, captcha.captcha_id, captchaOffset);
+      const delivery = await client.sendProfileMobileChallenge(id, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, captchaOffset));
+      if (delivery?.delivery_status === 'UNCERTAIN') {
+        setCaptcha(null);
+        setCaptchaOffset(0);
+        setDeliveryUncertain(true);
+        setChallengeSent(true);
+        setCaptchaError('');
+        return;
+      }
+      if (delivery?.delivery_status !== 'SENT') {
+        setCaptchaError(copy.smsDeliveryPending);
+        return;
+      }
       setCaptcha(null);
       setCaptchaOffset(0);
+      setCaptchaError('');
       setChallengeSent(true);
-    });
+      setDeliveryUncertain(false);
+    }, { captchaScoped: true });
   const completeMobile = (event) => {
     event.preventDefault();
     void perform(async () => {
@@ -1610,8 +1656,10 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
                   setMobile(event.target.value);
                   setRequestId('');
                   setChallengeSent(false);
+                  setDeliveryUncertain(false);
                   setSmsCode('');
                   setCaptcha(null);
+                  setCaptchaError('');
                 }}
                 disabled={busy || challengeSent}
                 inputMode="tel"
@@ -1619,9 +1667,12 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
               />
             </Field>
             {challengeSent && (
-              <Field label={copy.smsCode}>
-                <input value={smsCode} onChange={(event) => setSmsCode(event.target.value)} disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
-              </Field>
+              <>
+                <Field label={copy.smsCode}>
+                  <input value={smsCode} onChange={(event) => setSmsCode(event.target.value)} disabled={busy} inputMode="numeric" autoComplete="one-time-code" />
+                </Field>
+                {deliveryUncertain && <p className="ap-field-hint error">{copy.smsDeliveryUncertain}</p>}
+              </>
             )}
             {challengeSent ? (
               <button disabled={busy || !smsCode.trim()}>{copy.confirmChange}</button>
@@ -1639,12 +1690,17 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
             challenge={captcha}
             offset={captchaOffset}
             busy={busy}
+            error={captchaError}
             copy={copy}
             onOffset={setCaptchaOffset}
             onConfirm={sendMobileCode}
             onRefresh={openMobileCaptcha}
             onClose={() => {
-              if (!busy) setCaptcha(null);
+              if (!busy) {
+                setCaptcha(null);
+                setCaptchaOffset(0);
+                setCaptchaError('');
+              }
             }}
           />
         </div>

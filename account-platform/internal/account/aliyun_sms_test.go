@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,7 +39,7 @@ func TestAliyunSMSProviderSendAndVerify(t *testing.T) {
 			if query.Get("SignName") != "gifted-sign" || query.Get("TemplateCode") != "100001" {
 				t.Fatalf("unexpected sign or template: %v", query)
 			}
-			if query.Get("TemplateParam") != `{"code":"##code##","min":"5"}` || query.Get("ReturnVerifyCode") != "false" {
+			if query.Get("TemplateParam") != `{"code":"##code##","min":"5"}` || query.Get("ReturnVerifyCode") != "false" || query.Get("DuplicatePolicy") != "1" {
 				t.Fatalf("provider-generated verification was not requested: %v", query)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -68,6 +69,12 @@ func TestAliyunSMSProviderSendAndVerify(t *testing.T) {
 	}
 	provider.client = server.Client()
 	provider.now = func() time.Time { return time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC) }
+	if provider.DeliveryRetryPolicy() != SMSDeliveryAtMostOnce {
+		t.Fatalf("Aliyun delivery policy=%s, want AT_MOST_ONCE", provider.DeliveryRetryPolicy())
+	}
+	if verification, err := provider.PrepareVerification(challengeID); err != nil || verification != nil {
+		t.Fatalf("Aliyun provider-managed verification=%x err=%v", verification, err)
+	}
 
 	delivery, err := provider.SendCode(context.Background(), "+8613800138000", SMSPurposeRegister, challengeID)
 	if err != nil || delivery.MessageID != "biz-1" {
@@ -110,5 +117,29 @@ func TestAliyunSMSProviderRequiresHTTPS(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected an insecure endpoint to be rejected")
+	}
+}
+
+func TestAliyunSMSProviderClassifiesOnlyExplicitProviderRejection(t *testing.T) {
+	status := http.StatusOK
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"Code": "MOBILE_REJECTED", "Success": false})
+	}))
+	defer server.Close()
+	provider, err := NewAliyunSMSProvider(AliyunSMSConfig{AccessKeyID: "test-id", AccessKeySecret: strings.Repeat("s", 32), SignName: "gifted-sign", RegisterTemplate: "100001", LoginTemplate: "100001", Endpoint: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.client = server.Client()
+	_, err = provider.SendCode(context.Background(), "+8613800138000", SMSPurposeProfileMobile, uuid.New())
+	var rejected *SMSDeliveryRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("explicit provider rejection error=%v", err)
+	}
+	status = http.StatusServiceUnavailable
+	_, err = provider.SendCode(context.Background(), "+8613800138000", SMSPurposeProfileMobile, uuid.New())
+	if errors.As(err, &rejected) {
+		t.Fatalf("HTTP 503 must remain UNKNOWN, got %v", err)
 	}
 }

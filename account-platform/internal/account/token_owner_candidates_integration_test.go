@@ -428,14 +428,14 @@ func TestAccountApprovalAuthorizationMigrationChainPostgresIntegration(t *testin
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	repository, connection, _, loaded := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL, 0)
-	if latest := loaded[len(loaded)-1]; latest.Version != 80 {
-		t.Fatalf("latest account migration=%d, want 80", latest.Version)
+	if latest := loaded[len(loaded)-1]; latest.Version != 84 {
+		t.Fatalf("latest account migration=%d, want 84", latest.Version)
 	}
 	var sessionUser, currentUser string
 	var latestVersion int64
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT max(version) FROM schema_migrations)`).
 		Scan(&sessionUser, &currentUser, &latestVersion); err != nil || sessionUser != "account_migrator" ||
-		currentUser != "account_service" || latestVersion != 80 {
+		currentUser != "account_service" || latestVersion != 84 {
 		t.Fatalf("migration identity session=%q current=%q version=%d err=%v", sessionUser, currentUser, latestVersion, err)
 	}
 	var policyVersion int64

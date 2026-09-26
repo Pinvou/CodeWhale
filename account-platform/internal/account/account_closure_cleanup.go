@@ -66,7 +66,7 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, c
 		field, oldValue, newValue         string
 		identityUpdated, accountCommitted *time.Time
 	}
-	rows, err := tx.Query(ctx, `SELECT id,field,old_value,new_value,identity_updated_at,account_committed_at FROM profile_change_requests WHERE user_id=$1 AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE') ORDER BY id FOR UPDATE`, userID)
+	rows, err := tx.Query(ctx, `SELECT id,field,old_value,new_value,identity_updated_at,account_committed_at FROM profile_change_requests WHERE user_id=$1 AND status NOT IN ('COMPLETED','SUPERSEDED','CANCELLED_ACCOUNT_CLOSURE') ORDER BY id FOR UPDATE`, userID)
 	if err != nil {
 		return AccountClosureCleanupPreparation{}, err
 	}
@@ -102,6 +102,9 @@ func (r *PostgresRepository) PrepareAccountClosureCleanup(ctx context.Context, c
 			if err != nil {
 				return AccountClosureCleanupPreparation{}, err
 			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=(SELECT sms_challenge_id FROM profile_change_requests WHERE id=$1)`, item.id, now); err != nil {
+			return AccountClosureCleanupPreparation{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE profile_change_requests SET account_committed_at=CASE WHEN identity_updated_at IS NOT NULL THEN COALESCE(account_committed_at,$2) ELSE account_committed_at END,sessions_revoked_at=CASE WHEN identity_updated_at IS NOT NULL THEN COALESCE(sessions_revoked_at,$2) ELSE sessions_revoked_at END,status='CANCELLED_ACCOUNT_CLOSURE',last_error_code='ACCOUNT_CLOSURE',version=version+1,updated_at=$2 WHERE id=$1`, item.id, now); err != nil {
 			return AccountClosureCleanupPreparation{}, err
@@ -264,7 +267,7 @@ func (r *PostgresRepository) AnonymizeAccountClosure(ctx context.Context, closur
 	var unsafe bool
 	if err := tx.QueryRow(ctx, `SELECT
 EXISTS(SELECT 1 FROM memberships WHERE user_id=$1 AND status<>'REVOKED') OR
-EXISTS(SELECT 1 FROM profile_change_requests WHERE user_id=$1 AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE')) OR
+EXISTS(SELECT 1 FROM profile_change_requests WHERE user_id=$1 AND status NOT IN ('COMPLETED','SUPERSEDED','CANCELLED_ACCOUNT_CLOSURE')) OR
 EXISTS(SELECT 1 FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND subject_id=$1 AND status NOT IN ('COMPLETED','CANCELLED_ACCOUNT_CLOSURE'))`, userID).Scan(&unsafe); err != nil {
 		return err
 	}
@@ -272,7 +275,7 @@ EXISTS(SELECT 1 FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND s
 		return ErrConflict
 	}
 	now := r.now()
-	if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET mobile_e164='closed:'||gen_random_uuid()::text,provider_message_id=NULL,updated_at=$2 WHERE id IN (SELECT sms_challenge_id FROM profile_change_requests WHERE user_id=$1 AND sms_challenge_id IS NOT NULL UNION SELECT sms_challenge_id FROM password_reset_operations WHERE user_id=$1 UNION SELECT sms_challenge_id FROM registration_operations WHERE candidate_user_id=$1 OR committed_user_id=$1)`, userID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET mobile_e164='closed:'||gen_random_uuid()::text,provider_message_id=NULL,delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id IN (SELECT sms_challenge_id FROM profile_change_requests WHERE user_id=$1 AND sms_challenge_id IS NOT NULL UNION SELECT sms_challenge_id FROM password_reset_operations WHERE user_id=$1 UNION SELECT sms_challenge_id FROM registration_operations WHERE candidate_user_id=$1 OR committed_user_id=$1)`, userID, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE profile_change_requests SET old_value='closed:'||gen_random_uuid()::text,new_value='closed:'||gen_random_uuid()::text,identity_issuer='closed',identity_subject='closed:'||gen_random_uuid()::text,updated_at=$2 WHERE user_id=$1`, userID, now); err != nil {

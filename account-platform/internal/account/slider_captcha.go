@@ -105,10 +105,22 @@ func (r *PostgresRepository) ConsumeSliderCaptcha(ctx context.Context, id uuid.U
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.consumeSliderCaptchaTx(ctx, tx, id, mobile, purpose, offset); err != nil {
+		if errors.Is(err, ErrCaptchaInvalid) {
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return commitErr
+			}
+		}
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) consumeSliderCaptchaTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, mobile string, purpose SMSPurpose, offset int) error {
 	var target, attempts int
 	var status string
 	var expires time.Time
-	err = tx.QueryRow(ctx, `SELECT target_x,status,attempts,expires_at FROM slider_captcha_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3 FOR UPDATE`, id, mobile, purpose).Scan(&target, &status, &attempts, &expires)
+	err := tx.QueryRow(ctx, `SELECT target_x,status,attempts,expires_at FROM slider_captcha_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3 FOR UPDATE`, id, mobile, purpose).Scan(&target, &status, &attempts, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrCaptchaInvalid
 	}
@@ -118,7 +130,6 @@ func (r *PostgresRepository) ConsumeSliderCaptcha(ctx context.Context, id uuid.U
 	if status != "CREATED" || attempts >= 5 || !expires.After(r.now()) {
 		if status == "CREATED" && !expires.After(r.now()) {
 			_, _ = tx.Exec(ctx, `UPDATE slider_captcha_challenges SET status='EXPIRED',updated_at=$2 WHERE id=$1`, id, r.now())
-			_ = tx.Commit(ctx)
 		}
 		return ErrCaptchaInvalid
 	}
@@ -129,13 +140,12 @@ func (r *PostgresRepository) ConsumeSliderCaptcha(ctx context.Context, id uuid.U
 	if delta > sliderCaptchaTolerance {
 		attempts++
 		_, _ = tx.Exec(ctx, `UPDATE slider_captcha_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, id, attempts, r.now())
-		_ = tx.Commit(ctx)
 		return ErrCaptchaInvalid
 	}
 	if _, err := tx.Exec(ctx, `UPDATE slider_captcha_challenges SET status='PASSED',passed_at=$2,updated_at=$2 WHERE id=$1`, id, r.now()); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func secureRandomInt(minimum, maximum int) (int, error) {

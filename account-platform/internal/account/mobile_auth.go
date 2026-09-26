@@ -40,12 +40,17 @@ var registrationUsername = regexp.MustCompile(`^[a-z][a-z0-9._-]{2,31}$`)
 
 type SMSChallenge struct {
 	ID                              uuid.UUID             `json:"challenge_id"`
+	Status                          string                `json:"delivery_status,omitempty"`
 	Mobile                          string                `json:"-"`
 	Purpose                         SMSPurpose            `json:"-"`
 	ExpiresAt                       time.Time             `json:"expires_at"`
 	Source                          string                `json:"-"`
 	Device                          string                `json:"-"`
 	Provider                        SMSProviderDescriptor `json:"-"`
+	VerificationData                []byte                `json:"-"`
+	DeliveryLeaseUntil              *time.Time            `json:"-"`
+	DeliveryStartedAt               *time.Time            `json:"-"`
+	DeliveryUncertainAt             *time.Time            `json:"-"`
 	RegistrationOperationID         uuid.UUID             `json:"registration_operation_id,omitempty"`
 	RegistrationQueryToken          string                `json:"registration_query_token,omitempty"`
 	RegistrationQueryTokenExpiresAt time.Time             `json:"registration_query_token_expires_at,omitempty"`
@@ -286,12 +291,28 @@ func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile s
 	return s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
 }
 
-func (s *MobileAuthService) VerifyProfileMobile(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) error {
+func (s *MobileAuthService) VerifyProfileMobile(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (bool, error) {
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeProfileMobile, code)
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return false, ErrSMSInvalid
+	}
+	risk := authRiskFromContext(ctx)
+	if err := s.repository.AdmitSMSVerification(ctx, challengeID, mobile, SMSPurposeProfileMobile, risk.source, risk.device); err != nil {
+		return false, err
+	}
+	verificationData, err := s.repository.SMSChallengeReady(ctx, challengeID, mobile, SMSPurposeProfileMobile)
+	if err != nil {
+		return false, err
+	}
+	verified, err := s.sms.VerifyCode(ctx, mobile, challengeID, verificationData, code)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
+	}
+	return verified, nil
 }
 
 func registrationFingerprint(username, mobile string, challengeID uuid.UUID, policyVersion string) [32]byte {
@@ -625,18 +646,19 @@ func (r *PostgresRepository) SMSChallengeReady(ctx context.Context, id uuid.UUID
 	var status string
 	var attempts int
 	var expires time.Time
+	var deliveryStartedAt *time.Time
 	var verificationData []byte
 	var providerID, adapterVersion string
-	err := r.pool.QueryRow(ctx, `SELECT status,attempts,expires_at,code_hash,provider_id,adapter_version FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3`, id, mobile, purpose).Scan(&status, &attempts, &expires, &verificationData, &providerID, &adapterVersion)
+	err := r.pool.QueryRow(ctx, `SELECT status,attempts,expires_at,code_hash,provider_id,adapter_version,delivery_started_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3`, id, mobile, purpose).Scan(&status, &attempts, &expires, &verificationData, &providerID, &adapterVersion, &deliveryStartedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SMSVerificationData{}, ErrSMSInvalid
 	}
 	if err != nil {
 		return SMSVerificationData{}, err
 	}
-	if status != "SENT" || attempts >= 5 || !expires.After(r.now()) {
-		if status == "SENT" && !expires.After(r.now()) {
-			_, _ = r.pool.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',updated_at=$2 WHERE id=$1 AND status='SENT'`, id, r.now())
+	if status != "SENT" && !(status == "CREATED" && deliveryStartedAt != nil) || attempts >= 5 || !expires.After(r.now()) {
+		if (status == "SENT" || status == "CREATED") && !expires.After(r.now()) {
+			_, _ = r.pool.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','SENT')`, id, r.now())
 		}
 		return SMSVerificationData{}, ErrSMSInvalid
 	}
@@ -652,16 +674,17 @@ func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UU
 	var status string
 	var attempts int
 	var expires time.Time
-	err = tx.QueryRow(ctx, `SELECT status,attempts,expires_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3 FOR UPDATE`, id, mobile, purpose).Scan(&status, &attempts, &expires)
+	var deliveryStartedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT status,attempts,expires_at,delivery_started_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3 FOR UPDATE`, id, mobile, purpose).Scan(&status, &attempts, &expires, &deliveryStartedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSMSInvalid
 	}
 	if err != nil {
 		return err
 	}
-	if status != "SENT" || attempts >= 5 || !expires.After(r.now()) {
-		if status == "SENT" && !expires.After(r.now()) {
-			_, _ = tx.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',updated_at=$2 WHERE id=$1`, id, r.now())
+	if status != "SENT" && !(status == "CREATED" && deliveryStartedAt != nil) || attempts >= 5 || !expires.After(r.now()) {
+		if (status == "SENT" || status == "CREATED") && !expires.After(r.now()) {
+			_, _ = tx.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1`, id, r.now())
 			_ = tx.Commit(ctx)
 		}
 		return ErrSMSInvalid

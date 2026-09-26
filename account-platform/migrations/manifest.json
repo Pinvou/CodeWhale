@@ -802,6 +802,46 @@
         "file": "000080_activate_sms_send_attempt_purposes.up.sql",
         "version": 80,
         "sha256": "10d0a5120b55d6d09a95c8a1309748e46d7cea7180e95a973e29cd867f6fab81"
+      },
+      {
+        "file": "000081_expand_profile_change_statuses.down.sql",
+        "version": 81,
+        "sha256": "b69b0dbc047220ea5dcd066a001019aa2f3511114b79cb1cd0e74273643f50d0"
+      },
+      {
+        "file": "000081_expand_profile_change_statuses.up.sql",
+        "version": 81,
+        "sha256": "1cf8ced02f3592c6d02786984ff6d39d24ce1813c80eb22990dea661460adbf8"
+      },
+      {
+        "file": "000082_validate_profile_change_statuses.down.sql",
+        "version": 82,
+        "sha256": "d5435b321b42611fcef5670412978beebd19e8897a5de649ad712383cf42e985"
+      },
+      {
+        "file": "000082_validate_profile_change_statuses.up.sql",
+        "version": 82,
+        "sha256": "6282343740fbcccd2ba9d5cde75bfa0a5c44eb880c539c8b410d87426ec8fbf2"
+      },
+      {
+        "file": "000083_activate_profile_change_statuses.down.sql",
+        "version": 83,
+        "sha256": "929f7a20baefefddf6a8a8b6e8dc5a630fe46996ba6d17a03f69b8c42f9ffda9"
+      },
+      {
+        "file": "000083_activate_profile_change_statuses.up.sql",
+        "version": 83,
+        "sha256": "a86a2eaa78287e628948559fb344c43c37c9199c783a0b0b21a3ac452e1c6722"
+      },
+      {
+        "file": "000084_profile_sms_delivery_lease.down.sql",
+        "version": 84,
+        "sha256": "addf93e5b83dbe3f2fe845c170675bd37cdad6769898a3ec17e488b7d2174fc3"
+      },
+      {
+        "file": "000084_profile_sms_delivery_lease.up.sql",
+        "version": 84,
+        "sha256": "36510fb1f63a24c0f7d368884647b87ca5cf002922fdfaf5c524c6b5bd07fe8a"
       }
     ],
     "billing": [

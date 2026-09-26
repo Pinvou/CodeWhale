@@ -24,8 +24,8 @@ func TestSMSSendAttemptPurposeMigrationPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest := loaded[len(loaded)-1]; latest.Version != 80 {
-		t.Fatalf("latest account migration=%d, want 80", latest.Version)
+	if latest := loaded[len(loaded)-1]; latest.Version != 84 {
+		t.Fatalf("latest account migration=%d, want 84", latest.Version)
 	}
 	if latest := applied[len(applied)-1]; latest.Version != 77 {
 		t.Fatalf("initial account migration=%d, want 77", latest.Version)
@@ -131,7 +131,13 @@ WHERE conrelid='sms_send_attempts'::regclass AND conname=$1`, name).Scan(&valida
 	}
 	releaseTable()
 
-	if err = migrations.Up(ctx, connection, loaded); err != nil {
+	through80 := make([]migrations.Migration, 0, len(loaded))
+	for _, migration := range loaded {
+		if migration.Version <= 80 {
+			through80 = append(through80, migration)
+		}
+	}
+	if err = migrations.Up(ctx, connection, through80); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -154,7 +160,7 @@ VALUES($1,NULL,$2,$2,$2,$3,'ACCEPTED',now(),'integration','v1')`, uuid.New(), ma
 VALUES($1,NULL,$2,$2,$2,'UNKNOWN','ACCEPTED',now(),'integration','v1')`, uuid.New(), make([]byte, 32)); postgresSQLState(err) != "23514" {
 		t.Fatalf("invalid SMS purpose SQLSTATE=%s err=%v", postgresSQLState(err), err)
 	}
-	if err := migrations.DownOne(ctx, connection, loaded); postgresSQLState(err) != "55000" {
+	if err := migrations.DownOne(ctx, connection, through80); postgresSQLState(err) != "55000" {
 		t.Fatalf("SMS purpose migration down SQLSTATE=%s err=%v", postgresSQLState(err), err)
 	}
 	migrations.Unlock(ctx, connection)

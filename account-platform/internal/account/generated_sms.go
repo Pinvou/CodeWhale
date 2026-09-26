@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +36,14 @@ func (*HTTPGeneratedSMSProvider) Descriptor() SMSProviderDescriptor {
 	return SMSProviderDescriptor{ID: "http-generated", AdapterVersion: "v1"}
 }
 
+func (*HTTPGeneratedSMSProvider) DeliveryRetryPolicy() SMSDeliveryRetryPolicy {
+	return SMSDeliveryIdempotent
+}
+
+func (p *HTTPGeneratedSMSProvider) PrepareVerification(challengeID uuid.UUID) ([]byte, error) {
+	return p.digest(challengeID, p.codeForChallenge(challengeID)), nil
+}
+
 func NewHTTPGeneratedSMSProvider(config HTTPGeneratedSMSConfig) (*HTTPGeneratedSMSProvider, error) {
 	parsed, err := url.Parse(strings.TrimSpace(config.Endpoint))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Scheme != "https" && !(config.AllowInsecure && parsed.Scheme == "http")) {
@@ -50,15 +56,12 @@ func NewHTTPGeneratedSMSProvider(config HTTPGeneratedSMSConfig) (*HTTPGeneratedS
 }
 
 func (p *HTTPGeneratedSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
-	var random [4]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return SMSDelivery{}, err
-	}
-	code := fmt.Sprintf("%06d", binary.BigEndian.Uint32(random[:])%1000000)
+	code := p.codeForChallenge(challengeID)
 	body, _ := json.Marshal(map[string]string{"mobile": mobile, "purpose": string(purpose), "code": code, "challenge_id": challengeID.String()})
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint.String(), bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Idempotency-Key", challengeID.String())
 	if p.bearerToken != "" {
 		request.Header.Set("Authorization", "Bearer "+p.bearerToken)
 	}
@@ -70,10 +73,22 @@ func (p *HTTPGeneratedSMSProvider) SendCode(ctx context.Context, mobile string, 
 	var result struct {
 		MessageID string `json:"message_id"`
 	}
+	if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusRequestTimeout && response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusTooManyRequests {
+		return SMSDelivery{}, &SMSDeliveryRejectedError{Cause: fmt.Errorf("generated SMS adapter rejected the request with HTTP %d", response.StatusCode)}
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result) != nil || strings.TrimSpace(result.MessageID) == "" {
 		return SMSDelivery{}, fmt.Errorf("generated SMS adapter returned HTTP %d or an invalid response", response.StatusCode)
 	}
 	return SMSDelivery{MessageID: result.MessageID, VerificationData: p.digest(challengeID, code)}, nil
+}
+
+func (p *HTTPGeneratedSMSProvider) codeForChallenge(challengeID uuid.UUID) string {
+	mac := hmac.New(sha256.New, p.verificationKey)
+	_, _ = mac.Write([]byte("sms-code-v1\x00"))
+	_, _ = mac.Write([]byte(challengeID.String()))
+	sum := mac.Sum(nil)
+	value := uint32(sum[0])<<24 | uint32(sum[1])<<16 | uint32(sum[2])<<8 | uint32(sum[3])
+	return fmt.Sprintf("%06d", value%1000000)
 }
 
 func (p *HTTPGeneratedSMSProvider) VerifyCode(_ context.Context, _ string, challengeID uuid.UUID, verification SMSVerificationData, code string) (bool, error) {
