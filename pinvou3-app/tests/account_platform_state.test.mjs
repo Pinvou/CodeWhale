@@ -14,6 +14,7 @@ import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinan
 import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGroups, adminSectionURL, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { createFinanceDetailRecovery, financeCursorContext, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from '../src/features/account-platform/admin-finance-pagination.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
+import { createAccountSynchronizationQueue, resolveAccountSynchronization } from '../src/features/account-platform/account-synchronization.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformErrorCodes, localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
 import { accountDisplayLabel } from '../src/features/account-platform/account-display-label.js';
@@ -68,6 +69,129 @@ test('personal account summaries prefer the current username over a stale displa
   assert.match(view, /const userLabel = accountDisplayLabel\(me, copy\.user\)/);
   assert.match(view, /copy\.welcome\(accountDisplayLabel\(me, copy\.user\)\)/);
   assert.match(popover, /const displayName = accountDisplayLabel\(me, copy\.user\)/);
+});
+
+test('Web account synchronization updates profile fields without reloading unchanged context resources', () => {
+  const activeContext = {
+    context_version: 7,
+    personal_authorization_version: 11,
+    platform_authorization_version: 3,
+    organization_authorization_version: 0,
+    organization_id: '',
+    permissions: ['personal.profile.read'],
+  };
+  const currentAccount = { user_id: 'user-1', username: 'old-name', active_context: activeContext };
+  const renamedAccount = { user_id: 'user-1', username: 'new-name', active_context: { ...activeContext } };
+
+  const synchronization = resolveAccountSynchronization(currentAccount, currentAccount, renamedAccount);
+
+  assert.equal(synchronization.applyAccount, true);
+  assert.equal(synchronization.reloadContext, false);
+  assert.equal(synchronization.account.username, 'new-name');
+});
+
+test('Web account synchronization does not replace a newer active context with an in-flight bootstrap response', () => {
+  const requestAccount = {
+    user_id: 'user-1',
+    username: 'old-name',
+    active_context: { context_version: 7, organization_id: '' },
+  };
+  const currentAccount = {
+    ...requestAccount,
+    active_context: { context_version: 8, organization_id: 'organization-2' },
+  };
+  const staleBootstrapAccount = {
+    ...requestAccount,
+    username: 'new-name',
+    active_context: { ...requestAccount.active_context },
+  };
+
+  const synchronization = resolveAccountSynchronization(requestAccount, currentAccount, staleBootstrapAccount);
+
+  assert.equal(synchronization.applyAccount, false);
+  assert.equal(synchronization.reloadContext, false);
+  assert.equal(synchronization.account.active_context.organization_id, 'organization-2');
+
+  const mutationSynchronization = resolveAccountSynchronization(requestAccount, requestAccount, staleBootstrapAccount, true);
+  assert.equal(mutationSynchronization.applyAccount, false);
+  assert.equal(mutationSynchronization.account.active_context.organization_id, '');
+});
+
+test('Web account synchronization reloads context resources only when authorization context changes', () => {
+  const currentAccount = {
+    user_id: 'user-1',
+    username: 'old-name',
+    active_context: { context_version: 7, personal_authorization_version: 11, organization_id: '' },
+  };
+  const nextAccount = {
+    ...currentAccount,
+    username: 'new-name',
+    active_context: { ...currentAccount.active_context, personal_authorization_version: 12 },
+  };
+
+  const synchronization = resolveAccountSynchronization(currentAccount, currentAccount, nextAccount);
+
+  assert.equal(synchronization.applyAccount, true);
+  assert.equal(synchronization.reloadContext, true);
+  assert.equal(synchronization.account.username, 'new-name');
+});
+
+test('Web account synchronization converges after a context switch and coalesces event storms', async () => {
+  let releaseFirstBootstrap;
+  const firstBootstrap = new Promise((resolve) => {
+    releaseFirstBootstrap = resolve;
+  });
+  const personalContext = { context_version: 7, personal_authorization_version: 11, organization_id: '' };
+  const organizationContext = { context_version: 8, personal_authorization_version: 11, organization_authorization_version: 4, organization_id: 'organization-2' };
+  let currentAccount = { user_id: 'user-1', username: 'old-name', active_context: personalContext };
+  let bootstrapCalls = 0;
+  let accountUpdates = 0;
+  const queue = createAccountSynchronizationQueue();
+  const bootstrap = async () => {
+    bootstrapCalls += 1;
+    if (bootstrapCalls === 1) return firstBootstrap;
+    return { user_id: 'user-1', username: 'new-name', active_context: { ...organizationContext } };
+  };
+  const synchronize = async () => {
+    const requestAccount = currentAccount;
+    const account = await bootstrap();
+    const synchronization = resolveAccountSynchronization(
+      requestAccount,
+      currentAccount,
+      account,
+      queue.isContextMutationInProgress(),
+    );
+    if (!synchronization.applyAccount) {
+      queue.retry();
+      return;
+    }
+    currentAccount = synchronization.account;
+    accountUpdates += 1;
+  };
+
+  queue.request(synchronize);
+  await Promise.resolve();
+  assert.equal(bootstrapCalls, 1);
+
+  queue.beginContextMutation();
+  queue.request(synchronize);
+  queue.request(synchronize);
+  queue.request(synchronize);
+  currentAccount = { ...currentAccount, active_context: { ...organizationContext } };
+  releaseFirstBootstrap({ user_id: 'user-1', username: 'new-name', active_context: { ...personalContext } });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(bootstrapCalls, 1, 'events remain coalesced while the context mutation is active');
+
+  queue.endContextMutation();
+  await queue.whenIdle();
+
+  assert.equal(bootstrapCalls, 2, 'the stale response and repeated events produce one convergence bootstrap');
+  assert.equal(accountUpdates, 1);
+  assert.equal(currentAccount.username, 'new-name');
+  assert.equal(currentAccount.active_context.organization_id, 'organization-2');
+  assert.equal(currentAccount.active_context.context_version, 8);
+  queue.dispose();
 });
 
 test('admin portal navigation groups and URL state remain deterministic', () => {
@@ -1680,7 +1804,10 @@ test('organization purchases open the shared payment dialog and refresh organiza
 test('personal center clears a transient background synchronization error after account bootstrap recovers', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   assert.match(view, /const \[synchronizationError, setSynchronizationError\] = useState\(''\)/);
-  assert.match(view, /const account = await client\.bootstrap\(\);[\s\S]*?setSynchronizationError\(''\);[\s\S]*?authorizationVersionChanged/);
+  assert.match(view, /const account = await client\.bootstrap\(\);[\s\S]*?setSynchronizationError\(''\);[\s\S]*?resolveAccountSynchronization/);
+  assert.match(view, /resolveAccountSynchronization\([\s\S]*?if \(!synchronization\.applyAccount\) \{[\s\S]*?synchronizationQueue\.retry\(\);[\s\S]*?return;[\s\S]*?meRef\.current = synchronization\.account;[\s\S]*?setMe\(synchronization\.account\)/);
+  assert.match(view, /const requestSynchronization = \(\) => synchronizationQueue\.request\(synchronize\)/);
+  assert.match(view, /synchronizationQueue\?\.beginContextMutation\(\);[\s\S]*?finally \{[\s\S]*?synchronizationQueue\?\.endContextMutation\(\)/);
   assert.match(view, /catch \(reason\) \{[\s\S]*?setSynchronizationError\(localizedError\(copy, reason\)\)/);
   assert.match(view, /const visibleError = error \|\| synchronizationError/);
 });

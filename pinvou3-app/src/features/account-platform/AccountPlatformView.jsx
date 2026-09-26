@@ -5,7 +5,8 @@ import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
-import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
+import { canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
+import { createAccountSynchronizationQueue, resolveAccountSynchronization } from './account-synchronization.js';
 import { clearInvitationAcceptanceRetries, invitationAcceptanceMayBeCommitted, invitationRecoveryScope, readInvitationAcceptanceRetries, writeInvitationAcceptanceRetries } from './invitation-recovery.js';
 import { invitationSubmissionAttempt } from './invitation-client.js';
 import { PendingInvitations } from './pending-invitations.js';
@@ -210,8 +211,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
   const meRef = useRef(null);
-  const contextMutationRef = useRef(false);
-  const contextRefreshRef = useRef(false);
+  const contextSynchronizationRef = useRef(/** @type {ReturnType<typeof createAccountSynchronizationQueue> | null} */ (null));
   const invitationAcceptRetryRef = useRef([]);
   const invitationAcceptRetryScopeRef = useRef('');
   const activeOrganizationId = me?.active_context?.organization_id || '';
@@ -347,38 +347,50 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
 
   useEffect(() => {
     let disposed = false;
+    const synchronizationQueue = createAccountSynchronizationQueue();
+    contextSynchronizationRef.current = synchronizationQueue;
     const synchronize = async () => {
-      if (!meRef.current) return;
-      if (contextMutationRef.current || contextRefreshRef.current) return;
-      contextRefreshRef.current = true;
+      const requestAccount = meRef.current;
+      if (!requestAccount) return;
       try {
         const account = await client.bootstrap();
         if (disposed) return;
         setSynchronizationError('');
-        if (authorizationVersionChanged(authorizationVersions(meRef.current), authorizationVersions(account))) {
+        const synchronization = resolveAccountSynchronization(
+          requestAccount,
+          meRef.current,
+          account,
+          synchronizationQueue.isContextMutationInProgress(),
+        );
+        if (!synchronization.applyAccount) {
+          synchronizationQueue.retry();
+          return;
+        }
+        meRef.current = synchronization.account;
+        setMe(synchronization.account);
+        if (synchronization.reloadContext) {
           clearContextResources();
-          meRef.current = account;
-          setMe(account);
-          await loadContext(account);
+          await loadContext(synchronization.account);
         }
       } catch (reason) {
         if (!disposed && reason?.name !== 'AbortError') setSynchronizationError(localizedError(copy, reason));
-      } finally {
-        contextRefreshRef.current = false;
       }
     };
+    const requestSynchronization = () => synchronizationQueue.request(synchronize);
     const unsubscribeContext = client.onContextVersion?.(() => {
-      void synchronize();
+      requestSynchronization();
     });
     const unsubscribeAuthorization = client.onAuthorizationVersion?.(() => {
-      void synchronize();
+      requestSynchronization();
     });
     const onFocus = () => {
-      if (meRef.current) void synchronize();
+      if (meRef.current) requestSynchronization();
     };
     globalThis.addEventListener?.('focus', onFocus);
     return () => {
       disposed = true;
+      synchronizationQueue.dispose();
+      if (contextSynchronizationRef.current === synchronizationQueue) contextSynchronizationRef.current = null;
       unsubscribeContext?.();
       unsubscribeAuthorization?.();
       globalThis.removeEventListener?.('focus', onFocus);
@@ -569,10 +581,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
 
   const switchContext = (value) =>
     run(async () => {
-      clearContextResources();
+      const synchronizationQueue = contextSynchronizationRef.current;
+      synchronizationQueue?.beginContextMutation();
       const organizationId = value || null;
-      contextMutationRef.current = true;
       try {
+        clearContextResources();
         const expectedVersion = Number(meRef.current?.active_context?.context_version || 0);
         const context = await client.switchContext(organizationId ? 'ORGANIZATION' : 'PERSONAL', organizationId, expectedVersion);
         const updated = { ...meRef.current, active_context: context };
@@ -588,7 +601,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         }
         throw reason;
       } finally {
-        contextMutationRef.current = false;
+        synchronizationQueue?.endContextMutation();
       }
     });
 
