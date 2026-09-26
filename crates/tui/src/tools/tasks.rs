@@ -1402,11 +1402,12 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn gate_spawn_failure_still_returns_structured_evidence() {
-        // A gate whose command cannot even spawn is still gate evidence:
-        // the runner reports it as `spawn_error` and the classifier reads
-        // "environment_or_tooling_failure", so keep that path structured
-        // rather than raising a tool error through to the agent.
+    async fn gate_command_not_found_is_not_a_spawn_error() {
+        // The gate shell is a hardcoded /bin/sh -lc, so on a healthy Unix
+        // host the runner always spawns and a bogus command surfaces as
+        // the shell's exit 127. That must stay structured evidence with no
+        // fabricated `spawn_error` (the classifier reads that field as an
+        // environment failure): record the 127 instead.
         let tmp = tempfile::tempdir().expect("tempdir");
         let gate = TasksTool::alias("task_gate_run", "gate_run");
         let context = ToolContext::new(tmp.path().to_path_buf());
@@ -1423,6 +1424,7 @@ mod tests {
             .expect("gate evidence, not a raise");
         let meta = result.metadata.expect("gate metadata");
         assert_eq!(meta["spawn_error"].is_string(), false, "{meta}");
+        assert_eq!(meta["exit_code"].as_i64(), Some(127), "{meta}");
         assert!(meta["timed_out"].as_bool() == Some(false), "{meta}");
     }
 
