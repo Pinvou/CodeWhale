@@ -266,6 +266,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | TOK-47 | 已实现 | AUDIT_HEAD | GO-UNIT; MODEL-CATALOG-LIFECYCLE; MODEL-EMERGENCY-CANCELLATION; DESKTOP-CLIENT-SWITCH; ACCOUNT-PLATFORM-STATE | NOT_DEPLOYED | Gateway 执行新会话/继续截止，桌面选择前校验上下文和目录生命周期并在不可继续时进入显式替代分支；紧急 REMOVED 与取消策略原子提交，Worker 锁定生效前已受理的在途请求并按可信结果收敛 |
 | TOK-48 | 已实现 | AUDIT_HEAD | RUST-CHECK; RUST-TEST-COMPILE; MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; MULTIAGENT-REGRESSION; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 类型化全局/会话引用、兼容迁移、失败关闭、设置页新会话默认项和对话区当前会话选择均已实现；空白草稿只寄存选择并在首条消息物化时冻结，不改全局默认；来源冲突、生命周期、退役入口、三语状态和桥接协议已有自动回归门禁 |
 | TOK-49 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-MODEL-USAGE-PERMISSIONS | NOT_DEPLOYED | 目录/协议、模型调用与用量读取按个人/组织上下文分别强一致校验精确权限；取消始终以 `personal.usage.cancel` 绑定原稳定用户，不借用当前组织。 |
+| TOK-50 | 已实现 | CODE_COMPLETE; INDEPENDENT_REVIEW_PASS | GO-UNIT; IDEMPOTENCY-REPLAY; CRASH-CONVERGENCE; SETTLEMENT-CLASSIFICATION; OPENAPI | NOT_DEPLOYED | 首次余额不足与非流/流式追加不足均保存可重放状态；初次 402 保存后释放失败由同键重试优先恢复并收敛，普通/流式最终结果与 reconciler 可读的 usage、actual、notice 同事务持久化；明确余额不足以可信实际用量结算，未知 Commit 自动核对，确定冲突和自动核对终止进入人工审核；canonical v1 不受新默认值影响；经五轮独立代码审核通过。 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
 | BILL-05 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益组成表只允许 BASE/BONUS，商品入账按冻结商品快照拆分且舍入余数归 BONUS，不存在第三种积分类型 |
 | BILL-09 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 组织用量 Hold 同时锁定成员授予与其精确权益包、BASE/BONUS 组成，不跨包或跨组成回退；结算和释放同步维护成员授予及组织组成桶 |
@@ -471,6 +472,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | UI-57 | 已实现 | APT-136-DONE | ADMIN-MODEL-TOKEN-REDESIGN; GO-UNIT; OPENAPI; UI-LINT; UI-BUILD; BROWSER-SMOKE; POSTGRES-CI-GATE | NOT_DEPLOYED | APT-136 已通过身份 B 第三轮独立代码审核。Token 服务端以数据库权威时间聚合 24h/7d/30d 运行趋势，Portal 展示闭合桶、全零无数据、独立错误/重试/数据时间和保留筛选的下穿；目录差异不泄漏 Provider 私有事实。同步命令唯一重观测后在 publication lock 内重算目录基线/差异，并在首个事实写前通过 activation state/epoch 事务 guard，Provider、等量目录或激活漂移均零目录/命令/审计/outbox/result 写。`000028` 仅追加两个具名索引且 down 不删事实；性能 CI 完整保留生产 CHECK，以 1,000,000 用量/100,000 案件的 60k+20k+20k 互斥分布执行冷一暖三 `EXPLAIN (ANALYZE, BUFFERS)`，逐项拒绝 SKIP。Go、Node/OpenAPI、迁移/任务/i18n/架构、ESLint/build 与两套 Chromium smoke 连续五次通过；本地缺少隔离 PostgreSQL URL 的具名用例明确 SKIP。APT-137/138 未提前实现。 |
 | UI-58 | 部分实现 | APT-137-IN-PROGRESS | MODEL-TOKEN-RELEASE-TOOLING; ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | G0～G5 已签署，固定双域、十三 gate 计划/配置、受控角色/fence/CAS 包装、安全代理/只读探针、来源/原始工件/旧链接保留验证已交付；G6 持续 CI 接线代码与隔离门禁已验证，最后证据文档复核。真实 DNS/TLS/身份/KMS/NATS/备份及 N/N-1 灰度、SAFE/观察报告尚未闭合，不以代码或 fixture 证明部署。 |
 | UI-59 | 已实现 | APT-140-REVIEW-PASS | ADMIN-MODEL-TOKEN-OVERVIEW-REALIGNMENT | NOT_DEPLOYED | APT-140 已拆分三个所属页面概览，并实现同 section URL/history 下钻、权限/授权版本失效、三语和生产制品浏览器回归；首轮整改闭合后获身份 B 第二轮代码审核 PASS，尚未推送、启用或部署。 |
+| UI-61 | 已实现 | CODE_COMPLETE; INDEPENDENT_REVIEW_PASS | RUST-UNIT; NODE-HYDRATION; ORG-RECHARGE-ROUTING; I18N; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 结构化余额不足通知随 assistant_done 持久化，普通与代码会话切换/重开可恢复；个人上下文打开个人充值；组织通知携带稳定目标，有 `org.entitlements.purchase` 时仅调用该组织的余额/购买/查单接口，无权限时提示联系管理员，严格禁止回落个人钱包；经五轮独立代码审核通过。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -1164,7 +1166,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 - `INPUT_TOKEN` 只记录非缓存输入，`CACHED_INPUT_TOKEN` 只记录缓存输入；Provider 的含缓存总输入量必须先扣除缓存量再写入 `INPUT_TOKEN`，同一 Token 不得重复进入两个单位。
 
 - 长调用在到期前续租 Hold；续租失败时不得静默继续产生无限费用，应终止可控调用或进入不确定核对。
-- 实际费用超过 Hold 时先申请追加预占；追加成功后结算，追加失败时停止后续可控输出并进入人工复核，同时记录对应钱包负余额投影和独立应收，不能把其他上下文余额作为兜底。
+- 实际费用超过 Hold 时先申请追加预占；追加成功后结算，明确余额不足且最终用量可信时仍按实际费用 Commit 并记录对应钱包负余额投影和独立应收，不直接进入人工复核；未知结果自动核对，只有确定冲突、证据不一致或自动核对终止才进入人工复核，不能把其他上下文余额作为兜底。
 - 权益到期时直接释放并移除仍不确定的 Hold。释放不会恢复已经过期的可用积分；之后确认的真实用量记入人工损失复核，不重新扣减用户其他权益。
 
 ### 5.4 权益、退款与消费顺序

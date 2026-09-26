@@ -168,6 +168,12 @@
 | APT-142 | 治理与安全界面及审批业务闭环 | UI-60 | APT-098, APT-140 | CODE | PENDING |
 | APT-143 | 治理审批兼容切换与发布验收 | NFR-57 | APT-141, APT-142 | CODE+ENV | PENDING |
 
+### TOK-50 / UI-61 额度不足整改记录（2026-09-26）
+
+- 归属：在既有 APT-029（幂等重放）、APT-030（用量结算）、APT-032（桌面模型接入）和 APT-034（三语界面）边界内完成，不新增数据库迁移或重复任务编号。
+- 状态：`CODE_COMPLETE / INDEPENDENT_REVIEW_PASS / NOT_DEPLOYED`。已实现首次 402 保存后释放故障的同键恢复、普通/流式结果与自动核对证据同事务持久化、历史 `execution=SETTLEMENT_PENDING / domain=UPSTREAM_ACTIVE` 分裂状态具名恢复、缺用量响应的 Provider 证据核对和生成前拒绝的安全释放、canonical v1 滚动兼容、确定/不确定结算错误分流、普通及代码会话终态持久恢复，以及个人充值和按稳定组织目标/购买权限分流的应用内组织充值；组织路径不会回落个人钱包；五轮独立代码审核最终通过。
+- 验证：Go 单元/全量与 vet、Rust 定向测试与格式、Node 会话/hydration/三语回归、OpenAPI lint、UI build/lint、architecture guard 和 diff 检查；以本轮实际执行结果为准，不把本地验证声明为部署。
+
 ### APT-141～143 独立子任务执行合同
 
 需求基线为 `e15fe698`，B需求最终审核PASS。详细拆分、子任务依赖、验收和审核记录见 [治理与安全实施任务](admin-governance-security-tasks.md)。三个正式编号分别唯一拥有ADM-67/UI-60/NFR-57；GSA-01～40是独立审核、独立提交的执行子任务，不能重复主目标所有权。正式任务依赖表示既有基线及汇总关闭前置，跨主任务实现依赖按GSA表逐项校验；APT-141与APT-142不能等待彼此整体完成后才开始，否则会产生人为循环。每个GSA经B通过且Signed-off提交后才进入下一项。主任务只有全部所属子任务完成才可关闭。任务拆分已获B复审PASS并提交；APT-141已推进至GSA-26（GSA-21/22权益组成调整、GSA-23/24账本修复、GSA-25/26应收核销均已交付仓库实现并通过真实Account+Billing双库跨域E2E，三条命令的activation行保持INACTIVE；独立审核与GSA-27～36其余六个财务家族仍待办），逐项状态以子任务表及审核证据为准，均未部署。
