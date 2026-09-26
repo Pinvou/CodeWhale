@@ -168,6 +168,53 @@ func TestRestrictedMigrationLedgerPostgresIntegration(t *testing.T) {
 			t.Fatalf("role-switched down left table=%v err=%v", exists, err)
 		}
 	})
+	t.Run("after_hook_starts_as_migration_role_and_rolls_back", func(t *testing.T) {
+		hooked := Migration{Version: 4, Name: "after_hook_role",
+			UpSQL:   `SET ROLE ` + quotedSwitched + `; CREATE TABLE after_hook_role_probe(id INTEGER PRIMARY KEY)`,
+			DownSQL: `SET ROLE ` + quotedSwitched + `; DROP TABLE after_hook_role_probe`}
+		hooked.Checksum = normalizedChecksum(hooked.UpSQL)
+		withHook := []Migration{first, second, hooked}
+		observedRole := ""
+		failAfter := errors.New("injected after hook failure")
+		err := UpWithHooks(ctx, writer, withHook, UpHooks{AfterApply: func(ctx context.Context, tx pgx.Tx, migration Migration) error {
+			if migration.Version != hooked.Version {
+				return nil
+			}
+			if scanErr := tx.QueryRow(ctx, `SELECT current_user`).Scan(&observedRole); scanErr != nil {
+				return scanErr
+			}
+			return failAfter
+		}})
+		Unlock(ctx, writer)
+		if !errors.Is(err, failAfter) || observedRole != role {
+			t.Fatalf("after hook error=%v observed role=%q, want %q", err, observedRole, role)
+		}
+		var tableExists, ledgerAdvanced bool
+		if err := writer.QueryRow(ctx, `SELECT to_regclass('after_hook_role_probe') IS NOT NULL,EXISTS(SELECT 1 FROM schema_migrations WHERE version=4)`).Scan(&tableExists, &ledgerAdvanced); err != nil || tableExists || ledgerAdvanced {
+			t.Fatalf("failed after hook leaked table=%v ledger=%v err=%v", tableExists, ledgerAdvanced, err)
+		}
+		observedRole = ""
+		if err := UpWithHooks(ctx, writer, withHook, UpHooks{AfterApply: func(ctx context.Context, tx pgx.Tx, migration Migration) error {
+			if migration.Version != hooked.Version {
+				return nil
+			}
+			return tx.QueryRow(ctx, `SELECT current_user`).Scan(&observedRole)
+		}}); err != nil {
+			t.Fatalf("retry after hook migration: %v", err)
+		}
+		Unlock(ctx, writer)
+		if observedRole != role {
+			t.Fatalf("successful after hook role=%q, want %q", observedRole, role)
+		}
+		var owner string
+		if err := writer.QueryRow(ctx, `SELECT pg_catalog.pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid=to_regclass('after_hook_role_probe')))`).Scan(&owner); err != nil || owner != switchedRole {
+			t.Fatalf("hooked migration object owner=%q err=%v", owner, err)
+		}
+		if err := DownOne(ctx, writer, withHook); err != nil {
+			t.Fatalf("down hooked migration: %v", err)
+		}
+		Unlock(ctx, writer)
+	})
 	t.Run("empty_schema_without_create", func(t *testing.T) {
 		empty := connect(role, emptySchema)
 		assertMigrationPermissionDenied(t, Up(ctx, empty, []Migration{first}))

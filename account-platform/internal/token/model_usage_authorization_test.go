@@ -40,6 +40,8 @@ func TestModelAndUsageRoutesUseContextSpecificAtomicPermissions(t *testing.T) {
 		{name: "organization invocation", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodPost, path: "/v1/chat/completions", body: `{}`, permission: "org.model.invoke", organizationGate: true},
 		{name: "personal usage list", context: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}, method: http.MethodGet, path: "/v1/me/usage-requests?cursor=invalid", permission: "personal.usage.read"},
 		{name: "organization usage list", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodGet, path: "/v1/me/usage-requests?cursor=invalid", permission: "org.usage.read.self", organizationGate: true},
+		{name: "personal usage turn projection", context: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}, method: http.MethodGet, path: "/v1/me/usage-turns", permission: "personal.usage.read"},
+		{name: "organization usage turn projection", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodGet, path: "/v1/me/usage-turns", permission: "org.usage.read.self", organizationGate: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -1020,7 +1020,7 @@ func accountPathAllowed(method, resource string) bool {
 func tokenPathAllowed(method, resource string) bool {
 	if method == http.MethodGet {
 		switch resource {
-		case "/v1/models", "/v1/recharge/products", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/entitlement-packages", "/v1/me/usage-requests":
+		case "/v1/models", "/v1/recharge/products", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/entitlement-packages", "/v1/me/usage-requests", "/v1/me/usage-turns":
 			return true
 		}
 		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {

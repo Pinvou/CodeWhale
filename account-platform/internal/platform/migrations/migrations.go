@@ -26,6 +26,16 @@ type Migration struct {
 	Checksum string
 }
 
+// UpHooks let a trusted domain wrapper lend and revoke narrowly scoped DDL
+// privileges in the same transaction as one pending migration. Hooks never run
+// for already-recorded versions, and any hook or migration failure rolls the
+// complete transaction back before the ledger can advance. Both hooks start as
+// the original migration role; elevated hooks must select authority explicitly.
+type UpHooks struct {
+	BeforeApply func(context.Context, pgx.Tx, Migration) error
+	AfterApply  func(context.Context, pgx.Tx, Migration) error
+}
+
 func Load(directory string) ([]Migration, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -82,6 +92,10 @@ func Load(directory string) ([]Migration, error) {
 }
 
 func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error {
+	return UpWithHooks(ctx, connection, migrations, UpHooks{})
+}
+
+func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migration, hooks UpHooks) error {
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -108,15 +122,33 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 		if err != nil {
 			return fmt.Errorf("begin migration %d: %w", migration.Version, err)
 		}
-		if err = setMigrationRole(ctx, tx, role); err == nil {
-			if _, err = tx.Exec(ctx, migration.UpSQL); err == nil {
-				if err = setMigrationRole(ctx, tx, role); err == nil {
-					_, err = tx.Exec(ctx,
-						`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
-						migration.Version, migration.Name, migration.Checksum,
-					)
-				}
-			}
+		if err = setMigrationRole(ctx, tx, role); err == nil && hooks.BeforeApply != nil {
+			err = hooks.BeforeApply(ctx, tx, migration)
+		}
+		if err == nil {
+			err = setMigrationRole(ctx, tx, role)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, migration.UpSQL)
+		}
+		// Migration SQL may legitimately end under a trusted owner. Hooks are
+		// always entered as the original ledger/migration role; a hook that needs
+		// elevated authority must select that role explicitly and is reset again
+		// before the ledger write.
+		if err == nil {
+			err = setMigrationRole(ctx, tx, role)
+		}
+		if err == nil && hooks.AfterApply != nil {
+			err = hooks.AfterApply(ctx, tx, migration)
+		}
+		if err == nil {
+			err = setMigrationRole(ctx, tx, role)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx,
+				`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
+				migration.Version, migration.Name, migration.Checksum,
+			)
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)

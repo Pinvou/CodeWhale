@@ -2598,7 +2598,7 @@ function Usage({ copy, language, records, unavailable, page, hasPrevious, hasMor
       {summaries.length ? (
         <div className="ap-usage-list">
           {summaries.map((record, index) => {
-            const consumed = record.actual_microcredits == null && record.display_status !== 'RELEASED' ? '—' : formatUsagePoints(record.actual_microcredits || 0, language);
+            const consumed = record.charged_microcredits == null ? '—' : formatUsagePoints(record.charged_microcredits, language);
             const statusClass = String(record.display_status || '')
               .toLowerCase()
               .replaceAll('_', '-');
@@ -2623,9 +2623,11 @@ function Usage({ copy, language, records, unavailable, page, hasPrevious, hasMor
                     {consumed} {copy.points}
                   </strong>
                   <span className={`ap-status ap-usage-status-${statusClass}`}>{copy.usageStatuses[record.display_status] || record.display_status}</span>
-                  <small>
-                    {copy.executionState}: {record.execution_status} · {copy.settlementState}: {record.settlement_status}
-                  </small>
+                  {record.usage_request_count === 1 && (
+                    <small>
+                      {copy.executionState}: {record.execution_status} · {copy.settlementState}: {record.settlement_status}
+                    </small>
+                  )}
                   {canStop && (
                     <button disabled={busy || !canCancel} title={!canCancel ? copy.permissionDenied : undefined} onClick={() => onCancel(record.cancel_usage_request_id)}>
                       {copy.stopDelivery}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenmigrations"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -85,7 +86,11 @@ func main() {
 
 	switch *direction {
 	case "up":
-		err = migrations.Up(ctx, connection, loaded)
+		if filepathBase(*directory) == "token" {
+			err = tokenmigrations.Up(ctx, connection, loaded)
+		} else {
+			err = migrations.Up(ctx, connection, loaded)
+		}
 		if err == nil {
 			var verification migrations.Verification
 			verification, err = migrations.VerifyApplied(ctx, connection, loaded)

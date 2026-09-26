@@ -22,6 +22,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenmigrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -755,7 +756,7 @@ func newThreeServiceTokenRepository(t *testing.T, ctx context.Context, databaseU
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Up(ctx, connection, loaded); err != nil {
+	if err = tokenmigrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)

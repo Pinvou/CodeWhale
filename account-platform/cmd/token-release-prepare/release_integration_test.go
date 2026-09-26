@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenmigrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -113,7 +114,20 @@ func runTokenReleasePreparation(t *testing.T, artifacts *releaseCLIArtifacts) {
 	exec(control, `RESET ROLE`)
 	exec(control, `SET search_path TO pg_catalog,public`)
 	exec(account, `SET search_path TO public`)
-	if err = migrations.Up(ctx, account, accountLoaded); err != nil {
+	accountReleaseBoundary := 0
+	for index, migration := range accountLoaded {
+		if migration.Version > 49 {
+			break
+		}
+		accountReleaseBoundary = index + 1
+	}
+	if accountReleaseBoundary == 0 || accountLoaded[accountReleaseBoundary-1].Version != 49 {
+		t.Fatal("account release fixture is missing migration 49")
+	}
+	// The release gate only locks approval_command_policies. Account 50+ owns a
+	// separate multi-role control plane and must not be fabricated by this
+	// dedicated Token release fixture.
+	if err = migrations.Up(ctx, account, accountLoaded[:accountReleaseBoundary]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, account)
@@ -242,15 +256,32 @@ func runTokenReleasePreparation(t *testing.T, artifacts *releaseCLIArtifacts) {
 	if artifacts != nil {
 		artifacts.migrate(t, ctx, database, releaseTestDSN(admin.Config(), database, "token_migrator"))
 		var applied int
-		if err = control.QueryRow(ctx, `SELECT max(version) FROM public.schema_migrations`).Scan(&applied); err != nil || applied != 31 {
-			t.Fatal("real migrate wrapper did not install exact migration 31")
+		if err = control.QueryRow(ctx, `SELECT max(version) FROM public.schema_migrations`).Scan(&applied); err != nil || applied != 34 {
+			t.Fatal("real migrate wrapper did not install exact migration 34")
 		}
 		artifacts.cap(t, ctx, control, database, releaseTestDSN(admin.Config(), database, "token_policy_operator"), releaseTestDSN(admin.Config(), database, admin.Config().User))
 	} else {
 		migrator := connect(database, "token_migrator")
 		exec(migrator, `SET search_path TO public`)
 		exec(migrator, `SET ROLE token_gateway`)
-		if err = migrations.Up(ctx, migrator, loaded); err != nil {
+		if err = tokenmigrations.Up(ctx, migrator, loaded[:32]); err != nil {
+			t.Fatal(err)
+		}
+		migrations.Unlock(ctx, migrator)
+		exec(control, `SET ROLE token_schema_owner; CREATE TABLE public.routing_policies_overview_health_idx(failure_probe INTEGER); RESET ROLE`)
+		if err = tokenmigrations.Up(ctx, migrator, loaded[:33]); err == nil || !strings.Contains(err.Error(), "apply migration 33") {
+			t.Fatalf("migration 33 failure probe was accepted: %v", err)
+		}
+		migrations.Unlock(ctx, migrator)
+		var createLeaked, indexExists, ledgerAdvanced bool
+		if err = control.QueryRow(ctx, `SELECT
+ has_schema_privilege('token_gateway','public','CREATE'),
+ EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='routing_policies_overview_health_idx' AND c.relkind='i'),
+ EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=33)`).Scan(&createLeaked, &indexExists, &ledgerAdvanced); err != nil || createLeaked || indexExists || ledgerAdvanced {
+			t.Fatalf("failed migration 33 leaked privilege=%v index=%v ledger=%v err=%v", createLeaked, indexExists, ledgerAdvanced, err)
+		}
+		exec(control, `SET ROLE token_schema_owner; DROP TABLE public.routing_policies_overview_health_idx; RESET ROLE`)
+		if err = tokenmigrations.Up(ctx, migrator, loaded); err != nil {
 			t.Fatal(err)
 		}
 		migrations.Unlock(ctx, migrator)
@@ -356,6 +387,90 @@ func runTokenReleasePreparation(t *testing.T, artifacts *releaseCLIArtifacts) {
 	exec(admin, "ALTER ROLE "+quote(candidates[0])+" LOGIN")
 	call(enable, "CANDIDATE_LOGIN_STATE_MIXED")
 	exec(admin, "ALTER ROLE "+quote(candidates[0])+" NOLOGIN")
+	// N-1 remains releasable with the two privileged entry points installed by
+	// migrations 31 and 32. Exercise a real rollback/reapply so migration 34 is
+	// genuinely absent rather than merely hidden from the release query.
+	if err = migrations.DownOne(ctx, control, loaded); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, control)
+	var migration34Installed bool
+	if err = control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=34)`).Scan(&migration34Installed); err != nil || migration34Installed {
+		t.Fatal("migration 34 remained installed during N-1 release check")
+	}
+	call(enable, "")
+	for _, name := range candidates {
+		exec(admin, "ALTER ROLE "+quote(name)+" NOLOGIN")
+	}
+	if err = tokenmigrations.Up(ctx, control, loaded); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, control)
+	if err = control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=34)`).Scan(&migration34Installed); err != nil || !migration34Installed {
+		t.Fatal("migration 34 was not restored after N-1 release check")
+	}
+	// Migration 34 adds exactly one runtime SECURITY DEFINER capability. The
+	// release gate accepts only its exact schema/signature/owner/config tuple;
+	// lookalikes remain release-blocking even when owned by the trusted owner.
+	var backfillDefinition string
+	if err = control.QueryRow(ctx, `SELECT pg_catalog.pg_get_functiondef(to_regprocedure('public.backfill_usage_history_projection(integer)'))`).Scan(&backfillDefinition); err != nil {
+		t.Fatal(err)
+	}
+	exec(control, `SET ROLE token_schema_owner; DROP FUNCTION public.backfill_usage_history_projection(INTEGER); RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, backfillDefinition)
+	exec(control, `ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) OWNER TO token_schema_owner; REVOKE ALL ON FUNCTION public.backfill_usage_history_projection(INTEGER) FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.backfill_usage_history_projection(INTEGER) TO token_gateway`)
+	exec(control, `ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) OWNER TO token_gateway`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) OWNER TO token_schema_owner; GRANT EXECUTE ON FUNCTION public.backfill_usage_history_projection(INTEGER) TO token_gateway`)
+	exec(control, `SET ROLE token_schema_owner; ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) SECURITY INVOKER; RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `SET ROLE token_schema_owner; ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) SECURITY DEFINER; RESET ROLE`)
+	exec(control, `ALTER FUNCTION public.lock_token_account_owner_cap_policy() OWNER TO token_gateway`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `ALTER FUNCTION public.lock_token_account_owner_cap_policy() OWNER TO token_cap_policy_deployer; GRANT EXECUTE ON FUNCTION public.lock_token_account_owner_cap_policy() TO token_gateway`)
+	exec(control, `SET ROLE token_cap_policy_deployer; ALTER FUNCTION public.lock_token_account_owner_cap_policy() SET search_path=public; RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `SET ROLE token_cap_policy_deployer; ALTER FUNCTION public.lock_token_account_owner_cap_policy() SET search_path=pg_catalog; RESET ROLE`)
+	var capPolicyDefinition string
+	if err = control.QueryRow(ctx, `SELECT pg_catalog.pg_get_functiondef(to_regprocedure('public.lock_token_account_owner_cap_policy()'))`).Scan(&capPolicyDefinition); err != nil {
+		t.Fatal(err)
+	}
+	exec(control, `DROP FUNCTION public.lock_token_account_owner_cap_policy();
+CREATE FUNCTION public.lock_token_account_owner_cap_policy(INTEGER) RETURNS BIGINT LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT $1::bigint';
+ALTER FUNCTION public.lock_token_account_owner_cap_policy(INTEGER) OWNER TO token_cap_policy_deployer;
+REVOKE ALL ON FUNCTION public.lock_token_account_owner_cap_policy(INTEGER) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.lock_token_account_owner_cap_policy(INTEGER) TO token_gateway`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `DROP FUNCTION public.lock_token_account_owner_cap_policy(INTEGER)`)
+	exec(control, capPolicyDefinition)
+	exec(control, `ALTER FUNCTION public.lock_token_account_owner_cap_policy() OWNER TO token_cap_policy_deployer; REVOKE ALL ON FUNCTION public.lock_token_account_owner_cap_policy() FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.lock_token_account_owner_cap_policy() TO token_gateway`)
+	exec(control, `SET ROLE token_schema_owner;
+CREATE SCHEMA release_candidate_unsafe AUTHORIZATION token_schema_owner;
+CREATE FUNCTION release_candidate_unsafe.backfill_usage_history_projection(INTEGER) RETURNS INTEGER LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT 1';
+REVOKE ALL ON FUNCTION release_candidate_unsafe.backfill_usage_history_projection(INTEGER) FROM PUBLIC;
+GRANT USAGE ON SCHEMA release_candidate_unsafe TO token_gateway;
+GRANT EXECUTE ON FUNCTION release_candidate_unsafe.backfill_usage_history_projection(INTEGER) TO token_gateway;
+RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `SET ROLE token_schema_owner; DROP SCHEMA release_candidate_unsafe CASCADE; RESET ROLE`)
+	exec(control, `SET ROLE token_schema_owner;
+CREATE FUNCTION public.release_candidate_unsafe() RETURNS INTEGER LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT 1';
+REVOKE ALL ON FUNCTION public.release_candidate_unsafe() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.release_candidate_unsafe() TO token_gateway;
+RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `SET ROLE token_schema_owner; DROP FUNCTION public.release_candidate_unsafe(); RESET ROLE`)
+	exec(control, `SET ROLE token_schema_owner;
+CREATE FUNCTION public.backfill_usage_history_projection(TEXT) RETURNS INTEGER LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT 1';
+REVOKE ALL ON FUNCTION public.backfill_usage_history_projection(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.backfill_usage_history_projection(TEXT) TO token_gateway;
+RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `SET ROLE token_schema_owner; DROP FUNCTION public.backfill_usage_history_projection(TEXT); RESET ROLE`)
+	exec(control, `SET ROLE token_schema_owner; ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) SET search_path=public; RESET ROLE`)
+	call(enable, "CANDIDATE_ROLE_UNSAFE")
+	exec(control, `SET ROLE token_schema_owner; ALTER FUNCTION public.backfill_usage_history_projection(INTEGER) SET search_path=pg_catalog; RESET ROLE`)
 	call(enable, "")
 	if result := call(enable, ""); result.Decision != "ALREADY_ENABLED" || result.Applied {
 		t.Fatal("enable replay performed another write")

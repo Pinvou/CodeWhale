@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenmigrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -88,7 +90,7 @@ GRANT token_gateway,token_cap_policy_deployer,token_schema_owner TO token_migrat
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Up(ctx, connection, loaded); err != nil {
+	if err = tokenmigrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -259,7 +261,8 @@ GRANT token_gateway,token_cap_policy_deployer,token_schema_owner TO token_migrat
 	if err = pool.QueryRow(ctx, `SELECT lock_token_account_owner_cap_policy()`).Scan(&lockedVersion); err != nil || lockedVersion != 2 {
 		t.Fatalf("runtime fixed policy lock version=%d err=%v", lockedVersion, err)
 	}
-	if err = pool.QueryRow(ctx, `SELECT active_policy_version FROM token_account_owner_cap_policy_active WHERE singleton_key FOR SHARE`).Scan(&lockedVersion); err == nil || !strings.Contains(err.Error(), "permission denied") {
+	var permissionError *pgconn.PgError
+	if err = pool.QueryRow(ctx, `SELECT active_policy_version FROM token_account_owner_cap_policy_active WHERE singleton_key FOR SHARE`).Scan(&lockedVersion); !errors.As(err, &permissionError) || permissionError.Code != "42501" {
 		t.Fatalf("runtime direct policy row lock must remain denied: %v", err)
 	}
 	var policyTableOwner, policySequenceOwner, applyFunctionOwner, lockFunctionOwner string
@@ -277,10 +280,12 @@ GRANT token_gateway,token_cap_policy_deployer,token_schema_owner TO token_migrat
 	if err = pool.QueryRow(ctx, `SELECT proconfig FROM pg_proc WHERE oid='lock_token_account_owner_cap_policy()'::regprocedure`).Scan(&functionConfig); err != nil || !containsString(functionConfig, "search_path=pg_catalog") {
 		t.Fatalf("policy lock function search_path=%v err=%v", functionConfig, err)
 	}
-	if _, err = pool.Exec(ctx, `CREATE TABLE public.runtime_shadow_policy(value integer)`); err == nil || !strings.Contains(err.Error(), "permission denied") {
+	permissionError = nil
+	if _, err = pool.Exec(ctx, `CREATE TABLE public.runtime_shadow_policy(value integer)`); !errors.As(err, &permissionError) || permissionError.Code != "42501" {
 		t.Fatalf("runtime schema CREATE must be denied: %v", err)
 	}
-	if _, err = pool.Exec(ctx, `UPDATE token_account_owner_cap_policy_revisions SET max_per_owner=max_per_owner+1 WHERE policy_version=1`); err == nil || !strings.Contains(err.Error(), "permission denied") {
+	permissionError = nil
+	if _, err = pool.Exec(ctx, `UPDATE token_account_owner_cap_policy_revisions SET max_per_owner=max_per_owner+1 WHERE policy_version=1`); !errors.As(err, &permissionError) || permissionError.Code != "42501" {
 		t.Fatalf("immutable revision update err=%v", err)
 	}
 

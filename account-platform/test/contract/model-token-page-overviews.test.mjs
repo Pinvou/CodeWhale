@@ -143,7 +143,7 @@ test('Token and Portal wire exact permissions, deadline propagation, rate bucket
 });
 
 test('new gate and route index are default-off, forward-only and independently reversible', async () => {
-  const [compose, values, schema, deployment, up, down, manifest] = await Promise.all([
+  const [compose, values, schema, deployment, up, down, manifest, wrapper, runner, migrateMain, releaseTest] = await Promise.all([
     read('deploy/compose/compose.yaml'),
     read('deploy/helm/account-platform/values.yaml').then(YAML.parse),
     read('deploy/helm/account-platform/values.schema.json').then(JSON.parse),
@@ -151,6 +151,10 @@ test('new gate and route index are default-off, forward-only and independently r
     read('migrations/token/000033_model_token_page_overview_indexes.up.sql'),
     read('migrations/token/000033_model_token_page_overview_indexes.down.sql'),
     read('migrations/manifest.json').then(JSON.parse),
+    read('internal/tokenmigrations/migrate.go'),
+    read('internal/platform/migrations/migrations.go'),
+    read('cmd/migrate/main.go'),
+    read('cmd/token-release-prepare/release_integration_test.go'),
   ]);
   assert.match(compose, /TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED: \$\{TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED:-false\}/);
   assert.equal(values.tokenGateway.adminPageOverviewsEnabled, false);
@@ -161,6 +165,31 @@ test('new gate and route index are default-off, forward-only and independently r
   const files = manifest.domains.token.map(item => item.file);
   assert.ok(files.includes('000033_model_token_page_overview_indexes.up.sql'));
   assert.ok(files.includes('000033_model_token_page_overview_indexes.down.sql'));
+  assert.match(migrateMain, /filepathBase\(\*directory\) == "token"[\s\S]*tokenmigrations\.Up\(ctx, connection, loaded\)/);
+  assert.match(runner, /hooks\.BeforeApply[\s\S]*tx\.Exec\(ctx, migration\.UpSQL\)[\s\S]*setMigrationRole\(ctx, tx, role\)[\s\S]*hooks\.AfterApply[\s\S]*INSERT INTO schema_migrations/);
+  assert.match(wrapper, /legacyOverviewIndexVersion = int64\(33\)/);
+  assert.match(wrapper, /legacyOverviewIndexSHA256\s+= "a17e2fb2855c376b3a0b41961aa3ad0bc45f4193ebd445d6f4db31c430d3e0d6"/);
+  assert.match(wrapper, /migration\.Name != legacyOverviewIndexName/);
+  assert.match(wrapper, /current_user='token_gateway'[\s\S]*session_user='token_migrator'[\s\S]*pg_has_role\(session_user,'token_schema_owner','SET'\)/);
+  assert.match(wrapper, /GRANT CREATE ON SCHEMA public TO token_gateway/);
+  assert.match(wrapper, /REVOKE CREATE ON SCHEMA public FROM token_gateway/);
+  assert.match(releaseTest, /accountLoaded\[:accountReleaseBoundary\]/);
+  assert.match(releaseTest, /CREATE TABLE public\.routing_policies_overview_health_idx\(failure_probe INTEGER\)/);
+  assert.match(releaseTest, /failed migration 33 leaked privilege=%v index=%v ledger=%v/);
+});
+
+test('public Token role-chain fixtures use the migration 33 compatibility wrapper', async () => {
+  const publicFixtures = await Promise.all([
+    read('internal/token/usage_history_migration_role_integration_test.go'),
+    read('internal/token/account_provisioning_three_service_integration_test.go'),
+    read('internal/token/owner_cap_policy_integration_test.go'),
+    read('internal/token/credential_authority_integration_test.go'),
+  ]);
+  for (const source of publicFixtures) assert.match(source, /tokenmigrations\.Up\(ctx,/);
+  assert.equal((publicFixtures[0].match(/tokenmigrations\.Up\(ctx,/g) || []).length, 2);
+  const isolated = await read('internal/token/isolated_migrations_test.go');
+  assert.match(isolated, /intentionally use migrations\.Up directly/);
+  assert.match(isolated, /must never receive the public-schema[\s\S]*tokenmigrations compatibility grant/);
 });
 
 test('production performance gate freezes all page projection data and gives every SQL a cold process', async () => {

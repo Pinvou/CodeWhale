@@ -121,10 +121,19 @@ test('SMS adapters support both code ownership modes with versioned risk evidenc
 
 test('personal usage history exposes only user-facing fields', async () => {
   const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
-  const operation = gateway.paths['/me/usage-requests'].get;
-  const record = gateway.components.schemas.UserUsageRecord;
-  assert.equal(operation.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
-  assert.deepEqual(Object.keys(record.properties).sort(), [
+  const repository = await readFile(path.join(root, 'internal/token/postgres.go'), 'utf8');
+  const releaseRoles = await readFile(path.join(root, 'cmd/token-release-prepare/roles.go'), 'utf8');
+  const projectionMigration = await readFile(path.join(root, 'migrations/token/000034_usage_history_groups.up.sql'), 'utf8');
+  const projectionMigrationDown = await readFile(path.join(root, 'migrations/token/000034_usage_history_groups.down.sql'), 'utf8');
+  const compatibilityOperation = gateway.paths['/me/usage-requests'].get;
+  const turnOperation = gateway.paths['/me/usage-turns'].get;
+  const compatibilityRecord = gateway.components.schemas.UserUsageRecord;
+  const turnRecord = gateway.components.schemas.UserUsageTurnRecord;
+  assert.equal(compatibilityOperation.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
+  assert.equal(turnOperation.responses['200'].content['application/json'].schema.properties.view_version.const, 'logical-turns-v1');
+  assert.equal(compatibilityOperation.responses['200'].content['application/json'].schema.properties.items.items.$ref, '#/components/schemas/UserUsageRecord');
+  assert.equal(turnOperation.responses['200'].content['application/json'].schema.properties.items.items.$ref, '#/components/schemas/UserUsageTurnRecord');
+  assert.deepEqual(Object.keys(compatibilityRecord.properties).sort(), [
     'actual_microcredits',
     'cached_input_tokens',
     'cancel_status',
@@ -133,6 +142,7 @@ test('personal usage history exposes only user-facing fields', async () => {
     'display_status',
     'execution_status',
     'input_tokens',
+    'logical_turn_id',
     'model',
     'output_tokens',
     'settlement_status',
@@ -140,9 +150,48 @@ test('personal usage history exposes only user-facing fields', async () => {
     'updated_at',
     'usage_request_id',
   ]);
+  assert.deepEqual(Object.keys(turnRecord.properties).sort(), [
+    'actual_microcredits', 'cached_input_tokens', 'cancel_status', 'cancel_usage_request_id',
+    'charged_microcredits', 'completed_at', 'delivery_status', 'display_status',
+    'execution_status', 'input_tokens', 'logical_turn_id', 'model', 'output_tokens',
+    'settlement_status', 'started_at', 'updated_at', 'usage_request_count', 'usage_request_id',
+  ]);
   for (const internalField of ['token_account_id', 'credential_id', 'wallet_id', 'provider']) {
-    assert.equal(record.properties[internalField], undefined);
+    assert.equal(compatibilityRecord.properties[internalField], undefined);
+    assert.equal(turnRecord.properties[internalField], undefined);
   }
+  for (const leakedField of ['model_id', 'catalog_version']) {
+    assert.equal(compatibilityRecord.properties[leakedField], undefined);
+    assert.equal(turnRecord.properties[leakedField], undefined);
+  }
+  assert.match(repository, /FROM usage_history_groups[\s\S]*JOIN usage_history_members[\s\S]*GROUP BY history_organization_id,history_group_key,history_logical_turn_id,history_head_started_at,history_head_request_id/);
+  assert.match(repository, /count\(\*\) AS usage_request_count/);
+  assert.doesNotMatch(repository, /DISTINCT ON \(usage_group_key\)/);
+  assert.match(projectionMigration, /CREATE INDEX usage_history_groups_page_idx/);
+  assert.match(projectionMigration, /CREATE INDEX usage_history_members_group_idx/);
+  assert.match(projectionMigration, /CREATE TRIGGER usage_history_projection_after_insert/);
+  assert.match(projectionMigration, /backfill_usage_history_projection\(batch_size INTEGER\)/);
+  assert.match(projectionMigration, /SET LOCAL lock_timeout = '2s'/);
+  assert.match(projectionMigration, /SET ROLE token_schema_owner/);
+  assert.match(projectionMigration, /GRANT SELECT,REFERENCES ON public\.usage_requests TO token_schema_owner/);
+  assert.match(projectionMigration, /GRANT EXECUTE ON FUNCTION public\.maintain_usage_history_projection\(\) TO token_gateway;[\s\S]*SET ROLE token_gateway;[\s\S]*CREATE TRIGGER usage_history_projection_after_insert/);
+  assert.match(projectionMigration, /REVOKE REFERENCES ON public\.usage_requests FROM token_schema_owner/);
+  assert.match(projectionMigration, /REVOKE EXECUTE ON FUNCTION public\.maintain_usage_history_projection\(\) FROM token_gateway/);
+  assert.match(projectionMigration, /SECURITY DEFINER SET search_path=pg_catalog/);
+  assert.match(projectionMigration, /REVOKE ALL ON public\.usage_history_projection_state,public\.usage_history_members,public\.usage_history_groups FROM PUBLIC,token_gateway/);
+  assert.match(projectionMigration, /GRANT SELECT ON public\.usage_history_projection_state,public\.usage_history_members,public\.usage_history_groups TO token_gateway/);
+  assert.match(projectionMigration, /GRANT EXECUTE ON FUNCTION public\.backfill_usage_history_projection\(INTEGER\) TO token_gateway/);
+  assert.doesNotMatch(projectionMigration, /UPDATE\s+usage_requests/i);
+  assert.doesNotMatch(projectionMigration, /ALTER\s+TABLE\s+usage_requests/i);
+  assert.doesNotMatch(projectionMigration, /CREATE\s+(?:UNIQUE\s+)?INDEX[^;]+ON\s+usage_requests/i);
+  assert.match(projectionMigrationDown, /SET ROLE token_gateway;[\s\S]*DROP TRIGGER IF EXISTS usage_history_projection_after_insert ON public\.usage_requests;[\s\S]*SET ROLE token_schema_owner/);
+  assert.match(projectionMigrationDown, /REVOKE SELECT,REFERENCES ON public\.usage_requests FROM token_schema_owner/);
+  assert.match(releaseRoles, /version=31[\s\S]*to_regprocedure\('public\.lock_token_command_governance_activation\(\)'\)[\s\S]*owner\.rolname='token_schema_owner'[\s\S]*p\.prosecdef/);
+  assert.match(releaseRoles, /version=32[\s\S]*to_regprocedure\('public\.lock_token_account_owner_cap_policy\(\)'\)[\s\S]*owner\.rolname='token_cap_policy_deployer'[\s\S]*p\.prosecdef/);
+  assert.match(releaseRoles, /version=34[\s\S]*to_regprocedure\('public\.backfill_usage_history_projection\(integer\)'\)[\s\S]*owner\.rolname='token_schema_owner'[\s\S]*p\.prosecdef/);
+  assert.match(releaseRoles, /to_regprocedure\('public\.backfill_usage_history_projection\(integer\)'\)/);
+  assert.match(releaseRoles, /n\.nspname='public'[\s\S]*owner\.rolname='token_schema_owner'[\s\S]*p\.proconfig=ARRAY\['search_path=pg_catalog'\]::text\[\][\s\S]*has_function_privilege\(r\.oid,p\.oid,'EXECUTE'\)/);
+  assert.doesNotMatch(releaseRoles, /backfill_usage_history_projection\([^i][^)]*\)'/);
 });
 
 test('personal plans cannot be purchased into organization wallets', async () => {

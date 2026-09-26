@@ -274,6 +274,7 @@ func main() {
 	go observability.RunBackground(workerContext, "manual-review-sla", token.NewManualReviewSLAWorker(repository, onCallSchedule, time.Minute).Run)
 	go observability.RunBackground(workerContext, "replay-retention", token.NewReplayRetentionWorker(repository, 15*time.Second).Run)
 	go observability.RunBackground(workerContext, "admin-pagination-cleanup", token.NewAdminPaginationCleanupWorker(repository, time.Minute).Run)
+	go observability.RunBackground(workerContext, "usage-history-projection", token.NewUsageHistoryProjectionWorker(repository, 500).Run)
 	secretRotationInterval := 5 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("TOKEN_SECRET_ROTATION_INTERVAL_SECONDS")); raw != "" {
 		seconds, parseErr := strconv.Atoi(raw)

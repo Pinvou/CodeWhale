@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/jackc/pgx/v5"
@@ -127,9 +128,26 @@ func executeRelease(ctx context.Context, connection *pgx.Conn, r releaseRequest)
 				return result, coded("FENCED_SESSION_CLEANUP_INCOMPLETE")
 			}
 		}
-		var sessions int
-		if err = connection.QueryRow(ctx, `SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename=ANY($1::text[]) AND pid<>pg_backend_pid()`, r.Retired).Scan(&sessions); err != nil || sessions != 0 {
-			return result, coded("FENCED_SESSIONS_REMAIN")
+		cleanupDeadline := time.Now().Add(2 * time.Second)
+		for {
+			var sessions int
+			if err = connection.QueryRow(ctx, `SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE usename=ANY($1::text[]) AND pid<>pg_backend_pid()`, r.Retired).Scan(&sessions); err != nil {
+				return result, coded("FENCED_SESSIONS_REMAIN")
+			}
+			if sessions == 0 {
+				break
+			}
+			if !r.Terminate {
+				return result, coded("FENCED_SESSIONS_REMAIN")
+			}
+			if time.Now().After(cleanupDeadline) {
+				return result, coded("FENCED_SESSION_CLEANUP_INCOMPLETE")
+			}
+			select {
+			case <-ctx.Done():
+				return result, coded("FENCED_SESSION_CLEANUP_INCOMPLETE")
+			case <-time.After(25 * time.Millisecond):
+			}
 		}
 		result.WriterLogins, result.WriterSessions = 0, 0
 	}
@@ -266,6 +284,10 @@ func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest) (bool, error)
 	sessions := 0
 	for _, name := range r.Candidates {
 		var safe, login, credential bool
+		// Every installed privileged entry point must still have its reviewed
+		// catalog identity. This positive check intentionally runs separately from
+		// the catch-all scan below: changing an expected function to SECURITY
+		// INVOKER, moving its ownership, or dropping it must fail closed too.
 		if err := tx.QueryRow(ctx, `SELECT r.rolcanlogin,
  r.rolinherit AND NOT r.rolsuper AND NOT r.rolcreaterole AND NOT r.rolcreatedb AND NOT r.rolreplication AND NOT r.rolbypassrls
  AND pg_has_role(r.oid,'token_gateway','USAGE')
@@ -276,7 +298,58 @@ func enableRoles(ctx context.Context, tx pgx.Tx, r releaseRequest) (bool, error)
  AND NOT has_schema_privilege(r.oid,'public','CREATE')
  AND NOT has_table_privilege(r.oid,'public.token_command_governance_activation','INSERT,UPDATE,DELETE,TRUNCATE')
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner CROSS JOIN (VALUES('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS rights(privilege) WHERE n.nspname='public' AND c.relkind IN ('r','p') AND owner.rolname IN ('token_schema_owner','token_cap_policy_deployer') AND has_table_privilege(r.oid,c.oid,rights.privilege) AND NOT (owner.rolname='token_cap_policy_deployer' AND c.relname IN ('token_account_provisioning_reservations','token_account_provisioning_recovery_actions') AND rights.privilege IN ('INSERT','UPDATE')))
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner WHERE n.nspname='public' AND p.prosecdef AND owner.rolname IN ('token_schema_owner','token_cap_policy_deployer') AND NOT (p.oid=to_regprocedure('public.lock_token_command_governance_activation()') AND owner.rolname='token_schema_owner') AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
+ AND (NOT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=31) OR EXISTS(
+   SELECT 1 FROM pg_catalog.pg_proc p
+   JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+   JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner
+   JOIN pg_catalog.pg_language language ON language.oid=p.prolang
+   WHERE p.oid=to_regprocedure('public.lock_token_command_governance_activation()')
+     AND n.nspname='public' AND owner.rolname='token_schema_owner'
+     AND p.prokind='f' AND p.prosecdef AND language.lanname='sql'
+     AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
+     AND p.proretset AND p.prorettype=to_regtype('public.token_command_governance_activation')
+     AND has_function_privilege(r.oid,p.oid,'EXECUTE')
+ ))
+ AND (NOT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=32) OR EXISTS(
+   SELECT 1 FROM pg_catalog.pg_proc p
+   JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+   JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner
+   JOIN pg_catalog.pg_language language ON language.oid=p.prolang
+   WHERE p.oid=to_regprocedure('public.lock_token_account_owner_cap_policy()')
+     AND n.nspname='public' AND owner.rolname='token_cap_policy_deployer'
+     AND p.prokind='f' AND p.prosecdef AND language.lanname='sql'
+     AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
+     AND NOT p.proretset AND p.prorettype=to_regtype('pg_catalog.int8')
+     AND has_function_privilege(r.oid,p.oid,'EXECUTE')
+ ))
+ AND (NOT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=34) OR EXISTS(
+   SELECT 1 FROM pg_catalog.pg_proc p
+   JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+   JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner
+   JOIN pg_catalog.pg_language language ON language.oid=p.prolang
+   WHERE p.oid=to_regprocedure('public.backfill_usage_history_projection(integer)')
+     AND n.nspname='public' AND owner.rolname='token_schema_owner'
+     AND p.prokind='f' AND p.prosecdef AND language.lanname='plpgsql'
+     AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
+     AND p.proretset AND p.prorettype=to_regtype('pg_catalog.record')
+     AND pg_catalog.pg_get_function_result(p.oid)='TABLE(processed integer, complete boolean)'
+     AND has_function_privilege(r.oid,p.oid,'EXECUTE')
+ ))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner WHERE p.prosecdef AND owner.rolname IN ('token_schema_owner','token_cap_policy_deployer') AND NOT (
+   n.nspname='public'
+   AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]
+   AND (
+     (owner.rolname='token_schema_owner'
+       AND COALESCE(p.oid=to_regprocedure('public.lock_token_command_governance_activation()'),false)
+       AND EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=31))
+     OR (owner.rolname='token_cap_policy_deployer'
+       AND COALESCE(p.oid=to_regprocedure('public.lock_token_account_owner_cap_policy()'),false)
+       AND EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=32))
+     OR (owner.rolname='token_schema_owner'
+       AND COALESCE(p.oid=to_regprocedure('public.backfill_usage_history_projection(integer)'),false)
+       AND EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=34))
+   )
+ ) AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
  AND NOT EXISTS(SELECT 1 FROM public.token_command_governance_transitions WHERE state='ACTIVE' AND epoch<>$2 AND $1::text=ANY(approved_runtime_roles)),
  coalesce(a.rolpassword ~ '^SCRAM-SHA-256\$[1-9][0-9]*:[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}:[A-Za-z0-9+/]+={0,2}$' AND a.rolvaliduntil IS NOT NULL AND isfinite(a.rolvaliduntil) AND a.rolvaliduntil>clock_timestamp(),false)
  FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_authid a ON a.oid=r.oid WHERE r.rolname=$1`, name, r.ExpectedEpoch).Scan(&login, &safe, &credential); err != nil || !safe {

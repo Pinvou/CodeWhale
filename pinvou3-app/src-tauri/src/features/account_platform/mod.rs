@@ -1696,7 +1696,8 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
             None,
         ) => safe_id(organization_id) && safe_id(order_id),
         ("token", &Method::GET, ["v1", "me", "balance"], Some("consistency=strong")) => true,
-        ("token", &Method::GET, ["v1", "me", "usage-requests"], query) => {
+        ("token", &Method::GET, ["v1", "me", "usage-requests"], query)
+        | ("token", &Method::GET, ["v1", "me", "usage-turns"], query) => {
             usage_history_query_allowed(query)
         }
         _ => false,
@@ -1725,10 +1726,10 @@ fn usage_history_query_allowed(query: Option<&str>) -> bool {
             }
             "cursor" if !cursor_seen => {
                 cursor_seen = !value.is_empty()
-                    && value.len() <= 256
-                    && value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+                    && value.len() <= 264
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    });
                 if !cursor_seen {
                     return false;
                 }
@@ -2174,6 +2175,20 @@ mod tests {
                 ApiRequest {
                     area: "token".to_string(),
                     resource: "/v1/models".to_string(),
+                    method: "GET".to_string(),
+                    body: None,
+                    idempotency_key: None,
+                },
+            )
+            .is_ok()
+        );
+
+        assert!(
+            prepare_request(
+                &config(),
+                ApiRequest {
+                    area: "token".to_string(),
+                    resource: "/v1/me/usage-turns?limit=20&cursor=turn-v1.YWJjLTEyMw".to_string(),
                     method: "GET".to_string(),
                     body: None,
                     idempotency_key: None,

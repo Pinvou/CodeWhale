@@ -8,7 +8,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrationfixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	tokenservice "github.com/Pinvou/pinvou3/account-platform/internal/token"
@@ -664,29 +664,30 @@ func newApprovalSnapshotTokenRepository(t *testing.T, ctx context.Context, datab
 	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 		t.Fatal(err)
 	}
+	publicBefore := approvalSnapshotPublicUsageHistoryState(t, ctx, connection)
 	loaded, err := migrations.Load("../../migrations/token")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// This legacy fixture uses an isolated schema, not a deployment-role gate.
-	// Preserve the ownership migrations' qualification inside that schema; real database
-	// ownership/ACL safety is covered by the dedicated non-superuser gates.
+	// This legacy fixture uses an isolated schema, not a deployment-role gate,
+	// and therefore intentionally uses migrations.Up directly. Migration 33
+	// resolves through this fixture's private search_path; the public owner/table
+	// assertions and public-schema grant in tokenmigrations are not applicable.
+	// Preserve every role-aware migration's qualification inside that schema;
+	// migration 34 must not install its sidecars, functions, grants, or trigger
+	// into public. Real deployment ownership/ACL safety is covered by the
+	// dedicated non-superuser gates.
 	for index := range loaded {
-		if loaded[index].Version != 29 && loaded[index].Version != 31 && loaded[index].Version != 32 {
+		if loaded[index].Version != 29 && loaded[index].Version != 31 && loaded[index].Version != 32 && loaded[index].Version != 34 {
 			continue
 		}
-		sql := strings.ReplaceAll(loaded[index].UpSQL, "to_regnamespace('public')", "to_regnamespace('"+schema+"')")
-		sql = strings.ReplaceAll(sql, "SCHEMA public", "SCHEMA "+identifier)
-		sql = strings.ReplaceAll(sql, "public.", identifier+".")
-		loaded[index].UpSQL = "ALTER SCHEMA " + identifier + " OWNER TO token_schema_owner;\n" + sql + "\nRESET ROLE;"
-		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")
-		digest := sha256.Sum256([]byte(normalized))
-		loaded[index].Checksum = hex.EncodeToString(digest[:])
+		loaded[index] = migrationfixture.RewritePublicSchema(loaded[index], schema)
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
+	approvalSnapshotAssertUsageHistoryIsolated(t, ctx, connection, schema, publicBefore)
 	parsed, err := url.Parse(databaseURL)
 	if err != nil {
 		t.Fatal(err)
@@ -704,6 +705,51 @@ func newApprovalSnapshotTokenRepository(t *testing.T, ctx context.Context, datab
 	}
 	t.Cleanup(repository.Close)
 	return repository, connection
+}
+
+func approvalSnapshotPublicUsageHistoryState(t *testing.T, ctx context.Context, connection *pgx.Conn) string {
+	t.Helper()
+	var state string
+	if err := connection.QueryRow(ctx, `SELECT jsonb_build_object(
+  'schema',COALESCE((SELECT jsonb_build_object('owner',pg_catalog.pg_get_userbyid(nspowner),'acl',COALESCE(nspacl::text,'')) FROM pg_catalog.pg_namespace WHERE nspname='public'),'null'::jsonb),
+  'relations',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',class.relname,'oid',class.oid::text,'owner',pg_catalog.pg_get_userbyid(class.relowner),'acl',COALESCE(class.relacl::text,'')) ORDER BY class.relname)
+    FROM pg_catalog.pg_class class JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    WHERE namespace.nspname='public' AND class.relname IN ('usage_requests','usage_history_projection_state','usage_history_members','usage_history_members_group_idx','usage_history_groups','usage_history_groups_page_idx')),'[]'::jsonb),
+  'functions',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',procedure.proname,'oid',procedure.oid::text,'args',pg_catalog.pg_get_function_identity_arguments(procedure.oid),'owner',pg_catalog.pg_get_userbyid(procedure.proowner),'acl',COALESCE(procedure.proacl::text,'')) ORDER BY procedure.proname,procedure.oid)
+    FROM pg_catalog.pg_proc procedure JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+    WHERE namespace.nspname='public' AND procedure.proname IN ('project_usage_history_request','maintain_usage_history_projection','backfill_usage_history_projection')),'[]'::jsonb),
+  'triggers',COALESCE((SELECT jsonb_agg(jsonb_build_object('name',trigger.tgname,'oid',trigger.oid::text,'relation',class.relname) ORDER BY trigger.tgname,trigger.oid)
+    FROM pg_catalog.pg_trigger trigger JOIN pg_catalog.pg_class class ON class.oid=trigger.tgrelid JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    WHERE namespace.nspname='public' AND NOT trigger.tgisinternal AND trigger.tgname='usage_history_projection_after_insert'),'[]'::jsonb)
+)::text`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func approvalSnapshotAssertUsageHistoryIsolated(t *testing.T, ctx context.Context, connection *pgx.Conn, schema, publicBefore string) {
+	t.Helper()
+	if publicAfter := approvalSnapshotPublicUsageHistoryState(t, ctx, connection); publicAfter != publicBefore {
+		t.Fatalf("migration 34 changed public objects/owners/ACLs\nbefore=%s\nafter=%s", publicBefore, publicAfter)
+	}
+	var relationCount, functionCount, triggerCount int
+	var sidecarOwners, functionOwners []string
+	if err := connection.QueryRow(ctx, `SELECT
+  (SELECT count(*) FROM pg_catalog.pg_class class JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    WHERE namespace.nspname=$1 AND class.relname IN ('usage_history_projection_state','usage_history_members','usage_history_members_group_idx','usage_history_groups','usage_history_groups_page_idx')),
+  (SELECT count(*) FROM pg_catalog.pg_proc procedure JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+    WHERE namespace.nspname=$1 AND procedure.proname IN ('project_usage_history_request','maintain_usage_history_projection','backfill_usage_history_projection')),
+  (SELECT count(*) FROM pg_catalog.pg_trigger trigger JOIN pg_catalog.pg_class class ON class.oid=trigger.tgrelid JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    WHERE namespace.nspname=$1 AND class.relname='usage_requests' AND NOT trigger.tgisinternal AND trigger.tgname='usage_history_projection_after_insert'),
+  (SELECT array_agg(DISTINCT pg_catalog.pg_get_userbyid(class.relowner)) FROM pg_catalog.pg_class class JOIN pg_catalog.pg_namespace namespace ON namespace.oid=class.relnamespace
+    WHERE namespace.nspname=$1 AND class.relname IN ('usage_history_projection_state','usage_history_members','usage_history_members_group_idx','usage_history_groups','usage_history_groups_page_idx')),
+  (SELECT array_agg(DISTINCT pg_catalog.pg_get_userbyid(procedure.proowner)) FROM pg_catalog.pg_proc procedure JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+    WHERE namespace.nspname=$1 AND procedure.proname IN ('project_usage_history_request','maintain_usage_history_projection','backfill_usage_history_projection'))`, schema).Scan(&relationCount, &functionCount, &triggerCount, &sidecarOwners, &functionOwners); err != nil {
+		t.Fatal(err)
+	}
+	if relationCount != 5 || functionCount != 3 || triggerCount != 1 || len(sidecarOwners) != 1 || sidecarOwners[0] != "token_schema_owner" || len(functionOwners) != 1 || functionOwners[0] != "token_schema_owner" {
+		t.Fatalf("migration 34 private projection relations=%d functions=%d triggers=%d relation_owners=%v function_owners=%v", relationCount, functionCount, triggerCount, sidecarOwners, functionOwners)
+	}
 }
 
 func seedApprovalSnapshotTokenModel(t *testing.T, ctx context.Context, connection *pgx.Conn) uuid.UUID {

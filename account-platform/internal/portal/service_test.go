@@ -976,7 +976,7 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	if !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/recharge/orders") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/recharge/orders/"+orderID) || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/balance") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/entitlement-packages") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/quota-grants") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants:batch") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants/"+grantID+"/revoke") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/account-closed-grants/"+grantID+"/reclaim") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/account-closed-grants:reclaim-batch") {
 		t.Fatal("organization billing paths must be allowlisted")
 	}
-	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {
+	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-turns") || !accountPathAllowed(http.MethodGet, "/v1/me") {
 		t.Fatal("Portal BFF must expose the documented management APIs")
 	}
 	if !tokenPathAllowed(http.MethodPost, "/v1/recharge/orders/"+orderID+"/payment-claims") || tokenPathAllowed(http.MethodPost, "/v1/recharge/orders/invalid/payment-claims") {

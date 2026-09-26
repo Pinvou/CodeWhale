@@ -1938,6 +1938,16 @@
         "file": "000033_model_token_page_overview_indexes.up.sql",
         "version": 33,
         "sha256": "a17e2fb2855c376b3a0b41961aa3ad0bc45f4193ebd445d6f4db31c430d3e0d6"
+      },
+      {
+        "file": "000034_usage_history_groups.down.sql",
+        "version": 34,
+        "sha256": "7ffd599821fb4aa220ca06ef305af84527cbd5b3f27a9fbc9dbadf803f6099c0"
+      },
+      {
+        "file": "000034_usage_history_groups.up.sql",
+        "version": 34,
+        "sha256": "8f25256da33ce045b00f5f96471dee1169f92047a82fefa42d5485add44a4948"
       }
     ]
   }

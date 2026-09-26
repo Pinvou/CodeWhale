@@ -7,13 +7,6 @@ const cancellableExecutionStatuses = new Set([
   'STREAMING',
 ]);
 
-const unsettledDisplayStatuses = new Set([
-  'IN_PROGRESS',
-  'SETTLEMENT_PENDING',
-  'MANUAL_REVIEW',
-  'DISPLAY_STOPPED_EXECUTION_CONTINUES',
-]);
-
 function numeric(value) {
   if (value == null || value === '') return null;
   const number = Number(value);
@@ -21,20 +14,16 @@ function numeric(value) {
 }
 
 function recordKey(record, index) {
-  return record?.logical_turn_id || record?.usage_request_id || `legacy-usage-${index}`;
+  if (record?.logical_turn_id) return `turn:${record.logical_turn_id}`;
+  if (record?.usage_request_id) return `request:${record.usage_request_id}`;
+  return `legacy-usage-${index}`;
 }
 
 function isUsageCancellable(record) {
-  return record?.delivery_status !== 'USER_STOPPED' && cancellableExecutionStatuses.has(record?.execution_status);
-}
-
-function statusPriority(record) {
-  if (isUsageCancellable(record)) return 6;
-  if (record?.display_status === 'MANUAL_REVIEW' || record?.execution_status === 'REVIEW' || record?.settlement_status === 'REVIEW') return 5;
-  if (record?.display_status === 'DISPLAY_STOPPED_EXECUTION_CONTINUES') return 4;
-  if (unsettledDisplayStatuses.has(record?.display_status) || record?.execution_status === 'SETTLEMENT_PENDING' || record?.settlement_status === 'USAGE_PENDING') return 3;
-  if (record?.display_status === 'SETTLED' || record?.settlement_status === 'SETTLED') return 2;
-  return 1;
+  return record?.delivery_status !== 'USER_STOPPED'
+    && !['COMMITTED', 'RELEASED', 'REVIEW'].includes(record?.status)
+    && !['SETTLED', 'RELEASED', 'REVIEW'].includes(record?.settlement_status)
+    && cancellableExecutionStatuses.has(record?.execution_status);
 }
 
 function isNoCharge(record) {
@@ -43,12 +32,29 @@ function isNoCharge(record) {
   return record?.display_status === 'RELEASED' || record?.display_status === 'CANCELLED_BEFORE_DISPATCH';
 }
 
-function settledMicrocredits(record) {
+function missingTokensMeanZero(record) {
+  return record?.display_status === 'CANCELLED_BEFORE_DISPATCH';
+}
+
+function chargedMicrocredits(record) {
+  if (Object.prototype.hasOwnProperty.call(record || {}, 'charged_microcredits')) return numeric(record?.charged_microcredits);
+  // Rolling-deploy compatibility with the previous API shape. The fallback
+  // preserves charge semantics and never treats released Provider cost as a debit.
   if (record?.settlement_status === 'SETTLED') return numeric(record?.actual_microcredits);
   if (isNoCharge(record)) return 0;
-  if (record?.settlement_status) return null;
-  if (record?.display_status === 'SETTLED') return numeric(record?.actual_microcredits);
+  if (!record?.settlement_status && record?.display_status === 'SETTLED') return numeric(record?.actual_microcredits);
   return null;
+}
+
+function aggregateDisplayStatus(records) {
+  if (records.some((record) => record?.display_status === 'MANUAL_REVIEW' || record?.execution_status === 'REVIEW' || record?.settlement_status === 'REVIEW')) return 'MANUAL_REVIEW';
+  if (records.some((record) => isUsageCancellable(record) || record?.display_status === 'IN_PROGRESS')) return 'IN_PROGRESS';
+  if (records.some((record) => record?.display_status === 'DISPLAY_STOPPED_EXECUTION_CONTINUES')) return 'DISPLAY_STOPPED_EXECUTION_CONTINUES';
+  if (records.some((record) => record?.display_status === 'SETTLEMENT_PENDING' || record?.execution_status === 'SETTLEMENT_PENDING' || record?.settlement_status === 'USAGE_PENDING')) return 'SETTLEMENT_PENDING';
+  if (records.some((record) => record?.display_status === 'SETTLED' || record?.settlement_status === 'SETTLED')) return 'SETTLED';
+  if (records.every((record) => record?.display_status === 'CANCELLED_BEFORE_DISPATCH')) return 'CANCELLED_BEFORE_DISPATCH';
+  if (records.every(isNoCharge)) return 'RELEASED';
+  return 'MANUAL_REVIEW';
 }
 
 export function summarizeUsageRecords(records = []) {
@@ -64,36 +70,38 @@ export function summarizeUsageRecords(records = []) {
         usage_request_ids: [],
         cancel_usage_request_id: '',
         actual_microcredits: 0,
+        charged_microcredits: 0,
         input_tokens: 0,
         output_tokens: 0,
         cached_input_tokens: 0,
         _actualComplete: true,
+        _chargedComplete: true,
         _tokensComplete: true,
-        _statusPriority: 0,
+        _records: [],
       };
       groups.set(key, summary);
     }
 
-    summary.usage_request_count += 1;
-    if (record?.usage_request_id) summary.usage_request_ids.push(record.usage_request_id);
-    if (!summary.cancel_usage_request_id && isUsageCancellable(record) && record?.usage_request_id) {
-      summary.cancel_usage_request_id = record.usage_request_id;
+    const requestCount = Math.max(1, Number(record?.usage_request_count) || 1);
+    summary.usage_request_count += requestCount;
+    summary._records.push(record);
+    if (Array.isArray(record?.usage_request_ids)) summary.usage_request_ids.push(...record.usage_request_ids);
+    else if (record?.usage_request_id) summary.usage_request_ids.push(record.usage_request_id);
+    const cancellableID = record?.cancel_usage_request_id || (isUsageCancellable(record) ? record?.usage_request_id : '');
+    if (!summary.cancel_usage_request_id && cancellableID) {
+      summary.cancel_usage_request_id = cancellableID;
     }
-    const priority = statusPriority(record);
-    if (priority > summary._statusPriority) {
-      summary._statusPriority = priority;
-      for (const field of ['display_status', 'execution_status', 'delivery_status', 'settlement_status']) {
-        summary[field] = record[field];
-      }
-    }
-
-    const actual = settledMicrocredits(record);
+    const actual = numeric(record?.actual_microcredits);
     if (actual == null) summary._actualComplete = false;
     else summary.actual_microcredits += actual || 0;
 
+    const charged = chargedMicrocredits(record);
+    if (charged == null) summary._chargedComplete = false;
+    else summary.charged_microcredits += charged || 0;
+
     for (const field of ['input_tokens', 'output_tokens', 'cached_input_tokens']) {
       const amount = numeric(record?.[field]);
-      if (amount == null && !isNoCharge(record)) summary._tokensComplete = false;
+      if (amount == null && !missingTokensMeanZero(record)) summary._tokensComplete = false;
       else summary[field] += amount || 0;
     }
 
@@ -110,16 +118,24 @@ export function summarizeUsageRecords(records = []) {
   });
 
   return [...groups.values()].map((summary) => {
+    summary.display_status = aggregateDisplayStatus(summary._records);
     if (!summary._actualComplete) summary.actual_microcredits = null;
+    if (!summary._chargedComplete) summary.charged_microcredits = null;
     if (summary.cancel_usage_request_id) summary.completed_at = '';
+    if (summary.usage_request_count > 1) {
+      summary.execution_status = '';
+      summary.delivery_status = '';
+      summary.settlement_status = '';
+    }
     if (!summary._tokensComplete) {
       summary.input_tokens = null;
       summary.output_tokens = null;
       summary.cached_input_tokens = null;
     }
     delete summary._actualComplete;
+    delete summary._chargedComplete;
     delete summary._tokensComplete;
-    delete summary._statusPriority;
+    delete summary._records;
     return summary;
   });
 }

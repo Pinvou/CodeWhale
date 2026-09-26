@@ -240,11 +240,18 @@ export class AccountPlatformBffClient {
   organizationEntitlementPackages(organizationId, signal) {
     return this.request('token', `/v1/organizations/${organizationId}/entitlement-packages`, { signal });
   }
-  usageHistory(cursor = '', signal) {
+  async usageHistory(cursor = '', signal) {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-    return this.request('token', `/v1/me/usage-requests?limit=20${next}`, {
-      signal,
-    });
+    if (cursor && !cursor.startsWith('turn-v1.')) {
+      return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
+    }
+    try {
+      return await this.request('token', `/v1/me/usage-turns?limit=20${next}`, { signal });
+    } catch (error) {
+      const fallback = !cursor && (error?.status === 404 || ['USAGE_HISTORY_PROJECTION_BUILDING', 'USAGE_HISTORY_PROJECTION_UNAVAILABLE'].includes(error?.code));
+      if (!fallback) throw error;
+      return this.request('token', '/v1/me/usage-requests?limit=20', { signal });
+    }
   }
   cancelUsage(usageRequestId, key) {
     return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}/cancel`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: {} });

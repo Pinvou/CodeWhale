@@ -195,26 +195,26 @@ func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved A
 	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
 		return nil, ErrForbidden
 	}
-	query := `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+	query := `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL
 ORDER BY started_at DESC,id DESC LIMIT $2`
 	arguments := []any{resolved.UserID, limit}
 	if cursor != nil {
-		query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL AND (started_at,id)<($2,$3)
 ORDER BY started_at DESC,id DESC LIMIT $4`
 		arguments = []any{resolved.UserID, cursor.StartedAt, cursor.ID, limit}
 	}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
-		query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2
 ORDER BY started_at DESC,id DESC LIMIT $3`
 		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
 		if cursor != nil {
-			query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+			query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2 AND (started_at,id)<($3,$4)
 ORDER BY started_at DESC,id DESC LIMIT $5`
@@ -232,7 +232,7 @@ ORDER BY started_at DESC,id DESC LIMIT $5`
 	for rows.Next() {
 		var item UserUsageRecord
 		var snapshot []byte
-		if err := rows.Scan(&item.UsageRequestID, &item.LogicalTurnID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.status, &item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.UsageRequestID, &item.LogicalTurnID, &item.Model, &item.status, &item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if len(snapshot) > 0 {
@@ -248,6 +248,145 @@ ORDER BY started_at DESC,id DESC LIMIT $5`
 	}
 	return items, rows.Err()
 }
+
+func (r *PostgresRepository) UsageHistoryProjectionReady(ctx context.Context) (bool, error) {
+	var ready bool
+	err := r.pool.QueryRow(ctx, `SELECT completed_at IS NOT NULL FROM usage_history_projection_state WHERE singleton`).Scan(&ready)
+	return ready, err
+}
+
+func (r *PostgresRepository) BackfillUsageHistoryProjection(ctx context.Context, batchSize int) (int, bool, error) {
+	var processed int
+	var complete bool
+	err := r.pool.QueryRow(ctx, `SELECT processed,complete FROM backfill_usage_history_projection($1)`, batchSize).Scan(&processed, &complete)
+	return processed, complete, err
+}
+
+func (r *PostgresRepository) ListUsageTurnsForContext(ctx context.Context, resolved AuthorizationContext, limit int, cursor *UsageHistoryCursor) ([]UserUsageTurnRecord, error) {
+	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
+		return nil, ErrForbidden
+	}
+	organizationScopeID := uuid.Nil
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
+		organizationScopeID = *resolved.OrganizationID
+	} else if resolved.ContextType != "PERSONAL" {
+		return nil, ErrForbidden
+	}
+	var cursorStartedAt *time.Time
+	var cursorID *uuid.UUID
+	if cursor != nil {
+		cursorStartedAt, cursorID = &cursor.StartedAt, &cursor.ID
+	}
+	// The durable group-head projection makes deep pagination an indexed lookup.
+	// SQL aggregation returns exactly one bounded row per selected logical turn,
+	// regardless of how many model requests the turn contains.
+	query := usageTurnProjectionQuery
+	arguments := []any{resolved.UserID, organizationScopeID, cursorStartedAt, cursorID, limit}
+	rows, err := r.pool.Query(ctx, query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UserUsageTurnRecord, 0)
+	for rows.Next() {
+		var item UserUsageTurnRecord
+		if err := rows.Scan(&item.UsageRequestID, &item.LogicalTurnID, &item.UsageRequestCount, &item.CancelUsageRequestID, &item.Model, &item.DisplayStatus, &item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus, &item.ActualMicrocredits, &item.ChargedMicrocredits, &item.InputTokens, &item.OutputTokens, &item.CachedInputTokens, &item.StartedAt, &item.cursorStartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+const usageTurnProjectionQuery = `WITH page_groups AS (
+  SELECT organization_id,usage_group_key,logical_turn_id,head_started_at,head_request_id
+  FROM usage_history_groups
+  WHERE user_id=$1 AND organization_scope_id=$2
+    AND ($3::timestamptz IS NULL OR (head_started_at,head_request_id)<($3,$4::uuid))
+  ORDER BY head_started_at DESC,head_request_id DESC
+  LIMIT $5
+), members AS (
+  SELECT page.organization_id AS history_organization_id,
+         page.usage_group_key AS history_group_key,
+         page.logical_turn_id AS history_logical_turn_id,
+         page.head_started_at AS history_head_started_at,
+         page.head_request_id AS history_head_request_id,
+         request.id,
+         request.model,
+         request.model_snapshot,
+         request.status,
+         request.execution_status,
+         request.delivery_status,
+         request.cancel_status,
+         request.settlement_status,
+         request.actual_microcredits,
+         request.usage_snapshot,
+         request.started_at,
+         request.terminal_at,
+         request.updated_at,
+         CASE WHEN COALESCE(request.usage_snapshot->'usage'->>'input_tokens','') ~ '^[0-9]+$'
+              THEN (request.usage_snapshot->'usage'->>'input_tokens')::bigint END AS history_input_tokens,
+         CASE WHEN COALESCE(request.usage_snapshot->'usage'->>'output_tokens','') ~ '^[0-9]+$'
+              THEN (request.usage_snapshot->'usage'->>'output_tokens')::bigint END AS history_output_tokens,
+         CASE WHEN COALESCE(request.usage_snapshot->'usage'->>'cached_input_tokens','') ~ '^[0-9]+$'
+              THEN (request.usage_snapshot->'usage'->>'cached_input_tokens')::bigint END AS history_cached_input_tokens,
+         request.delivery_status<>'USER_STOPPED'
+           AND request.execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING')
+           AND request.status NOT IN ('COMMITTED','RELEASED','REVIEW')
+           AND request.settlement_status NOT IN ('SETTLED','RELEASED','REVIEW') AS history_cancellable,
+         CASE
+           WHEN request.cancel_status='LOCAL_CONFIRMED' THEN 'CANCELLED_BEFORE_DISPATCH'
+           WHEN request.settlement_status='SETTLED' OR request.status='COMMITTED' THEN 'SETTLED'
+           WHEN request.settlement_status='RELEASED' OR request.status='RELEASED' THEN 'RELEASED'
+           WHEN request.status='REVIEW' OR request.execution_status='REVIEW' OR request.settlement_status='REVIEW' THEN 'MANUAL_REVIEW'
+           WHEN request.delivery_status='USER_STOPPED' THEN 'DISPLAY_STOPPED_EXECUTION_CONTINUES'
+           WHEN request.status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE') THEN 'IN_PROGRESS'
+           WHEN request.status='SETTLEMENT_PENDING' THEN 'SETTLEMENT_PENDING'
+           ELSE 'MANUAL_REVIEW'
+         END AS history_display_status
+  FROM page_groups page
+  JOIN usage_history_members member
+    ON member.user_id=$1
+   AND member.organization_scope_id=$2
+   AND member.usage_group_key=page.usage_group_key
+  JOIN usage_requests request ON request.id=member.usage_request_id
+)
+SELECT history_head_request_id,COALESCE(history_logical_turn_id,''),count(*) AS usage_request_count,
+       (array_agg(id ORDER BY started_at DESC,id DESC) FILTER (WHERE history_cancellable))[1] AS cancel_usage_request_id,
+       (array_agg(COALESCE(model_snapshot->>'display_name',model) ORDER BY started_at DESC,id DESC))[1] AS model,
+       CASE
+         WHEN bool_or(history_display_status='MANUAL_REVIEW') THEN 'MANUAL_REVIEW'
+         WHEN bool_or(history_cancellable OR history_display_status='IN_PROGRESS') THEN 'IN_PROGRESS'
+         WHEN bool_or(history_display_status='DISPLAY_STOPPED_EXECUTION_CONTINUES') THEN 'DISPLAY_STOPPED_EXECUTION_CONTINUES'
+         WHEN bool_or(history_display_status='SETTLEMENT_PENDING') THEN 'SETTLEMENT_PENDING'
+         WHEN bool_or(history_display_status='SETTLED') THEN 'SETTLED'
+         WHEN bool_and(history_display_status='CANCELLED_BEFORE_DISPATCH') THEN 'CANCELLED_BEFORE_DISPATCH'
+         WHEN bool_and(history_display_status IN ('RELEASED','CANCELLED_BEFORE_DISPATCH')) THEN 'RELEASED'
+         ELSE 'MANUAL_REVIEW'
+       END AS display_status,
+       CASE WHEN count(*)=1 THEN max(execution_status) ELSE '' END AS execution_status,
+       CASE WHEN count(*)=1 THEN max(delivery_status) ELSE '' END AS delivery_status,
+       CASE WHEN count(*)=1 THEN max(cancel_status) ELSE '' END AS cancel_status,
+       CASE WHEN count(*)=1 THEN max(settlement_status) ELSE '' END AS settlement_status,
+       CASE WHEN bool_and(actual_microcredits IS NOT NULL) THEN sum(actual_microcredits) END AS actual_microcredits,
+       CASE WHEN bool_and(
+                  history_display_status IN ('SETTLED','RELEASED','CANCELLED_BEFORE_DISPATCH')
+                  AND (history_display_status<>'SETTLED' OR actual_microcredits IS NOT NULL)
+            ) THEN sum(CASE WHEN history_display_status='SETTLED' THEN actual_microcredits ELSE 0 END) END AS charged_microcredits,
+       CASE WHEN bool_and(history_input_tokens IS NOT NULL OR history_display_status='CANCELLED_BEFORE_DISPATCH')
+            THEN sum(COALESCE(history_input_tokens,0)) END AS input_tokens,
+       CASE WHEN bool_and(history_output_tokens IS NOT NULL OR history_display_status='CANCELLED_BEFORE_DISPATCH')
+            THEN sum(COALESCE(history_output_tokens,0)) END AS output_tokens,
+       CASE WHEN bool_and(history_cached_input_tokens IS NOT NULL OR history_display_status='CANCELLED_BEFORE_DISPATCH')
+            THEN sum(COALESCE(history_cached_input_tokens,0)) END AS cached_input_tokens,
+       min(started_at) AS started_at,
+       history_head_started_at AS cursor_started_at,
+       CASE WHEN bool_or(history_display_status IN ('IN_PROGRESS','DISPLAY_STOPPED_EXECUTION_CONTINUES','SETTLEMENT_PENDING','MANUAL_REVIEW'))
+            THEN NULL ELSE max(terminal_at) END AS completed_at,
+       max(updated_at) AS updated_at
+FROM members
+GROUP BY history_organization_id,history_group_key,history_logical_turn_id,history_head_started_at,history_head_request_id
+ORDER BY history_head_started_at DESC,history_head_request_id DESC`
 
 func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
 	tx, err := r.pool.Begin(ctx)

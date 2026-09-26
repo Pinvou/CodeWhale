@@ -229,6 +229,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
 	protected.POST("/v1/usage-requests/:usage_request_id/cancel", httpserver.AdaptFunc(s.cancelUsageRequest))
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
+	protected.GET("/v1/me/usage-turns", httpserver.AdaptFunc(s.listMyUsageTurns))
 	protected.GET("/v1/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
 	// Cancellation is actor-bound in the repository and deliberately remains
 	// reachable after a management permission or feature-gate revocation so an
@@ -747,6 +748,100 @@ func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": usageRequests, "next_cursor": nextCursor})
 }
 
+type usageTurnProjectionStore interface {
+	UsageHistoryProjectionReady(context.Context) (bool, error)
+	ListUsageTurnsForContext(context.Context, AuthorizationContext, int, *UsageHistoryCursor) ([]UserUsageTurnRecord, error)
+}
+
+const usageTurnCursorPrefix = "turn-v1."
+
+func (s *Service) listMyUsageTurns(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.usage.read", "org.usage.read.self")
+	if !ok {
+		return
+	}
+	store, ok := s.repository.(usageTurnProjectionStore)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "USAGE_HISTORY_PROJECTION_UNAVAILABLE", "usage turn projection is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	ready, err := store.UsageHistoryProjectionReady(r.Context())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !ready {
+		api.WriteError(w, http.StatusServiceUnavailable, "USAGE_HISTORY_PROJECTION_BUILDING", "usage turn projection is being prepared", httpserver.RequestID(r.Context()))
+		return
+	}
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 100 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "limit must be between 1 and 100", httpserver.RequestID(r.Context()))
+			return
+		}
+		limit = parsed
+	}
+	var cursor *UsageHistoryCursor
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		if !strings.HasPrefix(raw, usageTurnCursorPrefix) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "usage turn cursor is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		parsed, parseErr := decodeUsageCursor(strings.TrimPrefix(raw, usageTurnCursorPrefix))
+		if parseErr != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "usage turn cursor is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		cursor = &parsed
+	}
+	usageTurns, err := store.ListUsageTurnsForContext(r.Context(), resolved, limit+1, cursor)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	usageTurns, pageCursor := paginateUsageHistoryRecords(usageTurns, limit)
+	var nextCursor *string
+	if pageCursor != nil {
+		encoded := usageTurnCursorPrefix + encodeUsageCursor(*pageCursor)
+		nextCursor = &encoded
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": usageTurns, "next_cursor": nextCursor, "view_version": "logical-turns-v1"})
+}
+
+func paginateUsageHistoryRecords(records []UserUsageTurnRecord, limit int) ([]UserUsageTurnRecord, *UsageHistoryCursor) {
+	if limit < 1 || len(records) == 0 {
+		return records, nil
+	}
+	groupCount := 0
+	lastGroupKey := ""
+	var lastIncludedHead *UsageHistoryCursor
+	for index, record := range records {
+		groupKey := "turn:" + record.LogicalTurnID
+		if record.LogicalTurnID == "" {
+			groupKey = "request:" + record.UsageRequestID.String()
+		}
+		if groupKey == lastGroupKey {
+			continue
+		}
+		lastGroupKey = groupKey
+		groupCount++
+		if groupCount == limit {
+			cursorStartedAt := record.cursorStartedAt
+			if cursorStartedAt.IsZero() {
+				cursorStartedAt = record.StartedAt
+			}
+			lastIncludedHead = &UsageHistoryCursor{StartedAt: cursorStartedAt, ID: record.UsageRequestID}
+		}
+		if groupCount > limit {
+			return records[:index], lastIncludedHead
+		}
+	}
+	return records, nil
+}
+
 func encodeUsageCursor(cursor UsageHistoryCursor) string {
 	payload := cursor.StartedAt.UTC().Format(time.RFC3339Nano) + "|" + cursor.ID.String()
 	return base64.RawURLEncoding.EncodeToString([]byte(payload))
@@ -786,21 +881,26 @@ func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool 
 }
 
 func usageDisplayStatus(usage UsageRequest) string {
-	if usage.DeliveryStatus == "USER_STOPPED" && usage.CancelStatus != "LOCAL_CONFIRMED" {
-		return "DISPLAY_STOPPED_EXECUTION_CONTINUES"
-	}
 	if usage.CancelStatus == "LOCAL_CONFIRMED" {
 		return "CANCELLED_BEFORE_DISPATCH"
+	}
+	if usage.SettlementStatus == "SETTLED" || usage.Status == "COMMITTED" {
+		return "SETTLED"
+	}
+	if usage.SettlementStatus == "RELEASED" || usage.Status == "RELEASED" {
+		return "RELEASED"
+	}
+	if usage.Status == "REVIEW" || usage.ExecutionStatus == "REVIEW" || usage.SettlementStatus == "REVIEW" {
+		return "MANUAL_REVIEW"
+	}
+	if usage.DeliveryStatus == "USER_STOPPED" {
+		return "DISPLAY_STOPPED_EXECUTION_CONTINUES"
 	}
 	switch usage.Status {
 	case "CREATED", "RESERVED", "UPSTREAM_ACTIVE":
 		return "IN_PROGRESS"
-	case "COMMITTED":
-		return "SETTLED"
 	case "SETTLEMENT_PENDING":
 		return "SETTLEMENT_PENDING"
-	case "RELEASED":
-		return "RELEASED"
 	default:
 		return "MANUAL_REVIEW"
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenmigrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -31,7 +32,7 @@ func TestProductionCredentialAuthorityPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Up(ctx, control, loaded); err != nil {
+	if err = tokenmigrations.Up(ctx, control, loaded); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, control)
