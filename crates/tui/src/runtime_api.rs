@@ -5599,6 +5599,10 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                     "decision": payload.get("decision"),
                     "remember": payload.get("remember"),
                     "auto": payload.get("auto"),
+                    // Explains an execution-policy denial to compat
+                    // clients; null for plain decisions. The raw
+                    // event stream has always carried it.
+                    "posture": payload.get("posture"),
                     // `timeout` only ever arrives from legacy journal
                     // replays: current producers resolve pending approvals
                     // through deny + `interrupted` instead.

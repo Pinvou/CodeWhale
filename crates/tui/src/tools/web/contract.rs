@@ -322,6 +322,7 @@ mod tests {
     #[test]
     fn retrieval_defaults_are_coherent_across_search_and_fetch() {
         use super::super::fetch::{DEFAULT_TIMEOUT, HARD_MAX_TIMEOUT};
+        use crate::tools::spec::ToolSpec;
 
         // Search and fetch share one default timeout so the two halves of
         // the retrieval path behave identically by default. The fetch hard
@@ -330,6 +331,22 @@ mod tests {
         assert_eq!(
             u128::from(DEFAULT_SEARCH_TIMEOUT_MS),
             DEFAULT_TIMEOUT.as_millis()
+        );
+        // Pin the absolute value too: the fetch_url schema advertises
+        // "max 300,000" in milliseconds, and only this test binds that
+        // number to the constant.
+        assert_eq!(HARD_MAX_TIMEOUT.as_millis(), 300_000);
+        // Bind the schema text itself to the constant: the description is a
+        // hand-written string (fetch_url's `json!` schema), and a drift to
+        // any other number — or dropping the property outright — must fail
+        // here, not just on the constant above.
+        let schema = crate::tools::fetch_url::FetchUrlTool.input_schema();
+        let description = schema["properties"]["timeout_ms"]["description"]
+            .as_str()
+            .expect("fetch_url schema must keep the timeout_ms description");
+        assert!(
+            description.contains("max 300,000"),
+            "fetch_url schema text must match HARD_MAX_TIMEOUT (300,000 ms); got {description}"
         );
         assert!(HARD_MAX_TIMEOUT.as_millis() >= u128::from(MAX_SEARCH_TIMEOUT_MS));
         assert!(DEFAULT_SEARCH_RESULTS <= usize::from(MAX_SEARCH_RESULTS));

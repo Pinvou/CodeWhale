@@ -30,7 +30,10 @@ pub struct ImageAnalyzeTool {
 /// client therefore bounds only the connect handshake, and this envelope
 /// (the same 30-minute budget as non-streaming model requests) is the sole
 /// total bound; a stalled connection errors out through it instead of
-/// hanging.
+/// hanging. The envelope is shared across retry attempts, not per attempt:
+/// an attempt that fails slowly consumes its share of the one budget, so
+/// only retries of fast failures (connect errors, quick 5xx) fit before
+/// the shared envelope expires.
 const VISION_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
 
 fn vision_request_envelope() -> Duration {
@@ -288,12 +291,15 @@ impl ToolSpec for ImageAnalyzeTool {
             enabled: true,
             ..Default::default()
         };
-        let _inference = match self.route_client.as_ref() {
-            Some(client) => client.acquire_remote_control_inference_permit().await,
-            None => Some(crate::client::acquire_remote_control_inference_participant().await),
-        };
-
         let response_json = tokio::time::timeout(vision_request_envelope(), async {
+            // Acquire inside the envelope: the ownership window is part of
+            // the bounded call, so a contested permit cannot park this tool
+            // (and its share of Runtime Chat availability) outside every
+            // total bound. The guard is still held for the whole request.
+            let _inference = match self.route_client.as_ref() {
+                Some(client) => client.acquire_remote_control_inference_permit().await,
+                None => Some(crate::client::acquire_remote_control_inference_participant().await),
+            };
             let response = with_retry(
                 &retry_config,
                 || {
@@ -338,11 +344,8 @@ impl ToolSpec for ImageAnalyzeTool {
             Ok(json)
         })
         .await
-        .map_err(|_| {
-            ToolError::execution_failed(format!(
-                "Vision API request timed out after {}s",
-                vision_request_envelope().as_secs()
-            ))
+        .map_err(|_| ToolError::Timeout {
+            seconds: vision_request_envelope().as_secs(),
         })??;
 
         let content = response_json
@@ -774,6 +777,15 @@ mod tests {
             .execute(json!({"image_path": "sample.png"}), &ctx)
             .await
             .expect_err("a provider that never answers must hit the envelope");
+        // The variant matters, not just the text: both this Timeout variant
+        // and the pre-fix execution_failed form render "timed out after",
+        // so a text-only assertion would not catch a classification
+        // regression (the variant drives the error taxonomy, telemetry, and
+        // the wire `ToolCallError::Timeout` shape).
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "envelope timeout must classify as ToolError::Timeout; got {err:?}"
+        );
         assert!(
             err.to_string().contains("timed out after"),
             "envelope timeout must be reported as such; got {err}"
