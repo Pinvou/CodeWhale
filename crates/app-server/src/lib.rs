@@ -1371,6 +1371,12 @@ async fn interrupt_stdio_turn(
     let Some(turn) = state.in_flight_turns.lock().await.get(thread_id).cloned() else {
         return Ok(false);
     };
+    interrupt_in_flight_turn(&turn).await
+}
+
+/// POST the interrupt for an in-flight turn. Bounded by its own 10s client
+/// timeout so a wedged runtime child cannot park the caller.
+async fn interrupt_in_flight_turn(turn: &InFlightTurn) -> std::result::Result<bool, JsonRpcError> {
     let mut request = codewhale_release::platform_http_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -1422,6 +1428,50 @@ const RUNTIME_BRIDGE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration:
 /// hard-cut long turns — the same trap the model client's stream-open path
 /// avoids).
 const RUNTIME_BRIDGE_SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many times a dropped event stream may be reconnected after the first
+/// connection. A dropped stream is not evidence the turn died — the runtime's
+/// lifecycle task keeps it running — so the bridge resumes from the last
+/// consumed seq instead of interrupting, and only falls through to the
+/// orphan-interrupt once this budget is spent.
+const MAX_STREAM_RESUMES: usize = 2;
+
+/// How one live event-stream connection ended when it did not reach
+/// `turn.completed`. Carries what a resume needs: the seq to reconnect
+/// from, and whether resuming is pointless because the writer is gone.
+struct StreamDrop {
+    /// Highest event seq this connection consumed. A resume reconnects
+    /// with `?since_seq=` this value, which the runtime treats as
+    /// exclusive, so the replay picks up exactly the events that were
+    /// still in flight.
+    last_seq: u64,
+    /// The streaming writer (the client's stdio pipe or HTTP sink)
+    /// failed. No resume can deliver events to it, so the turn must be
+    /// interrupted rather than kept running for a peer that left.
+    writer_gone: bool,
+    source: anyhow::Error,
+}
+
+impl StreamDrop {
+    /// The stream stopped under us (idle deadline, transport error, ended
+    /// before completion). Resumable.
+    fn transport(last_seq: u64, source: anyhow::Error) -> Self {
+        Self {
+            last_seq,
+            writer_gone: false,
+            source,
+        }
+    }
+
+    /// An event could not be written to the streaming writer.
+    fn writer(last_seq: u64, source: anyhow::Error) -> Self {
+        Self {
+            last_seq,
+            writer_gone: true,
+            source,
+        }
+    }
+}
 
 impl RuntimeBridge {
     async fn start(config_path: Option<&Path>) -> Result<Self> {
@@ -1486,13 +1536,16 @@ impl RuntimeBridge {
                 ));
             }
 
-            match self
-                .client
-                .get(format!("{}/health", self.base_url))
-                .send()
-                .await
+            match tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                self.client.get(format!("{}/health", self.base_url)).send(),
+            )
+            .await
             {
-                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(Ok(response)) if response.status().is_success() => return Ok(()),
+                // Covers elapsed timeouts (`Err`) and late non-success
+                // responses alike: a child that accepts /health but never
+                // writes headers must not hang this probe forever.
                 _ if Instant::now() >= deadline => {
                     bail!(
                         "timed out waiting for runtime API bridge at {}/health",
@@ -1624,36 +1677,87 @@ impl RuntimeBridge {
         )
         .await?;
 
+        // Everything the interrupt needs is in scope on every surface, so
+        // build it unconditionally. The orphan rescue below must not be
+        // limited to the one surface that also exposes a manual
+        // `thread/interrupt`: HTTP `/thread` and `/prompt` turns have no
+        // client-reachable interrupt at all, so for them the rescue is the
+        // only thing between a dropped stream and a thread that rejects
+        // every later message with "already has an active turn".
+        let live_turn = InFlightTurn {
+            base_url: self.base_url.clone(),
+            auth_token: self.auth_token.clone(),
+            runtime_thread_id: thread_id.to_string(),
+            turn_id: turn_id.clone(),
+        };
         // Publish the turn only for the streaming window, and take it back
         // before any `?` below: a turn that has already finished must never
-        // look cancellable.
+        // look cancellable. Registration stays stdio-only because only that
+        // surface can ask for a cancel by thread id.
         if let Some((registry, key)) = registration.as_ref() {
-            registry.lock().await.insert(
-                key.clone(),
-                InFlightTurn {
-                    base_url: self.base_url.clone(),
-                    auth_token: self.auth_token.clone(),
-                    runtime_thread_id: thread_id.to_string(),
-                    turn_id: turn_id.clone(),
-                },
-            );
+            registry.lock().await.insert(key.clone(), live_turn.clone());
         }
 
         let since_seq = self.last_seq_by_thread.get(thread_id).copied().unwrap_or(0);
-        let stream_result = self
-            .stream_turn_events(
-                thread_id,
-                &turn_id,
-                &response_id,
-                writer,
-                since_seq,
-                transcript.as_deref_mut(),
-            )
-            .await;
+        // One live connection plus bounded resumes. A dropped stream is not
+        // evidence the turn died — the runtime's lifecycle task keeps it
+        // running — so reconnect from the last consumed seq and keep
+        // streaming. Only a writer failure (the peer is gone; no resume
+        // can ever deliver an event to it) or an exhausted resume budget
+        // falls through to the interrupt below.
+        let mut resume_from = since_seq;
+        let mut resumes_left = MAX_STREAM_RESUMES;
+        let stream_result = loop {
+            match self
+                .stream_turn_events(
+                    thread_id,
+                    &turn_id,
+                    &response_id,
+                    writer,
+                    resume_from,
+                    transcript.as_deref_mut(),
+                )
+                .await
+            {
+                Ok(result) => break Ok(result),
+                Err(drop) => {
+                    if drop.writer_gone || resumes_left == 0 {
+                        break Err(drop.source);
+                    }
+                    resumes_left -= 1;
+                    // Events the dropped connection consumed are not
+                    // replayed again: `since_seq` is exclusive, so resuming
+                    // from the last seen seq only replays what never
+                    // arrived. A repeated event can only come from a
+                    // runtime that reuses seqs, which the API contract
+                    // disallows.
+                    resume_from = drop.last_seq;
+                    tracing::warn!(
+                        "runtime event stream dropped mid-turn; resuming \
+                         from seq {resume_from} ({resumes_left} resume(s) left)"
+                    );
+                }
+            }
+        };
 
         if let Some((registry, key)) = registration.as_ref() {
             registry.lock().await.remove(key);
         }
+
+        // The stream died mid-turn past the resume budget (or the writer is
+        // gone). The runtime's lifecycle task keeps the turn running, so
+        // leave a best-effort interrupt behind: without it a retried message
+        // on the same thread is rejected with "already has an active turn"
+        // until the orphan completes on its own.
+        let stream_result = match stream_result {
+            Ok(result) => Ok(result),
+            Err(stream_err) => {
+                if let Err(interrupt_err) = interrupt_in_flight_turn(&live_turn).await {
+                    tracing::warn!("best-effort interrupt after stream failure: {interrupt_err:?}");
+                }
+                Err(stream_err)
+            }
+        };
 
         let _ = emit_stdio_event(
             writer,
@@ -1710,7 +1814,8 @@ impl RuntimeBridge {
         writer: &mut W,
         since_seq: u64,
         mut transcript: Option<&mut TurnTranscript>,
-    ) -> Result<(u64, TurnTerminalStatus, Option<String>)> {
+    ) -> Result<(u64, TurnTerminalStatus, Option<String>), StreamDrop> {
+        let mut last_seq = since_seq;
         // A runtime child that accepts the connection but never writes
         // response headers would otherwise hold the bridge lock forever —
         // the same accept-and-stall shape the chunk idle bound below covers
@@ -1726,11 +1831,24 @@ impl RuntimeBridge {
             .send(),
         )
         .await
-        .context("runtime event stream stalled before the first byte")??
-        .error_for_status()?;
+        .map_err(|elapsed| {
+            StreamDrop::transport(
+                last_seq,
+                anyhow!("runtime event stream stalled before the first byte: {elapsed}"),
+            )
+        })?
+        .map_err(|err| {
+            StreamDrop::transport(
+                last_seq,
+                anyhow!("runtime event stream request failed: {err}"),
+            )
+        })?
+        .error_for_status()
+        .map_err(|err| {
+            StreamDrop::transport(last_seq, anyhow!("runtime event stream rejected: {err}"))
+        })?;
 
         let mut buffer = Vec::new();
-        let mut last_seq = since_seq;
 
         // The event stream only ever pauses for the runtime's 15s
         // keepalives; anything longer means the child wedged mid-stream.
@@ -1739,22 +1857,34 @@ impl RuntimeBridge {
         loop {
             let chunk = tokio::time::timeout(RUNTIME_BRIDGE_SSE_IDLE_TIMEOUT, response.chunk())
                 .await
-                .context("runtime event stream stalled past the idle deadline")??;
+                .map_err(|elapsed| {
+                    StreamDrop::transport(
+                        last_seq,
+                        anyhow!("runtime event stream stalled past the idle deadline: {elapsed}"),
+                    )
+                })?
+                .map_err(|err| {
+                    StreamDrop::transport(last_seq, anyhow!("event stream read failed: {err}"))
+                })?;
             let Some(chunk) = chunk else {
                 break;
             };
             buffer.extend_from_slice(&chunk);
             if buffer.len() > MAX_SSE_FRAME_BYTES {
-                bail!(
-                    "runtime SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes without a frame delimiter"
-                );
+                return Err(StreamDrop::transport(
+                    last_seq,
+                    anyhow!(
+                        "runtime SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes without a frame delimiter"
+                    ),
+                ));
             }
             while let Some(frame_bytes) = take_sse_frame(&mut buffer) {
                 let Some((event_name, frame_data)) = parse_sse_frame(&frame_bytes) else {
                     continue;
                 };
                 let envelope: Value = serde_json::from_str(&frame_data)
-                    .with_context(|| format!("invalid SSE json for {event_name}: {frame_data}"))?;
+                    .with_context(|| format!("invalid SSE json for {event_name}: {frame_data}"))
+                    .map_err(|source| StreamDrop::transport(last_seq, source))?;
                 if let Some(seq) = envelope.get("seq").and_then(Value::as_u64) {
                     last_seq = last_seq.max(seq);
                 }
@@ -1780,7 +1910,13 @@ impl RuntimeBridge {
                                     "delta": delta,
                                 }),
                             )
-                            .await?;
+                            .await
+                            .map_err(|source| {
+                                StreamDrop::writer(
+                                    last_seq,
+                                    source.context("streaming writer failed"),
+                                )
+                            })?;
                             if let Some(transcript) = transcript.as_deref_mut() {
                                 transcript.text.push_str(delta);
                                 transcript.events.push(EventFrame::ResponseDelta {
@@ -1804,7 +1940,10 @@ impl RuntimeBridge {
             }
         }
 
-        bail!("runtime event stream ended before turn.completed")
+        Err(StreamDrop::transport(
+            last_seq,
+            anyhow!("runtime event stream ended before turn.completed"),
+        ))
     }
 
     #[cfg(test)]
@@ -3442,6 +3581,315 @@ mod tests {
         .await
         .expect("interrupt dispatch");
         assert_eq!(response.result["interrupted"], json!(false));
+    }
+
+    /// A mock runtime that serves event-stream connections from a scripted
+    /// list: connection N gets body N. A body that ends without
+    /// `turn.completed` is a mid-turn drop. Counts interrupts so tests can
+    /// assert the resume path never reached for one.
+    #[derive(Clone)]
+    struct ScriptedDropState {
+        interrupts: Arc<std::sync::atomic::AtomicUsize>,
+        connections: Arc<std::sync::atomic::AtomicUsize>,
+        served: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    async fn spawn_scripted_drop_runtime(
+        bodies: Vec<String>,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let interrupts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = Arc::new(std::sync::Mutex::new(bodies));
+
+        async fn create_turn(AxumPath(_thread_id): AxumPath<String>) -> Json<Value> {
+            Json(json!({ "turn": { "id": "turn_drop" } }))
+        }
+        async fn interrupt(
+            State(state): State<ScriptedDropState>,
+            AxumPath((_thread_id, _turn_id)): AxumPath<(String, String)>,
+        ) -> Json<Value> {
+            state
+                .interrupts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(json!({ "ok": true }))
+        }
+        async fn thread_events(
+            State(state): State<ScriptedDropState>,
+            AxumPath(_thread_id): AxumPath<String>,
+        ) -> ([(header::HeaderName, &'static str); 1], String) {
+            state
+                .connections
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body = {
+                let mut script = state.served.lock().expect("script");
+                if script.len() > 1 {
+                    script.remove(0)
+                } else {
+                    script[0].clone()
+                }
+            };
+            ([(header::CONTENT_TYPE, "text/event-stream")], body)
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let state = ScriptedDropState {
+            interrupts: Arc::clone(&interrupts),
+            connections: Arc::clone(&connections),
+            served: Arc::clone(&served),
+        };
+        let app = Router::new()
+            .route("/v1/threads/{thread_id}/turns", post(create_turn))
+            .route(
+                "/v1/threads/{thread_id}/turns/{turn_id}/interrupt",
+                post(interrupt),
+            )
+            .route("/v1/threads/{thread_id}/events", get(thread_events))
+            .with_state(state);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test runtime");
+        });
+        (format!("http://{addr}"), interrupts, connections, server)
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_drop_resumes_and_no_interrupt_is_issued() {
+        // Connection 1 delivers the first delta then ends mid-turn; the
+        // bridge must reconnect from the last consumed seq and finish the
+        // turn, never reaching for the interrupt.
+        let bodies = vec![
+            [sse_frame(
+                "item.delta",
+                json!({
+                    "seq": 1,
+                    "turn_id": "turn_drop",
+                    "payload": { "kind": "agent_message", "delta": "part-one " }
+                }),
+            )]
+            .concat(),
+            [
+                sse_frame(
+                    "item.delta",
+                    json!({
+                        "seq": 2,
+                        "turn_id": "turn_drop",
+                        "payload": { "kind": "agent_message", "delta": "part-two" }
+                    }),
+                ),
+                sse_frame(
+                    "turn.completed",
+                    json!({
+                        "seq": 3,
+                        "turn_id": "turn_drop",
+                        "payload": { "turn": { "status": "completed" } }
+                    }),
+                ),
+            ]
+            .concat(),
+        ];
+        let (base_url, interrupts, connections, server) = spawn_scripted_drop_runtime(bodies).await;
+        let mut bridge = RuntimeBridge::from_base_url_for_test(base_url);
+        let (mut reader, mut writer) = tokio::io::duplex(4096);
+
+        let result = bridge
+            .message_thread("thr_drop", "go", &mut writer, None, None)
+            .await
+            .expect("the resumed turn completes");
+        drop(writer);
+
+        let mut stdout = Vec::new();
+        reader.read_to_end(&mut stdout).await.expect("read output");
+        server.abort();
+        let _ = server.await;
+
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("accepted")
+        );
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the bridge must have reconnected exactly once"
+        );
+        assert_eq!(
+            interrupts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a resumed stream must never reach for the interrupt"
+        );
+        assert_eq!(bridge.last_seq_by_thread.get("thr_drop"), Some(&3));
+
+        let deltas: Vec<String> = String::from_utf8(stdout)
+            .expect("utf8")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("json line"))
+            .filter(|line| line.get("type").and_then(Value::as_str) == Some("response_delta"))
+            .map(|line| line["delta"].as_str().expect("delta").to_owned())
+            .collect::<Vec<String>>();
+        assert_eq!(
+            deltas,
+            ["part-one ", "part-two"],
+            "no delta may be replayed from the dropped connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_resumes_interrupt_the_orphaned_turn() {
+        // Every connection drops mid-turn, so the bridge exhausts its resume
+        // budget and must fall through to the best-effort interrupt instead
+        // of looping forever — a wedged child must not wedge the app-server.
+        let drop_once = || {
+            [sse_frame(
+                "item.delta",
+                json!({
+                    "seq": 1,
+                    "turn_id": "turn_drop",
+                    "payload": { "kind": "agent_message", "delta": "half" }
+                }),
+            )]
+            .concat()
+        };
+        let bodies = vec![drop_once(), drop_once(), drop_once()];
+        let (base_url, interrupts, connections, server) = spawn_scripted_drop_runtime(bodies).await;
+        let mut bridge = RuntimeBridge::from_base_url_for_test(base_url);
+        let (_reader, mut writer) = tokio::io::duplex(4096);
+
+        let result = bridge
+            .message_thread("thr_drop", "go", &mut writer, None, None)
+            .await;
+        drop(writer);
+        server.abort();
+        let _ = server.await;
+
+        assert!(result.is_err(), "the turn must end as an error, not hang");
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            1 + 2,
+            "first connection plus every resume attempt"
+        );
+        assert_eq!(
+            interrupts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the orphaned turn must be interrupted exactly once"
+        );
+    }
+
+    /// Succeeds for exactly one `emit_stdio_event` (write, write, flush),
+    /// then fails every later write and flush like a closed pipe.
+    #[derive(Default)]
+    struct WriterThatDiesAfterTheFirstEvent {
+        flushed: bool,
+    }
+
+    impl tokio::io::AsyncWrite for WriterThatDiesAfterTheFirstEvent {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::result::Result<usize, std::io::Error>> {
+            if self.flushed {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "peer closed the stream",
+                )))
+            } else {
+                std::task::Poll::Ready(Ok(buf.len()))
+            }
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
+            if self.flushed {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "peer closed the stream",
+                )))
+            } else {
+                self.flushed = true;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl std::marker::Unpin for WriterThatDiesAfterTheFirstEvent {}
+
+    #[tokio::test]
+    async fn a_dead_writer_interrupts_without_resuming() {
+        // The peer of the streaming writer is gone: no resume can ever
+        // deliver an event to it, so the bridge must skip the resume
+        // attempts entirely and interrupt the orphan immediately.
+        let drop_delta = || {
+            [sse_frame(
+                "item.delta",
+                json!({
+                    "seq": 1,
+                    "turn_id": "turn_drop",
+                    "payload": { "kind": "agent_message", "delta": "never-delivered" }
+                }),
+            )]
+            .concat()
+        };
+        // A later, completing body the resume must never pull from: if the
+        // resume path did run, the turn would complete instead of erroring.
+        let bodies = vec![
+            drop_delta(),
+            [sse_frame(
+                "turn.completed",
+                json!({
+                    "seq": 2,
+                    "turn_id": "turn_drop",
+                    "payload": { "turn": { "status": "completed" } }
+                }),
+            )]
+            .concat(),
+        ];
+        let (base_url, interrupts, connections, server) = spawn_scripted_drop_runtime(bodies).await;
+        let mut bridge = RuntimeBridge::from_base_url_for_test(base_url);
+
+        // A writer that is alive for `response_start` and dead before the
+        // first delta: the stream then ends with the writer gone, which
+        // must skip the resume and interrupt directly. (A writer dead from
+        // the very start trips the earlier `response_start` emit instead,
+        // which never reaches the stream at all.)
+        let mut dead_writer = WriterThatDiesAfterTheFirstEvent::default();
+
+        let result = bridge
+            .message_thread("thr_drop", "go", &mut dead_writer, None, None)
+            .await;
+        server.abort();
+        let _ = server.await;
+
+        assert!(
+            result.is_err(),
+            "a dead writer must end the turn as an error"
+        );
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "no resume may be attempted for a dead writer"
+        );
+        assert_eq!(
+            interrupts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the orphan must be interrupted without resuming"
+        );
     }
 
     #[tokio::test]

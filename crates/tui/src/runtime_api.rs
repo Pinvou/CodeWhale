@@ -855,9 +855,13 @@ pub async fn run_http_server(
         RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
         plugin_discovery.registry_for_workspace(&workspace),
     )?;
-    let task_manager =
-        TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
-            .await?;
+    let task_manager = TaskManager::start_with_runtime_manager(
+        task_cfg,
+        config.clone(),
+        runtime_threads.clone(),
+        true,
+    )
+    .await?;
     let automations = Arc::new(Mutex::new(AutomationManager::default_location()?));
     runtime_threads.attach_automation_manager(automations.clone());
     let scheduler_cancel = CancellationToken::new();
@@ -5599,6 +5603,10 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                     "decision": payload.get("decision"),
                     "remember": payload.get("remember"),
                     "auto": payload.get("auto"),
+                    // Explains an execution-policy denial to compat
+                    // clients; null for plain decisions. The raw
+                    // event stream has always carried it.
+                    "posture": payload.get("posture"),
                     // `timeout` only ever arrives from legacy journal
                     // replays: current producers resolve pending approvals
                     // through deny + `interrupted` instead.

@@ -43,7 +43,18 @@ use uuid::Uuid;
 /// Per-tool dispatch budget for the headless runtime. 30 minutes: tools
 /// legitimately run long (builds, test suites, MCP-backed calls), and this
 /// wrapper is a runaway backstop, not an expected duration — the previous
-/// 300s value cut off healthy in-flight tool work.
+/// 300s value cut off healthy in-flight tool work. Part of the 1800s family
+/// (TUI client envelope, vision request envelope, model stream cap
+/// `STREAM_MAX_DURATION_SECS`, dynamic-tool result wait, sub-agent tool
+/// timeout, MCP execute timeout, the mirrors in app-server and the MCP stdio
+/// proxy, the background-task wall clock `TaskExecutionLimits::wall_time`,
+/// the sub-agent `default_wall_time_secs`, and the fleet `builder` role
+/// preset) that comments keep in sync; this comment anchors the family
+/// roster — there is no shared constant across the crates yet.
+///
+/// `STREAM_MAX_DURATION_SECS` is the family's only configurable member: it
+/// is a default that user config may override within its own clamp, so a
+/// family-wide bump changes its default rather than its ceiling.
 fn tool_dispatch_timeout() -> Duration {
     if cfg!(test) {
         Duration::from_millis(50)

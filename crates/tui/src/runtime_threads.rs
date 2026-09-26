@@ -550,7 +550,9 @@ const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
 // ends on turn interrupt or runtime shutdown instead (mirrors the engine-side
 // approval wait, which excludes approval time from the turn wall clock).
 // Dynamic (client-executed) tools legitimately run long, so their result wait
-// is generous; it still ends on turn interrupt.
+// is generous (part of the 1800s family that comments keep in sync; the
+// roster is anchored at the core dispatch backstop's comment); it
+// still ends on turn interrupt.
 const DYNAMIC_TOOL_RESULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[cfg(test)]
@@ -3174,6 +3176,22 @@ pub enum ExternalApprovalDecision {
     Deny { remember: bool },
 }
 
+/// Settle the delivery race on the approval wait's interrupt exit.
+///
+/// `deliver_external_approval` removes the entry and then sends, so a
+/// decision can land in the oneshot after the wait already chose to stop.
+/// That decision was made by the user and must resolve the approval as one.
+/// Closing first makes this a linearization point: a send that lands before
+/// the close is still readable here, and one that lands after it fails and
+/// is reported to the client as not delivered, so a decision is never
+/// accepted and then discarded.
+fn rescue_decision_after_interrupt(
+    rx: &mut oneshot::Receiver<ExternalApprovalDecision>,
+) -> Option<ExternalApprovalDecision> {
+    rx.close();
+    rx.try_recv().ok()
+}
+
 struct PendingApprovalEntry {
     thread_id: String,
     request: PendingApprovalRequest,
@@ -3530,6 +3548,21 @@ impl RuntimeThreadManager {
         self.pending_approvals.lock().remove(approval_id);
     }
 
+    /// Remove `approval_id` only if its receiver is closed, i.e. the entry
+    /// belongs to a waiter that has stopped listening. Approval ids come
+    /// from the model's tool-call ids, which some providers reuse across
+    /// threads, so a waiter must never remove a live entry registered by
+    /// another waiter under the same id.
+    fn cancel_closed_pending_approval(&self, approval_id: &str) {
+        let mut map = self.pending_approvals.lock();
+        if map
+            .get(approval_id)
+            .is_some_and(|entry| entry.sender.is_closed())
+        {
+            map.remove(approval_id);
+        }
+    }
+
     fn register_pending_user_input(&self, thread_id: &str, request: PendingUserInputRequest) {
         let (settlement_tx, _settlement_rx) = watch::channel(0);
         self.pending_user_inputs.lock().insert(
@@ -3856,11 +3889,22 @@ impl RuntimeThreadManager {
         approval_id: &str,
         decision: ExternalApprovalDecision,
     ) -> bool {
-        let entry = self.pending_approvals.lock().remove(approval_id);
-        match entry {
-            Some(entry) => entry.sender.send(decision).is_ok(),
-            None => false,
-        }
+        let entry = {
+            let mut map = self.pending_approvals.lock();
+            // A closed receiver means the waiter is gone without removing its
+            // own entry — its monitor died. Leave the entry for the failure
+            // settlement, which publishes the resolution; taking it here
+            // would fail the send and leave the approval with no
+            // `approval.decided` at all.
+            if map
+                .get(approval_id)
+                .is_none_or(|entry| entry.sender.is_closed())
+            {
+                return false;
+            }
+            map.remove(approval_id)
+        };
+        entry.is_some_and(|entry| entry.sender.send(decision).is_ok())
     }
 
     pub async fn deliver_dynamic_tool_result(
@@ -6826,6 +6870,53 @@ impl RuntimeThreadManager {
             true
         };
 
+        // The dead monitor owned this turn's pending approval wait, so no
+        // code path is left to resolve it. Settle this turn's approvals the
+        // same way the interrupt exit does (deny + interrupted) so external
+        // clients clear the pending UI and the pending map cannot leak the
+        // entry; the evicted engine below is cancelled, which resolves the
+        // engine side of the wait.
+        let stranded_approvals: Vec<(String, PendingApprovalEntry)> = {
+            // Collect and remove under one lock hold. By the time this runs
+            // the monitor has unwound and its receivers are closed, so
+            // `deliver_external_approval` leaves these entries alone and
+            // every one of them is published here exactly once.
+            let mut map = self.pending_approvals.lock();
+            map.iter()
+                .filter(|(_, entry)| {
+                    entry.thread_id == thread_id && entry.request.turn_id == turn_id
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|id| map.remove(&id).map(|entry| (id, entry)))
+                .collect()
+        };
+        for (approval_id, entry) in stranded_approvals {
+            // The receiver died with the monitor, so the send cannot
+            // deliver; the removal and the event below are the contract.
+            let _ = entry
+                .sender
+                .send(ExternalApprovalDecision::Deny { remember: false });
+            if let Err(err) = self
+                .emit_event(
+                    thread_id,
+                    Some(turn_id),
+                    None,
+                    "approval.decided",
+                    json!({
+                        "approval_id": approval_id,
+                        "decision": "deny",
+                        "remember": false,
+                        "interrupted": true,
+                    }),
+                )
+                .await
+            {
+                tracing::error!("Failed to emit approval resolution after monitor failure: {err}");
+            }
+        }
+
         // A terminal record is the externally visible lifecycle boundary.
         // Keep snapshots outside that boundary until its terminal receipt and
         // active-claim cleanup are also ordered. The dedupe scan may yield to
@@ -9312,14 +9403,6 @@ impl RuntimeThreadManager {
                         tokio::select! {
                             biased;
                             _ = self.cancel_token.cancelled() => {
-                                // The biased order favors the cancel token,
-                                // but a decision already queued in the
-                                // oneshot is a choice the user actually
-                                // made — it must resolve the approval, not
-                                // be discarded as an interrupt.
-                                if let Ok(decision) = rx.try_recv() {
-                                    break ApprovalWakeup::Decision(Ok(decision));
-                                }
                                 break ApprovalWakeup::Interrupted;
                             }
                             decision = &mut rx => {
@@ -9335,17 +9418,25 @@ impl RuntimeThreadManager {
                                         .await
                                         .unwrap_or(false)
                                 {
-                                    // Same race as the cancel arm: honor a
-                                    // decision that arrived before the
-                                    // interrupt was observed.
-                                    if let Ok(decision) = rx.try_recv() {
-                                        break ApprovalWakeup::Decision(Ok(decision));
-                                    }
                                     break ApprovalWakeup::Interrupted;
                                 }
                             }
                         }
                     };
+                    let wakeup = match wakeup {
+                        ApprovalWakeup::Interrupted => {
+                            match rescue_decision_after_interrupt(&mut rx) {
+                                Some(decision) => ApprovalWakeup::Decision(Ok(decision)),
+                                None => ApprovalWakeup::Interrupted,
+                            }
+                        }
+                        other => other,
+                    };
+                    // The receiver is closed on every non-decision exit (by
+                    // the rescue above, or by the sender dropping), so this
+                    // removes our entry if a delivery has not already taken
+                    // it, and never a live entry that reuses our id.
+                    self.cancel_closed_pending_approval(&id);
                     match wakeup {
                         ApprovalWakeup::Decision(Ok(ExternalApprovalDecision::Allow {
                             remember,
@@ -9386,15 +9477,13 @@ impl RuntimeThreadManager {
                             .ok();
                             let _ = engine.deny_tool_call(id).await;
                         }
-                        ApprovalWakeup::Decision(Err(_recv_err)) => {
-                            self.cancel_pending_approval(&id);
-                            let _ = engine.deny_tool_call(id).await;
-                        }
-                        ApprovalWakeup::Interrupted => {
-                            self.cancel_pending_approval(&id);
-                            // Emit approval.decided so external clients can
-                            // clear the pending approval UI; the denial also
-                            // unblocks the engine if cancellation raced it.
+                        // Interrupt, runtime shutdown, engine exit, or the
+                        // sender dropping unsent (another registration
+                        // reused this approval id and replaced our entry):
+                        // a forced resolution, published as one so clients
+                        // clear the pending UI. The deny also unblocks the
+                        // engine if cancellation raced it.
+                        ApprovalWakeup::Decision(Err(_)) | ApprovalWakeup::Interrupted => {
                             self.emit_event(
                                 &thread_id,
                                 Some(&turn_id),

@@ -17,7 +17,10 @@ use crate::tools::spec::{ToolContext, ToolError};
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 // 300s hard max: the previous 60s cap made any page needing more than
 // ~1.3 Mbps of effective throughput unfetchable, and this bound covers the
-// whole request including body streaming (10 MB bodies are allowed).
+// whole HTTP request including body streaming (10 MB bodies are allowed).
+// The initial SSRF pre-flight DNS lookup runs before the envelope starts
+// and is bounded separately (10s in the guard), so worst-case wall clock
+// is the envelope plus one bounded lookup.
 pub(crate) const HARD_MAX_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const DEFAULT_MAX_BYTES: usize = 1_000_000;
 pub(crate) const HARD_MAX_BYTES: usize = 10 * 1024 * 1024;

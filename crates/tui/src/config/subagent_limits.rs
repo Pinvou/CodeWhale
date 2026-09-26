@@ -43,7 +43,11 @@ pub const MAX_SUBAGENT_API_TIMEOUT_SECS: u64 = 3600;
 /// legitimately outlasts 5 minutes, and the old default killed healthy
 /// in-flight tools mid-run. The child's own wall-time budget remains the
 /// spend backstop, and the heartbeat floor (tool_timeout + 30s) follows this
-/// constant automatically.
+/// constant automatically. Part of the 1800s family that comments keep in
+/// sync (roster anchored at the core dispatch backstop's comment);
+/// "single source of truth" applies within the sub-agent family.
+/// In a background task the task `wall_time` backstop bounds the whole run
+/// and preempts this timeout when they coincide — documented trade-off.
 pub const DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS: u64 = 1800;
 /// Default wall-clock interval without manager-visible sub-agent progress
 /// before a running child can be auto-cancelled to release its slot (#2614).

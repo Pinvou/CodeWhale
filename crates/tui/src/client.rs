@@ -354,7 +354,7 @@ pub(crate) const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(
 static TEST_NON_STREAMING_ENVELOPE_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-fn non_streaming_request_envelope() -> Duration {
+pub(crate) fn non_streaming_request_envelope() -> Duration {
     #[cfg(test)]
     {
         let ms = TEST_NON_STREAMING_ENVELOPE_MS.load(std::sync::atomic::Ordering::SeqCst);
@@ -3022,6 +3022,11 @@ impl DeepSeekClient {
                     crate::retry_status::failed(last.to_string());
                     self.mark_request_failure("non-streaming request envelope exceeded")
                         .await;
+                    // A provider that just wedged past the whole envelope is
+                    // exactly the case where the /models health probe
+                    // matters; without it, connection health stays degraded
+                    // until the next real request succeeds.
+                    self.maybe_probe_recovery().await;
                     return Err(anyhow::Error::new(last));
                 }
             }
@@ -4558,6 +4563,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn envelope_exceed_probes_recovery_once_degraded() {
+        // A provider that wedges past the whole envelope must not leave
+        // connection health stale: once the failure threshold has degraded
+        // the connection, the envelope exit probes /models so health
+        // recovers without waiting for the next real request. One exceed
+        // alone stays under the threshold and must not probe (the
+        // Healthy-state short-circuit), so this drives exactly two.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(2000);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "model": "deepseek-v4-pro",
+                        "choices": [
+                            { "message": { "role": "assistant", "content": "late" } }
+                        ]
+                    }))
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client(&server.uri(), server.uri());
+        let make_request = || MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "envelope".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+
+        for _ in 0..2 {
+            let err = client
+                .create_message(make_request())
+                .await
+                .expect_err("a provider that never answers must hit the envelope");
+            assert!(
+                err.to_string().to_lowercase().contains("timed out"),
+                "envelope timeout must be reported as such; got {err:#}"
+            );
+        }
+
+        // verify() enforces the expectations above: exactly two stalled
+        // requests and exactly one /models recovery probe.
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn stream_open_retry_path_sets_no_total_deadline() {
         // The injected budget is process-global; serialize against other
         // tests (which may issue non-streaming requests with their own
@@ -4574,7 +4649,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("data: [DONE]\n\n")
-                    .set_delay(Duration::from_millis(2500)),
+                    .set_delay(Duration::from_millis(4000)),
             )
             .mount(&server)
             .await;
@@ -4606,19 +4681,19 @@ mod tests {
         // A caller that pins its own, larger total (`list_models` pins 30s)
         // must keep it: `.timeout()` on the builder is a pure overwrite, so
         // an unconditional envelope would silently replace the pinned
-        // budget with the injected 2s and fail this 2.5s-late response.
+        // budget with the injected 2s and fail this 4s-late response.
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("{}")
-                    .set_delay(Duration::from_millis(2500)),
+                    .set_delay(Duration::from_millis(4000)),
             )
             .mount(&server)
             .await;
 
         let client = deepseek_request_boundary_client(&server.uri(), server.uri());
         let response = client
-            .send_with_retry_total(Duration::from_secs(5), || {
+            .send_with_retry_total(Duration::from_secs(12), || {
                 client.http_client.get(format!("{}/models", server.uri()))
             })
             .await
@@ -8325,6 +8400,11 @@ mod tests {
 
     #[tokio::test]
     async fn deepseek_anthropic_translate_uses_messages_endpoint() {
+        // The Anthropic dialect resolves its budget through the
+        // process-global `non_streaming_request_envelope()`, so this must
+        // hold the same lock the injecting tests take; otherwise a parallel
+        // `NonStreamingEnvelopeGuard` can cut this request off mid-flight.
+        let _env_lock = crate::test_support::lock_test_env();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -8452,6 +8532,9 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_anthropic_request_uses_messages_endpoint() {
+        // Same process-global envelope hazard as the DeepSeek sibling above,
+        // and its neighbour test injects a 1s budget.
+        let _env_lock = crate::test_support::lock_test_env();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/anthropic/v1/messages"))
@@ -8507,6 +8590,67 @@ mod tests {
             Some("disabled")
         );
         assert!(body.get("output_config").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_non_streaming_request_carries_the_envelope() {
+        // The Anthropic dialect sends one direct request with no retry
+        // loop; its total budget must match every other non-streaming
+        // completion and must actually cut off a stalled provider.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(1000);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "id": "msg_slow",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "late"}],
+                        "model": "MiniMax-M3",
+                        "stop_reason": "end_turn",
+                        "stop_sequence": null,
+                        "usage": {"input_tokens": 1, "output_tokens": 1}
+                    }))
+                    .set_delay(Duration::from_millis(4000)),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = minimax_anthropic_client_with_base_url(
+            crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string(),
+        );
+        client.test_messages_transport_base_url = Some(format!("{}/anthropic", server.uri()));
+        let err = client
+            .create_message(MessageRequest {
+                model: "MiniMax-M3".to_string(),
+                messages: vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "hello".to_string(),
+                        cache_control: None,
+                    }],
+                }],
+                max_tokens: 32,
+                system: None,
+                tools: None,
+                tool_choice: None,
+                metadata: None,
+                thinking: None,
+                reasoning_effort: Some("off".to_string()),
+                stream: Some(false),
+                temperature: None,
+                top_p: None,
+            })
+            .await
+            .expect_err("a provider that answers past the envelope must be cut off");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("timed out"),
+            "the cutoff must surface as a timeout, not a generic failure: {rendered}"
+        );
     }
 
     #[test]

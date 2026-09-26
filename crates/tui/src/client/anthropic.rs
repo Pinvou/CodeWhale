@@ -222,7 +222,7 @@ impl DeepSeekClient {
             .http_client
             .post(&url)
             .header("Accept", "text/event-stream")
-            .timeout(crate::client::NON_STREAMING_REQUEST_ENVELOPE)
+            .timeout(crate::client::non_streaming_request_envelope())
             .json(body)
             .send()
             .await
