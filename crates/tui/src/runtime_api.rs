@@ -855,9 +855,13 @@ pub async fn run_http_server(
         RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
         plugin_discovery.registry_for_workspace(&workspace),
     )?;
-    let task_manager =
-        TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
-            .await?;
+    let task_manager = TaskManager::start_with_runtime_manager(
+        task_cfg,
+        config.clone(),
+        runtime_threads.clone(),
+        true,
+    )
+    .await?;
     let automations = Arc::new(Mutex::new(AutomationManager::default_location()?));
     runtime_threads.attach_automation_manager(automations.clone());
     let scheduler_cancel = CancellationToken::new();
