@@ -597,10 +597,15 @@ long in-flight tool is cancelled before its own timeout can fire.
 Inside a durable task these budgets are additionally bounded by the task's
 `wall_time` (default 30 minutes, measured from task start): the wall clock
 pauses while a pending approval or user-input prompt waits on a human (with a
-24-hour fail-safe cap per prompt), but it otherwise wins over an in-flight
-sub-agent, so a maximal 1800-second tool started late in a task can still be
-interrupted by the task deadline. Raising `execute_timeout` or the tool
-budget above the remaining task wall has no effect inside a task.
+24-hour fail-safe cap that bounds each open window and the windows summed
+across the whole task), but it otherwise wins over an in-flight sub-agent, so
+a maximal 1800-second tool started late in a task can still be interrupted by
+the task deadline. Raising `execute_timeout` or the tool budget above the
+remaining task wall has no effect inside a task. The pause applies only where
+a host can actually deliver the decision: the runtime API serves task threads
+with HTTP `decide_approval`/`submit_user_input`, so its tasks pause; the
+TUI's private task runtime has no such channel, so there a prompt is not
+treated as a human-paced wait at all and the wall clock keeps running.
 
 ## Lifecycle
 
