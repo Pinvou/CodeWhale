@@ -24,7 +24,7 @@ export const desktopBridgeApi = {
     'attachmentAbort', 'attachmentBegin', 'attachmentChunk',
     'cancelRemoteTask', 'capabilitiesSnapshot', 'clientLog', 'controlledAuthorizeWorkspace', 'controlledDisconnectNow',
     'controlledListWorkspaces', 'controlledRefresh', 'controlledStart', 'controlledStatus', 'controlledStop',
-    'controlledSync', 'controllerApplyCapabilitySnapshot', 'controllerCapabilityRequest', 'controllerCapabilitySend',
+    'controlledSync', 'controlledTaskSend', 'controllerApplyCapabilitySnapshot', 'controllerCapabilityRequest', 'controllerCapabilitySend',
     'controllerConnect', 'controllerCreateHistory', 'controllerDisconnect', 'controllerListHistory', 'controllerStatus',
     'controllerSessionClose', 'controllerSessionOpen', 'controllerSessionState', 'controllerTaskCancelIntent',
     'controllerTaskCancelSend', 'controllerTaskIntent', 'controllerTaskSend', 'endpointProfiles',

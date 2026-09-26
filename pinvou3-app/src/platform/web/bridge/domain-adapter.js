@@ -36,11 +36,15 @@
     // 字段集必须与桌面 STATE_SLICE_FIELDS 完全一致（见 bridge_state_domains）。
     desktopRemoteControl: [
       "controlledDevice",
+      "controlledSession",
       "controllerConnection",
       "remoteCapabilities",
       "remoteModels",
       "remoteHistories",
       "tasks",
+      "transcript",
+      "controlledTasks",
+      "controlledTranscript",
       "remotePermissions"
     ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
