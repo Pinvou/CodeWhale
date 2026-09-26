@@ -1,4 +1,18 @@
-const terminalExecutionStatuses = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED_BEFORE_DISPATCH']);
+const cancellableExecutionStatuses = new Set([
+  'RECEIVED',
+  'HOLD_RESERVING',
+  'HOLD_RESERVED',
+  'DISPATCH_INTENT_PERSISTED',
+  'UPSTREAM_DISPATCHING',
+  'STREAMING',
+]);
+
+const unsettledDisplayStatuses = new Set([
+  'IN_PROGRESS',
+  'SETTLEMENT_PENDING',
+  'MANUAL_REVIEW',
+  'DISPLAY_STOPPED_EXECUTION_CONTINUES',
+]);
 
 function numeric(value) {
   if (value == null || value === '') return null;
@@ -10,8 +24,31 @@ function recordKey(record, index) {
   return record?.logical_turn_id || record?.usage_request_id || `legacy-usage-${index}`;
 }
 
-function isUsageTerminal(record) {
-  return record?.delivery_status === 'USER_STOPPED' || terminalExecutionStatuses.has(record?.execution_status);
+function isUsageCancellable(record) {
+  return record?.delivery_status !== 'USER_STOPPED' && cancellableExecutionStatuses.has(record?.execution_status);
+}
+
+function statusPriority(record) {
+  if (isUsageCancellable(record)) return 6;
+  if (record?.display_status === 'MANUAL_REVIEW' || record?.execution_status === 'REVIEW' || record?.settlement_status === 'REVIEW') return 5;
+  if (record?.display_status === 'DISPLAY_STOPPED_EXECUTION_CONTINUES') return 4;
+  if (unsettledDisplayStatuses.has(record?.display_status) || record?.execution_status === 'SETTLEMENT_PENDING' || record?.settlement_status === 'USAGE_PENDING') return 3;
+  if (record?.display_status === 'SETTLED' || record?.settlement_status === 'SETTLED') return 2;
+  return 1;
+}
+
+function isNoCharge(record) {
+  if (record?.settlement_status === 'RELEASED') return true;
+  if (record?.settlement_status) return false;
+  return record?.display_status === 'RELEASED' || record?.display_status === 'CANCELLED_BEFORE_DISPATCH';
+}
+
+function settledMicrocredits(record) {
+  if (record?.settlement_status === 'SETTLED') return numeric(record?.actual_microcredits);
+  if (isNoCharge(record)) return 0;
+  if (record?.settlement_status) return null;
+  if (record?.display_status === 'SETTLED') return numeric(record?.actual_microcredits);
+  return null;
 }
 
 export function summarizeUsageRecords(records = []) {
@@ -32,27 +69,32 @@ export function summarizeUsageRecords(records = []) {
         cached_input_tokens: 0,
         _actualComplete: true,
         _tokensComplete: true,
+        _statusPriority: 0,
       };
       groups.set(key, summary);
     }
 
     summary.usage_request_count += 1;
     if (record?.usage_request_id) summary.usage_request_ids.push(record.usage_request_id);
-    if (!summary.cancel_usage_request_id && !isUsageTerminal(record) && record?.usage_request_id) {
+    if (!summary.cancel_usage_request_id && isUsageCancellable(record) && record?.usage_request_id) {
       summary.cancel_usage_request_id = record.usage_request_id;
+    }
+    const priority = statusPriority(record);
+    if (priority > summary._statusPriority) {
+      summary._statusPriority = priority;
       for (const field of ['display_status', 'execution_status', 'delivery_status', 'settlement_status']) {
         summary[field] = record[field];
       }
     }
 
-    const actual = numeric(record?.actual_microcredits);
-    if (actual == null && record?.display_status !== 'RELEASED') summary._actualComplete = false;
+    const actual = settledMicrocredits(record);
+    if (actual == null) summary._actualComplete = false;
     else summary.actual_microcredits += actual || 0;
 
     for (const field of ['input_tokens', 'output_tokens', 'cached_input_tokens']) {
       const amount = numeric(record?.[field]);
-      if (amount == null) summary._tokensComplete = false;
-      else summary[field] += amount;
+      if (amount == null && !isNoCharge(record)) summary._tokensComplete = false;
+      else summary[field] += amount || 0;
     }
 
     const startedAt = Date.parse(record?.started_at || '');
@@ -77,6 +119,7 @@ export function summarizeUsageRecords(records = []) {
     }
     delete summary._actualComplete;
     delete summary._tokensComplete;
+    delete summary._statusPriority;
     return summary;
   });
 }
