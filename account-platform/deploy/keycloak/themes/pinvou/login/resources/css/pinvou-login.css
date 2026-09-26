@@ -24,7 +24,13 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .pv-field input:invalid:not(:placeholder-shown) { border-color: #d93025; }
 .pv-password-wrap, .pv-inline-control { position: relative; display: flex; align-items: center; }
 .pv-password-wrap input { padding-right: 44px; }
-.pv-eye { position: absolute; right: 4px; width: 36px; height: 36px; display: grid; place-items: center; border: 0; background: transparent; color: #6b7280; cursor: pointer; }
+.pv-password-wrap input::-ms-reveal, .pv-password-wrap input::-ms-clear { display: none; }
+@keyframes pv-password-autofill-start { from { opacity: 1; } to { opacity: 1; } }
+.pv-password-wrap input:-webkit-autofill { animation: pv-password-autofill-start 1ms; }
+.pv-password-reveal-output { position: absolute; inset: 0; z-index: 1; height: 44px; overflow: hidden; border: 1px solid #c8cdd4; border-radius: 8px; background: #fff; color: #202124; padding: 0 44px 0 13px; font-size: 14px; line-height: 42px; white-space: pre; pointer-events: none; user-select: none; }
+.pv-password-reveal-output[hidden] { display: none; }
+.pv-eye { position: absolute; right: 4px; z-index: 2; width: 36px; height: 36px; display: grid; place-items: center; border: 0; background: transparent; color: #6b7280; cursor: pointer; }
+.pv-eye[hidden] { display: none; }
 .pv-eye svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .pv-inline-control .pv-country { position: absolute; left: 13px; z-index: 1; color: #6b7280; font-size: 13px; }
 .pv-inline-control input { padding-left: 46px; padding-right: 108px; }

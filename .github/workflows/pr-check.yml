@@ -1082,7 +1082,7 @@ jobs:
 
       - name: OpenAPI、事件与迁移契约
         run: |
-          npm --prefix account-platform test
+          PINVOU_REQUIRE_PASSWORD_BROWSER_TEST=1 npm --prefix account-platform test
           buf lint account-platform/contracts/proto
 
       - name: PostgreSQL 迁移正反向验证
