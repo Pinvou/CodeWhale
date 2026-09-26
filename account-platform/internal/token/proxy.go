@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,62 @@ import (
 	"github.com/google/uuid"
 )
 
-const logicalTurnHeader = "X-Pinvou-Logical-Turn-ID"
+const (
+	logicalTurnHeader        = "X-Pinvou-Logical-Turn-ID"
+	clientCapabilitiesHeader = "X-Pinvou-Client-Capabilities"
+	billingNoticeCapability  = "billing-notice-v1"
+	billingNoticeEvent       = "BILLING_NOTICE"
+)
+
+type billingNotice struct {
+	SchemaVersion    int        `json:"schema_version"`
+	Code             string     `json:"code"`
+	Stage            string     `json:"stage"`
+	TurnOutcome      string     `json:"turn_outcome"`
+	SettlementStatus string     `json:"settlement_status"`
+	Action           string     `json:"action"`
+	ContextType      string     `json:"context_type"`
+	OrganizationID   *uuid.UUID `json:"organization_id,omitempty"`
+	UsageRequestID   uuid.UUID  `json:"usage_request_id"`
+}
+
+type billingNoticeContext struct {
+	ContextType                         string
+	OrganizationID                      *uuid.UUID
+	CanPurchaseOrganizationEntitlements bool
+}
+
+type chatCompletionRequest struct {
+	Model               string `json:"model"`
+	Stream              bool   `json:"stream"`
+	MaxTokens           int64  `json:"max_tokens"`
+	MaxCompletionTokens int64  `json:"max_completion_tokens"`
+}
+
+func newWalletInsufficientNotice(stage, outcome, settlement, contextType string, organizationID *uuid.UUID, canPurchaseOrganizationEntitlements bool, usageID uuid.UUID) billingNotice {
+	contextType = strings.ToUpper(strings.TrimSpace(contextType))
+	action := ""
+	switch contextType {
+	case "PERSONAL":
+		action = "OPEN_RECHARGE"
+	case "ORGANIZATION":
+		if organizationID != nil && canPurchaseOrganizationEntitlements {
+			action = "OPEN_ORGANIZATION_RECHARGE"
+		} else {
+			action = "CONTACT_ORG_ADMIN"
+		}
+	}
+	return billingNotice{SchemaVersion: 1, Code: "WALLET_INSUFFICIENT", Stage: stage, TurnOutcome: outcome, SettlementStatus: settlement, Action: action, ContextType: contextType, OrganizationID: organizationID, UsageRequestID: usageID}
+}
+
+func supportsBillingNotice(r *http.Request) bool {
+	for _, capability := range strings.Split(r.Header.Get(clientCapabilitiesHeader), ",") {
+		if strings.EqualFold(strings.TrimSpace(capability), billingNoticeCapability) {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.model.invoke", "org.model.invoke")
@@ -33,12 +89,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "the model request is too large", httpserver.RequestID(r.Context()))
 		return
 	}
-	var request struct {
-		Model               string `json:"model"`
-		Stream              bool   `json:"stream"`
-		MaxTokens           int64  `json:"max_tokens"`
-		MaxCompletionTokens int64  `json:"max_completion_tokens"`
-	}
+	var request chatCompletionRequest
 	if err := json.Unmarshal(body, &request); err != nil || strings.TrimSpace(request.Model) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
 		return
@@ -58,7 +109,15 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
 		return
 	}
+	// Canonical v1 fingerprints the caller's normalized request. Operational
+	// defaults are applied only after the fingerprint is frozen so a rolling
+	// gateway/client upgrade cannot turn a retry into IDEMPOTENCY_KEY_REUSED.
 	logicalBody := append([]byte(nil), body...)
+	body, err = applyDefaultChatMaximumOutput(body, &request, s.defaultMaxOutputTokens)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
+		return
+	}
 	keyDigest := digestString([]byte(idempotencyKey))
 	requestFingerprint := inferenceFingerprint("CHAT", 1, logicalBody)
 	if existing, lookupErr := s.repository.FindUsageByIdempotency(r.Context(), resolved.UserID, keyDigest); lookupErr == nil {
@@ -108,7 +167,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var upstreamPayload map[string]any
-	if err := json.Unmarshal(logicalBody, &upstreamPayload); err != nil {
+	if err := json.Unmarshal(body, &upstreamPayload); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -167,7 +226,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	modelID, capabilityID, protocolID := catalogModel.ModelID, catalogModel.ModelCapabilityVersionID, catalogModel.ProtocolDefinitionID
 	usageRequest := UsageRequest{ID: usageID, IdempotencyKeyDigest: keyDigest, IdempotencyNamespace: "model-inference", CanonicalVersion: 1, RequestFingerprint: requestFingerprint, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: catalogModel.ModelID.String(), ModelID: &modelID, CatalogVersion: &catalogVersion, CapabilityVersionID: &capabilityID, ProtocolDefinitionID: &protocolID, RouteGeneration: &routeGeneration, ModelSnapshot: modelSnapshot, MaximumMicrocredits: maximumCost}
 	pricingSnapshot, _ := json.Marshal(price)
-	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model_id": catalogModel.ModelID, "upstream_model_ref": catalogModel.UpstreamModelRef, "catalog_version": catalogModel.CatalogVersion, "model_capability_version_id": catalogModel.ModelCapabilityVersionID, "protocol_definition_id": catalogModel.ProtocolDefinitionID, "protocol_code": "CHAT", "protocol_version": catalogModel.ProtocolVersion, "route_generation": route.RouteGeneration, "lifecycle_status": catalogModel.LifecycleStatus, "deprecation_effective_at": catalogModel.DeprecationEffectiveAt, "display_name": catalogModel.DisplayName, "context_length": catalogModel.ContextLength, "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
+	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model_id": catalogModel.ModelID, "upstream_model_ref": catalogModel.UpstreamModelRef, "catalog_version": catalogModel.CatalogVersion, "model_capability_version_id": catalogModel.ModelCapabilityVersionID, "protocol_definition_id": catalogModel.ProtocolDefinitionID, "protocol_code": "CHAT", "protocol_version": catalogModel.ProtocolVersion, "route_generation": route.RouteGeneration, "lifecycle_status": catalogModel.LifecycleStatus, "deprecation_effective_at": catalogModel.DeprecationEffectiveAt, "display_name": catalogModel.DisplayName, "context_length": catalogModel.ContextLength, "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "can_purchase_organization_entitlements": slices.Contains(resolved.Permissions, "org.entitlements.purchase"), "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
 	if logicalTurnID != "" {
 		requestSnapshot["logical_turn_id"] = logicalTurnID
 	}
@@ -196,7 +255,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
-	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens}
+	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens, ContextType: resolved.ContextType, OrganizationID: resolved.OrganizationID, CanPurchaseOrganizationEntitlements: slices.Contains(resolved.Permissions, "org.entitlements.purchase")}
 	circuitKey := resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL)
 	if circuitErr := s.breaker.BeforeHighRisk(circuitKey); circuitErr != nil {
 		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "provider_circuit_open")
@@ -219,8 +278,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	hold, err := s.ensureUsageHold(r.Context(), usageRequest, envelope)
 	if err != nil {
 		if definitiveBillingFailure(err) {
-			_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "reserve_failed")
-			api.WriteError(w, http.StatusPaymentRequired, "WALLET_RESERVE_FAILED", "the wallet could not reserve enough credits", httpserver.RequestID(r.Context()))
+			s.writeInitialReservationFailure(w, r, usageRequest.ID, envelope, err)
 		} else {
 			w.Header().Set("Location", "/v1/usage-requests/"+usageRequest.ID.String())
 			api.WriteJSON(w, http.StatusAccepted, map[string]any{"code": "HOLD_RESULT_UNKNOWN", "usage_request_id": usageRequest.ID, "execution_status": "HOLD_RESERVING", "status_url": "/v1/usage-requests/" + usageRequest.ID.String()})
@@ -254,6 +312,25 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dispatchUsage(w, r, usageRequest, envelope)
+}
+
+func applyDefaultChatMaximumOutput(body []byte, request *chatCompletionRequest, fallback int64) ([]byte, error) {
+	if request == nil || request.MaxCompletionTokens != 0 || request.MaxTokens != 0 {
+		return body, nil
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(body, &normalized); err != nil {
+		return nil, err
+	}
+	if _, present := normalized["max_completion_tokens"]; present {
+		return body, nil
+	}
+	if _, present := normalized["max_tokens"]; present {
+		return body, nil
+	}
+	normalized["max_completion_tokens"] = fallback
+	request.MaxCompletionTokens = fallback
+	return json.Marshal(normalized)
 }
 
 func normalizeLogicalTurnID(raw string) (string, error) {
@@ -343,7 +420,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		w.Header().Set("Content-Type", "text/event-stream")
 		_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageRequest.ID, "DELIVERING")
 		w.WriteHeader(response.StatusCode)
-		s.proxyStream(w, r, usageRequest.ID, holdID, envelope.Price, response.Body, renewalFailed, envelope.MaximumCost)
+		s.proxyStream(w, r, usageRequest.ID, holdID, envelope.Price, response.Body, renewalFailed, envelope.MaximumCost, billingNoticeContext{ContextType: envelope.ContextType, OrganizationID: envelope.OrganizationID, CanPurchaseOrganizationEntitlements: envelope.CanPurchaseOrganizationEntitlements})
 		return
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
@@ -352,37 +429,53 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		_, _ = w.Write(payload)
 		return
 	}
-	if err := s.repository.MarkResponseReceived(context.WithoutCancel(r.Context()), usageRequest.ID); err != nil {
-		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "response_state_persistence_failed", map[string]any{})
-		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the model result could not be persisted", httpserver.RequestID(r.Context()))
-		return
-	}
 	contentType := response.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	if err := s.repository.SaveReplayResult(context.WithoutCancel(r.Context()), usageRequest.ID, ReplayResult{Kind: "JSON", HTTPStatus: response.StatusCode, ContentType: contentType, Payload: payload}); err != nil {
-		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "result_persistence_failed", map[string]any{})
-		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the model result could not be persisted", httpserver.RequestID(r.Context()))
-		return
-	}
 	usage, found := s.upstream.ParseUsage(payload)
 	if !found {
+		if err := s.repository.SaveReplayResult(context.WithoutCancel(r.Context()), usageRequest.ID, ReplayResult{Kind: "JSON", HTTPStatus: response.StatusCode, ContentType: contentType, Payload: payload, ResponseReceived: true, ResponseDisposition: responseDispositionUsageEvidenceRequired}); err != nil {
+			_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "result_persistence_failed", map[string]any{})
+			api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the model result could not be persisted", httpserver.RequestID(r.Context()))
+			return
+		}
 		w.WriteHeader(response.StatusCode)
 		_, _ = w.Write(payload)
-		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "usage_missing", map[string]any{"response_received": true})
 		return
 	}
 	background := context.WithoutCancel(r.Context())
-	maximumCost, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
+	_, insufficient, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
 	if !ok {
-		api.WriteError(w, http.StatusServiceUnavailable, "ADDITIONAL_PREAUTHORIZATION_FAILED", "the final response could not be authorized", httpserver.RequestID(r.Context()))
+		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_PENDING", "the final response is awaiting usage settlement", httpserver.RequestID(r.Context()))
 		return
+	}
+	var notice *billingNotice
+	if insufficient {
+		value := newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", envelope.ContextType, envelope.OrganizationID, envelope.CanPurchaseOrganizationEntitlements, usageRequest.ID)
+		notice = &value
+	}
+	actual, settlementSnapshot, err := settlementRecord(envelope.Price, usage, notice)
+	if err != nil {
+		_ = s.repository.MarkReview(background, usageRequest.ID, "usage_invalid", map[string]any{"usage": usage})
+		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_REVIEW_REQUIRED", settlementMessage("SETTLEMENT_REVIEW_REQUIRED"), httpserver.RequestID(r.Context()))
+		return
+	}
+	if err := s.repository.SaveReplayResult(background, usageRequest.ID, ReplayResult{Kind: "JSON", HTTPStatus: response.StatusCode, ContentType: contentType, Payload: payload, ResponseReceived: true, ResponseDisposition: responseDispositionTrustedUsage, FinalUsage: &usage, ActualMicrocredits: &actual, SettlementSnapshot: settlementSnapshot}); err != nil {
+		_ = s.repository.MarkReview(background, usageRequest.ID, "result_persistence_failed", settlementSnapshot)
+		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the model result could not be persisted", httpserver.RequestID(r.Context()))
+		return
+	}
+	if outcome := s.settlePrepared(background, usageRequest.ID, holdID, actual, usage, settlementSnapshot); outcome != "" {
+		api.WriteError(w, http.StatusServiceUnavailable, outcome, settlementMessage(outcome), httpserver.RequestID(r.Context()))
+		return
+	}
+	if notice != nil && supportsBillingNotice(r) {
+		setBillingNoticeHeaders(w.Header(), *notice)
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(payload)
 	_ = s.repository.MarkDelivery(background, usageRequest.ID, "DELIVERED")
-	s.settle(background, usageRequest.ID, holdID, envelope.Price, usage, maximumCost)
 }
 
 func normalizeInferenceBody(body []byte, stream bool) ([]byte, error) {
@@ -414,6 +507,16 @@ func inferenceFingerprint(protocol string, version int, body []byte) string {
 }
 
 func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage UsageRequest, logicalBody []byte) {
+	if usage.ExecutionStatus == "HOLD_RESERVING" {
+		handled, err := s.recoverInitialReservationFailure(w, r, usage.ID)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if handled {
+			return
+		}
+	}
 	if usage.ExecutionStatus == "RECEIVED" {
 		envelope, err := s.rebuildDispatchPreparation(r.Context(), usage, logicalBody)
 		if err != nil {
@@ -441,8 +544,7 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 		hold, err := s.ensureUsageHold(context.WithoutCancel(r.Context()), usage, envelope)
 		if err != nil {
 			if definitiveBillingFailure(err) {
-				_ = s.repository.MarkReleased(context.WithoutCancel(r.Context()), usage.ID, "reserve_failed")
-				api.WriteError(w, http.StatusPaymentRequired, "WALLET_RESERVE_FAILED", "the wallet could not reserve enough credits", httpserver.RequestID(r.Context()))
+				s.writeInitialReservationFailure(w, r, usage.ID, envelope, err)
 			} else {
 				w.Header().Set("Location", "/v1/usage-requests/"+usage.ID.String())
 				api.WriteJSON(w, http.StatusAccepted, map[string]any{"code": "HOLD_RESULT_UNKNOWN", "usage_request_id": usage.ID, "execution_status": "HOLD_RESERVING", "status_url": "/v1/usage-requests/" + usage.ID.String()})
@@ -519,6 +621,9 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 			return
 		}
 		w.Header().Set("Content-Type", snapshot.Result.ContentType)
+		if notice := billingNoticeFromUsageSnapshot(snapshot.Usage.UsageSnapshot); notice != nil && supportsBillingNotice(r) {
+			setBillingNoticeHeaders(w.Header(), *notice)
+		}
 		w.WriteHeader(snapshot.Result.HTTPStatus)
 		_, _ = w.Write(snapshot.Result.Payload)
 		return
@@ -529,6 +634,34 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 	}
 	w.Header().Set("Location", "/v1/usage-requests/"+usage.ID.String())
 	api.WriteJSON(w, http.StatusAccepted, map[string]any{"code": "USAGE_RESULT_PENDING", "usage_request_id": usage.ID, "execution_status": usage.ExecutionStatus, "status_url": "/v1/usage-requests/" + usage.ID.String()})
+}
+
+func (s *Service) recoverInitialReservationFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID) (bool, error) {
+	snapshot, err := s.repository.LoadReplay(context.WithoutCancel(r.Context()), usageID, 0)
+	if err != nil {
+		return false, err
+	}
+	if snapshot.Result == nil || snapshot.Result.Kind != "JSON" || snapshot.Result.HTTPStatus != http.StatusPaymentRequired {
+		return false, nil
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(snapshot.Result.Payload, &payload) != nil || (payload.Code != "WALLET_INSUFFICIENT" && payload.Code != "WALLET_RESERVE_FAILED") {
+		return false, nil
+	}
+	if err := s.repository.MarkReleased(context.WithoutCancel(r.Context()), usageID, "reserve_failed"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the billing result could not be finalized", httpserver.RequestID(r.Context()))
+		return true, nil
+	}
+	contentType := snapshot.Result.ContentType
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(snapshot.Result.HTTPStatus)
+	_, _ = w.Write(snapshot.Result.Payload)
+	return true, nil
 }
 
 func (s *Service) replayLiveStream(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, after int64) {
@@ -545,7 +678,13 @@ func (s *Service) replayLiveStream(w http.ResponseWriter, r *http.Request, usage
 			_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageID, "DISCONNECTED")
 			return
 		}
+		terminalReady := snapshot.Usage.ExecutionStatus == "SUCCEEDED" || snapshot.Usage.Status == "COMMITTED"
+		terminalWithheld := false
 		for _, event := range snapshot.Events {
+			if terminalReplayEvent(event.EventType) && !terminalReady {
+				terminalWithheld = true
+				break
+			}
 			if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, strings.ToLower(event.EventType), event.Payload); err != nil {
 				_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageID, "DISCONNECTED")
 				return
@@ -553,6 +692,20 @@ func (s *Service) replayLiveStream(w http.ResponseWriter, r *http.Request, usage
 			after = event.Sequence
 			if flusher != nil {
 				flusher.Flush()
+			}
+		}
+		settlementInFlight := snapshot.Usage.ExecutionStatus == "STREAMING" || snapshot.Usage.ExecutionStatus == "UPSTREAM_DISPATCHING" || snapshot.Usage.ExecutionStatus == "SETTLEMENT_PENDING"
+		if terminalWithheld && !settlementInFlight {
+			_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageID, "DISCONNECTED")
+			return
+		}
+		if terminalWithheld || snapshot.Usage.ExecutionStatus == "SETTLEMENT_PENDING" {
+			select {
+			case <-r.Context().Done():
+				_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageID, "DISCONNECTED")
+				return
+			case <-ticker.C:
+				continue
 			}
 		}
 		if snapshot.Usage.ExecutionStatus != "STREAMING" && snapshot.Usage.ExecutionStatus != "UPSTREAM_DISPATCHING" {
@@ -566,6 +719,11 @@ func (s *Service) replayLiveStream(w http.ResponseWriter, r *http.Request, usage
 		case <-ticker.C:
 		}
 	}
+}
+
+func terminalReplayEvent(eventType string) bool {
+	eventType = strings.ToUpper(strings.TrimSpace(eventType))
+	return eventType == "DONE" || eventType == billingNoticeEvent
 }
 
 func writeReplayEvents(w http.ResponseWriter, events []ReplayEvent) {
@@ -582,12 +740,14 @@ func writeReplayEvents(w http.ResponseWriter, events []ReplayEvent) {
 }
 
 type frozenUsageSnapshot struct {
-	UpstreamModelRef  string          `json:"upstream_model_ref"`
-	ContextType       string          `json:"context_type"`
-	MembershipVersion int64           `json:"membership_version"`
-	MaximumOutput     int64           `json:"maximum_output_tokens"`
-	Stream            bool            `json:"stream"`
-	PricingSnapshot   json.RawMessage `json:"pricing_snapshot"`
+	UpstreamModelRef                    string          `json:"upstream_model_ref"`
+	ContextType                         string          `json:"context_type"`
+	OrganizationID                      *uuid.UUID      `json:"organization_id,omitempty"`
+	CanPurchaseOrganizationEntitlements bool            `json:"can_purchase_organization_entitlements,omitempty"`
+	MembershipVersion                   int64           `json:"membership_version"`
+	MaximumOutput                       int64           `json:"maximum_output_tokens"`
+	Stream                              bool            `json:"stream"`
+	PricingSnapshot                     json.RawMessage `json:"pricing_snapshot"`
 }
 
 func (s *Service) rebuildDispatchPreparation(ctx context.Context, usage UsageRequest, logicalBody []byte) (DispatchEnvelope, error) {
@@ -611,12 +771,17 @@ func (s *Service) rebuildDispatchPreparation(ctx context.Context, usage UsageReq
 	if json.Unmarshal(logicalBody, &upstreamPayload) != nil {
 		return DispatchEnvelope{}, ErrForbidden
 	}
+	if _, hasCompletionLimit := upstreamPayload["max_completion_tokens"]; !hasCompletionLimit {
+		if _, hasLegacyLimit := upstreamPayload["max_tokens"]; !hasLegacyLimit {
+			upstreamPayload["max_completion_tokens"] = snapshot.MaximumOutput
+		}
+	}
 	upstreamPayload["model"] = snapshot.UpstreamModelRef
 	upstreamBody, err := json.Marshal(upstreamPayload)
 	if err != nil {
 		return DispatchEnvelope{}, err
 	}
-	return DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: snapshot.Stream, MaximumCost: usage.MaximumMicrocredits, MaximumOutput: snapshot.MaximumOutput}, nil
+	return DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: snapshot.Stream, MaximumCost: usage.MaximumMicrocredits, MaximumOutput: snapshot.MaximumOutput, ContextType: snapshot.ContextType, OrganizationID: snapshot.OrganizationID, CanPurchaseOrganizationEntitlements: snapshot.CanPurchaseOrganizationEntitlements}, nil
 }
 
 func (s *Service) ensureUsageHold(ctx context.Context, usage UsageRequest, envelope DispatchEnvelope) (BillingHold, error) {
@@ -658,38 +823,96 @@ func definitiveBillingFailure(err error) bool {
 	}
 }
 
+func walletInsufficient(err error) bool {
+	var failure *BillingHTTPError
+	return errors.As(err, &failure) && failure.Status == http.StatusPaymentRequired && strings.EqualFold(strings.TrimSpace(failure.Code), "WALLET_INSUFFICIENT")
+}
+
+func (s *Service) writeInitialReservationFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, envelope DispatchEnvelope, failure error) {
+	response := map[string]any{
+		"code":       "WALLET_RESERVE_FAILED",
+		"message":    "the wallet could not reserve enough credits",
+		"request_id": httpserver.RequestID(r.Context()),
+	}
+	if walletInsufficient(failure) {
+		response["code"] = "WALLET_INSUFFICIENT"
+		response["message"] = "the wallet has insufficient available credits"
+		response["billing_notice"] = newWalletInsufficientNotice("INITIAL_RESERVATION", "REJECTED", "NOT_STARTED", envelope.ContextType, envelope.OrganizationID, envelope.CanPurchaseOrganizationEntitlements, usageID)
+	}
+	payload, err := json.Marshal(response)
+	background := context.WithoutCancel(r.Context())
+	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusPaymentRequired, ContentType: "application/json", Payload: payload}) != nil {
+		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"billing_stage": "INITIAL_RESERVATION"})
+		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the billing result could not be persisted", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err := s.repository.MarkReleased(background, usageID, "reserve_failed"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the billing result could not be finalized", httpserver.RequestID(r.Context()))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusPaymentRequired)
+	_, _ = w.Write(payload)
+}
+
+func setBillingNoticeHeaders(header http.Header, notice billingNotice) {
+	header.Set("X-Pinvou-Billing-Code", notice.Code)
+	header.Set("X-Pinvou-Billing-Stage", notice.Stage)
+	header.Set("X-Pinvou-Billing-Turn-Outcome", notice.TurnOutcome)
+	header.Set("X-Pinvou-Billing-Settlement-Status", notice.SettlementStatus)
+	header.Set("X-Pinvou-Billing-Action", notice.Action)
+	if notice.ContextType != "" {
+		header.Set("X-Pinvou-Billing-Context-Type", notice.ContextType)
+	}
+	if notice.OrganizationID != nil {
+		header.Set("X-Pinvou-Billing-Organization-ID", notice.OrganizationID.String())
+	}
+	header.Set("X-Pinvou-Billing-Usage-Request-ID", notice.UsageRequestID.String())
+}
+
+func billingNoticeFromUsageSnapshot(snapshot json.RawMessage) *billingNotice {
+	if len(snapshot) == 0 {
+		return nil
+	}
+	var payload struct {
+		BillingNotice *billingNotice `json:"billing_notice"`
+	}
+	if json.Unmarshal(snapshot, &payload) != nil || payload.BillingNotice == nil || payload.BillingNotice.SchemaVersion != 1 || payload.BillingNotice.Code != "WALLET_INSUFFICIENT" {
+		return nil
+	}
+	return payload.BillingNotice
+}
+
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
 	payload, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	background := context.WithoutCancel(r.Context())
 	if len(payload) == 0 {
 		payload = []byte(`{"error":{"code":"UPSTREAM_ERROR","message":"the upstream rejected the model request"}}`)
 	}
-	if err := s.repository.MarkResponseReceived(background, usageID); err != nil {
-		_ = s.repository.MarkReview(background, usageID, "response_state_persistence_failed", map[string]any{"status_code": response.StatusCode})
-		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the upstream result could not be persisted", httpserver.RequestID(r.Context()))
-		return
-	}
 	contentType := response.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	if err := s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "JSON", HTTPStatus: response.StatusCode, ContentType: contentType, Payload: payload}); err != nil {
+	disposition := responseDispositionUsageEvidenceRequired
+	if s.upstream.RejectsBeforeGeneration(response.StatusCode) {
+		disposition = responseDispositionRejectedBeforeGeneration
+	}
+	if err := s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "JSON", HTTPStatus: response.StatusCode, ContentType: contentType, Payload: payload, ResponseReceived: true, ResponseDisposition: disposition}); err != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"status_code": response.StatusCode})
 		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the upstream result could not be persisted", httpserver.RequestID(r.Context()))
 		return
 	}
-	if s.upstream.RejectsBeforeGeneration(response.StatusCode) {
-		_ = s.billing.Release(background, usageID, holdID, "upstream rejected before generation")
-		_ = s.repository.MarkReleased(background, usageID, "upstream_rejected")
-	} else {
-		_ = s.repository.MarkReview(background, usageID, "upstream_error_unknown_usage", map[string]any{"status_code": response.StatusCode})
+	if disposition == responseDispositionRejectedBeforeGeneration {
+		if err := s.billing.Release(background, usageID, holdID, "upstream rejected before generation"); err == nil {
+			_ = s.repository.MarkReleased(background, usageID, "upstream_rejected")
+		}
 	}
 	s.upstream.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(payload)
 }
 
-func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedMaximum int64) {
+func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedMaximum int64, contexts ...billingNoticeContext) {
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
@@ -751,9 +974,29 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, reason, map[string]any{"stream_error": streamErr != nil, "usage_found": usageFound, "done_found": doneFound})
 		return
 	}
-	authorizedMaximum, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
+	_, insufficient, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
 	if !authorized {
 		return
+	}
+	var noticePayload []byte
+	var noticeSequence int64
+	var persistedNotice *billingNotice
+	if insufficient {
+		context := billingNoticeContextValue(contexts)
+		value := newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", context.ContextType, context.OrganizationID, context.CanPurchaseOrganizationEntitlements, usageID)
+		persistedNotice = &value
+	}
+	if persistedNotice != nil && supportsBillingNotice(r) {
+		noticePayload, _ = json.Marshal(persistedNotice)
+		if len(noticePayload) > 0 {
+			var err error
+			noticeSequence, err = s.repository.AppendReplayEvent(background, usageID, billingNoticeEvent, noticePayload)
+			if err != nil {
+				_ = s.repository.MarkReview(background, usageID, "stream_event_persistence_failed", map[string]any{"last_sequence": lastSequence})
+				return
+			}
+			lastSequence = noticeSequence
+		}
 	}
 	doneSequence, err := s.repository.AppendReplayEvent(background, usageID, "DONE", []byte("[DONE]"))
 	if err != nil {
@@ -761,14 +1004,32 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		return
 	}
 	lastSequence = doneSequence
-	if err := s.repository.MarkResponseReceived(background, usageID); err != nil {
-		_ = s.repository.MarkReview(background, usageID, "response_state_persistence_failed", map[string]any{"last_sequence": lastSequence})
+	actual, settlementSnapshot, settlementErr := settlementRecord(price, usage, persistedNotice)
+	if settlementErr != nil {
+		_ = s.repository.MarkReview(background, usageID, "usage_invalid", map[string]any{"usage": usage})
 		return
 	}
 	aggregatePayload, err := json.Marshal(map[string]any{"events": aggregate, "usage": usage, "last_sequence": lastSequence})
-	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, FinalUsage: &usage, LastSequence: lastSequence}) != nil {
+	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, ResponseReceived: true, ResponseDisposition: responseDispositionTrustedUsage, FinalUsage: &usage, ActualMicrocredits: &actual, SettlementSnapshot: settlementSnapshot, LastSequence: lastSequence}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"last_sequence": lastSequence})
 		return
+	}
+	if outcome := s.settlePrepared(background, usageID, holdID, actual, usage, settlementSnapshot); outcome != "" {
+		if deliveryConnected {
+			_, _ = fmt.Fprintf(w, "event: error\ndata: {\"error\":{\"code\":%q,\"message\":%q}}\n\n", outcome, settlementMessage(outcome))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		return
+	}
+	if deliveryConnected && len(noticePayload) > 0 {
+		if _, err := fmt.Fprintf(w, "id: %d\nevent: billing_notice\ndata: %s\n\n", noticeSequence, noticePayload); err != nil {
+			deliveryConnected = false
+			_ = s.repository.MarkDelivery(background, usageID, "DISCONNECTED")
+		} else if flusher != nil {
+			flusher.Flush()
+		}
 	}
 	if deliveryConnected {
 		if _, err := fmt.Fprintf(w, "id: %d\nevent: done\ndata: [DONE]\n\n", doneSequence); err != nil {
@@ -781,7 +1042,6 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	if deliveryConnected {
 		_ = s.repository.MarkDelivery(background, usageID, "DELIVERED")
 	}
-	s.settle(background, usageID, holdID, price, usage, authorizedMaximum)
 }
 
 func (s *Service) renewHold(ctx context.Context, cancel context.CancelFunc, usageID, holdID uuid.UUID) <-chan struct{} {
@@ -812,50 +1072,100 @@ func (s *Service) renewHold(ctx context.Context, cancel context.CancelFunc, usag
 	return failed
 }
 
-func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, authorizedMaximum ...int64) {
-	actual, err := Cost(price, usage)
-	if err != nil {
-		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
-		return
+func billingNoticeContextValue(values []billingNoticeContext) billingNoticeContext {
+	if len(values) == 0 {
+		return billingNoticeContext{}
 	}
-	maximum := int64(0)
-	if len(authorizedMaximum) > 0 {
-		maximum = authorizedMaximum[0]
+	return values[0]
+}
+
+func settlementMessage(outcome string) string {
+	if outcome == "SETTLEMENT_REVIEW_REQUIRED" {
+		return "the final response requires billing review"
 	}
-	if _, ok := s.authorizeAdditional(ctx, usageID, holdID, price, usage, maximum); !ok {
-		return
+	return "the final response is awaiting usage settlement"
+}
+
+func definitiveSettlementConflict(err error) bool {
+	var failure *BillingHTTPError
+	if !errors.As(err, &failure) {
+		return false
 	}
-	if err := s.billing.Commit(ctx, usageID, holdID, actual, usage); err != nil {
-		_ = s.repository.MarkReview(ctx, usageID, "settlement_pending", map[string]any{"usage": usage, "actual_microcredits": actual})
-		return
-	}
-	if err := s.repository.MarkCommitted(ctx, usageID, actual, map[string]any{"usage": usage}); err != nil {
-		_ = s.repository.MarkReview(ctx, usageID, "local_commit_record_pending", map[string]any{"usage": usage, "actual_microcredits": actual})
+	switch failure.Status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusPaymentRequired, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
 	}
 }
 
-func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, bool) {
+func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, notice *billingNotice) string {
+	actual, snapshot, err := settlementRecord(price, usage, notice)
+	if err != nil {
+		if markErr := s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage}); markErr != nil {
+			return "SETTLEMENT_PENDING"
+		}
+		return "SETTLEMENT_REVIEW_REQUIRED"
+	}
+	return s.settlePrepared(ctx, usageID, holdID, actual, usage, snapshot)
+}
+
+func settlementRecord(price PriceVersion, usage Usage, notice *billingNotice) (int64, map[string]any, error) {
+	actual, err := Cost(price, usage)
+	if err != nil {
+		return 0, nil, err
+	}
+	snapshot := map[string]any{"usage": usage, "actual_microcredits": actual}
+	if notice != nil {
+		snapshot["billing_notice"] = notice
+	}
+	return actual, snapshot, nil
+}
+
+func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage, snapshot map[string]any) string {
+	if err := s.billing.Commit(ctx, usageID, holdID, actual, usage); err != nil {
+		if definitiveSettlementConflict(err) {
+			if markErr := s.repository.MarkReview(ctx, usageID, "settlement_conflict", snapshot); markErr != nil {
+				return "SETTLEMENT_PENDING"
+			}
+			return "SETTLEMENT_REVIEW_REQUIRED"
+		}
+		_ = s.repository.MarkReview(ctx, usageID, "settlement_pending", snapshot)
+		return "SETTLEMENT_PENDING"
+	}
+	if err := s.repository.MarkCommitted(ctx, usageID, actual, snapshot); err != nil {
+		_ = s.repository.MarkReview(ctx, usageID, "local_commit_record_pending", snapshot)
+		return "SETTLEMENT_PENDING"
+	}
+	return ""
+}
+
+func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, bool, bool) {
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
-		return maximum, false
+		return maximum, false, false
 	}
 	if actual <= maximum {
-		return maximum, true
+		return maximum, false, true
 	}
 	additional := actual - maximum
 	client, ok := s.billing.(SnapshotBillingClient)
-	if !ok || client.Extend(ctx, usageID, holdID, additional) != nil {
-		_ = s.repository.MarkReview(ctx, usageID, "additional_preauthorization_failed", map[string]any{"usage": usage, "required_microcredits": additional})
-		return maximum, false
+	if !ok {
+		return actual, false, true
+	}
+	if err := client.Extend(ctx, usageID, holdID, additional); err != nil {
+		// Trusted final usage still converges through the idempotent Commit.
+		// Only a definite wallet-insufficient response becomes a user notice;
+		// uncertain failures become SETTLEMENT_PENDING only if Commit also fails.
+		return actual, walletInsufficient(err), true
 	}
 	if repository, ok := s.repository.(interface {
 		IncreaseMaximum(context.Context, uuid.UUID, int64) error
 	}); ok {
 		if err := repository.IncreaseMaximum(ctx, usageID, additional); err != nil {
-			_ = s.repository.MarkReview(ctx, usageID, "local_preauthorization_record_pending", map[string]any{"additional_microcredits": additional})
-			return maximum, false
+			return actual, false, true
 		}
 	}
-	return actual, true
+	return actual, false, true
 }

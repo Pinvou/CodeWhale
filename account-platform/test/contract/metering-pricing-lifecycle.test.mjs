@@ -43,14 +43,40 @@ test('gateway reserves the request maximum and authorizes final overage before s
   assert.match(proxy, /maximumUsage, err := EstimateChatUsage\(body, maximumOutput\)/);
   assert.match(proxy, /maximumCost, err := Cost\(price, maximumUsage\)/);
   assert.match(proxy, /MaximumCost: maximumCost/);
-  assert.match(proxy, /additional_preauthorization_failed/);
   assert.match(proxy, /client\.Extend\(/);
+  assert.match(proxy, /return actual, walletInsufficient\(err\), true/);
   assert.match(proxyTests, /TestProxyStreamDoesNotChargeSSEEnvelopeBytesBeyondReservedOutput/);
   assert.match(proxyTests, /TestProxyStreamAuthorizesAdditionalUsageBeforeDone/);
-  assert.match(proxyTests, /TestProxyStreamWithholdsDoneWhenAdditionalAuthorizationFails/);
+  assert.match(proxyTests, /TestProxyStreamCommitsTrustedUsageAndWarnsWhenAdditionalAuthorizationIsInsufficient/);
+  assert.match(proxyTests, /TestProxyStreamReportsSettlementPendingWhenCommitFails/);
+  assert.match(proxyTests, /TestProxyStreamRoutesDefinitiveCommitConflictToReview/);
   assert.match(billingClient, /"additional_microcredits": additional/);
   assert.match(reconciliation, /PricingSnapshot/);
   assert.match(reconciliation, /PromptTokens - cached/);
+});
+
+test('wallet insufficient notice freezes organization purchase routing', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/token-gateway.yaml'));
+  const notice = contract.components.schemas.BillingNotice;
+  assert.deepEqual(notice.properties.action.enum, ['OPEN_RECHARGE', 'OPEN_ORGANIZATION_RECHARGE', 'CONTACT_ORG_ADMIN']);
+  assert.equal(notice.properties.organization_id.format, 'uuid');
+  assert.deepEqual(notice.allOf[0].then.required, ['organization_id']);
+  assert.deepEqual(notice.allOf[0].then.properties.action.enum, ['OPEN_ORGANIZATION_RECHARGE', 'CONTACT_ORG_ADMIN']);
+  assert.equal(notice.allOf[0].else.properties.action.const, 'OPEN_RECHARGE');
+});
+
+test('response-only settlement recovery distinguishes evidence and safe rejection release', async () => {
+  const [reconciliation, replayRepository, proxyTests] = await Promise.all([
+    read('internal/token/reconciliation.go'),
+    read('internal/token/replay_repository.go'),
+    read('internal/token/proxy_test.go'),
+  ]);
+  assert.match(reconciliation, /RecoverLegacyResponseStateSplits/);
+  assert.match(reconciliation, /status='UPSTREAM_ACTIVE' AND execution_status='SETTLEMENT_PENDING'/);
+  assert.match(replayRepository, /responseDispositionUsageEvidenceRequired/);
+  assert.match(replayRepository, /responseDispositionRejectedBeforeGeneration/);
+  assert.match(proxyTests, /TestNonStreamingMissingUsagePersistsProviderEvidenceRecoveryState/);
+  assert.match(proxyTests, /TestPreGenerationRejectionSurvivesReleaseFailureForReconciliation/);
 });
 
 test('admin contract and React workspace expose units, price lifecycle, protocols, and formulas', async () => {

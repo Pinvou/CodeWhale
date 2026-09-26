@@ -112,6 +112,7 @@ type UsageRequest struct {
 	RouteGeneration             *int64
 	ModelSnapshot               json.RawMessage
 	RequestSnapshot             json.RawMessage
+	UsageSnapshot               json.RawMessage
 	Status                      string
 	ExecutionStatus             string
 	ExecutionVersion            int64
@@ -143,14 +144,17 @@ type CancellationResult struct {
 }
 
 type DispatchEnvelope struct {
-	BaseURL       string          `json:"base_url"`
-	Provider      string          `json:"provider"`
-	Credential    []byte          `json:"credential"`
-	RequestBody   json.RawMessage `json:"request_body"`
-	Price         PriceVersion    `json:"price"`
-	Stream        bool            `json:"stream"`
-	MaximumCost   int64           `json:"maximum_cost"`
-	MaximumOutput int64           `json:"maximum_output"`
+	BaseURL                             string          `json:"base_url"`
+	Provider                            string          `json:"provider"`
+	Credential                          []byte          `json:"credential"`
+	RequestBody                         json.RawMessage `json:"request_body"`
+	Price                               PriceVersion    `json:"price"`
+	Stream                              bool            `json:"stream"`
+	MaximumCost                         int64           `json:"maximum_cost"`
+	MaximumOutput                       int64           `json:"maximum_output"`
+	ContextType                         string          `json:"context_type,omitempty"`
+	OrganizationID                      *uuid.UUID      `json:"organization_id,omitempty"`
+	CanPurchaseOrganizationEntitlements bool            `json:"can_purchase_organization_entitlements,omitempty"`
 }
 
 type ReplayEvent struct {
@@ -160,13 +164,17 @@ type ReplayEvent struct {
 }
 
 type ReplayResult struct {
-	Kind         string
-	HTTPStatus   int
-	ContentType  string
-	Payload      []byte
-	FinalUsage   *Usage
-	LastSequence int64
-	ExpiresAt    time.Time
+	Kind                string
+	HTTPStatus          int
+	ContentType         string
+	Payload             []byte
+	ResponseReceived    bool
+	ResponseDisposition string
+	FinalUsage          *Usage
+	ActualMicrocredits  *int64
+	SettlementSnapshot  map[string]any
+	LastSequence        int64
+	ExpiresAt           time.Time
 }
 
 type ReplaySnapshot struct {
@@ -216,7 +224,6 @@ type UsageStore interface {
 	AcquireDispatch(context.Context, uuid.UUID, string, time.Duration) (DispatchEnvelope, bool, error)
 	MarkUpstream(context.Context, uuid.UUID) error
 	MarkStreaming(context.Context, uuid.UUID) error
-	MarkResponseReceived(context.Context, uuid.UUID) error
 	RecordUpstreamRequest(context.Context, uuid.UUID, UpstreamRequestEvidence) error
 	AppendReplayEvent(context.Context, uuid.UUID, string, []byte) (int64, error)
 	SaveReplayResult(context.Context, uuid.UUID, ReplayResult) error

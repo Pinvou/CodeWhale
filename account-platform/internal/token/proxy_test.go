@@ -7,22 +7,33 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/google/uuid"
 )
 
 type streamRepositoryFake struct {
 	Repository
-	events        []string
-	deliveries    []string
-	reviewReason  string
-	responseSaved bool
-	resultSaved   bool
-	committed     bool
-	increaseCalls int
-	increasedBy   int64
+	events          []string
+	deliveries      []string
+	reviewReason    string
+	responseSaved   bool
+	resultSaved     bool
+	committed       bool
+	released        bool
+	releaseErr      error
+	releaseCalls    int
+	replaySnapshot  ReplaySnapshot
+	loadReplayCalls int
+	savedResult     ReplayResult
+	saveResultErr   error
+	commitSnapshot  map[string]any
+	increaseCalls   int
+	increasedBy     int64
 }
 
 func (r *streamRepositoryFake) AppendReplayEvent(_ context.Context, _ uuid.UUID, eventType string, _ []byte) (int64, error) {
@@ -44,19 +55,36 @@ func (r *streamRepositoryFake) MarkReview(_ context.Context, _ uuid.UUID, reason
 	return nil
 }
 
-func (r *streamRepositoryFake) MarkResponseReceived(context.Context, uuid.UUID) error {
-	r.responseSaved = true
-	return nil
-}
+func (r *streamRepositoryFake) MarkUpstream(context.Context, uuid.UUID) error { return nil }
 
-func (r *streamRepositoryFake) SaveReplayResult(context.Context, uuid.UUID, ReplayResult) error {
+func (r *streamRepositoryFake) SaveReplayResult(_ context.Context, _ uuid.UUID, result ReplayResult) error {
+	if r.saveResultErr != nil {
+		return r.saveResultErr
+	}
 	r.resultSaved = true
+	r.savedResult = result
+	r.responseSaved = result.ResponseReceived
 	return nil
 }
 
-func (r *streamRepositoryFake) MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error {
+func (r *streamRepositoryFake) MarkCommitted(_ context.Context, _ uuid.UUID, _ int64, snapshot map[string]any) error {
 	r.committed = true
+	r.commitSnapshot = snapshot
 	return nil
+}
+
+func (r *streamRepositoryFake) MarkReleased(context.Context, uuid.UUID, string) error {
+	r.releaseCalls++
+	if r.releaseErr != nil {
+		return r.releaseErr
+	}
+	r.released = true
+	return nil
+}
+
+func (r *streamRepositoryFake) LoadReplay(context.Context, uuid.UUID, int64) (ReplaySnapshot, error) {
+	r.loadReplayCalls++
+	return r.replaySnapshot, nil
 }
 
 func (r *streamRepositoryFake) IncreaseMaximum(_ context.Context, _ uuid.UUID, additional int64) error {
@@ -71,8 +99,41 @@ type streamBillingFake struct {
 	extendedBy           int64
 	extendErr            error
 	commitCalls          int
+	commitErr            error
 	terminalSeenAtExtend func() bool
 	terminalBeforeExtend bool
+	releaseCalls         int
+	releaseErr           error
+}
+
+type liveReplayRepositoryFake struct {
+	Repository
+	snapshots  []ReplaySnapshot
+	loadCalls  int
+	deliveries []string
+	beforeLoad func(int)
+}
+
+func (r *liveReplayRepositoryFake) LoadReplay(_ context.Context, _ uuid.UUID, after int64) (ReplaySnapshot, error) {
+	r.loadCalls++
+	if r.beforeLoad != nil {
+		r.beforeLoad(r.loadCalls)
+	}
+	index := min(r.loadCalls-1, len(r.snapshots)-1)
+	snapshot := r.snapshots[index]
+	filtered := make([]ReplayEvent, 0, len(snapshot.Events))
+	for _, event := range snapshot.Events {
+		if event.Sequence > after {
+			filtered = append(filtered, event)
+		}
+	}
+	snapshot.Events = filtered
+	return snapshot, nil
+}
+
+func (r *liveReplayRepositoryFake) MarkDelivery(_ context.Context, _ uuid.UUID, status string) error {
+	r.deliveries = append(r.deliveries, status)
+	return nil
 }
 
 func (b *streamBillingFake) Extend(_ context.Context, _ uuid.UUID, _ uuid.UUID, additional int64) error {
@@ -90,7 +151,12 @@ func (b *streamBillingFake) ReservePriced(context.Context, uuid.UUID, uuid.UUID,
 
 func (b *streamBillingFake) Commit(context.Context, uuid.UUID, uuid.UUID, int64, Usage) error {
 	b.commitCalls++
-	return nil
+	return b.commitErr
+}
+
+func (b *streamBillingFake) Release(context.Context, uuid.UUID, uuid.UUID, string) error {
+	b.releaseCalls++
+	return b.releaseErr
 }
 
 func TestGatewayAdaptersOwnProtocolAndReferenceMapping(t *testing.T) {
@@ -123,6 +189,203 @@ func TestNormalizeLogicalTurnID(t *testing.T) {
 		if _, err := normalizeLogicalTurnID(invalid); err == nil {
 			t.Fatalf("accepted invalid logical turn ID %q", invalid)
 		}
+	}
+}
+
+func TestApplyDefaultChatMaximumOutputOnlyWhenBothFieldsAreMissing(t *testing.T) {
+	request := chatCompletionRequest{Model: "model"}
+	body, err := applyDefaultChatMaximumOutput([]byte(`{"model":"model","messages":[]}`), &request, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if request.MaxCompletionTokens != 4096 || payload["max_completion_tokens"] != float64(4096) {
+		t.Fatalf("missing output limit was not defaulted: request=%#v payload=%#v", request, payload)
+	}
+
+	explicit := chatCompletionRequest{Model: "model", MaxCompletionTokens: 1024}
+	body, err = applyDefaultChatMaximumOutput([]byte(`{"model":"model","max_completion_tokens":1024}`), &explicit, 4096)
+	if err != nil || !bytes.Contains(body, []byte(`"max_completion_tokens":1024`)) || explicit.MaxCompletionTokens != 1024 {
+		t.Fatalf("explicit output limit changed: request=%#v body=%s err=%v", explicit, body, err)
+	}
+}
+
+func TestOperationalOutputDefaultDoesNotChangeCanonicalV1Fingerprint(t *testing.T) {
+	canonical, err := normalizeInferenceBody([]byte(`{"model":"model","messages":[]}`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := chatCompletionRequest{Model: "model"}
+	effective, err := applyDefaultChatMaximumOutput(append([]byte(nil), canonical...), &request, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(canonical, effective) {
+		t.Fatal("test did not exercise the operational default")
+	}
+	const preUpgradeCanonicalV1 = "6ca55eae1a1bdcfd6e0699f7ce9a055571f4681276fbcd5486e575dc5c1447d3"
+	if got := inferenceFingerprint("CHAT", 1, canonical); got != preUpgradeCanonicalV1 {
+		t.Fatalf("canonical v1 fingerprint changed after operational default: %s", got)
+	}
+}
+
+func TestBillingNoticeCapabilityAndWalletInsufficientClassification(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request.Header.Set(clientCapabilitiesHeader, "other-v1, BILLING-NOTICE-V1")
+	if !supportsBillingNotice(request) {
+		t.Fatal("versioned billing notice capability was not detected")
+	}
+	if !walletInsufficient(&BillingHTTPError{Status: http.StatusPaymentRequired, Code: "wallet_insufficient"}) {
+		t.Fatal("definitive insufficient-balance response was not classified")
+	}
+	if walletInsufficient(&BillingHTTPError{Status: http.StatusServiceUnavailable, Code: "WALLET_INSUFFICIENT"}) || walletInsufficient(errors.New("insufficient balance")) {
+		t.Fatal("non-contract billing failures must not be classified from text or the wrong status")
+	}
+
+	header := http.Header{}
+	usageID := uuid.New()
+	setBillingNoticeHeaders(header, newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", "personal", nil, false, usageID))
+	if header.Get("X-Pinvou-Billing-Code") != "WALLET_INSUFFICIENT" || header.Get("X-Pinvou-Billing-Usage-Request-ID") != usageID.String() || header.Get("X-Pinvou-Billing-Context-Type") != "PERSONAL" {
+		t.Fatalf("unexpected billing notice headers: %#v", header)
+	}
+}
+
+func TestInitialWalletInsufficientIsPersistedBeforeTerminalReplay(t *testing.T) {
+	repository := &streamRepositoryFake{}
+	service := &Service{repository: repository}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request.Header.Set("X-Request-ID", "request-initial-insufficient")
+	usageID := uuid.New()
+
+	organizationID := uuid.New()
+	service.writeInitialReservationFailure(recorder, request, usageID, DispatchEnvelope{ContextType: "ORGANIZATION", OrganizationID: &organizationID}, &BillingHTTPError{Status: http.StatusPaymentRequired, Code: "WALLET_INSUFFICIENT"})
+
+	if recorder.Code != http.StatusPaymentRequired || !repository.resultSaved || !repository.released {
+		t.Fatalf("initial failure was not durably completed: code=%d repository=%#v", recorder.Code, repository)
+	}
+	if repository.savedResult.HTTPStatus != http.StatusPaymentRequired || !bytes.Equal(repository.savedResult.Payload, recorder.Body.Bytes()) {
+		t.Fatalf("replay payload differs from first response: %#v body=%s", repository.savedResult, recorder.Body.String())
+	}
+	var payload struct {
+		Code          string        `json:"code"`
+		BillingNotice billingNotice `json:"billing_notice"`
+	}
+	if json.Unmarshal(recorder.Body.Bytes(), &payload) != nil || payload.Code != "WALLET_INSUFFICIENT" || payload.BillingNotice.ContextType != "ORGANIZATION" || payload.BillingNotice.Action != "CONTACT_ORG_ADMIN" || payload.BillingNotice.OrganizationID == nil || *payload.BillingNotice.OrganizationID != organizationID {
+		t.Fatalf("organization notice is unsafe or incomplete: %#v", payload)
+	}
+
+	replayRepository := &liveReplayRepositoryFake{snapshots: []ReplaySnapshot{{
+		Usage:  UsageRequest{ID: usageID, Status: "RELEASED", ExecutionStatus: "FAILED"},
+		Result: &repository.savedResult,
+	}}}
+	replayRecorder := httptest.NewRecorder()
+	service.repository = replayRepository
+	service.replayUsage(replayRecorder, request, replayRepository.snapshots[0].Usage, nil)
+	if replayRecorder.Code != http.StatusPaymentRequired || !bytes.Equal(replayRecorder.Body.Bytes(), recorder.Body.Bytes()) {
+		t.Fatalf("same idempotency result did not replay the original 402: code=%d body=%s", replayRecorder.Code, replayRecorder.Body.String())
+	}
+}
+
+func TestInitialWalletInsufficientRetryRecoversSavedResultBeforeReservingAgain(t *testing.T) {
+	repository := &streamRepositoryFake{releaseErr: errors.New("database unavailable")}
+	service := &Service{repository: repository}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	usageID := uuid.New()
+
+	first := httptest.NewRecorder()
+	service.writeInitialReservationFailure(first, request, usageID, DispatchEnvelope{ContextType: "PERSONAL"}, &BillingHTTPError{Status: http.StatusPaymentRequired, Code: "WALLET_INSUFFICIENT"})
+	if first.Code != http.StatusServiceUnavailable || !repository.resultSaved || repository.released {
+		t.Fatalf("fault injection did not stop between replay save and release: code=%d repository=%#v", first.Code, repository)
+	}
+
+	repository.replaySnapshot = ReplaySnapshot{Usage: UsageRequest{ID: usageID, ExecutionStatus: "HOLD_RESERVING"}, Result: &repository.savedResult}
+	repository.releaseErr = nil
+	replayed := httptest.NewRecorder()
+	service.replayUsage(replayed, request, repository.replaySnapshot.Usage, nil)
+	if replayed.Code != http.StatusPaymentRequired || !bytes.Equal(replayed.Body.Bytes(), repository.savedResult.Payload) || !repository.released || repository.releaseCalls != 2 {
+		t.Fatalf("retry did not converge the saved 402 before reserve: code=%d body=%s repository=%#v", replayed.Code, replayed.Body.String(), repository)
+	}
+}
+
+func TestOrganizationWalletNoticeRoutesPurchasersToStableOrganization(t *testing.T) {
+	organizationID := uuid.New()
+	usageID := uuid.New()
+	notice := newWalletInsufficientNotice("INITIAL_RESERVATION", "REJECTED", "NOT_STARTED", "ORGANIZATION", &organizationID, true, usageID)
+	if notice.Action != "OPEN_ORGANIZATION_RECHARGE" || notice.OrganizationID == nil || *notice.OrganizationID != organizationID {
+		t.Fatalf("organization purchaser notice = %#v", notice)
+	}
+	header := http.Header{}
+	setBillingNoticeHeaders(header, notice)
+	if header.Get("X-Pinvou-Billing-Organization-ID") != organizationID.String() {
+		t.Fatalf("stable organization target missing from headers: %#v", header)
+	}
+	withoutPermission := newWalletInsufficientNotice("INITIAL_RESERVATION", "REJECTED", "NOT_STARTED", "ORGANIZATION", &organizationID, false, usageID)
+	if withoutPermission.Action != "CONTACT_ORG_ADMIN" {
+		t.Fatalf("non-purchaser organization action = %q", withoutPermission.Action)
+	}
+}
+
+func TestNonStreamingReplayRestoresBillingNoticeHeaders(t *testing.T) {
+	usageID := uuid.New()
+	notice := newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", "PERSONAL", nil, false, usageID)
+	snapshot, _ := json.Marshal(map[string]any{"usage": Usage{}, "billing_notice": notice})
+	repository := &liveReplayRepositoryFake{snapshots: []ReplaySnapshot{{
+		Usage:  UsageRequest{ID: usageID, Status: "COMMITTED", ExecutionStatus: "SUCCEEDED", UsageSnapshot: snapshot},
+		Result: &ReplayResult{Kind: "JSON", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: []byte(`{"ok":true}`)},
+	}}}
+	service := &Service{repository: repository}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request.Header.Set(clientCapabilitiesHeader, billingNoticeCapability)
+
+	service.replayUsage(recorder, request, repository.snapshots[0].Usage, nil)
+
+	if recorder.Code != http.StatusOK || recorder.Header().Get("X-Pinvou-Billing-Code") != "WALLET_INSUFFICIENT" || recorder.Header().Get("X-Pinvou-Billing-Action") != "OPEN_RECHARGE" {
+		t.Fatalf("replayed response lost billing notice: code=%d headers=%#v", recorder.Code, recorder.Header())
+	}
+}
+
+func TestSettlementTerminalReplayEventsStayGated(t *testing.T) {
+	for _, eventType := range []string{"DONE", "done", billingNoticeEvent} {
+		if !terminalReplayEvent(eventType) {
+			t.Fatalf("settlement terminal event %q was not gated", eventType)
+		}
+	}
+	if terminalReplayEvent("CHUNK") {
+		t.Fatal("ordinary stream chunks must remain replayable before settlement")
+	}
+}
+
+func TestLiveReplayWithholdsNoticeAndDoneUntilSettlementSucceeds(t *testing.T) {
+	events := []ReplayEvent{
+		{Sequence: 1, EventType: "CHUNK", Payload: []byte(`{"choices":[]}`)},
+		{Sequence: 2, EventType: billingNoticeEvent, Payload: []byte(`{"code":"WALLET_INSUFFICIENT"}`)},
+		{Sequence: 3, EventType: "DONE", Payload: []byte(`[DONE]`)},
+	}
+	recorder := httptest.NewRecorder()
+	repository := &liveReplayRepositoryFake{snapshots: []ReplaySnapshot{
+		{Usage: UsageRequest{Status: "UPSTREAM_ACTIVE", ExecutionStatus: "STREAMING"}, Events: events},
+		{Usage: UsageRequest{Status: "COMMITTED", ExecutionStatus: "SUCCEEDED"}, Events: events},
+	}}
+	repository.beforeLoad = func(call int) {
+		if call == 2 && (strings.Contains(recorder.Body.String(), "billing_notice") || strings.Contains(recorder.Body.String(), "[DONE]")) {
+			t.Fatal("settlement terminal escaped during the pending replay snapshot")
+		}
+	}
+	service := &Service{repository: repository}
+	request := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+
+	service.replayLiveStream(recorder, request, uuid.New(), 0)
+
+	if !strings.Contains(recorder.Body.String(), "event: chunk") || !strings.Contains(recorder.Body.String(), "event: billing_notice") || !strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatalf("committed replay is incomplete: %q", recorder.Body.String())
+	}
+	if repository.loadCalls != 2 || !slices.Contains(repository.deliveries, "DELIVERED") {
+		t.Fatalf("unexpected replay convergence: %#v", repository)
 	}
 }
 
@@ -239,12 +502,13 @@ func TestProxyStreamMarksMissingTerminalForReconciliation(t *testing.T) {
 	}
 }
 
-func TestProxyStreamWithholdsDoneWhenAdditionalAuthorizationFails(t *testing.T) {
+func TestProxyStreamCommitsTrustedUsageAndWarnsWhenAdditionalAuthorizationIsInsufficient(t *testing.T) {
 	repository := &streamRepositoryFake{}
-	billing := &streamBillingFake{extendErr: errors.New("insufficient balance")}
+	billing := &streamBillingFake{extendErr: &BillingHTTPError{Status: http.StatusPaymentRequired, Code: "WALLET_INSUFFICIENT"}}
 	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient()}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request.Header.Set(clientCapabilitiesHeader, billingNoticeCapability)
 	stream := strings.NewReader("data: {\"choices\":[]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":10}}\n\ndata: [DONE]\n\n")
 
 	service.proxyStream(recorder, request, uuid.New(), uuid.New(), PriceVersion{OutputPerMillion: 1_000_000}, stream, make(chan struct{}), 1)
@@ -252,14 +516,211 @@ func TestProxyStreamWithholdsDoneWhenAdditionalAuthorizationFails(t *testing.T) 
 	if billing.extendCalls != 1 || billing.extendedBy != 9 {
 		t.Fatalf("additional authorization = %d calls, %d microcredits", billing.extendCalls, billing.extendedBy)
 	}
-	if strings.Contains(recorder.Body.String(), "data: [DONE]") || strings.Contains(strings.Join(repository.events, ","), "DONE") {
-		t.Fatal("failed additional authorization persisted or delivered a successful terminal")
+	if !strings.Contains(recorder.Body.String(), "event: billing_notice") || !strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatalf("settled stream did not deliver its notice and terminal: %q", recorder.Body.String())
 	}
-	if repository.reviewReason != "additional_preauthorization_failed" || repository.increaseCalls != 0 {
-		t.Fatalf("failed authorization state = %#v", repository)
+	if repository.reviewReason != "" || repository.increaseCalls != 0 {
+		t.Fatalf("insufficient extension entered review or changed the reservation: %#v", repository)
 	}
+	if !repository.responseSaved || !repository.resultSaved || !repository.committed || billing.commitCalls != 1 {
+		t.Fatalf("trusted usage was not settled: repository=%#v billing=%#v", repository, billing)
+	}
+	if persisted, _ := repository.commitSnapshot["billing_notice"].(*billingNotice); persisted == nil || persisted.Code != "WALLET_INSUFFICIENT" {
+		t.Fatalf("settled notice was not persisted for replay: %#v", repository.commitSnapshot)
+	}
+	if got := strings.Join(repository.events, ","); got != "CHUNK,CHUNK,BILLING_NOTICE,DONE" {
+		t.Fatalf("persisted event order = %q", got)
+	}
+}
+
+func TestProxyStreamReportsSettlementPendingWhenCommitFails(t *testing.T) {
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{extendErr: errors.New("billing unavailable"), commitErr: errors.New("billing unavailable")}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient()}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	stream := strings.NewReader("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":10}}\n\ndata: [DONE]\n\n")
+
+	service.proxyStream(recorder, request, uuid.New(), uuid.New(), PriceVersion{OutputPerMillion: 1_000_000}, stream, make(chan struct{}), 1)
+
+	if strings.Contains(recorder.Body.String(), "data: [DONE]") || !strings.Contains(recorder.Body.String(), "SETTLEMENT_PENDING") {
+		t.Fatalf("uncertain settlement terminal = %q", recorder.Body.String())
+	}
+	if repository.reviewReason != "settlement_pending" || billing.commitCalls != 1 || repository.committed {
+		t.Fatalf("pending settlement state = repository=%#v billing=%#v", repository, billing)
+	}
+	assertSavedSettlementCanReconcile(t, repository.savedResult)
+}
+
+func TestProxyStreamReplayFailureLeavesNoSplitResponseState(t *testing.T) {
+	repository := &streamRepositoryFake{saveResultErr: errors.New("replay transaction failed")}
+	billing := &streamBillingFake{}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient()}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	stream := strings.NewReader("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":10}}\n\ndata: [DONE]\n\n")
+
+	service.proxyStream(recorder, request, uuid.New(), uuid.New(), PriceVersion{OutputPerMillion: 1_000_000}, stream, make(chan struct{}), 10)
+
 	if repository.responseSaved || repository.resultSaved || repository.committed || billing.commitCalls != 0 {
-		t.Fatalf("unauthorized stream was settled: repository=%#v billing=%#v", repository, billing)
+		t.Fatalf("stream response escaped the failed atomic replay transaction: repository=%#v billing=%#v", repository, billing)
+	}
+	if repository.reviewReason != "result_persistence_failed" || strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatalf("failed stream replay was not failed closed: body=%q repository=%#v", recorder.Body.String(), repository)
+	}
+}
+
+func TestNonStreamingResultPersistsReconcilerSnapshotBeforeCommit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":10}}`))
+	}))
+	defer server.Close()
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{commitErr: errors.New("billing unavailable")}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient(), breaker: resilience.NewBreaker()}
+	holdID := uuid.New()
+	usageID := uuid.New()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	recorder := httptest.NewRecorder()
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
+
+	if recorder.Code != http.StatusServiceUnavailable || !repository.resultSaved || repository.savedResult.Kind != "JSON" || repository.savedResult.FinalUsage == nil || repository.savedResult.ActualMicrocredits == nil || repository.savedResult.SettlementSnapshot == nil {
+		t.Fatalf("non-stream settlement evidence was not durable before commit: code=%d result=%#v", recorder.Code, repository.savedResult)
+	}
+	assertSavedSettlementCanReconcile(t, repository.savedResult)
+}
+
+func TestNonStreamingReplayFailureLeavesNoSplitResponseState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":10}}`))
+	}))
+	defer server.Close()
+	repository := &streamRepositoryFake{saveResultErr: errors.New("replay transaction failed")}
+	billing := &streamBillingFake{}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient(), breaker: resilience.NewBreaker()}
+	holdID := uuid.New()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	recorder := httptest.NewRecorder()
+
+	service.dispatchUsage(recorder, request, UsageRequest{ID: uuid.New(), HoldID: &holdID}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10, ContextType: "PERSONAL"})
+
+	if recorder.Code != http.StatusServiceUnavailable || repository.responseSaved || repository.resultSaved || repository.committed || billing.commitCalls != 0 {
+		t.Fatalf("non-stream response escaped the failed atomic replay transaction: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
+	}
+	if repository.reviewReason != "result_persistence_failed" {
+		t.Fatalf("failed non-stream replay review reason = %q", repository.reviewReason)
+	}
+}
+
+func TestNonStreamingMissingUsagePersistsProviderEvidenceRecoveryState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer server.Close()
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient(), breaker: resilience.NewBreaker()}
+	usageID, holdID := uuid.New(), uuid.New()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	recorder := httptest.NewRecorder()
+
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`), Price: PriceVersion{OutputPerMillion: 1_000_000}, MaximumCost: 10})
+
+	if recorder.Code != http.StatusOK || !repository.resultSaved || repository.savedResult.ResponseDisposition != responseDispositionUsageEvidenceRequired || repository.reviewReason != "" || billing.commitCalls != 0 {
+		t.Fatalf("missing usage was not frozen for provider evidence recovery: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
+	}
+	assertResponseDispositionCanReconcile(t, repository.savedResult, UsageEvidence{Usage: &Usage{OutputTokens: 2}}, false)
+}
+
+func TestPreGenerationRejectionSurvivesReleaseFailureForReconciliation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"INVALID_REQUEST"}}`))
+	}))
+	defer server.Close()
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{releaseErr: errors.New("billing unavailable")}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient(), breaker: resilience.NewBreaker()}
+	usageID, holdID := uuid.New(), uuid.New()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	recorder := httptest.NewRecorder()
+
+	service.dispatchUsage(recorder, request, UsageRequest{ID: usageID, HoldID: &holdID}, DispatchEnvelope{BaseURL: server.URL, Provider: "test", Credential: []byte("credential"), RequestBody: []byte(`{"model":"test"}`)})
+
+	if recorder.Code != http.StatusBadRequest || repository.savedResult.ResponseDisposition != responseDispositionRejectedBeforeGeneration || repository.released || billing.releaseCalls != 1 {
+		t.Fatalf("pre-generation rejection lost its retryable release state: code=%d repository=%#v billing=%#v", recorder.Code, repository, billing)
+	}
+	assertResponseDispositionCanReconcile(t, repository.savedResult, UsageEvidence{}, true)
+}
+
+func assertResponseDispositionCanReconcile(t *testing.T, result ReplayResult, evidence UsageEvidence, expectRelease bool) {
+	t.Helper()
+	snapshot, err := json.Marshal(replayResponseObservation{ResponseDisposition: result.ResponseDisposition, HTTPStatus: result.HTTPStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	store := &reconciliationStoreFake{}
+	billing := &reconciliationBillingFake{price: PriceVersion{ID: priceID, Model: "test-model", OutputPerMillion: 1_000_000}}
+	providerID, adapterVersion, upstreamRequestID := "NEW_API", "new-api-v1", "provider-request-1"
+	var provider UsageEvidenceProvider
+	if !expectRelease {
+		provider = evidenceClientFake{evidence: evidence}
+	}
+	reconciler := NewUsageReconciler(store, billing, provider, time.Second)
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "REVIEW"}, UsageSnapshot: snapshot, ProviderID: &providerID, AdapterVersion: &adapterVersion, UpstreamRequestID: &upstreamRequestID}
+	if err := reconciler.reconcile(context.Background(), item); err != nil {
+		t.Fatalf("persisted response disposition did not converge: %v", err)
+	}
+	if expectRelease {
+		if billing.releasedID != usageID || store.releasedID != usageID {
+			t.Fatalf("persisted rejection did not release: billing=%#v store=%#v", billing, store)
+		}
+		return
+	}
+	if billing.committedUsageID != usageID || store.committedID != usageID {
+		t.Fatalf("provider evidence did not commit: billing=%#v store=%#v", billing, store)
+	}
+}
+
+func assertSavedSettlementCanReconcile(t *testing.T, result ReplayResult) {
+	t.Helper()
+	if result.FinalUsage == nil || result.ActualMicrocredits == nil || result.SettlementSnapshot == nil {
+		t.Fatalf("incomplete settlement replay result: %#v", result)
+	}
+	snapshot, err := json.Marshal(result.SettlementSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	store := &reconciliationStoreFake{}
+	billing := &reconciliationBillingFake{price: PriceVersion{ID: priceID, OutputPerMillion: 1_000_000}}
+	reconciler := NewUsageReconciler(store, billing, nil, time.Second)
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Status: "SETTLEMENT_PENDING"}, UsageSnapshot: snapshot}
+	if err := reconciler.reconcile(context.Background(), item); err != nil {
+		t.Fatalf("saved settlement did not auto-converge: %v snapshot=%s", err, snapshot)
+	}
+	if billing.committedActual != *result.ActualMicrocredits || store.committedActual != *result.ActualMicrocredits {
+		t.Fatalf("saved settlement converged with wrong actual: billing=%#v store=%#v", billing, store)
+	}
+}
+
+func TestProxyStreamRoutesDefinitiveCommitConflictToReview(t *testing.T) {
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{commitErr: &BillingHTTPError{Status: http.StatusConflict, Code: "HOLD_STATE_CONFLICT"}}
+	service := &Service{repository: repository, billing: billing, upstream: NewHTTPUpstreamClient()}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	stream := strings.NewReader("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
+
+	service.proxyStream(recorder, request, uuid.New(), uuid.New(), PriceVersion{OutputPerMillion: 1_000_000}, stream, make(chan struct{}), 1)
+
+	if repository.reviewReason != "settlement_conflict" || !strings.Contains(recorder.Body.String(), "SETTLEMENT_REVIEW_REQUIRED") || strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatalf("definitive commit conflict did not fail closed to review: body=%q repository=%#v", recorder.Body.String(), repository)
 	}
 }
 

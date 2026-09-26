@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,52 @@ func TestUsageReconcilerCommitsSettlementPendingWithHistoricalPrice(t *testing.T
 	}
 }
 
+func TestUsageReconcilerCommitsTrustedUsageAboveOriginalReservation(t *testing.T) {
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	store := &reconciliationStoreFake{}
+	billing := &reconciliationBillingFake{price: PriceVersion{ID: priceID, Model: "test-model", OutputPerMillion: 1_000_000}}
+	reconciler := NewUsageReconciler(store, billing, nil, time.Second)
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "SETTLEMENT_PENDING", MaximumMicrocredits: 1}, UsageSnapshot: []byte(`{"usage":{"input_tokens":0,"output_tokens":10,"cached_input_tokens":0},"actual_microcredits":10}`)}
+
+	if err := reconciler.reconcile(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if billing.committedActual != 10 || store.committedActual != 10 {
+		t.Fatalf("over-reservation usage did not converge: billing=%#v store=%#v", billing, store)
+	}
+}
+
+func TestUsageReconcilerRoutesDefinitiveCommitConflictToManualReview(t *testing.T) {
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	store := &reconciliationStoreFake{}
+	billing := &reconciliationBillingFake{
+		price:     PriceVersion{ID: priceID, Model: "test-model", OutputPerMillion: 1_000_000},
+		commitErr: &BillingHTTPError{Status: http.StatusNotFound, Code: "HOLD_NOT_FOUND"},
+	}
+	reconciler := NewUsageReconciler(store, billing, nil, time.Second)
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "SETTLEMENT_PENDING"}, UsageSnapshot: []byte(`{"usage":{"input_tokens":0,"output_tokens":1,"cached_input_tokens":0},"actual_microcredits":1}`)}
+
+	err := reconciler.reconcile(context.Background(), item)
+	if !errors.Is(err, errManualReconciliationRequired) {
+		t.Fatalf("definitive commit conflict did not require manual review: %v", err)
+	}
+}
+
+func TestUsageReconcilerStopsAfterDeadlineWhenHoldReleaseFails(t *testing.T) {
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Status: "REVIEW", StartedAt: time.Now().Add(-25 * time.Hour)}, Attempts: 30}
+	store := &reconciliationStoreFake{claims: []ReconciliationItem{item}}
+	billing := &reconciliationBillingFake{releaseErr: errors.New("billing unavailable")}
+	reconciler := NewUsageReconciler(store, billing, nil, time.Second)
+	reconciler.now = time.Now
+
+	reconciler.runOnce(context.Background())
+
+	if store.stoppedID != usageID || !strings.HasPrefix(store.stoppedReason, "HOLD_RELEASE_UNAVAILABLE:") || store.rescheduledID != uuid.Nil {
+		t.Fatalf("expired release failure kept rescheduling: %#v", store)
+	}
+}
+
 func TestUsageReconcilerReleasesOnlyWithExplicitRejectionEvidence(t *testing.T) {
 	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
 	store := &reconciliationStoreFake{}
@@ -106,6 +153,49 @@ func TestUsageReconcilerReleasesOnlyWithExplicitRejectionEvidence(t *testing.T) 
 	}
 	if billing.releasedID != usageID || store.releasedID != usageID || store.releasedReason != "reconciled_upstream_rejected" {
 		t.Fatalf("hold was not released from explicit evidence: billing=%#v store=%#v", billing, store)
+	}
+}
+
+func TestUsageReconcilerRecoversLegacyResponseStateSplitBeforeClaim(t *testing.T) {
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	providerID, adapterVersion, upstreamRequestID := "NEW_API", "new-api-v1", "legacy-request-1"
+	legacy := UsageRequest{ID: usageID, Status: "UPSTREAM_ACTIVE", ExecutionStatus: "SETTLEMENT_PENDING"}
+	if !legacyResponseStateSplit(legacy) {
+		t.Fatal("legacy terminal execution/domain split was not recognized")
+	}
+	if legacyResponseStateSplit(UsageRequest{Status: "UPSTREAM_ACTIVE", ExecutionStatus: "STREAMING"}) {
+		t.Fatal("normally executing upstream request must not be recovered")
+	}
+	store := &reconciliationStoreFake{claimsAfterRecovery: []ReconciliationItem{{
+		UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "REVIEW", ExecutionStatus: "SETTLEMENT_PENDING", StartedAt: time.Now()},
+		ProviderID:   &providerID, AdapterVersion: &adapterVersion, UpstreamRequestID: &upstreamRequestID,
+	}}}
+	billing := &reconciliationBillingFake{price: PriceVersion{ID: priceID, Model: "test-model", OutputPerMillion: 1_000_000}}
+	reconciler := NewUsageReconciler(store, billing, evidenceClientFake{evidence: UsageEvidence{Usage: &Usage{OutputTokens: 2}}}, time.Second)
+
+	reconciler.runOnce(context.Background())
+
+	if store.recoveryCalls != 1 || store.claimedBeforeRecovery || billing.committedActual != 2 || store.committedID != usageID {
+		t.Fatalf("legacy split did not enter evidence reconciliation: store=%#v billing=%#v", store, billing)
+	}
+}
+
+func TestUsageReconcilerReleasesPersistedPreGenerationRejectionWithoutProviderLookup(t *testing.T) {
+	usageID, holdID, priceID := uuid.New(), uuid.New(), uuid.New()
+	snapshot, err := json.Marshal(replayResponseObservation{ResponseDisposition: responseDispositionRejectedBeforeGeneration, HTTPStatus: http.StatusBadRequest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &reconciliationStoreFake{}
+	billing := &reconciliationBillingFake{}
+	reconciler := NewUsageReconciler(store, billing, nil, time.Second)
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Status: "REVIEW"}, UsageSnapshot: snapshot}
+
+	if err := reconciler.reconcile(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if billing.releasedID != usageID || store.releasedID != usageID || store.releasedReason != "reconciled_upstream_rejected_before_generation" {
+		t.Fatalf("persisted pre-generation rejection did not release the hold: billing=%#v store=%#v", billing, store)
 	}
 }
 
@@ -126,23 +216,43 @@ func TestReconciliationErrorCodeDoesNotPersistProviderMessage(t *testing.T) {
 }
 
 type reconciliationStoreFake struct {
-	committedID     uuid.UUID
-	committedActual int64
-	releasedID      uuid.UUID
-	releasedReason  string
+	committedID           uuid.UUID
+	committedActual       int64
+	releasedID            uuid.UUID
+	releasedReason        string
+	claims                []ReconciliationItem
+	stoppedID             uuid.UUID
+	stoppedReason         string
+	rescheduledID         uuid.UUID
+	recoveryCalls         int
+	claimsAfterRecovery   []ReconciliationItem
+	claimedBeforeRecovery bool
 }
 
 func (s *reconciliationStoreFake) RecordConvergenceEvidence(_ context.Context, _ uuid.UUID, _, _, _, _ string, _ map[string]any) error {
 	return nil
 }
 
-func (*reconciliationStoreFake) ClaimReconciliation(context.Context, int, time.Duration) ([]ReconciliationItem, error) {
-	return nil, nil
+func (s *reconciliationStoreFake) ClaimReconciliation(context.Context, int, time.Duration) ([]ReconciliationItem, error) {
+	if s.recoveryCalls == 0 {
+		s.claimedBeforeRecovery = true
+	}
+	return s.claims, nil
 }
-func (*reconciliationStoreFake) RescheduleReconciliation(context.Context, uuid.UUID, string, time.Time) error {
+func (s *reconciliationStoreFake) RecoverLegacyResponseStateSplits(context.Context, int) (int64, error) {
+	s.recoveryCalls++
+	if len(s.claimsAfterRecovery) > 0 {
+		s.claims = s.claimsAfterRecovery
+		return int64(len(s.claims)), nil
+	}
+	return 0, nil
+}
+func (s *reconciliationStoreFake) RescheduleReconciliation(_ context.Context, id uuid.UUID, _ string, _ time.Time) error {
+	s.rescheduledID = id
 	return nil
 }
-func (*reconciliationStoreFake) StopReconciliation(context.Context, uuid.UUID, string) error {
+func (s *reconciliationStoreFake) StopReconciliation(_ context.Context, id uuid.UUID, reason string) error {
+	s.stoppedID, s.stoppedReason = id, reason
 	return nil
 }
 func (s *reconciliationStoreFake) MarkCommitted(_ context.Context, id uuid.UUID, actual int64, _ map[string]any) error {
@@ -159,6 +269,8 @@ type reconciliationBillingFake struct {
 	committedUsageID uuid.UUID
 	committedActual  int64
 	releasedID       uuid.UUID
+	commitErr        error
+	releaseErr       error
 }
 
 func (b *reconciliationBillingFake) PriceByID(context.Context, uuid.UUID) (PriceVersion, error) {
@@ -166,11 +278,11 @@ func (b *reconciliationBillingFake) PriceByID(context.Context, uuid.UUID) (Price
 }
 func (b *reconciliationBillingFake) Commit(_ context.Context, usageID, _ uuid.UUID, actual int64, _ Usage) error {
 	b.committedUsageID, b.committedActual = usageID, actual
-	return nil
+	return b.commitErr
 }
 func (b *reconciliationBillingFake) Release(_ context.Context, usageID, _ uuid.UUID, _ string) error {
 	b.releasedID = usageID
-	return nil
+	return b.releaseErr
 }
 
 type evidenceClientFake struct{ evidence UsageEvidence }

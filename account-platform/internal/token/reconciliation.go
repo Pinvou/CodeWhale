@@ -28,12 +28,68 @@ type ReconciliationItem struct {
 }
 
 type ReconciliationStore interface {
+	RecoverLegacyResponseStateSplits(context.Context, int) (int64, error)
 	ClaimReconciliation(context.Context, int, time.Duration) ([]ReconciliationItem, error)
 	RescheduleReconciliation(context.Context, uuid.UUID, string, time.Time) error
 	StopReconciliation(context.Context, uuid.UUID, string) error
 	MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error
 	MarkReleased(context.Context, uuid.UUID, string) error
 	RecordConvergenceEvidence(context.Context, uuid.UUID, string, string, string, string, map[string]any) error
+}
+
+func legacyResponseStateSplit(request UsageRequest) bool {
+	return request.Status == "UPSTREAM_ACTIVE" && request.ExecutionStatus == "SETTLEMENT_PENDING"
+}
+
+func (r *PostgresRepository) RecoverLegacyResponseStateSplits(ctx context.Context, limit int) (int64, error) {
+	if limit < 1 || limit > 100 {
+		return 0, ErrForbidden
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id,status,execution_status FROM usage_requests WHERE status='UPSTREAM_ACTIVE' AND execution_status='SETTLEMENT_PENDING' AND reconciliation_stopped_at IS NULL ORDER BY updated_at,id FOR UPDATE SKIP LOCKED LIMIT $1`, limit)
+	if err != nil {
+		return 0, err
+	}
+	candidates := make([]UsageRequest, 0, limit)
+	for rows.Next() {
+		var candidate UsageRequest
+		if err := rows.Scan(&candidate.ID, &candidate.Status, &candidate.ExecutionStatus); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	now := r.now()
+	var recovered int64
+	for _, candidate := range candidates {
+		if !legacyResponseStateSplit(candidate) {
+			continue
+		}
+		command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='REVIEW',settlement_status='USAGE_PENDING',error_class=COALESCE(error_class,'legacy_response_state_split'),reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND status='UPSTREAM_ACTIVE' AND execution_status='SETTLEMENT_PENDING'`, candidate.ID, now)
+		if err != nil {
+			return 0, err
+		}
+		if command.RowsAffected() == 0 {
+			continue
+		}
+		if err := appendUsageConvergenceEvidenceTx(ctx, tx, candidate.ID, "LEGACY_RESPONSE_STATE_SPLIT", "RECONCILER", "RECOVERED", "execution:SETTLEMENT_PENDING/domain:UPSTREAM_ACTIVE", map[string]any{"automatic_reconciliation_enabled": true}, now); err != nil {
+			return 0, err
+		}
+		recovered++
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return recovered, nil
 }
 
 func (r *PostgresRepository) ClaimReconciliation(ctx context.Context, limit int, lease time.Duration) ([]ReconciliationItem, error) {
@@ -340,6 +396,9 @@ func (r *UsageReconciler) Run(ctx context.Context) {
 }
 
 func (r *UsageReconciler) runOnce(ctx context.Context) {
+	if _, err := r.store.RecoverLegacyResponseStateSplits(ctx, r.batchSize); err != nil {
+		r.logger.Error("legacy response-state recovery failed", "error", err)
+	}
 	items, err := r.store.ClaimReconciliation(ctx, r.batchSize, r.lease)
 	if err != nil {
 		r.logger.Error("claim failed", "error", err)
@@ -356,7 +415,7 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 			if r.now().Sub(item.StartedAt) >= r.maxAge {
 				if item.HoldID != nil {
 					if releaseErr := r.billing.Release(ctx, item.ID, *item.HoldID, "trusted usage deadline exceeded"); releaseErr != nil {
-						_ = r.store.RescheduleReconciliation(ctx, item.ID, "HOLD_RELEASE_UNAVAILABLE", r.now().Add(reconciliationBackoff(item.Attempts)))
+						_ = r.store.StopReconciliation(ctx, item.ID, "HOLD_RELEASE_UNAVAILABLE:"+errorCode)
 						continue
 					}
 				}
@@ -380,8 +439,21 @@ func reconciliationErrorCode(err error) string {
 }
 
 func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem) error {
-	if item.HoldID == nil || item.PriceVersionID == nil {
-		return fmt.Errorf("%w: usage request is missing hold or price version", errManualReconciliationRequired)
+	if item.HoldID == nil {
+		return fmt.Errorf("%w: usage request is missing hold", errManualReconciliationRequired)
+	}
+	var observation replayResponseObservation
+	if json.Unmarshal(item.UsageSnapshot, &observation) == nil && observation.ResponseDisposition == responseDispositionRejectedBeforeGeneration {
+		if err := r.store.RecordConvergenceEvidence(ctx, item.ID, "PROVIDER_REJECTION", "GATEWAY_RESPONSE", "RELEASE", fmt.Sprintf("http:%d", observation.HTTPStatus), map[string]any{"response_disposition": observation.ResponseDisposition, "http_status": observation.HTTPStatus}); err != nil {
+			return err
+		}
+		if err := r.billing.Release(ctx, item.ID, *item.HoldID, "upstream rejected before generation"); err != nil {
+			return err
+		}
+		return r.store.MarkReleased(ctx, item.ID, "reconciled_upstream_rejected_before_generation")
+	}
+	if item.PriceVersionID == nil {
+		return fmt.Errorf("%w: usage request is missing price version", errManualReconciliationRequired)
 	}
 	if item.Status == "SETTLEMENT_PENDING" {
 		var snapshot struct {
@@ -447,16 +519,26 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 		return fmt.Errorf("%w: historical price does not match usage request", errManualReconciliationRequired)
 	}
 	actual, err := Cost(price, usage)
-	if err != nil || actual > item.MaximumMicrocredits {
-		return fmt.Errorf("%w: reconciled usage exceeds the reserved amount", errManualReconciliationRequired)
+	if err != nil {
+		return fmt.Errorf("%w: reconciled usage is invalid", errManualReconciliationRequired)
 	}
 	if expectedActual != nil && actual != *expectedActual {
 		return fmt.Errorf("%w: settlement snapshot does not match historical pricing", errManualReconciliationRequired)
 	}
 	if err := r.billing.Commit(ctx, item.ID, *item.HoldID, actual, usage); err != nil {
+		if definitiveSettlementConflict(err) {
+			return fmt.Errorf("%w: billing commit was definitively rejected", errManualReconciliationRequired)
+		}
 		return err
 	}
-	return r.store.MarkCommitted(ctx, item.ID, actual, map[string]any{"usage": usage, "reconciled": true})
+	settlementSnapshot := map[string]any{"usage": usage, "actual_microcredits": actual, "reconciled": true}
+	var previous struct {
+		BillingNotice *billingNotice `json:"billing_notice"`
+	}
+	if json.Unmarshal(item.UsageSnapshot, &previous) == nil && previous.BillingNotice != nil {
+		settlementSnapshot["billing_notice"] = previous.BillingNotice
+	}
+	return r.store.MarkCommitted(ctx, item.ID, actual, settlementSnapshot)
 }
 
 func reconciliationBackoff(attempt int) time.Duration {

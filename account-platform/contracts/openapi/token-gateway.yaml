@@ -507,6 +507,12 @@ paths:
             type: integer
             format: int64
             minimum: 0
+        - name: X-Pinvou-Client-Capabilities
+          in: header
+          required: false
+          description: Comma-separated opt-in capabilities. `billing-notice-v1` enables structured insufficient-balance notices in successful response headers and SSE events.
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -528,13 +534,20 @@ paths:
               additionalProperties: true
       responses:
         "200":
-          description: Newly executed or replayed JSON/SSE response. SSE events carry a monotonic id and normalized event type.
+          description: Newly executed or replayed JSON/SSE response. SSE events carry a monotonic id and normalized event type. A client opting into `billing-notice-v1` may receive a `billing_notice` event before `[DONE]` when trusted usage was settled after additional authorization was declined.
           headers:
             X-Pinvou-Usage-Request-ID:
               required: true
               schema:
                 type: string
                 format: uuid
+            X-Pinvou-Billing-Code: { schema: { type: string, enum: [WALLET_INSUFFICIENT] } }
+            X-Pinvou-Billing-Stage: { schema: { type: string, enum: [ADDITIONAL_RESERVATION] } }
+            X-Pinvou-Billing-Turn-Outcome: { schema: { type: string, enum: [COMPLETED] } }
+            X-Pinvou-Billing-Settlement-Status: { schema: { type: string, enum: [SETTLED] } }
+            X-Pinvou-Billing-Action: { schema: { type: string, enum: [OPEN_RECHARGE, CONTACT_ORG_ADMIN] } }
+            X-Pinvou-Billing-Context-Type: { schema: { type: string, enum: [PERSONAL, ORGANIZATION] } }
+            X-Pinvou-Billing-Usage-Request-ID: { schema: { type: string, format: uuid } }
         "202":
           description: Existing execution is still running, awaiting settlement, or under review; no second upstream request was created.
           headers:
@@ -544,7 +557,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/UsageReplayStatus"
         "402":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/WalletReservationRejected"
         "409":
           $ref: "#/components/responses/Error"
         "410":
@@ -1032,6 +1045,27 @@ components:
         application/json:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
+    WalletReservationRejected:
+      description: The initial model-usage reservation was definitively rejected; WALLET_INSUFFICIENT carries a structured notice, while other definitive reserve failures use WALLET_RESERVE_FAILED. The upstream provider was not called.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - type: object
+                additionalProperties: false
+                required: [code, message, request_id, billing_notice]
+                properties:
+                  code: { type: string, const: WALLET_INSUFFICIENT }
+                  message: { type: string }
+                  request_id: { type: string }
+                  billing_notice: { $ref: "#/components/schemas/BillingNotice" }
+              - type: object
+                additionalProperties: false
+                required: [code, message, request_id]
+                properties:
+                  code: { type: string, const: WALLET_RESERVE_FAILED }
+                  message: { type: string }
+                  request_id: { type: string }
     RateLimited:
       description: The request exceeds an atomic multidimensional rate or concurrency limit
       headers:
@@ -1053,6 +1087,32 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    BillingNotice:
+      type: object
+      additionalProperties: false
+      required: [schema_version, code, stage, turn_outcome, settlement_status, action, context_type, usage_request_id]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        code: { type: string, const: WALLET_INSUFFICIENT }
+        stage: { type: string, enum: [INITIAL_RESERVATION, ADDITIONAL_RESERVATION] }
+        turn_outcome: { type: string, enum: [REJECTED, COMPLETED] }
+        settlement_status: { type: string, enum: [NOT_STARTED, SETTLED] }
+        action: { type: string, enum: [OPEN_RECHARGE, OPEN_ORGANIZATION_RECHARGE, CONTACT_ORG_ADMIN] }
+        context_type: { type: string, enum: [PERSONAL, ORGANIZATION] }
+        organization_id: { type: string, format: uuid, description: Stable target organization; required for ORGANIZATION notices and forbidden for PERSONAL notices }
+        usage_request_id: { type: string, format: uuid }
+      allOf:
+        - if:
+            properties: { context_type: { const: ORGANIZATION } }
+          then:
+            required: [organization_id]
+            properties:
+              action: { enum: [OPEN_ORGANIZATION_RECHARGE, CONTACT_ORG_ADMIN] }
+              organization_id: { type: string, format: uuid }
+          else:
+            properties:
+              action: { const: OPEN_RECHARGE }
+              organization_id: false
     TokenApprovalEffectObservation:
       type: object
       additionalProperties: false

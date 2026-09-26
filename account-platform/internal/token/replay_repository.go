@@ -18,7 +18,16 @@ const (
 	streamRetention    = 24 * time.Hour
 	resultRetention    = 30 * 24 * time.Hour
 	tombstoneRetention = 90 * 24 * time.Hour
+
+	responseDispositionTrustedUsage             = "TRUSTED_USAGE"
+	responseDispositionUsageEvidenceRequired    = "USAGE_EVIDENCE_REQUIRED"
+	responseDispositionRejectedBeforeGeneration = "REJECTED_BEFORE_GENERATION"
 )
+
+type replayResponseObservation struct {
+	ResponseDisposition string `json:"response_disposition"`
+	HTTPStatus          int    `json:"http_status"`
+}
 
 func replayDigest(value []byte) string {
 	digest := sha256.Sum256(value)
@@ -275,14 +284,6 @@ func (r *PostgresRepository) MarkHoldReserving(ctx context.Context, usageID uuid
 	return r.transitionExecution(ctx, usageID, []string{"RECEIVED"}, "HOLD_RESERVING", "billing hold reservation started")
 }
 
-func (r *PostgresRepository) MarkResponseReceived(ctx context.Context, usageID uuid.UUID) error {
-	if err := r.transitionExecution(ctx, usageID, []string{"UPSTREAM_DISPATCHING", "STREAMING"}, "SETTLEMENT_PENDING", "complete upstream response persisted"); err != nil {
-		return err
-	}
-	_, err := r.pool.Exec(ctx, `UPDATE usage_requests SET settlement_status='USAGE_PENDING',provider_terminal_at=COALESCE(provider_terminal_at,$2),updated_at=$2 WHERE id=$1`, usageID, r.now())
-	return err
-}
-
 func (r *PostgresRepository) AppendReplayEvent(ctx context.Context, usageID uuid.UUID, eventType string, payload []byte) (int64, error) {
 	eventType = strings.ToUpper(strings.TrimSpace(eventType))
 	if usageID == uuid.Nil || eventType == "" || len(payload) == 0 {
@@ -327,6 +328,29 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 	if usageID == uuid.Nil || (result.Kind != "JSON" && result.Kind != "STREAM_AGGREGATE") || result.HTTPStatus < 100 || result.HTTPStatus > 599 || len(result.Payload) == 0 || result.LastSequence < 0 {
 		return ErrForbidden
 	}
+	settlementPresent := result.ActualMicrocredits != nil || result.SettlementSnapshot != nil
+	if settlementPresent && (result.FinalUsage == nil || result.ActualMicrocredits == nil || result.SettlementSnapshot == nil || *result.ActualMicrocredits < 0) {
+		return ErrForbidden
+	}
+	if !result.ResponseReceived && result.FinalUsage != nil {
+		return ErrForbidden
+	}
+	if result.ResponseReceived {
+		switch result.ResponseDisposition {
+		case responseDispositionTrustedUsage:
+			if !settlementPresent {
+				return ErrForbidden
+			}
+		case responseDispositionUsageEvidenceRequired, responseDispositionRejectedBeforeGeneration:
+			if settlementPresent || result.FinalUsage != nil {
+				return ErrForbidden
+			}
+		default:
+			return ErrForbidden
+		}
+	} else if result.ResponseDisposition != "" {
+		return ErrForbidden
+	}
 	ciphertext, err := r.secrets.Encrypt(result.Payload, replayAAD(usageID, "result:"+result.Kind, result.LastSequence))
 	if err != nil {
 		return err
@@ -342,6 +366,24 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if result.ResponseReceived {
+		if err := transitionExecutionTx(ctx, tx, usageID, []string{"UPSTREAM_DISPATCHING", "STREAMING"}, "SETTLEMENT_PENDING", "complete upstream response and replay persisted", now); err != nil {
+			return err
+		}
+		if result.ResponseDisposition == responseDispositionTrustedUsage {
+			if _, err := tx.Exec(ctx, `UPDATE usage_requests SET status='SETTLEMENT_PENDING',settlement_status='USAGE_PENDING',provider_terminal_at=COALESCE(provider_terminal_at,$2),reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, now); err != nil {
+				return err
+			}
+		} else {
+			observation, marshalErr := json.Marshal(replayResponseObservation{ResponseDisposition: result.ResponseDisposition, HTTPStatus: result.HTTPStatus})
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if _, err := tx.Exec(ctx, `UPDATE usage_requests SET status='REVIEW',settlement_status='USAGE_PENDING',error_class=$2,usage_snapshot=$3,provider_terminal_at=COALESCE(provider_terminal_at,$4),reconciliation_next_at=$4,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$4 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, strings.ToLower(result.ResponseDisposition), observation, now); err != nil {
+				return err
+			}
+		}
+	}
 	command, err := tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,evidence_payload_digest,final_usage,last_sequence,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), responseDigest, finalUsage, result.LastSequence, now)
 	if err != nil {
 		return err
@@ -369,12 +411,20 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		if marshalErr != nil {
 			return marshalErr
 		}
-		if _, err = tx.Exec(ctx, `UPDATE usage_requests SET trusted_usage_snapshot=$2,trusted_usage_source='PROVIDER_FINAL_USAGE',final_usage_observed_at=COALESCE(final_usage_observed_at,$3),provider_terminal_at=COALESCE(provider_terminal_at,$3),settlement_status='USAGE_PENDING',updated_at=$3 WHERE id=$1`, usageID, encodedUsage, now); err != nil {
+		if settlementPresent {
+			encodedSnapshot, marshalErr := json.Marshal(result.SettlementSnapshot)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if _, err = tx.Exec(ctx, `UPDATE usage_requests SET status='SETTLEMENT_PENDING',settlement_status='USAGE_PENDING',actual_microcredits=$2,usage_snapshot=$3,trusted_usage_snapshot=$3,trusted_usage_source='PROVIDER_FINAL_USAGE',final_usage_observed_at=COALESCE(final_usage_observed_at,$4),provider_terminal_at=COALESCE(provider_terminal_at,$4),reconciliation_next_at=$4,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$4 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, *result.ActualMicrocredits, encodedSnapshot, now); err != nil {
+				return err
+			}
+		} else if _, err = tx.Exec(ctx, `UPDATE usage_requests SET trusted_usage_snapshot=$2,trusted_usage_source='PROVIDER_FINAL_USAGE',final_usage_observed_at=COALESCE(final_usage_observed_at,$3),provider_terminal_at=COALESCE(provider_terminal_at,$3),settlement_status='USAGE_PENDING',updated_at=$3 WHERE id=$1`, usageID, encodedUsage, now); err != nil {
 			return err
 		}
 	}
 	if err == nil {
-		err = appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("%s:%d:%d", result.Kind, result.HTTPStatus, result.LastSequence), map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "content_type": result.ContentType, "response_payload_digest": responseDigest, "final_usage_present": result.FinalUsage != nil, "last_sequence": result.LastSequence}, now)
+		err = appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("%s:%d:%d", result.Kind, result.HTTPStatus, result.LastSequence), map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "content_type": result.ContentType, "response_payload_digest": responseDigest, "final_usage_present": result.FinalUsage != nil, "settlement_snapshot_present": settlementPresent, "last_sequence": result.LastSequence}, now)
 	}
 	if err == nil {
 		err = tx.Commit(ctx)
