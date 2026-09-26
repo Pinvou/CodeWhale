@@ -66,6 +66,20 @@ pub(crate) const DRAIN_TRUNCATED_NOTE: &[u8] =
       (inherited by a still-running grandchild?); returning the output \
       captured before the drain grace expired\n";
 
+/// Cap on the bytes a drain reader retains per stream. The readers keep
+/// draining to EOF regardless, so the pipes still close and the grace
+/// clock still bounds the wait — only the capture stops growing. Sized to
+/// comfortably hold every legitimate interpreter result (the largest is
+/// the plugin JSON, and callers truncate for their own limits anyway); a
+/// child producing more than this is runaway output, not a result.
+const DRAIN_CAPTURE_CAP: usize = 16 * 1024 * 1024;
+
+/// Appended in place when the cap stops the capture mid-stream. Reads like
+/// the drain note so a reader looking for truncation evidence finds it in
+/// the tail either way.
+const DRAIN_CAP_TRUNCATED_NOTE: &[u8] =
+    b"\n[codewhale] output capture stopped at the size cap; later output was dropped\n";
+
 /// True when `output` carries the drain-truncation note.
 pub(crate) fn drain_truncated(output: &std::process::Output) -> bool {
     output
@@ -325,7 +339,16 @@ async fn drain_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>, buf: Arc<Mu
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 if let Ok(mut buf) = buf.lock() {
-                    buf.extend_from_slice(&chunk[..n]);
+                    // Keep draining to EOF — the budget clock and the drain
+                    // grace bound the wait — but stop retaining bytes past
+                    // the cap so a chatty child cannot grow the capture
+                    // without bound across a multi-minute run.
+                    let remaining = DRAIN_CAPTURE_CAP.saturating_sub(buf.len());
+                    let retained = n.min(remaining);
+                    buf.extend_from_slice(&chunk[..retained]);
+                    if retained < n && !buf.ends_with(DRAIN_CAP_TRUNCATED_NOTE) {
+                        buf.extend_from_slice(DRAIN_CAP_TRUNCATED_NOTE);
+                    }
                 }
             }
         }
@@ -400,6 +423,46 @@ mod tests {
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(script);
         cmd
+    }
+
+    #[tokio::test]
+    async fn drain_pipe_caps_the_capture_and_notes_the_truncation() {
+        // A chatty child must not grow the capture without bound across a
+        // multi-minute budget: the reader keeps draining to EOF (so the
+        // grace still works) but stops retaining bytes past the cap, and
+        // the captured tail says so. The cap is 16 MiB; sending the cap
+        // plus overruns proves both the boundary and the drop.
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let task = tokio::spawn(drain_pipe(Some(reader), Arc::clone(&buf)));
+
+        let cap = DRAIN_CAPTURE_CAP;
+        let chunk = vec![b'x'; 1024 * 1024];
+        let mut sent = 0usize;
+        while sent < cap + 2 * 1024 * 1024 {
+            writer.write_all(&chunk).await.expect("write");
+            sent += chunk.len();
+        }
+        drop(writer);
+        task.await.expect("drain task");
+
+        let captured = buf.lock().expect("captured").clone();
+        assert!(
+            captured.len() <= cap + DRAIN_CAP_TRUNCATED_NOTE.len(),
+            "the capture must stop at the cap, got {} bytes",
+            captured.len()
+        );
+        assert!(
+            captured.ends_with(DRAIN_CAP_TRUNCATED_NOTE),
+            "a capped capture must end with the truncation note"
+        );
+        assert_eq!(
+            &captured[..cap],
+            &vec![b'x'; cap][..],
+            "the first cap bytes are retained unchanged"
+        );
     }
 
     #[cfg(unix)]

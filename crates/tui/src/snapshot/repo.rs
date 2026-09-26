@@ -366,8 +366,11 @@ impl SnapshotRepo {
             // must ignore an ambient GIT_DIR/GIT_WORK_TREE exported by the
             // launching shell — it would redirect the one-time init away
             // from the hashed side-repo path.
-            let mut init_cmd = crate::dependencies::Git::command()
-                .ok_or_else(|| io_other("git not found on PATH"))?;
+            let mut init_cmd = crate::dependencies::Git::command().ok_or_else(|| {
+                // Same kind as `run_git`'s arm for the same condition, so
+                // kind-matching consumers see one shape for "no git".
+                io::Error::new(io::ErrorKind::NotFound, "git not found on PATH")
+            })?;
             init_cmd
                 .arg("init")
                 .arg("--quiet")
@@ -390,7 +393,10 @@ impl SnapshotRepo {
                 // is the silent-disable failure mode.
                 return Err(io_other(format!(
                     "{GIT_INIT_FAILED_MARKER}: {}",
-                    git_stderr_tail(String::from_utf8_lossy(&init.stderr).trim(), 500)
+                    git_stderr_tail(
+                        String::from_utf8_lossy(&init.stderr).trim(),
+                        GIT_STDERR_TAIL_CHARS
+                    )
                 )));
             }
 
@@ -759,7 +765,10 @@ impl SnapshotRepo {
             }
             return Err(io_other(format!(
                 "git log failed: {}",
-                git_stderr_tail(String::from_utf8_lossy(&log.stderr).trim(), 500)
+                git_stderr_tail(
+                    String::from_utf8_lossy(&log.stderr).trim(),
+                    GIT_STDERR_TAIL_CHARS
+                )
             )));
         }
         let stdout = String::from_utf8_lossy(&log.stdout);
@@ -1188,6 +1197,18 @@ const GIT_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// the peek-poll cadence for data on an otherwise quiet pipe.
 const GIT_PIPE_READER_POLL: Duration = Duration::from_millis(50);
 
+/// Cap on the bytes a git pipe reader retains per stream. The readers keep
+/// polling to EOF regardless, so cancellation still works and the drain
+/// grace still bounds the wait — only the capture stops growing. Legitimate
+/// git output here is status lines and a snapshot listing; anything past
+/// this is a runaway (e.g. a hook spamming stderr), not a result.
+const GIT_CAPTURE_CAP: usize = 16 * 1024 * 1024;
+
+/// Appended in place when the cap stops a capture mid-stream, so a tail
+/// reader sees the truncation instead of a silently cut output.
+const GIT_CAPTURE_CAP_NOTE: &[u8] =
+    b"\n[codewhale] git output capture stopped at the size cap; later output was dropped\n";
+
 /// Number of bounded-git pipe readers currently running. The thread-leak
 /// regression uses this to prove a cancelled reader actually exits: a
 /// reader detached while blocked on a grandchild-held pipe would keep this
@@ -1268,7 +1289,12 @@ fn drain_git_pipe<R>(
             Ok(0) => return,
             Ok(n) => {
                 if let Ok(mut buf) = buf.lock() {
-                    buf.extend_from_slice(&chunk[..n]);
+                    let remaining = GIT_CAPTURE_CAP.saturating_sub(buf.len());
+                    let retained = n.min(remaining);
+                    buf.extend_from_slice(&chunk[..retained]);
+                    if retained < n && !buf.ends_with(GIT_CAPTURE_CAP_NOTE) {
+                        buf.extend_from_slice(GIT_CAPTURE_CAP_NOTE);
+                    }
                 }
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => continue,
@@ -1334,7 +1360,12 @@ fn drain_git_pipe<R>(
             Ok(0) => return,
             Ok(n) => {
                 if let Ok(mut buf) = buf.lock() {
-                    buf.extend_from_slice(&chunk[..n]);
+                    let remaining = GIT_CAPTURE_CAP.saturating_sub(buf.len());
+                    let retained = n.min(remaining);
+                    buf.extend_from_slice(&chunk[..retained]);
+                    if retained < n && !buf.ends_with(GIT_CAPTURE_CAP_NOTE) {
+                        buf.extend_from_slice(GIT_CAPTURE_CAP_NOTE);
+                    }
                 }
             }
             Err(err) if err.kind() == ErrorKind::Interrupted => continue,
@@ -1342,6 +1373,10 @@ fn drain_git_pipe<R>(
         }
     }
 }
+
+/// Characters of git stderr kept in timeout and failure details — the
+/// diagnostics closest to the wedge, not the whole firehose.
+const GIT_STDERR_TAIL_CHARS: usize = 500;
 
 /// Keep the last `limit` characters (the diagnostics closest to the
 /// wedge), prefixed with `…`, character-boundary safe by construction.
@@ -1450,7 +1485,7 @@ fn run_bounded_git(cmd: &mut std::process::Command, subcommand: &str) -> io::Res
                 String::from_utf8_lossy(&stderr_buf.lock().map(|b| b.clone()).unwrap_or_default())
                     .trim()
                     .to_string();
-            let stderr_tail = git_stderr_tail(&stderr_all, 500);
+            let stderr_tail = git_stderr_tail(&stderr_all, GIT_STDERR_TAIL_CHARS);
             let marker = git_timeout_marker(subcommand);
             let detail = if stderr_tail.is_empty() {
                 format!("{marker} after {}s", GIT_COMMAND_TIMEOUT.as_secs())
