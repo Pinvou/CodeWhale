@@ -1745,17 +1745,7 @@ impl RegistrationValidationContext {
                     "registration result",
                 ));
             }
-            for field in ["registration_request_id", "remote_control_generation"] {
-                let Some(actual) = value.get(field) else {
-                    return Err(ControllerProtocolError::new(
-                        "missing_field",
-                        format!("message.{field}"),
-                    ));
-                };
-                if Some(actual) != validated.get(field) {
-                    return Err(ControllerProtocolError::new("invalid_message", field));
-                }
-            }
+            validate_registration_result_binding(&value, &validated, false)?;
             Some(value)
         } else {
             None
@@ -1773,6 +1763,53 @@ fn registration_comparable(value: &Value) -> Value {
         object.remove("request_id");
     }
     value
+}
+
+fn validate_registration_result_binding(
+    value: &Value,
+    request: &Value,
+    require_error_context: bool,
+) -> Result<()> {
+    let kind = value.get("type").and_then(Value::as_str);
+    if kind == Some("error") {
+        // Router-generated errors do not always carry registration-specific
+        // context, so bind them to the exact transport request instead. A
+        // sealed contextual error may be replayed for an idempotent retry with
+        // a fresh transport request id and is bound by the fields below.
+        if !require_error_context && value.get("request_id") != request.get("request_id") {
+            return Err(ControllerProtocolError::new(
+                "invalid_message",
+                "request_id",
+            ));
+        }
+        for field in ["registration_request_id", "remote_control_generation"] {
+            match value.get(field) {
+                Some(actual) if Some(actual) != request.get(field) => {
+                    return Err(ControllerProtocolError::new("invalid_message", field));
+                }
+                None if require_error_context => {
+                    return Err(ControllerProtocolError::new(
+                        "missing_field",
+                        format!("message.{field}"),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+    for field in ["registration_request_id", "remote_control_generation"] {
+        let Some(actual) = value.get(field) else {
+            return Err(ControllerProtocolError::new(
+                "missing_field",
+                format!("message.{field}"),
+            ));
+        };
+        if Some(actual) != request.get(field) {
+            return Err(ControllerProtocolError::new("invalid_message", field));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_controller_registration_message_json(
@@ -1814,17 +1851,13 @@ pub(crate) fn validate_controller_registration_message_json(
             "registration result",
         ));
     }
-    for field in ["registration_request_id", "remote_control_generation"] {
-        let Some(actual) = value.get(field) else {
-            return Err(ControllerProtocolError::new(
-                "missing_field",
-                format!("message.{field}"),
-            ));
-        };
-        if Some(actual) != context.request.get(field) {
-            return Err(ControllerProtocolError::new("invalid_message", field));
-        }
-    }
+    let require_error_context = context.sealed_result.as_ref().is_some_and(|sealed| {
+        sealed.get("type").and_then(Value::as_str) == Some("error")
+            && ["registration_request_id", "remote_control_generation"]
+                .iter()
+                .all(|field| sealed.get(*field).is_some())
+    });
+    validate_registration_result_binding(&value, &context.request, require_error_context)?;
     if let Some(sealed) = &context.sealed_result {
         if registration_comparable(&value) != registration_comparable(sealed) {
             return Err(ControllerProtocolError::new(
