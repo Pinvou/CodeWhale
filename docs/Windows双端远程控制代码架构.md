@@ -20,7 +20,7 @@
 - Relay 只负责鉴权和转发；任务正文通过双端派生的会话密钥加密。
 - B 端复用本地 Session、EnginePool、Codex ACP、权限、附件和产物体系，不重复实现执行引擎。
 - 设置页负责连接管理；连接后的主要任务交互复用统一 `ChatView`。
-- `SessionStore`、`EnginePool`、`AcpPool` 与 `RemoteControl` 是并列 Rust 能力；不在其上新增 `ConversationRuntime`、`LocalRuntime` 或 `RemoteRuntime`。
+- `SessionStore` 提供会话状态、持久化与投影能力；`EnginePool`、`AcpPool`、`RemoteControl` 分别参与本地 Engine、本地 ACP 和远程设备路径。各组件保持独立状态所有权，不在其上新增 `ConversationRuntime`、`LocalRuntime` 或 `RemoteRuntime`，也不要求三种后端能力实现统一接口。
 - Tauri Command 是薄 IPC 入口；跨能力调用顺序、准入、权限和失败收口由无独立持久状态的用例编排完成。
 - A 端远程会话使用 `SessionStore + RemoteControl`：`SessionStore` 保存 `RemoteProxy` 会话、A 本地 UI 元数据和已认证历史投影，`RemoteControl` 负责连接、加密通道、请求关联和恢复。
 - B 端 Session、Journal、任务准入和执行终态始终是唯一业务权威；A 的 `RemoteProxy` 只是已认证投影，不得进入 A 本机 EnginePool/AcpPool。
@@ -32,9 +32,12 @@ flowchart LR
     subgraph A["A 端 · 主控设备"]
         ASettings["远程控制设置页"]
         AChat["ChatView"]
-        ABridge["desktop-remote-control.js"]
-        ACommands["薄 Controller Tauri Commands"]
+        AControlBridge["desktop-remote-control.js<br/>控制面 API"]
+        ASessionBridge["desktop-remote-control.js<br/>会话面 API"]
+        AControlCommands["连接控制 Commands"]
+        ASessionCommands["会话 Commands"]
         AUseCase["A 远程会话用例编排"]
+        AProjectionPort["RemoteSessionProjectionPort"]
         AStore["SessionStore<br/>RemoteProxy / 历史投影"]
         ARemote["RemoteControl<br/>连接 / 租约 / 加密通道"]
     end
@@ -48,8 +51,10 @@ flowchart LR
     subgraph B["B 端 · 被控设备"]
         BSettings["远程控制设置页"]
         BChat["ChatView"]
-        BBridge["desktop-remote-control.js"]
-        BCommands["薄 Controlled Tauri Commands"]
+        BControlBridge["desktop-remote-control.js<br/>控制面 API"]
+        BSessionBridge["desktop-remote-control.js<br/>会话面 API"]
+        BControlCommands["连接控制 Commands"]
+        BSessionCommands["会话 Commands"]
         BState["ControlledDeviceManager"]
         BWorker["ControlledRelayWorker"]
         BLane["ControlledLaneState"]
@@ -62,12 +67,17 @@ flowchart LR
         Journal["Journal / History / Artifacts"]
     end
 
-    ASettings --> ABridge
-    AChat --> ABridge
-    ABridge --> ACommands
-    ACommands --> AUseCase
+    ASettings -->|连接 / 断开| AControlBridge
+    AControlBridge --> AControlCommands
+    AControlCommands --> ARemote
+    ASettings -. Connected 后导航 .-> AChat
+    AChat -->|会话操作| ASessionBridge
+    ASessionBridge --> ASessionCommands
+    ASessionCommands --> AUseCase
     AUseCase --> AStore
     AUseCase --> ARemote
+    ARemote -->|已认证远端事件| AProjectionPort
+    AProjectionPort -. 组合根注入实现 .-> AUseCase
 
     ARemote <--> WS
     WS --> Pairing
@@ -87,15 +97,18 @@ flowchart LR
     Journal --> BLane
     BLane --> BWorker
 
-    BSettings --> BBridge
-    BChat --> BBridge
-    BBridge --> BCommands
-    BCommands --> BState
-    Journal --> BBridge
-    ARemote --> AUseCase
+    BSettings -->|启停 / 刷新 / 授权| BControlBridge
+    BControlBridge --> BControlCommands
+    BControlCommands --> BState
+    BChat -->|本地输入| BSessionBridge
+    BSessionBridge --> BSessionCommands
+    BSessionCommands --> LocalUseCase
+    Journal -->|状态投影| BSessionBridge
 ```
 
-图中的用例编排是薄调用逻辑，可以是 Command 模块内的普通 Rust 函数，也可以在复杂度增长后提取为无持久状态的应用服务；它不是新 Runtime。`ControlledExecutionPort` 由远控 feature 定义、由 app 组合根注入实现，避免 `features/remote_control` 反向依赖 `app/commands`。
+图中的控制面/会话面 Bridge 与 Command 是逻辑职责，不要求拆分现有 `desktop-remote-control.js` 或 Command 文件。A 设置页通过控制面建立连接，进入 `Connected` 后只执行 UI 导航到统一 `ChatView`；导航不是后端调用，也不经过远程会话用例或 `SessionStore`。B 的 `ChatView` 本地输入和 `RemoteControl` 网络入站分别经会话 Command 与 `ControlledExecutionPort` 进入同一本地会话用例，再使用相同的 `SessionStore + EnginePool/AcpPool` 链路。
+
+图中的用例编排是可复用、Tauri 无关的普通 Rust 边界，最终按职责位于所属 feature 的 `application` 子模块并显式导出；既有 Command 内 helper 只作为迁移兼容 shim，不得继续承载新增业务。边界的签名和实现均不导入或调用 Tauri API，宿主事件通过注入的 `AppEventBus` 等窄端口发布，也不是新 Runtime。`ControlledExecutionPort` 与 `RemoteSessionProjectionPort` 由远控 feature 定义、由 app 组合根注入实现；图中 A 的虚线是经端口发生的运行时回调，不代表 `features/remote_control → app/commands` 或 feature 之间的反向模块依赖。本设计不要求新增固定的 `features/conversation` 目录。
 
 ## 3. 当前代码分层
 
@@ -207,7 +220,7 @@ remotePermissions
 | `desktop_remote_artifact.rs` | 产物索引、预览和下载 |
 | `desktop_remote_history.rs` | Journal、快照和离线历史 |
 
-Command 层负责 Tauri 参数、返回值和事件适配，不应成为连接状态、会话状态或任务状态的第二所有者。目标架构下，Command/薄用例编排按会话类型使用以下组合：
+Command 入口负责 Tauri 参数、返回值和事件适配，不应成为连接状态、会话状态或任务状态的第二所有者。目标架构下，需要复用的业务流程由 Command 委托给所属 feature `application` 子模块显式导出的 Tauri 无关用例边界，再按会话类型使用以下组合；不要求统一迁入 conversation feature，既有 Command helper 仅作为迁移 shim：
 
 | 会话类型 | 调用组合 | 约束 |
 |---|---|---|
@@ -216,7 +229,7 @@ Command 层负责 Tauri 参数、返回值和事件适配，不应成为连接�
 | A 远程代理 | `SessionStore(RemoteProxy) + RemoteControl` | 不得调用 A 本机 EnginePool/AcpPool |
 | B 远程受控 | `RemoteControl 入口 + 本地用例 + SessionStore + EnginePool/AcpPool` | B 只产生一个权威 Session |
 
-用例编排可负责参数校验、会话类型检查、turn 准入、附件准备、调用顺序、失败回滚/收口、错误转换和事件投影；持久化和长生命周期状态仍归并列能力组件。
+用例编排可负责参数校验、会话类型检查、turn 准入、附件准备、调用顺序、失败回滚/收口、错误转换和事件投影；持久化和长生命周期状态仍归各自的能力组件，其中会话状态、持久化与投影归 `SessionStore`，本地执行资源和远程控制状态分别归对应后端组件。
 
 ### 3.5 Rust 领域层
 
@@ -621,7 +634,7 @@ transport disconnected
 
 ### 7.7 B 受控入口与本地用例复用边界不明
 
-B 端网络入站和 Tauri Command 都需要进入相同的 Session、turn 准入、附件、执行器和 Journal 链路，但 feature 不能反向依赖 `app/commands`。目标架构需要从 Command 中提取普通 Rust 用例函数，并由组合根向 `RemoteControl` 注入窄 `ControlledExecutionPort`，避免内部 invoke、跨 Command 调用和第二套执行逻辑。
+B 端网络入站和 Tauri Command 都需要进入相同的 Session、turn 准入、附件、执行器和 Journal 链路，但 feature 不能反向依赖 `app/commands`。目标架构需要在职责所属 feature 的 `application` 子模块为共享流程暴露不导入或调用 Tauri API 的普通 Rust 用例边界，并由组合根向 `RemoteControl` 注入窄 `ControlledExecutionPort` 适配器；不强制新增统一 conversation feature，也不搬迁无关 Command。既有 Command helper 只能作为代理到该边界的迁移 shim，同时必须避免内部 invoke、跨 Command 调用和第二套执行逻辑。
 
 ## 8. 推荐目标分层
 
@@ -675,7 +688,8 @@ src/features/remote_control/
 │  ├─ permission/
 │  ├─ journal/
 │  └─ ports/
-│     └─ controlled_execution.rs # B 受控请求进入本地用例的窄端口
+│     ├─ controlled_execution.rs       # B 受控请求进入本地用例的窄端口
+│     └─ remote_session_projection.rs  # A 已认证事件进入投影/对账用例的窄端口
 ├─ application/
 │  ├─ controlled_service.rs
 │  ├─ controller_service.rs
@@ -692,11 +706,9 @@ src/features/sessions/
 ├─ ...
 └─ remote_proxy.rs                  # RemoteProxy 格式、字段级写权限和 pending 对账
 
-src/features/conversation/                 # 无独立持久状态的跨能力用例编排
-├─ local_chat.rs                    # SessionStore + EnginePool
-├─ local_acp.rs                     # SessionStore + AcpPool
-├─ remote_proxy.rs                  # SessionStore + RemoteControl
-└─ controlled_execution.rs          # ControlledExecutionPort 实现
+src/features/<owner>/application/         # 可枚举的 Tauri 无关共享用例边界
+├─ mod.rs                            # 显式导出供 Command/注入端口复用的入口
+└─ <use_case>.rs                     # 按职责归属到 assistant/codex_acp/remote_control 等 feature
 
 src/app/commands/remote_control/
 ├─ connection.rs
@@ -707,17 +719,23 @@ src/app/commands/remote_control/
 └─ history.rs
 ```
 
-上述目录是职责示意；`features/conversation` 只组合窄领域端口，不持有第二份 Session、Engine、ACP 或远控状态，也不形成 Runtime 抽象。具体装配由 `lib.rs` 组合根完成，并保持下述依赖方向：
+上述目录只规定共享业务边界位于其职责所属 feature 的 `application` 子模块，不要求新增统一的 `features/conversation`。这一约定使架构守卫能够枚举 `features/*/application/**/*.rs`，检查其不导入或调用 Tauri API；既有 Command 内 helper 仅能作为有退出条件的兼容代理，不属于最终边界。用例不持有第二份 Session、Engine、ACP、任务或远控状态，也不形成 Runtime 抽象。具体装配由 `lib.rs` 组合根完成，并保持下述依赖方向：
 
 ```text
-Tauri Commands → 薄用例编排 → SessionStore / EnginePool / AcpPool / RemoteControl
+Tauri Command（IPC 入口） → 可复用、Tauri 无关的用例边界
+                           ├→ SessionStore（会话状态/持久化/投影）
+                           └→ 按会话类型选择 EnginePool / AcpPool / RemoteControl
 
 B RemoteControl 入站 → ControlledExecutionPort
-                         ↑ 由 lib.rs 组合根注入 conversation feature 实现
-                         └→ 薄本地用例 → SessionStore + EnginePool/AcpPool
+                         ↑ 由 lib.rs 组合根注入适配器实现
+                         └→ 同一 Tauri 无关用例边界 → SessionStore + EnginePool/AcpPool
+
+A RemoteControl 已认证事件 → RemoteSessionProjectionPort
+                              ↑ 由 lib.rs 组合根注入实现
+                              └→ 投影/对账用例 → SessionStore.RemoteProxy → AppEventBus
 ```
 
-领域层不得依赖 Tauri、WebView 或具体 Relay Manager；`features/remote_control` 不得依赖 `app/commands`。并列能力之间需要跨 feature 协作时，通过组合根注入窄端口，而不是形成 Runtime 包装层或反向调用 Command。
+领域层不得依赖 Tauri、WebView 或具体 Relay Manager；`features/remote_control` 不得依赖 `app/commands`。能力组件之间需要跨 feature 协作时，通过组合根注入窄端口，而不是形成 Runtime 包装层或反向调用 Command。
 
 ### 8.3 Relay 窄接口
 
@@ -754,10 +772,11 @@ trait DesktopRelayPort {
 
 ### 阶段三：收敛 Rust 用例编排
 
-- 将本地普通、ACP 和 A 远程 Command 收敛为薄 IPC 适配；
+- 保持现有 Command 名称、参数和已验证行为兼容，只为确需复用的流程在所属 feature 的 `application` 子模块暴露 Tauri 无关用例边界；
 - 保持 `SessionStore + EnginePool`、`SessionStore + AcpPool`、`SessionStore + RemoteControl` 三类显式编排，不引入统一 Runtime；
-- 抽取本地与 B 受控入口共享的普通 Rust 用例函数；
-- 由组合根注入 `ControlledExecutionPort` 实现，禁止 remote-control feature 反向依赖 Tauri Command；
+- 最小化提取本地与 B 受控入口共享的普通 Rust 逻辑，不新增统一 conversation feature；既有 Command helper 仅作为代理到最终边界的迁移 shim，不得新增业务并在消费者迁移后删除；
+- 定义并由组合根同时注入 `ControlledExecutionPort` 与 `RemoteSessionProjectionPort` 实现：前者承接 B 受控请求，后者承接 A 已认证入站事件和投影/对账；禁止 remote-control feature 反向依赖 Tauri Command、`app` 或 Tauri 事件 API；
+- 将旧 A 入站直连回调或直接 Tauri 事件调用收敛为 `RemoteSessionProjectionPort` 兼容 shim；通过静态调用方扫描和端口契约测试证明无消费者后删除，最终状态不得保留绕过端口的路径；
 - 保留 controller v1 wire contract 和 B 端唯一权威 Session。
 
 ### 阶段四：统一会话界面与拆分前端 Bridge
@@ -782,10 +801,11 @@ trait DesktopRelayPort {
 
 ## 10. 关键约束
 
-- `SessionStore`、`EnginePool`、`AcpPool` 与 `RemoteControl` 保持并列；不引入持有会话或任务状态的统一 Conversation Runtime。
+- `SessionStore` 负责会话状态、持久化与投影；`EnginePool`、`AcpPool`、`RemoteControl` 分别参与本地 Engine、本地 ACP 和远程设备路径。各组件保持独立状态所有权，不引入持有会话或任务状态的统一 Conversation Runtime，也不要求三种后端能力实现统一接口。
 - A 端远程会话必须经 `SessionStore.RemoteProxy + RemoteControl` 编排，不得进入 A 本机 EnginePool/AcpPool。
 - A 只权威拥有本地 UI 元数据；远程正文、任务状态和终态只是经 B 已认证 Journal/快照对账的投影。
 - B 端网络入站通过组合根注入的 `ControlledExecutionPort` 进入本地用例，不得反向调用 Tauri Command。
+- A 端已认证入站事件只能通过组合根注入的 `RemoteSessionProjectionPort` 进入投影/对账用例，再经注入的 `AppEventBus` 等宿主端口通知 UI；不得直接依赖 `app`、Tauri 事件 API 或形成 feature 反向依赖。
 - 不因目录重构改变 controller v1 协议字段或加密语义。
 - 不允许 React 构造 lease、task ID、摘要或临时模型包。
 - 不允许凭据、连接码、resume token、会话密钥进入日志或持久化。
@@ -821,6 +841,8 @@ trait DesktopRelayPort {
 
 ### Rust 领域与基础设施
 
+- `pinvou3-app/src-tauri/src/features/remote_control/domain/ports/controlled_execution.rs`（目标）
+- `pinvou3-app/src-tauri/src/features/remote_control/domain/ports/remote_session_projection.rs`（目标）
 - `pinvou3-app/src-tauri/src/features/remote_control/controller/controlled.rs`
 - `pinvou3-app/src-tauri/src/features/remote_control/controller/controlling.rs`
 - `pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_session.rs`
@@ -845,7 +867,7 @@ trait DesktopRelayPort {
 - `remote_chat_projection.test.mjs`
 - `remote_capability_request_loop.test.mjs`
 
-Rust 领域测试集中在 `features/remote_control/controller/` 各模块及 controller crypto harness。
+Rust 领域测试集中在 `features/remote_control/controller/` 各模块及 controller crypto harness。目标实现还必须分别为 `ControlledExecutionPort` 和 `RemoteSessionProjectionPort` 增加注入、错误映射、单次调用、重复/迟到事件过滤和无绕行路径的契约测试；`scripts/architecture-guard.py` 必须枚举 `features/*/application/**/*.rs`，拒绝其中的 Tauri API 引用，并拒绝 `features/remote_control → app/commands`、直接 Tauri 事件调用和新增 feature 依赖环。
 
 常用验证命令：
 
