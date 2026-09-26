@@ -668,7 +668,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
     };
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
-    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, accountPlatformClient }) => {
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, accountPlatformClient, onOpenAccountRecharge }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -2658,6 +2658,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     renderItem={handleTimelineRenderItem}
                     renderToolItem={handleTimelineRenderToolItem}
                     onOpenExternal={openChatExternalUrl}
+                    onUserErrorAction={onOpenAccountRecharge}
                   />
                 {/* 实体占位必须覆盖输入框和其上方渐变区，保证滚到底时最后一张卡
                     完整停在渐变之外，而不是虽然能滚到却被遮罩淡化。 */}

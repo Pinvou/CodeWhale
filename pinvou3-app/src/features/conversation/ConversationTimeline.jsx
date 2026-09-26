@@ -30,6 +30,7 @@ import {
 } from './conversation-model.js';
 import { AssistantMessageActions, AssistantMessageFooter } from './AssistantMessageActions.jsx';
 import { assistantResponseAvailable, assistantResponseText } from './message-clipboard.js';
+import { walletRechargeTarget } from './billing-notice.js';
 import {
   CONVERSATION_VIRTUALIZATION_THRESHOLD,
   shouldVirtualizeConversationTurns,
@@ -831,6 +832,7 @@ function ConversationTurnView({
   renderToolItem,
   onOpenExternal,
   onOpenResource,
+  onUserErrorAction,
   agentLabel = 'Agent',
   assistantAvatar,
   copy,
@@ -860,6 +862,18 @@ function ConversationTurnView({
       : '';
   const userAttachments = Array.isArray(turn.userAttachments) ? turn.userAttachments : [];
   const assistantAvailable = assistantResponseAvailable(turn);
+  const walletInsufficient = turn.userError?.kind === 'wallet_insufficient';
+  const walletTurnCompleted = walletInsufficient && turn.userError?.turnOutcome === 'COMPLETED';
+  const organizationWallet = walletInsufficient && turn.userError?.contextType === 'ORGANIZATION';
+  const rechargeTarget = walletRechargeTarget(turn.userError);
+  const userErrorTitle = walletInsufficient
+    ? (walletTurnCompleted ? c.walletInsufficientCompletedTitle : c.walletInsufficientTitle)
+    : turn.userError?.title;
+  const userErrorMessage = walletInsufficient
+    ? (organizationWallet
+        ? (rechargeTarget ? c.organizationWalletPurchaserMessage : c.organizationWalletInsufficientMessage)
+        : (walletTurnCompleted ? c.walletInsufficientCompletedMessage : c.walletInsufficientMessage))
+    : turn.userError?.message;
   // Footer/visibility: a turn with no assistant content must not render an
   // avatar-only row. Live repro: a steered message sandwiched between two
   // consecutive injections has no items of its own — the unconditional avatar
@@ -962,12 +976,17 @@ function ConversationTurnView({
                   {/* Dual theme: light uses a white card with gray text; dark: keeps the dark glass style. */}
                   <div className="w-fit max-w-[640px] rounded-[22px] bg-white/85 ring-1 ring-black/5 dark:bg-[rgba(38,38,42,0.78)] dark:ring-0 px-4 py-3 text-[13px] shadow-[0_16px_48px_rgba(0,0,0,0.10),inset_0_1px_0_rgba(255,255,255,0.06)] dark:shadow-[0_16px_48px_rgba(0,0,0,0.24),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-2xl">
                     <div className="flex items-start gap-3">
-                      <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-500/10 text-red-600 dark:bg-[rgba(255,105,97,0.16)] dark:text-[#ff9f9a]">
+                      <span className={`mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${walletTurnCompleted ? 'bg-amber-500/10 text-amber-600 dark:bg-amber-400/15 dark:text-amber-300' : 'bg-red-500/10 text-red-600 dark:bg-[rgba(255,105,97,0.16)] dark:text-[#ff9f9a]'}`}>
                         <AlertTriangle className="h-4 w-4" />
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className="leading-5 font-semibold text-gray-900 dark:text-[rgba(255,255,255,0.94)]">{turn.userError.title}</div>
-                        <div className="mt-1.5 leading-5 text-gray-600 dark:text-[rgba(255,255,255,0.72)]">{turn.userError.message}</div>
+                        <div className="leading-5 font-semibold text-gray-900 dark:text-[rgba(255,255,255,0.94)]">{userErrorTitle}</div>
+                        <div className="mt-1.5 leading-5 text-gray-600 dark:text-[rgba(255,255,255,0.72)]">{userErrorMessage}</div>
+                        {walletInsufficient && rechargeTarget && onUserErrorAction && (
+                          <button type="button" onClick={() => onUserErrorAction(turn.userError, turn)} className="mt-2 inline-flex text-[13px] font-semibold text-[#087F5B] underline underline-offset-4 hover:text-[#066B4D] dark:text-[#6EE7B7] dark:hover:text-[#A7F3D0]">
+                            {rechargeTarget.contextType === 'ORGANIZATION' ? c.organizationRechargeNow : c.rechargeNow}
+                          </button>
+                        )}
                       </div>
                     </div>
                     {turn.userError.technicalDetail && (

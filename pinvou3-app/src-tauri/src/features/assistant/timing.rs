@@ -32,6 +32,7 @@ struct ActiveTurnTiming {
     /// remains stable for the local timeline, while value signals must join
     /// the task lifecycle on the engine-provided id.
     behavior_turn_id: Option<String>,
+    billing_notice: Option<serde_json::Value>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     recorded_first_events: HashSet<&'static str>,
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -45,6 +46,7 @@ impl ActiveTurnTiming {
         Self {
             turn_id,
             behavior_turn_id: None,
+            billing_notice: None,
             #[cfg(any(feature = "benchmark-hooks", test))]
             recorded_first_events: HashSet::new(),
             #[cfg(any(feature = "benchmark-hooks", test))]
@@ -193,6 +195,20 @@ pub fn bind_behavior_turn_id(session_id: &str, behavior_turn_id: &str) -> bool {
         .and_then(|mut map| {
             let active = map.get_mut(session_id)?.back_mut()?;
             active.behavior_turn_id = Some(behavior_turn_id.to_string());
+            Some(())
+        })
+        .is_some()
+}
+
+/// Persist the gateway's bounded, versioned billing notice onto the active
+/// turn so timeline hydration can restore the user-visible business state.
+pub fn record_billing_notice(session_id: &str, notice: serde_json::Value) -> bool {
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let active = map.get_mut(session_id)?.back_mut()?;
+            active.billing_notice = Some(notice);
             Some(())
         })
         .is_some()
@@ -374,6 +390,9 @@ fn finish_turn_internal(
     if let Some(behavior_turn_id) = active_turn.behavior_turn_id {
         entry["behavior_turn_id"] = json!(behavior_turn_id);
     }
+    if let Some(billing_notice) = active_turn.billing_notice {
+        entry["billing_notice"] = billing_notice;
+    }
     if let Some(u) = usage {
         entry["usage"] = json!({
             "input_tokens": u.input_tokens,
@@ -497,6 +516,8 @@ pub struct TimelineEvent {
     pub ts: String,     // RFC3339
     pub status: Option<String>, // assistant_done only
     pub error: Option<String>, // assistant_done only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_notice: Option<serde_json::Value>, // assistant_done only
     pub usage: Option<TurnUsage>, // assistant_done / context_snapshot(老事件为 None)
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub tool_name: Option<String>,
@@ -650,6 +671,7 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        billing_notice: v.get("billing_notice").cloned(),
         usage,
         #[cfg(any(feature = "benchmark-hooks", test))]
         tool_name: v
@@ -854,6 +876,49 @@ mod tests {
             done.behavior_turn_id.as_deref(),
             Some("engine-turn-authoritative")
         );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn billing_notice_survives_timeline_hydration() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-billing-notice-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-billing-notice";
+        start_turn(sid);
+        assert!(record_billing_notice(
+            sid,
+            json!({
+                "schema_version": 1,
+                "code": "WALLET_INSUFFICIENT",
+                "stage": "INITIAL_RESERVATION",
+                "turn_outcome": "REJECTED",
+                "settlement_status": "NOT_STARTED",
+                "action": "CONTACT_ORG_ADMIN",
+                "context_type": "ORGANIZATION",
+                "usage_request_id": "0199a100-0001-7000-8000-000000000106"
+            })
+        ));
+        finish_turn(sid, "Failed", Some("wallet reservation rejected"));
+
+        let done = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .expect("assistant terminal");
+        let notice = done.billing_notice.expect("persisted billing notice");
+        assert_eq!(notice["code"], "WALLET_INSUFFICIENT");
+        assert_eq!(notice["context_type"], "ORGANIZATION");
+        assert_eq!(notice["action"], "CONTACT_ORG_ADMIN");
 
         let _ = std::fs::remove_dir_all(tmp);
     }

@@ -28,7 +28,7 @@ const conversationJa = {
   attachment:'添付ファイル', operations:(count,failedCount)=>`${count} 件実行${failedCount?` · ${failedCount} 件失敗`:''}`, copyReply:'返信をコピー', copyReplySuccess:'コピーしました', copyReplyFailed:'コピーに失敗しました',
   exportReply:'エクスポート', exportReplyTitle:'返信をエクスポート', exportMarkdown:'Markdown 文書', exportMarkdownHint:'既定。元の書式を保持', exportHtml:'HTML 文書', exportHtmlHint:'ブラウザーでの閲覧に最適', exportSuccess:'エクスポートしました', exportFailed:'エクスポートに失敗しました', exportTooLarge:'返信がエクスポートのサイズ上限を超えています',
   shareReply:'共有', shareReplyTitle:'返信を共有', shareSystem:'システム共有', shareSystemHint:'インストール済みの通信アプリを選択', shareApps:'内容をコピーしてアプリを開く', shareSuccess:'共有しました', shareCopiedOpen:app=>`内容をコピーし、${app}を開きました。貼り付けて送信してください`, shareCopiedWeb:app=>`内容をコピーしました。${app}を開いて貼り付けてください`, shareFailed:'共有に失敗しました', shareUnavailable:'システム共有を利用できないため、内容をコピーしました', shareTargets:{wechat:'WeChat',wecom:'WeCom',feishu:'Feishu',dingtalk:'DingTalk',qq:'QQ'},
-  technicalDetails:'技術詳細',
+  technicalDetails:'技術詳細', walletInsufficientTitle:'残高不足', walletInsufficientMessage:'残高が不足しているため、このタスクを開始できません。', walletInsufficientCompletedTitle:'残高不足', walletInsufficientCompletedMessage:'今回の回答は完了しましたが、続けるにはチャージが必要です。', organizationWalletInsufficientMessage:'組織の利用枠が不足しています。チャージまたは利用枠の調整について組織管理者にお問い合わせください。', organizationWalletPurchaserMessage:'組織の利用枠が不足しています。組織用クレジットを購入すると続行できます。', rechargeNow:'今すぐチャージ', organizationRechargeNow:'組織用に購入',
 };
 
 const codexJa = {

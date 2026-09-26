@@ -94,6 +94,7 @@ import { PinvouSummonCard } from '../features/tools/tool-renderers.jsx';
 import { TeamRelayView } from '../features/team-relay/TeamRelayView.jsx';
 import { AccountPlatformPopover } from '../features/account-platform/AccountPlatformPopover.jsx';
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
+import { walletRechargeTarget } from '../features/conversation/billing-notice.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../features/team-relay/team-relay-access.js';
 import { teamRelayHasUnread } from '../features/team-relay/team-relay-state.js';
 import { SearchOverlay } from '../features/search/SearchOverlay.jsx';
@@ -297,6 +298,7 @@ const NAV_PREFETCH = {
       const [colorScheme, setColorScheme] = useState('system');
       const activeTheme = resolveTheme(colorScheme, systemDark);
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
+      const [accountPopoverRequest, setAccountPopoverRequest] = useState(null);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
       // that chat's WebView2. The login profile remains globally shared by the
@@ -3371,6 +3373,12 @@ const NAV_PREFETCH = {
         browserDockOpen: browserPaneOpen,
         onOpenBrowserDock: openBrowserDock,
         accountPlatformClient,
+        onOpenAccountRecharge: (userError) => {
+          const target = walletRechargeTarget(userError);
+          if (!target) return;
+          setAccountPopoverRequest({ ...target, requestId: Date.now() });
+          setAccountPopoverOpen(true);
+        },
       };
       // The three byte-identical empty states in the sidebar task list (task groups / date groups / flat list) share one node.
       const sidebarTaskEmptyNode = (
@@ -3940,7 +3948,10 @@ const NAV_PREFETCH = {
                   data-testid="account-platform-button"
                   aria-expanded={accountPopoverOpen}
                   onMouseDown={event => event.stopPropagation()}
-                  onClick={() => setAccountPopoverOpen(value => !value)}
+                  onClick={() => {
+                    setAccountPopoverRequest(null);
+                    setAccountPopoverOpen(value => !value);
+                  }}
                   title={t.uiAccountPlatform.title}
                   className={`flex items-center transition-colors ${isSidebarOpen ? 'w-full rounded-xl px-2 py-1.5 gap-3 text-left' : 'relative justify-center w-10 h-10 rounded-full'} ${activeTheme === 'dark' ? 'text-[#E3E3E3] hover:bg-[#333537] active:bg-[#3A3C3E]' : 'text-[#444746] hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
                 >
@@ -3955,6 +3966,7 @@ const NAV_PREFETCH = {
                   language={language}
                   theme={activeTheme}
                   collapsed={!isSidebarOpen}
+                  requestedView={accountPopoverRequest}
                   onClose={() => setAccountPopoverOpen(false)}
                 />
               </div>
@@ -4160,6 +4172,7 @@ const NAV_PREFETCH = {
                 onGotoModelSettings={() => openSettingsSection('model')}
                 onGotoSettings={() => openSettingsSection('general')}
                 onGotoTools={() => navigateFromScheduledRun('toolStore')}
+                onOpenAccountRecharge={chatViewBaseProps.onOpenAccountRecharge}
               />
             )}
             {SCHEDULED_TASKS_ENTRY_ENABLED && currentView === 'scheduled' && (

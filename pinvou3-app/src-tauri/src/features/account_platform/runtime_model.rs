@@ -92,8 +92,8 @@ pub(crate) struct AccountPlatformRuntimeModelProvider {
 impl AccountPlatformRuntimeModelProvider {
     pub(crate) fn new(app: AppHandle) -> Self {
         Self {
+            model_proxy: super::model_proxy::ModelGatewayProxy::new(app.clone()),
             app,
-            model_proxy: super::model_proxy::ModelGatewayProxy::default(),
         }
     }
 }

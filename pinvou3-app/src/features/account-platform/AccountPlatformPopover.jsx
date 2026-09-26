@@ -8,6 +8,13 @@ import { effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePayment
 import { localizedAccountPlatformError } from './error-localization.js';
 import { PasswordInput } from './PasswordInput.jsx';
 import { accountDisplayLabel } from './account-display-label.js';
+import {
+  createRechargeForTarget,
+  loadRechargeTarget,
+  rechargeBalanceForTarget,
+  rechargeOrderForTarget,
+  rechargeTargetAllowed,
+} from './recharge-target.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
@@ -141,7 +148,7 @@ function formatCountdown(seconds) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function RechargePanel({ copy, language, products, balance, order, qrData, qrError, loading, busy, error, notice, cardTheme, controlTheme, mutedText, isDark, onCreate, onRetryLoad, onRetryQR, onRefreshBalance, onResetOrder, onDone }) {
+function RechargePanel({ copy, language, products, balance, order, qrData, qrError, loading, busy, error, notice, actionLabel, cardTheme, controlTheme, mutedText, isDark, onCreate, onRetryLoad, onRetryQR, onRefreshBalance, onResetOrder, onDone }) {
   const [productId, setProductId] = useState('');
   const [channel, setChannel] = useState('ALIPAY');
   const [now, setNow] = useState(Date.now());
@@ -322,13 +329,13 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
       )}
       <button type="button" disabled={busy || !selectedAvailable || !effectiveChannel} onClick={() => onCreate(productId, effectiveChannel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">
         {busy && <RefreshCw size={13} className="animate-spin" />}
-        {copy.createRecharge}
+        {actionLabel || copy.createRecharge}
       </button>
     </div>
   );
 }
 
-export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, onClose }) {
+export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, requestedView, onClose }) {
   const panelRef = useRef(null);
   const requestRef = useRef({ generation: 0, controller: null });
   const contextSyncRef = useRef({
@@ -337,9 +344,11 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     pending: false,
   });
   const rechargeRequestRef = useRef({ generation: 0, controller: null });
+  const handledRequestedViewRef = useRef(null);
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
   const [balance, setBalance] = useState(null);
+  const [rechargeTarget, setRechargeTarget] = useState({ contextType: 'PERSONAL', view: 'recharge' });
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirmation, setPasswordConfirmation] = useState('');
@@ -433,7 +442,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     }
   }, [client, copy]);
 
-  const loadRecharge = useCallback(async () => {
+  const loadRecharge = useCallback(async (target = rechargeTarget) => {
     rechargeRequestRef.current.controller?.abort();
     const controller = new window.AbortController();
     const generation = rechargeRequestRef.current.generation + 1;
@@ -443,19 +452,17 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     setRechargeError('');
     setRechargeNotice('');
     try {
-      const results = await Promise.allSettled([client.products(controller.signal), client.balance(controller.signal)]);
+      const loaded = await loadRechargeTarget(client, me, target, controller.signal);
       if (!isCurrent()) return;
-      const value = (index) => (results[index].status === 'fulfilled' ? results[index].value : null);
-      setProducts(value(0)?.items || []);
+      setProducts(loaded.products?.items || []);
       setOrder(null);
-      if (value(1)) setBalance(value(1));
-      if (results.some((result) => result.status === 'rejected')) setRechargeError(copy.billingUnavailable);
+      setBalance(loaded.balance);
     } catch (reason) {
       if (reason?.name !== 'AbortError' && isCurrent()) setRechargeError(localizedError(copy, reason));
     } finally {
       if (isCurrent()) setRechargeLoading(false);
     }
-  }, [client, copy]);
+  }, [client, copy, me, rechargeTarget]);
 
   useEffect(() => {
     if (open) {
@@ -554,13 +561,13 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     let attempt = 0;
     const poll = async () => {
       try {
-        const latest = await client.rechargeOrder(order.order_id);
+        const latest = await rechargeOrderForTarget(client, me, rechargeTarget, order.order_id);
         if (stopped) return;
         if (paidOrderStates.has(latest.status)) {
           let refreshedBalance = null;
           let refreshFailed = false;
           try {
-            refreshedBalance = await client.balance();
+            refreshedBalance = await rechargeBalanceForTarget(client, me, rechargeTarget);
           } catch {
             refreshFailed = true;
           }
@@ -586,7 +593,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [auth, client, copy, open, order?.order_id, order?.status]);
+  }, [auth, client, copy, me, open, order?.order_id, order?.status, rechargeTarget]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -611,10 +618,31 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   }, [busy, captcha, open, onClose]);
 
   useEffect(() => {
-    if (view === 'recharge' && !personalSurfaceAccess(me).rechargeCreate) {
+    if (view === 'recharge' && !rechargeTargetAllowed(me, rechargeTarget)) {
       setView('account');
     }
-  }, [me, view]);
+  }, [me, rechargeTarget, view]);
+
+  useEffect(() => {
+    if (!open || auth !== 'ready' || !['recharge', 'organizationRecharge'].includes(requestedView?.view)) return;
+    if (handledRequestedViewRef.current === requestedView.requestId) return;
+    handledRequestedViewRef.current = requestedView.requestId;
+    const target = requestedView?.view === 'organizationRecharge'
+      ? { contextType: 'ORGANIZATION', view: 'organizationRecharge', organizationId: requestedView.organizationId }
+      : { contextType: 'PERSONAL', view: 'recharge' };
+    if (!rechargeTargetAllowed(me, target)) {
+      setError(copy.permissionDenied);
+      return;
+    }
+    setRechargeTarget(target);
+    setOrder(null);
+    setQrData('');
+    setQrError(false);
+    setRechargeError('');
+    setRechargeNotice('');
+    setView('recharge');
+    void loadRecharge(target);
+  }, [auth, copy.permissionDenied, loadRecharge, me, open, requestedView?.organizationId, requestedView?.requestId, requestedView?.view]);
 
   if (!open) return null;
 
@@ -808,7 +836,10 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   };
 
   const openRecharge = () => {
-    if (!personalSurfaceAccess(me).rechargeCreate) {
+    const target = me?.active_context?.organization_id
+      ? { contextType: 'ORGANIZATION', view: 'organizationRecharge', organizationId: me.active_context.organization_id }
+      : { contextType: 'PERSONAL', view: 'recharge' };
+    if (!rechargeTargetAllowed(me, target)) {
       setError(copy.permissionDenied);
       return;
     }
@@ -817,17 +848,18 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     setQrError(false);
     setRechargeError('');
     setRechargeNotice('');
+    setRechargeTarget(target);
     setView('recharge');
-    void loadRecharge();
+    void loadRecharge(target);
   };
 
   const createRecharge = async (productId, channel) => {
-    if (rechargeBusy || !personalSurfaceAccess(me).rechargeCreate) return;
+    if (rechargeBusy || !rechargeTargetAllowed(me, rechargeTarget)) return;
     setRechargeBusy(true);
     setRechargeError('');
     setRechargeNotice('');
     try {
-      const nextOrder = await client.createRecharge(productId, channel, newIdempotencyKey());
+      const nextOrder = await createRechargeForTarget(client, me, rechargeTarget, productId, channel, newIdempotencyKey());
       setOrder(nextOrder);
     } catch (reason) {
       setRechargeError(localizedError(copy, reason));
@@ -840,7 +872,8 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     if (rechargeBusy) return;
     setRechargeBusy(true);
     try {
-      setBalance(await client.balance());
+      const refreshed = await rechargeBalanceForTarget(client, me, rechargeTarget);
+      if (refreshed) setBalance(refreshed);
       setRechargeError('');
       setRechargeNotice(copy.paymentReceived);
     } catch {
@@ -864,7 +897,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
           </div>
         )}
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[15px] font-semibold">{view === 'recharge' && auth === 'ready' ? copy.rechargeTitle : auth === 'ready' ? displayName : copy.title}</div>
+          <div className="truncate text-[15px] font-semibold">{view === 'recharge' && auth === 'ready' ? (rechargeTarget.contextType === 'ORGANIZATION' ? copy.organizationPurchase : copy.rechargeTitle) : auth === 'ready' ? displayName : copy.title}</div>
           {auth === 'ready' && view !== 'recharge' && (
             <div className={`truncate font-mono text-[11px] ${mutedText}`} title={me?.user_code || ''}>
               {me?.user_code || '—'}
@@ -1094,6 +1127,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
           busy={rechargeBusy}
           error={rechargeError}
           notice={rechargeNotice}
+          actionLabel={rechargeTarget.contextType === 'ORGANIZATION' ? copy.purchaseForOrganization : copy.createRecharge}
           cardTheme={cardTheme}
           controlTheme={controlTheme}
           mutedText={mutedText}

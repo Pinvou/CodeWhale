@@ -28,7 +28,7 @@ const conversationZh = {
   attachment:'附件', operations:(count,failedCount)=>`执行 ${count} 项${failedCount?` · ${failedCount} 项失败`:''}`, copyReply:'复制回复', copyReplySuccess:'已复制', copyReplyFailed:'复制失败',
   exportReply:'导出', exportReplyTitle:'导出回复', exportMarkdown:'Markdown 文档', exportMarkdownHint:'默认，保留原始排版', exportHtml:'HTML 文档', exportHtmlHint:'适合在浏览器中查看', exportSuccess:'导出成功', exportFailed:'导出失败', exportTooLarge:'回复内容超出导出大小限制',
   shareReply:'分享', shareReplyTitle:'分享回复', shareSystem:'系统分享', shareSystemHint:'选择系统中已安装的通信应用', shareApps:'复制内容并打开应用', shareSuccess:'已分享', shareCopiedOpen:app=>`内容已复制，已尝试打开${app}，请粘贴发送`, shareCopiedWeb:app=>`内容已复制，请打开${app}粘贴发送`, shareFailed:'分享失败', shareUnavailable:'系统分享不可用，内容已复制', shareTargets:{wechat:'微信',wecom:'企业微信',feishu:'飞书',dingtalk:'钉钉',qq:'QQ'},
-  technicalDetails:'技术详情',
+  technicalDetails:'技术详情', walletInsufficientTitle:'余额不足', walletInsufficientMessage:'当前余额不足，无法开始本次任务。', walletInsufficientCompletedTitle:'余额不足', walletInsufficientCompletedMessage:'本次回答已完成，但账户余额不足，继续使用前请充值。', organizationWalletInsufficientMessage:'当前组织额度不足，请联系组织管理员充值或调整额度。', organizationWalletPurchaserMessage:'当前组织额度不足，可购买组织额度后继续使用。', rechargeNow:'立即充值', organizationRechargeNow:'为组织购买额度',
 };
 
 const codexZh = {

@@ -534,6 +534,7 @@ const NATIVE_CHAT_EVENTS = [
   'chat:plan_snapshot',
   'chat:plan_ready',
   'chat:transient_error',
+  'chat:billing_notice',
   'chat:done',
 ];
 
@@ -658,6 +659,7 @@ export function CodexAcpView({
   onGotoTools,
   onGotoModelSettings,
   onGotoSettings,
+  onOpenAccountRecharge,
   fixedSession = false,
 }) {
   const codeTelemetryViewIdRef = useRef(null);
@@ -3554,6 +3556,7 @@ export function CodexAcpView({
                       pendingByTool={pendingByTool}
                       onRespond={respond}
                       responding={responding}
+                      onUserErrorAction={onOpenAccountRecharge}
                       assistantAvatar={(
                         <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#1F1F1F] dark:text-[#E3E3E3]">
                           <AcpAgentLogo agentId={activeAgentId} className="h-5 w-5" title={activeAgentName} />

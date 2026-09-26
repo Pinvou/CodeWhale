@@ -36,6 +36,7 @@ export function createNativeLane() {
     streamText: '',
     toolMeta: {},
     planSnapshot: { plan: null, todos: null },
+    pendingBillingNotices: Object.create(null),
     // chat:memory 推送的本回合注入记忆快照（{ items, runtimePath, updatedAt }），
     // 未收到过事件时为 null；会话级状态，不随 hydration 落盘/清空。
     memory: null,
@@ -264,6 +265,8 @@ function recordTurnCompleted(lane, payload) {
     timestamp: Date.now(),
     status: payload && payload.status || (payload && payload.error ? 'Failed' : 'Completed'),
     error: payload && payload.error || null,
+    user_error: payload && (payload.user_error || payload.userError) || null,
+    billing_notice: payload && payload.billing_notice || null,
     ui_turn_index: open.ui_turn_index,
   };
   lane.timeline.push(record);
@@ -317,6 +320,12 @@ export function removeLocalUserMessage(lane, id) {
 export function applyNativeChatEvent(lane, name, payload, options = {}) {
   const p = payload || {};
   switch (name) {
+    case 'chat:billing_notice': {
+      const notice = p.billing_notice;
+      if (!notice || notice.code !== 'WALLET_INSUFFICIENT') return false;
+      lane.pendingBillingNotices[String(Number(p.turn_generation || 0))] = notice;
+      return false;
+    }
     case 'chat:user_message': {
       const content = String(p.content || '');
       if (!content) return false;
@@ -639,6 +648,37 @@ export function applyNativeChatEvent(lane, name, payload, options = {}) {
     case 'chat:done': {
       finalizeReasoning(lane);
       finalizeStream(lane);
+      const billingKey = String(Number(p.generation || 0));
+      const billingNotice = lane.pendingBillingNotices[billingKey];
+      if (billingNotice) {
+        delete lane.pendingBillingNotices[billingKey];
+        const completed = billingNotice.turn_outcome === 'COMPLETED';
+        const contextType = billingNotice.context_type || '';
+        const organizationId = String(billingNotice.organization_id || '').trim();
+        const action = contextType === 'PERSONAL' && billingNotice.action === 'OPEN_RECHARGE'
+          ? 'OPEN_RECHARGE'
+          : contextType === 'ORGANIZATION' && billingNotice.action === 'OPEN_ORGANIZATION_RECHARGE' && organizationId
+            ? 'OPEN_ORGANIZATION_RECHARGE'
+            : contextType === 'ORGANIZATION' && billingNotice.action === 'CONTACT_ORG_ADMIN' && organizationId
+              ? 'CONTACT_ORG_ADMIN'
+            : '';
+        p.billing_notice = billingNotice;
+        p.user_error = {
+          kind: 'wallet_insufficient',
+          severity: completed ? 'warning' : 'error',
+          stage: billingNotice.stage || '',
+          turnOutcome: billingNotice.turn_outcome || '',
+          settlementStatus: billingNotice.settlement_status || '',
+          action,
+          contextType,
+          organizationId,
+          errorCode: billingNotice.code,
+        };
+        p.userError = p.user_error;
+      }
+      Object.keys(lane.pendingBillingNotices).forEach(key => {
+        if (Number(key) <= Number(p.generation || 0)) delete lane.pendingBillingNotices[key];
+      });
       // Live-path terminal ratchet: a stop or an error mid-tool never
       // delivers chat:tool_end, so an unpaired tool card (typically an
       // in-flight `agent` spawn) would stay state "running" forever and the

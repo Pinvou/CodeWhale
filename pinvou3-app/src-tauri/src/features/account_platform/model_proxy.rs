@@ -14,8 +14,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{Stream, StreamExt, stream};
 use rand::Rng as _;
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{OnceCell, RwLock};
 use tokio::time::sleep;
 
@@ -23,10 +25,14 @@ const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 const IDEMPOTENCY_PREFIX: &str = "pinvou-desktop-";
 const LOGICAL_TURN_PREFIX: &str = "pinvou-turn-";
 const LOGICAL_TURN_HEADER: &str = "X-Pinvou-Logical-Turn-ID";
+const CLIENT_CAPABILITIES_HEADER: &str = "X-Pinvou-Client-Capabilities";
+const BILLING_NOTICE_CAPABILITY: &str = "billing-notice-v1";
+const BILLING_NOTICE_EVENT: &str = "chat:billing_notice";
 
 #[derive(Clone, Default)]
 pub(super) struct ModelGatewayProxy {
     server: Arc<OnceCell<ProxyServer>>,
+    app: Option<AppHandle>,
 }
 
 struct ProxyServer {
@@ -38,6 +44,7 @@ struct ProxyServer {
 struct ProxyState {
     client: reqwest::Client,
     registry: Arc<RwLock<ProxyRegistry>>,
+    app: Option<AppHandle>,
 }
 
 #[derive(Default)]
@@ -48,13 +55,76 @@ struct ProxyRegistry {
 
 #[derive(Clone)]
 struct ProxyTarget {
+    session_id: String,
     upstream: Url,
     gateway_model_id: String,
     turn_generation: u64,
     maximum_output_tokens: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BillingNotice {
+    schema_version: u32,
+    code: String,
+    stage: String,
+    turn_outcome: String,
+    settlement_status: String,
+    action: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    context_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    organization_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    usage_request_id: String,
+}
+
+impl BillingNotice {
+    fn is_valid(&self) -> bool {
+        self.schema_version == 1
+            && self.code == "WALLET_INSUFFICIENT"
+            && match (self.context_type.as_str(), self.action.as_str()) {
+                ("PERSONAL", "OPEN_RECHARGE") => self.organization_id.is_empty(),
+                ("ORGANIZATION", "CONTACT_ORG_ADMIN")
+                | ("ORGANIZATION", "OPEN_ORGANIZATION_RECHARGE") => {
+                    uuid::Uuid::parse_str(&self.organization_id).is_ok()
+                }
+                _ => false,
+            }
+            && uuid::Uuid::parse_str(&self.usage_request_id).is_ok()
+    }
+}
+
+#[derive(Clone)]
+struct BillingNoticeEmitter {
+    app: AppHandle,
+    session_id: String,
+    turn_generation: u64,
+}
+
+impl BillingNoticeEmitter {
+    fn emit(&self, notice: BillingNotice) {
+        if let Ok(persisted) = serde_json::to_value(&notice) {
+            crate::features::assistant::timing::record_billing_notice(&self.session_id, persisted);
+        }
+        let _ = self.app.emit(
+            BILLING_NOTICE_EVENT,
+            json!({
+                "session_id": self.session_id,
+                "turn_generation": self.turn_generation,
+                "billing_notice": notice,
+            }),
+        );
+    }
+}
+
 impl ModelGatewayProxy {
+    pub(super) fn new(app: AppHandle) -> Self {
+        Self {
+            server: Arc::new(OnceCell::new()),
+            app: Some(app),
+        }
+    }
+
     pub(super) async fn register_session(
         &self,
         session_id: &str,
@@ -71,7 +141,10 @@ impl ModelGatewayProxy {
         if gateway_model_id.is_empty() {
             anyhow::bail!("account platform gateway model ID is missing");
         }
-        let server = self.server.get_or_try_init(start_proxy_server).await?;
+        let server = self
+            .server
+            .get_or_try_init(|| start_proxy_server(self.app.clone()))
+            .await?;
         let route = {
             let mut registry = server.state.registry.write().await;
             let route = registry
@@ -83,11 +156,13 @@ impl ModelGatewayProxy {
                 .targets
                 .entry(route.clone())
                 .and_modify(|target| {
+                    target.session_id = session_id.to_string();
                     target.upstream = upstream.clone();
                     target.gateway_model_id = gateway_model_id.to_string();
                     target.maximum_output_tokens = maximum_output_tokens;
                 })
                 .or_insert(ProxyTarget {
+                    session_id: session_id.to_string(),
                     upstream,
                     gateway_model_id: gateway_model_id.to_string(),
                     turn_generation: 0,
@@ -112,7 +187,7 @@ impl ModelGatewayProxy {
     }
 }
 
-async fn start_proxy_server() -> Result<ProxyServer> {
+async fn start_proxy_server(app: Option<AppHandle>) -> Result<ProxyServer> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .context("bind account platform model proxy")?;
@@ -126,6 +201,7 @@ async fn start_proxy_server() -> Result<ProxyServer> {
             .build()
             .context("build account platform model proxy client")?,
         registry: Arc::new(RwLock::new(ProxyRegistry::default())),
+        app,
     };
     let router = Router::new()
         .route("/{route}/v1/chat/completions", post(forward_chat))
@@ -245,6 +321,7 @@ async fn forward(
         if let Some(turn_id) = logical_turn_id {
             builder = builder.header(LOGICAL_TURN_HEADER, turn_id);
         }
+        builder = builder.header(CLIENT_CAPABILITIES_HEADER, BILLING_NOTICE_CAPABILITY);
         if let Some(body) = body.clone() {
             builder = builder.body(body);
         }
@@ -271,6 +348,16 @@ async fn forward(
     };
     let status = upstream_response.status();
     let upstream_headers = upstream_response.headers().clone();
+    let notice_emitter = state.app.clone().map(|app| BillingNoticeEmitter {
+        app,
+        session_id: target.session_id.clone(),
+        turn_generation: target.turn_generation,
+    });
+    if let Some(notice) = billing_notice_from_headers(&upstream_headers) {
+        if let Some(emitter) = &notice_emitter {
+            emitter.emit(notice);
+        }
+    }
     let upstream_is_sse = upstream_headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -307,9 +394,26 @@ async fn forward(
             response = response.header(name, value);
         }
     }
+    if status == StatusCode::PAYMENT_REQUIRED {
+        let payload = match upstream_response.bytes().await {
+            Ok(payload) => payload,
+            Err(_) => return proxy_error(StatusCode::BAD_GATEWAY, "invalid gateway response"),
+        };
+        if let Some(notice) = billing_notice_from_body(&payload) {
+            if let Some(emitter) = &notice_emitter {
+                emitter.emit(notice);
+            }
+        }
+        return response
+            .body(Body::from(payload))
+            .unwrap_or_else(|_| proxy_error(StatusCode::BAD_GATEWAY, "invalid gateway response"));
+    }
     let upstream_stream = upstream_response.bytes_stream();
     let body = if upstream_is_sse {
-        Body::from_stream(require_sse_done(upstream_stream))
+        Body::from_stream(require_sse_done_with_notice(
+            upstream_stream,
+            notice_emitter,
+        ))
     } else {
         Body::from_stream(upstream_stream)
     };
@@ -330,12 +434,26 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
+    require_sse_done_with_notice(source, None)
+}
+
+fn require_sse_done_with_notice<S, E>(
+    source: S,
+    notice_emitter: Option<BillingNoticeEmitter>,
+) -> impl Stream<Item = Result<Bytes, io::Error>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
     struct State<S> {
         source: std::pin::Pin<Box<S>>,
         line: Vec<u8>,
         line_overflow: bool,
         saw_done: bool,
+        saw_terminal_error: bool,
         emitted_terminal_error: bool,
+        event_name: String,
+        notice_emitter: Option<BillingNoticeEmitter>,
     }
 
     stream::unfold(
@@ -344,17 +462,27 @@ where
             line: Vec::with_capacity(64),
             line_overflow: false,
             saw_done: false,
+            saw_terminal_error: false,
             emitted_terminal_error: false,
+            event_name: String::new(),
+            notice_emitter,
         },
         |mut state| async move {
             match state.source.next().await {
                 Some(Ok(bytes)) => {
-                    observe_sse_lines(
+                    let notices = observe_sse_lines(
                         &mut state.line,
                         &mut state.line_overflow,
                         &mut state.saw_done,
+                        &mut state.saw_terminal_error,
+                        &mut state.event_name,
                         &bytes,
                     );
+                    if let Some(emitter) = &state.notice_emitter {
+                        for notice in notices {
+                            emitter.emit(notice);
+                        }
+                    }
                     Some((Ok(bytes), state))
                 }
                 Some(Err(error)) => {
@@ -366,7 +494,12 @@ where
                         state,
                     ))
                 }
-                None if state.saw_done || state.emitted_terminal_error => None,
+                None if state.saw_done
+                    || state.saw_terminal_error
+                    || state.emitted_terminal_error =>
+                {
+                    None
+                }
                 None => {
                     state.emitted_terminal_error = true;
                     Some((
@@ -382,13 +515,41 @@ where
     )
 }
 
-fn observe_sse_lines(line: &mut Vec<u8>, overflow: &mut bool, saw_done: &mut bool, bytes: &[u8]) {
-    const MAX_TERMINAL_LINE_BYTES: usize = 256;
+fn observe_sse_lines(
+    line: &mut Vec<u8>,
+    overflow: &mut bool,
+    saw_done: &mut bool,
+    saw_terminal_error: &mut bool,
+    event_name: &mut String,
+    bytes: &[u8],
+) -> Vec<BillingNotice> {
+    const MAX_TERMINAL_LINE_BYTES: usize = 4096;
+    let mut notices = Vec::new();
     for byte in bytes {
         if *byte == b'\n' {
             let candidate = line.strip_suffix(b"\r").unwrap_or(line.as_slice());
-            if !*overflow && candidate == b"data: [DONE]" {
-                *saw_done = true;
+            if !*overflow {
+                if candidate.is_empty() {
+                    event_name.clear();
+                } else if let Some(value) = candidate.strip_prefix(b"event:") {
+                    *event_name = String::from_utf8_lossy(value).trim().to_ascii_lowercase();
+                } else if let Some(value) = candidate.strip_prefix(b"data:") {
+                    let data = value.strip_prefix(b" ").unwrap_or(value);
+                    if data == b"[DONE]" {
+                        *saw_done = true;
+                    } else if event_name == "billing_notice" {
+                        if let Ok(notice) = serde_json::from_slice::<BillingNotice>(data) {
+                            if notice.is_valid() {
+                                notices.push(notice);
+                            }
+                        }
+                    } else if serde_json::from_slice::<serde_json::Value>(data)
+                        .ok()
+                        .is_some_and(|value| value.get("error").is_some())
+                    {
+                        *saw_terminal_error = true;
+                    }
+                }
             }
             line.clear();
             *overflow = false;
@@ -398,6 +559,41 @@ fn observe_sse_lines(line: &mut Vec<u8>, overflow: &mut bool, saw_done: &mut boo
             *overflow = true;
         }
     }
+    notices
+}
+
+fn billing_notice_from_headers(headers: &reqwest::header::HeaderMap) -> Option<BillingNotice> {
+    let value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let code = value("x-pinvou-billing-code");
+    if code != "WALLET_INSUFFICIENT" {
+        return None;
+    }
+    let notice = BillingNotice {
+        schema_version: 1,
+        code,
+        stage: value("x-pinvou-billing-stage"),
+        turn_outcome: value("x-pinvou-billing-turn-outcome"),
+        settlement_status: value("x-pinvou-billing-settlement-status"),
+        action: value("x-pinvou-billing-action"),
+        context_type: value("x-pinvou-billing-context-type"),
+        organization_id: value("x-pinvou-billing-organization-id"),
+        usage_request_id: value("x-pinvou-billing-usage-request-id"),
+    };
+    notice.is_valid().then_some(notice)
+}
+
+fn billing_notice_from_body(body: &[u8]) -> Option<BillingNotice> {
+    let payload = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let notice = payload.get("billing_notice")?;
+    let notice = serde_json::from_value::<BillingNotice>(notice.clone()).ok()?;
+    notice.is_valid().then_some(notice)
 }
 
 fn transport_error_kind(error: &reqwest::Error) -> &'static str {
@@ -495,8 +691,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        ModelGatewayProxy, logical_turn_id, prepare_chat_body, request_idempotency_key,
-        require_sse_done,
+        ModelGatewayProxy, billing_notice_from_body, billing_notice_from_headers, logical_turn_id,
+        prepare_chat_body, request_idempotency_key, require_sse_done,
     };
 
     #[tokio::test]
@@ -519,6 +715,58 @@ mod tests {
             incomplete[1].as_ref().unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
+
+        let explicit_error = stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
+            b"event: error\ndata: {\"error\":{\"code\":\"SETTLEMENT_PENDING\"}}\n\n",
+        ))]);
+        let explicit_error = require_sse_done(explicit_error).collect::<Vec<_>>().await;
+        assert_eq!(explicit_error.len(), 1);
+        assert!(explicit_error[0].is_ok());
+    }
+
+    #[test]
+    fn billing_notice_is_parsed_only_from_the_versioned_contract() {
+        let body = br#"{"code":"WALLET_INSUFFICIENT","billing_notice":{"schema_version":1,"code":"WALLET_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_RECHARGE","context_type":"PERSONAL","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#;
+        let notice = billing_notice_from_body(body).expect("structured body notice");
+        assert_eq!(notice.stage, "INITIAL_RESERVATION");
+        assert_eq!(notice.turn_outcome, "REJECTED");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-pinvou-billing-code",
+            "WALLET_INSUFFICIENT".parse().unwrap(),
+        );
+        headers.insert(
+            "x-pinvou-billing-stage",
+            "ADDITIONAL_RESERVATION".parse().unwrap(),
+        );
+        headers.insert(
+            "x-pinvou-billing-turn-outcome",
+            "COMPLETED".parse().unwrap(),
+        );
+        headers.insert(
+            "x-pinvou-billing-settlement-status",
+            "SETTLED".parse().unwrap(),
+        );
+        headers.insert("x-pinvou-billing-action", "OPEN_RECHARGE".parse().unwrap());
+        headers.insert("x-pinvou-billing-context-type", "PERSONAL".parse().unwrap());
+        headers.insert(
+            "x-pinvou-billing-usage-request-id",
+            "0199a100-0001-7000-8000-000000000106".parse().unwrap(),
+        );
+        let notice = billing_notice_from_headers(&headers).expect("structured header notice");
+        assert_eq!(notice.settlement_status, "SETTLED");
+        assert_eq!(notice.action, "OPEN_RECHARGE");
+
+        let organization = billing_notice_from_body(br#"{"code":"WALLET_INSUFFICIENT","billing_notice":{"schema_version":1,"code":"WALLET_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_ORGANIZATION_RECHARGE","context_type":"ORGANIZATION","organization_id":"0199a100-0001-7000-8000-000000000201","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#).expect("organization purchase notice");
+        assert_eq!(organization.action, "OPEN_ORGANIZATION_RECHARGE");
+        assert_eq!(
+            organization.organization_id,
+            "0199a100-0001-7000-8000-000000000201"
+        );
+
+        assert!(billing_notice_from_body(br#"{"message":"insufficient balance"}"#).is_none());
+        assert!(billing_notice_from_body(br#"{"billing_notice":{"schema_version":1,"code":"WALLET_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_RECHARGE","context_type":"ORGANIZATION","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#).is_none());
     }
 
     #[test]
@@ -573,19 +821,34 @@ mod tests {
         let smaller: serde_json::Value = serde_json::from_slice(&smaller).unwrap();
         assert_eq!(smaller["max_completion_tokens"], 1024);
         assert_eq!(smaller["model"], "stable-model-id");
+
+        let missing = prepare_chat_body(
+            Bytes::from_static(br#"{"messages":[]}"#),
+            4096,
+            "stable-model-id",
+        )
+        .expect("request without explicit limit");
+        let missing: serde_json::Value = serde_json::from_slice(&missing).unwrap();
+        assert!(missing.get("max_completion_tokens").is_none());
+        assert!(missing.get("max_tokens").is_none());
     }
 
     #[tokio::test]
     async fn proxy_injects_stable_key_and_preserves_sse_response() {
-        let captures = Arc::new(Mutex::new(
-            Vec::<(String, String, String, u64, String)>::new(),
-        ));
+        let captures = Arc::new(Mutex::new(Vec::<(
+            String,
+            String,
+            String,
+            String,
+            u64,
+            String,
+        )>::new()));
         let upstream = Router::new()
             .route(
                 "/v1/chat/completions",
                 post(
                     |State(captures): State<
-                        Arc<Mutex<Vec<(String, String, String, u64, String)>>>,
+                        Arc<Mutex<Vec<(String, String, String, String, u64, String)>>>,
                     >,
                      headers: HeaderMap,
                      body: Bytes| async move {
@@ -604,6 +867,11 @@ mod tests {
                             .and_then(|value| value.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
+                        let capabilities = headers
+                            .get("x-pinvou-client-capabilities")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
                         let payload = serde_json::from_slice::<serde_json::Value>(&body)
                             .expect("forwarded JSON body");
                         let maximum_output = payload
@@ -619,6 +887,7 @@ mod tests {
                             key,
                             authorization,
                             logical_turn,
+                            capabilities,
                             maximum_output,
                             model,
                         ));
@@ -701,17 +970,14 @@ mod tests {
         assert_ne!(captures[0].2, captures[2].2);
         assert_eq!(captures[2].2, captures[3].2);
         assert!((16..=128).contains(&captures[0].0.len()));
-        assert!(
-            captures
-                .iter()
-                .all(
-                    |(_, authorization, logical_turn, maximum_output, model)| authorization
-                        == "Bearer oidc-access-token"
-                        && logical_turn.starts_with("pinvou-turn-")
-                        && *maximum_output == 4096
-                        && model == "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
-                )
-        );
+        assert!(captures.iter().all(
+            |(_, authorization, logical_turn, capabilities, maximum_output, model)| authorization
+                == "Bearer oidc-access-token"
+                && logical_turn.starts_with("pinvou-turn-")
+                && capabilities == "billing-notice-v1"
+                && *maximum_output == 4096
+                && model == "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
+        ));
     }
 
     #[tokio::test]
