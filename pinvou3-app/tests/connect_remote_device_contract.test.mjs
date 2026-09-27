@@ -9,13 +9,14 @@ import {
   connectionErrorKey,
   connectionErrorState,
   createAsyncOperationGuard,
+  createPairingInputGuard,
   controllerConnectionUiState,
-  groupPairingCode,
   pairingCodeInputState,
   isControlledDeviceChatActive,
   normalizePairingCode,
   openControlledDeviceChatWithRetry,
 } from '../src/features/remote-control/remote-control-logic.mjs';
+import { dialogTabTarget } from '../src/features/remote-control/remote-connection-shell-focus.mjs';
 
 const source = (relative) => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
 const form = source('features/remote-control/RemoteConnectForm.jsx');
@@ -32,23 +33,22 @@ test('pasted, mixed-case and separated codes normalize to one wire value', () =>
   assert.equal(normalizePairingCode('2345-678'), '2345678');
   assert.equal(normalizePairingCode('  2345\t678  '), '2345678');
   assert.equal(normalizePairingCode('2345678'), '2345678');
+  assert.equal(normalizePairingCode('abc2-345'), 'ABC2345');
+  assert.equal(normalizePairingCode('2-3 4-5 6-7 8'), '2345678');
   // Ambiguous characters from the frozen alphabet are dropped, not guessed.
   assert.equal(normalizePairingCode('234567O'), null);
   assert.equal(normalizePairingCode('234567'), null);
   assert.equal(normalizePairingCode('23456789'), null);
   assert.equal(normalizePairingCode(''), null);
-  assert.equal(groupPairingCode('2345678'), '2345 678');
+  assert.equal(normalizePairingCode('234?5678'), null);
+  assert.equal(normalizePairingCode('2345_678'), null);
 });
 
 test('every service failure maps to one shared copy key', () => {
   const keys = new Set();
   for (const code of [
-    'controller_busy', 'desktop_controller_active', 'desktop_controller_pending',
-    'controller_already_connecting', 'pairing_code_generation_failed',
-    'endpoint_not_found', 'controller_offline', 'pairing_code_invalid', 'pairing_expired',
-    'protocol_version_unsupported', 'unsupported_capability', 'anything_else',
-    // E2E-07：A 端连接链路自己的有界码也必须有专属文案。
-    'endpoint_offline', 'invalid_message',
+    'controller_busy', 'controller_already_connecting', 'pairing_code_invalid',
+    'version_incompatible', 'endpoint_offline', 'invalid_message', 'anything_else',
     'desktop_remote_control_unsupported',
   ]) {
     const key = connectionErrorKey(code);
@@ -59,7 +59,9 @@ test('every service failure maps to one shared copy key', () => {
   }
   // Distinct server reasons collapse onto a small bounded set of copy keys.
   assert.ok(keys.size <= 8);
-  assert.equal(connectionErrorKey('endpoint_not_found'), connectionErrorKey('pairing_expired'));
+  assert.equal(connectionErrorKey('endpoint_not_found'), 'errorGeneric');
+  assert.equal(connectionErrorKey('protocol_version_unsupported'), 'errorGeneric');
+  assert.equal(connectionErrorKey('version_incompatible'), 'errorVersion');
   assert.equal(connectionErrorKey('endpoint_offline'), 'errorOffline');
   assert.equal(connectionErrorKey('invalid_message'), 'errorProtocol');
   assert.equal(connectionErrorKey('controller_already_connecting'), 'errorLocalBusy');
@@ -70,7 +72,18 @@ test('the inline form never persists or replays a code', () => {
   assert.ok(!/localStorage|sessionStorage|indexedDB/.test(form));
   assert.ok(!/recent|lastCode|codeHistory/i.test(form));
   assert.ok(form.includes('autoComplete="off"'));
-  assert.ok(form.includes('settings-error-code'));
+  assert.ok(!form.includes('settings-error-code'));
+  assert.ok(form.includes("onValueChange?.('')"), 'failed and successful attempts clear the bearer code');
+  assert.match(form, /if \(!bridge\.available \|\| !bridge\.desktopRemoteControl\) \{[\s\S]*?setErrorKey\('errorUnsupported'\)[\s\S]*?onValueChange\?\.\(''\)[\s\S]*?inputRef\.current\?\.focus\(\)/);
+  assert.ok(!form.includes("new Error('desktop_remote_control_unsupported')"));
+  assert.ok(form.includes('onCompositionStart'));
+  assert.ok(form.includes('onCompositionEnd'));
+  assert.ok(form.includes('onPaste={event =>'));
+  assert.ok(form.includes('event.preventDefault();'));
+  assert.ok(form.includes('inputGuard.current.canApplyPaste(revision)'));
+  assert.ok(form.includes('inputGuard.current.compositionStart()'));
+  assert.match(form, /onPaste=\{event => \{[\s\S]*?inputGuard\.current\.isComposing\(\)[\s\S]*?event\.preventDefault\(\);[\s\S]*?return;/);
+  assert.ok(form.includes('maxLength={64}'), 'separated paste is accepted before canonical normalization');
   assert.ok(form.includes('type="submit"'));
   assert.ok(!form.includes('role="dialog"'));
   assert.ok(!form.includes('fixed inset-0'));
@@ -161,8 +174,8 @@ test('the controller exposes all seventeen designed UI states', () => {
     assert.equal(controllerConnectionUiState({ status }), expected);
   }
   const errorCases = {
-    pairing_expired: 'invalid', controller_busy: 'busy', endpoint_offline: 'offline',
-    protocol_version_unsupported: 'version', invalid_message: 'protocol',
+    pairing_code_invalid: 'invalid', controller_busy: 'busy', endpoint_offline: 'offline',
+    version_incompatible: 'version', invalid_message: 'protocol',
     desktop_remote_control_unsupported: 'unsupported', controller_already_connecting: 'local_busy',
     anything_else: 'failed',
   };
@@ -191,6 +204,75 @@ test('the shell separates hiding the page section from disconnecting', () => {
   // Closing the shell calls onClose; only disconnect requests the transport.
   assert.ok(shell.includes('onRequestDisconnect'));
   assert.ok(!/onClose[\s\S]{0,80}controllerDisconnect/.test(shell));
+  assert.ok(shell.includes("'reconnecting'"), 'recovery must retain explicit disconnect');
+  assert.ok(shell.includes('dialogTabTarget'));
+  assert.ok(shell.includes("event.key === 'Escape'"));
+  assert.ok(shell.includes('previousFocus?.isConnected'));
+  assert.ok(main.includes('role="dialog" aria-modal="true"'));
+  assert.ok(main.includes('.then(opened => { if (!opened) setRemoteConversationOpen(true); })'));
+  assert.ok(shell.includes('motion-reduce:transition-none'));
+  assert.ok(form.includes('motion-reduce:transition-none'));
+  assert.ok(shell.includes('forced-colors:border'));
+  assert.ok(form.includes('forced-colors:border'));
+  assert.match(shell, /if \(!bridge\?\.available \|\| !bridge\.desktopRemoteControl \|\| !onRequestDisconnect\) \{[\s\S]*?setError\('errorUnsupported'\)/);
+  assert.match(panel, /if \(!bridge\.available \|\| !bridge\.desktopRemoteControl\) \{[\s\S]*?setDisconnectError\('errorUnsupported'\)/);
+  assert.ok(main.includes("failure.code = 'desktop_remote_control_unsupported'"));
+});
+
+test('an IME composition invalidates pending async paste before any change event', async () => {
+  const guard = createPairingInputGuard();
+  let resolveClipboard;
+  const clipboard = new Promise(resolve => { resolveClipboard = resolve; });
+  const applied = [];
+  const startedAt = guard.revision();
+  const pendingPaste = clipboard.then(text => {
+    if (guard.canApplyPaste(startedAt)) applied.push(text);
+  });
+
+  guard.compositionStart(); // No onChange yet: the reviewer's interleaving.
+  assert.equal(guard.isComposing(), true);
+  assert.equal(guard.canApplyPaste(startedAt), false);
+  assert.equal(guard.canApplyPaste(guard.revision()), false, 'native paste is blocked during composition');
+  resolveClipboard('2345678');
+  await pendingPaste;
+  assert.deepEqual(applied, []);
+
+  guard.compositionEnd();
+  assert.equal(guard.canApplyPaste(startedAt), false, 'late paste cannot apply after composition ends');
+  const freshPaste = guard.revision();
+  assert.equal(guard.canApplyPaste(freshPaste), true);
+  guard.changed();
+  assert.equal(guard.canApplyPaste(freshPaste), false, 'typing also invalidates a pending paste');
+});
+
+test('dialog Tab stays within the connection shell and Escape has a close-only path', () => {
+  const first = { id: 'hide' };
+  const last = { id: 'disconnect' };
+  const dialog = {
+    querySelectorAll: () => [first, last],
+    contains: target => target === first || target === last,
+  };
+  assert.equal(dialogTabTarget(dialog, last, false), first);
+  assert.equal(dialogTabTarget(dialog, first, true), last);
+  assert.equal(dialogTabTarget(dialog, {}, false), first);
+  assert.equal(dialogTabTarget(dialog, {}, true), last);
+  assert.equal(dialogTabTarget(dialog, first, false), null);
+  const emptyDialog = { querySelectorAll: () => [], contains: () => false };
+  assert.equal(dialogTabTarget(emptyDialog, {}, false), emptyDialog);
+  assert.match(shell, /event\.key === 'Escape'[\s\S]*?onCloseRef\.current\?\.\(\)/);
+  assert.ok(!/event\.key === 'Escape'[\s\S]{0,130}onRequestDisconnect/.test(shell));
+});
+
+test('three languages explain bearer secrecy, safe hide, failure and trusted relay boundary', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = dict[language].controllerConnection;
+    for (const key of ['codeHint', 'securityNotice', 'close', 'deviceLabel', 'deviceUnknown',
+      'disconnectSafetyHint', 'errorPaste', 'errorInvalidCode', 'errorVersion']) {
+      assert.ok(copy[key], `${language}.${key}`);
+    }
+  }
+  assert.ok(!shell.includes('connection.lastError}'));
+  assert.ok(!panel.includes('settings-error-code'));
 });
 
 test('the controlled operation zone precedes the controller zone in settings', () => {
