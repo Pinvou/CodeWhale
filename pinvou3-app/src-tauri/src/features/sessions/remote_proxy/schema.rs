@@ -9,8 +9,9 @@ use super::{
 use crate::features::sessions::SessionStore;
 use crate::features::sessions::validators::validate_session_id;
 
-pub(super) const REMOTE_PROXY_SCHEMA_VERSION: u32 = 2;
+pub(super) const REMOTE_PROXY_SCHEMA_VERSION: u32 = 3;
 pub(super) const MAX_PENDING_REQUESTS: usize = 64;
+pub(super) const MAX_RETIRED_REQUESTS: usize = 4096;
 pub(super) const MAX_PROJECTION_ENTRIES: usize = 512;
 pub(super) const MAX_PROJECTION_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_PROJECTION_BODY_BYTES: usize = 16 * 1024;
@@ -46,11 +47,14 @@ pub(crate) struct RemoteProxyRecord {
     /// Versioned, bounded cache of B-authenticated content. Never B authority.
     pub(crate) projection: AuthenticatedProjection,
     pub(crate) pending: Vec<PendingRemoteRequest>,
+    /// Permanent across this SessionStore. Capacity exhaustion fails closed;
+    /// no identifier may be recycled by evicting an older tombstone.
+    pub(crate) retired_requests: Vec<RetiredRemoteRequest>,
 }
 
 impl RemoteProxyRecord {
     /// The same durable invariant is checked before every write and after
-    /// decoding either v1 migration input or a native v2 record.
+    /// decoding legacy migration input or a native v3 record.
     pub(super) fn validate_stored(&self) -> Result<()> {
         validate_session_id(&self.local_session_id)?;
         if !self.local_session_id.starts_with("remote-")
@@ -62,7 +66,7 @@ impl RemoteProxyRecord {
         }
         self.ui.validate()?;
         self.projection.validate()?;
-        validate_pending_requests(&self.pending)?;
+        validate_request_ids(&self.pending, &self.retired_requests)?;
         if self.retired_epochs.len() > MAX_RETIRED_EPOCHS {
             bail!("retired RemoteProxy journal epoch capacity exceeded");
         }
@@ -352,8 +356,41 @@ fn require_next_cursor(
 pub(crate) struct PendingRemoteRequest {
     pub(crate) client_request_id: String,
     pub(crate) task_id: String,
+    /// Lowercase SHA-256 of DEV-29's canonical, non-secret request semantics.
+    /// This is not a digest of a randomized temporary model package.
     pub(crate) request_fingerprint: String,
-    pub(crate) outcome_unknown: bool,
+    /// Durable pre-send barrier. Never move back to `NeverAttempted` after
+    /// persistence, including when the transport reports an error.
+    pub(crate) dispatch_state: PendingDispatchState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PendingDispatchState {
+    PreparedNeverAttempted,
+    AttemptMayHaveOccurred,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetiredRemoteRequest {
+    pub(crate) client_request_id: String,
+    pub(crate) task_id: String,
+    pub(crate) request_fingerprint: String,
+    pub(crate) disposition: RetiredRequestDisposition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RetiredRequestDisposition {
+    AbandonedNeverAttempted,
+    Terminal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingReservation {
+    Inserted,
+    Existing(PendingRemoteRequest),
 }
 
 pub(crate) fn valid_remote_identifier(text: &str) -> bool {
@@ -368,11 +405,7 @@ impl PendingRemoteRequest {
     fn validate(&self) -> Result<()> {
         if !valid_remote_identifier(&self.client_request_id)
             || !valid_remote_identifier(&self.task_id)
-            || self.request_fingerprint.len() != 64
-            || !self
-                .request_fingerprint
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !valid_request_fingerprint(&self.request_fingerprint)
         {
             bail!("invalid remote pending correlation");
         }
@@ -380,8 +413,11 @@ impl PendingRemoteRequest {
     }
 }
 
-pub(super) fn validate_pending_requests(pending: &[PendingRemoteRequest]) -> Result<()> {
-    if pending.len() > MAX_PENDING_REQUESTS {
+pub(super) fn validate_request_ids(
+    pending: &[PendingRemoteRequest],
+    retired: &[RetiredRemoteRequest],
+) -> Result<()> {
+    if pending.len() > MAX_PENDING_REQUESTS || retired.len() > MAX_RETIRED_REQUESTS {
         bail!("remote pending capacity reached");
     }
     let mut client_ids = HashSet::new();
@@ -392,7 +428,24 @@ pub(super) fn validate_pending_requests(pending: &[PendingRemoteRequest]) -> Res
             bail!("remote pending identifier conflict");
         }
     }
+    for item in retired {
+        if !valid_remote_identifier(&item.client_request_id)
+            || !valid_remote_identifier(&item.task_id)
+            || !valid_request_fingerprint(&item.request_fingerprint)
+            || !client_ids.insert(&item.client_request_id)
+            || !task_ids.insert(&item.task_id)
+        {
+            bail!("invalid or reused retired remote request identifier");
+        }
+    }
     Ok(())
+}
+
+fn valid_request_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.len() == 64
+        && fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -454,7 +507,7 @@ impl SessionStore {
             pending_unknown_count: record
                 .pending
                 .iter()
-                .filter(|item| item.outcome_unknown)
+                .filter(|item| item.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred)
                 .count(),
         })
     }
@@ -550,29 +603,147 @@ impl SessionStore {
         remote_ref: &str,
         context: &LiveRemoteContext,
         pending: PendingRemoteRequest,
-    ) -> Result<()> {
+    ) -> Result<PendingReservation> {
         pending.validate()?;
+        if pending.dispatch_state != PendingDispatchState::PreparedNeverAttempted {
+            bail!("new remote pending request must be unattempted and known");
+        }
         let mut state = self.remote_proxies.lock();
         require_live_locked(&state, id, remote_ref, context)?;
         let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
         if let Some(existing) = record.pending.iter().find(|item| {
             item.client_request_id == pending.client_request_id || item.task_id == pending.task_id
         }) {
-            // A recovered pending item may now be outcome_unknown=true; an
-            // idempotent retry must not clear that uncertainty.
+            // Returning the existing durable state must not cross the send
+            // barrier or turn a possibly attempted request into a fresh one.
             if existing.client_request_id == pending.client_request_id
                 && existing.task_id == pending.task_id
                 && existing.request_fingerprint == pending.request_fingerprint
             {
-                return Ok(());
+                return Ok(PendingReservation::Existing(existing.clone()));
             }
             bail!("remote pending identifier conflict");
+        }
+        if record.retired_requests.iter().any(|item| {
+            item.client_request_id == pending.client_request_id || item.task_id == pending.task_id
+        }) {
+            bail!("retired remote request identifier cannot be reused");
         }
         if record.pending.len() >= MAX_PENDING_REQUESTS {
             bail!("remote pending capacity reached");
         }
         record.pending.push(pending);
-        validate_pending_requests(&record.pending)?;
+        validate_request_ids(&record.pending, &record.retired_requests)?;
+        persist_changed(&mut state, id, record)?;
+        Ok(PendingReservation::Inserted)
+    }
+
+    /// Persist the irreversible send barrier before any transport call. A
+    /// failed persistence must stop dispatch; an ambiguous transport failure
+    /// must never restore `NeverAttempted`.
+    pub(crate) fn mark_remote_dispatch_attempt(
+        &self,
+        id: &str,
+        remote_ref: &str,
+        context: &LiveRemoteContext,
+        client_request_id: &str,
+        task_id: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut state = self.remote_proxies.lock();
+        require_live_locked(&state, id, remote_ref, context)?;
+        let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
+        let pending = record
+            .pending
+            .iter_mut()
+            .find(|item| item.client_request_id == client_request_id && item.task_id == task_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown remote pending request"))?;
+        if pending.request_fingerprint != fingerprint
+            || pending.dispatch_state != PendingDispatchState::PreparedNeverAttempted
+        {
+            bail!("remote request cannot cross the dispatch barrier");
+        }
+        pending.dispatch_state = PendingDispatchState::AttemptMayHaveOccurred;
+        persist_changed(&mut state, id, record)
+    }
+
+    /// Only a persisted proof of `NeverAttempted` permits abandoning a lost
+    /// ephemeral package. The two identifiers are retired atomically with
+    /// pending removal, even when this process no longer has a live binding.
+    pub(crate) fn abandon_unattempted_remote_pending(
+        &self,
+        id: &str,
+        client_request_id: &str,
+        task_id: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut state = self.remote_proxies.lock();
+        let mut record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .clone();
+        let index = record
+            .pending
+            .iter()
+            .position(|item| item.client_request_id == client_request_id && item.task_id == task_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown remote pending request"))?;
+        let pending = &record.pending[index];
+        if pending.request_fingerprint != fingerprint
+            || pending.dispatch_state != PendingDispatchState::PreparedNeverAttempted
+        {
+            bail!("remote dispatch may have been attempted");
+        }
+        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
+            bail!("retired remote request capacity reached");
+        }
+        record.pending.remove(index);
+        record.retired_requests.push(RetiredRemoteRequest {
+            client_request_id: client_request_id.to_owned(),
+            task_id: task_id.to_owned(),
+            request_fingerprint: fingerprint.to_owned(),
+            disposition: RetiredRequestDisposition::AbandonedNeverAttempted,
+        });
+        persist_changed(&mut state, id, record)
+    }
+
+    /// Complete an authenticated terminal result without ever releasing its
+    /// correlation identifiers. Authentication is the caller's obligation;
+    /// this storage API only performs the atomic state transition.
+    pub(crate) fn retire_remote_pending_terminal(
+        &self,
+        id: &str,
+        client_request_id: &str,
+        task_id: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut state = self.remote_proxies.lock();
+        let mut record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .clone();
+        let index = record
+            .pending
+            .iter()
+            .position(|item| item.client_request_id == client_request_id && item.task_id == task_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown remote pending request"))?;
+        let pending = &record.pending[index];
+        if pending.request_fingerprint != fingerprint
+            || pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
+        {
+            bail!("remote request has no attempted dispatch to retire");
+        }
+        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
+            bail!("retired remote request capacity reached");
+        }
+        record.pending.remove(index);
+        record.retired_requests.push(RetiredRemoteRequest {
+            client_request_id: client_request_id.to_owned(),
+            task_id: task_id.to_owned(),
+            request_fingerprint: fingerprint.to_owned(),
+            disposition: RetiredRequestDisposition::Terminal,
+        });
         persist_changed(&mut state, id, record)
     }
 }

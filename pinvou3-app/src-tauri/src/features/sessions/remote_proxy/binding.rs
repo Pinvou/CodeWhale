@@ -121,6 +121,7 @@ impl SessionStore {
             retired_epochs: Vec::new(),
             projection: AuthenticatedProjection::default(),
             pending: Vec::new(),
+            retired_requests: Vec::new(),
         };
         persist_changed(&mut state, &id, record)?;
         if state.current_context.as_ref().is_some_and(|current| {

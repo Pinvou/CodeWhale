@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::binding::{AuthenticatedMapping, LiveRemoteContext};
 use super::routing::{LocalBackendBinding, SessionRoute};
 use super::schema::{
-    AuthenticatedCursor, AuthenticatedProjection, AuthenticatedSnapshot, PendingRemoteRequest,
-    ProjectionAttachment, ProjectionEntry, ProjectionKind, RemoteUiMetadata, SnapshotCandidate,
-    SnapshotVerificationPort,
+    AuthenticatedCursor, AuthenticatedProjection, AuthenticatedSnapshot, PendingDispatchState,
+    PendingRemoteRequest, ProjectionAttachment, ProjectionEntry, ProjectionKind, RemoteUiMetadata,
+    RetiredRequestDisposition, SnapshotCandidate, SnapshotVerificationPort,
 };
 use crate::features::sessions::{SessionKind, SessionStore};
 
@@ -429,7 +429,7 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
         client_request_id: "request-1".into(),
         task_id: "task-1".into(),
         request_fingerprint: "a".repeat(64),
-        outcome_unknown: false,
+        dispatch_state: PendingDispatchState::PreparedNeverAttempted,
     };
     store
         .insert_remote_pending(
@@ -457,7 +457,7 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
                     client_request_id: format!("request-{index}"),
                     task_id: format!("task-{index}"),
                     request_fingerprint: format!("{index:064x}"),
-                    outcome_unknown: false,
+                    dispatch_state: PendingDispatchState::PreparedNeverAttempted,
                 },
             )
             .unwrap();
@@ -472,7 +472,7 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
                     client_request_id: "request-65".into(),
                     task_id: "task-65".into(),
                     request_fingerprint: "b".repeat(64),
-                    outcome_unknown: false
+                    dispatch_state: PendingDispatchState::PreparedNeverAttempted,
                 }
             )
             .is_err()
@@ -489,7 +489,8 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
             .remote_proxy_snapshot(&opened.local_session_id)
             .unwrap()
             .pending[0]
-            .outcome_unknown
+            .dispatch_state
+            == PendingDispatchState::PreparedNeverAttempted
     );
 }
 
@@ -516,7 +517,7 @@ fn version_zero_records_migrate_without_granting_live_authority() {
     .unwrap();
     let store = make_store(temp.path());
     let record = store.remote_proxy_snapshot("remote-legacy").unwrap();
-    assert_eq!(record.schema_version, 2);
+    assert_eq!(record.schema_version, 3);
     assert_eq!(record.ui.title, "old title");
     assert!(
         store
@@ -536,7 +537,7 @@ fn version_zero_records_migrate_without_granting_live_authority() {
     );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["schema_version"],
-        2
+        3
     );
     drop(store);
     let mut corrupted =
@@ -805,6 +806,10 @@ fn legacy_v1_without_projection_is_upgraded_deterministically() {
         .as_object_mut()
         .unwrap()
         .remove("retired_epochs");
+    file["records"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("retired_requests");
     std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
     let migrated = make_store(temp.path());
     let view = migrated
@@ -818,7 +823,8 @@ fn legacy_v1_without_projection_is_upgraded_deterministically() {
             .remote_proxy_snapshot(&opened.local_session_id)
             .unwrap()
             .pending[0]
-            .outcome_unknown
+            .dispatch_state
+            == PendingDispatchState::AttemptMayHaveOccurred
     );
     assert_eq!(
         migrated
@@ -830,11 +836,15 @@ fn legacy_v1_without_projection_is_upgraded_deterministically() {
     );
     let rewritten: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(rewritten["schema_version"], 2);
-    assert_eq!(rewritten["records"][0]["schema_version"], 2);
+    assert_eq!(rewritten["schema_version"], 3);
+    assert_eq!(rewritten["records"][0]["schema_version"], 3);
     assert_eq!(rewritten["records"][0]["projection"]["schema_version"], 1);
     assert_eq!(
         rewritten["records"][0]["retired_epochs"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        rewritten["records"][0]["retired_requests"],
         serde_json::json!([])
     );
     drop(migrated);
@@ -850,7 +860,8 @@ fn legacy_v1_without_projection_is_upgraded_deterministically() {
             .remote_proxy_snapshot(&opened.local_session_id)
             .unwrap()
             .pending[0]
-            .outcome_unknown
+            .dispatch_state
+            == PendingDispatchState::AttemptMayHaveOccurred
     );
 }
 
@@ -918,6 +929,10 @@ fn v1_and_v2_reject_malformed_or_conflicting_pending_without_rewriting_disk() {
             file["schema_version"] = version.into();
             file["records"][0]["schema_version"] = version.into();
             file["records"][0]["pending"] = serde_json::Value::Array(pending.clone());
+            file["records"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("retired_requests");
             if version == 1 {
                 let record = file["records"][0].as_object_mut().unwrap();
                 record.remove("projection");
@@ -962,7 +977,7 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
         client_request_id: "request-1".into(),
         task_id: "task-1".into(),
         request_fingerprint: "a".repeat(64),
-        outcome_unknown: true,
+        dispatch_state: PendingDispatchState::PreparedNeverAttempted,
     };
     let mut invalid = valid.clone();
     invalid.client_request_id = "bad/slash".into();
@@ -978,15 +993,14 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
     invalid.request_fingerprint = "A".repeat(64);
     assert!(write(invalid).is_err());
     write(valid.clone()).unwrap();
-    let mut retry = valid.clone();
-    retry.outcome_unknown = false;
-    write(retry).unwrap();
+    write(valid.clone()).unwrap();
     assert!(
         store
             .remote_proxy_snapshot(&opened.local_session_id)
             .unwrap()
             .pending[0]
-            .outcome_unknown
+            .dispatch_state
+            == PendingDispatchState::PreparedNeverAttempted
     );
     let mut conflict = valid;
     conflict.request_fingerprint = "b".repeat(64);
@@ -994,7 +1008,7 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
 }
 
 #[test]
-fn v2_cannot_masquerade_as_legacy_by_erasing_security_fields() {
+fn v3_cannot_masquerade_as_legacy_by_erasing_security_fields() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     store.open_remote_proxy(None, &context()).unwrap();
@@ -1005,6 +1019,7 @@ fn v2_cannot_masquerade_as_legacy_by_erasing_security_fields() {
     for removed in [
         vec!["projection"],
         vec!["retired_epochs"],
+        vec!["retired_requests"],
         vec!["projection", "retired_epochs"],
     ] {
         let mut tampered = pristine.clone();
@@ -1017,10 +1032,16 @@ fn v2_cannot_masquerade_as_legacy_by_erasing_security_fields() {
         std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
         assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
     }
-    for tamper in ["retired-type", "projection-version", "record-version"] {
+    for tamper in [
+        "retired-type",
+        "retired-requests-type",
+        "projection-version",
+        "record-version",
+    ] {
         let mut tampered = pristine.clone();
         match tamper {
             "retired-type" => tampered["records"][0]["retired_epochs"] = "old".into(),
+            "retired-requests-type" => tampered["records"][0]["retired_requests"] = "old".into(),
             "projection-version" => {
                 tampered["records"][0]["projection"]["schema_version"] = 99.into()
             }
@@ -1259,4 +1280,355 @@ fn snapshot_rejects_mixed_epoch_gap_and_cursor_mismatch_before_write() {
             .unwrap(),
         original
     );
+}
+
+fn pending_request(client: &str, task: &str) -> PendingRemoteRequest {
+    PendingRemoteRequest {
+        client_request_id: client.into(),
+        task_id: task.into(),
+        request_fingerprint: "a".repeat(64),
+        dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+    }
+}
+
+#[test]
+fn dispatch_barrier_and_terminal_retirement_are_durable_and_irreversible() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let live = context();
+    let opened = store.open_remote_proxy(None, &live).unwrap();
+    store
+        .confirm_remote_mapping(
+            &opened.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: opened.remote_session_ref.clone(),
+                controlled_session_id: "b-session".into(),
+            },
+        )
+        .unwrap();
+    let pending = pending_request("request-1", "task-1");
+    store
+        .insert_remote_pending(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &live,
+            pending.clone(),
+        )
+        .unwrap();
+    store
+        .mark_remote_dispatch_attempt(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &live,
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint,
+        )
+        .unwrap();
+    assert!(
+        store
+            .mark_remote_dispatch_attempt(
+                &opened.local_session_id,
+                &opened.remote_session_ref,
+                &live,
+                "request-1",
+                "task-1",
+                &pending.request_fingerprint
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .abandon_unattempted_remote_pending(
+                &opened.local_session_id,
+                "request-1",
+                "task-1",
+                &pending.request_fingerprint
+            )
+            .is_err()
+    );
+    drop(store);
+    let restarted = make_store(temp.path());
+    assert_eq!(
+        restarted
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .unwrap()
+            .pending[0]
+            .dispatch_state,
+        PendingDispatchState::AttemptMayHaveOccurred
+    );
+    assert!(
+        restarted
+            .abandon_unattempted_remote_pending(
+                &opened.local_session_id,
+                "request-1",
+                "task-1",
+                &pending.request_fingerprint
+            )
+            .is_err()
+    );
+    restarted
+        .retire_remote_pending_terminal(
+            &opened.local_session_id,
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint,
+        )
+        .unwrap();
+    let retired = &restarted
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap()
+        .retired_requests[0];
+    assert_eq!(retired.disposition, RetiredRequestDisposition::Terminal);
+    assert_eq!(retired.request_fingerprint, pending.request_fingerprint);
+    let another = restarted.open_remote_proxy(None, &live).unwrap();
+    restarted
+        .confirm_remote_mapping(
+            &another.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: another.remote_session_ref.clone(),
+                controlled_session_id: "another-b-session".into(),
+            },
+        )
+        .unwrap();
+    for attempt in [
+        pending_request("request-1", "task-2"),
+        pending_request("request-2", "task-1"),
+    ] {
+        assert!(
+            restarted
+                .insert_remote_pending(
+                    &another.local_session_id,
+                    &another.remote_session_ref,
+                    &live,
+                    attempt
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn never_attempted_abandon_is_atomic_and_retires_both_ids_across_records() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let live = context();
+    let opened = store.open_remote_proxy(None, &live).unwrap();
+    store
+        .confirm_remote_mapping(
+            &opened.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: opened.remote_session_ref.clone(),
+                controlled_session_id: "b-session".into(),
+            },
+        )
+        .unwrap();
+    let pending = pending_request("request-1", "task-1");
+    store
+        .insert_remote_pending(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &live,
+            pending.clone(),
+        )
+        .unwrap();
+    let original_path = {
+        let mut state = store.remote_proxies.lock();
+        std::mem::replace(
+            &mut state.path,
+            temp.path().join("missing-parent/remote.json"),
+        )
+    };
+    assert!(
+        store
+            .abandon_unattempted_remote_pending(
+                &opened.local_session_id,
+                "request-1",
+                "task-1",
+                &pending.request_fingerprint
+            )
+            .is_err()
+    );
+    store.remote_proxies.lock().path = original_path;
+    let record = store
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap();
+    assert_eq!(record.pending.len(), 1);
+    assert!(record.retired_requests.is_empty());
+    drop(store);
+    let restarted = make_store(temp.path());
+    assert_eq!(
+        restarted
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .unwrap()
+            .pending[0]
+            .dispatch_state,
+        PendingDispatchState::PreparedNeverAttempted
+    );
+    restarted
+        .abandon_unattempted_remote_pending(
+            &opened.local_session_id,
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint,
+        )
+        .unwrap();
+    assert!(
+        restarted
+            .abandon_unattempted_remote_pending(
+                &opened.local_session_id,
+                "request-1",
+                "task-1",
+                &pending.request_fingerprint
+            )
+            .is_err()
+    );
+    let retired = &restarted
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap()
+        .retired_requests[0];
+    assert_eq!(
+        retired.disposition,
+        RetiredRequestDisposition::AbandonedNeverAttempted
+    );
+    let another = restarted.open_remote_proxy(None, &live).unwrap();
+    restarted
+        .confirm_remote_mapping(
+            &another.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: another.remote_session_ref.clone(),
+                controlled_session_id: "another-b-session".into(),
+            },
+        )
+        .unwrap();
+    for attempt in [
+        pending_request("request-1", "task-2"),
+        pending_request("request-2", "task-1"),
+    ] {
+        assert!(
+            restarted
+                .insert_remote_pending(
+                    &another.local_session_id,
+                    &another.remote_session_ref,
+                    &live,
+                    attempt
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn v2_pending_migrates_to_possibly_attempted_without_releasing_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let opened = store.open_remote_proxy(None, &context()).unwrap();
+    let path = temp.path().join("sessions/_remote_proxies.json");
+    drop(store);
+    let mut file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file["schema_version"] = 2.into();
+    file["records"][0]["schema_version"] = 2.into();
+    file["records"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("retired_requests");
+    file["records"][0]["pending"] = serde_json::json!([{
+        "client_request_id": "request-1",
+        "task_id": "task-1",
+        "request_fingerprint": "a".repeat(64),
+        "outcome_unknown": false
+    }]);
+    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let migrated = make_store(temp.path());
+    let pending = &migrated
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap()
+        .pending[0];
+    assert_eq!(
+        pending.dispatch_state,
+        PendingDispatchState::AttemptMayHaveOccurred
+    );
+    assert!(
+        migrated
+            .abandon_unattempted_remote_pending(
+                &opened.local_session_id,
+                "request-1",
+                "task-1",
+                &"a".repeat(64)
+            )
+            .is_err()
+    );
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(rewritten["schema_version"], 3);
+    assert_eq!(
+        rewritten["records"][0]["pending"][0]["dispatch_state"],
+        "attempt_may_have_occurred"
+    );
+    assert!(
+        rewritten["records"][0]["pending"][0]
+            .get("outcome_unknown")
+            .is_none()
+    );
+}
+
+#[test]
+fn v3_rejects_incomplete_or_conflicting_outbox_contract_without_disk_rewrite() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    store.open_remote_proxy(None, &context()).unwrap();
+    let path = temp.path().join("sessions/_remote_proxies.json");
+    let pristine: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    drop(store);
+    let pending = serde_json::json!({
+        "client_request_id": "request-1",
+        "task_id": "task-1",
+        "request_fingerprint": "a".repeat(64),
+        "dispatch_state": "prepared_never_attempted"
+    });
+    let retired = serde_json::json!({
+        "client_request_id": "request-2",
+        "task_id": "task-2",
+        "request_fingerprint": "b".repeat(64),
+        "disposition": "abandoned_never_attempted"
+    });
+    let mut cases = Vec::new();
+    let mut missing_dispatch = pristine.clone();
+    let mut item = pending.clone();
+    item.as_object_mut().unwrap().remove("dispatch_state");
+    missing_dispatch["records"][0]["pending"] = serde_json::json!([item]);
+    cases.push(missing_dispatch);
+    let mut old_boolean = pristine.clone();
+    let mut item = pending.clone();
+    item["outcome_unknown"] = false.into();
+    old_boolean["records"][0]["pending"] = serde_json::json!([item]);
+    cases.push(old_boolean);
+    let mut unknown_state = pristine.clone();
+    let mut item = pending.clone();
+    item["dispatch_state"] = "sent".into();
+    unknown_state["records"][0]["pending"] = serde_json::json!([item]);
+    cases.push(unknown_state);
+    let mut missing_disposition = pristine.clone();
+    let mut item = retired.clone();
+    item.as_object_mut().unwrap().remove("disposition");
+    missing_disposition["records"][0]["retired_requests"] = serde_json::json!([item]);
+    cases.push(missing_disposition);
+    let mut duplicate_id = pristine.clone();
+    duplicate_id["records"][0]["pending"] = serde_json::json!([pending]);
+    let mut item = retired;
+    item["client_request_id"] = "request-1".into();
+    duplicate_id["records"][0]["retired_requests"] = serde_json::json!([item]);
+    cases.push(duplicate_id);
+    for case in cases {
+        let bytes = serde_json::to_vec(&case).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 }
