@@ -86,11 +86,15 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 render(context, mode, "pinvouUsernameInvalid");
                 return;
             }
+            // Preserve the validated, non-secret field before password precheck
+            // errors re-render the form. Passwords must never be stored in notes.
+            put(context, "username", username);
             if (get(context, "password_handle").isEmpty()) {
                 String password = form.getFirst("password");
                 String confirmation = form.getFirst("password_confirmation");
-                if (password == null || password.length() < 8 || password.length() > 128 || !password.equals(confirmation)) {
-                    render(context, mode, "pinvouPasswordInvalid");
+                String passwordMessage = registrationPasswordMessage(password, confirmation);
+                if (!passwordMessage.isEmpty()) {
+                    render(context, mode, passwordMessage);
                     return;
                 }
                 Map<String, Object> reference = CLIENT.precheckPassword(password);
@@ -100,7 +104,6 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 put(context, "password_handle", handle);
                 put(context, "password_policy", policy);
             }
-            put(context, "username", username);
         } else if ("reset".equals(mode) && get(context, "password_handle").isEmpty()) {
             String password = form.getFirst("password");
             String confirmation = form.getFirst("password_confirmation");
@@ -318,6 +321,12 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
 
     static boolean shouldRestartPasswordReset(String mode, String code) {
         return "reset".equals(mode) && ("PASSWORD_REFERENCE_INVALID".equals(code) || "PASSWORD_REFERENCE_CONFLICT".equals(code));
+    }
+
+    static String registrationPasswordMessage(String password, String confirmation) {
+        if (password == null || password.isEmpty()) return "pinvouPasswordRequiredBeforeSms";
+        if (password.length() < 8 || password.length() > 128 || !password.equals(confirmation)) return "pinvouPasswordInvalid";
+        return "";
     }
 
     static String messageFor(String code) {
