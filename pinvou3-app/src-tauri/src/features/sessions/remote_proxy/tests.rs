@@ -1348,34 +1348,19 @@ fn dispatch_barrier_and_terminal_retirement_are_durable_and_irreversible() {
             )
             .is_err()
     );
-    drop(store);
-    let restarted = make_store(temp.path());
-    assert_eq!(
-        restarted
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .pending[0]
-            .dispatch_state,
-        PendingDispatchState::AttemptMayHaveOccurred
-    );
-    assert!(
-        restarted
-            .abandon_unattempted_remote_pending(
-                &opened.local_session_id,
-                "request-1",
-                "task-1",
-                &pending.request_fingerprint
-            )
-            .is_err()
-    );
-    restarted
+    store
         .retire_remote_pending_terminal(
             &opened.local_session_id,
+            &opened.remote_session_ref,
+            &live,
+            "b-session",
             "request-1",
             "task-1",
             &pending.request_fingerprint,
         )
         .unwrap();
+    drop(store);
+    let restarted = make_store(temp.path());
     let retired = &restarted
         .remote_proxy_snapshot(&opened.local_session_id)
         .unwrap()
@@ -1631,4 +1616,229 @@ fn v3_rejects_incomplete_or_conflicting_outbox_contract_without_disk_rewrite() {
         assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
+}
+
+#[test]
+fn terminal_retirement_rechecks_live_b_mapping_and_correlation_under_write_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let live = context();
+    let opened = store.open_remote_proxy(None, &live).unwrap();
+    store
+        .confirm_remote_mapping(
+            &opened.local_session_id,
+            &live,
+            &AuthenticatedMapping {
+                remote_session_ref: opened.remote_session_ref.clone(),
+                controlled_session_id: "b-session-1".into(),
+            },
+        )
+        .unwrap();
+    let pending = pending_request("request-1", "task-1");
+    store
+        .insert_remote_pending(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &live,
+            pending.clone(),
+        )
+        .unwrap();
+    store
+        .mark_remote_dispatch_attempt(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &live,
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint,
+        )
+        .unwrap();
+    let path = temp.path().join("sessions/_remote_proxies.json");
+    let before = std::fs::read(&path).unwrap();
+    let retire = |context: &LiveRemoteContext,
+                  remote_ref: &str,
+                  b_session: &str,
+                  client_id: &str,
+                  task_id: &str,
+                  fingerprint: &str| {
+        store.retire_remote_pending_terminal(
+            &opened.local_session_id,
+            remote_ref,
+            context,
+            b_session,
+            client_id,
+            task_id,
+            fingerprint,
+        )
+    };
+    let mut stale_generation = live.clone();
+    stale_generation.generation = "stale-generation".into();
+    let mut wrong_lease = live.clone();
+    wrong_lease.controller_lease_id = "wrong-lease".into();
+    let mut wrong_connection = live.clone();
+    wrong_connection.connection_id = "wrong-connection".into();
+    for changed in [&stale_generation, &wrong_lease, &wrong_connection] {
+        assert!(
+            retire(
+                changed,
+                &opened.remote_session_ref,
+                "b-session-1",
+                "request-1",
+                "task-1",
+                &pending.request_fingerprint
+            )
+            .is_err()
+        );
+    }
+    let wrong_fingerprint = "b".repeat(64);
+    for (remote_ref, b_session, client_id, task_id, fingerprint) in [
+        (
+            "foreign-ref",
+            "b-session-1",
+            "request-1",
+            "task-1",
+            pending.request_fingerprint.as_str(),
+        ),
+        (
+            opened.remote_session_ref.as_str(),
+            "foreign-b-session",
+            "request-1",
+            "task-1",
+            pending.request_fingerprint.as_str(),
+        ),
+        (
+            opened.remote_session_ref.as_str(),
+            "b-session-1",
+            "foreign-request",
+            "task-1",
+            pending.request_fingerprint.as_str(),
+        ),
+        (
+            opened.remote_session_ref.as_str(),
+            "b-session-1",
+            "request-1",
+            "foreign-task",
+            pending.request_fingerprint.as_str(),
+        ),
+        (
+            opened.remote_session_ref.as_str(),
+            "b-session-1",
+            "request-1",
+            "task-1",
+            wrong_fingerprint.as_str(),
+        ),
+    ] {
+        assert!(
+            retire(
+                &live,
+                remote_ref,
+                b_session,
+                client_id,
+                task_id,
+                fingerprint
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        store
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .unwrap()
+            .pending
+            .len(),
+        1
+    );
+
+    // A read-only validation is not a grant: disconnect between validation
+    // and write must make the atomic terminal operation fail closed.
+    store
+        .require_live_remote_mutation(&opened.local_session_id, &opened.remote_session_ref, &live)
+        .unwrap();
+    store.disconnect_remote_proxy(&opened.local_session_id);
+    assert!(
+        retire(
+            &live,
+            &opened.remote_session_ref,
+            "b-session-1",
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let mut rebound = live.clone();
+    rebound.connection_id = "connection-2".into();
+    rebound.lease_epoch = "epoch-2".into();
+    rebound.generation = "generation-2".into();
+    rebound.control_connected = true;
+    rebound.encrypted_channel_connected = true;
+    store
+        .resume_remote_proxy(&opened.local_session_id, &rebound)
+        .unwrap();
+    store
+        .confirm_remote_mapping(
+            &opened.local_session_id,
+            &rebound,
+            &AuthenticatedMapping {
+                remote_session_ref: opened.remote_session_ref.clone(),
+                controlled_session_id: "b-session-1".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        retire(
+            &live,
+            &opened.remote_session_ref,
+            "b-session-1",
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // Persistence failure rolls back the in-memory retirement as well.
+    let original_path = {
+        let mut state = store.remote_proxies.lock();
+        std::mem::replace(
+            &mut state.path,
+            temp.path().join("missing-parent/remote.json"),
+        )
+    };
+    assert!(
+        retire(
+            &rebound,
+            &opened.remote_session_ref,
+            "b-session-1",
+            "request-1",
+            "task-1",
+            &pending.request_fingerprint
+        )
+        .is_err()
+    );
+    store.remote_proxies.lock().path = original_path;
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let record = store
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap();
+    assert_eq!(record.pending.len(), 1);
+    assert!(record.retired_requests.is_empty());
+    retire(
+        &rebound,
+        &opened.remote_session_ref,
+        "b-session-1",
+        "request-1",
+        "task-1",
+        &pending.request_fingerprint,
+    )
+    .unwrap();
+    let record = store
+        .remote_proxy_snapshot(&opened.local_session_id)
+        .unwrap();
+    assert!(record.pending.is_empty());
+    assert_eq!(record.retired_requests.len(), 1);
 }

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use super::{
-    binding::{LiveRemoteContext, require_live_locked},
+    binding::{LiveRemoteContext, require_live_locked, require_live_mapping_locked},
     migration::persist_changed,
 };
 use crate::features::sessions::SessionStore;
@@ -709,19 +709,24 @@ impl SessionStore {
 
     /// Complete an authenticated terminal result without ever releasing its
     /// correlation identifiers. Authentication is the caller's obligation;
-    /// this storage API only performs the atomic state transition.
+    /// all live A/B binding and pending checks happen under the same mutex as
+    /// retirement and persistence, so a post-verification rebind cannot win.
     pub(crate) fn retire_remote_pending_terminal(
         &self,
         id: &str,
+        remote_ref: &str,
+        context: &LiveRemoteContext,
+        controlled_session_id: &str,
         client_request_id: &str,
         task_id: &str,
         fingerprint: &str,
     ) -> Result<()> {
         let mut state = self.remote_proxies.lock();
+        require_live_mapping_locked(&state, id, remote_ref, context, controlled_session_id)?;
         let mut record = state
             .records
             .get(id)
-            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .expect("checked live RemoteProxy")
             .clone();
         let index = record
             .pending

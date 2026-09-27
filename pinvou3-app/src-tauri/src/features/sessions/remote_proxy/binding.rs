@@ -279,3 +279,26 @@ pub(super) fn require_live_locked(
     }
     Ok(())
 }
+
+/// Terminal correlation must bind the exact B-owned Session in the same lock
+/// acquisition as the current A lease/opening check. A prior read-only check
+/// is not authority after disconnect, resume, or re-pair.
+pub(super) fn require_live_mapping_locked(
+    state: &RemoteProxyState,
+    id: &str,
+    remote_ref: &str,
+    context: &LiveRemoteContext,
+    controlled_session_id: &str,
+) -> Result<()> {
+    require_live_locked(state, id, remote_ref, context)?;
+    if controlled_session_id.is_empty()
+        || state
+            .records
+            .get(id)
+            .and_then(|record| record.controlled_session_id.as_deref())
+            != Some(controlled_session_id)
+    {
+        bail!("remote terminal B Session mapping mismatch");
+    }
+    Ok(())
+}
