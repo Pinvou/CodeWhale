@@ -20,15 +20,11 @@ if [ -z "$NOTES" ]; then
   exit 1
 fi
 
-# ── 1. 三处版本号一致校验（防版本漂移发出错包）────────────────────
-V_TAURI=$(jq -r .version "$APP_DIR/src-tauri/tauri.conf.json")
-V_CARGO=$(grep -m1 '^version = ' "$APP_DIR/src-tauri/Cargo.toml" | sed 's/version = "\(.*\)"/\1/')
-V_NPM=$(jq -r .version "$APP_DIR/package.json")
-if [ "$V_TAURI" != "$V_CARGO" ] || [ "$V_TAURI" != "$V_NPM" ]; then
-  echo "版本号不一致: tauri.conf.json=$V_TAURI Cargo.toml=$V_CARGO package.json=$V_NPM" >&2
-  exit 1
-fi
-VERSION="$V_TAURI"
+# ── 1. 版本号以根目录 VERSION 为单一事实来源(社区 #604 回流)──────
+# 旧三处交叉比对在打包文件同时过时时照样通过;改由 sync-version.mjs --check
+# 把登记的全部版本文件逐一与 VERSION 比对(社区 #604),版本号直接读 VERSION。
+node "$REPO_ROOT/scripts/sync-version.mjs" --check
+VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 echo "=== 发布 pinvou3 v$VERSION ==="
 
 # ── 1.5 embedding 模型不再随 deb 打包（deb 瘦 ~559MB）──────
@@ -41,12 +37,23 @@ echo "=== 发布 pinvou3 v$VERSION ==="
 "$APP_DIR/scripts/prepare-codex-bridge-runtime.sh"
 (cd "$APP_DIR" && npm ci --prefer-offline --no-audit && npm run build)
 
-ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-DEB="$APP_DIR/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_${ARCH}.deb"
-if [ ! -f "$DEB" ]; then
-  echo "deb 产物不存在: $DEB" >&2
+# 架构取实际构建出的产物(社区 #604 回流):构建 target 来自 host 的 node/Rust 三元组,
+# 与 dpkg 无关;dpkg 缺失时旧的 `2>/dev/null || echo amd64` 会在 arm64 非 Debian host 上
+# 静默猜成 amd64,随后以误导性的"产物不存在"指向一个从未构建过的文件名。
+DEB_DIR="$APP_DIR/src-tauri/target/release/bundle/deb"
+shopt -s nullglob
+BUILT=("$DEB_DIR/pinvou3_${VERSION}_"*.deb)
+shopt -u nullglob
+if [ "${#BUILT[@]}" -ne 1 ]; then
+  echo "Expected exactly one $DEB_DIR/pinvou3_${VERSION}_*.deb, found ${#BUILT[@]}" >&2
+  if [ -d "$DEB_DIR" ]; then
+    ls -la "$DEB_DIR" >&2
+  fi
   exit 1
 fi
+DEB="${BUILT[0]}"
+ARCH="$(basename "$DEB" .deb)"
+ARCH="${ARCH#pinvou3_"${VERSION}"_}"
 
 # ── 3. 合并 latest.json(保留其它平台条目,只更新顶层 Linux 字段) ──────
 # 修复「Linux 发版抹掉 platforms.macos-arm64」:此前用 `jq -n` 从零生成 latest.json,
