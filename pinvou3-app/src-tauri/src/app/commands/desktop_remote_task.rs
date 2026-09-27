@@ -85,11 +85,16 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
     }
 
     fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String> {
-        match self.store.session_kind(session_id) {
-            Ok(crate::features::sessions::SessionKind::ScheduledRun) => Ok(false),
-            Ok(crate::features::sessions::SessionKind::Chat) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        Ok(controlled_session_exists(&self.store, session_id))
+    }
+}
+
+fn controlled_session_exists(store: &SessionStore, session_id: &str) -> bool {
+    match store.session_kind(session_id) {
+        Ok(crate::features::sessions::SessionKind::ScheduledRun) => false,
+        Ok(crate::features::sessions::SessionKind::Chat) => true,
+        Ok(crate::features::sessions::SessionKind::RemoteProxy) => false,
+        Err(_) => false,
     }
 }
 
@@ -918,6 +923,35 @@ pub fn desktop_remote_task_interrupt_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controlled_provisioner_never_reuses_a_remote_proxy_as_b_authority() {
+        use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::boot_at_test_dir(root.path()).unwrap();
+        let local = store
+            .create_new("model".into(), None, root.path().join("local"))
+            .unwrap();
+        assert!(controlled_session_exists(&store, &local.metadata.id));
+        let remote = store
+            .open_remote_proxy(
+                None,
+                &LiveRemoteContext {
+                    peer_id: "peer".into(),
+                    resume_boundary_id: "boundary".into(),
+                    connection_id: "connection".into(),
+                    controller_lease_id: "lease".into(),
+                    lease_epoch: "epoch".into(),
+                    relay_epoch: "relay".into(),
+                    generation: "generation".into(),
+                    control_connected: true,
+                    encrypted_channel_connected: true,
+                },
+            )
+            .unwrap();
+        assert!(!controlled_session_exists(&store, &remote.local_session_id));
+    }
 
     #[test]
     fn command_surface_names_are_stable() {

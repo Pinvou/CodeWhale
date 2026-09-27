@@ -36,6 +36,7 @@ pub(crate) mod application;
 pub(crate) mod diagnostics;
 mod injections;
 pub(crate) mod mode_state;
+pub(crate) mod remote_proxy;
 mod retention;
 mod rewind;
 mod scheduled;
@@ -84,6 +85,7 @@ pub(crate) use self::validators::validate_session_id;
 pub enum SessionKind {
     Chat,
     ScheduledRun,
+    RemoteProxy,
 }
 
 /// pinvou3 session store: wraps SessionManager + active-id tracking +
@@ -117,6 +119,10 @@ pub enum SessionKind {
 pub struct SessionStore {
     /// Underlying upstream session manager (durable JSON store).
     pub(crate) manager: Arc<deepseek_tui::session_manager::SessionManager>,
+    /// SessionStore-owned durable remote records; live credentials are separate and never saved.
+    pub(crate) remote_proxies: Arc<Mutex<remote_proxy::RemoteProxyState>>,
+    pub(crate) local_backend_resolver:
+        Arc<RwLock<Option<remote_proxy::routing::LocalBackendResolver>>>,
     /// Scheduled-run profiles keyed by session id (`sched-*`).
     pub(crate) scheduled_profiles: Arc<RwLock<HashMap<String, ScheduledRunProfile>>>,
     /// Path to the scheduled-profile registry JSON.
