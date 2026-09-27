@@ -166,7 +166,7 @@ Wallet not ready within SLA
 3. `[ACC-03]` `PROVISIONING` 和 `REPAIR_REQUIRED` 都允许登录、登出、刷新会话、查看初始化状态及管理用户名、手机号和密码；Token Gateway 对个人和组织平台模型调用返回稳定 `ACCOUNT_PROVISIONING` 或 `ACCOUNT_REPAIR_REQUIRED`，支付下单返回对应稳定原因码。桌面本地独立模型不受影响。
 4. `[ACC-04]` Provisioning SLA 从 Account 成功提交时开始，配置必须版本化并保存到任务快照；SLA 内失败只能保持 `PROVISIONING` 和自动重试，超过 SLA 才能转为 `REPAIR_REQUIRED`、进入运营队列并允许人工重试。
 5. `[ID-15]` Account 一旦成功提交，钱包初始化失败、超时、Billing 熔断或事件积压都不得触发 Identity 删除、手机号释放或 Account 删除。只有用户注销、安全处置或“Identity 已创建但 Account 从未成功提交”的注册补偿可以停用或删除 Identity。
-6. `[UI-02]` 客户端必须把 `PROVISIONING` 显示为“账号已创建，服务初始化中”，把 `REPAIR_REQUIRED` 显示为“账号已创建，初始化需要处理”，并允许用户登录和查看账号资料；不得显示密码错误、注册失败、资料修改入口或诱导重复注册。
+6. `[UI-02]` 客户端必须把 `PROVISIONING` 显示为“账号已创建，服务初始化中”，把 `REPAIR_REQUIRED` 显示为“账号已创建，初始化需要处理”，并允许用户登录和查看账号资料；Web 注册响应已包含 `user_id` 且状态为 `ACCOUNT_COMMITTED`、`PROVISIONING`、`ACTIVE` 或 `REPAIR_REQUIRED` 时，必须按 `registration_operation_id` 唯一定位 Identity 用户，并仅在该 Identity subject 的 `personal.session.login` 权限校验返回相同 Account `user_id` 后继续当前 OIDC 登录流程；任一标识缺失、重复、不匹配或用户禁用时都必须失败关闭，不得创建其他账号的会话；登录成功后 Portal 必须允许该会话调用 Account bootstrap 并展示初始化状态，不得退回密码登录页；不得显示密码错误、注册失败、资料修改入口或诱导重复注册。
 
 `[ACC-54]` Identity 已创建但 Account 尚未提交的注册操作使用以下持久状态：
 

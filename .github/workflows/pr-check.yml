@@ -788,6 +788,13 @@ jobs:
           cache: npm
           cache-dependency-path: account-platform/package-lock.json
 
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: account-platform/deploy/keycloak/mobile-authenticator/pom.xml
+
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: '1.57.0'
@@ -822,6 +829,31 @@ jobs:
           test -n "$chrome"
           echo "CHROME=$chrome" >> "$GITHUB_ENV"
 
+      - name: Prepare Account integration roles
+        env:
+          PGPASSWORD: account_platform_test
+        run: |
+          psql --host 127.0.0.1 --username account_platform_test --dbname postgres --set=ON_ERROR_STOP=1 <<'SQL'
+          SELECT 'CREATE ROLE account_service LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_service') \gexec
+          SELECT 'CREATE ROLE account_approval_control_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_control_owner') \gexec
+          SELECT 'CREATE ROLE account_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_migrator') \gexec
+          SELECT 'CREATE ROLE account_approval_authorization_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_authorization_owner') \gexec
+          SELECT 'CREATE ROLE account_approval_writer LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_writer') \gexec
+          SELECT 'CREATE ROLE account_approval_backfill LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_backfill') \gexec
+          SELECT 'CREATE ROLE account_approval_relay LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_relay') \gexec
+          SELECT 'CREATE ROLE account_approval_recovery NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_recovery') \gexec
+          GRANT account_service, account_approval_control_owner TO account_migrator;
+          GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE, SET TRUE, ADMIN TRUE;
+          SQL
+
       - name: 启动隔离 Token 审批事件测试队列
         run: |
           docker run --detach --name apt138-nats --publish 127.0.0.1:4222:4222 --publish 127.0.0.1:8222:8222 nats:2.11-alpine --jetstream --http_port 8222
@@ -830,6 +862,31 @@ jobs:
             sleep 1
           done
           curl --fail --silent http://127.0.0.1:8222/healthz
+
+      - name: Keycloak mobile authenticator tests
+        working-directory: account-platform/deploy/keycloak/mobile-authenticator
+        run: |
+          mvn --batch-mode --no-transfer-progress -DfailIfNoTests=true test
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          expected_classes = {
+              "ProvisioningPasswordLoginFixtureTest",
+              "RegistrationLoginPolicyTest",
+              "RegistrationUserSelectorTest",
+          }
+          reports = [ET.parse(path).getroot() for path in Path("target/surefire-reports").glob("TEST-*.xml")]
+          classes = {report.attrib["name"].rsplit(".", 1)[-1] for report in reports}
+          counts = {
+              key: sum(int(report.attrib.get(key, "0")) for report in reports)
+              for key in ("tests", "failures", "errors", "skipped")
+          }
+          if classes != expected_classes:
+              raise SystemExit(f"unexpected Surefire classes: {sorted(classes)}")
+          if counts != {"tests": 16, "failures": 0, "errors": 0, "skipped": 0}:
+              raise SystemExit(f"unexpected Surefire counts: {counts}")
+          PY
 
       - name: Go 格式、测试与静态检查
         working-directory: account-platform
@@ -857,10 +914,12 @@ jobs:
             grep -F -- "--- PASS: $test_name" <<< "$wallet_provisioning_output"
             ! grep -F -- "--- SKIP: $test_name" <<< "$wallet_provisioning_output"
           done
-          owner_candidates_output="$(go test -run '^TestTokenOwnerCandidatesPostgresIntegration$' -count=1 -v ./internal/account)"
+          owner_candidates_output="$(go test -run '^(TestTokenOwnerCandidatesPostgresIntegration|TestProvisioningPasswordLoginAccountChainPostgresIntegration)$' -count=1 -v ./internal/account)"
           printf '%s\n' "$owner_candidates_output"
-          grep -F -- '--- PASS: TestTokenOwnerCandidatesPostgresIntegration' <<< "$owner_candidates_output"
-          ! grep -F -- '--- SKIP: TestTokenOwnerCandidatesPostgresIntegration' <<< "$owner_candidates_output"
+          for test_name in TestTokenOwnerCandidatesPostgresIntegration TestProvisioningPasswordLoginAccountChainPostgresIntegration; do
+            grep -F -- "--- PASS: $test_name" <<< "$owner_candidates_output"
+            ! grep -F -- "--- SKIP: $test_name" <<< "$owner_candidates_output"
+          done
           token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^(TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)|TestAdminModelDetailPostgresIntegration|TestTokenImpactPrecheckPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_pagination_output"
           for test_name in \

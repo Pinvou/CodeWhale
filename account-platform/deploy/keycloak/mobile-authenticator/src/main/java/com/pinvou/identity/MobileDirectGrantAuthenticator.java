@@ -72,7 +72,7 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
             return;
         }
         try {
-            if (!CLIENT.authorizeLogin(user.getId())) {
+            if (!CLIENT.authorizeLogin(user.getId()).allowed()) {
                 fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
                 return;
             }

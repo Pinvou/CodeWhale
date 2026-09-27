@@ -110,10 +110,17 @@ async function loginPasswordControls(initialPassword = '') {
 }
 
 test('web login is rendered by the Identity boundary and Portal redirects guests into OIDC', async () => {
-  const [authenticator, template, portal] = await Promise.all([
+  const [authenticator, policy, selector, authClient, identityAdapter, template, portal, accountContract, accountAuthorization, registrationSaga] = await Promise.all([
     read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/PinvouBrowserAuthenticator.java'),
+    read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/RegistrationLoginPolicy.java'),
+    read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/RegistrationUserSelector.java'),
+    read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/PinvouAuthClient.java'),
+    read('internal/identityadapter/keycloak.go'),
     read('deploy/keycloak/themes/pinvou/login/pinvou-login.ftl'),
     read('../pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
+    read('contracts/openapi/account.yaml'),
+    read('internal/account/authorization.go'),
+    read('internal/account/registration_saga.go'),
   ]);
   assert.match(portal, /if \(portal && auth === 'guest'\) \{\s*globalThis\.location\.replace\(portalLoginLocation\(globalThis\.location\?\.pathname \|\| '\/', globalThis\.location\?\.search \|\| ''\)\);/);
   assert.match(authenticator, /CLIENT\.precheckPassword\(password\)/);
@@ -121,8 +128,24 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.match(authenticator, /CLIENT\.sendSMS\(/);
   assert.match(authenticator, /CLIENT\.verifySMS\(/);
   assert.match(authenticator, /CLIENT\.register\(/);
-  assert.match(authenticator, /!"COMMITTED"\.equals\(status\)/);
+  const registrationStatuses = new Set(YAML.parse(accountContract).components.schemas.RegistrationStatus.properties.status.enum);
+  const loginReadyStatuses = ['ACCOUNT_COMMITTED', 'PROVISIONING', 'ACTIVE', 'REPAIR_REQUIRED'];
+  for (const status of loginReadyStatuses) assert.ok(registrationStatuses.has(status), `${status} must remain an Account registration status`);
+  assert.match(policy, /LOGIN_READY_STATUSES = Set\.of\(\s*"ACCOUNT_COMMITTED", "PROVISIONING", "ACTIVE", "REPAIR_REQUIRED"\s*\)/);
+  assert.match(policy, /sameID\(requestedRegistrationOperationID, returnedRegistrationOperationID\)/);
+  assert.match(policy, /sameID\(registrationAccountUserID, authorizedAccountUserID\)/);
+  assert.match(policy, /LOGIN_READY_STATUSES\.contains\(value\(status\)\)\s*&& authorizationAllowed\s*&& keycloakUserPresent/);
+  assert.match(authenticator, /searchForUserByUserAttributeStream\([\s\S]*REGISTRATION_OPERATION_ATTRIBUTE, operationID\)/);
+  assert.match(authenticator, /\.filter\(user -> operationID\.equals\(user\.getFirstAttribute\(REGISTRATION_OPERATION_ATTRIBUTE\)\)\)[\s\S]*\.limit\(2\)[\s\S]*\.toList\(\)/);
+  assert.match(authenticator, /RegistrationUserSelector\.uniqueExactMatch\([\s\S]*user -> user\.getFirstAttribute\(REGISTRATION_OPERATION_ATTRIBUTE\)/);
+  assert.match(selector, /if \(match != null\) return null;[\s\S]*match = candidate/);
+  assert.match(authenticator, /RegistrationLoginPolicy\.allows\([\s\S]*result\.get\("registration_operation_id"\)[\s\S]*result\.get\("user_id"\)[\s\S]*authorization\.accountUserID\(\)[\s\S]*authorization\.allowed\(\)/);
+  assert.match(authClient, /record LoginAuthorization\(boolean allowed, String accountUserID\)/);
+  assert.match(identityAdapter, /"pinvou_registration_operation_id": \{operationID\.String\(\)\}/);
+  assert.doesNotMatch(authenticator, /!"COMMITTED"\.equals\(status\)/);
   assert.match(authenticator, /result\.get\("user_id"\)/);
+  assert.match(registrationSaga, /operation\.Status = "PROVISIONING"/);
+  assert.match(accountAuthorization, /case "PROVISIONING", "REPAIR_REQUIRED":[\s\S]*PermissionPersonalSessionLogin/);
   assert.match(authenticator, /put\(context, "password_handle", handle\)/);
   assert.doesNotMatch(authenticator, /put\(context, "password",/);
   assert.match(template, /name="mode"/);

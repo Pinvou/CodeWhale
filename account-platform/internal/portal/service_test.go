@@ -2,12 +2,15 @@ package portal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -963,6 +966,136 @@ func TestCallbackAcceptsNonExpiringOfflineRefreshTokenWithBoundedSession(t *test
 		if got, want := session.RefreshExpiresAt, now.Add(defaultSessionMaxAge); !got.Equal(want) {
 			t.Fatalf("refresh expiry = %s, want %s", got, want)
 		}
+	}
+}
+
+func TestOIDCCallbackSessionCanBootstrapAProvisioningRegistration(t *testing.T) {
+	var fixture struct {
+		AccountUserID        string `json:"account_user_id"`
+		AccountStatus        string `json:"account_status"`
+		AuthorizationAllowed bool   `json:"authorization_allowed"`
+		OIDCState            string `json:"oidc_state"`
+		OIDCCode             string `json:"oidc_code"`
+		CodeVerifier         string `json:"code_verifier"`
+		AccessToken          string `json:"access_token"`
+		RefreshToken         string `json:"refresh_token"`
+		ReturnTo             string `json:"return_to"`
+	}
+	rawFixture, err := os.ReadFile(filepath.Join("..", "..", "test", "fixtures", "provisioning-password-login.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(rawFixture, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if !fixture.AuthorizationAllowed || fixture.AccountStatus != "PROVISIONING" {
+		t.Fatalf("invalid provisioning login fixture: %+v", fixture)
+	}
+	bootstrapCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("code") != fixture.OIDCCode || r.Form.Get("code_verifier") != fixture.CodeVerifier {
+				t.Fatalf("unexpected token request: %v", r.Form)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": fixture.AccessToken, "refresh_token": fixture.RefreshToken, "token_type": "Bearer", "expires_in": 300, "refresh_expires_in": 3600})
+		case "/v1/account/bootstrap":
+			bootstrapCalls++
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+fixture.AccessToken {
+				t.Fatalf("unexpected bootstrap request: method=%s authorization=%q", r.Method, r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"user_id": fixture.AccountUserID, "status": fixture.AccountStatus, "active_context": map[string]any{"context_type": "PERSONAL"}, "personal_permissions": []string{"personal.session.login"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	parse := func(raw string) *url.URL {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	store := newMemoryStore()
+	service, err := NewService(Config{
+		PublicURL:        parse("https://portal.example"),
+		AuthorizationURL: parse("https://identity.example/auth"),
+		TokenURL:         parse(upstream.URL + "/token"),
+		ClientID:         "portal",
+		AccountURL:       parse(upstream.URL),
+		BillingURL:       parse("https://billing.internal"),
+		TokenGatewayURL:  parse("https://token.internal"),
+		SecureCookies:    true,
+	}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.September, 27, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	store.flows[fixture.OIDCState] = LoginFlow{
+		Verifier:  fixture.CodeVerifier,
+		ExpiresAt: now.Add(time.Minute),
+		ReturnTo:  fixture.ReturnTo,
+	}
+
+	callback := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+url.QueryEscape(fixture.OIDCState)+"&code="+url.QueryEscape(fixture.OIDCCode), nil)
+	callback.AddCookie(&http.Cookie{Name: service.flowCookieName(), Value: fixture.OIDCState})
+	callbackResponse := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(callbackResponse, callback)
+	if callbackResponse.Code != http.StatusFound {
+		t.Fatalf("callback response = %d %s", callbackResponse.Code, callbackResponse.Body.String())
+	}
+	var sessionCookie, csrfCookie *http.Cookie
+	for _, cookie := range callbackResponse.Result().Cookies() {
+		switch cookie.Name {
+		case service.sessionCookieName():
+			sessionCookie = cookie
+		case service.csrfCookieName():
+			csrfCookie = cookie
+		}
+	}
+	if sessionCookie == nil || csrfCookie == nil {
+		t.Fatalf("callback did not create the Portal session cookies: %v", callbackResponse.Result().Cookies())
+	}
+	sessionRequest := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	sessionRequest.AddCookie(sessionCookie)
+	sessionResponse := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(sessionResponse, sessionRequest)
+	var sessionProjection struct {
+		Authenticated bool   `json:"authenticated"`
+		CSRFToken     string `json:"csrf_token"`
+	}
+	if sessionResponse.Code != http.StatusOK || json.Unmarshal(sessionResponse.Body.Bytes(), &sessionProjection) != nil || !sessionProjection.Authenticated || sessionProjection.CSRFToken != csrfCookie.Value {
+		t.Fatalf("unexpected session projection: status=%d body=%s", sessionResponse.Code, sessionResponse.Body.String())
+	}
+
+	bootstrap := httptest.NewRequest(http.MethodPost, "/api/account/v1/account/bootstrap", strings.NewReader(`{}`))
+	bootstrap.Header.Set("Content-Type", "application/json")
+	bootstrap.Header.Set("Origin", "https://portal.example")
+	bootstrap.Header.Set("X-CSRF-Token", csrfCookie.Value)
+	bootstrap.AddCookie(sessionCookie)
+	bootstrap.AddCookie(csrfCookie)
+	bootstrapResponse := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(bootstrapResponse, bootstrap)
+	if bootstrapResponse.Code != http.StatusOK || bootstrapCalls != 1 {
+		t.Fatalf("bootstrap response = %d calls=%d body=%s", bootstrapResponse.Code, bootstrapCalls, bootstrapResponse.Body.String())
+	}
+	var account struct {
+		UserID string `json:"user_id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(bootstrapResponse.Body.Bytes(), &account); err != nil {
+		t.Fatal(err)
+	}
+	if account.UserID != fixture.AccountUserID || account.Status != fixture.AccountStatus {
+		t.Fatalf("unexpected provisioning bootstrap: %+v", account)
 	}
 }
 

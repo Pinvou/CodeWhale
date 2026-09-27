@@ -189,6 +189,61 @@ test("all title-gate runs share one cancel-and-replace concurrency group", () =>
   );
 });
 
+test("account-platform gate executes the Keycloak authenticator unit tests on Java 21", () => {
+  const accountJob = workflow.match(
+    /^  account-platform-test:\r?\n[\s\S]*?(?=^  [\w-]+:\r?$)/m,
+  );
+  assert.ok(accountJob, "account-platform-test job block not found");
+  assert.match(accountJob[0], /uses: actions\/setup-java@v5/);
+  assert.match(accountJob[0], /java-version: '21'/);
+  assert.match(
+    accountJob[0],
+    /cache-dependency-path: account-platform\/deploy\/keycloak\/mobile-authenticator\/pom\.xml/,
+  );
+  assert.match(
+    accountJob[0],
+    /working-directory: account-platform\/deploy\/keycloak\/mobile-authenticator\r?\n\s+run: \|[\s\S]*mvn --batch-mode --no-transfer-progress -DfailIfNoTests=true test/,
+  );
+  for (const expectedClass of [
+    "ProvisioningPasswordLoginFixtureTest",
+    "RegistrationLoginPolicyTest",
+    "RegistrationUserSelectorTest",
+  ]) {
+    assert.match(accountJob[0], new RegExp(`"${expectedClass}"`));
+  }
+  assert.match(accountJob[0], /"tests": 16/);
+  assert.match(accountJob[0], /"failures": 0/);
+  assert.match(accountJob[0], /"errors": 0/);
+  assert.match(accountJob[0], /"skipped": 0/);
+  for (const role of [
+    "account_service",
+    "account_migrator",
+    "account_approval_control_owner",
+    "account_approval_authorization_owner",
+    "account_approval_writer",
+    "account_approval_backfill",
+    "account_approval_relay",
+    "account_approval_recovery",
+  ]) {
+    assert.match(
+      accountJob[0],
+      new RegExp(`WHERE NOT EXISTS \\(SELECT FROM pg_roles WHERE rolname = '${role}'\\)`),
+      `${role} must be prepared idempotently for the Account PostgreSQL tests`,
+    );
+  }
+  assert.match(
+    accountJob[0],
+    /TestProvisioningPasswordLoginAccountChainPostgresIntegration/,
+    "the production Account authorization/bootstrap half of the shared login fixture must run in CI",
+  );
+  const rolePreparation = accountJob[0].indexOf("- name: Prepare Account integration roles");
+  const accountPostgresTest = accountJob[0].indexOf("TestProvisioningPasswordLoginAccountChainPostgresIntegration");
+  assert.ok(
+    rolePreparation >= 0 && accountPostgresTest > rolePreparation,
+    "Account roles must be prepared before the PostgreSQL login-chain test",
+  );
+});
+
 test("title gate enforces the convention on the live PR title (squash subject)", () => {
   // The squash merge subject is "<PR title> (#N)" and the merge queue never
   // runs commit-message, so the title is validated at PR time. Review

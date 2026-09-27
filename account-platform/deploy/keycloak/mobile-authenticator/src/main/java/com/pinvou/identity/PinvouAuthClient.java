@@ -47,17 +47,19 @@ final class PinvouAuthClient {
         return subject;
     }
 
-    boolean authorizeLogin(String subject) throws AuthClientException {
+    LoginAuthorization authorizeLogin(String subject) throws AuthClientException {
         String issuer = requiredValue("PINVOU_OIDC_ISSUER");
         Response result = post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/internal/v1/authorization/check"), Map.of(
             "issuer", issuer,
             "subject", subject,
             "permission", "personal.session.login"
         ), Map.of("Authorization", "Bearer " + workloadToken()));
-        return Boolean.TRUE.equals(result.body().get("allowed"))
+        String userID = string(result.body().get("user_id"));
+        boolean allowed = Boolean.TRUE.equals(result.body().get("allowed"))
             && "personal.session.login".equals(string(result.body().get("permission")))
             && "PERSONAL".equals(string(result.body().get("permission_scope")))
-            && !string(result.body().get("user_id")).isBlank();
+            && !userID.isBlank();
+        return new LoginAuthorization(allowed, userID);
     }
 
     Map<String, Object> register(Map<String, Object> body, String source, String device) throws AuthClientException {
@@ -117,6 +119,8 @@ final class PinvouAuthClient {
     }
 
     static String string(Object value) { return value == null ? "" : String.valueOf(value); }
+
+    record LoginAuthorization(boolean allowed, String accountUserID) {}
 
     record Response(Map<String, Object> body, Map<String, java.util.List<String>> headers) {
         String header(String name) {

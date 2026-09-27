@@ -4,6 +4,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.jboss.logging.Logger;
@@ -27,6 +28,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     private static final Pattern DEVICE = Pattern.compile("^[A-Za-z0-9._:-]{8,128}$");
     private static final String TEMPLATE = "pinvou-login.ftl";
     private static final String NOTE_PREFIX = "pinvou.browser.";
+    private static final String REGISTRATION_OPERATION_ATTRIBUTE = "pinvou_registration_operation_id";
     private static final PinvouAuthClient CLIENT = new PinvouAuthClient();
 
     @Override
@@ -167,15 +169,26 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             request.put("registration_operation_id", get(context, "registration_operation"));
             request.put("registration_query_token", get(context, "registration_token"));
             Map<String, Object> result = CLIENT.register(request, source(context), get(context, "device"));
-            String username = PinvouAuthClient.string(result.getOrDefault("username", get(context, "username")));
-            String status = PinvouAuthClient.string(result.get("status"));
-            UserModel user = KeycloakModelUtils.findUserByNameOrEmail(context.getSession(), context.getRealm(), username);
-            if (!"COMMITTED".equals(status) || PinvouAuthClient.string(result.get("user_id")).isBlank() || user == null || !user.isEnabled()) {
+            String operationID = get(context, "registration_operation");
+            UserModel user = findRegistrationUser(context, operationID);
+            PinvouAuthClient.LoginAuthorization authorization = user == null
+                ? new PinvouAuthClient.LoginAuthorization(false, "")
+                : CLIENT.authorizeLogin(user.getId());
+            if (!RegistrationLoginPolicy.allows(
+                PinvouAuthClient.string(result.get("status")),
+                operationID,
+                PinvouAuthClient.string(result.get("registration_operation_id")),
+                PinvouAuthClient.string(result.get("user_id")),
+                authorization.accountUserID(),
+                authorization.allowed(),
+                user != null,
+                user != null && user.isEnabled()
+            )) {
                 clearState(context);
                 render(context, "password", "pinvouRegistrationRecovering");
                 return;
             }
-            succeed(context, user);
+            complete(context, user);
             return;
         }
         String subject = CLIENT.verifySMS(mobile, challenge, code, source(context), get(context, "device"));
@@ -192,14 +205,36 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         String login = trim(form.getFirst("username"));
         String password = form.getFirst("password");
         UserModel user = findUser(context, login);
-        boolean valid = user != null && password != null && !password.isEmpty()
-            && user.credentialManager().isValid(UserCredentialModel.password(password));
         if (user == null) AuthenticatorUtils.dummyHash(context);
-        if (!valid || user == null || !user.isEnabled() || AuthenticatorUtils.getDisabledByBruteForceEventError(context, user) != null) {
+        boolean allowed = PasswordLoginGate.allows(
+            password,
+            user != null,
+            candidate -> user != null && user.credentialManager().isValid(UserCredentialModel.password(candidate)),
+            () -> user.isEnabled(),
+            () -> AuthenticatorUtils.getDisabledByBruteForceEventError(context, user) != null,
+            () -> CLIENT.authorizeLogin(user.getId())
+        );
+        if (!allowed) {
             credentialFailure(context, "password");
             return;
         }
-        succeed(context, user);
+        complete(context, user);
+    }
+
+    private UserModel findRegistrationUser(AuthenticationFlowContext context, String operationID) {
+        if (operationID.isBlank()) return null;
+        try (Stream<UserModel> users = context.getSession().users()
+            .searchForUserByUserAttributeStream(context.getRealm(), REGISTRATION_OPERATION_ATTRIBUTE, operationID)) {
+            List<UserModel> candidates = users
+                .filter(user -> operationID.equals(user.getFirstAttribute(REGISTRATION_OPERATION_ATTRIBUTE)))
+                .limit(2)
+                .toList();
+            return RegistrationUserSelector.uniqueExactMatch(
+                candidates,
+                operationID,
+                user -> user.getFirstAttribute(REGISTRATION_OPERATION_ATTRIBUTE)
+            );
+        }
     }
 
     private UserModel findUser(AuthenticationFlowContext context, String login) {
@@ -212,11 +247,15 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     }
 
     private void succeed(AuthenticationFlowContext context, UserModel user) throws PinvouAuthClient.AuthClientException {
-        if (!CLIENT.authorizeLogin(user.getId())) {
+        if (!CLIENT.authorizeLogin(user.getId()).allowed()) {
             clearState(context);
             credentialFailure(context, "password");
             return;
         }
+        complete(context, user);
+    }
+
+    private void complete(AuthenticationFlowContext context, UserModel user) {
         clearState(context);
         context.setUser(user);
         context.getEvent().user(user);
