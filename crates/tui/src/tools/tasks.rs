@@ -1,7 +1,6 @@
 //! Durable task, gate, and PR-attempt tools.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -40,14 +39,12 @@ fn build_gate_command_parts(command: &str) -> (String, Vec<String>) {
 fn build_gate_command(command: &str, cwd: &Path) -> Command {
     let (program, args) = build_gate_command_parts(command);
     let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // The gate runs under `timeout(cmd.output())`: on timeout the future
-        // is dropped, and without this the child would be left running
-        // orphaned — the same bug the interpreter tools fixed.
-        .kill_on_drop(true);
+    // Pipe ends and the Unix process group are configured by
+    // run_bounded_child_observed; on timeout it kills the child's whole
+    // process group, which `timeout(cmd.output())` + kill_on_drop could not
+    // do — the kill targeted the direct child only, orphaning any command
+    // the shell had forked.
+    cmd.args(args).current_dir(cwd);
     cmd
 }
 
@@ -634,27 +631,45 @@ impl TasksTool {
 
         let started = Instant::now();
         let mut cmd = build_gate_command(&command, &cwd);
-        let output =
-            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output()).await;
+        // A gate that could not even spawn is still gate evidence, so the
+        // runner's error is recorded as `spawn_error` instead of surfacing
+        // a tool error no classifier can describe.
+        let (exit_code, stdout, stderr, timed_out, spawn_error) =
+            match crate::tools::process::run_bounded_child_observed(
+                &mut cmd,
+                None,
+                std::time::Duration::from_millis(timeout_ms),
+                "gate",
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    let (exit_code, timed_out) = if outcome.timed_out {
+                        // On Unix a group-killed child has no exit code;
+                        // report the conventional 128+SIGKILL so the record
+                        // schema always carries an integer.
+                        (outcome.output.status.code().or(Some(128 + 9)), true)
+                    } else {
+                        (outcome.output.status.code(), false)
+                    };
+                    (
+                        exit_code,
+                        String::from_utf8_lossy(&outcome.output.stdout).to_string(),
+                        String::from_utf8_lossy(&outcome.output.stderr).to_string(),
+                        timed_out,
+                        None,
+                    )
+                }
+                Err(e) => (
+                    None,
+                    String::new(),
+                    String::new(),
+                    false,
+                    Some(e.to_string()),
+                ),
+            };
 
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let (exit_code, stdout, stderr, timed_out, spawn_error) = match output {
-            Ok(Ok(out)) => (
-                out.status.code(),
-                String::from_utf8_lossy(&out.stdout).to_string(),
-                String::from_utf8_lossy(&out.stderr).to_string(),
-                false,
-                None,
-            ),
-            Ok(Err(err)) => (
-                None,
-                String::new(),
-                String::new(),
-                false,
-                Some(err.to_string()),
-            ),
-            Err(_) => (None, String::new(), String::new(), true, None),
-        };
 
         let full_log = format!(
             "$ {command}\n\n[stdout]\n{stdout}\n\n[stderr]\n{stderr}\n{}",
@@ -712,6 +727,9 @@ impl TasksTool {
                 "artifacts": artifact_updates("gate_log", log_path.clone(), &summary)
             }
         });
+        if let Some(err) = &spawn_error {
+            metadata["spawn_error"] = json!(err);
+        }
         if let Some(path) = log_path {
             metadata["artifact_path"] = json!(path);
         }
@@ -1314,6 +1332,101 @@ fn sanitize_filename(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::tools::spec::ToolSpec;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_timeout_kills_the_child_instead_of_orphaning_it() {
+        // The gate used to run under `timeout(cmd.output())` + kill_on_drop:
+        // the kill targeted the direct child only, so a command the shell
+        // had forked (`... & sleep 60`) outlived the gate's whole lifecycle
+        // and kept leaking past every retry. The gate now runs on the shared
+        // bounded runner, whose timeout SIGKILLs the child's process group.
+        // Pin that a forked grandchild dies with it, not just the shell.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let child_pid_file = tmp.path().join("gate.pid");
+        let grandchild_pid_file = tmp.path().join("gate-grandchild.pid");
+        let command = format!(
+            "echo $$ > {}; sleep 60 & echo $! > {}; sleep 60",
+            child_pid_file.display(),
+            grandchild_pid_file.display(),
+        );
+        let mut cmd = build_gate_command(&command, tmp.path());
+        let started = std::time::Instant::now();
+        // 5s, not human-scale-tight: `build_gate_command` runs a login
+        // shell that sources the profile files, and a slow runner must not
+        // flake the spawn before `echo $$` lands.
+        let outcome = crate::tools::process::run_bounded_child_observed(
+            &mut cmd,
+            None,
+            std::time::Duration::from_secs(5),
+            "gate",
+        )
+        .await
+        .expect("observed run");
+        assert!(outcome.timed_out, "sleep 60 must hit the gate deadline");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "the gate call must return at the deadline, not at the child's sleep"
+        );
+
+        let child: libc::pid_t = std::fs::read_to_string(&child_pid_file)
+            .expect("gate child pid")
+            .trim()
+            .parse()
+            .expect("pid integer");
+        let grandchild: libc::pid_t = std::fs::read_to_string(&grandchild_pid_file)
+            .expect("grandchild pid")
+            .trim()
+            .parse()
+            .expect("pid integer");
+        let gone = |pid: libc::pid_t, what: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                // kill(pid, 0) stays 0 for a zombie, so this only passes
+                // once the kill was sent AND the process was reaped — a
+                // group-killed orphan is reparented to init when its parent
+                // dies first, so allow a short reaping race.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{what} {pid} still alive after the timeout kill"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        };
+        gone(child, "gate child");
+        gone(grandchild, "gate grandchild");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_command_not_found_is_not_a_spawn_error() {
+        // The gate shell is a hardcoded /bin/sh -lc, so on a healthy Unix
+        // host the runner always spawns and a bogus command surfaces as
+        // the shell's exit 127. That must stay structured evidence with no
+        // fabricated `spawn_error` (the classifier reads that field as an
+        // environment failure): record the 127 instead.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gate = TasksTool::alias("task_gate_run", "gate_run");
+        let context = ToolContext::new(tmp.path().to_path_buf());
+        let result = gate
+            .execute(
+                json!({
+                    "gate": "test",
+                    "command": "exec definitely-not-a-real-shell-binary",
+                    "timeout_ms": 5000,
+                }),
+                &context,
+            )
+            .await
+            .expect("gate evidence, not a raise");
+        let meta = result.metadata.expect("gate metadata");
+        assert_eq!(meta["spawn_error"].is_string(), false, "{meta}");
+        assert_eq!(meta["exit_code"].as_i64(), Some(127), "{meta}");
+        assert!(meta["timed_out"].as_bool() == Some(false), "{meta}");
+    }
 
     #[test]
     fn durable_task_schema_requires_prompt() {

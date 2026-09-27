@@ -29,9 +29,19 @@ pub fn snapshot_dir_for(workspace: &Path) -> PathBuf {
 /// Used by tests so they never touch the user's real state directory.
 pub fn snapshot_dir_with_home(workspace: &Path, home: Option<PathBuf>) -> PathBuf {
     let home = home.unwrap_or_else(|| PathBuf::from("."));
-    let canonical = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    // The turn pipeline canonicalizes the workspace (bounded) before
+    // reaching here, so this second resolution normally returns instantly.
+    // On a wedged mount it is bounded too; the raw-path fallback can only
+    // be reached on a wedge (or a fast failure), and for an already
+    // canonical input the raw path hashes identically.
+    let canonical = super::repo::canonicalize_bounded(
+        workspace,
+        super::repo::WORKSPACE_PROBE_TIMEOUT,
+    )
+    .unwrap_or_else(|err| {
+        tracing::warn!(target: "snapshot", "workspace canonicalization fell back to the raw path: {err}");
+        workspace.to_path_buf()
+    });
     let project_root = strip_worktree_suffix(&canonical);
     let project_hash = stable_hex(&project_root);
     let worktree_hash = stable_hex(&canonical);

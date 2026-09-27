@@ -900,6 +900,26 @@ impl Drop for Connection {
 }
 
 #[cfg(test)]
+mod budget_pins {
+    // The engine-side stdio proxy has no behavioral timeout tests (the
+    // budgets are compile-time constants), so pin the wiring values: a
+    // drift here silently re-bounds every MCP `tools/call` the engine
+    // proxy carries. CALL_TOOL_TIMEOUT must mirror the TUI pool's default
+    // execute timeout (1800s), and the generic request budget must stay
+    // separate and much shorter.
+    use super::{CALL_TOOL_TIMEOUT, HANDSHAKE_TIMEOUT, REQUEST_TIMEOUT};
+    use std::time::Duration;
+
+    #[test]
+    fn call_tool_budget_mirrors_the_pool_default_and_stays_separate() {
+        assert_eq!(CALL_TOOL_TIMEOUT, Duration::from_secs(1800));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(120));
+        assert!(CALL_TOOL_TIMEOUT > REQUEST_TIMEOUT);
+        assert_eq!(HANDSHAKE_TIMEOUT, Duration::from_secs(30));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::io::Cursor;

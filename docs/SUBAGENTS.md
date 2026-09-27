@@ -594,6 +594,15 @@ progress at step boundaries, not mid-tool, so a silent build or MCP call must
 not be cleaned up mid-run), so neither a configured long model request nor a
 long in-flight tool is cancelled before its own timeout can fire.
 
+These floors only keep the heartbeat from firing early; they do not outrank
+the wall clocks above them. Every sub-agent runs under its own wall time
+(`default_wall_time_secs`, 1800 seconds by default), and inside a durable task
+the task's `wall_time` (default 30 minutes, measured from task start, and
+running while a prompt waits on a human) bounds the whole run. A maximal
+1800-second tool started late in a child or a task can therefore still be
+interrupted by either deadline; raising `execute_timeout` above the remaining
+wall time has no effect.
+
 ## Lifecycle
 
 Each opened session produces a record that progresses through:
