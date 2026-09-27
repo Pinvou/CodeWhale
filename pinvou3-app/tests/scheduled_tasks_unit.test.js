@@ -491,7 +491,7 @@ assert.ok(
     /scheduledRunHistory\.map/.test(indexHtml) &&
     /<RecentItem[\s\S]{0,900}chat=\{chat\}[\s\S]{0,900}handleOpenScheduledRunShortcut\(c\.scheduledRun\)/.test(indexHtml) &&
     /onContextMenu=\{openContextMenu\}/.test(indexHtml) &&
-    /onTogglePinned && onTogglePinned\(chat\.id, !chat\.pinned\)/.test(indexHtml) &&
+    /onTogglePinned && <button[\s\S]{0,200}onTogglePinned\(chat\.id, !chat\.pinned\)/.test(indexHtml) &&
     /setConfirming\(true\)/.test(indexHtml) &&
     /renameSession\(id, title\)/.test(indexHtml),
   'scheduled run record operations belong to the sidebar RecentItem, not the scheduled task definition list'

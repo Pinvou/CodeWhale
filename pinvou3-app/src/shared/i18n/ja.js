@@ -2062,6 +2062,7 @@ dictJa["controllerConnection"] = {
   connected: "接続済み",
   connectedTo: device => `${device} に接続しました`,
   backgroundHint: "ウィンドウを閉じても接続とタスクは継続します。切断するには「相手の端末を切断」を押してください。",
+  openChat: "リモート会話を開く",
   codeHint: "接続コードは短期間だけ有効です。保存せず、期限切れや失敗の後は現在のコードを確認してください。",
   errorInvalidCode: "コードが無効か期限切れです。相手の端末に表示されているコードを確認してください。",
   errorBusy: "相手の端末は別の端末から操作中です。しばらくしてからお試しください。",
@@ -2155,6 +2156,14 @@ dictJa["remoteConversation"] = {
   offlineHint: "これはローカルに保存されたコピーです。相手の端末に接続中という意味ではありません。",
   journalResync: "会話状態を再同期しました。",
   resultUnknownHint: "接続が切れたため、このタスクの完了有無を確認できません。",
+  preparedNotSent: "タスクはまだ送信されていません。同じタスク ID で再試行するか、放棄してから新しいメッセージとして送信してください。",
+  preparedPayloadLost: "タスクは未送信ですが、再起動後は元の内容を復元できません。安全に放棄してから入力し直してください。",
+  outcomeUnknownNoResend: "タスクの結果は不明です。重複実行を避けるため自動再送はできません。被操作端末の結果を確認してください。",
+  retrySameTask: "同じタスクを再試行",
+  abandonPreparedTask: "安全に放棄",
+  pendingActionFailed: "未確定タスクの操作に失敗しました。復旧用の情報は保持されています。",
+  deletePreparedBlocked: "このリモート会話には未送信のタスクがあります。会話を開いて安全に放棄してから削除してください。",
+  draftCapacityExceeded: "一時下書きの上限に達したため、会話を切り替えるとこの下書きを保持できません。先に本文をコピーしてください。",
   sessionBusy: "このリモートセッションではタスクを実行中です。メッセージは保持されているため、しばらくしてから再試行してください。",
   temporaryModelCapabilityRequired: "相手側のバージョンは、あなたのモデルの使用にまだ対応していません。双方のクライアントを更新して再接続するか、被操作端末のモデルを使用してください。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
@@ -2167,4 +2176,3 @@ dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
 // （「ヘルプとフィードバック → 行動分析」と同じパターン）。
 dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
 dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';
-dictJa.remoteConversation.migrationRequired = 'リモート会話を移行中です。しばらくしてから再試行してください。';

@@ -2,14 +2,12 @@
 
 use std::sync::Arc;
 
-use tauri::{Emitter as _, Manager as _};
+use tauri::Emitter as _;
 
-use super::{commands, remote_projection_adapter};
-use crate::features::remote_control::controller::event_envelope::{
-    AuthenticatedProxyEvent, ConnectionEvent, ControlledSessionBinding,
-};
+use super::commands;
+use crate::features::remote_control::controller::event_envelope::AuthenticatedProxyEvent;
 use crate::features::remote_control::controller::ports::{
-    ControlledExecutionPort, RemotePortError, RemotePortFuture, RemoteSessionProjectionPort,
+    ControlledExecutionPort, RemotePortFuture, RemoteSessionProjectionPort,
 };
 use crate::features::sessions::application::ports::{
     ApplicationEvent, ApplicationEventPort, UseCaseError,
@@ -68,110 +66,5 @@ impl ApplicationEventPort for DesktopRemoteApplicationEvents {
             event.payload().clone(),
         );
         Ok(())
-    }
-}
-
-/// The current role owners expose only five of EventLease's seven identity
-/// fields. Until DEV-31 injects a single authoritative peer/resume verifier,
-/// host notifications must fail closed even when those five fields match.
-pub(crate) struct DesktopRemoteEventFreshness;
-
-impl remote_projection_adapter::ControllerEventFreshnessPort for DesktopRemoteEventFreshness {
-    fn verify_connection(&self, _event: &ConnectionEvent) -> Result<(), UseCaseError> {
-        Err(UseCaseError::new(
-            "remote_event_binding_unverifiable",
-            false,
-        ))
-    }
-
-    fn verify_controlled(&self, _binding: &ControlledSessionBinding) -> Result<(), UseCaseError> {
-        Err(UseCaseError::new(
-            "remote_event_binding_unverifiable",
-            false,
-        ))
-    }
-}
-
-/// DEV-31's authenticated ingress can consume only this typed seam. No
-/// JournalEvent or UI JSON can be promoted into an AuthenticatedProxyEvent.
-#[allow(dead_code)]
-pub(crate) async fn project_authenticated_desktop_remote_event(
-    app: &tauri::AppHandle,
-    event: AuthenticatedProxyEvent,
-) -> Result<ProjectionReport, RemotePortError> {
-    app.state::<DesktopRemoteProjectionPort>()
-        .project_authenticated(event)
-        .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::remote_projection_adapter::ControllerEventFreshnessPort;
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct RecordingEvents(AtomicUsize);
-
-    impl ApplicationEventPort for RecordingEvents {
-        fn publish(&self, _event: ApplicationEvent) -> Result<(), UseCaseError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn host_notifications_fail_closed_without_full_authoritative_lease() {
-        use crate::features::remote_control::controller::event_envelope::{
-            ConnectionEventKind, ConnectionRole, EventLease,
-        };
-        let event = EventLease::new(
-            "peer-1".into(),
-            "resume-1".into(),
-            "connection-1".into(),
-            "lease-1".into(),
-            "epoch-1".into(),
-            "relay-1".into(),
-            "generation-1".into(),
-        )
-        .unwrap();
-        let freshness = DesktopRemoteEventFreshness;
-        for role in [ConnectionRole::Controller, ConnectionRole::Controlled] {
-            let connection =
-                ConnectionEvent::new(event.clone(), role, ConnectionEventKind::Connected);
-            assert_eq!(
-                freshness.verify_connection(&connection).unwrap_err().code(),
-                "remote_event_binding_unverifiable"
-            );
-        }
-        let controlled =
-            ControlledSessionBinding::new(event, "b-session-1".into(), "remote-ref-1".into())
-                .unwrap();
-        assert_eq!(
-            freshness.verify_controlled(&controlled).unwrap_err().code(),
-            "remote_event_binding_unverifiable"
-        );
-        let events = Arc::new(RecordingEvents(AtomicUsize::new(0)));
-        let host = remote_projection_adapter::ControllerHostEventAdapter::new(
-            events.clone(),
-            Arc::new(DesktopRemoteEventFreshness),
-        );
-        assert!(
-            host.publish_connection(ConnectionEvent::new(
-                controlled.lease().clone(),
-                ConnectionRole::Controller,
-                ConnectionEventKind::Connected,
-            ))
-            .is_err()
-        );
-        assert!(
-            host.publish_controlled(
-                crate::features::remote_control::controller::event_envelope::ControlledSessionEvent::capability(
-                    controlled,
-                    1,
-                ),
-            )
-            .is_err()
-        );
-        assert_eq!(events.0.load(Ordering::SeqCst), 0);
     }
 }

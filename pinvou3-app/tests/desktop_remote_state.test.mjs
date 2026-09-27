@@ -34,7 +34,7 @@ test('late controlled-device results never revive an older intent', () => {
 
   const stale = logic.applyControlledStatus(state, {
     intent: firstIntent,
-    status: 'waiting_for_pairing',
+    status: 'waiting_connection',
     pairingCode: '2345678',
     generation: 'gen-1',
   });
@@ -42,11 +42,11 @@ test('late controlled-device results never revive an older intent', () => {
 
   const fresh = logic.applyControlledStatus(state, {
     intent: secondIntent,
-    status: 'waiting_for_pairing',
+    status: 'waiting_connection',
     pairingCode: '3456789',
     generation: 'gen-2',
   });
-  assert.equal(fresh.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(fresh.controlledDevice.status, 'waiting_connection');
   assert.equal(fresh.controlledDevice.pairingCode, '3456789');
   assert.equal(fresh.controlledDevice.expiresAtMs, null);
 
@@ -59,9 +59,9 @@ test('late controlled-device results never revive an older intent', () => {
 
 test('a relay registration result carries the pairing expiry into the UI state', () => {
   const state = logic.applyControlledStatus(logic.createState(), {
-    status: 'waiting_for_pairing',
+    status: 'waiting_connection',
     pairingCode: '3456789',
-    pairingExpiresAtMs: 1_800_000_000_000,
+    expiresAtMs: 1_800_000_000_000,
     generation: 'gen-1',
   });
   assert.equal(state.controlledDevice.expiresAtMs, 1_800_000_000_000);
@@ -70,7 +70,7 @@ test('a relay registration result carries the pairing expiry into the UI state',
 test('a stopped controlled device clears the pairing code', () => {
   let state = logic.createState();
   state = logic.applyControlledStatus(state, {
-    status: 'waiting_for_pairing',
+    status: 'waiting_connection',
     pairingCode: '3456789',
     generation: 'gen-1',
   });
@@ -82,7 +82,7 @@ test('a stopped controlled device clears the pairing code', () => {
 test('controlled status preserves the bounded Rust error code for diagnostics', () => {
   const state = logic.applyControlledStatus(logic.createState(), {
     status: 'error',
-    errorCode: 'desktop_remote_watchdog_expired',
+    error: 'desktop_remote_watchdog_expired',
   });
   assert.equal(state.controlledDevice.status, 'error');
   assert.equal(state.controlledDevice.lastError, 'desktop_remote_watchdog_expired');
@@ -152,12 +152,11 @@ test('capability preparation exposes pending and bounded failure states', () => 
   state = logic.applyControllerStatus(state, {
     ...liveController('connection-1', '2'),
   });
-  state = logic.applyControllerSession(state, {
-    sessionRef: 'session-ref-1',
-    sessionId: 'session-1',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
-    mode: 'chat',
+  state = logic.applyRemoteProxyBinding(state, {
+    localSessionId: 'remote-one', remoteSessionRef: 'session-ref-1',
+    sessionId: 'session-1', mode: 'chat', connectionId: 'connection-1',
+    controllerLeaseId: 'lease-connection-1', leaseEpoch: '2',
+    relayEpoch: 'relay-connection-1', remoteControlGeneration: 'generation-connection-1',
   });
   state = logic.applyCapabilityPending(state, { sessionRef: 'session-ref-1' });
   assert.equal(state.controllerConnection.capabilityStatus, 'preparing');
@@ -203,35 +202,6 @@ test('model descriptors stay opaque and never carry credentials', () => {
     'reason',
     'visionModelId',
   ]);
-});
-
-test('task events deduplicate and never regress a terminal state', () => {
-  let state = logic.createState();
-  state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'admitted' });
-  state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'running' });
-  state = logic.applyTaskEvent(state, {
-    taskId: 'task-1',
-    status: 'admitted',
-    text: 'late prompt projection',
-  });
-  assert.equal(state.tasks[0].status, 'running', 'late admitted must not regress running');
-  assert.equal(state.tasks[0].text, 'late prompt projection', 'late prompt text is still retained');
-  state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'succeeded' });
-  assert.equal(state.tasks[0].status, 'succeeded');
-
-  const regressed = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'running' });
-  assert.equal(regressed, state, 'a terminal task must not go back to running');
-
-  const duplicate = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'succeeded' });
-  assert.equal(duplicate, state, 'duplicate terminals must not create new entries');
-
-  const resultUnknown = logic.applyTaskEvent(state, {
-    taskId: 'task-2',
-    status: 'result_unknown',
-    outcomeUnknown: true,
-  });
-  assert.equal(resultUnknown.tasks.length, 2);
-  assert.equal(resultUnknown.tasks[1].outcomeUnknown, true);
 });
 
 test('B-side task projection keeps locally visible prompt text across status changes', () => {
@@ -413,7 +383,8 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   );
   assert.match(feature, /desktop_remote_control_unsupported/);
   assert.match(feature, /can\("desktopRemoteControl"\)/);
-  assert.match(feature, /"transcript",/, 'authoritative remote journal must be mirrored into ChatView state');
+  assert.doesNotMatch(feature, /"transcript",/, 'A history must not create a second WebView transcript');
+  assert.match(feature, /"controlledTranscript",/, 'B local session projection remains available');
   // The bridge must never forward raw credential fields.
   assert.ok(!/api_key|apiKey|credential_ref|credentialRef/.test(feature));
   // Every desktop command it forwards is a desktop_remote_* command.
@@ -427,10 +398,23 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   }
 });
 
+test('B live status without a generation cannot open the controlled chat', () => {
+  const initial = logic.createState();
+  assert.equal(logic.applyControlledStatus(initial, { status: 'connected' }), initial);
+  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_connection', pairingCode: '2345678' }), initial);
+  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', generation: 'old' }), initial);
+});
+
 test('authenticated RemoteProxy notifications require the exact live lease and never carry body text', () => {
   let state = logic.applyControllerStatus(logic.createState(), {
     status: 'connected', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
     leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  state = logic.applyRemoteProxyBinding(state, {
+    localSessionId: 'remote-abc', remoteSessionRef: 'ref-1', sessionId: 'session-b',
+    mode: 'chat', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
+    capabilityRevision: 5, mappingConfirmed: false,
   });
   const event = {
     kind: 'journal', localSessionId: 'remote-abc', remoteSessionRef: 'ref-1',
@@ -441,11 +425,15 @@ test('authenticated RemoteProxy notifications require the exact live lease and n
   assert.equal(logic.applyRemoteProxyNotice(state, { ...event, generation: 'old' }), state);
   assert.equal(logic.applyRemoteProxyNotice(state, { ...event, leaseEpoch: '1' }), state);
   assert.equal(logic.applyRemoteProxyNotice(state, { ...event, controllerLeaseId: 'other' }), state);
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...event, localSessionId: 'remote-other' }), state);
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...event, remoteSessionRef: 'ref-other' }), state);
+  assert.equal(state.controllerConnection.mappingConfirmed, false);
   state = logic.applyRemoteProxyNotice(state, event);
+  assert.equal(state.controllerConnection.mappingConfirmed, true);
   assert.equal(state.remoteProxyNotice.localSessionId, 'remote-abc');
   assert.equal(state.remoteProxyNotice.sequence, 1);
   assert.equal(JSON.stringify(state.remoteProxyNotice).includes('not from SessionStore'), false);
-  assert.equal(state.transcript.length, 0, 'event is only an invalidation, not journal content');
+  assert.equal(Object.hasOwn(state, 'transcript'), false, 'A WebView has no second journal store');
   assert.equal(logic.applyRemoteProxyNotice(state, event), state, 'duplicate notice is ignored');
   const capability = { ...event, kind: 'capability', fields: { capabilityRevision: 5 } };
   state = logic.applyRemoteProxyNotice(state, capability);
@@ -458,7 +446,43 @@ test('authenticated RemoteProxy notifications require the exact live lease and n
     leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
   });
   assert.equal(disconnected.remoteProxyNotice, null);
+  assert.equal(disconnected.controllerConnection.mappingConfirmed, false);
   assert.equal(logic.applyRemoteProxyNotice(disconnected, event), disconnected);
+});
+
+test('capability failure preserves a proven B mapping but never permits task dispatch', () => {
+  let state = logic.beginControllerIntent(logic.createState(), true);
+  state = logic.applyControllerStatus(state, {
+    intent: state.intents.controller, status: 'connected',
+    connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  const opened = {
+    localSessionId: 'remote-one', remoteSessionRef: 'ref-1', sessionId: 'session-b',
+    mode: 'chat', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
+    capabilityRevision: 2,
+  };
+  const result = {
+    ...opened, capabilityRequestId: 'request-1', capabilityRevision: null,
+    capabilityError: 'capability_denied',
+  };
+  const unconfirmed = logic.applyRemoteProxyBinding(state, { ...opened, mappingConfirmed: false });
+  const firstError = logic.applyRemoteProxyCapabilityResult(unconfirmed, {
+    ...result, mappingConfirmed: false,
+  });
+  assert.equal(firstError.controllerConnection.mappingConfirmed, false);
+  assert.equal(firstError.controllerConnection.capabilityRevision, null);
+  assert.equal(firstError.controllerConnection.capabilityStatus, 'error');
+
+  const mapped = logic.applyRemoteProxyBinding(state, { ...opened, mappingConfirmed: true });
+  const renewalError = logic.applyRemoteProxyCapabilityResult(mapped, {
+    ...result, mappingConfirmed: true,
+  });
+  assert.equal(renewalError.controllerConnection.mappingConfirmed, true);
+  assert.equal(renewalError.controllerConnection.capabilityRevision, null);
+  assert.equal(renewalError.controllerConnection.capabilityStatus, 'error');
+  assert.equal(renewalError.controllerConnection.capabilityError, 'capability_denied');
 });
 
 test('terminal events from replaced A/B generations cannot clear the current UI', () => {
@@ -481,8 +505,11 @@ test('a new A connection after terminal drops old RemoteProxy revision gates and
     status: 'connected', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
     leaseEpoch: '1', relayEpoch: 'relay-1', generation: 'generation-1',
   });
-  state = logic.applyControllerSession(state, {
-    sessionRef: 'ref-old', sessionId: 'session-old', connectionId: 'connection-1', leaseEpoch: '1',
+  state = logic.applyRemoteProxyBinding(state, {
+    localSessionId: 'remote-one', remoteSessionRef: 'ref-old', sessionId: 'session-old',
+    mode: 'chat', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
+    capabilityRevision: 9, mappingConfirmed: false,
   });
   state = logic.applyRemoteProxyNotice(state, {
     kind: 'capability', localSessionId: 'remote-one', remoteSessionRef: 'ref-old',

@@ -155,7 +155,7 @@ impl ControllerTaskEventSink for TaskEventBridge {
         });
         let history = self
             .app
-            .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+            .state::<Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
         let Ok((lease, _)) = self.app.state::<
             crate::features::remote_control::controller::controlled::ControlledDeviceManager,
         >().live_runtime_context() else { return; };
@@ -223,7 +223,7 @@ impl ControllerTaskEventSink for TaskEventBridge {
                     "journal_event_projected",
                     &event.kind,
                 );
-                super::desktop_remote_history::publish_authoritative_event(
+                super::desktop_remote_journal::publish_authoritative_event(
                     &self.app,
                     &lease.remote_control_generation,
                     &event,
@@ -484,62 +484,6 @@ pub(crate) fn project_controlled_session(
         }),
     )
     .map_err(|_| "controlled_session_projection_failed".to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_task_open_session(
-    app: AppHandle,
-    remote_session_ref: String,
-    title: String,
-    code_mode: bool,
-    controlled: State<'_, ControlledDeviceManager>,
-    _runtime: RuntimeState<'_>,
-) -> Result<String, String> {
-    ensure_supported(&controlled)?;
-    let (lease, _) = controlled
-        .live_runtime_context()
-        .map_err(|error| error.code.to_owned())?;
-    ensure_controlled_session(
-        &app,
-        &remote_session_ref,
-        &title,
-        code_mode,
-        &lease.remote_control_generation,
-    )
-}
-
-#[tauri::command]
-pub fn desktop_remote_task_switch_session(
-    remote_session_ref: String,
-    session_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<String, String> {
-    ensure_supported(&controlled)?;
-    let (lease, _) = controlled
-        .live_runtime_context()
-        .map_err(|error| error.code.to_owned())?;
-    runtime
-        .service()
-        .switch_remote_session(
-            &remote_session_ref,
-            &session_id,
-            &lease.remote_control_generation,
-        )
-        .map_err(|error| error.code.to_owned())
-        .and_then(|session_id| {
-            let remains_current = controlled.live_runtime_context().is_ok_and(|(current, _)| {
-                current.remote_control_generation == lease.remote_control_generation
-            });
-            if remains_current {
-                Ok(session_id)
-            } else {
-                runtime
-                    .service()
-                    .clear_generation_sessions(&lease.remote_control_generation);
-                Err("task_session_generation_stale".to_owned())
-            }
-        })
 }
 
 #[tauri::command]
@@ -925,18 +869,6 @@ fn admit_and_dispatch(
     }
 }
 
-#[tauri::command]
-pub fn desktop_remote_task_cancel(
-    app: AppHandle,
-    task_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<Value, String> {
-    ensure_supported(&controlled)?;
-    let service = runtime.service();
-    cancel_and_project(&app, &service, &task_id)
-}
-
 /// wire 入口（E2E-04）：取消一条任务并回传终态/请求态载荷。
 pub(crate) fn cancel_decrypted_task(app: &AppHandle, task_id: &str) -> Result<Value, String> {
     let controlled = app.state::<ControlledDeviceManager>();
@@ -967,31 +899,6 @@ fn cancel_and_project(
     Ok(payload)
 }
 
-#[tauri::command]
-pub fn desktop_remote_task_status(
-    task_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<Value, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .service()
-        .status_payload(&task_id)
-        .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_task_interrupt_all(
-    reason: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<Vec<String>, String> {
-    ensure_supported(&controlled)?;
-    let reason = sanitized_reason(&reason);
-    let records = runtime.service().interrupt_all(&reason, monotonic_millis());
-    Ok(records.into_iter().map(|record| record.task_id).collect())
-}
-
 /// DEV-29 host adapter. Registration and replacement of the legacy A command
 /// belong to DEV-20/DEV-31; this adapter itself owns no outbox state.
 pub(crate) struct DesktopRemoteTaskDispatchPort {
@@ -1019,7 +926,70 @@ fn lease_matches_remote_binding(
         && lease.remote_control_generation == live.generation
 }
 
+fn with_current_dispatch_binding<T>(
+    app: &AppHandle,
+    live: &crate::features::sessions::remote_proxy::binding::LiveRemoteContext,
+    commit: impl FnOnce() -> Result<T, String>,
+) -> Result<T, UseCaseError> {
+    let manager = app.state::<ControllingDeviceManager>();
+    let lane = app.state::<ControllingLaneState>();
+    let (lease, peer, boundary) = manager
+        .authenticated_remote_proxy_identity()
+        .map_err(|_| dispatch_error("remote_binding_mismatch"))?;
+    if !lease_matches_remote_binding(&lease, live)
+        || peer != live.peer_id
+        || boundary != live.resume_boundary_id
+    {
+        return Err(dispatch_error("remote_binding_mismatch"));
+    }
+    manager
+        .with_current_authenticated_remote_proxy_identity(&lane, &(lease, peer, boundary), commit)
+        .map_err(|code| match code.as_str() {
+            "remote_pending_persist_failed" => dispatch_error("remote_pending_persist_failed"),
+            "remote_attempt_persist_failed" => dispatch_error("remote_attempt_persist_failed"),
+            _ => dispatch_error("remote_binding_mismatch"),
+        })
+}
+
 impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
+    fn reserve_pending(
+        &self,
+        store: &SessionStore,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &crate::features::sessions::remote_proxy::binding::LiveRemoteContext,
+        pending: crate::features::sessions::remote_proxy::schema::PendingRemoteRequest,
+    ) -> Result<crate::features::sessions::remote_proxy::schema::PendingReservation, UseCaseError>
+    {
+        with_current_dispatch_binding(&self.app, live, || {
+            store
+                .insert_remote_pending(local_session_id, remote_ref, live, pending)
+                .map_err(|_| "remote_pending_persist_failed".to_owned())
+        })
+    }
+
+    fn mark_dispatch_attempt(
+        &self,
+        store: &SessionStore,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &crate::features::sessions::remote_proxy::binding::LiveRemoteContext,
+        handle: &RemoteRetryHandle,
+    ) -> Result<(), UseCaseError> {
+        with_current_dispatch_binding(&self.app, live, || {
+            store
+                .mark_remote_dispatch_attempt(
+                    local_session_id,
+                    remote_ref,
+                    live,
+                    &handle.client_request_id,
+                    &handle.task_id,
+                    &handle.request_fingerprint,
+                )
+                .map_err(|_| "remote_attempt_persist_failed".to_owned())
+        })
+    }
+
     fn prepare(&self, request: &RemoteDispatchRequest) -> Result<PreparedRemoteTask, UseCaseError> {
         let manager = self.app.state::<ControllingDeviceManager>();
         let sessions = self.app.state::<ControllingSessionManager>();
@@ -1249,14 +1219,14 @@ pub fn desktop_remote_task_dispatch_a(
         .map_err(|error| error.code().to_owned())
 }
 #[tauri::command]
-pub fn desktop_remote_task_abandon_lost_a(
+pub fn desktop_remote_task_abandon_prepared_a(
     service: State<'_, RemoteDispatchService>,
     local_session_id: String,
     client_request_id: String,
     task_id: String,
 ) -> Result<(), String> {
     service
-        .abandon_lost_payload(&local_session_id, &client_request_id, &task_id)
+        .abandon_prepared_remote_task(&local_session_id, &client_request_id, &task_id)
         .map_err(|error| error.code().to_owned())
 }
 
@@ -1311,7 +1281,7 @@ mod tests {
             .find("pub fn desktop_remote_task_dispatch_a(")
             .unwrap();
         let end = source[start..]
-            .find("pub fn desktop_remote_task_abandon_lost_a(")
+            .find("pub fn desktop_remote_task_abandon_prepared_a(")
             .map(|offset| start + offset)
             .unwrap();
         let command = &source[start..end];
@@ -1633,7 +1603,7 @@ mod tests {
             .unwrap();
         assert!(controlled_session_exists(&store, &local.metadata.id));
         let remote = store
-            .open_remote_proxy(
+            .test_commit_remote_proxy_open(
                 None,
                 &LiveRemoteContext {
                     peer_id: "peer".into(),

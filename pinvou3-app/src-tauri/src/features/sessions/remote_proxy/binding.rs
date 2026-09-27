@@ -5,7 +5,7 @@ use super::schema::{
     AuthenticatedProjection, MAX_REMOTE_PROXY_RECORDS, REMOTE_PROXY_SCHEMA_VERSION,
     RemoteProxyRecord, RemoteUiMetadata,
 };
-use super::{RemoteProxyState, migration::persist_changed};
+use super::{RemoteProxyState, persistence::persist_changed};
 use crate::features::sessions::SessionStore;
 
 /// Supplied only by the authenticated controller boundary, never by UI input.
@@ -49,6 +49,13 @@ pub(crate) struct RemoteOpen {
     pub(crate) remote_session_ref: String,
 }
 
+/// An unpersisted identity allocated inside Rust. Only commit creates a visible record.
+pub(crate) struct PreparedRemoteOpen {
+    pub(crate) open: RemoteOpen,
+    context: LiveRemoteContext,
+    existing: bool,
+}
+
 /// B's authenticated acknowledgement that this opaque reference maps to
 /// exactly one B-owned Session. This is not a local execution authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,15 +74,15 @@ impl SessionStore {
     /// An omitted id starts a new A-local Session. Retrying an id is permitted
     /// only inside the same in-process resume boundary. A restart or re-pair
     /// must create a new id/ref; persisted history cannot authorize a reopen.
-    pub(crate) fn open_remote_proxy(
+    pub(crate) fn prepare_remote_proxy_open(
         &self,
         existing_id: Option<&str>,
         context: &LiveRemoteContext,
-    ) -> Result<RemoteOpen> {
+    ) -> Result<PreparedRemoteOpen> {
         if !context.valid() || !context.connected() {
             bail!("remote controller channel is not connected");
         }
-        let mut state = self.remote_proxies.lock();
+        let state = self.remote_proxies.lock();
         if let Some(id) = existing_id {
             let record = state
                 .records
@@ -92,9 +99,13 @@ impl SessionStore {
             {
                 bail!("remote session belongs to another pairing or resume boundary");
             }
-            return Ok(RemoteOpen {
-                local_session_id: id.to_owned(),
-                remote_session_ref: record.remote_session_ref.clone(),
+            return Ok(PreparedRemoteOpen {
+                open: RemoteOpen {
+                    local_session_id: id.to_owned(),
+                    remote_session_ref: record.remote_session_ref.clone(),
+                },
+                context: context.clone(),
+                existing: true,
             });
         }
         if state.records.len() >= MAX_REMOTE_PROXY_RECORDS {
@@ -110,6 +121,59 @@ impl SessionStore {
         {
             bail!("RemoteProxy id collides with a local Session");
         }
+        Ok(PreparedRemoteOpen {
+            open: RemoteOpen {
+                local_session_id: id,
+                remote_session_ref: remote_ref,
+            },
+            context: context.clone(),
+            existing: false,
+        })
+    }
+
+    pub(crate) fn commit_prepared_remote_proxy_open(
+        &self,
+        prepared: PreparedRemoteOpen,
+        context: &LiveRemoteContext,
+    ) -> Result<RemoteOpen> {
+        if !context.valid() || !context.connected() || prepared.context != *context {
+            bail!("remote controller channel changed");
+        }
+        let mut state = self.remote_proxies.lock();
+        let id = &prepared.open.local_session_id;
+        let remote_ref = &prepared.open.remote_session_ref;
+        if prepared.existing {
+            let record = state
+                .records
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?;
+            let opening = state
+                .openings
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("remote session is offline"))?;
+            if state.current_context.as_ref() != Some(context)
+                || record.remote_session_ref != *remote_ref
+                || record.peer_id != context.peer_id
+                || opening.context != *context
+            {
+                bail!("remote session binding changed");
+            }
+            return Ok(prepared.open);
+        }
+        if state.records.len() >= MAX_REMOTE_PROXY_RECORDS
+            || state.records.contains_key(id)
+            || state
+                .records
+                .values()
+                .any(|record| record.remote_session_ref == *remote_ref)
+            || self
+                .manager
+                .sessions_dir()
+                .join(format!("{id}.json"))
+                .exists()
+        {
+            bail!("RemoteProxy identity is no longer available");
+        }
         let record = RemoteProxyRecord {
             schema_version: REMOTE_PROXY_SCHEMA_VERSION,
             local_session_id: id.clone(),
@@ -123,7 +187,7 @@ impl SessionStore {
             pending: Vec::new(),
             retired_requests: Vec::new(),
         };
-        persist_changed(&mut state, &id, record)?;
+        persist_changed(&mut state, id, record)?;
         if state.current_context.as_ref().is_some_and(|current| {
             current.peer_id != context.peer_id
                 || current.resume_boundary_id != context.resume_boundary_id
@@ -143,10 +207,19 @@ impl SessionStore {
                 confirmed: false,
             },
         );
-        Ok(RemoteOpen {
-            local_session_id: id,
-            remote_session_ref: remote_ref,
-        })
+        Ok(prepared.open)
+    }
+
+    /// Test setup exercises the same explicit prepare/commit contract used by
+    /// the host-gated command; it is absent from production builds.
+    #[cfg(test)]
+    pub(crate) fn test_commit_remote_proxy_open(
+        &self,
+        existing_id: Option<&str>,
+        context: &LiveRemoteContext,
+    ) -> Result<RemoteOpen> {
+        let prepared = self.prepare_remote_proxy_open(existing_id, context)?;
+        self.commit_prepared_remote_proxy_open(prepared, context)
     }
 
     /// The caller must verify B's authenticated response before invoking this.
@@ -197,43 +270,12 @@ impl SessionStore {
         Ok(())
     }
 
-    /// A short resume can retain the same ref only inside the same boundary;
-    /// the changed lease requires a fresh B mapping confirmation.
-    pub(crate) fn resume_remote_proxy(&self, id: &str, context: &LiveRemoteContext) -> Result<()> {
-        if !context.valid() || !context.connected() {
-            bail!("remote controller channel is not connected");
-        }
-        let mut state = self.remote_proxies.lock();
-        let record = state
-            .records
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?;
-        if record.peer_id != context.peer_id {
-            bail!("remote pairing mismatch");
-        }
-        let opening = state
-            .openings
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("remote resume boundary expired"))?;
-        if opening.context.resume_boundary_id != context.resume_boundary_id {
-            bail!("remote resume boundary changed");
-        }
-        state.current_context = Some(context.clone());
-        let opening = state.openings.get_mut(id).expect("checked opening");
-        opening.context = context.clone();
-        opening.confirmed = false;
-        Ok(())
-    }
-
-    pub(crate) fn disconnect_remote_proxy(&self, id: &str) {
+    #[cfg(test)]
+    pub(crate) fn test_expire_remote_binding(&self, id: &str) {
         let mut state = self.remote_proxies.lock();
         if state.openings.contains_key(id) {
             state.current_context = None;
-            for opening in state.openings.values_mut() {
-                opening.context.control_connected = false;
-                opening.context.encrypted_channel_connected = false;
-                opening.confirmed = false;
-            }
+            state.openings.clear();
         }
     }
 
@@ -249,6 +291,41 @@ impl SessionStore {
 
     pub(crate) fn remote_proxy_snapshot(&self, id: &str) -> Option<RemoteProxyRecord> {
         self.remote_proxies.lock().records.get(id).cloned()
+    }
+
+    /// Lookup is not admission. The caller must still use confirm_remote_mapping,
+    /// which rechecks the current live opening under the same store lock as write.
+    pub(crate) fn remote_proxy_local_id_for_ref(&self, remote_ref: &str) -> Option<String> {
+        self.remote_proxies
+            .lock()
+            .records
+            .values()
+            .find(|record| record.remote_session_ref == remote_ref)
+            .map(|record| record.local_session_id.clone())
+    }
+
+    pub(crate) fn current_remote_proxy_id_for_ref(
+        &self,
+        remote_ref: &str,
+        context: &LiveRemoteContext,
+    ) -> Result<String> {
+        let state = self.remote_proxies.lock();
+        if state.current_context.as_ref() != Some(context) {
+            bail!("remote session connection changed");
+        }
+        let record = state
+            .records
+            .values()
+            .find(|record| record.remote_session_ref == remote_ref)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy reference"))?;
+        let opening = state
+            .openings
+            .get(&record.local_session_id)
+            .ok_or_else(|| anyhow::anyhow!("remote session is offline"))?;
+        if record.peer_id != context.peer_id || opening.context != *context {
+            bail!("remote session binding changed");
+        }
+        Ok(record.local_session_id.clone())
     }
 }
 

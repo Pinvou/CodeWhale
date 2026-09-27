@@ -27,11 +27,11 @@ pub(crate) mod dependencies;
 pub(crate) mod desktop_remote_artifact;
 pub(crate) mod desktop_remote_attachment;
 pub(crate) mod desktop_remote_capabilities;
+pub(crate) mod desktop_remote_capability;
 pub(crate) mod desktop_remote_controlled;
 pub(crate) mod desktop_remote_controller;
 pub(crate) mod desktop_remote_controller_business;
-pub(crate) mod desktop_remote_controller_session;
-pub(crate) mod desktop_remote_history;
+pub(crate) mod desktop_remote_journal;
 pub(crate) mod desktop_remote_model;
 pub(crate) mod desktop_remote_permission;
 // DEV-20 RemoteProxy history surface is a dedicated guarded command module.

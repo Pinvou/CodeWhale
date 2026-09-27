@@ -631,7 +631,6 @@ impl SnapshotDisplay {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProxyEventKind {
-    Capability { revision: u64 },
     Journal(JournalDisplay),
     Terminal(TerminalDisplay),
     Snapshot(SnapshotDisplay),
@@ -645,13 +644,6 @@ pub(crate) struct ProxyEventCandidate {
 }
 
 impl ProxyEventCandidate {
-    pub(crate) fn capability(binding: ProxySessionBinding, revision: u64) -> Self {
-        Self {
-            binding,
-            kind: ProxyEventKind::Capability { revision },
-        }
-    }
-
     pub(crate) fn journal(
         binding: ProxySessionBinding,
         journal: JournalDisplay,

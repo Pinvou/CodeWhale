@@ -2,8 +2,8 @@
 
 pub(crate) mod binding;
 pub(crate) mod history;
-mod migration;
 pub(crate) mod outbox;
+mod persistence;
 pub(crate) mod projection;
 pub(crate) mod routing;
 pub(crate) mod schema;

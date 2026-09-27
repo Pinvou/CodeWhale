@@ -48,11 +48,8 @@ use crate::features::remote_control::RemoteControlManager;
 
 pub(crate) const CONTROLLER_STATUS_EVENT: &str = "desktop-remote-controller-status";
 /// A 端远程会话投影事件（sessionId / capability revision）。
-pub(crate) const CONTROLLER_SESSION_EVENT: &str = "desktop-remote-controller-session";
 /// A 端任务状态事件（加密回传解密后的投影）。
 pub(crate) const CONTROLLER_TASK_EVENT: &str = "desktop-remote-task-status";
-/// A 端权威 journal 事件（E2E-05）：命令层据此写独立历史并投影正文。
-pub(crate) const CONTROLLER_JOURNAL_EVENT: &str = "desktop-remote-controller-journal";
 
 /// claim→joined 的本地上限。Relay 侧预留 10 秒、握手 20 秒（DEV-04），这里取
 /// 40 秒兜底：超过即失败关闭，不留下半租约，也不会无限停留在 connecting。
@@ -85,13 +82,59 @@ pub(crate) trait ControllingLane: Send {
 }
 
 /// A 端权威 journal 落库端口（E2E-05）：由命令层实现——按会话引用写入 A 的
-/// 独立历史，并把事件投影给 UI。feature 层只负责解密与校验。
+/// SessionStore.RemoteProxy 投影正文；feature 层只负责解密与校验。
+/// Constructed only inside the AEAD-opened business-frame dispatcher. The
+/// app receives an authenticated frame, never a caller-asserted boolean.
+pub(crate) struct AuthenticatedJournalFrame<'a> {
+    lease: &'a LeaseContext,
+    event: &'a JournalEvent,
+}
+
+impl AuthenticatedJournalFrame<'_> {
+    pub(crate) fn lease(&self) -> &LeaseContext {
+        self.lease
+    }
+    pub(crate) fn event(&self) -> &JournalEvent {
+        self.event
+    }
+}
+
+pub(crate) struct AuthenticatedSnapshotFrame<'a> {
+    lease: &'a LeaseContext,
+    snapshot: &'a JournalSnapshot,
+}
+
+impl AuthenticatedSnapshotFrame<'_> {
+    pub(crate) fn lease(&self) -> &LeaseContext {
+        self.lease
+    }
+    pub(crate) fn snapshot(&self) -> &JournalSnapshot {
+        self.snapshot
+    }
+}
+
 pub(crate) trait ControllingJournalSink: Send + Sync {
-    fn publish(&self, event: &JournalEvent) -> Result<(), String>;
+    fn publish(&self, frame: &AuthenticatedJournalFrame<'_>) -> Result<(), String>;
+
+    fn publish_capability(&self, _projection: &ControllingSessionProjection) -> Result<(), String> {
+        Err("remote_capability_projection_not_configured".into())
+    }
+
+    /// Called only for a validated encrypted capability response belonging to
+    /// the pending request. The app adapter confirms the exact B Session in
+    /// SessionStore under the current authenticated lease and lane guard.
+    fn confirm_mapping(
+        &self,
+        _lease: &LeaseContext,
+        _remote_ref: &str,
+        _controlled_session_id: &str,
+    ) -> Result<(), String> {
+        Err("remote_mapping_not_configured".into())
+    }
 
     /// E2E-05 缺口恢复：权威快照原子替换 A 端本地副本（默认忽略，命令层实现
     /// 为写入对应历史并广播）。
-    fn publish_snapshot(&self, _snapshot: &JournalSnapshot) -> Result<(), String> {
+    fn publish_snapshot(&self, _frame: &AuthenticatedSnapshotFrame<'_>) -> Result<(), String> {
         Err("remote_projection_not_configured".to_owned())
     }
 }
@@ -146,7 +189,10 @@ impl ControllingRelayPort for ControllerTransportPort {
                         // 保留原文才能定位 Relay 到底拒绝在哪一步。
                         log_controller_event(
                             "relay_error",
-                            value.get("code").and_then(Value::as_str).unwrap_or("unknown"),
+                            value
+                                .get("code")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown"),
                         );
                     }
                     return Some(value);
@@ -329,6 +375,8 @@ fn complete_connected(
         .map_err(|_| GENERIC_CONNECT_ERROR.to_owned())?;
     let lease = ControllerLease {
         context: context.clone(),
+        peer_endpoint_id: outcome.peer_endpoint_id,
+        reservation_id: outcome.reservation_id,
         device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
         liveness_epoch_a: outcome.lease.liveness_epoch_a.clone(),
         resume_deadline_b: outcome.lease.resume_deadline_ms,
@@ -377,11 +425,16 @@ fn fail_connection(
 pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_status: &'a mut (dyn FnMut(&ControllingStatus) + Send),
     pub(crate) on_session: &'a mut (dyn FnMut(&ControllingSessionProjection) + Send),
+    /// Authenticated capability response mapping, before A capability state advances.
+    pub(crate) on_mapping:
+        &'a mut (dyn FnMut(&LeaseContext, &str, &str) -> Result<(), String> + Send),
     pub(crate) on_task: &'a mut (dyn FnMut(Value) + Send),
-    /// 解密并校验过的权威 journal 事件（E2E-05）：A 端据此写独立历史并渲染正文。
-    pub(crate) on_journal: &'a mut (dyn FnMut(&JournalEvent) -> Result<(), String> + Send),
+    /// 解密并校验过的 B 权威 journal：A 端仅投影到 RemoteProxy。
+    pub(crate) on_journal:
+        &'a mut (dyn FnMut(&AuthenticatedJournalFrame<'_>) -> Result<(), String> + Send),
     /// 权威快照（E2E-05 缺口恢复）：A 端据此原子替换本地副本。
-    pub(crate) on_snapshot: &'a mut (dyn FnMut(&JournalSnapshot) -> Result<(), String> + Send),
+    pub(crate) on_snapshot:
+        &'a mut (dyn FnMut(&AuthenticatedSnapshotFrame<'_>) -> Result<(), String> + Send),
     /// E2E-06：待发送的 A 端心跳帧（明文控制帧，绑定当前租约）。
     pub(crate) on_liveness: &'a mut (dyn FnMut(Value) + Send),
 }
@@ -864,7 +917,15 @@ fn dispatch_inbound_frame(
     };
     match payload_kind.as_str() {
         "capability_snapshot" => {
-            match sessions.apply_capability_snapshot_for_lease(&lease, &payload) {
+            match sessions.apply_capability_snapshot_for_lease_with_mapping(
+                &lease,
+                &payload,
+                |remote_ref, controlled_session_id| {
+                    (sinks.on_mapping)(&lease, remote_ref, controlled_session_id).map_err(|_| {
+                        super::controlling_session::SessionError::new("remote_mapping_unavailable")
+                    })
+                },
+            ) {
                 Ok(projection) => {
                     log_controller_event("capability_snapshot_applied", "ready");
                     (sinks.on_session)(&projection);
@@ -889,7 +950,10 @@ fn dispatch_inbound_frame(
             if let Some(event) = task_event_projection(&lease, &payload) {
                 log_controller_event(
                     "task_status_received",
-                    event.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                    event
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
                 );
                 (sinks.on_task)(event);
             }
@@ -903,7 +967,12 @@ fn dispatch_inbound_frame(
                 log_controller_event("journal_event_ignored", "retired_epoch");
                 return;
             }
-            match project_journal_event(journal, &event, sinks.on_journal) {
+            match project_journal_event(journal, &event, &mut |event| {
+                (sinks.on_journal)(&AuthenticatedJournalFrame {
+                    lease: &lease,
+                    event,
+                })
+            }) {
                 Ok(JournalAdmission::Apply) => {
                     log_controller_event("journal_event_applied", &event.kind);
                 }
@@ -921,16 +990,18 @@ fn dispatch_inbound_frame(
                         event.sequence,
                         &lease.remote_control_generation,
                         tokio::time::Instant::now(),
-                        |pending| request_journal_replay(
-                            manager,
-                            business,
-                            &lease,
-                            &capabilities,
-                            &event.session_id,
-                            &pending.epoch,
-                            pending.after,
-                            &pending.request_id,
-                        ),
+                        |pending| {
+                            request_journal_replay(
+                                manager,
+                                business,
+                                &lease,
+                                &capabilities,
+                                &event.session_id,
+                                &pending.epoch,
+                                pending.after,
+                                &pending.request_id,
+                            )
+                        },
                     );
                 }
             }
@@ -942,7 +1013,12 @@ fn dispatch_inbound_frame(
             // Equal-base snapshots still enter the authoritative sink so
             // DEV-30 can verify immutable content; transport cache is not ACK
             // authority and may never skip that comparison.
-            match project_journal_snapshot(journal, &snapshot, sinks.on_snapshot) {
+            match project_journal_snapshot(journal, &snapshot, &mut |snapshot| {
+                (sinks.on_snapshot)(&AuthenticatedSnapshotFrame {
+                    lease: &lease,
+                    snapshot,
+                })
+            }) {
                 Ok(()) => {}
                 Err(_) => log_controller_event("journal_snapshot_rejected", "projection_failed"),
             }
@@ -1106,7 +1182,10 @@ fn project_journal_event(
     sink: &mut dyn FnMut(&JournalEvent) -> Result<(), String>,
 ) -> Result<JournalAdmission, String> {
     let admission = journal_admission(cache.expected(&event.session_id), event);
-    if matches!(admission, JournalAdmission::Apply | JournalAdmission::Duplicate) {
+    if matches!(
+        admission,
+        JournalAdmission::Apply | JournalAdmission::Duplicate
+    ) {
         sink(event)?;
         if admission == JournalAdmission::Apply {
             cache.mark_applied(event);
@@ -1163,9 +1242,9 @@ impl LivenessExpectations {
 /// A restart may lose these hints; only the DEV-30 durable projection decides
 /// duplicate content and confirmed cursor. In-flight replay suppresses only
 /// redundant transport requests, not calls into the projection sink.
-/// DEV-19's `ConfirmedJournalReceipt`/generation ACK contract is wired by
-/// the DEV-20 production adapter after durable confirmation; this transport
-/// cache does not send a wire ACK or introduce another protocol message type.
+/// The authenticated journal sink sends ACK only after DEV-30's RemoteProxy
+/// projection confirms the durable cursor. This transport cache does not
+/// grant ACK authority or introduce another protocol message type.
 const MAX_PENDING_REPLAYS: usize = 256;
 const REPLAY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -1206,9 +1285,13 @@ impl JournalExpectations {
             event.session_id.clone(),
             (event.epoch.clone(), event.sequence),
         );
-        if self.awaiting_replay.get(&event.session_id).is_some_and(|pending| {
-            pending.epoch == event.epoch && event.sequence >= pending.target_sequence
-        }) {
+        if self
+            .awaiting_replay
+            .get(&event.session_id)
+            .is_some_and(|pending| {
+                pending.epoch == event.epoch && event.sequence >= pending.target_sequence
+            })
+        {
             self.awaiting_replay.remove(&event.session_id);
         }
     }
@@ -1227,9 +1310,13 @@ impl JournalExpectations {
             snapshot.session_id.clone(),
             (snapshot.epoch.clone(), snapshot.sequence),
         );
-        if self.awaiting_replay.get(&snapshot.session_id).is_some_and(|pending| {
-            pending.epoch == snapshot.epoch && snapshot.sequence >= pending.target_sequence
-        }) {
+        if self
+            .awaiting_replay
+            .get(&snapshot.session_id)
+            .is_some_and(|pending| {
+                pending.epoch == snapshot.epoch && snapshot.sequence >= pending.target_sequence
+            })
+        {
             self.awaiting_replay.remove(&snapshot.session_id);
         }
     }
@@ -1494,19 +1581,24 @@ pub(crate) async fn connect_controlling_device(
             log_controller_event("status", &controller_status_log_detail(status));
             let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
         };
+        let capability_sink = Arc::clone(&journal);
         let mut on_session = |projection: &ControllingSessionProjection| {
-            let _ = keeper.emit(CONTROLLER_SESSION_EVENT, projection);
+            let _ = capability_sink.publish_capability(projection);
+        };
+        let mapping = Arc::clone(&journal);
+        let mut on_mapping = |lease: &LeaseContext, remote_ref: &str, controlled_id: &str| {
+            mapping.confirm_mapping(lease, remote_ref, controlled_id)
         };
         let mut on_task = |event: Value| {
             let _ = keeper.emit(CONTROLLER_TASK_EVENT, event);
         };
-        let mut on_journal = |event: &JournalEvent| {
-            // A 端独立历史由命令层端口写入（feature 层不反向依赖 app 层）。
-            journal.publish(event)
+        let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
+            // A 端经 app 组合适配器写入 SessionStore.RemoteProxy。
+            journal.publish(frame)
         };
-        let mut on_snapshot = |snapshot: &JournalSnapshot| {
+        let mut on_snapshot = |frame: &AuthenticatedSnapshotFrame<'_>| {
             // E2E-05 缺口恢复：权威快照原子替换 A 的本地副本。
-            journal.publish_snapshot(snapshot)
+            journal.publish_snapshot(frame)
         };
         let mut on_liveness = |frame: Value| {
             // E2E-06 心跳：经当前认证 transport 的租约控制队列发送。
@@ -1515,6 +1607,7 @@ pub(crate) async fn connect_controlling_device(
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut on_mapping,
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -1540,6 +1633,47 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // Test-only fixture uses the request-correlated, mapping-checked
+    // capability admission path rather than the removed direct-apply API.
+    trait SessionCapabilityFixture {
+        fn apply_verified_snapshot_for_test(
+            &self,
+            remote_ref: &str,
+            payload: &Value,
+            lease: &LeaseContext,
+        ) -> std::result::Result<
+            ControllingSessionProjection,
+            super::super::controlling_session::SessionError,
+        >;
+    }
+
+    impl SessionCapabilityFixture for ControllingSessionManager {
+        fn apply_verified_snapshot_for_test(
+            &self,
+            remote_ref: &str,
+            payload: &Value,
+            lease: &LeaseContext,
+        ) -> std::result::Result<
+            ControllingSessionProjection,
+            super::super::controlling_session::SessionError,
+        > {
+            let request = self.capability_request(remote_ref, lease)?;
+            let mut response = payload.clone();
+            response["request_id"] = json!(request.request_id);
+            response["session_id"] = json!(request.session_id);
+            response["controlled_session_id"] = json!("b-session-1");
+            self.apply_capability_snapshot_for_lease_with_mapping(
+                lease,
+                &response,
+                |actual_ref, b_session| {
+                    assert_eq!(actual_ref, remote_ref);
+                    assert_eq!(b_session, "b-session-1");
+                    Ok(())
+                },
+            )
+        }
+    }
     use crate::features::remote_control::controller::controlled_handshake::ControlledHandshake;
     use crate::features::remote_control::controller::crypto::AuthenticatedRelayTrustConfig;
     use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
@@ -1820,7 +1954,11 @@ mod tests {
         assert_eq!(status["status"], "error");
         assert_eq!(status["errorCode"], "pairing_code_invalid");
         assert_eq!(status["hasPendingCode"], false);
-        assert!(statuses.last().is_some_and(|status| projection(status)["status"] == "error"));
+        assert!(
+            statuses
+                .last()
+                .is_some_and(|status| projection(status)["status"] == "error")
+        );
         // 失败路径不留半租约，也不再占用 transport。
         assert!(sender.authenticated_lease().is_none());
         assert!(sender.is_stopped());
@@ -1907,9 +2045,16 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, "invalid_message");
-        assert_eq!(projection(&manager.status())["errorCode"], "invalid_message");
+        assert_eq!(
+            projection(&manager.status())["errorCode"],
+            "invalid_message"
+        );
         assert!(sender.authenticated_lease().is_none());
-        assert_eq!(sender.generation(), "", "untrusted transcript must not bind");
+        assert_eq!(
+            sender.generation(),
+            "",
+            "untrusted transcript must not bind"
+        );
 
         // 2) transport 已经绑定过 generation 时，Reserved 阶段必须中止。
         let PairingFixture {
@@ -1967,6 +2112,8 @@ mod tests {
                         relay_epoch: "epoch-test-1".into(),
                         remote_control_generation: "generation-0001".into(),
                     },
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "liveness-epoch-a-0001".into(),
                     resume_deadline_b: 30_000,
@@ -2000,19 +2147,20 @@ mod tests {
         };
         let mut on_task = |event: Value| tasks_seen.push(event);
         let mut journal_seen: Vec<JournalEvent> = Vec::new();
-        let mut on_journal = |event: &JournalEvent| {
-            journal_seen.push(event.clone());
+        let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
+            journal_seen.push(frame.event().clone());
             Ok(())
         };
         let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
-        let mut on_snapshot = |snapshot: &JournalSnapshot| {
-            snapshots_seen.push(snapshot.clone());
+        let mut on_snapshot = |frame: &AuthenticatedSnapshotFrame<'_>| {
+            snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
         let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -2063,6 +2211,8 @@ mod tests {
                 operation,
                 ControllerLease {
                     context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "liveness-epoch-a-0001".into(),
                     resume_deadline_b: 30_000,
@@ -2089,11 +2239,12 @@ mod tests {
         ];
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease, &capabilities)
+            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
+            .map(|(projection, _)| projection)
             .unwrap();
         // 旅程第 2 段：B 的能力快照先落到 A 的会话状态（任务意图需要能力 revision）。
         sessions
-            .apply_capability_snapshot(
+            .apply_verified_snapshot_for_test(
                 &session.session_ref,
                 &json!({
                     "v": 1,
@@ -2146,6 +2297,7 @@ mod tests {
                     "remote_control_generation": lease.remote_control_generation,
                     "request_id": refresh.request_id,
                     "session_id": session.session_id,
+                    "controlled_session_id": "b-session-1",
                     "capability_revision": "4",
                     "expires_at_ms": "30000",
                     "modes": ["chat"],
@@ -2222,22 +2374,27 @@ mod tests {
             session_projections.push(projection.capability_revision);
         };
         let mut on_task = |event: Value| task_events.push(event);
-        let mut on_journal = |event: &JournalEvent| {
-            journal_seen.push(event.clone());
+        let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
+            journal_seen.push(frame.event().clone());
             Ok(())
         };
-        let mut on_snapshot = |_: &JournalSnapshot| Ok(());
+        let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |_: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
-        assert_eq!(session_projections, vec![Some(4)], "能力快照必须落到会话状态");
+        assert_eq!(
+            session_projections,
+            vec![Some(4)],
+            "能力快照必须落到会话状态"
+        );
         assert_eq!(task_events.len(), 1);
         assert_eq!(task_events[0]["status"], "succeeded");
         assert_eq!(task_events[0]["sessionId"], session.session_id);
@@ -2285,12 +2442,13 @@ mod tests {
         let mut stale_status = |_: &ControllingStatus| {};
         let mut stale_session = |_: &ControllingSessionProjection| {};
         let mut stale_task = |event: Value| task_events.push(event);
-        let mut stale_journal = |_: &JournalEvent| Ok(());
-        let mut stale_snapshot = |_: &JournalSnapshot| Ok(());
+        let mut stale_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
+        let mut stale_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut stale_liveness = |_: Value| {};
         let mut stale_sinks = ControllingLaneSinks {
             on_status: &mut stale_status,
             on_session: &mut stale_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut stale_task,
             on_journal: &mut stale_journal,
             on_snapshot: &mut stale_snapshot,
@@ -2304,7 +2462,11 @@ mod tests {
             &mut stale_sinks,
         )
         .await;
-        assert_eq!(task_events.len(), seen_before, "断开后的残留帧不得产生任务投影");
+        assert_eq!(
+            task_events.len(),
+            seen_before,
+            "断开后的残留帧不得产生任务投影"
+        );
         assert_eq!(journal_seen.len(), 1, "断开后的残留帧不得产生正文投影");
     }
 
@@ -2327,6 +2489,8 @@ mod tests {
                         relay_epoch: "epoch-test-1".into(),
                         remote_control_generation: "generation-0001".into(),
                     },
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "liveness-epoch-a-0001".into(),
                     resume_deadline_b: 30_000,
@@ -2436,12 +2600,13 @@ mod tests {
         };
         let mut on_session = |_: &ControllingSessionProjection| {};
         let mut on_task = |_: Value| {};
-        let mut on_journal = |_: &JournalEvent| Ok(());
-        let mut on_snapshot = |_: &JournalSnapshot| Ok(());
+        let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
+        let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |_: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -2559,6 +2724,8 @@ mod tests {
                 operation,
                 ControllerLease {
                     context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
                     resume_deadline_b: 30_000,
@@ -2574,7 +2741,8 @@ mod tests {
             .unwrap();
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease, &capabilities)
+            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
+            .map(|(projection, _)| projection)
             .unwrap();
         let capability_request = sessions
             .capability_request(&session.session_ref, &lease)
@@ -2592,6 +2760,7 @@ mod tests {
             "remote_control_generation": lease.remote_control_generation,
             "request_id": capability_request.request_id,
             "session_id": session.session_id,
+            "controlled_session_id": "b-session-1",
             "capability_revision": "4",
             "expires_at_ms": "30000",
             "modes": ["chat"],
@@ -2653,19 +2822,20 @@ mod tests {
         };
         let mut on_task = |event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
-        let mut on_journal = |event: &JournalEvent| {
-            journal_events.push(event.clone());
+        let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
+            journal_events.push(frame.event().clone());
             Ok(())
         };
         let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
-        let mut on_snapshot = |snapshot: &JournalSnapshot| {
-            snapshots_seen.push(snapshot.clone());
+        let mut on_snapshot = |frame: &AuthenticatedSnapshotFrame<'_>| {
+            snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
         let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -2702,6 +2872,8 @@ mod tests {
                 operation,
                 ControllerLease {
                     context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
                     resume_deadline_b: 30_000,
@@ -2713,7 +2885,8 @@ mod tests {
             .unwrap();
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease, &capabilities)
+            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
+            .map(|(projection, _)| projection)
             .unwrap();
         let request = sessions
             .capability_request(&session.session_ref, &lease)
@@ -2724,12 +2897,13 @@ mod tests {
         let mut on_session =
             |projection: &ControllingSessionProjection| projections.push(projection.clone());
         let mut on_task = |_: Value| {};
-        let mut on_journal = |_: &JournalEvent| Ok(());
-        let mut on_snapshot = |_: &JournalSnapshot| Ok(());
+        let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
+        let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |_: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -2791,6 +2965,8 @@ mod tests {
                 operation,
                 ControllerLease {
                     context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
                     resume_deadline_b: 30_000,
@@ -2823,12 +2999,13 @@ mod tests {
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
         let mut on_task = |_: Value| {};
-        let mut on_journal = |_: &JournalEvent| Ok(());
-        let mut on_snapshot = |_: &JournalSnapshot| Ok(());
+        let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
+        let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |frame: Value| responses.push(frame);
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -2879,7 +3056,7 @@ mod tests {
                 &self,
                 _lease: &LeaseContext,
                 request_id: &str,
-                _session_id: Option<&str>,
+                _session_id: &str,
                 known_revision: u64,
             ) -> Result<Value, String> {
                 Ok(serde_json::json!({
@@ -2966,6 +3143,8 @@ mod tests {
                 operation,
                 ControllerLease {
                     context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
                     resume_deadline_b: 30_000,
@@ -2981,10 +3160,11 @@ mod tests {
             .unwrap();
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease, &capabilities)
+            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
+            .map(|(projection, _)| projection)
             .unwrap();
         sessions
-            .apply_capability_snapshot(
+            .apply_verified_snapshot_for_test(
                 &session.session_ref,
                 &serde_json::json!({
                     "v": 1,
@@ -3078,19 +3258,20 @@ mod tests {
         };
         let mut on_task = |event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
-        let mut on_journal = |event: &JournalEvent| {
-            journal_events.push(event.clone());
+        let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
+            journal_events.push(frame.event().clone());
             Ok(())
         };
         let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
-        let mut on_snapshot = |snapshot: &JournalSnapshot| {
-            snapshots_seen.push(snapshot.clone());
+        let mut on_snapshot = |frame: &AuthenticatedSnapshotFrame<'_>| {
+            snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
         let mut on_liveness = |_frame: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -3139,6 +3320,8 @@ mod tests {
                 operation,
                 ControllerLease {
                     context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
                     resume_deadline_b: 30_000,
@@ -3154,7 +3337,8 @@ mod tests {
             .unwrap();
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease, &capabilities)
+            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
+            .map(|(projection, _)| projection)
             .unwrap();
 
         let snapshot = JournalSnapshot {
@@ -3227,15 +3411,16 @@ mod tests {
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
         let mut on_task = |_: Value| {};
-        let mut on_journal = |_: &JournalEvent| Ok(());
-        let mut on_snapshot = |snapshot: &JournalSnapshot| {
-            snapshots_seen.push(snapshot.clone());
+        let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
+        let mut on_snapshot = |frame: &AuthenticatedSnapshotFrame<'_>| {
+            snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
         let mut on_liveness = |_: Value| {};
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -3295,16 +3480,30 @@ mod tests {
         assert!(expectations.expected("session-a").is_none());
         expectations.mark_applied(&event("epoch-1", 1));
         assert_eq!(expectations.expected("session-a"), Some(("epoch-1", 1)));
-        let pending = expectations.begin_replay("session-a", "epoch-1", 1, 3, "generation-1", now).unwrap();
+        let pending = expectations
+            .begin_replay("session-a", "epoch-1", 1, 3, "generation-1", now)
+            .unwrap();
         assert_eq!(pending.epoch, "epoch-1");
         assert_eq!(pending.after, 1);
-        assert!(expectations.begin_replay("session-a", "epoch-1", 1, 3, "generation-1", now).is_none());
+        assert!(
+            expectations
+                .begin_replay("session-a", "epoch-1", 1, 3, "generation-1", now)
+                .is_none()
+        );
         // A partial response must not clear a request for sequence 3.
         expectations.mark_applied(&event("epoch-1", 2));
         assert_eq!(expectations.expected("session-a"), Some(("epoch-1", 2)));
-        assert!(expectations.begin_replay("session-a", "epoch-1", 2, 3, "generation-1", now).is_none());
+        assert!(
+            expectations
+                .begin_replay("session-a", "epoch-1", 2, 3, "generation-1", now)
+                .is_none()
+        );
         expectations.mark_applied(&event("epoch-1", 3));
-        assert!(expectations.begin_replay("session-a", "epoch-1", 3, 5, "generation-1", now).is_some());
+        assert!(
+            expectations
+                .begin_replay("session-a", "epoch-1", 3, 5, "generation-1", now)
+                .is_some()
+        );
     }
 
     /// E2E-05 缺口恢复：回放请求必须是冻结形状且通过运行时校验（角色 A +
@@ -3367,6 +3566,8 @@ mod tests {
                         relay_epoch: "epoch-test-1".into(),
                         remote_control_generation: "generation-0001".into(),
                     },
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
                     resume_deadline_b: 30_000,
@@ -3387,12 +3588,13 @@ mod tests {
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
         let mut on_task = |_: Value| {};
-        let mut on_journal = |_: &JournalEvent| Ok(());
-        let mut on_snapshot = |_: &JournalSnapshot| Ok(());
+        let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
+        let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |frame: Value| frames.push(frame);
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
+            on_mapping: &mut |_, _, _| Ok(()),
             on_task: &mut on_task,
             on_journal: &mut on_journal,
             on_snapshot: &mut on_snapshot,
@@ -3495,7 +3697,13 @@ mod dev19_wire_tests {
     fn duplicate_event_and_equal_base_snapshot_still_verify_durable_content() {
         let journal = RemoteJournal::new("epoch-1");
         let event = journal
-            .append("event-1", JournalKind::UserMessage, "remote-a", None, json!({"text":"safe"}))
+            .append(
+                "event-1",
+                JournalKind::UserMessage,
+                "remote-a",
+                None,
+                json!({"text":"safe"}),
+            )
             .unwrap();
         let snapshot = journal.snapshot_for("remote-a").unwrap();
         let mut cache = JournalExpectations::default();
@@ -3555,21 +3763,44 @@ mod dev19_wire_tests {
         let now = tokio::time::Instant::now();
         let mut request_id = String::new();
         assert!(begin_and_send_replay(
-            &mut cache, "remote-a", "epoch-1", 3, 5, "generation-1", now, |pending| {
+            &mut cache,
+            "remote-a",
+            "epoch-1",
+            3,
+            5,
+            "generation-1",
+            now,
+            |pending| {
                 request_id = pending.request_id.clone();
                 assert_eq!((pending.epoch.as_str(), pending.after), ("epoch-1", 3));
                 true
             }
         ));
-        assert!(cache.due_replays("generation-1", now + REPLAY_RETRY_INTERVAL - Duration::from_millis(1)).is_empty());
+        assert!(
+            cache
+                .due_replays(
+                    "generation-1",
+                    now + REPLAY_RETRY_INTERVAL - Duration::from_millis(1)
+                )
+                .is_empty()
+        );
         let due = cache.due_replays("generation-1", now + REPLAY_RETRY_INTERVAL);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].1.request_id, request_id);
-        assert!(cache.due_replays("generation-1", now + REPLAY_RETRY_INTERVAL).is_empty());
+        assert!(
+            cache
+                .due_replays("generation-1", now + REPLAY_RETRY_INTERVAL)
+                .is_empty()
+        );
         assert!(!begin_and_send_replay(
-            &mut cache, "remote-a", "epoch-1", 3, 5, "generation-1", now, |_| {
-                panic!("one session cannot have two concurrent requests")
-            }
+            &mut cache,
+            "remote-a",
+            "epoch-1",
+            3,
+            5,
+            "generation-1",
+            now,
+            |_| { panic!("one session cannot have two concurrent requests") }
         ));
         // A correlated negative response advances this same request to the
         // next heartbeat without replacing its identity.
@@ -3577,15 +3808,31 @@ mod dev19_wire_tests {
         let due = cache.due_replays("generation-1", now + Duration::from_secs(4));
         assert_eq!(due[0].1.request_id, request_id);
         let mut confirmed = JournalEvent {
-            event_id: "event-5".into(), epoch: "epoch-1".into(), sequence: 5,
-            kind: "user_message".into(), session_id: "remote-a".into(),
-            task_id: None, terminal_status: None, payload: json!({"text":"safe"}),
+            event_id: "event-5".into(),
+            epoch: "epoch-1".into(),
+            sequence: 5,
+            kind: "user_message".into(),
+            session_id: "remote-a".into(),
+            task_id: None,
+            terminal_status: None,
+            payload: json!({"text":"safe"}),
         };
         cache.mark_applied(&confirmed);
-        assert!(cache.due_replays("generation-1", now + Duration::from_secs(30)).is_empty());
+        assert!(
+            cache
+                .due_replays("generation-1", now + Duration::from_secs(30))
+                .is_empty()
+        );
         confirmed.sequence = 6;
         assert!(!begin_and_send_replay(
-            &mut cache, "remote-a", "epoch-1", 5, 6, "generation-1", now, |_| {
+            &mut cache,
+            "remote-a",
+            "epoch-1",
+            5,
+            6,
+            "generation-1",
+            now,
+            |_| {
                 // Local seal or queue failure does not discard retry state.
                 false
             }
@@ -3597,13 +3844,20 @@ mod dev19_wire_tests {
         let resumed = cache.due_replays("generation-1", now + Duration::from_secs(4));
         assert_eq!(resumed[0].1.request_id, retry[0].1.request_id);
         let mut snapshot = JournalSnapshot {
-            epoch: "epoch-1".into(), session_id: "remote-a".into(), sequence: 6,
-            digest: String::new(), events: vec![confirmed],
+            epoch: "epoch-1".into(),
+            session_id: "remote-a".into(),
+            sequence: 6,
+            digest: String::new(),
+            events: vec![confirmed],
         };
         snapshot.digest = snapshot.compute_digest();
         assert!(snapshot.verify_digest());
         cache.mark_snapshot(&snapshot);
-        assert!(cache.due_replays("generation-1", now + Duration::from_secs(30)).is_empty());
+        assert!(
+            cache
+                .due_replays("generation-1", now + Duration::from_secs(30))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3611,11 +3865,35 @@ mod dev19_wire_tests {
         let mut cache = JournalExpectations::default();
         let now = tokio::time::Instant::now();
         for index in 0..MAX_PENDING_REPLAYS {
-            assert!(cache.begin_replay(&format!("session-{index}"), "epoch-1", 0, 1, "generation-1", now).is_some());
+            assert!(
+                cache
+                    .begin_replay(
+                        &format!("session-{index}"),
+                        "epoch-1",
+                        0,
+                        1,
+                        "generation-1",
+                        now
+                    )
+                    .is_some()
+            );
         }
-        assert!(cache.begin_replay("overflow", "epoch-1", 0, 1, "generation-1", now).is_none());
-        assert_eq!(cache.due_replays("generation-1", now + REPLAY_RETRY_INTERVAL).len(), MAX_PENDING_REPLAYS);
-        assert!(cache.due_replays("generation-2", now + Duration::from_secs(6)).is_empty());
+        assert!(
+            cache
+                .begin_replay("overflow", "epoch-1", 0, 1, "generation-1", now)
+                .is_none()
+        );
+        assert_eq!(
+            cache
+                .due_replays("generation-1", now + REPLAY_RETRY_INTERVAL)
+                .len(),
+            MAX_PENDING_REPLAYS
+        );
+        assert!(
+            cache
+                .due_replays("generation-2", now + Duration::from_secs(6))
+                .is_empty()
+        );
         assert!(cache.awaiting_replay.is_empty());
     }
 
@@ -3649,11 +3927,20 @@ mod dev19_wire_tests {
         let future = event("epoch-2", 5);
         assert_eq!(
             journal_admission(cache.expected("remote-a"), &future),
-            JournalAdmission::RequestReplay { epoch: "epoch-2".into(), after: 0 }
+            JournalAdmission::RequestReplay {
+                epoch: "epoch-2".into(),
+                after: 0
+            }
         );
         let mut request_id = String::new();
         assert!(begin_and_send_replay(
-            &mut cache, "remote-a", "epoch-2", 0, 5, "generation-1", now,
+            &mut cache,
+            "remote-a",
+            "epoch-2",
+            0,
+            5,
+            "generation-1",
+            now,
             |pending| {
                 request_id = pending.request_id.clone();
                 true
@@ -3673,10 +3960,16 @@ mod dev19_wire_tests {
         assert_eq!(due[0].1.epoch, "epoch-2");
         assert_eq!(due[0].1.request_id, request_id);
         project_journal_snapshot(
-            &mut cache, &snapshot(event("epoch-2", 5)), &mut snapshot_sink,
+            &mut cache,
+            &snapshot(event("epoch-2", 5)),
+            &mut snapshot_sink,
         )
         .unwrap();
         assert!(cache.awaiting_replay.is_empty());
-        assert!(cache.due_replays("generation-1", now + Duration::from_secs(30)).is_empty());
+        assert!(
+            cache
+                .due_replays("generation-1", now + Duration::from_secs(30))
+                .is_empty()
+        );
     }
 }

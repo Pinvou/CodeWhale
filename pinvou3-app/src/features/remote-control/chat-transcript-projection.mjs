@@ -1,6 +1,6 @@
-// Projects the authoritative remote journal into ChatView's legacy item shape.
-// ChatView stays responsible only for input/output in remote mode; connection,
-// capabilities, permissions and artifacts remain owned by remote control.
+// Projects B's authoritative controlled-session journal into ChatView items.
+// A's history comes only from SessionStore.RemoteProxy; this module is not an
+// alternative A-side transcript or compatibility read path.
 
 export function isRemoteChatActive(connection) {
   return !!connection && connection.status === 'connected';

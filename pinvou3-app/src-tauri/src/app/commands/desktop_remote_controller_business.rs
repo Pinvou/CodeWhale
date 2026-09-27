@@ -611,34 +611,46 @@ impl DesktopControlledBusiness {
     }
 }
 
+/// B sends its actual Session identity only inside the authenticated encrypted
+/// capability response; A's opaque wire ref remains a distinct field.
+fn bind_capability_session(
+    mut payload: Value,
+    remote_ref: &str,
+    controlled_session_id: &str,
+) -> Result<Value, String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "capability_snapshot_invalid".to_owned())?;
+    object.insert("session_id".into(), Value::String(remote_ref.to_owned()));
+    object.insert(
+        "controlled_session_id".into(),
+        Value::String(controlled_session_id.to_owned()),
+    );
+    Ok(payload)
+}
+
 #[async_trait::async_trait]
 impl ControlledBusinessPort for DesktopControlledBusiness {
     async fn capability_snapshot(
         &self,
         lease: &LeaseContext,
         request_id: &str,
-        session_id: Option<&str>,
+        session_id: &str,
         known_revision: u64,
     ) -> Result<Value, String> {
-        let controlled_session =
-            if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
-                let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
-                    &self.app,
-                    session_ref,
-                    "",
-                    false,
-                    &lease.remote_control_generation,
-                )?;
-                Some((session_ref.to_owned(), authoritative_id))
-            } else {
-                None
-            };
+        let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
+            &self.app,
+            session_id,
+            "",
+            false,
+            &lease.remote_control_generation,
+        )?;
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         let now_b =
             crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
             );
         // 只复用刚生成、且比 A 已知 revision 更新的快照：这能吸收紧邻的重复
-        // 请求，又不会把临近过期的快照当作完整 30 秒租期返回给兼容旧报文的 A。
+        // 请求，也不会把临近过期的快照误报成完整 30 秒有效期。
         if let Ok(current) = capabilities.current_for_context(lease, now_b) {
             let payload = capabilities.wire_capability_snapshot(&current, request_id);
             let revision = payload["capability_revision"]
@@ -651,19 +663,17 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                 .unwrap_or(0)
                 .saturating_sub(now_b);
             if revision > known_revision && remaining_ms >= 29_000 {
-                if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
-                    super::desktop_remote_task::project_controlled_session(
-                        &self.app,
-                        session_ref,
-                        authoritative_id,
-                        lease,
-                    )?;
-                }
+                super::desktop_remote_task::project_controlled_session(
+                    &self.app,
+                    session_id,
+                    &authoritative_id,
+                    lease,
+                )?;
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                     "capability_snapshot_ready",
                     "cached",
                 );
-                return Ok(payload);
+                return bind_capability_session(payload, session_id, &authoritative_id);
             }
         }
         let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(
@@ -684,15 +694,17 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             "capability_snapshot_ready",
             "fresh",
         );
-        if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
-            super::desktop_remote_task::project_controlled_session(
-                &self.app,
-                session_ref,
-                authoritative_id,
-                lease,
-            )?;
-        }
-        Ok(capabilities.wire_capability_snapshot(&snapshot, request_id))
+        super::desktop_remote_task::project_controlled_session(
+            &self.app,
+            session_id,
+            &authoritative_id,
+            lease,
+        )?;
+        bind_capability_session(
+            capabilities.wire_capability_snapshot(&snapshot, request_id),
+            session_id,
+            &authoritative_id,
+        )
     }
 
     async fn submit_task(
@@ -766,7 +778,7 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
-            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+            .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
         history
             .journal()
             .bind_generation(&lease.remote_control_generation)
@@ -811,7 +823,7 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
-            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+            .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
         history
             .journal()
             .bind_generation(&lease.remote_control_generation)

@@ -4,7 +4,8 @@
 
 use anyhow::{Result, bail};
 
-use super::migration::persist_changed;
+use super::persistence::persist_changed;
+use super::schema::PendingDispatchState;
 use crate::features::sessions::SessionStore;
 
 impl SessionStore {
@@ -17,6 +18,13 @@ impl SessionStore {
             .clone();
         if record.local_session_id != local_session_id || !local_session_id.starts_with("remote-") {
             bail!("remote_proxy_not_found");
+        }
+        if record
+            .pending
+            .iter()
+            .any(|pending| pending.dispatch_state == PendingDispatchState::PreparedNeverAttempted)
+        {
+            bail!("remote_unattempted_pending_exists");
         }
         if record.ui.hidden {
             return Ok(());
@@ -49,7 +57,7 @@ mod tests {
             control_connected: true,
             encrypted_channel_connected: true,
         };
-        let opened = store.open_remote_proxy(None, &live).unwrap();
+        let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
         {
             let mut state = store.remote_proxies.lock();
             let mut record = state.records.get(&opened.local_session_id).unwrap().clone();

@@ -28,9 +28,9 @@ test('only the live remote session projects into ChatView items', () => {
   assert.equal(items[1].streaming, false);
 });
 
-test('wire journal entries are matched by the A-generated session id, not the local history ref', () => {
+test('B journal entries are matched by its authoritative local session ID', () => {
   const items = remoteChatItems(
-    { status: 'connected', sessionRef: 'history-ref-1', sessionId: 'wire-session-1' },
+    { status: 'connected', sessionId: 'wire-session-1' },
     [{ sessionId: 'wire-session-1', epoch: 'e1', sequence: 1, role: 'user', text: 'sent' }],
   );
   assert.equal(items.length, 1);

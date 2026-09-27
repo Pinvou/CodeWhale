@@ -5,6 +5,8 @@
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
 > 进度：E2E-00～E2E-04 完成并审核通过；E2E-05 完成（正文链路 + 缺口恢复 + A 渲染，见第 8 节）；E2E-06 已落地 A 心跳、B 存活证据（直接应答 + Relay 兜底）与双端显式断开，剩余 resume 序列与 B 停止/刷新清理核对（见第 9 节）；E2E-07 已落地双端 UI 闭环与错误码回传，剩余浏览器冒烟与文案细化；E2E-08 待做。
+>
+> **DEV-31 后续收口说明**：本文第 5～11 节保留早期 E2E 提交与审核记录，其中 `RemoteConversationView`、`RemoteHistoryStore`、A 端独立 `tasks/transcript` 和旧 desktop Command/Event 只是历史实现证据，不是当前契约。这些未发布路径不迁移、不兼容；当前契约以需求文档、代码架构和 DEV-31 任务描述为准。
 
 ## 1. 执行规则
 
@@ -100,10 +102,10 @@
 | B 端信任根缺失在接管点失败关闭 | 保守默认，登记 | 为保持 E2E-01 的注册行为不变，B 在收到 `controller_pairing_reserved` 时才要求信任根（错误码 `relay_trust_unconfigured`）；A 端在 connect 前即失败关闭。 |
 | 命令层错误码未映射到 A 对话框文案 | 已知缺口（E2E-07） | `desktop_remote_controller_*` 现在返回有界错误码，但 `desktop-remote-control.js` 的 `controllerConnect` 未把 `Err(String)` 转成带 `code` 的错误，`connectionErrorKey` 只能拿到 undefined；B 面板与 A 壳层的状态名映射同样与后端枚举不一致（`ControlledDevicePanel.jsx:27-40` 期望 `registering`/`waiting_for_pairing`/`pairing_reserved`/`handshake_pending`，后端实际是 `reserving`/`waiting_connection`/`safety_handshake`），导致 B 面板回落到 statusIdle 且不显示连接码。E2E-07 统一修复并补行为测试。 |
 | 能力协商按交集收敛 | 依赖 E2E-04/E2E-06 处理 | `negotiateControllerCapabilities` 取「A 请求 ∩ B 注册」；B 目前只注册 `[pairing_v1, encrypted_frames_v1, finished_receipt_v1]`，A 声明 `pairing_v1/encrypted_frames_v1/finished_receipt_v1/role_liveness_v1/resume_v1`，因此 `role_liveness_v1`、`resume_v1`、`task_v1` 都未协商成功。E2E-02 只用到 `pairing_v1`（`controller_joined` 能力绑定）所以可跑通；E2E-04 发送业务帧前必须先在两侧声明 `task_v1`（本地运行时校验会以 `unsupported_capability` 拒绝 `task_submit` 等载荷），E2E-06 同理需要 `role_liveness_v1`/`resume_v1`。 |
-| A 端会话 id 由本端生成 | E2E-03 决策 | 冻结协议没有「创建会话」帧：`task_submit.session_id` 必须由发起方提供。E2E-03 由 A 生成 `session-<uuid>` 作为该远程会话在 wire 上的 id（UI 持有的「远程 sessionId」即此值），`session_ref` 只用于本地索引；B 的派发层（E2E-04）需据此绑定/创建权威会话（B 侧 `RemoteSessionMap` 支持 ref→权威 id 映射），并能把权威 id 回传（`task_status`/`session_snapshot` 都带 `session_id`）。 |
+| A 端会话引用与 B 权威 Session | DEV-31 替代 E2E-03 实验决策 | A 的可信 Rust 只生成 opaque `remote_session_ref`，B 在已认证加密请求下幂等创建/复用权威 Session，并在加密响应中返回 ref→B `session_id` 映射。A 只在完整 connection/lease/generation 绑定验证后写入 `SessionStore.RemoteProxy`；不保留 A 生成 wire session id 的兼容分支。 |
 | 任务意图重试必须复用 client_request_id | 依赖 E2E-04 | `desktop_remote_controller_task_intent` 每次调用生成新的 `task_id`/`client_request_id`（一次用户提交 = 一个新意图）；断线重试/恢复时必须复用已返回的 id（B 侧 `task_id + client_request_id` 幂等），E2E-04 接线时不要把重试当成新意图。 |
-| A 会话视图发送路径仍走旧 JS 拼装 | 已知缺口（E2E-07） | `RemoteConversationView.jsx:55-62` 仍在 JS 拼一个 camelCase 伪 payload 并调用 B 侧 `desktop_remote_task_submit`（DEV-22 遗留，必然被冻结校验拒绝）。E2E-03 只提供了 A 专用构造路径与状态位；E2E-07 收敛 UI 时把发送/取消改为 `controllerTaskIntent`/`controllerTaskCancelIntent` 并接 E2E-04 的加密派发。 |
-| A 端历史与远程会话尚未关联 | 依赖 E2E-05 | `desktop_remote_controller_create_history` 的 `b_session_reference` 目前由前端传入；E2E-03 的 `session_ref`/`session_id` 是它的自然来源，E2E-05 写 A 独立历史时统一关联。 |
+| A 会话视图发送路径 | DEV-31 已收口 | `RemoteConversationView` 和 JS 自建 wire payload 已删除；现有 `ChatView` 只通过 RemoteProxy action 进入可信 Rust `prepare → persist → dispatch` 链路。 |
+| A 端历史与远程会话 | DEV-31 已收口 | 未发布的独立历史 Command/Store/Bridge 已删除；远程正文、pending 和对账游标只存入 `SessionStore.RemoteProxy`，不迁移实验数据。 |
 | B 端取消不校验跨 lease 任务 | 依赖 E2E-06 | `cancel_decrypted_task` 只校验帧的租约与任务存在性；旧 lease 遗留任务的清理由 E2E-06（B stop/刷新的任务与凭证清理）负责，`ControllerTaskEventSink` 级别的权限不再扩张。 |
 | 能力快照按 `known_revision` 复用 | E2E-04 决策 | B 收到 `capability_snapshot_request` 时，若本地已有同一 revision 且未过期的快照则直接复用（A 端同 revision 幂等接受），否则重建并把 revision 加一；避免每次请求都抬 revision。 |
 | B 端 journal 回传的 session 身份 | E2E-05 决策 | journal 事件在 B 侧按权威 session id 记录；回传 wire 帧时与 `task_status` 一致改写回 A 的 ref（需要在 `RemoteSessionMap` 补反向查询），保证 A 端一份 wire 身份贯穿任务与正文。 |
@@ -560,6 +562,6 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 - **需求结论**：连接和能力准备完成后，A、B 两端输入框都必须向同一个 B 权威 Session 提交任务；B 端不得沿用普通本地聊天发送链路，否则会形成 UI 看似同屏、实际上下文分叉的第二条 Session。
 - **会话准备**：`capability_snapshot_request.session_id` 继续表示 A 的稳定会话引用。B 在生成或复用能力快照时先通过幂等临界区创建/查找权威 Session，再把 `sessionRef + sessionId + remote_control_generation` 投影给 B UI，因此 B 可以成为首个发言方，重试也不会重复建 Session。
 - **统一任务链路**：B composer 调用 `desktop_remote_controlled_task_send`；任务 ID、请求 ID 和输入摘要由 Rust 生成，并与 A 的 `task_submit` 共用 `validated_task_payload → admit_and_dispatch → RemoteTaskService → Engine`。同一 Session 继续复用既有 turn lock，忙碌时明确返回 `task_session_busy`，不另开会话或静默排队。
-- **双端投影**：B 独立维护 `controlledSession / controlledTasks / controlledTranscript`，只接受当前 generation 和精确权威 Session 的事件；A 保持 `tasks / transcript`，B 的任务状态和权威 journal 经加密通道把 session ID 改写为 A 的 session reference 后回传。两端按同一 `task_id` 去重，接纳成功时先展示有界 prompt fallback，收到权威 `user_message` 后由 journal 替代。
+- **双端投影**：B 独立维护 `controlledSession / controlledTasks / controlledTranscript`，只接受当前 generation 和精确权威 Session 的事件；A 只保留 `SessionStore.RemoteProxy` 中的已认证正文、pending/outcome_unknown 与对账游标，不再维护独立 `tasks / transcript`。B 的权威 journal 经加密通道按同一 `task_id` 去重投影；`result_unknown` 可推进已认证游标，但不得退休 A pending 或伪造成功/失败终态。
 - **生命周期**：会话映射显式绑定当前 generation；受控端停止、连接终态或 generation 更新会在同一生命周期临界区取消本代执行器并使旧映射失效，同时清空 B 的会话、任务和 transcript 投影。旧 generation/session 的迟到准备、任务或 journal 事件均被拒绝，避免后台副作用和重连后串消息。ChatView 的滚动、会话是否开始、发送可用性、错误提示和执行中提示均以当前远程投影为准，旧连接的发送错误不会带入新会话。
 - **回归重点**：覆盖 B 首次发送、A/B 消息同会话可见、任务状态不回退、旧 generation/session 事件丢弃、prompt fallback 被 journal 去重、受控端 composer 不调用普通 `chat.sendMessage`，以及 A/B 状态切片彼此隔离。

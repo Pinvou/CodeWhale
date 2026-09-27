@@ -49,6 +49,8 @@
       // E2E-03：A 端远程会话身份与能力版本由 Rust 构造后投影到这里，视图不再
       // 自行拼装协议字段。
       sessionRef: null,
+      localSessionId: null,
+      mappingConfirmed: false,
       sessionId: null,
       sessionMode: null,
       capabilityRevision: null,
@@ -71,7 +73,6 @@
       controllerConnection: createControllerConnection(),
       remoteCapabilities: null,
       remoteModels: [],
-      remoteHistories: [],
       remoteProxyHistories: [],
       remoteProxyHistory: null,
       remoteProxyNotice: null,
@@ -84,8 +85,6 @@
       controllerOpenIntent: null,
       controlledTerminatedOpenIntent: null,
       controllerTerminatedOpenIntent: null,
-      tasks: [],
-      transcript: [],
       controlledTasks: [],
       controlledTranscript: [],
       intents: { controlled: 0, controller: 0 },
@@ -151,18 +150,14 @@
     var payload = envelope || {};
     if (!isCurrentIntent(state, "controlled", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
-    if (!status) return state;
+    if (!["disabled", "reserving", "waiting_connection", "safety_handshake",
+      "connected", "reconnecting", "refreshing", "stopped", "error"].includes(status)) return state;
     var generation = payload.generation ? String(payload.generation) : null;
+    if (!CONTROLLED_TERMINAL[status] && !generation) return state;
     var current = state.controlledDevice;
-    // 后端枚举是 reserving / waiting_connection（DEV-21 早期拼写是 registering /
-    // waiting_for_pairing，两者都要认）。若不把新拼写算作"进行中"，新 generation
-    // 的 waiting_connection 更新会被下面的代际门丢弃——表现为后端已生成连接码、
-    // 界面却一直显示旧状态且拿不到码（2026-09-20 实测）。
-    var starting = status === "reserving"
-      || status === "registering"
-      || status === "waiting_connection"
-      || status === "waiting_for_pairing";
-    var waiting = status === "waiting_connection" || status === "waiting_for_pairing";
+    // Only the current Rust ControlledStatus enum may open a generation.
+    var starting = status === "reserving" || status === "waiting_connection";
+    var waiting = status === "waiting_connection";
     var pendingOpen = state.controlledOpenIntent === state.intents.controlled;
     if (CONTROLLED_TERMINAL[status] && !state.controlledFenced
       && current.generation && !generation && payload.intent == null) return state;
@@ -191,11 +186,11 @@
       status: status,
       generation: generation || (starting ? current.generation : null),
       pairingCode: payload.pairingCode || (waiting ? current.pairingCode : null),
-      expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || (waiting ? current.expiresAtMs : null),
+      expiresAtMs: payload.expiresAtMs || (waiting ? current.expiresAtMs : null),
       deviceName: payload.deviceName || current.deviceName,
       controllerDeviceName: payload.controllerDeviceName || current.controllerDeviceName,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
-      lastError: payload.error || payload.errorCode || null,
+      lastError: payload.error || null,
     };
     if (generation && !CONTROLLED_TERMINAL[status]) {
       next.controlledFenced = false;
@@ -225,7 +220,7 @@
       || state.intents.controlled !== intent || !generation
       || generation !== String(expectedGeneration || "")
       || state.retiredControlledGenerations.indexOf(generation) >= 0
-      || ["reserving", "waiting_connection", "waiting_for_pairing", "safety_handshake", "connected", "reconnecting", "refreshing"].indexOf(payload.status) < 0) {
+      || ["reserving", "waiting_connection", "safety_handshake", "connected", "reconnecting", "refreshing"].indexOf(payload.status) < 0) {
       return state;
     }
     var candidate = shallowCopy(state);
@@ -321,8 +316,10 @@
       relayEpoch: relayEpoch || current.relayEpoch,
       generation: generation || current.generation,
       deviceName: payload.deviceName || current.deviceName,
-      lastError: payload.error || payload.errorCode || null,
+      lastError: payload.error || null,
       sessionRef: current.sessionRef,
+      localSessionId: current.localSessionId,
+      mappingConfirmed: current.mappingConfirmed === true,
       sessionId: current.sessionId,
       sessionMode: current.sessionMode,
       capabilityRevision: current.capabilityRevision,
@@ -349,7 +346,6 @@
       next.remoteCapabilities = null;
       next.remoteProxyNotice = null;
       next.remoteProxyCapabilityRevisions = {};
-      next.tasks = [];
       next.controllerConnection.connectionId = null;
       next.controllerConnection.controllerLeaseId = null;
       next.controllerConnection.leaseEpoch = null;
@@ -357,6 +353,8 @@
       next.controllerConnection.generation = null;
       // 终端状态清空会话身份：旧 sessionId 不得被下一次连接复用。
       next.controllerConnection.sessionRef = null;
+      next.controllerConnection.localSessionId = null;
+      next.controllerConnection.mappingConfirmed = false;
       next.controllerConnection.sessionId = null;
       next.controllerConnection.sessionMode = null;
       next.controllerConnection.capabilityRevision = null;
@@ -398,6 +396,8 @@
     if (!/^remote-[A-Za-z0-9._:-]+$/.test(item.localSessionId || "")
       || !item.remoteSessionRef || !item.controlledSessionId
       || ["journal", "snapshot", "terminal", "capability"].indexOf(item.kind) < 0) return state;
+    if (item.localSessionId !== live.localSessionId
+      || item.remoteSessionRef !== live.sessionRef) return state;
     var detail = item.fields && typeof item.fields === "object" ? item.fields : {};
     var revision = Number(detail.capabilityRevision);
     if (item.kind === "capability" && (!Number.isSafeInteger(revision) || revision <= 0)) return state;
@@ -411,6 +411,8 @@
       && previous.sequence === detail.sequence
       && previous.capabilityRevision === (item.kind === "capability" ? revision : null)) return state;
     var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(live);
+    next.controllerConnection.mappingConfirmed = true;
     next.remoteProxyNotice = {
       kind: item.kind,
       localSessionId: String(item.localSessionId),
@@ -422,56 +424,12 @@
       sequence: Number.isSafeInteger(detail.sequence) && detail.sequence >= 0 ? detail.sequence : null,
     };
     if (item.kind === "capability") {
+      next.controllerConnection.capabilityRevision = revision;
+      next.controllerConnection.capabilityStatus = "ready";
+      next.controllerConnection.capabilityError = null;
       next.remoteProxyCapabilityRevisions = shallowCopy(state.remoteProxyCapabilityRevisions || {});
       next.remoteProxyCapabilityRevisions[item.localSessionId] = revision;
     }
-    next.revision = state.revision + 1;
-    return next;
-  }
-
-  /**
-   * Applies the A-side remote session projection (E2E-03). The projection is
-   * produced by Rust and carries the session identity bound to the live lease;
-   * a projection from another connection or an older lease is dropped so a
-   * stale session can never be adopted by the current shell.
-   */
-  function applyControllerSession(state, envelope) {
-    var payload = envelope || {};
-    var sessionRef = payload.sessionRef ? String(payload.sessionRef) : "";
-    var sessionId = payload.sessionId ? String(payload.sessionId) : "";
-    if (!sessionRef || !sessionId) return state;
-    var connectionId = payload.connectionId ? String(payload.connectionId) : "";
-    var leaseEpoch = payload.leaseEpoch != null ? String(payload.leaseEpoch) : "";
-    var current = state.controllerConnection;
-    if (CONTROLLER_TERMINAL[current.status]) return state;
-    if (!current.connectionId || (connectionId && connectionId !== current.connectionId)) return state;
-    if (
-      current.leaseEpoch &&
-      leaseEpoch &&
-      Number(leaseEpoch) < Number(current.leaseEpoch)
-    ) {
-      return state;
-    }
-    var revision = payload.capabilityRevision == null ? null : Number(payload.capabilityRevision);
-    var next = shallowCopy(state);
-    next.controllerConnection = shallowCopy(current);
-    next.controllerConnection.sessionRef = sessionRef;
-    next.controllerConnection.sessionId = sessionId;
-    next.controllerConnection.sessionMode = payload.mode ? String(payload.mode) : current.sessionMode;
-    next.controllerConnection.capabilityRevision = revision;
-    next.controllerConnection.capabilityError = payload.capabilityError
-      ? String(payload.capabilityError)
-      : null;
-    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId
-      ? String(payload.capabilityRequestId)
-      : null;
-    next.controllerConnection.capabilityValidForMs = payload.capabilityValidForMs == null
-      ? null
-      : Number(payload.capabilityValidForMs);
-    next.controllerConnection.temporaryModelAvailable = payload.temporaryModelAvailable === true;
-    next.controllerConnection.capabilityStatus = next.controllerConnection.capabilityError
-      ? "error"
-      : (revision != null ? "ready" : "idle");
     next.revision = state.revision + 1;
     return next;
   }
@@ -547,9 +505,8 @@
   var MAX_TRANSCRIPT_ENTRIES = 200;
 
   /**
-   * E2E-05/E2E-07: projects one authoritative journal envelope (event or
-   * snapshot) into the A-side transcript. Entries are deduplicated by
-   * session+epoch+sequence and every payload is treated as plain text.
+   * B-side UI projection for the authoritative local Session timeline.
+   * A-side history is read only from SessionStore.RemoteProxy.
    */
   function applyJournalEventTo(state, envelope, transcriptField) {
     var payload = envelope || {};
@@ -588,10 +545,6 @@
     updated[transcriptField] = list;
     updated.revision = state.revision + 1;
     return updated;
-  }
-
-  function applyJournalEvent(state, envelope) {
-    return applyJournalEventTo(state, envelope, "transcript");
   }
 
   function applyControlledJournalEvent(state, envelope) {
@@ -642,23 +595,6 @@
     return next;
   }
 
-  function applyHistories(state, histories) {
-    if (!Array.isArray(histories)) return state;
-    var next = shallowCopy(state);
-    next.remoteHistories = histories.slice(0, 64).map(function (record) {
-      return {
-        historyId: String(record && record.historyId ? record.historyId : ""),
-        title: String(record && record.title ? record.title : ""),
-        deviceDisplayName: String(record && record.deviceDisplayName ? record.deviceDisplayName : ""),
-        state: String(record && record.state ? record.state : "offline_copy"),
-        lastSequence: Number(record && record.lastSequence ? record.lastSequence : 0),
-        lastTerminalStatus: record && record.lastTerminalStatus ? String(record.lastTerminalStatus) : null,
-      };
-    });
-    next.revision = state.revision + 1;
-    return next;
-  }
-
   function capabilityDescriptors(entries, idField, limit, workspace) {
     if (!Array.isArray(entries)) return [];
     return entries.slice(0, limit).filter(function (entry) {
@@ -701,6 +637,97 @@
     return next;
   }
 
+  function applyRemoteProxyBinding(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    var localSessionId = String(payload.localSessionId || "");
+    var remoteRef = String(payload.remoteSessionRef || "");
+    if (current.status !== "connected" || state.controllerFenced
+      || localSessionId.length > 128 || !/^remote-[A-Za-z0-9._:-]+$/.test(localSessionId)
+      || !/^[A-Za-z0-9._:-]{1,128}$/.test(remoteRef)
+      || !payload.sessionId || payload.mode !== "chat"
+      || String(payload.connectionId || "") !== String(current.connectionId || "")
+      || String(payload.controllerLeaseId || "") !== String(current.controllerLeaseId || "")
+      || String(payload.leaseEpoch || "") !== String(current.leaseEpoch || "")
+      || String(payload.relayEpoch || "") !== String(current.relayEpoch || "")
+      || String(payload.remoteControlGeneration || "") !== String(current.generation || "")
+      || !current.connectionId || !current.controllerLeaseId || !current.leaseEpoch
+      || !current.relayEpoch || !current.generation) return state;
+    if (current.sessionRef && current.sessionRef !== remoteRef) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.localSessionId = localSessionId;
+    next.controllerConnection.sessionRef = remoteRef;
+    next.controllerConnection.mappingConfirmed = payload.mappingConfirmed === true;
+    next.controllerConnection.sessionId = String(payload.sessionId);
+    next.controllerConnection.sessionMode = "chat";
+    next.controllerConnection.capabilityRevision = Number.isSafeInteger(payload.capabilityRevision)
+      && payload.capabilityRevision > 0 ? payload.capabilityRevision : null;
+    next.controllerConnection.capabilityValidForMs = payload.capabilityValidForMs == null
+      ? null : Number(payload.capabilityValidForMs);
+    next.controllerConnection.capabilityError = payload.capabilityError || null;
+    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId || null;
+    next.controllerConnection.capabilityStatus = next.controllerConnection.capabilityError
+      ? "error" : (next.controllerConnection.capabilityRevision == null ? "idle" : "ready");
+    next.controllerConnection.temporaryModelAvailable = payload.temporaryModelAvailable === true;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function matchesRemoteProxyCapabilityBinding(state, envelope) {
+    var payload = envelope || {};
+    var live = state.controllerConnection || {};
+    return (live.status === "connected" || live.status === "reconnecting")
+      && !!live.localSessionId && !!live.sessionRef && !!live.sessionId
+      && !!live.connectionId && !!live.controllerLeaseId && !!live.leaseEpoch
+      && !!live.relayEpoch && !!live.generation
+      && String(payload.localSessionId || "") === live.localSessionId
+      && String(payload.remoteSessionRef || "") === live.sessionRef
+      && String(payload.sessionId || "") === live.sessionId
+      && String(payload.connectionId || "") === live.connectionId
+      && String(payload.controllerLeaseId || "") === live.controllerLeaseId
+      && String(payload.leaseEpoch || "") === live.leaseEpoch
+      && String(payload.relayEpoch || "") === live.relayEpoch
+      && String(payload.remoteControlGeneration || "") === live.generation
+      && /^[A-Za-z0-9._:-]{1,128}$/.test(String(payload.capabilityRequestId || ""));
+  }
+
+  function applyRemoteProxyCapabilityResult(state, envelope) {
+    if (!matchesRemoteProxyCapabilityBinding(state, envelope)) return state;
+    var payload = envelope;
+    var current = state.controllerConnection;
+    var errorCode = String(payload.capabilityError || "");
+    var revision = Number(payload.capabilityRevision);
+    var confirmed = payload.mappingConfirmed === true && !errorCode
+      && Number.isSafeInteger(revision) && revision > 0;
+    if (confirmed && current.capabilityRevision != null
+      && revision < current.capabilityRevision) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    // Mapping is a distinct B-authoritative fact. A renewal can fail after
+    // the mapping was already confirmed; the capability still fails closed.
+    next.controllerConnection.mappingConfirmed = payload.mappingConfirmed === true;
+    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId;
+    next.controllerConnection.capabilityRevision = confirmed ? revision : null;
+    next.controllerConnection.capabilityStatus = confirmed ? "ready" : "error";
+    next.controllerConnection.capabilityError = confirmed
+      ? null : (errorCode || "capability_snapshot_unavailable");
+    next.controllerConnection.capabilityValidForMs = confirmed
+      && Number.isSafeInteger(payload.capabilityValidForMs)
+      && payload.capabilityValidForMs > 0 ? payload.capabilityValidForMs : null;
+    next.controllerConnection.temporaryModelAvailable = confirmed
+      && payload.temporaryModelAvailable === true;
+    if (confirmed) {
+      next.remoteProxyCapabilityRevisions = shallowCopy(state.remoteProxyCapabilityRevisions || {});
+      next.remoteProxyCapabilityRevisions[payload.localSessionId] = Math.max(
+        next.remoteProxyCapabilityRevisions[payload.localSessionId] || 0, revision,
+      );
+    }
+    if (!confirmed) next.remoteCapabilities = null;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
   var PROJECTION_KINDS = {
     user_message: true, assistant_message: true, reasoning: true, tool: true,
     approval: true, status: true, error: true, attachment: true,
@@ -709,7 +736,15 @@
 
   function projectRemoteProxyRead(state, record) {
     if (!record || !remoteProxyId(record.localSessionId)
-      || !Array.isArray(record.entries) || record.entries.length > 512) return state;
+      || !Array.isArray(record.entries) || record.entries.length > 512
+      || !Number.isSafeInteger(record.pendingUnknownCount) || record.pendingUnknownCount < 0
+      || !Array.isArray(record.unattemptedPending) || record.unattemptedPending.length > 128
+      || record.unattemptedPending.some(function (item) {
+        return !item || item.dispatchState !== "prepared_never_attempted"
+          || !/^[A-Za-z0-9._:-]{1,128}$/.test(item.taskId || "")
+          || !/^[A-Za-z0-9._:-]{1,128}$/.test(item.clientRequestId || "")
+          || !/^[a-fA-F0-9]{64}$/.test(item.requestFingerprint || "");
+      })) return state;
     var next = shallowCopy(state);
     next.remoteProxyHistory = {
       localSessionId: record.localSessionId,
@@ -723,8 +758,15 @@
             journalEpoch: projectionText(record.authenticatedCursor.journalEpoch, 128),
             sequence: record.authenticatedCursor.sequence,
           } : null,
-      pendingUnknownCount: Number.isSafeInteger(record.pendingUnknownCount)
-        && record.pendingUnknownCount >= 0 ? record.pendingUnknownCount : 0,
+      pendingUnknownCount: record.pendingUnknownCount,
+      unattemptedPending: record.unattemptedPending.map(function (item) {
+        return {
+          taskId: item.taskId,
+          clientRequestId: item.clientRequestId,
+          requestFingerprint: item.requestFingerprint,
+          dispatchState: item.dispatchState,
+        };
+      }),
       entries: record.entries.filter(function (entry) {
         return entry && typeof entry.journalEpoch === "string"
           && Number.isSafeInteger(entry.sequence) && entry.sequence >= 0
@@ -772,6 +814,9 @@
    * committed terminal state.
    */
   function applyTaskEventTo(state, event, tasksField) {
+    // Current B sources intentionally differ: the encrypted task_status
+    // protocol uses snake_case, while local admitted/executor projections
+    // emitted by the same Rust task service use camelCase.
     var payload = event || {};
     var taskIdValue = payload.taskId || payload.task_id;
     var statusValue = payload.status || payload.taskStatus || payload.task_status;
@@ -847,10 +892,6 @@
     next[tasksField] = tasks;
     next.revision = state.revision + 1;
     return next;
-  }
-
-  function applyTaskEvent(state, event) {
-    return applyTaskEventTo(state, event, "tasks");
   }
 
   function applyControlledTaskEvent(state, event) {
@@ -935,18 +976,17 @@
     applyControllerStatus: applyControllerStatus,
     reconcileControllerOpenStatus: reconcileControllerOpenStatus,
     applyRemoteProxyNotice: applyRemoteProxyNotice,
-    applyControllerSession: applyControllerSession,
+    applyRemoteProxyBinding: applyRemoteProxyBinding,
+    matchesRemoteProxyCapabilityBinding: matchesRemoteProxyCapabilityBinding,
+    applyRemoteProxyCapabilityResult: applyRemoteProxyCapabilityResult,
     applyCapabilityPending: applyCapabilityPending,
     applyCapabilityFailure: applyCapabilityFailure,
     applyCapabilities: applyCapabilities,
-    applyJournalEvent: applyJournalEvent,
     applyControlledJournalEvent: applyControlledJournalEvent,
     applyModels: applyModels,
-    applyHistories: applyHistories,
     projectRemoteProxyList: projectRemoteProxyList,
     projectRemoteProxyRead: projectRemoteProxyRead,
     hideRemoteProxyHistory: hideRemoteProxyHistory,
-    applyTaskEvent: applyTaskEvent,
     applyControlledTaskEvent: applyControlledTaskEvent,
     applyTaskContent: applyTaskContent,
     matchesLiveContext: matchesLiveContext,

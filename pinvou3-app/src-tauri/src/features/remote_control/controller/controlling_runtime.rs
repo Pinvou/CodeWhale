@@ -56,6 +56,8 @@ pub(crate) enum ControllingStageEvent {
 #[derive(Debug)]
 pub(crate) struct ControllingHandshakeOutcome {
     pub(crate) lease: JoinedLease,
+    pub(crate) peer_endpoint_id: String,
+    pub(crate) reservation_id: String,
     pub(crate) negotiated_capabilities: Vec<String>,
     pub(crate) transcript_hash: [u8; 32],
     /// 会话密钥：握手的最终产物，只在调用方导入加密业务通道时使用一次。
@@ -77,7 +79,8 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     mut on_stage: impl FnMut(ControllingStageEvent) -> Result<(), HandshakeError>,
 ) -> Result<ControllingHandshakeOutcome, HandshakeError> {
     let claim = handshake.claim()?;
-    port.send(claim).map_err(|_| HandshakeError::new("controller_claim_failed"))?;
+    port.send(claim)
+        .map_err(|_| HandshakeError::new("controller_claim_failed"))?;
     on_stage(ControllingStageEvent::ClaimSent)?;
 
     // 1) 等 controller_pairing_reserved，产出本端 commit。
@@ -113,6 +116,8 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
         .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
     Ok(ControllingHandshakeOutcome {
         lease,
+        peer_endpoint_id: handshake.peer_endpoint_id().to_owned(),
+        reservation_id: handshake.reservation_id().to_owned(),
         negotiated_capabilities: handshake.negotiated_capabilities().to_vec(),
         transcript_hash,
         session,
@@ -265,13 +270,11 @@ mod tests {
             inbound: VecDeque::from(vec![reserved]),
             outbound: Vec::new(),
         };
-        let error = drive_controlling_handshake(&mut port, &mut handshake, |event| {
-            match event {
-                ControllingStageEvent::Reserved { .. } => {
-                    Err(HandshakeError::new("controller_generation_bind_failed"))
-                }
-                _ => Ok(()),
+        let error = drive_controlling_handshake(&mut port, &mut handshake, |event| match event {
+            ControllingStageEvent::Reserved { .. } => {
+                Err(HandshakeError::new("controller_generation_bind_failed"))
             }
+            _ => Ok(()),
         })
         .await
         .unwrap_err();
@@ -352,12 +355,9 @@ mod tests {
             "resume_token_b64": base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
             "resume_deadline_ms": "30000",
         });
-        let peer = super::super::controlled_handshake::ControlledHandshake::new(
-            &reserved,
-            b_keys,
-            &trust,
-        )
-        .unwrap();
+        let peer =
+            super::super::controlled_handshake::ControlledHandshake::new(&reserved, b_keys, &trust)
+                .unwrap();
         let mut a = ControllingHandshake::new(
             reserved["request_id"].as_str().unwrap(),
             "claim-0001",

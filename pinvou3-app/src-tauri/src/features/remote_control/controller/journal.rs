@@ -11,19 +11,18 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use super::ports::RemoteSessionProjectionPort;
 use super::task::RemoteTaskEvent;
 #[cfg(test)]
 use super::task::RemoteTaskEventSink;
 
-pub(crate) const JOURNAL_CAPACITY: usize = 1024;
+/// Must not exceed SessionStore.RemoteProxy's authenticated projection window.
+pub(crate) const JOURNAL_CAPACITY: usize = 512;
 // Count complete serialized events plus the maximum B-session -> A-ref
 // expansion. A 256 KiB window remains below the 512 KiB plaintext ceiling
 // after snapshot JSON and base64 framing.
@@ -257,141 +256,6 @@ struct JournalInner {
     acknowledged: u64,
 }
 
-/// A-side synchronization decisions come from the durable SessionStore
-/// cursor, never a second in-memory acknowledgement counter.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum SyncPlan {
-    Apply,
-    Duplicate,
-    Replay { epoch: String, after: u64 },
-    SnapshotRequired,
-    StaleEpoch,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) enum SyncOutcome {
-    Applied,
-    Duplicate,
-    Replay { epoch: String, after: u64 },
-    SnapshotRequired,
-    StaleEpoch,
-}
-
-/// The application adapter delegates this contract to sessions' neutral
-/// journal planner. `confirmed_cursor` must read the same authoritative store
-/// that the projection port wrote, checking the exact live/B binding as well
-/// as epoch and sequence before the caller may ACK.
-pub(crate) trait DurableJournalCursorPort: Send + Sync {
-    type Scope: Send + Sync;
-    fn plan_event(
-        &self,
-        scope: &Self::Scope,
-        epoch: &str,
-        sequence: u64,
-    ) -> std::result::Result<SyncPlan, String>;
-    fn plan_snapshot(
-        &self,
-        scope: &Self::Scope,
-        epoch: &str,
-        base_sequence: u64,
-    ) -> std::result::Result<SyncPlan, String>;
-    fn confirmed_cursor(
-        &self,
-        scope: &Self::Scope,
-        epoch: &str,
-        sequence: u64,
-    ) -> std::result::Result<bool, String>;
-}
-
-/// Serializes snapshot and incremental projection for one A sync stream.
-/// Each accepted event crosses the DEV-30 projection port exactly once; an
-/// `Ok` alone is insufficient until the durable cursor is confirmed.
-pub(crate) struct RemoteJournalSyncCoordinator<P, C> {
-    projection: Arc<P>,
-    cursor: Arc<C>,
-    gate: tokio::sync::Mutex<()>,
-}
-
-impl<P, C> RemoteJournalSyncCoordinator<P, C>
-where
-    P: RemoteSessionProjectionPort,
-    C: DurableJournalCursorPort,
-{
-    pub(crate) fn new(projection: Arc<P>, cursor: Arc<C>) -> Self {
-        Self {
-            projection,
-            cursor,
-            gate: tokio::sync::Mutex::new(()),
-        }
-    }
-
-    pub(crate) async fn project_event(
-        &self,
-        scope: &C::Scope,
-        epoch: &str,
-        sequence: u64,
-        authenticated: P::Event,
-    ) -> std::result::Result<SyncOutcome, String> {
-        self.project(scope, epoch, sequence, authenticated, false)
-            .await
-    }
-
-    pub(crate) async fn project_snapshot(
-        &self,
-        scope: &C::Scope,
-        epoch: &str,
-        base_sequence: u64,
-        authenticated: P::Event,
-    ) -> std::result::Result<SyncOutcome, String> {
-        self.project(scope, epoch, base_sequence, authenticated, true)
-            .await
-    }
-
-    async fn project(
-        &self,
-        scope: &C::Scope,
-        epoch: &str,
-        sequence: u64,
-        authenticated: P::Event,
-        snapshot: bool,
-    ) -> std::result::Result<SyncOutcome, String> {
-        let _gate = self.gate.lock().await;
-        let plan = if snapshot {
-            self.cursor.plan_snapshot(scope, epoch, sequence)?
-        } else {
-            self.cursor.plan_event(scope, epoch, sequence)?
-        };
-        match plan {
-            SyncPlan::Apply => {
-                self.projection
-                    .project_authenticated(authenticated)
-                    .await
-                    .map_err(|error| error.code().to_owned())?;
-                if !self.cursor.confirmed_cursor(scope, epoch, sequence)? {
-                    return Err("remote_journal_cursor_unconfirmed".to_owned());
-                }
-                Ok(SyncOutcome::Applied)
-            }
-            SyncPlan::Duplicate => {
-                // Cursor equality alone does not prove immutable content:
-                // route the duplicate through DEV-30's key/content conflict
-                // check. Its Unchanged path performs no write or UI notify.
-                self.projection
-                    .project_authenticated(authenticated)
-                    .await
-                    .map_err(|error| error.code().to_owned())?;
-                if !self.cursor.confirmed_cursor(scope, epoch, sequence)? {
-                    return Err("remote_journal_cursor_unconfirmed".to_owned());
-                }
-                Ok(SyncOutcome::Duplicate)
-            }
-            SyncPlan::Replay { epoch, after } => Ok(SyncOutcome::Replay { epoch, after }),
-            SyncPlan::SnapshotRequired => Ok(SyncOutcome::SnapshotRequired),
-            SyncPlan::StaleEpoch => Ok(SyncOutcome::StaleEpoch),
-        }
-    }
-}
-
 struct JournalState {
     epoch_seed: String,
     epoch: String,
@@ -528,36 +392,6 @@ impl RemoteJournal {
             .map_or(0, |stream| stream.events.len())
     }
 
-    // Legacy test fixtures use one fixed B session. Production callers must
-    // always choose the authenticated session-scoped APIs above/below.
-    #[cfg(test)]
-    pub(crate) fn last_sequence(&self) -> u64 {
-        self.last_sequence_for("session-0001")
-    }
-    #[cfg(test)]
-    pub(crate) fn acknowledged(&self) -> u64 {
-        self.acknowledged_for("session-0001")
-    }
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.len_for("session-0001")
-    }
-    #[cfg(test)]
-    pub(crate) fn replay_after(&self, epoch: &str, sequence: u64) -> ReplayOutcome {
-        self.replay_after_for("session-0001", epoch, sequence)
-            .unwrap()
-    }
-    #[cfg(test)]
-    pub(crate) fn snapshot(&self) -> JournalSnapshot {
-        self.snapshot_for("session-0001").unwrap()
-    }
-    #[cfg(test)]
-    pub(crate) fn acknowledge(&self, sequence: u64) {
-        let epoch = self.epoch();
-        self.acknowledge_for("session-0001", &epoch, sequence)
-            .unwrap();
-    }
-
     #[cfg(test)]
     pub(crate) fn append(
         &self,
@@ -580,8 +414,16 @@ impl RemoteJournal {
         task_id: Option<&str>,
         payload: Value,
     ) -> Result<JournalEvent> {
-        self.append_inner(Some(generation), event_id, kind, session_id, task_id, payload, None)?
-            .ok_or_else(|| error("journal_kind_not_exportable"))
+        self.append_inner(
+            Some(generation),
+            event_id,
+            kind,
+            session_id,
+            task_id,
+            payload,
+            None,
+        )?
+        .ok_or_else(|| error("journal_kind_not_exportable"))
     }
 
     /// Terminal CAS: only the first terminal state of a task is journaled, and
@@ -725,11 +567,9 @@ impl RemoteJournal {
         event.validate_exportable()?;
         // A's opaque remote ref may be up to 128 bytes longer than B's local
         // ID. Reserve that headroom before consuming a visible sequence.
-        let event_bytes = serde_json::to_vec(&event)
-            .map_err(|_| error("journal_payload_invalid"))?;
-        if event_bytes.len()
-            > MAX_EVENT_PAYLOAD_BYTES - MAX_SESSION_ID_CHARS
-        {
+        let event_bytes =
+            serde_json::to_vec(&event).map_err(|_| error("journal_payload_invalid"))?;
+        if event_bytes.len() > MAX_EVENT_PAYLOAD_BYTES - MAX_SESSION_ID_CHARS {
             return Err(error("journal_payload_too_large"));
         }
         inner.sequence = next_sequence;
@@ -907,9 +747,7 @@ impl RemoteJournal {
 
 #[cfg(test)]
 mod dev19_contract_tests {
-    use super::super::ports::{RemotePortError, RemotePortFuture};
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn b_sessions_have_isolated_sequences_windows_and_acknowledgements() {
@@ -1061,6 +899,13 @@ mod dev19_contract_tests {
                 )
                 .unwrap();
         }
+        let bounded = journal.snapshot_for("session-a").unwrap();
+        assert_eq!(JOURNAL_CAPACITY, 512);
+        assert_eq!(bounded.events.len(), 512);
+        assert_eq!(bounded.events.first().unwrap().sequence, 2);
+        assert_eq!(bounded.events.last().unwrap().sequence, 513);
+        assert_eq!(bounded.sequence, 513);
+        assert!(bounded.verify_digest());
         assert!(
             matches!(journal.replay_after_for("session-a", "epoch-1", 0).unwrap(),
             ReplayOutcome::Gap(snapshot) if snapshot.verify_digest())
@@ -1126,272 +971,6 @@ mod dev19_contract_tests {
         );
     }
 
-    #[derive(Clone)]
-    struct FakeEvent {
-        scope: String,
-        epoch: String,
-        sequence: u64,
-        body: String,
-        snapshot: bool,
-    }
-    #[derive(Default)]
-    struct FakeState {
-        current: HashMap<String, (String, u64, HashMap<u64, String>)>,
-        retired: HashMap<String, HashSet<String>>,
-    }
-    struct FakeProjection {
-        state: Arc<Mutex<FakeState>>,
-        calls: AtomicUsize,
-        inserts: AtomicUsize,
-        fail: AtomicBool,
-        omit_commit: AtomicBool,
-    }
-    impl RemoteSessionProjectionPort for FakeProjection {
-        type Event = FakeEvent;
-        type Projection = ();
-        fn project_authenticated(&self, event: FakeEvent) -> RemotePortFuture<'_, ()> {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                if self.fail.load(Ordering::SeqCst) {
-                    return Err(RemotePortError::new("projection_failed", true));
-                }
-                if self.omit_commit.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                let mut state = self.state.lock();
-                let existing = state.current.get(&event.scope).cloned();
-                if let Some((epoch, _, entries)) = &existing {
-                    if epoch == &event.epoch {
-                        if let Some(body) = entries.get(&event.sequence) {
-                            if body == &event.body {
-                                return Ok(());
-                            }
-                            return Err(RemotePortError::new("projection_conflict", false));
-                        }
-                    }
-                }
-                if event.snapshot {
-                    if let Some((old_epoch, _, _)) = existing {
-                        if old_epoch != event.epoch {
-                            state
-                                .retired
-                                .entry(event.scope.clone())
-                                .or_default()
-                                .insert(old_epoch);
-                        }
-                    }
-                    state.current.insert(
-                        event.scope,
-                        (
-                            event.epoch,
-                            event.sequence,
-                            HashMap::from([(event.sequence, event.body)]),
-                        ),
-                    );
-                } else {
-                    let stream = state
-                        .current
-                        .entry(event.scope)
-                        .or_insert_with(|| (event.epoch.clone(), 0, HashMap::new()));
-                    if stream.0 != event.epoch || event.sequence != stream.1 + 1 {
-                        return Err(RemotePortError::new("projection_gap", false));
-                    }
-                    stream.1 = event.sequence;
-                    stream.2.insert(event.sequence, event.body);
-                }
-                self.inserts.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-        }
-    }
-    struct FakeCursor {
-        state: Arc<Mutex<FakeState>>,
-    }
-    impl DurableJournalCursorPort for FakeCursor {
-        type Scope = String;
-        fn plan_event(
-            &self,
-            scope: &String,
-            epoch: &str,
-            sequence: u64,
-        ) -> std::result::Result<SyncPlan, String> {
-            let state = self.state.lock();
-            if state
-                .retired
-                .get(scope)
-                .is_some_and(|epochs| epochs.contains(epoch))
-            {
-                return Ok(SyncPlan::StaleEpoch);
-            }
-            let Some((current_epoch, last, _)) = state.current.get(scope) else {
-                return Ok(if sequence == 1 {
-                    SyncPlan::Apply
-                } else {
-                    SyncPlan::Replay {
-                        epoch: epoch.into(),
-                        after: 0,
-                    }
-                });
-            };
-            Ok(if current_epoch != epoch {
-                SyncPlan::Replay {
-                    epoch: epoch.into(),
-                    after: 0,
-                }
-            } else if sequence <= *last {
-                SyncPlan::Duplicate
-            } else if sequence == last + 1 {
-                SyncPlan::Apply
-            } else {
-                SyncPlan::Replay {
-                    epoch: epoch.into(),
-                    after: *last,
-                }
-            })
-        }
-        fn plan_snapshot(
-            &self,
-            scope: &String,
-            epoch: &str,
-            base: u64,
-        ) -> std::result::Result<SyncPlan, String> {
-            let state = self.state.lock();
-            if state
-                .retired
-                .get(scope)
-                .is_some_and(|epochs| epochs.contains(epoch))
-            {
-                return Ok(SyncPlan::StaleEpoch);
-            }
-            Ok(match state.current.get(scope) {
-                Some((current_epoch, last, _)) if current_epoch == epoch && base <= *last => {
-                    SyncPlan::Duplicate
-                }
-                _ => SyncPlan::Apply,
-            })
-        }
-        fn confirmed_cursor(
-            &self,
-            scope: &String,
-            epoch: &str,
-            sequence: u64,
-        ) -> std::result::Result<bool, String> {
-            Ok(self
-                .state
-                .lock()
-                .current
-                .get(scope)
-                .is_some_and(|(e, n, _)| e == epoch && *n >= sequence))
-        }
-    }
-
-    #[tokio::test]
-    async fn coordinator_confirms_durable_port_and_checks_duplicate_content() {
-        let state = Arc::new(Mutex::new(FakeState::default()));
-        let port = Arc::new(FakeProjection {
-            state: state.clone(),
-            calls: AtomicUsize::new(0),
-            inserts: AtomicUsize::new(0),
-            fail: AtomicBool::new(false),
-            omit_commit: AtomicBool::new(false),
-        });
-        let coordinator =
-            RemoteJournalSyncCoordinator::new(port.clone(), Arc::new(FakeCursor { state }));
-        let scope = "remote-a".to_owned();
-        let event = |sequence, body: &str| FakeEvent {
-            scope: scope.clone(),
-            epoch: "epoch-1".into(),
-            sequence,
-            body: body.into(),
-            snapshot: false,
-        };
-        port.fail.store(true, Ordering::SeqCst);
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 1, event(1, "one"))
-                .await
-                .unwrap_err(),
-            "projection_failed"
-        );
-        port.fail.store(false, Ordering::SeqCst);
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 1, event(1, "one"))
-                .await
-                .unwrap(),
-            SyncOutcome::Applied
-        );
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 1, event(1, "one"))
-                .await
-                .unwrap(),
-            SyncOutcome::Duplicate
-        );
-        assert_eq!(port.inserts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 1, event(1, "changed"))
-                .await
-                .unwrap_err(),
-            "projection_conflict"
-        );
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 3, event(3, "three"))
-                .await
-                .unwrap(),
-            SyncOutcome::Replay {
-                epoch: "epoch-1".into(),
-                after: 1
-            }
-        );
-        port.omit_commit.store(true, Ordering::SeqCst);
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 2, event(2, "two"))
-                .await
-                .unwrap_err(),
-            "remote_journal_cursor_unconfirmed"
-        );
-        port.omit_commit.store(false, Ordering::SeqCst);
-        let snapshot = FakeEvent {
-            scope: scope.clone(),
-            epoch: "epoch-2".into(),
-            sequence: 4,
-            body: "snap".into(),
-            snapshot: true,
-        };
-        assert_eq!(
-            coordinator
-                .project_snapshot(&scope, "epoch-2", 4, snapshot)
-                .await
-                .unwrap(),
-            SyncOutcome::Applied
-        );
-        let next = FakeEvent {
-            scope: scope.clone(),
-            epoch: "epoch-2".into(),
-            sequence: 5,
-            body: "next".into(),
-            snapshot: false,
-        };
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-2", 5, next)
-                .await
-                .unwrap(),
-            SyncOutcome::Applied
-        );
-        assert_eq!(
-            coordinator
-                .project_event(&scope, "epoch-1", 1, event(1, "one"))
-                .await
-                .unwrap(),
-            SyncOutcome::StaleEpoch
-        );
-    }
-
     #[test]
     fn generation_check_and_journal_operation_share_one_lock() {
         use std::sync::{Arc, Barrier};
@@ -1420,31 +999,50 @@ mod dev19_contract_tests {
                 ready.wait();
                 switched.wait();
                 journal.append_for_generation(
-                    "generation-1", "event-late", JournalKind::UserMessage,
-                    "session-a", None, json!({"text":"must-not-land"}),
+                    "generation-1",
+                    "event-late",
+                    JournalKind::UserMessage,
+                    "session-a",
+                    None,
+                    json!({"text":"must-not-land"}),
                 )
             })
         };
         ready.wait();
         let second_epoch = journal.bind_generation("generation-2").unwrap();
         switched.wait();
-        assert_eq!(old_writer.join().unwrap().unwrap_err().code, "journal_generation_stale");
+        assert_eq!(
+            old_writer.join().unwrap().unwrap_err().code,
+            "journal_generation_stale"
+        );
         assert_ne!(first_epoch, second_epoch);
         for operation in [
-            journal.replay_after_for_generation("generation-1", "session-a", &second_epoch, 0).map(|_| ()),
-            journal.snapshot_for_generation("generation-1", "session-a").map(|_| ()),
-            journal.acknowledge_for_generation("generation-1", "session-a", &second_epoch, 1).map(|_| ()),
+            journal
+                .replay_after_for_generation("generation-1", "session-a", &second_epoch, 0)
+                .map(|_| ()),
+            journal
+                .snapshot_for_generation("generation-1", "session-a")
+                .map(|_| ()),
+            journal
+                .acknowledge_for_generation("generation-1", "session-a", &second_epoch, 1)
+                .map(|_| ()),
         ] {
             assert_eq!(operation.unwrap_err().code, "journal_generation_stale");
         }
         let new = journal
             .append_for_generation(
-                "generation-2", "event-new", JournalKind::UserMessage,
-                "session-a", None, json!({"text":"new"}),
+                "generation-2",
+                "event-new",
+                JournalKind::UserMessage,
+                "session-a",
+                None,
+                json!({"text":"new"}),
             )
             .unwrap();
         assert_eq!(new.sequence, 1);
-        let snapshot = journal.snapshot_for_generation("generation-2", "session-a").unwrap();
+        let snapshot = journal
+            .snapshot_for_generation("generation-2", "session-a")
+            .unwrap();
         assert_eq!(snapshot.events, vec![new]);
     }
 }
@@ -1506,11 +1104,20 @@ impl RemoteJournal {
         );
         let result = match generation {
             Some(generation) => self.append_terminal_for_generation(
-                generation, &event_id, &event.session_id, &event.task_id, &event.status, payload,
+                generation,
+                &event_id,
+                &event.session_id,
+                &event.task_id,
+                &event.status,
+                payload,
             ),
             #[cfg(test)]
             None => self.append_terminal(
-                &event_id, &event.session_id, &event.task_id, &event.status, payload,
+                &event_id,
+                &event.session_id,
+                &event.task_id,
+                &event.status,
+                payload,
             ),
             #[cfg(not(test))]
             None => return None,
@@ -1778,7 +1385,10 @@ mod tests {
                 )
                 .unwrap();
         }
-        match journal.replay_after("epoch-1", 2) {
+        match journal
+            .replay_after_for("session-0001", "epoch-1", 2)
+            .unwrap()
+        {
             ReplayOutcome::Events(events) => {
                 assert_eq!(events.len(), 3);
                 assert_eq!(events[0].sequence, 3);
@@ -1787,7 +1397,9 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(matches!(
-            journal.replay_after("epoch-other", 2),
+            journal
+                .replay_after_for("session-0001", "epoch-other", 2)
+                .unwrap(),
             ReplayOutcome::Gap(_)
         ));
     }
@@ -1806,14 +1418,39 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(journal.len() <= JOURNAL_CAPACITY);
-        match journal.replay_after("epoch-1", 1) {
+        assert!(journal.len_for("session-0001") <= JOURNAL_CAPACITY);
+        match journal
+            .replay_after_for("session-0001", "epoch-1", 1)
+            .unwrap()
+        {
             ReplayOutcome::Gap(snapshot) => {
                 assert_eq!(snapshot.epoch, "epoch-1");
                 assert!(!snapshot.digest.is_empty());
             }
             ReplayOutcome::Events(_) => panic!("an old gap must not replay partially"),
         }
+    }
+
+    #[test]
+    fn byte_budget_produces_valid_shorter_snapshot_at_same_cursor() {
+        let journal = RemoteJournal::new("epoch-1");
+        let body = "x".repeat(8 * 1024);
+        for sequence in 1..=40 {
+            journal
+                .append(
+                    &format!("event-{sequence}"),
+                    JournalKind::AssistantDelta,
+                    "session-a",
+                    Some("task-1"),
+                    json!({"text": body}),
+                )
+                .unwrap();
+        }
+        let snapshot = journal.snapshot_for("session-a").unwrap();
+        assert!(snapshot.events.len() < 40);
+        assert_eq!(snapshot.sequence, 40);
+        assert_eq!(snapshot.events.last().unwrap().sequence, 40);
+        assert!(snapshot.verify_digest());
     }
 
     #[test]
@@ -1838,7 +1475,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first.sequence, replay.sequence);
-        assert_eq!(journal.len(), 1);
+        assert_eq!(journal.len_for("session-0001"), 1);
     }
 
     #[test]
@@ -1863,7 +1500,7 @@ mod tests {
             )
             .unwrap();
         assert!(second.is_none());
-        let snapshot = journal.snapshot();
+        let snapshot = journal.snapshot_for("session-0001").unwrap();
         let terminals: Vec<&str> = snapshot
             .events
             .iter()
@@ -1988,12 +1625,14 @@ mod tests {
             )
             .unwrap();
         journal.reset("epoch-2");
-        let snapshot = journal.snapshot();
+        let snapshot = journal.snapshot_for("session-0001").unwrap();
         assert_eq!(snapshot.epoch, "epoch-2");
         assert_eq!(snapshot.sequence, 0);
         assert!(snapshot.events.is_empty());
         assert!(matches!(
-            journal.replay_after("epoch-1", 0),
+            journal
+                .replay_after_for("session-0001", "epoch-1", 0)
+                .unwrap(),
             ReplayOutcome::Gap(_)
         ));
     }
@@ -2012,12 +1651,18 @@ mod tests {
                 )
                 .unwrap();
         }
-        journal.acknowledge(2);
-        assert_eq!(journal.acknowledged(), 2);
-        journal.acknowledge(1);
-        assert_eq!(journal.acknowledged(), 2);
-        journal.acknowledge(99);
-        assert_eq!(journal.acknowledged(), 3);
+        journal
+            .acknowledge_for("session-0001", "epoch-1", 2)
+            .unwrap();
+        assert_eq!(journal.acknowledged_for("session-0001"), 2);
+        journal
+            .acknowledge_for("session-0001", "epoch-1", 1)
+            .unwrap();
+        assert_eq!(journal.acknowledged_for("session-0001"), 2);
+        journal
+            .acknowledge_for("session-0001", "epoch-1", 99)
+            .unwrap();
+        assert_eq!(journal.acknowledged_for("session-0001"), 3);
     }
 
     #[test]
@@ -2044,7 +1689,7 @@ mod tests {
             terminal_reason: Some("completed".into()),
             result_digest: Some("a".repeat(64)),
         });
-        let snapshot = journal.snapshot();
+        let snapshot = journal.snapshot_for("session-0001").unwrap();
         assert_eq!(snapshot.events.len(), 1);
         assert_eq!(
             snapshot.events[0].terminal_status.as_deref(),
@@ -2069,7 +1714,7 @@ mod tests {
             result_digest: None,
         };
         assert!(journal.record_task_event(&event).is_none());
-        assert_eq!(journal.len(), 0);
+        assert_eq!(journal.len_for("session-0001"), 0);
         let waiting = RemoteTaskEvent {
             status: "waiting_permission".into(),
             transition_sequence: 3,
@@ -2081,7 +1726,7 @@ mod tests {
             ..event.clone()
         };
         assert!(journal.record_task_event(&resumed).is_none());
-        assert_eq!(journal.len(), 0);
+        assert_eq!(journal.len_for("session-0001"), 0);
         // 终态只落一次，冲突的终态不会改写已落库结果。
         let terminal = RemoteTaskEvent {
             status: "succeeded".into(),

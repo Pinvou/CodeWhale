@@ -13,8 +13,6 @@ use super::protocol::LeaseContext;
 use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
 use super::resume::ControllerResumeGate;
 
-const MAX_HISTORY_ENTRIES: usize = 256;
-const MAX_TITLE_CHARS: usize = 120;
 const MAX_DEVICE_NAME_CHARS: usize = 80;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -62,26 +60,6 @@ impl std::fmt::Display for ControllingStateError {
 impl std::error::Error for ControllingStateError {}
 
 type Result<T> = std::result::Result<T, ControllingStateError>;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RemoteHistoryStatus {
-    Active,
-    Completed,
-    Failed,
-    Cancelled,
-    Interrupted,
-}
-
-#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RemoteHistoryEntry {
-    history_id: String,
-    title: String,
-    device_display_name: String,
-    status: RemoteHistoryStatus,
-    b_session_reference: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +111,9 @@ impl std::fmt::Debug for ControllingStatus {
 #[derive(Clone)]
 pub(crate) struct ControllerLease {
     pub(crate) context: LeaseContext,
+    /// B endpoint and pairing reservation are covered by the verified Relay transcript.
+    pub(crate) peer_endpoint_id: String,
+    pub(crate) reservation_id: String,
     pub(crate) device_display_name: String,
     pub(crate) liveness_epoch_a: String,
     pub(crate) resume_deadline_b: u64,
@@ -208,7 +189,6 @@ struct Inner {
     retired_lease: Option<LeaseContext>,
     resume_gate: Option<ControllerResumeGate>,
     transport: Option<ControllerTransportSender>,
-    history: Vec<RemoteHistoryEntry>,
     error_code: Option<&'static str>,
 }
 
@@ -223,7 +203,6 @@ impl Default for Inner {
             retired_lease: None,
             resume_gate: None,
             transport: None,
-            history: Vec::new(),
             error_code: None,
         }
     }
@@ -547,6 +526,55 @@ impl ControllingDeviceManager {
             .ok_or_else(|| ControllingStateError::new("controller_not_connected"))
     }
 
+    /// Authenticated lease identity from the signed handshake. A caller must also check
+    /// the encrypted lane before opening a RemoteProxy; this getter alone is not admission.
+    pub(crate) fn authenticated_remote_proxy_identity(
+        &self,
+    ) -> Result<(LeaseContext, String, String)> {
+        let inner = self.inner.lock();
+        if inner.phase != ControllingStatusKind::Connected {
+            return Err(ControllingStateError::new("controller_not_connected"));
+        }
+        let lease = inner
+            .lease
+            .as_ref()
+            .ok_or_else(|| ControllingStateError::new("controller_not_connected"))?;
+        if lease.peer_endpoint_id.is_empty() || lease.reservation_id.is_empty() {
+            return Err(ControllingStateError::new(
+                "controller_identity_unavailable",
+            ));
+        }
+        Ok((
+            lease.context.clone(),
+            lease.peer_endpoint_id.clone(),
+            lease.reservation_id.clone(),
+        ))
+    }
+
+    /// The final RemoteProxy commit is guarded by the same live lease and encrypted
+    /// channel ownership. Disconnect, generation replacement, or channel suspension
+    /// cannot interleave between this check and the caller's durable commit.
+    pub(crate) fn with_current_authenticated_remote_proxy_identity<T>(
+        &self,
+        lane: &super::encrypted_lane::ControllingLaneState,
+        expected: &(LeaseContext, String, String),
+        commit: impl FnOnce() -> std::result::Result<T, String>,
+    ) -> std::result::Result<T, String> {
+        let inner = self.inner.lock();
+        let lease = inner
+            .lease
+            .as_ref()
+            .ok_or_else(|| "remote_proxy_channel_unavailable".to_owned())?;
+        if inner.phase != ControllingStatusKind::Connected
+            || lease.context != expected.0
+            || lease.peer_endpoint_id != expected.1
+            || lease.reservation_id != expected.2
+        {
+            return Err("remote_proxy_channel_changed".into());
+        }
+        lane.with_active(&lease.context, commit)
+    }
+
     /// 本次连接尝试是否仍然拥有待决状态（connecting / safety_handshake）。
     /// 在途 worker 的失败收尾据此判断「该不该把状态投影为 error」：用户已经
     /// 显式断开、或尝试已被新 intent 取代时不得覆盖既有状态。
@@ -635,62 +663,6 @@ impl ControllingDeviceManager {
             return None;
         };
         transport.send_control_with_receipt(&frame).ok()
-    }
-
-    pub(crate) fn create_history(
-        &self,
-        title: &str,
-        b_session_reference: Option<&str>,
-    ) -> Result<RemoteHistoryEntry> {
-        let title = title.trim();
-        if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
-            return Err(ControllingStateError::new("history_title_invalid"));
-        }
-        if let Some(reference) = b_session_reference {
-            if reference.is_empty() || reference.len() > 128 {
-                return Err(ControllingStateError::new("history_reference_invalid"));
-            }
-        }
-        let mut inner = self.inner.lock();
-        let device_name = inner
-            .lease
-            .as_ref()
-            .map(|lease| lease.device_display_name.clone())
-            .ok_or_else(|| ControllingStateError::new("controller_not_connected"))?;
-        if inner.phase != ControllingStatusKind::Connected {
-            return Err(ControllingStateError::new("controller_not_connected"));
-        }
-        let entry = RemoteHistoryEntry {
-            history_id: format!("history_{}", Uuid::new_v4().simple()),
-            title: title.to_owned(),
-            device_display_name: device_name,
-            status: RemoteHistoryStatus::Active,
-            b_session_reference: b_session_reference.map(str::to_owned),
-        };
-        if inner.history.len() >= MAX_HISTORY_ENTRIES {
-            inner.history.remove(0);
-        }
-        inner.history.push(entry.clone());
-        Ok(entry)
-    }
-
-    pub(crate) fn finish_history(
-        &self,
-        history_id: &str,
-        status: RemoteHistoryStatus,
-    ) -> Result<RemoteHistoryEntry> {
-        let mut inner = self.inner.lock();
-        let entry = inner
-            .history
-            .iter_mut()
-            .find(|entry| entry.history_id == history_id)
-            .ok_or_else(|| ControllingStateError::new("history_not_found"))?;
-        entry.status = status;
-        Ok(entry.clone())
-    }
-
-    pub(crate) fn history(&self) -> Vec<RemoteHistoryEntry> {
-        self.inner.lock().history.clone()
     }
 
     pub(crate) fn status(&self) -> ControllingStatus {
@@ -861,6 +833,8 @@ mod tests {
                 relay_epoch: "relay-epoch-0001".into(),
                 remote_control_generation: "generation-0001".into(),
             },
+            peer_endpoint_id: "endpoint-0001".into(),
+            reservation_id: "reservation-0001".into(),
             device_display_name: " Studio PC ".into(),
             liveness_epoch_a: "live-a-1".into(),
             resume_deadline_b: 30_000,
@@ -941,39 +915,6 @@ mod tests {
         assert_eq!(status.status, ControllingStatusKind::Error);
         assert_eq!(status.error_code, Some("version_incompatible"));
         assert_eq!(status.has_pending_code, false);
-    }
-
-    #[test]
-    fn explicit_disconnect_closes_live_api_but_history_remains_offline() {
-        let manager = ControllingDeviceManager::default();
-        let operation = manager.connect("234-4567").unwrap();
-        manager.complete_reserved(operation.clone()).unwrap();
-        manager.complete_connected(operation, lease()).unwrap();
-        let history = manager
-            .create_history("Weekly report", Some("session-ref-1"))
-            .unwrap();
-        assert_eq!(history.status, RemoteHistoryStatus::Active);
-
-        let disconnected = manager.disconnect();
-        assert_eq!(disconnected.status, ControllingStatusKind::Disconnected);
-        assert_eq!(disconnected.lease, Some(lease().context.into()));
-        assert_eq!(manager.status().lease, disconnected.lease);
-        assert_eq!(
-            manager.live_lease().unwrap_err().code,
-            "controller_not_connected"
-        );
-        assert_eq!(
-            manager.create_history("Late", None).unwrap_err().code,
-            "controller_not_connected"
-        );
-        let stored = manager.history();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].title, "Weekly report");
-        assert!(!format!("{stored:?}").contains("2344567"));
-        let finished = manager
-            .finish_history(&history.history_id, RemoteHistoryStatus::Interrupted)
-            .unwrap();
-        assert_eq!(finished.status, RemoteHistoryStatus::Interrupted);
     }
 
     #[test]
@@ -1121,7 +1062,6 @@ mod tests {
         drop(old);
         let manager = ControllingDeviceManager::default();
         assert_eq!(manager.status().status, ControllingStatusKind::Idle);
-        assert_eq!(manager.history(), Vec::new());
         assert_eq!(
             manager
                 .complete_reserved(ControllerOperation {

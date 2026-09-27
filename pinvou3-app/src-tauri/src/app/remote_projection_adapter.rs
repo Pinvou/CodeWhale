@@ -4,8 +4,6 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
-
 use crate::features::remote_control::controller::event_envelope::*;
 use crate::features::remote_control::controller::ports::{
     RemotePortError, RemotePortFuture, RemoteSessionProjectionPort,
@@ -13,13 +11,10 @@ use crate::features::remote_control::controller::ports::{
 use crate::features::sessions::application::dispatch_remote::{
     RemoteTerminalCandidate, RemoteTerminalVerificationPort, VerifiedRemoteTerminal,
 };
-use crate::features::sessions::application::ports::{
-    ApplicationEvent, ApplicationEventPort, UseCaseError,
-};
+use crate::features::sessions::application::ports::UseCaseError;
 use crate::features::sessions::application::project_remote::{
-    ProjectRemoteUseCase, ProjectionBinding, ProjectionCandidate, ProjectionPayload,
-    ProjectionReport, ProjectionVerificationPort, RemoteProjectionService,
-    VerifiedRemoteProjection,
+    ProjectionBinding, ProjectionCandidate, ProjectionPayload, ProjectionReport,
+    ProjectionVerificationPort, RemoteProjectionService, VerifiedRemoteProjection,
 };
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 use crate::features::sessions::remote_proxy::schema::{
@@ -132,9 +127,6 @@ fn projection_candidate(
     let source = event.candidate();
     let binding = projection_binding(source.binding());
     let payload = match source.kind() {
-        ProxyEventKind::Capability { revision } => ProjectionPayload::Capability {
-            revision: *revision,
-        },
         ProxyEventKind::Journal(display) => ProjectionPayload::Journal(projection_entry(display)),
         ProxyEventKind::Snapshot(display) => {
             ProjectionPayload::Snapshot(projection_snapshot(display))
@@ -172,10 +164,6 @@ impl ProjectionVerificationPort for EnvelopeProof<'_> {
         let source = self.event.candidate();
         let matched = candidate.binding == projection_binding(source.binding())
             && match (&candidate.payload, source.kind()) {
-                (
-                    ProjectionPayload::Capability { revision: left },
-                    ProxyEventKind::Capability { revision: right },
-                ) => left == right,
                 (ProjectionPayload::Journal(left), ProxyEventKind::Journal(right)) => {
                     left == &projection_entry(right)
                 }
@@ -209,6 +197,23 @@ impl RemoteProjectionAdapter {
     pub(crate) fn new(projector: Arc<RemoteProjectionService>) -> Self {
         Self { projector }
     }
+
+    /// Synchronous ingress for the existing lane callback. It executes the
+    /// same typed proof and session use case as the async port, so the caller
+    /// can acknowledge only after the durable writer returns.
+    pub(crate) fn project_authenticated_now(
+        &self,
+        event: AuthenticatedProxyEvent,
+    ) -> Result<ProjectionReport, RemotePortError> {
+        let candidate = projection_candidate(&event)
+            .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))?;
+        let verified =
+            VerifiedRemoteProjection::verify(candidate, &EnvelopeProof { event: &event })
+                .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))?;
+        self.projector
+            .project_now(verified)
+            .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))
+    }
 }
 
 impl RemoteSessionProjectionPort for RemoteProjectionAdapter {
@@ -216,108 +221,14 @@ impl RemoteSessionProjectionPort for RemoteProjectionAdapter {
     type Projection = ProjectionReport;
 
     fn project_authenticated(&self, event: Self::Event) -> RemotePortFuture<'_, Self::Projection> {
-        Box::pin(async move {
-            let result = async {
-                let candidate = projection_candidate(&event)?;
-                let verified =
-                    VerifiedRemoteProjection::verify(candidate, &EnvelopeProof { event: &event })?;
-                self.projector.project(verified).await
-            }
-            .await;
-            result.map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))
-        })
-    }
-}
-
-/// Typed host adapter for non-projection control/B events. The payload shape
-/// cannot acquire a fake Session field on the pure control branch.
-/// DEV-20 must inject this from the unique role-specific live connection
-/// owners and the authoritative B session map, not a copied adapter cache.
-/// `verify_controlled` must require the binding's fixed Controlled role,
-/// current full lease, and exact remote-ref -> B-session mapping together.
-/// Without a validator no host adapter can be constructed.
-pub(crate) trait ControllerEventFreshnessPort: Send + Sync {
-    fn verify_connection(&self, event: &ConnectionEvent) -> Result<(), UseCaseError>;
-    fn verify_controlled(&self, binding: &ControlledSessionBinding) -> Result<(), UseCaseError>;
-}
-
-pub(crate) struct ControllerHostEventAdapter {
-    events: Arc<dyn ApplicationEventPort>,
-    freshness: Arc<dyn ControllerEventFreshnessPort>,
-}
-
-impl ControllerHostEventAdapter {
-    pub(crate) fn new(
-        events: Arc<dyn ApplicationEventPort>,
-        freshness: Arc<dyn ControllerEventFreshnessPort>,
-    ) -> Self {
-        Self { events, freshness }
-    }
-
-    pub(crate) fn publish_connection(&self, event: ConnectionEvent) -> Result<(), UseCaseError> {
-        self.freshness.verify_connection(&event)?;
-        let lease = event.lease();
-        self.events.publish(ApplicationEvent::new(
-            "desktop_remote_connection",
-            json!({
-                "kind": event.kind().as_str(),
-                "role": event.role().as_str(),
-                "connectionId": lease.connection_id(),
-                "controllerLeaseId": lease.controller_lease_id(),
-                "leaseEpoch": lease.lease_epoch(),
-                "relayEpoch": lease.relay_epoch(),
-                "generation": lease.generation(),
-            }),
-        ))
-    }
-
-    pub(crate) fn publish_controlled(
-        &self,
-        event: ControlledSessionEvent,
-    ) -> Result<(), UseCaseError> {
-        let view = event.view();
-        let binding = view.binding();
-        self.freshness.verify_controlled(binding)?;
-        let (kind, fields) = match view {
-            ControlledSessionView::Capability { revision, .. } => {
-                ("capability", json!({ "capabilityRevision": revision }))
-            }
-            ControlledSessionView::Task { task_id, .. } => ("task", json!({ "taskId": task_id })),
-            ControlledSessionView::Journal {
-                task_id,
-                journal_epoch,
-                sequence,
-                event_id,
-                ..
-            } => (
-                "journal",
-                json!({
-                    "taskId": task_id, "journalEpoch": journal_epoch,
-                    "sequence": sequence, "eventId": event_id,
-                }),
-            ),
-        };
-        self.events.publish(ApplicationEvent::new(
-            "desktop_remote_controlled_session",
-            json!({
-                "kind": kind,
-                "role": binding.role().as_str(),
-                "localSessionId": binding.local_session_id(),
-                "remoteSessionRef": binding.remote_session_ref(),
-                "connectionId": binding.lease().connection_id(),
-                "controllerLeaseId": binding.lease().controller_lease_id(),
-                "leaseEpoch": binding.lease().lease_epoch(),
-                "relayEpoch": binding.lease().relay_epoch(),
-                "generation": binding.lease().generation(),
-                "fields": fields,
-            }),
-        ))
+        Box::pin(async move { self.project_authenticated_now(event) })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::sessions::application::ports::{ApplicationEvent, ApplicationEventPort};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::features::sessions::SessionStore;
@@ -370,66 +281,9 @@ mod tests {
         }
     }
 
-    struct FixedFreshness {
-        controller_current: Option<EventLease>,
-        controlled_current: Option<EventLease>,
-        b_mapping: Option<(String, String)>,
-    }
-
-    impl ControllerEventFreshnessPort for FixedFreshness {
-        fn verify_connection(&self, event: &ConnectionEvent) -> Result<(), UseCaseError> {
-            let current = match event.role() {
-                ConnectionRole::Controller => self.controller_current.as_ref(),
-                ConnectionRole::Controlled => self.controlled_current.as_ref(),
-            };
-            if current != Some(event.lease()) {
-                return Err(UseCaseError::new("remote_event_stale_binding", false));
-            }
-            Ok(())
-        }
-
-        fn verify_controlled(
-            &self,
-            binding: &ControlledSessionBinding,
-        ) -> Result<(), UseCaseError> {
-            if binding.role() != ConnectionRole::Controlled
-                || self.controlled_current.as_ref() != Some(binding.lease())
-                || self
-                    .b_mapping
-                    .as_ref()
-                    .is_none_or(|(b_session_id, remote_ref)| {
-                        binding.local_session_id() != b_session_id
-                            || binding.remote_session_ref() != remote_ref
-                    })
-            {
-                return Err(UseCaseError::new("remote_event_stale_binding", false));
-            }
-            Ok(())
-        }
-    }
-
-    fn host_with_owners(
-        bus: Arc<RecordingEvents>,
-        controller_current: Option<EventLease>,
-        controlled_current: Option<EventLease>,
-    ) -> ControllerHostEventAdapter {
-        ControllerHostEventAdapter::new(
-            bus,
-            Arc::new(FixedFreshness {
-                controller_current,
-                controlled_current,
-                b_mapping: Some(("b-session-1".into(), "ref-1".into())),
-            }),
-        )
-    }
-
-    fn host(bus: Arc<RecordingEvents>) -> ControllerHostEventAdapter {
-        host_with_owners(bus, Some(lease()), Some(lease()))
-    }
-
     fn open(store: &SessionStore) -> ProxySessionBinding {
         let live = live(&lease());
-        let opened = store.open_remote_proxy(None, &live).unwrap();
+        let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
         store
             .confirm_remote_mapping(
                 &opened.local_session_id,
@@ -626,7 +480,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        store.disconnect_remote_proxy(binding.local_session_id());
+        store.test_expire_remote_binding(binding.local_session_id());
         assert!(
             adapter
                 .project_authenticated(authenticated(
@@ -723,7 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_and_snapshot_bind_revision_and_cursor() {
+    async fn snapshot_binds_exact_mapping_and_cursor() {
         let temp = tempfile::tempdir().unwrap();
         let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
         let binding = open(&store);
@@ -732,37 +586,13 @@ mod tests {
             store.clone(),
             bus.clone(),
         )));
-        let capability =
-            |revision| authenticated(ProxyEventCandidate::capability(binding.clone(), revision));
-        assert_eq!(
-            adapter.project_authenticated(capability(2)).await.unwrap(),
-            ProjectionReport {
-                committed: false,
-                notified: true
-            }
-        );
-        assert_eq!(
-            adapter.project_authenticated(capability(2)).await.unwrap(),
-            ProjectionReport {
-                committed: false,
-                notified: false
-            }
-        );
-        assert_eq!(
-            adapter
-                .project_authenticated(capability(1))
-                .await
-                .unwrap_err()
-                .code(),
-            "remote_capability_stale"
-        );
         let display = SnapshotDisplay::new(
             "journal-1".into(),
             1,
             vec![journal(1, DisplayKind::AssistantMessage)],
         )
         .unwrap();
-        let snap = ProxyEventCandidate::snapshot(binding.clone(), display).unwrap();
+        let snap = ProxyEventCandidate::snapshot(binding.clone(), display.clone()).unwrap();
         assert_eq!(
             adapter
                 .project_authenticated(authenticated(snap.clone()))
@@ -775,7 +605,7 @@ mod tests {
         );
         assert_eq!(
             adapter
-                .project_authenticated(authenticated(snap))
+                .project_authenticated(authenticated(snap.clone()))
                 .await
                 .unwrap(),
             ProjectionReport {
@@ -783,7 +613,7 @@ mod tests {
                 notified: false
             }
         );
-        assert_eq!(bus.events.lock().len(), 2);
+        assert_eq!(bus.events.lock().len(), 1);
         let wrong_b = ProxySessionBinding::new(
             binding.lease().clone(),
             binding.local_session_id().into(),
@@ -793,157 +623,20 @@ mod tests {
         .unwrap();
         assert!(
             adapter
-                .project_authenticated(authenticated(ProxyEventCandidate::capability(wrong_b, 3)))
+                .project_authenticated(authenticated(
+                    ProxyEventCandidate::snapshot(wrong_b, display).unwrap()
+                ))
                 .await
                 .is_err()
         );
-        store.disconnect_remote_proxy(binding.local_session_id());
-        assert!(adapter.project_authenticated(capability(3)).await.is_err());
-        assert_eq!(bus.events.lock().len(), 2);
-    }
-
-    #[test]
-    fn host_adapter_keeps_control_event_session_free_and_b_event_authoritative() {
-        let bus = Arc::new(RecordingEvents::default());
-        let host = host(bus.clone());
-        host.publish_connection(ConnectionEvent::new(
-            lease(),
-            ConnectionRole::Controller,
-            ConnectionEventKind::Connected,
-        ))
-        .unwrap();
-        let connection = bus.events.lock()[0].payload().clone();
-        assert!(connection.get("localSessionId").is_none());
-        assert!(connection.get("remoteSessionRef").is_none());
-        assert!(connection.get("controlledSessionId").is_none());
-        let binding =
-            ControlledSessionBinding::new(lease(), "b-session-1".into(), "ref-1".into()).unwrap();
-        host.publish_controlled(ControlledSessionEvent::task(binding, "task-1".into()).unwrap())
-            .unwrap();
-        assert_eq!(
-            bus.events.lock()[1].payload()["localSessionId"],
-            "b-session-1"
-        );
-    }
-
-    #[test]
-    fn controlled_event_requires_controlled_owner_even_with_matching_controller_lease() {
-        let bus = Arc::new(RecordingEvents::default());
-        let controller_only = host_with_owners(bus.clone(), Some(lease()), None);
+        store.test_expire_remote_binding(binding.local_session_id());
         assert!(
-            controller_only
-                .publish_connection(ConnectionEvent::new(
-                    lease(),
-                    ConnectionRole::Controlled,
-                    ConnectionEventKind::Connected,
-                ))
+            adapter
+                .project_authenticated(authenticated(snap))
+                .await
                 .is_err()
         );
-        let binding =
-            ControlledSessionBinding::new(lease(), "b-session-1".into(), "ref-1".into()).unwrap();
-        assert_eq!(binding.role(), ConnectionRole::Controlled);
-        assert_eq!(
-            controller_only
-                .publish_controlled(
-                    ControlledSessionEvent::task(binding.clone(), "task-1".into()).unwrap()
-                )
-                .unwrap_err()
-                .code(),
-            "remote_event_stale_binding"
-        );
-        assert!(bus.events.lock().is_empty());
-
-        let controlled_only = host_with_owners(bus.clone(), None, Some(lease()));
-        assert!(
-            controlled_only
-                .publish_connection(ConnectionEvent::new(
-                    lease(),
-                    ConnectionRole::Controller,
-                    ConnectionEventKind::Connected,
-                ))
-                .is_err()
-        );
-        assert!(bus.events.lock().is_empty());
-        controlled_only
-            .publish_controlled(ControlledSessionEvent::task(binding, "task-1".into()).unwrap())
-            .unwrap();
         assert_eq!(bus.events.lock().len(), 1);
-        assert_eq!(bus.events.lock()[0].payload()["role"], "controlled");
-    }
-
-    #[test]
-    fn host_rejects_stale_lease_generation_and_wrong_b_binding_before_bus() {
-        let bus = Arc::new(RecordingEvents::default());
-        let host = host(bus.clone());
-        let stale_generation = EventLease::new(
-            "peer-1".into(),
-            "resume-1".into(),
-            "connection-1".into(),
-            "lease-1".into(),
-            "1".into(),
-            "relay-1".into(),
-            "generation-old".into(),
-        )
-        .unwrap();
-        assert!(
-            host.publish_connection(ConnectionEvent::new(
-                stale_generation,
-                ConnectionRole::Controller,
-                ConnectionEventKind::Connected,
-            ))
-            .is_err()
-        );
-        let stale_lease = EventLease::new(
-            "peer-1".into(),
-            "resume-1".into(),
-            "connection-1".into(),
-            "lease-old".into(),
-            "1".into(),
-            "relay-1".into(),
-            "generation-1".into(),
-        )
-        .unwrap();
-        assert!(
-            host.publish_connection(ConnectionEvent::new(
-                stale_lease,
-                ConnectionRole::Controller,
-                ConnectionEventKind::Connected,
-            ))
-            .is_err()
-        );
-        for (b_session, remote_ref) in [("other-b", "ref-1"), ("b-session-1", "other-ref")] {
-            let binding =
-                ControlledSessionBinding::new(lease(), b_session.into(), remote_ref.into())
-                    .unwrap();
-            assert!(
-                host.publish_controlled(
-                    ControlledSessionEvent::task(binding, "task-1".into()).unwrap()
-                )
-                .is_err()
-            );
-        }
-        let stale_b = ControlledSessionBinding::new(
-            EventLease::new(
-                "peer-1".into(),
-                "resume-1".into(),
-                "connection-1".into(),
-                "lease-1".into(),
-                "1".into(),
-                "relay-1".into(),
-                "generation-old".into(),
-            )
-            .unwrap(),
-            "b-session-1".into(),
-            "ref-1".into(),
-        )
-        .unwrap();
-        assert!(
-            host.publish_controlled(
-                ControlledSessionEvent::task(stale_b, "task-1".into()).unwrap(),
-            )
-            .is_err()
-        );
-        assert!(bus.events.lock().is_empty());
     }
 
     #[test]

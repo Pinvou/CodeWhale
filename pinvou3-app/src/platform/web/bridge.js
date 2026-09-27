@@ -178,6 +178,7 @@
     // 当前会话未发送的输入草稿。只存内存，随 session working set 切换；
     // 不落盘，避免把敏感的未发送内容带到下次启动。
     composerDraft: "",
+    remoteProxyDraftError: null,
     messages: [],      // Anthropic Messages schema
     chatItems: [],     // display items for React
     // DeepSeek Turn 生命周期(user_start / assistant_done)，来自 timing_events.jsonl；
@@ -294,12 +295,9 @@
     controllerConnection: null,
     remoteCapabilities: null,
     remoteModels: [],
-    remoteHistories: [],
     remoteProxyHistories: [],
     remoteProxyHistory: null,
     remoteProxyNotice: null,
-    tasks: [],
-    transcript: [],
     controlledTasks: [],
     controlledTranscript: [],
     remotePermissions: [],
