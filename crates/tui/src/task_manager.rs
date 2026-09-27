@@ -468,6 +468,18 @@ pub struct TaskManagerConfig {
     pub allow_shell: bool,
     pub trust_mode: bool,
     pub execution_limits: TaskExecutionLimits,
+    /// Whether a host is attached that can actually deliver an approval or
+    /// user-input decision to tasks run by this manager — today only the
+    /// runtime API, whose HTTP `decide_approval`/`submit_user_input`
+    /// endpoints reach a task thread's engine turn. A pending prompt on an
+    /// answerable manager is a human-paced wait: the wall and idle clocks
+    /// pause for it (bounded by `human_wait_cap`). A prompt on an
+    /// unanswerable manager — the TUI's private task runtime has no
+    /// delivery channel — can never be answered, so arming the window
+    /// there would park the worker on the fail-safe cap; the clocks keep
+    /// running instead. Defaults to `false`: opt in only where the
+    /// delivery channel exists.
+    pub human_waits_answerable: bool,
 }
 
 /// Deadlines and persistence cadence for one durable execution.
@@ -477,10 +489,11 @@ pub struct TaskExecutionLimits {
     pub idle_progress: Duration,
     pub cancel_grace: Duration,
     pub persist_debounce: Duration,
-    /// Fail-safe ceiling for one continuous human wait (a pending approval
-    /// or user-input prompt). Human-paced waits are excluded from
-    /// `wall_time` — a slow answer must not end the task — but a prompt
-    /// nobody will ever answer must still release the worker eventually.
+    /// Fail-safe ceiling for the human-wait windows of one task, applied
+    /// both to each open window and to the windows summed across the whole
+    /// execution. Human-paced waits are excluded from `wall_time` — a slow
+    /// answer must not end the task — but prompts that nobody will ever
+    /// answer must still release the worker eventually.
     pub human_wait_cap: Duration,
 }
 
@@ -616,15 +629,6 @@ impl ExecutionGuard {
         // is expected, not idleness — and the idle budget restarts when the
         // window closes (see `end_human_wait`).
         let idle_elapsed = now.saturating_duration_since(self.last_progress_at);
-        // The aggregate bound: each window may close under the cap, but a
-        // task chaining prompts must not sum its way past the cap once per
-        // prompt. Checked whether or not a window is open right now, so the
-        // accumulated total terminalizes the task even between windows.
-        if self.human_wait_total >= self.limits.human_wait_cap {
-            return GuardAction::Interrupt {
-                reason: TaskTerminalReason::HumanWaitTimeout,
-            };
-        }
         let pending = if shutdown {
             Some(TaskTerminalReason::Shutdown)
         } else if cancel {
@@ -636,6 +640,13 @@ impl ExecutionGuard {
             } else {
                 None
             }
+        } else if self.human_wait_total >= self.limits.human_wait_cap {
+            // The aggregate bound: each window may close under the cap, but
+            // a task chaining prompts must not sum its way past the cap once
+            // per prompt. With no window open right now, the closed windows
+            // alone can cross it, so the accumulated total terminalizes the
+            // task even between windows.
+            Some(TaskTerminalReason::HumanWaitTimeout)
         } else if wall_elapsed >= self.limits.wall_time {
             Some(TaskTerminalReason::WallTimeout)
         } else if idle_elapsed >= self.limits.idle_progress {
@@ -659,15 +670,23 @@ impl ExecutionGuard {
             // waste: back the poll off, doubling with each parked second
             // up to PARKED_POLL_CAP. An arriving decision broadcasts on
             // the subscription and wakes the loop early, so the backoff
-            // never delays an answer, only the empty poll.
+            // never delays an answer — it only thins the empty polls, and
+            // only while the event bus is quiet. The cap wait excludes the
+            // already-closed windows too: the aggregate budget, not this
+            // window alone, bounds the sleep.
             let parked = now.saturating_duration_since(since);
-            let cap_wait = self.limits.human_wait_cap.saturating_sub(parked);
+            let cap_wait = self
+                .limits
+                .human_wait_cap
+                .saturating_sub(self.human_wait_total)
+                .saturating_sub(parked);
             let backoff = EVENT_CATCHUP_POLL
                 .saturating_mul(1u32 << parked.as_secs().min(4))
                 .min(PARKED_POLL_CAP);
             wait = cap_wait.min(backoff);
+        } else {
+            wait = wait.min(EVENT_CATCHUP_POLL);
         }
-        let wait = wait.min(EVENT_CATCHUP_POLL);
         GuardAction::Run {
             wait: wait.max(Duration::from_millis(1)),
         }
@@ -705,6 +724,7 @@ impl TaskManagerConfig {
             allow_shell: config.allow_shell(),
             trust_mode: false,
             execution_limits: TaskExecutionLimits::default(),
+            human_waits_answerable: false,
         }
     }
 }
@@ -1112,12 +1132,14 @@ async fn drive_engine_turn(
                 // A pending approval or user-input prompt is a human-paced
                 // wait: exclude it from the wall clock exactly like the
                 // engine-side turn budget does, and publish the window so
-                // the worker supervisor's guard follows in lockstep. Every
-                // wait exit emits one of the paired closing events (the
-                // decision, the interrupt deny, the legacy replayed
-                // timeout, or the cancellation), so the window cannot stick
-                // open; the guard's fail-safe cap bounds the pathological
-                // case regardless.
+                // the worker supervisor's guard follows in lockstep. Both
+                // arms are gated on `answerable_waits`, so the window pair
+                // only flows where a decision can actually be delivered.
+                // Every wait exit emits one of the paired closing events
+                // (the decision, the interrupt deny, the legacy replayed
+                // timeout, or the cancellation), so the window cannot
+                // stick open; the guard's fail-safe cap bounds the
+                // pathological case regardless.
                 "approval.required" | "user_input.required" if answerable_waits => {
                     guard.begin_human_wait(Instant::now());
                     emit_task_event(&events, TaskExecutionEvent::HumanWaitStarted).await;
@@ -1125,7 +1147,9 @@ async fn drive_engine_turn(
                 "approval.decided"
                 | "approval.timeout"
                 | "user_input.answered"
-                | "user_input.canceled" => {
+                | "user_input.canceled"
+                    if answerable_waits =>
+                {
                     guard.end_human_wait(Instant::now());
                     emit_task_event(&events, TaskExecutionEvent::HumanWaitEnded).await;
                 }
@@ -1448,26 +1472,23 @@ impl TaskManager {
             RuntimeThreadManagerConfig::for_session(cfg.data_dir.clone(), session_id),
             plugin_registry,
         )?);
-        Self::start_with_runtime_manager(cfg, api_config, runtime_threads, false).await
+        Self::start_with_runtime_manager(cfg, api_config, runtime_threads).await
     }
 
     /// Start the manager with an injected runtime thread manager.
     ///
-    /// `human_waits_answerable` is true only when the given manager is
-    /// served by the runtime API, whose HTTP delivery is the one channel
-    /// that can answer a task thread's prompt. The TUI's `start` builds a
-    /// private manager and passes false; a task that prompts there must
-    /// be released by the wall clock, not parked on the human-wait window.
+    /// Whether prompts on this manager's tasks are answerable human-paced
+    /// waits is `cfg.human_waits_answerable` — the TUI's `start` leaves it
+    /// `false`, the runtime API opts in. See that field for the contract.
     pub async fn start_with_runtime_manager(
         cfg: TaskManagerConfig,
         _api_config: Config,
         runtime_threads: SharedRuntimeThreadManager,
-        human_waits_answerable: bool,
     ) -> Result<SharedTaskManager> {
         let executor: Arc<dyn TaskExecutor> = Arc::new(EngineTaskExecutor::new(
             runtime_threads.clone(),
             cfg.execution_limits,
-            human_waits_answerable,
+            cfg.human_waits_answerable,
         ));
         let manager = Self::start_with_executor(cfg, executor).await?;
         runtime_threads.attach_task_manager(manager.clone());
@@ -3231,6 +3252,7 @@ mod tests {
             allow_shell: false,
             trust_mode: false,
             execution_limits: TaskExecutionLimits::default(),
+            human_waits_answerable: false,
         }
     }
 
@@ -4586,6 +4608,154 @@ mod tests {
             }
             other => panic!("expected cancel timeout, got {other:?}"),
         }
+    }
+
+    /// Limits with generous wall/idle budgets so a test exercises exactly
+    /// one guard mechanism (the human-wait arithmetic) in isolation.
+    fn execution_guard_limits(human_wait_cap: Duration) -> TaskExecutionLimits {
+        TaskExecutionLimits {
+            wall_time: Duration::from_secs(30),
+            idle_progress: Duration::from_secs(30),
+            cancel_grace: Duration::from_millis(50),
+            persist_debounce: Duration::from_millis(10),
+            human_wait_cap,
+        }
+    }
+
+    #[test]
+    fn execution_guard_parked_backoff_grows_past_the_catchup_poll() {
+        // Two seconds parked: the doubling has run twice, so the parked
+        // wait must exceed the 200ms catch-up cadence the backoff exists
+        // to escape.
+        let start = Instant::now();
+        let mut guard = ExecutionGuard::new(
+            execution_guard_limits(Duration::from_secs(24 * 60 * 60)),
+            start,
+        );
+        guard.begin_human_wait(start);
+        match guard.evaluate(start + Duration::from_secs(2), false, false) {
+            GuardAction::Run { wait } => {
+                assert_eq!(wait, EVENT_CATCHUP_POLL * 4);
+            }
+            other => panic!("expected a parked run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_parked_backoff_caps_at_two_seconds() {
+        let start = Instant::now();
+        let mut guard = ExecutionGuard::new(
+            execution_guard_limits(Duration::from_secs(24 * 60 * 60)),
+            start,
+        );
+        guard.begin_human_wait(start);
+        match guard.evaluate(start + Duration::from_secs(3600), false, false) {
+            GuardAction::Run { wait } => {
+                assert_eq!(wait, PARKED_POLL_CAP);
+            }
+            other => panic!("expected a parked run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_parked_wait_respects_the_aggregate_budget() {
+        // The parked wake must respect the aggregate budget, not just the
+        // open window: 10s cap, 7s already closed, 2.5s parked this window
+        // leaves 500ms — not the 800ms the doubling alone would suggest.
+        let start = Instant::now();
+        let mut guard = ExecutionGuard::new(execution_guard_limits(Duration::from_secs(10)), start);
+        guard.begin_human_wait(start);
+        guard.end_human_wait(start + Duration::from_secs(7));
+        guard.begin_human_wait(start + Duration::from_secs(7));
+        match guard.evaluate(start + Duration::from_millis(9500), false, false) {
+            GuardAction::Run { wait } => {
+                assert_eq!(wait, Duration::from_millis(500));
+            }
+            other => panic!("expected a parked run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_spent_aggregate_cap_terminalizes_between_windows() {
+        // Closed windows alone reach the cap with no window open: the
+        // guard must terminalize between prompts even though wall and idle
+        // have barely elapsed.
+        let start = Instant::now();
+        let mut guard =
+            ExecutionGuard::new(execution_guard_limits(Duration::from_millis(200)), start);
+        guard.begin_human_wait(start);
+        guard.end_human_wait(start + Duration::from_millis(200));
+        match guard.evaluate(start + Duration::from_millis(250), false, false) {
+            GuardAction::Interrupt { reason } => {
+                assert_eq!(reason, TaskTerminalReason::HumanWaitTimeout);
+            }
+            other => panic!("expected the aggregate cap to fire, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_cancel_outranks_a_spent_aggregate_cap() {
+        let start = Instant::now();
+        let mut guard =
+            ExecutionGuard::new(execution_guard_limits(Duration::from_millis(200)), start);
+        guard.begin_human_wait(start);
+        guard.end_human_wait(start + Duration::from_millis(200));
+        match guard.evaluate(start + Duration::from_millis(250), true, false) {
+            GuardAction::Interrupt { reason } => {
+                assert_eq!(reason, TaskTerminalReason::Canceled);
+            }
+            other => panic!("cancel must outrank the spent cap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_shutdown_outranks_a_spent_aggregate_cap() {
+        let start = Instant::now();
+        let mut guard =
+            ExecutionGuard::new(execution_guard_limits(Duration::from_millis(200)), start);
+        guard.begin_human_wait(start);
+        guard.end_human_wait(start + Duration::from_millis(200));
+        match guard.evaluate(start + Duration::from_millis(250), false, true) {
+            GuardAction::Interrupt { reason } => {
+                assert_eq!(reason, TaskTerminalReason::Shutdown);
+            }
+            other => panic!("shutdown must outrank the spent cap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execution_guard_human_wait_close_restarts_the_idle_budget() {
+        // Ending a window restarts idle from zero: 100ms after the close
+        // the guard must still run, though 1.1s have passed since start.
+        let start = Instant::now();
+        let limits = TaskExecutionLimits {
+            wall_time: Duration::from_millis(400),
+            idle_progress: Duration::from_millis(150),
+            cancel_grace: Duration::from_millis(500),
+            persist_debounce: Duration::from_millis(10),
+            human_wait_cap: Duration::from_secs(24 * 60 * 60),
+        };
+        let mut guard = ExecutionGuard::new(limits, start);
+        guard.begin_human_wait(start);
+        guard.end_human_wait(start + Duration::from_secs(1));
+        match guard.evaluate(start + Duration::from_millis(1100), false, false) {
+            GuardAction::Run { .. } => {}
+            other => panic!("a closed window must restart idle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_runtime_defaults_to_unanswerable_human_waits() {
+        // The safe default: the TUI builds its private task runtime through
+        // `from_runtime` and must never arm the human-wait window — no host
+        // can answer a prompt there. Only the runtime API opts in, via
+        // `server_task_config`.
+        let cfg =
+            TaskManagerConfig::from_runtime(&Config::default(), PathBuf::from("."), None, None);
+        assert!(
+            !cfg.human_waits_answerable,
+            "from_runtime must default to unanswerable human waits"
+        );
     }
 
     #[test]
