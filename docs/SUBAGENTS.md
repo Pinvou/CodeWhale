@@ -608,6 +608,9 @@ a host can actually deliver the decision: the runtime API serves task threads
 with HTTP `decide_approval`/`submit_user_input`, so its tasks pause; the
 TUI's private task runtime has no such channel, so there a prompt is not
 treated as a human-paced wait at all and the wall clock keeps running.
+While parked, the task keeps holding its worker slot (two workers by
+default), so several simultaneously parked tasks can stall the durable-task
+queue until their answers arrive or the fail-safe cap fires.
 
 ## Lifecycle
 
