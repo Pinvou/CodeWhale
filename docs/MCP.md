@@ -438,10 +438,12 @@ Per-server settings:
 - `env` (object, optional)
 - `connect_timeout`, `execute_timeout`, `read_timeout` (seconds, optional)
 - Defaults: `connect_timeout` 10s, `execute_timeout` 1800s (30 min), `read_timeout` 120s.
-  `execute_timeout` bounds a whole tool call — a server is silent until its tool
+  `execute_timeout` bounds a tool call — a server is silent until its tool
   finishes, so slow tools need this raised, not `read_timeout`. `read_timeout`
   bounds the response wait of quick requests (`resources/read`, discovery, …);
   a `tools/call` wait is automatically widened to at least its `execute_timeout`.
+  The budget applies per leg (send, then read): a server that drains its input
+  barely within the budget can push the total toward twice `execute_timeout`.
 - `disabled` (bool, optional)
 - `enabled` (bool, optional, default `true`)
 - `required` (bool, optional): startup/connect validation fails if this server cannot initialize.

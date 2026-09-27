@@ -3927,6 +3927,7 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
             "approval_id": "approval_test",
             "decision": "allow",
             "remember": false,
+            "posture": "auto_review",
             "internal_secret": "approval-decision-secret",
         }),
     };
@@ -3940,6 +3941,9 @@ async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("event: approval.decided"));
     assert!(text.contains("\"decision\":\"allow\""));
+    // The execution-policy explanation must reach compat clients so an
+    // auto_review denial is distinguishable from a plain auto-deny.
+    assert!(text.contains("\"posture\":\"auto_review\""));
     assert!(!text.contains("approval-decision-secret"));
 
     // An interrupted resolution (turn interrupt / engine death / runtime

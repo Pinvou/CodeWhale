@@ -222,11 +222,29 @@ impl DeepSeekClient {
             .http_client
             .post(&url)
             .header("Accept", "text/event-stream")
-            .timeout(crate::client::NON_STREAMING_REQUEST_ENVELOPE)
+            .timeout(crate::client::non_streaming_request_envelope())
             .json(body)
             .send()
-            .await
-            .context("Anthropic Messages API request failed")?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let rendered = if error.is_timeout() {
+                    "anthropic request exceeded the envelope".to_string()
+                } else {
+                    format!("anthropic transport failure: {error}")
+                };
+                // A transport-level failure never reaches the status checks
+                // below, so it must mark health and probe on its own —
+                // otherwise a provider that stalls past the envelope leaves
+                // connection health stale until the next request retries.
+                self.mark_request_failure(&rendered).await;
+                self.maybe_probe_recovery().await;
+                return Err(
+                    anyhow::Error::new(error).context("Anthropic Messages API request failed")
+                );
+            }
+        };
         self.check_anthropic_response(response).await
     }
 

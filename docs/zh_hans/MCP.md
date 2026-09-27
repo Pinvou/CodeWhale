@@ -343,9 +343,11 @@ codewhale-tui mcp tools codewhale
 - `env`（对象，可选）
 - `connect_timeout`、`execute_timeout`、`read_timeout`（秒，可选）
 - 默认值：`connect_timeout` 10 秒、`execute_timeout` 1800 秒（30 分钟）、`read_timeout` 120 秒。
-  `execute_timeout` 约束一次完整的工具调用——工具结束前服务器不会回话，慢工具应调大它而不是
+  `execute_timeout` 约束一次工具调用——工具结束前服务器不会回话，慢工具应调大它而不是
   `read_timeout`。`read_timeout` 约束快速请求（`resources/read`、发现流程等）的响应等待；
   `tools/call` 的内部读等待会自动放宽到至少其 `execute_timeout`。
+  该预算按阶段生效（发送、读取各计一次）：几乎耗尽预算才读完输入的服务器可能让总耗时接近
+  `execute_timeout` 的两倍。
 - `disabled`（布尔值，可选）
 - `enabled`（布尔值，可选，默认 `true`）
 - `required`（布尔值，可选）：如果该服务器无法初始化，启动/连接验证会失败。

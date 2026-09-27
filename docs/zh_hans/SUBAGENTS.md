@@ -160,7 +160,7 @@ max_concurrent = 20
 launch_concurrency = 20
 max_admitted = 200
 max_depth = 6
-# 调用不带预算时的每个子代理运行预算（角色默认：60/120 回合）。
+# 调用不带预算时的每个子代理运行预算（角色默认：所有角色的模型回合数不设上限，`WorkerRuntimeProfile::default_max_steps` 返回零）。
 default_max_steps = 120
 default_wall_time_secs = 1800
 token_budget = 100000
@@ -217,7 +217,7 @@ max_admitted = 12
 
 1. 调用上一个显式的、解析接受的 `max_steps` / `wall_time_secs`（重放兼容），
 2. 操作者默认 `[subagents] default_max_steps` 和 `[subagents] default_wall_time_secs`，
-3. Fleet 角色默认：读取为主的角色（scout/planner/reviewer/verifier/consultant）为 **60** 个模型回合，builder/worker/custom 为 **120**（`WorkerRuntimeProfile::default_max_steps`），墙钟默认 **1800 秒**。
+3. Fleet 角色默认：所有角色的模型回合数**不设上限**（`WorkerRuntimeProfile::default_max_steps` 返回零），墙钟默认 **1800 秒**。
 
 步数值钳制到 2000 回合的硬上限；墙钟值钳制到 1..=86400 秒。
 
@@ -318,6 +318,8 @@ heartbeat_timeout_secs = 300  # 钳制到 30..=3600
 ```
 
 有效心跳至少保持在解析后的 `api_timeout_secs` 与内置子代理工具超时之上各 30 秒（子代理只在步骤边界记录进度，不会在工具执行中途记录，因此静默的构建或 MCP 调用不能在运行中被清理），所以配置的长模型请求与长时间在途工具都不会在自己的超时触发之前被取消。
+
+这些下限只保证心跳不会提前触发，并不凌驾于其上的墙钟：每个子代理都受自身墙钟（`default_wall_time_secs`，默认 1800 秒）约束；在持久任务内部，任务 `wall_time`（默认 30 分钟，自任务启动起算，等待人工回应提示期间照常计时）约束整个运行。因此在子代理或任务后段启动的满额 1800 秒工具仍可能被任一截止时间中断；把 `execute_timeout` 调到超过剩余墙钟不会生效。
 
 ## 生命周期
 
