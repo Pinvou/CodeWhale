@@ -605,6 +605,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AccountClosure" }
+        "401":
+          description: Recent authentication is missing or older than five minutes; stable code RECENT_AUTHENTICATION_REQUIRED
+          content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /me/commerce-customer-mapping:

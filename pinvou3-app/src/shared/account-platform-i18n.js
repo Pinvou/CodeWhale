@@ -1195,6 +1195,9 @@ Object.assign(accountPlatformCopy.zh, {
     confirmPrompt: '此操作会进入账号注销流程。请输入 CLOSE_MY_ACCOUNT 继续：',
     confirmMismatch: '确认文本不匹配，未创建注销请求。',
     requested: '注销请求已创建。',
+    queryLoading: '正在核对当前注销状态，请稍候。',
+    queryFailed: '暂时无法确认当前注销状态。为避免重复申请，重新查询成功前不能提交注销请求。',
+    queryRetry: '重新查询注销状态',
     sla: '目标处理时限',
     noBlockers: '当前没有需要你处理的阻断项，系统将自动推进。',
     blockerCodes: {
@@ -1240,6 +1243,9 @@ Object.assign(accountPlatformCopy.en, {
     confirmPrompt: 'This starts account closure. Enter CLOSE_MY_ACCOUNT to continue:',
     confirmMismatch: 'The confirmation did not match. No closure request was created.',
     requested: 'The closure request was created.',
+    queryLoading: 'Checking the current account-closure status…',
+    queryFailed: 'The current closure status could not be confirmed. To prevent duplicate requests, account closure remains unavailable until this check succeeds.',
+    queryRetry: 'Retry status check',
     sla: 'Target completion time',
     noBlockers: 'No action is currently required. The workflow will continue automatically.',
     blockerCodes: {
@@ -1285,6 +1291,9 @@ Object.assign(accountPlatformCopy.ja, {
     confirmPrompt: 'アカウント削除を開始します。続行するには CLOSE_MY_ACCOUNT と入力してください：',
     confirmMismatch: '確認文字列が一致しないため、削除リクエストは作成されませんでした。',
     requested: '削除リクエストを作成しました。',
+    queryLoading: '現在のアカウント削除状況を確認しています…',
+    queryFailed: '現在の削除状況を確認できません。重複申請を防ぐため、確認が成功するまで削除申請は利用できません。',
+    queryRetry: '削除状況を再確認',
     sla: '目標完了時刻',
     noBlockers: '現在必要な操作はありません。ワークフローは自動的に続行します。',
     blockerCodes: {
@@ -1323,6 +1332,9 @@ Object.assign(accountPlatformCopy.ja, {
 // Keep timeline labels separate from the dense closure copy so status polling remains explicit.
 Object.assign(accountPlatformCopy.zh.closure, { updated: '最后更新时间' });
 Object.assign(accountPlatformCopy.en.closure, { updated: 'Last updated' });
+Object.assign(accountPlatformCopy.zh.closure, { recentAuthenticationRequired: '申请注销前需要重新认证，请重新登录后再次申请。' });
+Object.assign(accountPlatformCopy.en.closure, { recentAuthenticationRequired: 'Reauthenticate before requesting account closure. Sign in again, then retry the request.' });
+Object.assign(accountPlatformCopy.ja.closure, { recentAuthenticationRequired: 'アカウント削除を申請する前に再認証が必要です。再度ログインしてから申請を再試行してください。' });
 Object.assign(accountPlatformCopy.ja.closure, { updated: '最終更新日時' });
 Object.assign(accountPlatformCopy.zh, {
   reclaimClosedQuota: '整笔回收注销账号剩余额度',

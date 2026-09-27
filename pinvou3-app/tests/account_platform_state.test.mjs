@@ -1582,6 +1582,27 @@ test('Web profile captcha submits the visible slider offset and keeps failures i
   assert.equal(typeof accountPlatformCopy.ja.smsDeliveryPending, 'string');
 });
 
+test('Web account closure reauthenticates and resumes explicit confirmation instead of reporting platform unavailable', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const flow = await readFile(new URL('../src/features/account-platform/account-closure-flow.js', import.meta.url), 'utf8');
+  const closure = await readFile(new URL('../../account-platform/internal/account/account_closure.go', import.meta.url), 'utf8');
+  const service = await readFile(new URL('../../account-platform/internal/account/service.go', import.meta.url), 'utf8');
+
+  assert.match(closure, /validateAccountClosureRequest\(now, principal, idempotencyKey, confirmation\)/);
+  assert.match(closure, /now\.Sub\(principal\.AuthenticatedAt\) > accountClosureRecentAuth[\s\S]*?return ErrRecentAuthenticationRequired/);
+  assert.match(service, /ErrRecentAuthenticationRequired[\s\S]*?RECENT_AUTHENTICATION_REQUIRED/);
+  assert.match(flow, /accountPlatformErrorCodes\(reason\)\.includes\('RECENT_AUTHENTICATION_REQUIRED'\)/);
+  assert.match(view, /params\.set\('closure', 'confirm'\)[\s\S]*?submitAccountClosure\(\{/);
+  assert.match(view, /accountClosureResumeAction\(\{[\s\S]*?if \(!action\.clearMarker\) return;[\s\S]*?params\.delete\('closure'\)[\s\S]*?if \(action\.prompt\) void onRequestClosure\(\)/);
+  assert.match(view, /<AccountClosure[\s\S]*?queryStatus=\{closureQueryState\}[\s\S]*?onRetry=\{retryClosure\}/);
+  assert.match(view, /presentation\.state === accountClosureQueryStatus\.loading[\s\S]*?presentation\.state === accountClosureQueryStatus\.error[\s\S]*?!presentation\.canRequest/);
+  assert.match(flow, /confirmation !== 'CLOSE_MY_ACCOUNT'[\s\S]*?confirmation-mismatch/);
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.equal(typeof accountPlatformCopy[language].closure.recentAuthenticationRequired, 'string');
+    assert.ok(accountPlatformCopy[language].closure.recentAuthenticationRequired.length > 0);
+  }
+});
+
 test('desktop account popover does not expose the internal user id', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   assert.doesNotMatch(popover, /me\?\.user_id/);

@@ -86,8 +86,8 @@ func scanAccountClosure(row interface{ Scan(...any) error }) (AccountClosureRequ
 func (r *PostgresRepository) CreateAccountClosure(ctx context.Context, principal identity.Principal, idempotencyKey, confirmation string) (AccountClosureRequest, error) {
 	idempotencyKey, confirmation = strings.TrimSpace(idempotencyKey), strings.TrimSpace(confirmation)
 	now := r.now()
-	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 || confirmation != accountClosureConfirmation || principal.AuthenticatedAt.IsZero() || principal.AuthenticatedAt.After(now.Add(time.Minute)) || now.Sub(principal.AuthenticatedAt) > accountClosureRecentAuth {
-		return AccountClosureRequest{}, ErrForbidden
+	if err := validateAccountClosureRequest(now, principal, idempotencyKey, confirmation); err != nil {
+		return AccountClosureRequest{}, err
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -140,6 +140,16 @@ func (r *PostgresRepository) CreateAccountClosure(ctx context.Context, principal
 		return AccountClosureRequest{}, err
 	}
 	return request, tx.Commit(ctx)
+}
+
+func validateAccountClosureRequest(now time.Time, principal identity.Principal, idempotencyKey, confirmation string) error {
+	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 || confirmation != accountClosureConfirmation {
+		return ErrForbidden
+	}
+	if principal.AuthenticatedAt.IsZero() || principal.AuthenticatedAt.After(now.Add(time.Minute)) || now.Sub(principal.AuthenticatedAt) > accountClosureRecentAuth {
+		return ErrRecentAuthenticationRequired
+	}
+	return nil
 }
 
 func (r *PostgresRepository) AccountClosureForPrincipal(ctx context.Context, principal identity.Principal) (AccountClosureRequest, error) {

@@ -15,6 +15,7 @@ import { localeNames, supportedLocales } from '../../shared/supported-locales.js
 import { localizedAccountPlatformError } from './error-localization.js';
 import { accountDisplayLabel } from './account-display-label.js';
 import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
+import { accountClosurePresentation, accountClosureQueryStatus, accountClosureResumeAction, queryAccountClosure, submitAccountClosure } from './account-closure-flow.js';
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
@@ -210,6 +211,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [catalogModels, setCatalogModels] = useState([]);
   const [modelPolicy, setModelPolicy] = useState(null);
   const [closure, setClosure] = useState(null);
+  const [closureQueryState, setClosureQueryState] = useState(accountClosureQueryStatus.loading);
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
   const meRef = useRef(null);
@@ -230,11 +232,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     .join('|');
 
   const refreshClosure = async (signal) => {
-    try {
-      setClosure(await client.accountClosure(signal));
-    } catch (reason) {
-      if (reason?.status !== 404 && reason?.name !== 'AbortError') throw reason;
-    }
+    setClosureQueryState(accountClosureQueryStatus.loading);
+    const result = await queryAccountClosure(client, signal);
+    if (result.status === accountClosureQueryStatus.loading) return;
+    if (result.status === accountClosureQueryStatus.ready) setClosure(result.closure);
+    setClosureQueryState(result.status);
+    if (result.status === accountClosureQueryStatus.error) throw result.reason;
   };
 
   const clearContextResources = () => {
@@ -333,11 +336,17 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         meRef.current = account;
         setMe(account);
         setAuth('ready');
-        await Promise.all([loadContext(account), refreshClosure()]);
-      } catch {
+        await loadContext(account);
+        if (!active) return;
+        try {
+          await refreshClosure();
+        } catch (reason) {
+          if (active) setError(localizedError(copy, reason));
+        }
+      } catch (reason) {
         if (active) {
           setAuth('error');
-          setError(copy.requestFailed);
+          setError(localizedError(copy, reason));
         }
       }
     })();
@@ -627,14 +636,23 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const requestClosure = () =>
     run(async () => {
       const confirmation = globalThis.prompt(copy.closure.confirmPrompt);
-      if (confirmation !== 'CLOSE_MY_ACCOUNT') {
-        if (confirmation !== null) setError(copy.closure.confirmMismatch);
-        return;
-      }
-      const created = await client.createAccountClosure(confirmation, idempotencyKey('account-closure'));
-      setClosure(created);
+      const params = new URLSearchParams(globalThis.location?.search || '');
+      params.set('closure', 'confirm');
+      const result = await submitAccountClosure({
+        client,
+        confirmation,
+        key: idempotencyKey('account-closure'),
+        returnTo: portalSectionLocation('accountSettings', `?${params.toString()}`, globalThis.location?.pathname || '/'),
+      });
+      if (result.status === 'confirmation-mismatch') setError(copy.closure.confirmMismatch);
+      if (result.status === 'recent-authentication-required') setError(copy.closure.recentAuthenticationRequired);
+      if (result.status !== 'created') return;
+      setClosure(result.closure);
+      setClosureQueryState(accountClosureQueryStatus.ready);
       setNotice(copy.closure.requested);
     });
+
+  const retryClosure = () => run(async () => refreshClosure());
 
   const acceptPersonalInvitation = async (invitation) => {
     const acceptanceScope = invitationRecoveryScope(meRef.current);
@@ -923,7 +941,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             canAcceptInvitations={access.invitationsAccept}
             onAcceptInvitation={acceptPersonalInvitation}
             closure={closure}
+            closureQueryStatus={closureQueryState}
             onRequestClosure={requestClosure}
+            onRetryClosure={retryClosure}
           />
         )}
         {!portal && (
@@ -1043,7 +1063,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
               />
             )}
             {section === 'profile' && <ProfileSettings copy={copy} client={client} me={me} onError={(reason) => setError(localizedError(copy, reason))} onChanged={finishProfileChange} onRecovering={() => setNotice(copy.profileChangeRecovering)} />}
-            {section === 'closure' && <AccountClosure copy={copy} item={closure} busy={busy} canRequest={access.closureRequest} onRequest={requestClosure} />}
+            {section === 'closure' && <AccountClosure copy={copy} item={closure} queryStatus={closureQueryState} busy={busy} canRequest={access.closureRequest} onRequest={requestClosure} onRetry={retryClosure} />}
           </>
         )}
       </main>
@@ -1101,11 +1121,22 @@ function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
   );
 }
 
-function PortalAccountSettings({ copy, language, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, invitations, invitationsUnavailable, canReadInvitations, canAcceptInvitations, onAcceptInvitation, closure, onRequestClosure }) {
+function PortalAccountSettings({ copy, language, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, invitations, invitationsUnavailable, canReadInvitations, canAcceptInvitations, onAcceptInvitation, closure, closureQueryStatus, onRequestClosure, onRetryClosure }) {
   const requestedProfile = new URLSearchParams(globalThis.location?.search || '').get('profile');
+  const requestedClosure = new URLSearchParams(globalThis.location?.search || '').get('closure');
   const initialProfile = requestedProfile === 'username' || requestedProfile === 'mobile' ? requestedProfile : '';
   const [profileDialog, setProfileDialog] = useState(initialProfile);
   const [identityDialog, setIdentityDialog] = useState(false);
+  const resumedClosureRef = useRef(false);
+  useEffect(() => {
+    const action = accountClosureResumeAction({ requestedClosure, queryStatus: closureQueryStatus, closure, resumed: resumedClosureRef.current });
+    if (!action.clearMarker) return;
+    resumedClosureRef.current = true;
+    const params = new URLSearchParams(globalThis.location?.search || '');
+    params.delete('closure');
+    globalThis.history?.replaceState?.({}, '', portalSectionLocation('accountSettings', `?${params.toString()}`, globalThis.location?.pathname || '/'));
+    if (action.prompt) void onRequestClosure();
+  }, [closure, closureQueryStatus, onRequestClosure, requestedClosure]);
   const closeProfileDialog = () => {
     setProfileDialog('');
     if (requestedProfile) globalThis.history?.replaceState?.({}, '', portalSectionLocation('accountSettings', globalThis.location?.search || '', globalThis.location?.pathname || '/'));
@@ -1117,7 +1148,7 @@ function PortalAccountSettings({ copy, language, me, access, organizations, acti
       <p className="ap-lead">{copy.accountSettingsLead}</p>
       <AccountProfileCard copy={copy} me={me} organizations={organizations} activeOrganization={activeOrganization} canSwitchIdentity={access.contextSwitch} canEditProfile={access.profileUpdate} onSwitchIdentity={() => setIdentityDialog(true)} onEditUsername={() => setProfileDialog('username')} onEditMobile={() => setProfileDialog('mobile')} />
       {canReadInvitations && <PendingInvitations copy={copy} language={language} items={invitations} unavailable={invitationsUnavailable} busy={busy} canAccept={canAcceptInvitations} onAccept={onAcceptInvitation} />}
-      <AccountClosure copy={copy} item={closure} busy={busy} canRequest={access.closureRequest} onRequest={onRequestClosure} embedded />
+      <AccountClosure copy={copy} item={closure} queryStatus={closureQueryStatus} busy={busy} canRequest={access.closureRequest} onRequest={onRequestClosure} onRetry={onRetryClosure} embedded />
       {identityDialog && (
         <IdentityDialog
           copy={copy}
@@ -1709,15 +1740,24 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
   );
 }
 
-function AccountClosure({ copy, item, busy, canRequest = true, onRequest, embedded = false }) {
+function AccountClosure({ copy, item, queryStatus = accountClosureQueryStatus.ready, busy, canRequest = true, onRequest, onRetry, embedded = false }) {
   const Heading = embedded ? 'h3' : 'h2';
+  const presentation = accountClosurePresentation({ queryStatus, closure: item });
   return (
     <section className={embedded ? 'ap-combined-section ap-danger-section' : 'ap-danger-section'}>
       {!embedded && <p className="ap-eyebrow">{copy.sections.closure}</p>}
       <Heading>{copy.closure.title}</Heading>
       <p className="ap-lead">{copy.closure.lead}</p>
       <article className="ap-card ap-danger-card">
-        {item ? (
+        {presentation.canRetry && (
+          <div role="alert">
+            <p className="ap-muted">{copy.closure.queryFailed}</p>
+            <button type="button" disabled={busy} onClick={onRetry}>{copy.closure.queryRetry}</button>
+          </div>
+        )}
+        {presentation.state === accountClosureQueryStatus.loading ? (
+          <p className="ap-muted" role="status">{copy.closure.queryLoading}</p>
+        ) : presentation.state === accountClosureQueryStatus.error ? null : item ? (
           <>
             <div className="ap-inline">
               <span className="ap-status">{item.status}</span>
@@ -1746,7 +1786,7 @@ function AccountClosure({ copy, item, busy, canRequest = true, onRequest, embedd
           <>
             <h3>{copy.closure.beforeTitle}</h3>
             <p className="ap-muted">{copy.closure.before}</p>
-            <button className="ap-primary" disabled={busy || !canRequest} title={!canRequest ? copy.permissionDenied : undefined} onClick={onRequest}>
+            <button className="ap-primary" disabled={busy || !canRequest || !presentation.canRequest} title={!canRequest ? copy.permissionDenied : undefined} onClick={onRequest}>
               {copy.closure.start}
             </button>
           </>

@@ -684,7 +684,7 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, ErrInvalidApprovalInput):
 		status, code, message = http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "the approval request is invalid"
 	case errors.Is(err, ErrRecentAuthenticationRequired):
-		status, code, message = http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "authentication within the last 15 minutes is required"
+		status, code, message = http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "recent authentication is required"
 	case errors.Is(err, ErrAuditExportQuota):
 		status, code, message = http.StatusTooManyRequests, "AUDIT_EXPORT_QUOTA_EXCEEDED", "the audit export limit was exceeded"
 	case errors.Is(err, ErrLastOwner):
