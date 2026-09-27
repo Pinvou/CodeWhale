@@ -24,6 +24,8 @@ func TestProfileChangeChallengeErrorsStayActionable(t *testing.T) {
 	}{
 		{name: "captcha", err: ErrCaptchaInvalid, status: http.StatusBadRequest, code: "CAPTCHA_INVALID"},
 		{name: "sms provider", err: errors.Join(ErrSMSUnavailable, errors.New("provider rejected request")), status: http.StatusServiceUnavailable, code: "SMS_UNAVAILABLE"},
+		{name: "expired password reference", err: ErrPasswordReferenceInvalid, status: http.StatusGone, code: "PASSWORD_REFERENCE_INVALID"},
+		{name: "mismatched password reference", err: ErrPasswordReferenceConflict, status: http.StatusConflict, code: "PASSWORD_REFERENCE_CONFLICT"},
 	}
 	for _, item := range tests {
 		t.Run(item.name, func(t *testing.T) {

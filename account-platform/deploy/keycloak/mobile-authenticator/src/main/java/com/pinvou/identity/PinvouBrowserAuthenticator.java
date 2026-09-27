@@ -100,6 +100,16 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 put(context, "password_policy", policy);
             }
             put(context, "username", username);
+        } else if ("reset".equals(mode) && get(context, "password_handle").isEmpty()) {
+            String password = form.getFirst("password");
+            String confirmation = form.getFirst("password_confirmation");
+            if (password == null || password.length() < 8 || password.length() > 128 || !password.equals(confirmation)) {
+                render(context, mode, "pinvouPasswordInvalid");
+                return;
+            }
+            Map<String, Object> reference = CLIENT.precheckPassword(password);
+            put(context, "password_handle", PinvouAuthClient.string(reference.get("password_handle")));
+            put(context, "password_policy", PinvouAuthClient.string(reference.get("password_policy_version")));
         }
         Map<String, Object> captcha = CLIENT.createCaptcha(mobile, purpose(mode));
         put(context, "captcha_id", PinvouAuthClient.string(captcha.get("captcha_id")));
@@ -189,6 +199,18 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 return;
             }
             complete(context, user);
+            return;
+        }
+        if ("reset".equals(mode)) {
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("mobile", mobile);
+            request.put("challenge_id", challenge);
+            request.put("code", code);
+            request.put("password_handle", get(context, "password_handle"));
+            request.put("password_policy_version", get(context, "password_policy"));
+            CLIENT.resetPassword(request, source(context), get(context, "device"));
+            clearState(context);
+            render(context, "password", "pinvouPasswordResetSuccess");
             return;
         }
         String subject = CLIENT.verifySMS(mobile, challenge, code, source(context), get(context, "device"));
@@ -289,7 +311,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             .setAttribute("pinvouCaptchaPieceHeight", get(context, "captcha_piece_height"))
             .setAttribute("pinvouCaptchaPieceY", get(context, "captcha_piece_y"));
         if (message == null || message.isBlank()) return form;
-        if ("pinvouCodeSent".equals(message) || "pinvouRegistrationRecovering".equals(message)) return form.setInfo(message);
+        if ("pinvouCodeSent".equals(message) || "pinvouRegistrationRecovering".equals(message) || "pinvouPasswordResetSuccess".equals(message)) return form.setInfo(message);
         return form.setError(message);
     }
 
@@ -320,8 +342,13 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         return DEVICE.matcher(value).matches() ? value : "web-device-absent";
     }
 
-    private static String purpose(String mode) { return "register".equals(mode) ? "REGISTER" : "LOGIN"; }
-    private static String safeMode(String value) { return "sms".equals(value) || "register".equals(value) ? value : "password"; }
+    private static String purpose(String mode) {
+        if ("register".equals(mode)) return "REGISTER";
+        return "reset".equals(mode) ? "PASSWORD_RESET" : "LOGIN";
+    }
+    private static String safeMode(String value) {
+        return "sms".equals(value) || "register".equals(value) || "reset".equals(value) ? value : "password";
+    }
     private static String trim(String value) { return value == null ? "" : value.trim(); }
     private static String normalizeMobile(String value) {
         String national = trim(value);

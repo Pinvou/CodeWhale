@@ -67,6 +67,11 @@ final class PinvouAuthClient {
             Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device)).body();
     }
 
+    void resetPassword(Map<String, Object> body, String source, String device) throws AuthClientException {
+        post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/password-resets"), body,
+            Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device));
+    }
+
     private Response post(URI target, Map<String, Object> body, Map<String, String> headers) throws AuthClientException {
         try {
             HttpRequest.Builder request = HttpRequest.newBuilder(target).timeout(Duration.ofSeconds(8))

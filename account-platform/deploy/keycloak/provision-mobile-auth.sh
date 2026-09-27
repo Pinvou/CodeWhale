@@ -61,7 +61,7 @@ execution_id=$("$KCADM" get "authentication/flows/$FLOW/executions" -r "$REALM" 
 browser_flow_id=$("$KCADM" get authentication/flows -r "$REALM" --fields id,alias --format csv --noquotes | find_id_by_name "$BROWSER_FLOW")
 if [ -z "$browser_flow_id" ]; then
   browser_flow_id=$("$KCADM" create authentication/flows -r "$REALM" -i \
-    -s "alias=$BROWSER_FLOW" -s 'description=Pinvou browser cookie, password, SMS, and verified mobile registration' \
+    -s "alias=$BROWSER_FLOW" -s 'description=Pinvou browser cookie, password, SMS, verified mobile registration, and password recovery' \
     -s providerId=basic-flow -s topLevel=true -s builtIn=false)
 fi
 if ! "$KCADM" get "authentication/flows/$BROWSER_FLOW/executions" -r "$REALM" --format csv --noquotes | grep -q 'auth-cookie'; then
@@ -75,7 +75,7 @@ for browser_provider in auth-cookie "$BROWSER_PROVIDER"; do
   "$KCADM" update "authentication/flows/$BROWSER_FLOW/executions" -r "$REALM" -s "id=$browser_execution_id" -s requirement=ALTERNATIVE -n >/dev/null
 done
 "$KCADM" update "realms/$REALM" -s "directGrantFlow=$FLOW" -s "browserFlow=$BROWSER_FLOW" \
-  -s registrationAllowed=false -s rememberMe=true -s loginTheme=pinvou \
+  -s registrationAllowed=false -s resetPasswordAllowed=false -s rememberMe=true -s loginTheme=pinvou \
   -s internationalizationEnabled=true -s 'supportedLocales=["zh-CN","en","ja"]' -s defaultLocale=zh-CN >/dev/null
 
 # Mobile-only accounts do not have email or legal-name fields at registration

@@ -10,7 +10,7 @@
   "registrationEmailAsUsername": false,
   "rememberMe": true,
   "verifyEmail": false,
-  "resetPasswordAllowed": true,
+  "resetPasswordAllowed": false,
   "loginWithEmailAllowed": true,
   "bruteForceProtected": true,
   "accessTokenLifespan": 600,
@@ -87,7 +87,7 @@
   "authenticationFlows": [
     {
       "alias": "pinvou-browser",
-      "description": "Pinvou browser cookie, password, SMS, and verified mobile registration",
+      "description": "Pinvou browser cookie, password, SMS, verified mobile registration, and password recovery",
       "providerId": "basic-flow",
       "topLevel": true,
       "builtIn": false,

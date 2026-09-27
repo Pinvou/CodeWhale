@@ -166,6 +166,8 @@ func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err 
 		status, code, message = http.StatusServiceUnavailable, "SMS_UNAVAILABLE", "the SMS service is temporarily unavailable"
 	case errors.Is(err, ErrPasswordReferenceInvalid):
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired"
+	case errors.Is(err, ErrPasswordReferenceConflict):
+		status, code, message = http.StatusConflict, "PASSWORD_REFERENCE_CONFLICT", "the password precheck does not match this request"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted"
 	case errors.Is(err, ErrNotFound):

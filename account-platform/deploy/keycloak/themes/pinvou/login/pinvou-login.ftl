@@ -12,7 +12,7 @@
     <section class="pv-auth-card" aria-labelledby="pv-auth-title">
       <header class="pv-auth-header">
         <p class="pv-brand">PINVOU ACCOUNT PLATFORM</p>
-        <h1 id="pv-auth-title"><#if pinvouMode == "register">${msg("pinvouRegisterTitle")}<#else>${msg("pinvouLoginTitle")}</#if></h1>
+        <h1 id="pv-auth-title"><#if pinvouMode == "register">${msg("pinvouRegisterTitle")}<#elseif pinvouMode == "reset">${msg("pinvouResetPasswordTitle")}<#else>${msg("pinvouLoginTitle")}</#if></h1>
         <p>${msg("pinvouLoginSubtitle")}</p>
       </header>
 
@@ -49,7 +49,7 @@
             </label>
             <div class="pv-options">
               <label><input id="pv-remember" type="checkbox"> <span>${msg("pinvouRememberAccount")}</span></label>
-              <a href="${url.loginResetCredentialsUrl!'#'}">${msg("pinvouForgotPassword")}</a>
+              <button type="submit" data-mode="reset" formnovalidate>${msg("pinvouForgotPassword")}</button>
             </div>
           <#elseif pinvouMode == "sms">
             <label class="pv-field">
@@ -64,7 +64,7 @@
               <span>${msg("pinvouCodeLabel")}</span>
               <input name="sms_code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="${msg('pinvouCodePlaceholder')}" required>
             </label>
-          <#else>
+          <#elseif pinvouMode == "register">
             <label class="pv-field">
               <span>${msg("pinvouUsernameLabel")}</span>
               <input name="username" type="text" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z][A-Za-z0-9._-]{2,31}" value="${pinvouUsername}" placeholder="${msg('pinvouUsernamePlaceholder')}" <#if pinvouPasswordAccepted>readonly</#if> required autofocus>
@@ -93,13 +93,38 @@
               <span>${msg("pinvouCodeLabel")}</span>
               <input name="sms_code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="${msg('pinvouCodePlaceholder')}" required>
             </label>
+          <#else>
+            <label class="pv-field">
+              <span>${msg("pinvouMobileLabel")}</span>
+              <span class="pv-inline-control">
+                <span class="pv-country">+86</span>
+                <input name="mobile" type="tel" inputmode="tel" autocomplete="tel-national" pattern="1[3-9][0-9]{9}" maxlength="11" value="${pinvouMobile}" placeholder="${msg('pinvouMobilePlaceholder')}" <#if pinvouPasswordAccepted>readonly</#if> required autofocus>
+                <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
+              </span>
+            </label>
+            <#if !pinvouPasswordAccepted>
+              <label class="pv-field">
+                <span>${msg("pinvouNewPasswordLabel")}</span>
+                <span class="pv-password-wrap"><input id="pv-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouNewPasswordPlaceholder')}" required><span class="pv-password-reveal-output" data-password-reveal-output role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" hidden></span><button type="button" class="pv-eye" data-toggle-password aria-label="${msg('pinvouShowPassword')}" aria-pressed="false" disabled hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg></button></span>
+              </label>
+              <label class="pv-field">
+                <span>${msg("pinvouConfirmPasswordLabel")}</span>
+                <input name="password_confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="${msg('pinvouConfirmPasswordPlaceholder')}" required>
+              </label>
+            <#else>
+              <div class="pv-password-accepted" role="status">${msg("pinvouResetPasswordAccepted")}</div>
+            </#if>
+            <label class="pv-field">
+              <span>${msg("pinvouCodeLabel")}</span>
+              <input name="sms_code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="${msg('pinvouCodePlaceholder')}" required>
+            </label>
           </#if>
         </div>
 
-        <button type="submit" class="pv-submit" data-submit-auth><#if pinvouMode == "register">${msg("pinvouRegisterAndLogin")}<#else>${msg("pinvouLoginButton")}</#if></button>
+        <button type="submit" class="pv-submit" data-submit-auth><#if pinvouMode == "register">${msg("pinvouRegisterAndLogin")}<#elseif pinvouMode == "reset">${msg("pinvouResetPasswordButton")}<#else>${msg("pinvouLoginButton")}</#if></button>
 
         <div class="pv-register-entry">
-          <#if pinvouMode == "register">
+          <#if pinvouMode == "register" || pinvouMode == "reset">
             <span>${msg("pinvouHasAccount")}</span>
             <button type="submit" data-mode="password" formnovalidate>${msg("pinvouBackToLogin")}</button>
           <#else>

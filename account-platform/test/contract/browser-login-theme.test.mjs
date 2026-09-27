@@ -110,7 +110,7 @@ async function loginPasswordControls(initialPassword = '') {
 }
 
 test('web login is rendered by the Identity boundary and Portal redirects guests into OIDC', async () => {
-  const [authenticator, policy, selector, authClient, identityAdapter, template, portal, accountContract, accountAuthorization, registrationSaga] = await Promise.all([
+  const [authenticator, policy, selector, authClient, identityAdapter, template, portal, accountContract, accountAuthorization, registrationSaga, developmentRealm, provisioner] = await Promise.all([
     read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/PinvouBrowserAuthenticator.java'),
     read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/RegistrationLoginPolicy.java'),
     read('deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/RegistrationUserSelector.java'),
@@ -121,6 +121,8 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
     read('contracts/openapi/account.yaml'),
     read('internal/account/authorization.go'),
     read('internal/account/registration_saga.go'),
+    read('deploy/keycloak/pinvou-dev-realm.json'),
+    read('deploy/keycloak/provision-mobile-auth.sh'),
   ]);
   assert.match(portal, /if \(portal && auth === 'guest'\) \{\s*globalThis\.location\.replace\(portalLoginLocation\(globalThis\.location\?\.pathname \|\| '\/', globalThis\.location\?\.search \|\| ''\)\);/);
   assert.match(authenticator, /CLIENT\.precheckPassword\(password\)/);
@@ -128,6 +130,9 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.match(authenticator, /CLIENT\.sendSMS\(/);
   assert.match(authenticator, /CLIENT\.verifySMS\(/);
   assert.match(authenticator, /CLIENT\.register\(/);
+  assert.match(authenticator, /CLIENT\.resetPassword\(/);
+  assert.match(authenticator, /return "reset"\.equals\(mode\) \? "PASSWORD_RESET" : "LOGIN"/);
+  assert.match(authClient, /publicURL\("PINVOU_ACCOUNT_AUTH_URL", "\/v1\/auth\/password-resets"\)/);
   const registrationStatuses = new Set(YAML.parse(accountContract).components.schemas.RegistrationStatus.properties.status.enum);
   const loginReadyStatuses = ['ACCOUNT_COMMITTED', 'PROVISIONING', 'ACTIVE', 'REPAIR_REQUIRED'];
   for (const status of loginReadyStatuses) assert.ok(registrationStatuses.has(status), `${status} must remain an Account registration status`);
@@ -152,6 +157,10 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.match(template, /data-mode="password"/);
   assert.match(template, /data-mode="sms"/);
   assert.match(template, /data-mode="register"/);
+  assert.match(template, /data-mode="reset"/);
+  assert.doesNotMatch(template, /loginResetCredentialsUrl/);
+  assert.equal(JSON.parse(developmentRealm).resetPasswordAllowed, false, 'the unsupported Keycloak email reset flow must stay disabled');
+  assert.match(provisioner, /resetPasswordAllowed=false/);
   assert.match(template, /name="sms_code"/);
   assert.match(template, /name="captcha_offset"/);
   assert.doesNotMatch(template, /type="hidden"[^>]+name="password"/);

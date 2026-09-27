@@ -505,7 +505,7 @@ APT-123-R2 最终状态（2026-09-06）：`DONE / REMEDIATION_REVIEW_PASS`，身
 | ACC-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; PERSONAL-CENTER-IA | NOT_DEPLOYED | 持久变更请求预约规范化新值并保存独立资料版本，按 Identity 更新、Account CAS、会话撤销顺序向前收敛；Web 个人中心接入该 Saga，桌面客户端不封装资料变更。 |
 | ACC-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; PERSONAL-CENTER-IA | NOT_DEPLOYED | Web Portal 通过 `prompt=login`/`max_age=0` 强制重新认证，规范回到根路径用户名修改弹窗，再执行用户名预约、唯一性门禁、CAS 提交和会话撤销；Portal/Account 不接触密码，桌面无用户名修改入口。 |
 | ACC-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; COMMERCE-MAPPING; PERSONAL-CENTER-IA | NOT_DEPLOYED | Web Portal 强制重新认证后规范回到根路径手机号修改弹窗，再提供新手机号滑块/短信验证、资料提交和 Commerce Mapping 版本同步；Portal/Account 不接触密码，桌面无手机号修改入口。 |
-| ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; IDENTITY-SMS | NOT_DEPLOYED | 桌面未登录 Popover 保留忘记密码；反枚举短信、短期密码引用、Keycloak 重置和全会话撤销完整接通。 |
+| ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; IDENTITY-SMS | NOT_DEPLOYED | 网页个人中心和桌面共用的 Identity 托管登录页保留忘记密码；反枚举短信、短期密码引用、Keycloak 重置和全会话撤销完整接通，Keycloak 内置邮件重置保持关闭。 |
 | ACC-10 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA; UI-LINT | NOT_DEPLOYED | 最近5分钟认证、精确确认和幂等键可创建唯一注销请求；所有权/最后有效超级管理员在静默前阻断，进入静默后由账务和 Token 强一致评估推进到自动清理边界，后续资料及标识清理由 ACC-46–ACC-50 独立约束。 |
 | ACC-11 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | Identity 删除确认后随机覆盖用户、资料请求、注册/短信和邀请直接标识，永久保留不可变 user_id/user_code；分类保留记录固定三年期限、法律保全例外及到期自动 PURGED 状态。 |
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |

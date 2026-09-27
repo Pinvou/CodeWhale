@@ -15,14 +15,14 @@ public final class PinvouBrowserAuthenticatorFactory implements AuthenticatorFac
     private static final PinvouBrowserAuthenticator INSTANCE = new PinvouBrowserAuthenticator();
 
     @Override public String getId() { return ID; }
-    @Override public String getDisplayType() { return "Pinvou browser password, SMS, or registration"; }
+    @Override public String getDisplayType() { return "Pinvou browser password, SMS, registration, or password recovery"; }
     @Override public String getReferenceCategory() { return "pinvou-browser"; }
     @Override public boolean isConfigurable() { return false; }
     @Override public AuthenticationExecutionModel.Requirement[] getRequirementChoices() {
         return new AuthenticationExecutionModel.Requirement[]{AuthenticationExecutionModel.Requirement.ALTERNATIVE, AuthenticationExecutionModel.Requirement.REQUIRED};
     }
     @Override public boolean isUserSetupAllowed() { return false; }
-    @Override public String getHelpText() { return "Renders the Pinvou browser login and performs password, verified mobile SMS, and verified mobile registration flows."; }
+    @Override public String getHelpText() { return "Renders the Pinvou browser login and performs password, verified mobile SMS, verified mobile registration, and password recovery flows."; }
     @Override public List<ProviderConfigProperty> getConfigProperties() { return Collections.emptyList(); }
     @Override public Authenticator create(KeycloakSession session) { return INSTANCE; }
     @Override public void init(Config.Scope config) {}
