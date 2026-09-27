@@ -39,7 +39,9 @@ images:
   eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
   migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
   newApi: { repository: calciumion/new-api, tag: v1.0.0-rc.26, digest: sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d, pullPolicy: IfNotPresent }
-  keycloak: { repository: quay.io/keycloak/keycloak, tag: "26.7.0", pullPolicy: IfNotPresent }
+  # This image is built from deploy/keycloak/Dockerfile. The upstream image
+  # alone does not contain the identity-security SPI or realm upgrade script.
+  keycloak: { repository: pinvou/account-platform-keycloak, tag: dev, pullPolicy: IfNotPresent }
   redis: { repository: redis, tag: "8.2-alpine", pullPolicy: IfNotPresent }
   nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
 
@@ -224,6 +226,8 @@ keycloak:
   hostname: https://accounts.example.invalid
   adminHostname: http://127.0.0.1:18081
   replicas: 2
+  realmUpgradeEnabled: false
+  oidcClientId: pinvou-desktop-dev
 
 redis:
   enabled: true

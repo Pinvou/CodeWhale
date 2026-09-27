@@ -52,15 +52,24 @@ type UserDirectory interface {
 	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
 	DisableUserAndConfirm(context.Context, string) error
 	DeleteUser(context.Context, string) error
-	UpdateUsername(context.Context, string, uuid.UUID, string) error
-	UpdateMobile(context.Context, string, uuid.UUID, string) error
+	UpdateUsername(context.Context, string, uuid.UUID, int64, string) error
+	UpdateMobile(context.Context, string, uuid.UUID, int64, string) error
 	SetPassword(context.Context, string, string) error
+	SetPasswordForOperation(context.Context, string, uuid.UUID, int64, string) error
+	PasswordResetApplied(context.Context, string, uuid.UUID, int64) (bool, error)
 	RevokeSessions(context.Context, string) error
 }
 
-func (v *PasswordVault) ResetPassword(ctx context.Context, operationID uuid.UUID, handle, policyVersion, subject, mobile string) error {
-	if operationID == uuid.Nil || strings.TrimSpace(subject) == "" {
+func (v *PasswordVault) ResetPassword(ctx context.Context, operationID uuid.UUID, fenceVersion int64, handle, policyVersion, subject, mobile string) error {
+	if operationID == uuid.Nil || fenceVersion <= 0 || strings.TrimSpace(subject) == "" {
 		return ErrReferenceInvalid
+	}
+	applied, err := v.directory.PasswordResetApplied(ctx, subject, operationID, fenceVersion)
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
 	}
 	if err := v.ValidateReference(operationID, handle, policyVersion, subject, mobile); err != nil {
 		return err
@@ -80,19 +89,19 @@ func (v *PasswordVault) ResetPassword(ctx context.Context, operationID uuid.UUID
 	if err := ValidatePassword(record.password); err != nil {
 		return err
 	}
-	if err := v.directory.SetPassword(ctx, subject, record.password); err != nil {
+	if err := v.directory.SetPasswordForOperation(ctx, subject, operationID, fenceVersion, record.password); err != nil {
 		return err
 	}
 	record.password = ""
-	return v.directory.RevokeSessions(ctx, subject)
+	return nil
 }
 
-func (v *PasswordVault) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, username string) error {
-	return v.directory.UpdateUsername(ctx, subject, operationID, username)
+func (v *PasswordVault) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, fenceVersion int64, username string) error {
+	return v.directory.UpdateUsername(ctx, subject, operationID, fenceVersion, username)
 }
 
-func (v *PasswordVault) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, mobile string) error {
-	return v.directory.UpdateMobile(ctx, subject, operationID, mobile)
+func (v *PasswordVault) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, fenceVersion int64, mobile string) error {
+	return v.directory.UpdateMobile(ctx, subject, operationID, fenceVersion, mobile)
 }
 
 func (v *PasswordVault) RevokeSessions(ctx context.Context, subject string) error {

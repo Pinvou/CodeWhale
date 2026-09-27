@@ -25,22 +25,22 @@ type IdentityProvisioner interface {
 	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
 	DisableUserAndConfirm(context.Context, string) error
 	DeleteUser(context.Context, string) error
-	UpdateUsername(context.Context, string, uuid.UUID, string) error
-	UpdateMobile(context.Context, string, uuid.UUID, string) error
-	ResetPassword(context.Context, string, uuid.UUID, string, string, string) error
+	UpdateUsername(context.Context, string, uuid.UUID, int64, string) error
+	UpdateMobile(context.Context, string, uuid.UUID, int64, string) error
+	ResetPassword(context.Context, string, uuid.UUID, int64, string, string, string) error
 	RevokeSessions(context.Context, string) error
 }
 
-func (p *HTTPIdentityProvisioner) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, username string) error {
-	return p.request(ctx, http.MethodPut, "/internal/v1/users/"+url.PathEscape(subject)+"/username", map[string]any{"operation_id": operationID, "username": username}, nil)
+func (p *HTTPIdentityProvisioner) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, fenceVersion int64, username string) error {
+	return p.request(ctx, http.MethodPut, "/internal/v1/users/"+url.PathEscape(subject)+"/username", map[string]any{"operation_id": operationID, "fence_version": fenceVersion, "username": username}, nil)
 }
 
-func (p *HTTPIdentityProvisioner) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, mobile string) error {
-	return p.request(ctx, http.MethodPut, "/internal/v1/users/"+url.PathEscape(subject)+"/mobile", map[string]any{"operation_id": operationID, "mobile": mobile}, nil)
+func (p *HTTPIdentityProvisioner) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, fenceVersion int64, mobile string) error {
+	return p.request(ctx, http.MethodPut, "/internal/v1/users/"+url.PathEscape(subject)+"/mobile", map[string]any{"operation_id": operationID, "fence_version": fenceVersion, "mobile": mobile}, nil)
 }
 
-func (p *HTTPIdentityProvisioner) ResetPassword(ctx context.Context, subject string, operationID uuid.UUID, mobile, handle, policyVersion string) error {
-	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/password-resets", map[string]any{"operation_id": operationID, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion}, nil)
+func (p *HTTPIdentityProvisioner) ResetPassword(ctx context.Context, subject string, operationID uuid.UUID, fenceVersion int64, mobile, handle, policyVersion string) error {
+	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/password-resets", map[string]any{"operation_id": operationID, "fence_version": fenceVersion, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion}, nil)
 }
 
 func (p *HTTPIdentityProvisioner) RevokeSessions(ctx context.Context, subject string) error {
@@ -140,6 +140,10 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 		}
 		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&problem)
 		switch problem.Code {
+		case "PASSWORD_INVALID":
+			return ErrPasswordInvalid
+		case "PASSWORD_EDGE_SPACE_NOT_ALLOWED":
+			return ErrPasswordEdgeSpace
 		case "PASSWORD_REFERENCE_INVALID":
 			return ErrPasswordReferenceInvalid
 		case "PASSWORD_REFERENCE_CONFLICT":

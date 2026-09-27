@@ -168,6 +168,10 @@ func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err 
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired"
 	case errors.Is(err, ErrPasswordReferenceConflict):
 		status, code, message = http.StatusConflict, "PASSWORD_REFERENCE_CONFLICT", "the password precheck does not match this request"
+	case errors.Is(err, ErrPasswordEdgeSpace):
+		status, code, message = http.StatusBadRequest, "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "password must not start or end with a space"
+	case errors.Is(err, ErrPasswordInvalid):
+		status, code, message = http.StatusBadRequest, "PASSWORD_INVALID", "password must satisfy the active password policy"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted"
 	case errors.Is(err, ErrNotFound):

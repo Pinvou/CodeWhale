@@ -26,6 +26,8 @@ func TestProfileChangeChallengeErrorsStayActionable(t *testing.T) {
 		{name: "sms provider", err: errors.Join(ErrSMSUnavailable, errors.New("provider rejected request")), status: http.StatusServiceUnavailable, code: "SMS_UNAVAILABLE"},
 		{name: "expired password reference", err: ErrPasswordReferenceInvalid, status: http.StatusGone, code: "PASSWORD_REFERENCE_INVALID"},
 		{name: "mismatched password reference", err: ErrPasswordReferenceConflict, status: http.StatusConflict, code: "PASSWORD_REFERENCE_CONFLICT"},
+		{name: "password policy", err: ErrPasswordInvalid, status: http.StatusBadRequest, code: "PASSWORD_INVALID"},
+		{name: "password edge space", err: ErrPasswordEdgeSpace, status: http.StatusBadRequest, code: "PASSWORD_EDGE_SPACE_NOT_ALLOWED"},
 	}
 	for _, item := range tests {
 		t.Run(item.name, func(t *testing.T) {
@@ -81,6 +83,10 @@ type profileStoreFake struct {
 	reserveCalls     int
 	profileErr       error
 	calls            []string
+	reset            PasswordResetOperation
+	resetChallenge   uuid.UUID
+	retryCode        string
+	failedCode       string
 }
 
 func (f *profileStoreFake) CreateProfileChange(_ context.Context, p identity.Principal, field, value string) (ProfileChange, error) {
@@ -211,21 +217,92 @@ func (*profileStoreFake) ScheduleProfileChangeRetry(context.Context, uuid.UUID, 
 	return nil
 }
 func (*profileStoreFake) ClaimProfileChange(context.Context) (*ProfileChange, error) { return nil, nil }
-func (*profileStoreFake) CreatePasswordReset(context.Context, string, string, uuid.UUID) (uuid.UUID, uuid.UUID, error) {
-	return uuid.New(), uuid.New(), nil
+func (f *profileStoreFake) PasswordResetByChallenge(_ context.Context, challengeID uuid.UUID) (PasswordResetOperation, error) {
+	if f.resetChallenge == challengeID && f.reset.ID != uuid.Nil {
+		return f.reset, nil
+	}
+	return PasswordResetOperation{}, ErrNotFound
 }
-func (*profileStoreFake) CreateAuthenticatedPasswordReset(_ context.Context, principal identity.Principal) (uuid.UUID, string, string, error) {
-	return uuid.New(), principal.Subject, "+8613800138000", nil
+func (f *profileStoreFake) CreatePasswordReset(_ context.Context, _ string, challengeID uuid.UUID, mobile string, verified bool, handle, policy string) (PasswordResetOperation, error) {
+	if !verified {
+		return PasswordResetOperation{}, ErrSMSInvalid
+	}
+	f.resetChallenge = challengeID
+	f.reset = PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: mobile, PasswordHandle: handle, PasswordPolicyVersion: policy, FenceVersion: 1, Status: "VERIFIED"}
+	return f.reset, nil
 }
-func (*profileStoreFake) CompletePasswordReset(context.Context, uuid.UUID, string) error { return nil }
+func (f *profileStoreFake) CreateAuthenticatedPasswordReset(_ context.Context, principal identity.Principal, handle, policy string) (PasswordResetOperation, error) {
+	f.reset = PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: principal.Subject, Mobile: "+8613800138000", PasswordHandle: handle, PasswordPolicyVersion: policy, FenceVersion: 1, Status: "VERIFIED"}
+	return f.reset, nil
+}
+func (f *profileStoreFake) MarkPasswordWriteStarted(_ context.Context, _ uuid.UUID, owner uuid.UUID) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reset.Status != "VERIFIED" || f.reset.PasswordWriteStartedAt != nil {
+		return false, nil
+	}
+	now := time.Now()
+	f.reset.PasswordWriteStartedAt = &now
+	f.reset.PasswordWriteOwner = &owner
+	f.reset.Status = "PASSWORD_STARTED"
+	f.calls = append(f.calls, "password-started")
+	return true, nil
+}
+func (f *profileStoreFake) MarkPasswordUpdated(context.Context, uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	f.reset.PasswordUpdatedAt = &now
+	f.reset.Status = "PASSWORD_UPDATED"
+	f.calls = append(f.calls, "password-updated")
+	return nil
+}
+func (f *profileStoreFake) MarkPasswordSessionsRevoked(context.Context, uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	f.reset.SessionsRevokedAt = &now
+	f.calls = append(f.calls, "password-sessions")
+	return nil
+}
+func (f *profileStoreFake) CompletePasswordReset(context.Context, uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reset.Status = "COMPLETED"
+	f.calls = append(f.calls, "password-complete")
+	return nil
+}
+func (f *profileStoreFake) FailPasswordReset(_ context.Context, _ uuid.UUID, code string) error {
+	f.failedCode = code
+	f.reset.Status = "FAILED"
+	return nil
+}
+func (f *profileStoreFake) SchedulePasswordResetRetry(_ context.Context, _ uuid.UUID, code string) error {
+	f.retryCode = code
+	f.reset.Status = "RETRY"
+	return nil
+}
+func (f *profileStoreFake) RequirePasswordResetRepair(_ context.Context, _ uuid.UUID, code string) error {
+	f.retryCode = code
+	f.reset.Status = "REPAIR_REQUIRED"
+	return nil
+}
+func (f *profileStoreFake) ClaimPasswordReset(context.Context) (*PasswordResetOperation, error) {
+	return nil, nil
+}
 func (*profileStoreFake) ListProfileRepairs(context.Context) ([]profileChangeRepairItem, error) {
 	return nil, nil
 }
-func (*profileStoreFake) RetryProfileRepair(context.Context, identity.Principal, uuid.UUID) error {
-	return nil
+func (*profileStoreFake) RetryProfileRepair(_ context.Context, _ identity.Principal, id uuid.UUID) (profileRepairRetryResult, error) {
+	return profileRepairRetryResult{RequestID: id, ResourceType: "profile_change", Action: "RETRY_SCHEDULED", Status: "RETRY"}, nil
 }
 
-type profileIdentityFake struct{ calls []string }
+type profileIdentityFake struct {
+	mu        sync.Mutex
+	calls     []string
+	resetErr  error
+	revokeErr error
+}
 
 func (*profileIdentityFake) ValidateMobileUser(context.Context, uuid.UUID, string, string, string, string) error {
 	return nil
@@ -238,20 +315,182 @@ func (*profileIdentityFake) FindMobileUserByRegistrationOperation(context.Contex
 }
 func (*profileIdentityFake) DisableUserAndConfirm(context.Context, string) error { return nil }
 func (*profileIdentityFake) DeleteUser(context.Context, string) error            { return nil }
-func (f *profileIdentityFake) UpdateUsername(context.Context, string, uuid.UUID, string) error {
+func (f *profileIdentityFake) UpdateUsername(context.Context, string, uuid.UUID, int64, string) error {
 	f.calls = append(f.calls, "identity")
 	return nil
 }
-func (*profileIdentityFake) UpdateMobile(context.Context, string, uuid.UUID, string) error {
+func (*profileIdentityFake) UpdateMobile(context.Context, string, uuid.UUID, int64, string) error {
 	return nil
 }
-func (f *profileIdentityFake) ResetPassword(context.Context, string, uuid.UUID, string, string, string) error {
+func (f *profileIdentityFake) ResetPassword(context.Context, string, uuid.UUID, int64, string, string, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "password")
-	return nil
+	return f.resetErr
 }
 func (f *profileIdentityFake) RevokeSessions(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, "sessions")
-	return nil
+	return f.revokeErr
+}
+
+func TestPasswordResetRetriesSessionRevocationWithoutRepeatingPasswordMutation(t *testing.T) {
+	store := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: "+8613800138000", PasswordHandle: "handle", PasswordPolicyVersion: "user-v1", FenceVersion: 1, Status: "VERIFIED"}}
+	identities := &profileIdentityFake{revokeErr: errors.New("keycloak temporarily unavailable")}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), store.reset); err == nil {
+		t.Fatal("first attempt must report the incomplete session revocation")
+	}
+	if store.reset.PasswordUpdatedAt == nil || store.reset.Status != "RETRY" || store.retryCode != "SESSION_REVOCATION_FAILED" {
+		t.Fatalf("partial reset was not checkpointed for retry: %#v code=%s", store.reset, store.retryCode)
+	}
+	identities.revokeErr = nil
+	if err := service.resumePasswordReset(context.Background(), store.reset); err != nil {
+		t.Fatal(err)
+	}
+	if store.reset.Status != "COMPLETED" || store.reset.SessionsRevokedAt == nil {
+		t.Fatalf("retry did not converge: %#v", store.reset)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password,sessions,sessions" {
+		t.Fatalf("identity calls=%s, password must not be applied twice", got)
+	}
+}
+
+func TestPasswordResetDefiniteReferenceFailureDoesNotPretendThePasswordChanged(t *testing.T) {
+	store := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: "+8613800138000", PasswordHandle: "handle", PasswordPolicyVersion: "user-v1", FenceVersion: 1, Status: "VERIFIED"}}
+	identities := &profileIdentityFake{resetErr: ErrPasswordReferenceInvalid}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), store.reset); !errors.Is(err, ErrPasswordReferenceInvalid) {
+		t.Fatalf("uncertain reset error=%v", err)
+	}
+	if store.reset.PasswordWriteStartedAt == nil || store.reset.SessionsRevokedAt != nil || store.reset.Status != "FAILED" {
+		t.Fatalf("definite non-application was not terminated safely: %#v", store.reset)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password" {
+		t.Fatalf("definite non-application calls=%s", got)
+	}
+}
+
+func TestPasswordResetUncertainAtomicResultRevokesSessionsBeforeRetry(t *testing.T) {
+	store := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: "+8613800138000", PasswordHandle: "handle", PasswordPolicyVersion: "user-v1", FenceVersion: 1, Status: "VERIFIED"}}
+	identities := &profileIdentityFake{resetErr: errors.New("atomic endpoint response lost")}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), store.reset); err == nil {
+		t.Fatal("uncertain atomic result must remain incomplete")
+	}
+	if store.reset.SessionsRevokedAt == nil || store.reset.Status != "RETRY" || store.retryCode != "IDENTITY_RESET_UNCERTAIN" {
+		t.Fatalf("uncertain reset did not revoke sessions before retry: %#v code=%s", store.reset, store.retryCode)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password,sessions" {
+		t.Fatalf("uncertain reset calls=%s", got)
+	}
+}
+
+func TestPasswordResetStartedReplayUsesTheAtomicIdentityProbe(t *testing.T) {
+	now := time.Now()
+	store := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", FenceVersion: 3, Status: "PASSWORD_STARTED", PasswordWriteStartedAt: &now, LastErrorCode: "IDENTITY_RESET_UNCERTAIN"}}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), store.reset); err != nil {
+		t.Fatalf("started replay error=%v", err)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password,sessions" {
+		t.Fatalf("started replay calls=%s", got)
+	}
+	if store.reset.Status != "COMPLETED" || store.reset.SessionsRevokedAt == nil {
+		t.Fatalf("started replay result=%#v", store.reset)
+	}
+}
+
+func TestLegacyAmbiguousPasswordResetOnlyRevokesSessionsAndRequiresRepair(t *testing.T) {
+	now := time.Now()
+	store := &profileStoreFake{reset: PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", FenceVersion: 1, Status: "PASSWORD_STARTED", PasswordWriteStartedAt: &now, LastErrorCode: "LEGACY_SESSION_REVOCATION_UNCERTAIN"}}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.resumePasswordReset(context.Background(), store.reset); !errors.Is(err, ErrConflict) {
+		t.Fatalf("legacy recovery error=%v", err)
+	}
+	if got := strings.Join(identities.calls, ","); got != "sessions" {
+		t.Fatalf("legacy recovery calls=%s", got)
+	}
+	if store.reset.Status != "REPAIR_REQUIRED" || store.reset.SessionsRevokedAt == nil {
+		t.Fatalf("legacy recovery result=%#v", store.reset)
+	}
+}
+
+func TestPasswordResetVerifiedSnapshotCanOnlyAcquireOneIdentityWrite(t *testing.T) {
+	operation := PasswordResetOperation{ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: "+8613800138000", PasswordHandle: "handle", PasswordPolicyVersion: "user-v1", FenceVersion: 1, Status: "VERIFIED"}
+	store := &profileStoreFake{reset: operation}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	errorsSeen := make(chan error, 2)
+	var wait sync.WaitGroup
+	wait.Add(2)
+	for range 2 {
+		go func() {
+			defer wait.Done()
+			errorsSeen <- service.resumePasswordReset(context.Background(), operation)
+		}()
+	}
+	wait.Wait()
+	close(errorsSeen)
+	successes, conflicts := 0, 0
+	for err := range errorsSeen {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent reset error=%v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent reset successes=%d conflicts=%d", successes, conflicts)
+	}
+	identities.mu.Lock()
+	defer identities.mu.Unlock()
+	if got := strings.Count(strings.Join(identities.calls, ","), "password"); got != 1 {
+		t.Fatalf("identity password calls=%v, want one", identities.calls)
+	}
+}
+
+func TestPasswordResetResponseLossResumesTheOperationBoundToTheConsumedChallenge(t *testing.T) {
+	challengeID := uuid.New()
+	store := &profileStoreFake{
+		resetChallenge: challengeID,
+		reset: PasswordResetOperation{
+			ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: "+8613800138000",
+			PasswordHandle: "handle", PasswordPolicyVersion: "user-v1", FenceVersion: 7, Status: "VERIFIED",
+		},
+	}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: time.Now}
+	if err := service.ResetPassword(context.Background(), "13800138000", challengeID, "already-consumed", "different-handle", "user-v1"); err != nil {
+		t.Fatal(err)
+	}
+	if store.reset.Status != "COMPLETED" {
+		t.Fatalf("recovered operation status=%s", store.reset.Status)
+	}
+	if got := strings.Join(identities.calls, ","); got != "password,sessions" {
+		t.Fatalf("recovery calls=%s", got)
+	}
+}
+
+func TestPasswordResetResponseLossPreservesTerminalPasswordReferenceError(t *testing.T) {
+	challengeID := uuid.New()
+	store := &profileStoreFake{
+		resetChallenge: challengeID,
+		reset: PasswordResetOperation{
+			ID: uuid.New(), UserID: uuid.New(), IdentitySubject: "subject", Mobile: "+8613800138000",
+			Status: "FAILED", LastErrorCode: "PASSWORD_REFERENCE_INVALID",
+		},
+	}
+	service := &ProfileChangeService{store: store, identities: &profileIdentityFake{}, now: time.Now}
+	if err := service.ResetPassword(context.Background(), "13800138000", challengeID, "already-consumed", "new-handle", "user-v1"); !errors.Is(err, ErrPasswordReferenceInvalid) {
+		t.Fatalf("recovered terminal error=%v, want PASSWORD_REFERENCE_INVALID", err)
+	}
 }
 
 func TestUsernameChangeRequiresRecentAuthenticationAndConvergesForward(t *testing.T) {
@@ -643,7 +882,7 @@ func TestAuthenticatedPasswordChangeRequiresRecentAuthentication(t *testing.T) {
 	if err := service.ChangePassword(context.Background(), current, "password-handle", "user-v1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(identities.calls) != 1 || identities.calls[0] != "password" {
+	if got := strings.Join(identities.calls, ","); got != "password,sessions" {
 		t.Fatalf("identity calls=%v", identities.calls)
 	}
 }

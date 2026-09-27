@@ -14,4 +14,5 @@ RUN /opt/keycloak/bin/kc.sh build
 
 FROM quay.io/keycloak/keycloak:26.7.0@sha256:0f198be292568439d700cdbfb893e69a6009bb43a94a06a945b1d3d506c76b13
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
+COPY --chown=keycloak:keycloak --chmod=550 provision-mobile-auth.sh /opt/keycloak/bin/pinvou-provision-mobile-auth.sh
 ENV KC_DB=postgres KC_HEALTH_ENABLED=true KC_METRICS_ENABLED=true KC_FEATURES=token-exchange-standard:v2

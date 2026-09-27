@@ -29,6 +29,7 @@ type ProfileChange struct {
 	OldValue               string     `json:"-"`
 	NewValue               string     `json:"new_value"`
 	ExpectedProfileVersion int64      `json:"-"`
+	FenceVersion           int64      `json:"-"`
 	SMSChallengeID         *uuid.UUID `json:"sms_challenge_id,omitempty"`
 	SMSVerifiedAt          *time.Time `json:"-"`
 	IdentityUpdatedAt      *time.Time `json:"-"`
@@ -39,6 +40,23 @@ type ProfileChange struct {
 	SLAExpiresAt           time.Time  `json:"sla_expires_at"`
 	Attempts               int        `json:"-"`
 	LastErrorCode          string     `json:"reason,omitempty"`
+}
+
+type PasswordResetOperation struct {
+	ID                     uuid.UUID
+	UserID                 uuid.UUID
+	IdentitySubject        string
+	Mobile                 string
+	PasswordHandle         string
+	PasswordPolicyVersion  string
+	FenceVersion           int64
+	Status                 string
+	PasswordWriteStartedAt *time.Time
+	PasswordWriteOwner     *uuid.UUID
+	PasswordUpdatedAt      *time.Time
+	SessionsRevokedAt      *time.Time
+	Attempts               int
+	LastErrorCode          string
 }
 
 type ProfileChangeStore interface {
@@ -57,11 +75,19 @@ type ProfileChangeStore interface {
 	CompleteProfileChange(context.Context, uuid.UUID) error
 	ScheduleProfileChangeRetry(context.Context, uuid.UUID, string) error
 	ClaimProfileChange(context.Context) (*ProfileChange, error)
-	CreatePasswordReset(context.Context, string, string, uuid.UUID) (uuid.UUID, uuid.UUID, error)
-	CreateAuthenticatedPasswordReset(context.Context, identity.Principal) (uuid.UUID, string, string, error)
-	CompletePasswordReset(context.Context, uuid.UUID, string) error
+	PasswordResetByChallenge(context.Context, uuid.UUID) (PasswordResetOperation, error)
+	CreatePasswordReset(context.Context, string, uuid.UUID, string, bool, string, string) (PasswordResetOperation, error)
+	CreateAuthenticatedPasswordReset(context.Context, identity.Principal, string, string) (PasswordResetOperation, error)
+	MarkPasswordWriteStarted(context.Context, uuid.UUID, uuid.UUID) (bool, error)
+	MarkPasswordUpdated(context.Context, uuid.UUID) error
+	MarkPasswordSessionsRevoked(context.Context, uuid.UUID) error
+	CompletePasswordReset(context.Context, uuid.UUID) error
+	FailPasswordReset(context.Context, uuid.UUID, string) error
+	SchedulePasswordResetRetry(context.Context, uuid.UUID, string) error
+	RequirePasswordResetRepair(context.Context, uuid.UUID, string) error
+	ClaimPasswordReset(context.Context) (*PasswordResetOperation, error)
 	ListProfileRepairs(context.Context) ([]profileChangeRepairItem, error)
-	RetryProfileRepair(context.Context, identity.Principal, uuid.UUID) error
+	RetryProfileRepair(context.Context, identity.Principal, uuid.UUID) (profileRepairRetryResult, error)
 }
 
 type ProfileChangeService struct {
@@ -231,9 +257,9 @@ func (s *ProfileChangeService) resume(ctx context.Context, change ProfileChange)
 	if change.IdentityUpdatedAt == nil {
 		var err error
 		if change.Field == "USERNAME" {
-			err = s.identities.UpdateUsername(ctx, change.IdentitySubject, change.ID, change.NewValue)
+			err = s.identities.UpdateUsername(ctx, change.IdentitySubject, change.ID, change.FenceVersion, change.NewValue)
 		} else {
-			err = s.identities.UpdateMobile(ctx, change.IdentitySubject, change.ID, change.NewValue)
+			err = s.identities.UpdateMobile(ctx, change.IdentitySubject, change.ID, change.FenceVersion, change.NewValue)
 		}
 		if err != nil {
 			_ = s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "IDENTITY_UPDATE_UNAVAILABLE")
@@ -271,34 +297,149 @@ func (s *ProfileChangeService) ResetPassword(ctx context.Context, mobile string,
 	if err != nil {
 		return err
 	}
-	subject, err := s.auth.VerifyPasswordReset(ctx, normalized, challengeID, code)
+	if existing, loadErr := s.store.PasswordResetByChallenge(ctx, challengeID); loadErr == nil {
+		if existing.Mobile != normalized {
+			return ErrSMSInvalid
+		}
+		return s.resumePasswordReset(ctx, existing)
+	} else if !errors.Is(loadErr, ErrNotFound) {
+		return loadErr
+	}
+	verified, err := s.auth.VerifyPasswordReset(ctx, normalized, challengeID, code)
 	if err != nil {
 		return err
 	}
-	operationID, _, err := s.store.CreatePasswordReset(ctx, s.auth.issuer, subject, challengeID)
+	operation, err := s.store.CreatePasswordReset(ctx, s.auth.issuer, challengeID, normalized, verified, handle, policyVersion)
 	if err != nil {
 		return err
 	}
-	if err := s.identities.ResetPassword(ctx, subject, operationID, normalized, handle, policyVersion); err != nil {
-		_ = s.store.CompletePasswordReset(context.WithoutCancel(ctx), operationID, "IDENTITY_RESET_FAILED")
-		return err
-	}
-	return s.store.CompletePasswordReset(ctx, operationID, "")
+	return s.resumePasswordReset(ctx, operation)
 }
 
 func (s *ProfileChangeService) ChangePassword(ctx context.Context, principal identity.Principal, handle, policyVersion string) error {
 	if err := s.requireRecent(principal); err != nil {
 		return err
 	}
-	operationID, subject, mobile, err := s.store.CreateAuthenticatedPasswordReset(ctx, principal)
+	operation, err := s.store.CreateAuthenticatedPasswordReset(ctx, principal, handle, policyVersion)
 	if err != nil {
 		return err
 	}
-	if err := s.identities.ResetPassword(ctx, subject, operationID, mobile, handle, policyVersion); err != nil {
-		_ = s.store.CompletePasswordReset(context.WithoutCancel(ctx), operationID, "IDENTITY_RESET_FAILED")
+	return s.resumePasswordReset(ctx, operation)
+}
+
+func (s *ProfileChangeService) resumePasswordReset(ctx context.Context, operation PasswordResetOperation) error {
+	switch operation.Status {
+	case "COMPLETED":
+		return nil
+	case "FAILED":
+		return passwordResetStoredError(operation.LastErrorCode)
+	case "REPAIR_REQUIRED":
+		return ErrConflict
+	}
+	if operation.PasswordWriteStartedAt != nil && operation.PasswordUpdatedAt == nil && operation.LastErrorCode == "LEGACY_SESSION_REVOCATION_UNCERTAIN" {
+		return s.recoverUncertainPasswordReset(ctx, operation, operation.LastErrorCode)
+	}
+	if operation.PasswordUpdatedAt == nil {
+		if operation.PasswordWriteStartedAt == nil {
+			owner := uuid.Must(uuid.NewV7())
+			acquired, err := s.store.MarkPasswordWriteStarted(ctx, operation.ID, owner)
+			if err != nil {
+				return err
+			}
+			if !acquired {
+				return ErrConflict
+			}
+			operation.PasswordWriteStartedAt = ptrTime(s.now())
+		}
+		if err := s.identities.ResetPassword(ctx, operation.IdentitySubject, operation.ID, operation.FenceVersion, operation.Mobile, operation.PasswordHandle, operation.PasswordPolicyVersion); err != nil {
+			if errors.Is(err, ErrPasswordReferenceInvalid) || errors.Is(err, ErrPasswordReferenceConflict) || errors.Is(err, ErrPasswordInvalid) || errors.Is(err, ErrPasswordEdgeSpace) {
+				_ = s.store.FailPasswordReset(context.WithoutCancel(ctx), operation.ID, passwordResetErrorCode(err))
+			} else {
+				if revokeErr := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); revokeErr != nil {
+					_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN_SESSION_REVOCATION_FAILED")
+					return errors.Join(err, revokeErr)
+				}
+				_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN")
+			}
+			return err
+		}
+		if err := s.store.MarkPasswordUpdated(ctx, operation.ID); err != nil {
+			if revokeErr := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); revokeErr != nil {
+				_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_AND_SESSION_REVOCATION_FAILED")
+				return errors.Join(err, revokeErr)
+			}
+			_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_FAILED")
+			return err
+		}
+		operation.PasswordUpdatedAt = ptrTime(s.now())
+	}
+	if operation.SessionsRevokedAt == nil {
+		if err := s.identities.RevokeSessions(ctx, operation.IdentitySubject); err != nil {
+			_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_FAILED")
+			return err
+		}
+		if err := s.store.MarkPasswordSessionsRevoked(ctx, operation.ID); err != nil {
+			_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_CHECKPOINT_FAILED")
+			return err
+		}
+	}
+	return s.store.CompletePasswordReset(ctx, operation.ID)
+}
+
+func (s *ProfileChangeService) revokePasswordSessionsAfterUncertainWrite(ctx context.Context, operation PasswordResetOperation) error {
+	if operation.SessionsRevokedAt != nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.identities.RevokeSessions(cleanupCtx, operation.IdentitySubject); err != nil {
 		return err
 	}
-	return s.store.CompletePasswordReset(ctx, operationID, "")
+	return s.store.MarkPasswordSessionsRevoked(cleanupCtx, operation.ID)
+}
+
+func (s *ProfileChangeService) recoverUncertainPasswordReset(ctx context.Context, operation PasswordResetOperation, code string) error {
+	if strings.TrimSpace(code) == "" {
+		code = "PASSWORD_WRITE_UNCERTAIN"
+	}
+	if err := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); err != nil {
+		_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, code+"_SESSION_REVOCATION_FAILED")
+		return err
+	}
+	if err := s.store.RequirePasswordResetRepair(context.WithoutCancel(ctx), operation.ID, code); err != nil {
+		return err
+	}
+	return passwordResetStoredError(code)
+}
+
+func passwordResetStoredError(code string) error {
+	switch code {
+	case "PASSWORD_REFERENCE_INVALID", "MIGRATION_PASSWORD_REFERENCE_UNAVAILABLE":
+		return ErrPasswordReferenceInvalid
+	case "PASSWORD_REFERENCE_CONFLICT":
+		return ErrPasswordReferenceConflict
+	case "PASSWORD_EDGE_SPACE_NOT_ALLOWED":
+		return ErrPasswordEdgeSpace
+	case "PASSWORD_INVALID":
+		return ErrPasswordInvalid
+	default:
+		return ErrConflict
+	}
+}
+
+func passwordResetErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrPasswordReferenceInvalid):
+		return "PASSWORD_REFERENCE_INVALID"
+	case errors.Is(err, ErrPasswordReferenceConflict):
+		return "PASSWORD_REFERENCE_CONFLICT"
+	case errors.Is(err, ErrPasswordEdgeSpace):
+		return "PASSWORD_EDGE_SPACE_NOT_ALLOWED"
+	case errors.Is(err, ErrPasswordInvalid):
+		return "PASSWORD_INVALID"
+	default:
+		return "IDENTITY_RESET_UNCERTAIN"
+	}
 }
 
 type ProfileChangeWorker struct {
@@ -320,6 +461,10 @@ func (w *ProfileChangeWorker) Run(ctx context.Context) {
 		if change != nil {
 			_, _ = w.service.resume(ctx, *change)
 		}
+		reset, _ := w.service.store.ClaimPasswordReset(ctx)
+		if reset != nil {
+			_ = w.service.resumePasswordReset(ctx, *reset)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -331,22 +476,36 @@ func (w *ProfileChangeWorker) Run(ctx context.Context) {
 func ptrTime(value time.Time) *time.Time { return &value }
 
 func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal identity.Principal, field, value string) (ProfileChange, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// The user row is the cross-table identity-security mutex. READ COMMITTED
+	// lets a waiter observe the winner after acquiring that row lock instead of
+	// surfacing a serialization failure to the user.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return ProfileChange{}, err
 	}
 	defer tx.Rollback(ctx)
 	var change ProfileChange
 	var username, mobile *string
-	err = tx.QueryRow(ctx, `SELECT u.id,i.issuer,i.subject,u.username,u.mobile_e164,u.profile_version FROM users u JOIN identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2 AND u.status IN ('ACTIVE','PROVISIONING','REPAIR_REQUIRED') FOR UPDATE OF u`, principal.Issuer, principal.Subject).Scan(&change.UserID, &change.IdentityIssuer, &change.IdentitySubject, &username, &mobile, &change.ExpectedProfileVersion)
+	var securityVersion int64
+	err = tx.QueryRow(ctx, `SELECT u.id,i.issuer,i.subject,u.username,u.mobile_e164,u.profile_version,u.identity_security_version FROM users u JOIN identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2 AND u.status IN ('ACTIVE','PROVISIONING','REPAIR_REQUIRED') FOR UPDATE OF u`, principal.Issuer, principal.Subject).Scan(&change.UserID, &change.IdentityIssuer, &change.IdentitySubject, &username, &mobile, &change.ExpectedProfileVersion, &securityVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProfileChange{}, ErrNotFound
 	}
 	if err != nil {
 		return ProfileChange{}, err
 	}
-	active, activeErr := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE user_id=$1 AND field=$2 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED') FOR UPDATE`, change.UserID, field))
+	var passwordActive bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM password_reset_operations WHERE user_id=$1 AND status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED'))`, change.UserID).Scan(&passwordActive); err != nil {
+		return ProfileChange{}, err
+	}
+	if passwordActive {
+		return ProfileChange{}, ErrProfileChangeConflict
+	}
+	active, activeErr := scanProfileChange(tx.QueryRow(ctx, profileChangeSelect+` WHERE user_id=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED') ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, change.UserID))
 	if activeErr == nil {
+		if active.Field != field {
+			return ProfileChange{}, ErrProfileChangeConflict
+		}
 		if active.Status != "PENDING" || active.SMSVerifiedAt != nil || active.IdentityUpdatedAt != nil || active.AccountCommittedAt != nil || active.SessionsRevokedAt != nil {
 			return ProfileChange{}, ErrProfileChangeConflict
 		}
@@ -373,13 +532,14 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 		return ProfileChange{}, activeErr
 	}
 	change.ID = uuid.Must(uuid.NewV7())
+	change.FenceVersion = securityVersion + 1
 	change.Field = field
 	change.NewValue = value
 	change.Status = "PENDING"
 	if field == "USERNAME" {
 		change.Status = "VERIFIED"
 	}
-	change.NextAttemptAt = r.now()
+	change.NextAttemptAt = r.now().Add(30 * time.Second)
 	change.SLAExpiresAt = r.now().Add(30 * time.Minute)
 	if field == "USERNAME" {
 		if username != nil && *username == value {
@@ -413,7 +573,14 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 			return ProfileChange{}, ErrMobileAlreadyRegistered
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO profile_change_requests(id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,status,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$10)`, change.ID, change.UserID, change.IdentityIssuer, change.IdentitySubject, field, change.OldValue, value, change.ExpectedProfileVersion, change.Status, change.NextAttemptAt, change.SLAExpiresAt)
+	command, err := tx.Exec(ctx, `UPDATE users SET identity_security_version=$2,version=version+1,updated_at=$3 WHERE id=$1 AND identity_security_version=$4`, change.UserID, change.FenceVersion, r.now(), securityVersion)
+	if err != nil {
+		return ProfileChange{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return ProfileChange{}, ErrProfileChangeConflict
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO profile_change_requests(id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,fence_version,status,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`, change.ID, change.UserID, change.IdentityIssuer, change.IdentitySubject, field, change.OldValue, value, change.ExpectedProfileVersion, change.FenceVersion, change.Status, change.NextAttemptAt, change.SLAExpiresAt, r.now())
 	if err != nil {
 		if strings.Contains(err.Error(), "profile_change_requests_active") {
 			return ProfileChange{}, ErrProfileChangeConflict
@@ -428,11 +595,11 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 
 func scanProfileChange(row pgx.Row) (ProfileChange, error) {
 	var c ProfileChange
-	err := row.Scan(&c.ID, &c.UserID, &c.IdentityIssuer, &c.IdentitySubject, &c.Field, &c.OldValue, &c.NewValue, &c.ExpectedProfileVersion, &c.SMSChallengeID, &c.SMSVerifiedAt, &c.IdentityUpdatedAt, &c.AccountCommittedAt, &c.SessionsRevokedAt, &c.Status, &c.NextAttemptAt, &c.SLAExpiresAt, &c.Attempts, &c.LastErrorCode)
+	err := row.Scan(&c.ID, &c.UserID, &c.IdentityIssuer, &c.IdentitySubject, &c.Field, &c.OldValue, &c.NewValue, &c.ExpectedProfileVersion, &c.FenceVersion, &c.SMSChallengeID, &c.SMSVerifiedAt, &c.IdentityUpdatedAt, &c.AccountCommittedAt, &c.SessionsRevokedAt, &c.Status, &c.NextAttemptAt, &c.SLAExpiresAt, &c.Attempts, &c.LastErrorCode)
 	return c, err
 }
 
-const profileChangeSelect = `SELECT id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,sms_challenge_id,sms_verified_at,identity_updated_at,account_committed_at,sessions_revoked_at,status,next_attempt_at,sla_expires_at,attempts,COALESCE(last_error_code,'') FROM profile_change_requests`
+const profileChangeSelect = `SELECT id,user_id,identity_issuer,identity_subject,field,old_value,new_value,expected_profile_version,fence_version,sms_challenge_id,sms_verified_at,identity_updated_at,account_committed_at,sessions_revoked_at,status,next_attempt_at,sla_expires_at,attempts,COALESCE(last_error_code,'') FROM profile_change_requests`
 
 func (r *PostgresRepository) ProfileChange(ctx context.Context, id uuid.UUID, userID *uuid.UUID) (ProfileChange, error) {
 	query := profileChangeSelect + ` WHERE id=$1`
@@ -772,17 +939,60 @@ func (r *PostgresRepository) ClaimProfileChange(ctx context.Context) (*ProfileCh
 	return &c, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) CreatePasswordReset(ctx context.Context, issuer, subject string, challengeID uuid.UUID) (uuid.UUID, uuid.UUID, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+func (r *PostgresRepository) PasswordResetByChallenge(ctx context.Context, challengeID uuid.UUID) (PasswordResetOperation, error) {
+	operation, err := scanPasswordReset(r.pool.QueryRow(ctx, passwordResetSelect+` WHERE sms_challenge_id=$1`, challengeID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PasswordResetOperation{}, ErrNotFound
+	}
+	return operation, err
+}
+
+func (r *PostgresRepository) CreatePasswordReset(ctx context.Context, issuer string, challengeID uuid.UUID, mobile string, verified bool, handle, policyVersion string) (PasswordResetOperation, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return PasswordResetOperation{}, err
 	}
 	defer tx.Rollback(ctx)
+	if existing, loadErr := scanPasswordReset(tx.QueryRow(ctx, passwordResetSelect+` WHERE sms_challenge_id=$1`, challengeID)); loadErr == nil {
+		if existing.Mobile != mobile {
+			return PasswordResetOperation{}, ErrSMSInvalid
+		}
+		return existing, tx.Commit(ctx)
+	} else if !errors.Is(loadErr, pgx.ErrNoRows) {
+		return PasswordResetOperation{}, loadErr
+	}
+	var challengeStatus string
+	var challengeAttempts int
+	var challengeExpiresAt time.Time
+	var deliveryStartedAt *time.Time
+	if err = tx.QueryRow(ctx, `SELECT status,attempts,expires_at,delivery_started_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose='PASSWORD_RESET' FOR UPDATE`, challengeID, mobile).Scan(&challengeStatus, &challengeAttempts, &challengeExpiresAt, &deliveryStartedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PasswordResetOperation{}, ErrSMSInvalid
+		}
+		return PasswordResetOperation{}, err
+	}
+	now := r.now()
+	ready := challengeStatus == "SENT" || challengeStatus == "CREATED" && deliveryStartedAt != nil
+	if !ready || challengeAttempts >= 5 || !challengeExpiresAt.After(now) {
+		return PasswordResetOperation{}, ErrSMSInvalid
+	}
+	if !verified {
+		challengeAttempts++
+		if _, err = tx.Exec(ctx, `UPDATE sms_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, challengeID, challengeAttempts, now); err != nil {
+			return PasswordResetOperation{}, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return PasswordResetOperation{}, err
+		}
+		return PasswordResetOperation{}, ErrSMSInvalid
+	}
 	var userID uuid.UUID
+	var subject string
+	var currentFence int64
 	err = tx.QueryRow(ctx, `
-SELECT u.id
+SELECT u.id,i.subject,u.identity_security_version
 FROM identities i JOIN users u ON u.id=i.user_id
-WHERE i.issuer=$1 AND i.subject=$2
+WHERE i.issuer=$1 AND u.mobile_e164=$2
   AND u.status IN ('ACTIVE','PROVISIONING','REPAIR_REQUIRED')
   AND EXISTS(
     SELECT 1 FROM role_assignments ra
@@ -791,34 +1001,61 @@ WHERE i.issuer=$1 AND i.subject=$2
     WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL
       AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
   )
-FOR UPDATE OF u`, issuer, subject, PermissionPersonalSecurityManage).Scan(&userID)
+FOR UPDATE OF u`, issuer, mobile, PermissionPersonalSecurityManage).Scan(&userID, &subject, &currentFence)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, uuid.Nil, ErrNotFound
+		return PasswordResetOperation{}, ErrNotFound
 	}
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return PasswordResetOperation{}, err
+	}
+	var profileActive bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM profile_change_requests WHERE user_id=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))`, userID).Scan(&profileActive); err != nil {
+		return PasswordResetOperation{}, err
+	}
+	if profileActive {
+		return PasswordResetOperation{}, ErrConflict
+	}
+	var active bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM password_reset_operations WHERE user_id=$1 AND status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED'))`, userID).Scan(&active); err != nil {
+		return PasswordResetOperation{}, err
+	}
+	if active {
+		return PasswordResetOperation{}, ErrConflict
+	}
+	fenceVersion := currentFence + 1
+	command, err := tx.Exec(ctx, `UPDATE users SET identity_security_version=$2,version=version+1,updated_at=$3 WHERE id=$1 AND identity_security_version=$4`, userID, fenceVersion, now, currentFence)
+	if err != nil {
+		return PasswordResetOperation{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return PasswordResetOperation{}, ErrConflict
+	}
+	if _, err = tx.Exec(ctx, `UPDATE sms_challenges SET status='CONSUMED',consumed_at=$2,updated_at=$2 WHERE id=$1`, challengeID, now); err != nil {
+		return PasswordResetOperation{}, err
 	}
 	id := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,sms_challenge_id,method,status,created_at) VALUES($1,$2,$3,$4,$5,'SMS','VERIFIED',$6)`, id, userID, issuer, subject, challengeID, r.now())
+	_, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,sms_challenge_id,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'SMS','VERIFIED',$6,$7,$8,$9,$10+interval '30 seconds',$10+interval '30 minutes',$10,$10)`, id, userID, issuer, subject, challengeID, mobile, handle, policyVersion, fenceVersion, now)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return PasswordResetOperation{}, err
 	}
 	if err = appendAudit(ctx, tx, userID, "", nil, "account.password_reset.verified", "password_reset", id.String(), "SUCCEEDED", map[string]any{"method": "SMS"}); err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return PasswordResetOperation{}, err
 	}
-	return id, userID, tx.Commit(ctx)
+	operation := PasswordResetOperation{ID: id, UserID: userID, IdentitySubject: subject, Mobile: mobile, PasswordHandle: handle, PasswordPolicyVersion: policyVersion, FenceVersion: fenceVersion, Status: "VERIFIED"}
+	return operation, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) CreateAuthenticatedPasswordReset(ctx context.Context, principal identity.Principal) (uuid.UUID, string, string, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+func (r *PostgresRepository) CreateAuthenticatedPasswordReset(ctx context.Context, principal identity.Principal, handle, policyVersion string) (PasswordResetOperation, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return uuid.Nil, "", "", err
+		return PasswordResetOperation{}, err
 	}
 	defer tx.Rollback(ctx)
 	var userID uuid.UUID
 	var subject, mobile string
+	var currentFence int64
 	err = tx.QueryRow(ctx, `
-SELECT u.id,i.subject,COALESCE(u.mobile_e164,'')
+SELECT u.id,i.subject,COALESCE(u.mobile_e164,''),u.identity_security_version
 FROM identities i JOIN users u ON u.id=i.user_id
 WHERE i.issuer=$1 AND i.subject=$2
   AND u.status IN ('ACTIVE','PROVISIONING','REPAIR_REQUIRED')
@@ -829,50 +1066,198 @@ WHERE i.issuer=$1 AND i.subject=$2
     WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL
       AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
   )
-FOR UPDATE OF u`, principal.Issuer, principal.Subject, PermissionPersonalSecurityManage).Scan(&userID, &subject, &mobile)
+FOR UPDATE OF u`, principal.Issuer, principal.Subject, PermissionPersonalSecurityManage).Scan(&userID, &subject, &mobile, &currentFence)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, "", "", ErrForbidden
+		return PasswordResetOperation{}, ErrForbidden
 	}
 	if err != nil {
-		return uuid.Nil, "", "", err
+		return PasswordResetOperation{}, err
+	}
+	now := r.now()
+	var profileActive bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM profile_change_requests WHERE user_id=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))`, userID).Scan(&profileActive); err != nil {
+		return PasswordResetOperation{}, err
+	}
+	if profileActive {
+		return PasswordResetOperation{}, ErrConflict
+	}
+	var active bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM password_reset_operations WHERE user_id=$1 AND status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED'))`, userID).Scan(&active); err != nil {
+		return PasswordResetOperation{}, err
+	}
+	if active {
+		return PasswordResetOperation{}, ErrConflict
+	}
+	fenceVersion := currentFence + 1
+	command, err := tx.Exec(ctx, `UPDATE users SET identity_security_version=$2,version=version+1,updated_at=$3 WHERE id=$1 AND identity_security_version=$4`, userID, fenceVersion, now, currentFence)
+	if err != nil {
+		return PasswordResetOperation{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return PasswordResetOperation{}, ErrConflict
 	}
 	id := uuid.Must(uuid.NewV7())
-	if _, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,method,status,created_at) VALUES($1,$2,$3,$4,'AUTHENTICATED','VERIFIED',$5)`, id, userID, principal.Issuer, subject, r.now()); err != nil {
-		return uuid.Nil, "", "", err
+	if _, err = tx.Exec(ctx, `INSERT INTO password_reset_operations(id,user_id,identity_issuer,identity_subject,method,status,mobile_e164,password_handle,password_policy_version,fence_version,next_attempt_at,sla_expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'AUTHENTICATED','VERIFIED',$5,$6,$7,$8,$9+interval '30 seconds',$9+interval '30 minutes',$9,$9)`, id, userID, principal.Issuer, subject, mobile, handle, policyVersion, fenceVersion, now); err != nil {
+		return PasswordResetOperation{}, err
 	}
 	if err = appendAudit(ctx, tx, userID, principal.Subject, nil, "account.password_change.verified", "password_reset", id.String(), "SUCCEEDED", map[string]any{"method": "RECENT_AUTHENTICATION"}); err != nil {
-		return uuid.Nil, "", "", err
+		return PasswordResetOperation{}, err
 	}
-	return id, subject, mobile, tx.Commit(ctx)
+	operation := PasswordResetOperation{ID: id, UserID: userID, IdentitySubject: subject, Mobile: mobile, PasswordHandle: handle, PasswordPolicyVersion: policyVersion, FenceVersion: fenceVersion, Status: "VERIFIED"}
+	return operation, tx.Commit(ctx)
 }
-func (r *PostgresRepository) CompletePasswordReset(ctx context.Context, id uuid.UUID, code string) error {
-	status := "COMPLETED"
-	if code != "" {
-		status = "FAILED"
+
+func (r *PostgresRepository) MarkPasswordUpdated(ctx context.Context, id uuid.UUID) error {
+	command, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET password_updated_at=COALESCE(password_updated_at,$2),password_handle='',password_policy_version='',status='PASSWORD_UPDATED',last_error_code=NULL,next_attempt_at=$2,updated_at=$2 WHERE id=$1 AND password_write_started_at IS NOT NULL AND status IN ('PASSWORD_STARTED','PASSWORD_UPDATED','RETRY')`, id, r.now())
+	if err == nil && command.RowsAffected() != 1 {
+		return r.passwordResetStageSatisfied(ctx, id, `password_updated_at IS NOT NULL`)
 	}
+	return err
+}
+
+func (r *PostgresRepository) MarkPasswordWriteStarted(ctx context.Context, id, owner uuid.UUID) (bool, error) {
+	if owner == uuid.Nil {
+		return false, ErrConflict
+	}
+	now := r.now()
+	command, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET password_write_started_at=$3,password_write_owner=$2,status='PASSWORD_STARTED',next_attempt_at=$3+interval '30 seconds',updated_at=$3 WHERE id=$1 AND status='VERIFIED' AND password_write_started_at IS NULL`, id, owner, now)
+	if err != nil {
+		return false, err
+	}
+	return command.RowsAffected() == 1, nil
+}
+
+func (r *PostgresRepository) MarkPasswordSessionsRevoked(ctx context.Context, id uuid.UUID) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE password_reset_operations SET status=$2,last_error_code=NULLIF($3,''),completed_at=$4 WHERE id=$1 AND status='VERIFIED'`, id, status, code, r.now()); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=(SELECT user_id FROM password_reset_operations WHERE id=$1)`, id); err != nil {
 		return err
 	}
-	if status == "COMPLETED" {
-		if _, err = tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=(SELECT user_id FROM password_reset_operations WHERE id=$1)`, id); err != nil {
+	command, err := tx.Exec(ctx, `UPDATE password_reset_operations SET sessions_revoked_at=COALESCE(sessions_revoked_at,$2),next_attempt_at=$2,updated_at=$2 WHERE id=$1 AND password_write_started_at IS NOT NULL AND status IN ('PASSWORD_STARTED','PASSWORD_UPDATED','RETRY','REPAIR_REQUIRED')`, id, r.now())
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		var satisfied bool
+		if err = tx.QueryRow(ctx, `SELECT sessions_revoked_at IS NOT NULL FROM password_reset_operations WHERE id=$1`, id).Scan(&satisfied); err != nil {
 			return err
 		}
+		if !satisfied {
+			return ErrConflict
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) CompletePasswordReset(ctx context.Context, id uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	now := r.now()
+	command, err := tx.Exec(ctx, `UPDATE password_reset_operations SET status='COMPLETED',last_error_code=NULL,completed_at=$2,updated_at=$2 WHERE id=$1 AND password_updated_at IS NOT NULL AND sessions_revoked_at IS NOT NULL AND status IN ('PASSWORD_UPDATED','RETRY')`, id, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		var completed bool
+		if err = tx.QueryRow(ctx, `SELECT status='COMPLETED' FROM password_reset_operations WHERE id=$1`, id).Scan(&completed); err != nil {
+			return err
+		}
+		if !completed {
+			return ErrConflict
+		}
+		return tx.Commit(ctx)
 	}
 	var userID uuid.UUID
 	if err = tx.QueryRow(ctx, `SELECT user_id FROM password_reset_operations WHERE id=$1`, id).Scan(&userID); err != nil {
 		return err
 	}
-	result := "SUCCEEDED"
-	if status != "COMPLETED" {
-		result = "FAILED"
-	}
-	if err = appendAudit(ctx, tx, userID, "", nil, "account.password_reset.completed", "password_reset", id.String(), result, map[string]any{"reason": code}); err != nil {
+	if err = appendAudit(ctx, tx, userID, "", nil, "account.password_reset.completed", "password_reset", id.String(), "SUCCEEDED", map[string]any{}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) FailPasswordReset(ctx context.Context, id uuid.UUID, code string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	now := r.now()
+	command, err := tx.Exec(ctx, `UPDATE password_reset_operations SET password_handle='',password_policy_version='',status='FAILED',last_error_code=$2,completed_at=$3,updated_at=$3 WHERE id=$1 AND password_updated_at IS NULL AND status IN ('VERIFIED','PASSWORD_STARTED','RETRY')`, id, code, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	var userID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT user_id FROM password_reset_operations WHERE id=$1`, id).Scan(&userID); err != nil {
+		return err
+	}
+	if err = appendAudit(ctx, tx, userID, "", nil, "account.password_reset.completed", "password_reset", id.String(), "FAILED", map[string]any{"reason": code}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) SchedulePasswordResetRetry(ctx context.Context, id uuid.UUID, code string) error {
+	now := r.now()
+	_, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET attempts=attempts+1,status=CASE WHEN attempts+1>=10 OR sla_expires_at<=$2 THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2+make_interval(secs=>LEAST(300,power(2,LEAST(attempts+1,8))::int)),updated_at=$2 WHERE id=$1 AND status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY')`, id, now, code)
+	return err
+}
+
+func (r *PostgresRepository) RequirePasswordResetRepair(ctx context.Context, id uuid.UUID, code string) error {
+	command, err := r.pool.Exec(ctx, `UPDATE password_reset_operations SET password_handle='',password_policy_version='',status='REPAIR_REQUIRED',last_error_code=$2,next_attempt_at=$3,updated_at=$3 WHERE id=$1 AND password_write_started_at IS NOT NULL AND password_updated_at IS NULL AND sessions_revoked_at IS NOT NULL AND status IN ('PASSWORD_STARTED','RETRY','REPAIR_REQUIRED')`, id, code, r.now())
+	if err == nil && command.RowsAffected() != 1 {
+		return r.passwordResetStageSatisfied(ctx, id, `status='REPAIR_REQUIRED' AND sessions_revoked_at IS NOT NULL`)
+	}
+	return err
+}
+
+func (r *PostgresRepository) passwordResetStageSatisfied(ctx context.Context, id uuid.UUID, predicate string) error {
+	var satisfied bool
+	if err := r.pool.QueryRow(ctx, `SELECT `+predicate+` FROM password_reset_operations WHERE id=$1`, id).Scan(&satisfied); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !satisfied {
+		return ErrConflict
+	}
+	return nil
+}
+
+const passwordResetSelect = `SELECT id,user_id,identity_subject,mobile_e164,password_handle,password_policy_version,fence_version,status,password_write_started_at,password_write_owner,password_updated_at,sessions_revoked_at,attempts,COALESCE(last_error_code,'') FROM password_reset_operations`
+
+func scanPasswordReset(row pgx.Row) (PasswordResetOperation, error) {
+	var operation PasswordResetOperation
+	err := row.Scan(&operation.ID, &operation.UserID, &operation.IdentitySubject, &operation.Mobile, &operation.PasswordHandle, &operation.PasswordPolicyVersion, &operation.FenceVersion, &operation.Status, &operation.PasswordWriteStartedAt, &operation.PasswordWriteOwner, &operation.PasswordUpdatedAt, &operation.SessionsRevokedAt, &operation.Attempts, &operation.LastErrorCode)
+	return operation, err
+}
+
+func (r *PostgresRepository) ClaimPasswordReset(ctx context.Context) (*PasswordResetOperation, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	operation, err := scanPasswordReset(tx.QueryRow(ctx, passwordResetSelect+` WHERE status IN ('VERIFIED','PASSWORD_STARTED','PASSWORD_UPDATED','RETRY') AND next_attempt_at<=$1 ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1`, r.now()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, tx.Commit(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE password_reset_operations SET next_attempt_at=$2+interval '30 seconds',updated_at=$2 WHERE id=$1`, operation.ID, r.now()); err != nil {
+		return nil, err
+	}
+	return &operation, tx.Commit(ctx)
 }

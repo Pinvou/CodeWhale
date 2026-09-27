@@ -547,24 +547,47 @@ paths:
   /account/admin/v1/profile-change-requests:
     get:
       operationId: listProfileChangeRepairQueue
-      summary: List redacted retry and repair-required profile changes
-      description: Requires platform.profile-changes.repair. Old/new identifiers, Identity subjects, SMS details, and provider errors are never returned.
+      summary: List redacted retry and repair-required profile or password changes
+      description: Requires platform.profile-changes.repair. PASSWORD rows are password-reset recovery operations; old/new identifiers, Identity subjects, SMS details, password references, and provider errors are never returned.
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
   /account/admin/v1/profile-change-requests/{request_id}/actions/retry:
     post:
       operationId: retryProfileChangeRepair
-      summary: Return one repair-required profile change to the forward-only recovery worker
+      summary: Schedule one repair-required profile retry or fenced atomic password recovery
+      description: Requires platform.profile-changes.repair. The response reports the actual scheduled action. Password recovery first probes Keycloak's atomic operation/fence marker; if definitively not applied and the same short-lived reference remains valid, it may resume that same fenced write. The endpoint never releases the operation or marks it failed, and an indeterminate result returns to REPAIR_REQUIRED. Legacy ambiguous rows have no atomic marker to probe and return 409 without changing state.
       parameters:
         - name: request_id
           in: path
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "202": { $ref: "#/components/responses/Overview" }
+        "202":
+          description: The exact forward recovery action scheduled for the selected resource
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required: [request_id, resource_type, action, status]
+                    properties:
+                      request_id: { type: string, format: uuid }
+                      resource_type: { type: string, const: profile_change }
+                      action: { type: string, const: RETRY_SCHEDULED }
+                      status: { type: string, const: RETRY }
+                  - type: object
+                    additionalProperties: false
+                    required: [request_id, resource_type, action, status]
+                    properties:
+                      request_id: { type: string, format: uuid }
+                      resource_type: { type: string, const: password_reset }
+                      action: { type: string, const: ATOMIC_PASSWORD_RECOVERY_SCHEDULED }
+                      status: { type: string, const: RETRY }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/account-closure-requests:
     get:
       operationId: listAccountClosureRepairQueue

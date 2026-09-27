@@ -13,6 +13,7 @@ externalSecrets:
   refreshInterval: 5m
 
 images:
+  keycloak: { repository: pinvou/account-platform-keycloak, tag: "26.7.0-pinvou.1", pullPolicy: IfNotPresent }
   accountService: { repository: registry.example.com/pinvou/account-service, tag: 0.1.0, pullPolicy: IfNotPresent }
   identityService: { repository: registry.example.com/pinvou/identity-service, tag: 0.1.0, pullPolicy: IfNotPresent }
   billingService: { repository: registry.example.com/pinvou/billing-service, tag: 0.1.0, pullPolicy: IfNotPresent }
@@ -104,3 +105,5 @@ ingress:
 keycloak:
   hostname: https://accounts.example.com
   adminHostname: http://127.0.0.1:18081
+  realmUpgradeEnabled: true
+  oidcClientId: pinvou-desktop

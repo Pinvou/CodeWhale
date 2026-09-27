@@ -842,6 +842,16 @@
         "file": "000084_profile_sms_delivery_lease.up.sql",
         "version": 84,
         "sha256": "36510fb1f63a24c0f7d368884647b87ca5cf002922fdfaf5c524c6b5bd07fe8a"
+      },
+      {
+        "file": "000085_password_reset_recovery.down.sql",
+        "version": 85,
+        "sha256": "36d41f53919f8d9dcecdbc4f80e87ea46402e46aa38efb74ff4f87cd4b8df3e7"
+      },
+      {
+        "file": "000085_password_reset_recovery.up.sql",
+        "version": 85,
+        "sha256": "0208d0e94e4b232da9660994186978e118f6a4dd1bc16dc4c559918cc44cf437"
       }
     ],
     "billing": [

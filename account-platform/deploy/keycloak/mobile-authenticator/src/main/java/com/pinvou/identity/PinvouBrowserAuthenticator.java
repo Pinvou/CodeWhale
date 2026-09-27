@@ -58,6 +58,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             LOG.warnf("Pinvou browser authentication dependency rejected a request: %s", error.code());
             if ("CAPTCHA_INVALID".equals(error.code()) || "SMS_RATE_LIMITED".equals(error.code())) clearCaptcha(context);
             if ("REGISTRATION_RESTART_REQUIRED".equals(error.code())) clearState(context);
+            if (shouldRestartPasswordReset(requestedMode, error.code())) clearState(context);
             render(context, requestedMode, messageFor(error.code()));
         } catch (RuntimeException error) {
             LOG.errorf("Pinvou browser authentication failed safely: %s", error.getClass().getSimpleName());
@@ -315,7 +316,11 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         return form.setError(message);
     }
 
-    private static String messageFor(String code) {
+    static boolean shouldRestartPasswordReset(String mode, String code) {
+        return "reset".equals(mode) && ("PASSWORD_REFERENCE_INVALID".equals(code) || "PASSWORD_REFERENCE_CONFLICT".equals(code));
+    }
+
+    static String messageFor(String code) {
         return switch (code) {
             case "MOBILE_INVALID" -> "pinvouMobileInvalid";
             case "USERNAME_INVALID" -> "pinvouUsernameInvalid";
@@ -324,7 +329,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             case "CAPTCHA_INVALID" -> "pinvouCaptchaInvalid";
             case "SMS_RATE_LIMITED" -> "pinvouSmsRateLimited";
             case "SMS_CODE_INVALID" -> "pinvouCodeInvalid";
-            case "PASSWORD_POLICY_VIOLATION", "PASSWORD_REFERENCE_INVALID", "PASSWORD_REFERENCE_CONFLICT" -> "pinvouPasswordInvalid";
+            case "PASSWORD_POLICY_VIOLATION", "PASSWORD_INVALID", "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "PASSWORD_REFERENCE_INVALID", "PASSWORD_REFERENCE_CONFLICT" -> "pinvouPasswordInvalid";
             case "REGISTRATION_RESTART_REQUIRED" -> "pinvouRegistrationRestart";
             default -> "pinvouServiceUnavailable";
         };
@@ -342,7 +347,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         return DEVICE.matcher(value).matches() ? value : "web-device-absent";
     }
 
-    private static String purpose(String mode) {
+    static String purpose(String mode) {
         if ("register".equals(mode)) return "REGISTER";
         return "reset".equals(mode) ? "PASSWORD_RESET" : "LOGIN";
     }

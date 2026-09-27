@@ -32,6 +32,7 @@ test('Helm production-new values contain references, not secret material or simu
   assert.match(values.externalSecrets.remoteKey, /production/);
   assert.ok(values.tokenGateway.secretRotationIntervalSeconds >= 60);
   assert.equal(values.keycloak.adminHostname, 'http://127.0.0.1:18081');
+  assert.equal(values.keycloak.oidcClientId, 'pinvou-desktop');
   assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
   assert.equal(values.availability.enabled, true);
 	assert.equal(values.security.authRiskEnabled, true);
@@ -70,6 +71,8 @@ test('Helm values schema rejects unsafe production-new overrides', async () => {
   assert.equal(validate({ ...values, images: { ...values.images, newApi: { ...values.images.newApi, digest: '' } } }), false);
   assert.equal(validate({ ...values, external: { ...values.external, postgresCidrs: ['0.0.0.0/0'] } }), false);
   assert.equal(validate({ ...values, keycloak: { hostname: values.keycloak.hostname } }), false);
+  assert.equal(validate({ ...values, keycloak: { ...values.keycloak, realmUpgradeEnabled: false } }), false);
+  assert.equal(validate({ ...values, keycloak: { ...values.keycloak, oidcClientId: 'pinvou-desktop-dev' } }), false);
   assert.equal(validate({ ...values, availability: { ...values.availability, enabled: false } }), false);
   assert.equal(validate({ ...values, redis: { ...values.redis, enabled: true } }), false);
   assert.equal(validate({ ...values, dependencies: { ...values.dependencies, natsUrl: 'nats://nats.example.com:4222' } }), false);

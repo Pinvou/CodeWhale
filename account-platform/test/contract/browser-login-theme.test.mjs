@@ -132,6 +132,8 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.match(authenticator, /CLIENT\.register\(/);
   assert.match(authenticator, /CLIENT\.resetPassword\(/);
   assert.match(authenticator, /return "reset"\.equals\(mode\) \? "PASSWORD_RESET" : "LOGIN"/);
+  assert.match(authenticator, /shouldRestartPasswordReset\(requestedMode, error\.code\(\)\)\) clearState\(context\)/);
+  assert.match(authenticator, /"PASSWORD_INVALID", "PASSWORD_EDGE_SPACE_NOT_ALLOWED"/);
   assert.match(authClient, /publicURL\("PINVOU_ACCOUNT_AUTH_URL", "\/v1\/auth\/password-resets"\)/);
   const registrationStatuses = new Set(YAML.parse(accountContract).components.schemas.RegistrationStatus.properties.status.enum);
   const loginReadyStatuses = ['ACCOUNT_COMMITTED', 'PROVISIONING', 'ACTIVE', 'REPAIR_REQUIRED'];
@@ -161,6 +163,10 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.doesNotMatch(template, /loginResetCredentialsUrl/);
   assert.equal(JSON.parse(developmentRealm).resetPasswordAllowed, false, 'the unsupported Keycloak email reset flow must stay disabled');
   assert.match(provisioner, /resetPasswordAllowed=false/);
+  assert.match(provisioner, /"name": "pinvou_password_reset_operation_id"[\s\S]*?"view": \[ "admin" \][\s\S]*?"edit": \[ "admin" \]/);
+  assert.match(provisioner, /"name": "pinvou_password_reset_fence_version"[\s\S]*?"view": \[ "admin" \][\s\S]*?"edit": \[ "admin" \]/);
+  assert.match(provisioner, /"name": "pinvou_identity_security_operation_id"[\s\S]*?"view": \[ "admin" \][\s\S]*?"edit": \[ "admin" \]/);
+  assert.match(provisioner, /"name": "pinvou_identity_security_fence_version"[\s\S]*?"view": \[ "admin" \][\s\S]*?"edit": \[ "admin" \]/);
   assert.match(template, /name="sms_code"/);
   assert.match(template, /name="captcha_offset"/);
   assert.doesNotMatch(template, /type="hidden"[^>]+name="password"/);

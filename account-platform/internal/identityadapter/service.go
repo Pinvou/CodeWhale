@@ -55,13 +55,14 @@ func (s *Service) Handler() http.Handler {
 
 func (s *Service) updateUsername(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		OperationID uuid.UUID `json:"operation_id"`
-		Username    string    `json:"username"`
+		OperationID  uuid.UUID `json:"operation_id"`
+		FenceVersion int64     `json:"fence_version"`
+		Username     string    `json:"username"`
 	}
-	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil {
+	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil || body.FenceVersion <= 0 {
 		return
 	}
-	if err := s.vault.UpdateUsername(r.Context(), r.PathValue("subject"), body.OperationID, body.Username); err != nil {
+	if err := s.vault.UpdateUsername(r.Context(), r.PathValue("subject"), body.OperationID, body.FenceVersion, body.Username); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -70,13 +71,14 @@ func (s *Service) updateUsername(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) updateMobile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		OperationID uuid.UUID `json:"operation_id"`
-		Mobile      string    `json:"mobile"`
+		OperationID  uuid.UUID `json:"operation_id"`
+		FenceVersion int64     `json:"fence_version"`
+		Mobile       string    `json:"mobile"`
 	}
-	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil {
+	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil || body.FenceVersion <= 0 {
 		return
 	}
-	if err := s.vault.UpdateMobile(r.Context(), r.PathValue("subject"), body.OperationID, body.Mobile); err != nil {
+	if err := s.vault.UpdateMobile(r.Context(), r.PathValue("subject"), body.OperationID, body.FenceVersion, body.Mobile); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -86,14 +88,15 @@ func (s *Service) updateMobile(w http.ResponseWriter, r *http.Request) {
 func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OperationID           uuid.UUID `json:"operation_id"`
+		FenceVersion          int64     `json:"fence_version"`
 		Mobile                string    `json:"mobile"`
 		PasswordHandle        string    `json:"password_handle"`
 		PasswordPolicyVersion string    `json:"password_policy_version"`
 	}
-	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil {
+	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil || body.FenceVersion <= 0 {
 		return
 	}
-	if err := s.vault.ResetPassword(r.Context(), body.OperationID, body.PasswordHandle, body.PasswordPolicyVersion, r.PathValue("subject"), body.Mobile); err != nil {
+	if err := s.vault.ResetPassword(r.Context(), body.OperationID, body.FenceVersion, body.PasswordHandle, body.PasswordPolicyVersion, r.PathValue("subject"), body.Mobile); err != nil {
 		s.writeError(w, r, err)
 		return
 	}

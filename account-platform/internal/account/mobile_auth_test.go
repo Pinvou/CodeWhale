@@ -325,13 +325,13 @@ func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, _ uuid.UUI
 
 func (*identityProvisionerFake) DeleteUser(context.Context, string) error            { return nil }
 func (*identityProvisionerFake) DisableUserAndConfirm(context.Context, string) error { return nil }
-func (*identityProvisionerFake) UpdateUsername(context.Context, string, uuid.UUID, string) error {
+func (*identityProvisionerFake) UpdateUsername(context.Context, string, uuid.UUID, int64, string) error {
 	return nil
 }
-func (*identityProvisionerFake) UpdateMobile(context.Context, string, uuid.UUID, string) error {
+func (*identityProvisionerFake) UpdateMobile(context.Context, string, uuid.UUID, int64, string) error {
 	return nil
 }
-func (*identityProvisionerFake) ResetPassword(context.Context, string, uuid.UUID, string, string, string) error {
+func (*identityProvisionerFake) ResetPassword(context.Context, string, uuid.UUID, int64, string, string, string) error {
 	return nil
 }
 func (*identityProvisionerFake) RevokeSessions(context.Context, string) error { return nil }

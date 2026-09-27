@@ -873,6 +873,8 @@ jobs:
 
           expected_classes = {
               "ProvisioningPasswordLoginFixtureTest",
+              "PasswordResetBrowserPolicyTest",
+              "PinvouIdentitySecurityResourceTest",
               "RegistrationLoginPolicyTest",
               "RegistrationUserSelectorTest",
           }
@@ -884,9 +886,64 @@ jobs:
           }
           if classes != expected_classes:
               raise SystemExit(f"unexpected Surefire classes: {sorted(classes)}")
-          if counts != {"tests": 16, "failures": 0, "errors": 0, "skipped": 0}:
+          if counts != {"tests": 22, "failures": 0, "errors": 0, "skipped": 0}:
               raise SystemExit(f"unexpected Surefire counts: {counts}")
           PY
+
+      - name: Keycloak identity security two-node PostgreSQL gate
+        env:
+          PGPASSWORD: account_platform_test
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker rm --force pinvou-keycloak-security-one pinvou-keycloak-security-two >/dev/null 2>&1 || true
+            docker network rm pinvou-keycloak-security-gate >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          admin_password="$(openssl rand -hex 24)"
+          provisioner_secret="$(openssl rand -hex 24)"
+          createdb --host 127.0.0.1 --username account_platform_test keycloak_identity_security_test
+          docker build --tag pinvou-keycloak-identity-security-gate account-platform/deploy/keycloak
+          docker network create pinvou-keycloak-security-gate >/dev/null
+          for node in one two; do
+            if [ "$node" = one ]; then port=18082; management_port=19082; import=(--volume "$PWD/account-platform/deploy/keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-dev-realm.json:ro"); keycloak_args=(start --optimized --http-enabled=true --import-realm); else port=18083; management_port=19083; import=(); keycloak_args=(start --optimized --http-enabled=true); fi
+            docker run --detach --name "pinvou-keycloak-security-$node" --network pinvou-keycloak-security-gate \
+              --add-host host.docker.internal:host-gateway \
+              --publish "127.0.0.1:$port:8080" \
+              "${import[@]}" \
+              --env KC_DB=postgres \
+              --env KC_DB_URL='jdbc:postgresql://host.docker.internal:5432/keycloak_identity_security_test' \
+              --env KC_DB_USERNAME=account_platform_test \
+              --env KC_DB_PASSWORD="$PGPASSWORD" \
+              --env KC_HOSTNAME=http://127.0.0.1:18082 \
+              --env KC_HOSTNAME_STRICT=false \
+              --env KC_HTTP_MANAGEMENT_PORT="$management_port" \
+              --env KC_CACHE=ispn \
+              --env KC_CACHE_STACK=jdbc-ping \
+              --env KC_SPI_CACHE_EMBEDDED_DEFAULT_NODE_NAME="identity-security-$node" \
+              --env KC_BOOTSTRAP_ADMIN_USERNAME=identity-security-admin \
+              --env KC_BOOTSTRAP_ADMIN_PASSWORD="$admin_password" \
+              pinvou-keycloak-identity-security-gate "${keycloak_args[@]}"
+            for attempt in $(seq 1 120); do
+              if curl --fail --silent "http://127.0.0.1:$port/realms/master/.well-known/openid-configuration" >/dev/null; then break; fi
+              sleep 1
+            done
+            curl --fail --silent "http://127.0.0.1:$port/realms/master/.well-known/openid-configuration" >/dev/null
+            if [ "$node" = one ]; then
+              docker exec \
+                --env KEYCLOAK_ADMIN_SERVER=http://127.0.0.1:8080 \
+                --env KEYCLOAK_ADMIN_USERNAME=identity-security-admin \
+                --env KEYCLOAK_ADMIN_PASSWORD="$admin_password" \
+                --env KEYCLOAK_PROVISIONER_CLIENT_SECRET="$provisioner_secret" \
+                pinvou-keycloak-security-one /opt/keycloak/bin/pinvou-provision-mobile-auth.sh
+            fi
+          done
+          KEYCLOAK_NODE_ONE_URL=http://127.0.0.1:18082 \
+          KEYCLOAK_NODE_TWO_URL=http://127.0.0.1:18083 \
+          KEYCLOAK_ADMIN_USERNAME=identity-security-admin \
+          KEYCLOAK_ADMIN_PASSWORD="$admin_password" \
+          KEYCLOAK_PROVISIONER_CLIENT_SECRET="$provisioner_secret" \
+            bash account-platform/test/integration/keycloak-identity-security.sh
 
       - name: Go 格式、测试与静态检查
         working-directory: account-platform
@@ -914,9 +971,9 @@ jobs:
             grep -F -- "--- PASS: $test_name" <<< "$wallet_provisioning_output"
             ! grep -F -- "--- SKIP: $test_name" <<< "$wallet_provisioning_output"
           done
-          owner_candidates_output="$(go test -run '^(TestTokenOwnerCandidatesPostgresIntegration|TestProvisioningPasswordLoginAccountChainPostgresIntegration)$' -count=1 -v ./internal/account)"
+          owner_candidates_output="$(go test -run '^(TestTokenOwnerCandidatesPostgresIntegration|TestProvisioningPasswordLoginAccountChainPostgresIntegration|TestPasswordResetRecoveryPostgresIntegration)$' -count=1 -v ./internal/account)"
           printf '%s\n' "$owner_candidates_output"
-          for test_name in TestTokenOwnerCandidatesPostgresIntegration TestProvisioningPasswordLoginAccountChainPostgresIntegration; do
+          for test_name in TestTokenOwnerCandidatesPostgresIntegration TestProvisioningPasswordLoginAccountChainPostgresIntegration TestPasswordResetRecoveryPostgresIntegration; do
             grep -F -- "--- PASS: $test_name" <<< "$owner_candidates_output"
             ! grep -F -- "--- SKIP: $test_name" <<< "$owner_candidates_output"
           done

@@ -3,6 +3,15 @@ set -eu
 
 KEYCLOAK_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USERNAME:-${KC_BOOTSTRAP_ADMIN_USERNAME:-}}
 KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-${KC_BOOTSTRAP_ADMIN_PASSWORD:-}}
+if [ -z "$KEYCLOAK_ADMIN_USERNAME" ] && [ -n "${KEYCLOAK_ADMIN_USERNAME_FILE:-}" ]; then
+  KEYCLOAK_ADMIN_USERNAME=$(cat "$KEYCLOAK_ADMIN_USERNAME_FILE")
+fi
+if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] && [ -n "${KEYCLOAK_ADMIN_PASSWORD_FILE:-}" ]; then
+  KEYCLOAK_ADMIN_PASSWORD=$(cat "$KEYCLOAK_ADMIN_PASSWORD_FILE")
+fi
+if [ -z "${KEYCLOAK_PROVISIONER_CLIENT_SECRET:-}" ] && [ -n "${KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE:-}" ]; then
+  KEYCLOAK_PROVISIONER_CLIENT_SECRET=$(cat "$KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE")
+fi
 : "${KEYCLOAK_ADMIN_USERNAME:?set KEYCLOAK_ADMIN_USERNAME or KC_BOOTSTRAP_ADMIN_USERNAME}"
 : "${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD or KC_BOOTSTRAP_ADMIN_PASSWORD}"
 : "${KEYCLOAK_PROVISIONER_CLIENT_SECRET:?set KEYCLOAK_PROVISIONER_CLIENT_SECRET}"
@@ -15,6 +24,16 @@ FLOW=pinvou-mobile-direct-grant
 PROVIDER=pinvou-mobile-direct-grant
 BROWSER_FLOW=pinvou-browser
 BROWSER_PROVIDER=pinvou-browser-authenticator
+ADMIN_SERVER=${KEYCLOAK_ADMIN_SERVER:-http://127.0.0.1:8080}
+
+if [ -n "${KEYCLOAK_ADMIN_TRUSTSTORE:-}" ]; then
+  KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD=${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD:-}
+  if [ -z "$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD" ] && [ -n "${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD_FILE:-}" ]; then
+    KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD=$(cat "$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD_FILE")
+  fi
+  : "${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD:?set truststore password or password file}"
+  "$KCADM" config truststore --trustpass "$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD" "$KEYCLOAK_ADMIN_TRUSTSTORE" >/dev/null
+fi
 
 find_id_by_name() {
   wanted=$1
@@ -26,8 +45,16 @@ find_id_by_name() {
   done
 }
 
-"$KCADM" config credentials --server http://127.0.0.1:8080 --realm master \
-  --user "$KEYCLOAK_ADMIN_USERNAME" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+attempt=0
+until "$KCADM" config credentials --server "$ADMIN_SERVER" --realm master \
+  --user "$KEYCLOAK_ADMIN_USERNAME" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge "${KEYCLOAK_PROVISION_MAX_ATTEMPTS:-60}" ]; then
+    printf 'Keycloak realm provisioning could not authenticate after %s attempts\n' "$attempt" >&2
+    exit 1
+  fi
+  sleep 2
+done
 
 client_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$PROVISIONER_CLIENT" --fields id,clientId --format csv --noquotes | find_id_by_name "$PROVISIONER_CLIENT")
 if [ -z "$client_id" ]; then
@@ -156,6 +183,42 @@ done
       "displayName": "Phone number verified",
       "permissions": {
         "view": [ "admin", "user" ],
+        "edit": [ "admin" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "pinvou_identity_security_operation_id",
+      "displayName": "Identity security operation",
+      "permissions": {
+        "view": [ "admin" ],
+        "edit": [ "admin" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "pinvou_identity_security_fence_version",
+      "displayName": "Identity security fence",
+      "permissions": {
+        "view": [ "admin" ],
+        "edit": [ "admin" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "pinvou_password_reset_operation_id",
+      "displayName": "Password reset operation",
+      "permissions": {
+        "view": [ "admin" ],
+        "edit": [ "admin" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "pinvou_password_reset_fence_version",
+      "displayName": "Password reset fence",
+      "permissions": {
+        "view": [ "admin" ],
         "edit": [ "admin" ]
       },
       "multivalued": false

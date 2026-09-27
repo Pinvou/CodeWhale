@@ -1,0 +1,51 @@
+{{- if and .Values.keycloak.enabled .Values.keycloak.realmUpgradeEnabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "pinvou.fullname" . }}-keycloak-realm-upgrade
+  labels:
+    {{- include "pinvou.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak-realm-upgrade
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "pinvou.selector" . | nindent 8 }}
+        app.kubernetes.io/component: keycloak-realm-upgrade
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: realm-upgrade
+          image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
+          imagePullPolicy: {{ .Values.images.keycloak.pullPolicy }}
+          command: ["/opt/keycloak/bin/pinvou-provision-mobile-auth.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          env:
+            - { name: HOME, value: /tmp }
+            - { name: KEYCLOAK_ADMIN_SERVER, value: {{ printf "http://%s-keycloak:8080" (include "pinvou.fullname" .) | quote }} }
+            - { name: PINVOU_OIDC_CLIENT_ID, value: {{ .Values.keycloak.oidcClientId | quote }} }
+            - name: KEYCLOAK_ADMIN_USERNAME
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-realm-upgrade-admin-username } }
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-realm-upgrade-admin-password } }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 32Mi } }
+{{- end }}

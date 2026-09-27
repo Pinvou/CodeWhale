@@ -2,7 +2,7 @@
 name: pinvou-production-identity
 services:
   keycloak:
-    image: ${KEYCLOAK_IMAGE:?set verified Keycloak 26.7.0 image digest}
+    image: ${KEYCLOAK_IMAGE:?set verified Pinvou Keycloak 26.7.0 image digest}
     pull_policy: never
     user: "1000:0"
     command: ["--config-file=/run/pinvou/keycloak-config/keycloak.conf", "start", "--optimized"]
@@ -56,6 +56,38 @@ services:
     networks:
       data:
         aliases: [keycloak]
+  keycloak-realm-upgrade:
+    image: ${KEYCLOAK_IMAGE:?set verified Pinvou Keycloak 26.7.0 image digest}
+    pull_policy: never
+    user: "1000:0"
+    entrypoint: ["/opt/keycloak/bin/pinvou-provision-mobile-auth.sh"]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    environment:
+      HOME: /tmp
+      KEYCLOAK_ADMIN_SERVER: https://keycloak:8443
+      PINVOU_OIDC_CLIENT_ID: pinvou-desktop
+      KEYCLOAK_ADMIN_USERNAME_FILE: /run/pinvou/keycloak-realm-upgrade/admin-username
+      KEYCLOAK_ADMIN_PASSWORD_FILE: /run/pinvou/keycloak-realm-upgrade/admin-password
+      KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE: /run/pinvou/keycloak-realm-upgrade/provisioner-client-secret
+      KEYCLOAK_ADMIN_TRUSTSTORE: /run/pinvou/keycloak-realm-upgrade/admin-truststore.p12
+      KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD_FILE: /run/pinvou/keycloak-realm-upgrade/admin-truststore-password
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=32m,uid=1000,gid=0,mode=0700
+    volumes:
+      - type: bind
+        source: ${KEYCLOAK_REALM_UPGRADE_SECRET_DIRECTORY:?set one-shot Keycloak realm upgrade secret directory}
+        target: /run/pinvou/keycloak-realm-upgrade
+        read_only: true
+        bind: {create_host_path: false}
+    depends_on:
+      keycloak: { condition: service_healthy }
+    networks: [data]
 networks:
   data:
     external: true

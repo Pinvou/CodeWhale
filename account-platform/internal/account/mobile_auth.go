@@ -25,6 +25,8 @@ var (
 	ErrUsernameAlreadyRegistered     = errors.New("username is already registered")
 	ErrPasswordReferenceInvalid      = errors.New("password reference is invalid or expired")
 	ErrPasswordReferenceConflict     = errors.New("password reference conflicts with registration data")
+	ErrPasswordInvalid               = errors.New("password does not satisfy the active policy")
+	ErrPasswordEdgeSpace             = errors.New("password must not start or end with a space")
 	ErrCaptchaInvalid                = errors.New("slider captcha is invalid")
 	ErrSMSRateLimited                = errors.New("SMS requests are rate limited")
 	ErrSMSInvalid                    = errors.New("SMS challenge is invalid")
@@ -280,15 +282,28 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	return challenge, nil
 }
 
-func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {
+func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (bool, error) {
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
-		return "", err
+		return false, err
 	}
-	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposePasswordReset, code); err != nil {
-		return "", err
+	risk := authRiskFromContext(ctx)
+	if err := s.repository.AdmitSMSVerification(ctx, challengeID, mobile, SMSPurposePasswordReset, risk.source, risk.device); err != nil {
+		return false, err
 	}
-	return s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return false, ErrSMSInvalid
+	}
+	verificationData, err := s.repository.SMSChallengeReady(ctx, challengeID, mobile, SMSPurposePasswordReset)
+	if err != nil {
+		return false, err
+	}
+	verified, err := s.sms.VerifyCode(ctx, mobile, challengeID, verificationData, code)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
+	}
+	return verified, nil
 }
 
 func (s *MobileAuthService) VerifyProfileMobile(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (bool, error) {
