@@ -2,6 +2,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { isIP } from "node:net";
 
 const DEFAULT_MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+const DEFAULT_UPLOAD_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 
 function required(environment, name) {
   const value = environment[name]?.trim();
@@ -104,6 +105,14 @@ export function loadConfig(environment = process.env) {
       environment.PINVOU_UPDATE_MAX_UPLOAD_BYTES || String(DEFAULT_MAX_UPLOAD_BYTES),
       "PINVOU_UPDATE_MAX_UPLOAD_BYTES",
       { min: 1, max: Number.MAX_SAFE_INTEGER },
+    ),
+    uploadIdleTimeoutMs: parseInteger(
+      environment.PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS || String(DEFAULT_UPLOAD_IDLE_TIMEOUT_MS),
+      "PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS",
+      // The bundled Nginx configuration uses a 150-second client body idle
+      // timeout. Keep the application watchdog at least 30 seconds lower so
+      // it can return a structured error and clean staging first.
+      { min: 1000, max: DEFAULT_UPLOAD_IDLE_TIMEOUT_MS },
     ),
     onlineVerifyTimeoutMs: parseInteger(
       environment.PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS || String(15 * 60 * 1000),

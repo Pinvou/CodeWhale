@@ -225,11 +225,98 @@
       };
       const showBusy = (text) => { $("#busyText").textContent = text; $("#busy").classList.add("show"); };
       const hideBusy = () => $("#busy").classList.remove("show");
+      const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
       const message = (text, type = "success") => {
         const node = $("#globalMessage"); node.textContent = text; node.className = `message show ${type}`;
         window.scrollTo({ top: 0, behavior: "smooth" });
       };
       const fact = (label, value) => `<div class="fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+
+      function retryableUploadError(text) {
+        const error = new Error(text);
+        error.retryable = true;
+        return error;
+      }
+
+      function uploadOnce(form, attempt) {
+        return new Promise((resolve, reject) => {
+          const request = new XMLHttpRequest();
+          request.open("POST", "api/releases/windows/upload");
+          request.responseType = "json";
+          request.timeout = 60 * 60 * 1000;
+          request.setRequestHeader("Authorization", `Bearer ${token}`);
+          request.upload.addEventListener("progress", (event) => {
+            const progress = event.lengthComputable && event.total > 0
+              ? ` ${Math.min(100, Math.round((event.loaded / event.total) * 100))}%`
+              : "";
+            showBusy(`正在上传并计算 SHA-256${progress}（第 ${attempt}/2 次），请勿关闭页面…`);
+          });
+          request.addEventListener("load", () => {
+            const payload = request.response && typeof request.response === "object" ? request.response : {};
+            if (request.status >= 200 && request.status < 300) {
+              resolve(payload);
+              return;
+            }
+            const error = new Error(payload.message || `请求失败 (${request.status})`);
+            error.status = request.status;
+            error.code = payload.error;
+            error.retryable = [408, 502, 503, 504].includes(request.status);
+            reject(error);
+          });
+          request.addEventListener("error", () => reject(retryableUploadError("上传连接中断，正在自动确认并重试。")));
+          request.addEventListener("timeout", () => reject(retryableUploadError("上传超时，正在自动确认并重试。")));
+          request.addEventListener("abort", () => reject(new Error("上传已取消，服务端不会保留未完成文件。")));
+          request.send(new FormData(form));
+        });
+      }
+
+      function draftMatchesUpload(draft, form, file) {
+        const values = new FormData(form);
+        const text = (name) => String(values.get(name) || "").trim();
+        const multiline = (value) => String(value || "").trim().replace(/\r\n?/gu, "\n");
+        return Boolean(
+          draft
+          && draft.entry?.version === text("version")
+          && draft.entry?.sha256 === text("expectedSha256").toLowerCase()
+          && draft.entry?.size === file.size
+          && draft.file_name === file.name.normalize("NFC")
+          && draft.git_commit === text("gitCommit").toLowerCase()
+          && draft.operator === text("operator")
+          && multiline(draft.entry?.notes) === multiline(values.get("notes")),
+        );
+      }
+
+      async function matchingDraftAfterRefresh(form, file) {
+        try {
+          await refresh();
+          return draftMatchesUpload(state.draft, form, file) ? state.draft : null;
+        } catch {
+          return null;
+        }
+      }
+
+      async function uploadWithRecovery(form) {
+        const file = $("#installer").files[0];
+        if (!file) throw new Error("请选择安装器文件");
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          try {
+            return await uploadOnce(form, attempt);
+          } catch (error) {
+            const resultUncertain = error.retryable || error.code === "draft_exists";
+            if (!resultUncertain) throw error;
+            showBusy("上传连接中断，正在确认服务端是否已经生成草稿…");
+            const matchingDraft = await matchingDraftAfterRefresh(form, file);
+            if (matchingDraft) return matchingDraft;
+            if (error.code === "draft_exists") throw error;
+            if (attempt === 2) {
+              throw new Error("上传连接连续中断。服务端未生成草稿；请确认安装器不再被构建或签名程序写入，重新选择文件后重试。");
+            }
+            showBusy("上传连接中断，1 秒后自动重试（2/2）…");
+            await wait(1000);
+          }
+        }
+        throw new Error("上传未完成");
+      }
 
       function render() {
         const current = state.windows;
@@ -274,7 +361,7 @@
       for (const name of ["dragleave", "drop"]) $("#dropZone").addEventListener(name, () => $("#dropZone").classList.remove("drag"));
       $("#uploadForm").addEventListener("submit", async (event) => {
         event.preventDefault();
-        try { showBusy("正在上传并计算 SHA-256，请勿关闭页面…"); state.draft = await api("releases/windows/upload", { method: "POST", body: new FormData(event.currentTarget) }); await refresh(); message("安装器校验通过，发布草稿已生成。请再次检查后发布。"); }
+        try { showBusy("正在上传并计算 SHA-256，请勿关闭页面…"); state.draft = await uploadWithRecovery(event.currentTarget); await refresh(); message("安装器校验通过，发布草稿已生成。请再次检查后发布。"); }
         catch (error) { message(error.message, "error"); }
         finally { hideBusy(); }
       });

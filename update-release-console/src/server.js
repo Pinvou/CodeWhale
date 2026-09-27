@@ -11,15 +11,20 @@ import { ReleaseService } from "./release-service.js";
 const sourceDir = dirname(fileURLToPath(import.meta.url));
 const indexPath = resolve(sourceDir, "../public/index.html");
 
-function sendJson(response, status, value) {
+function sendJson(response, status, value, { close = false } = {}) {
   const body = `${JSON.stringify(value)}\n`;
-  response.writeHead(status, {
+  const headers = {
     "Cache-Control": "no-store",
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
     "X-Content-Type-Options": "nosniff",
-  });
-  response.end(body);
+  };
+  if (close) {
+    headers.Connection = "close";
+    response.shouldKeepAlive = false;
+  }
+  response.writeHead(status, headers);
+  response.end(body, close ? () => response.socket?.end() : undefined);
 }
 
 function sendEmpty(response, status) {
@@ -132,7 +137,12 @@ export class AuthFailureLimiter {
 
 function errorResponse(response, error) {
   if (error instanceof AppError) {
-    sendJson(response, error.status, { error: error.code, message: error.message });
+    sendJson(
+      response,
+      error.status,
+      { error: error.code, message: error.message },
+      { close: error.code === "upload_idle_timeout" },
+    );
     return;
   }
   console.error(error);

@@ -29,6 +29,9 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
   与 Nginx 相同的本地文件系统；不要把第一阶段部署成多副本。
 - `latest.json` 的临时文件与正式文件位于同一目录，Linux 本地文件系统上的 `rename(2)`
   提供原子替换。NFS/对象存储不属于第一阶段支持范围。
+- 服务可以在 `UMask=0077` 下运行；私有草稿、审计和历史文件保持 `0600`，公开
+  `latest.json` 和安装器在原子替换前显式设为 `0644`，不依赖进程 umask。启动时如果
+  已有清单不是权限为 `0644` 的实际普通文件，服务将失败关闭而不会自动将其公开。
 
 建议再通过 VPN、固定出口 IP 或 Nginx `allow`/`deny` 限制管理页访问来源。管理令牌应由
 密码管理系统分发并定期轮换，不应提交到仓库。
@@ -45,6 +48,7 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 | `PINVOU_UPDATE_PORT` | 否 | 监听端口，默认 `8792` |
 | `PINVOU_UPDATE_CONSOLE_BASE_PATH` | 否 | 反代路径，默认 `/` |
 | `PINVOU_UPDATE_MAX_UPLOAD_BYTES` | 否 | 最大安装器字节数，默认 4 GiB |
+| `PINVOU_UPDATE_UPLOAD_IDLE_TIMEOUT_MS` | 否 | 上传连续无数据进展的超时，范围 1000–120000 毫秒，默认 120000；必须低于随附 Nginx 的 150 秒 |
 | `PINVOU_UPDATE_ONLINE_VERIFY_TIMEOUT_MS` | 否 | HTTPS 回读超时，默认 15 分钟 |
 | `PINVOU_UPDATE_TRUSTED_PROXIES` | 否 | 可提供 `X-Real-IP` 的直接反向代理 IP/CIDR，逗号分隔；不配置时忽略该请求头 |
 | `PINVOU_UPDATE_AUTH_FAILURE_LIMIT` | 否 | 同一客户端在窗口内允许的认证失败次数，默认 5 |
@@ -61,11 +65,18 @@ Authenticode 状态、证书指纹或时间戳证书；签名结果继续以独�
 认证失败限流按上述可信代理解析后的客户端 IP 计数，达到阈值返回 `429` 和
 `Retry-After`；成功认证会清除该 IP 的失败记录，TTL 与容量上限避免长期占用内存。
 Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 multipart
-字段、边界和请求头保留空间。
+字段、边界和请求头保留空间；`client_body_timeout` 是 150 秒无数据超时，应用自身默认在连续
+120 秒没有收到请求数据时终止连接并清理本次独立暂存文件。只要上传持续有数据，
+`server.requestTimeout`、`proxy_read_timeout` 和 `proxy_send_timeout` 仍允许最长 1 小时。
+上传正文接收和文件校验不持有发布锁，只有校验完成后的草稿一致性检查与落盘进入短临界区，
+因此单个半开连接不会阻塞后续上传、发布或回滚。
+页面显示实时上传进度；连接中断时会先查询草稿状态，确认服务端尚未完成后自动重试一次，
+连续失败则要求重新选择已经停止写入的安装器，避免构建或签名程序仍在改写文件。
 
 ## Docker Compose 部署
 
-1. 确认 `/var/www/pinvou3/latest.json` 是当前线上清单，且运行容器的 UID 对该目录有写权限。
+1. 确认 `/var/www/pinvou3/latest.json` 是经过复核的当前线上清单、是权限为 `0644` 的实际普通文件，
+   且运行容器的 UID 对该目录有写权限。不得为了通过启动门禁而将未经复核的清单直接改为公开可读。
 2. 生成令牌并写入不进 Git 的 `update-release-console/deploy/.env`：
 
    ```bash
@@ -82,7 +93,8 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
    ```
 
 4. 将 [`nginx-location.conf`](../update-release-console/deploy/nginx-location.conf) 加入
-   `pinvou.com` HTTPS server block，执行 `nginx -t` 后 reload。
+   `pinvou.com` HTTPS server block，执行 `nginx -t` 后 reload，再用
+   `curl -fsS https://pinvou.com/pinvou3/latest.json >/dev/null` 验证公网清单可读。
 5. 打开 `https://pinvou.com/pinvou3/release-console/`，输入管理令牌。
 
 如果服务器不是 `pinvou.com`，先同步修改 Compose 中的 `PINVOU_UPDATE_PUBLIC_BASE_URL` 和
