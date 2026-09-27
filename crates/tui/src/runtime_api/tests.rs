@@ -52,6 +52,19 @@ fn runtime_session_fallback_retains_non_unicode_explicit_home_boundary() {
 }
 
 #[test]
+fn server_task_config_opts_tasks_into_answerable_human_waits() {
+    // The HTTP server is the one host that can deliver a decision to its
+    // tasks (`/v1/approvals/`, `/v1/user-input/`), so its config must opt
+    // in explicitly; everywhere else (`from_runtime`, the TUI's private
+    // runtime) the safe default is unanswerable.
+    let cfg = server_task_config(&Config::default(), PathBuf::from("."), 2);
+    assert!(
+        cfg.human_waits_answerable,
+        "server task config must arm answerable human waits"
+    );
+}
+
+#[test]
 fn thread_route_credential_error_is_bad_request_not_not_found() {
     let credential = map_thread_err(anyhow::anyhow!("DeepSeek API key not found"));
     assert_eq!(credential.status, StatusCode::BAD_REQUEST);
@@ -969,6 +982,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             allow_shell: false,
             trust_mode: false,
             execution_limits: crate::task_manager::TaskExecutionLimits::default(),
+            human_waits_answerable: false,
         },
         Arc::new(MockExecutor),
     )
