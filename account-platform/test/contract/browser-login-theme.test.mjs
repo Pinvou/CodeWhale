@@ -182,7 +182,13 @@ test('saved browser passwords stay masked while passwords typed from empty can b
   assert.match(template, /data-toggle-password[^>]+aria-pressed="false" disabled hidden/);
   assert.match(template, /<input id="pv-password" name="password" type="password"[^>]*>\s*<span class="pv-password-reveal-output" data-password-reveal-output role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" hidden><\/span>/);
   assert.doesNotMatch(template, /data-password-reveal-output[^>]+name=/);
-  assert.match(styles, /input::\-ms-reveal, \.pv-password-wrap input::\-ms-clear \{ display: none; \}/);
+  assert.match(styles, /\.pv-password-wrap input::\-ms-reveal \{ display: none; \}/);
+  assert.match(styles, /\.pv-password-wrap input::\-ms-clear \{ display: none; \}/);
+  assert.doesNotMatch(
+    styles,
+    /::\-ms-reveal\s*,\s*\.pv-password-wrap input::\-ms-clear/,
+    'unsupported private pseudo-elements must not invalidate the Edge password reveal rule',
+  );
   assert.match(styles, /\.pv-password-reveal-output \{[^}]+pointer-events: none;[^}]+user-select: none;/);
   assert.doesNotMatch(script, /password\.type\s*=/, 'the named password input must stay type=password');
 
@@ -361,6 +367,8 @@ test('native Chromium keeps manual password editing revealable without accepting
 
   const source = (await read('deploy/keycloak/themes/pinvou/login/resources/js/pinvou-login.js'))
     .replaceAll('</script', '<\\/script');
+  const styles = (await read('deploy/keycloak/themes/pinvou/login/resources/css/pinvou-login.css'))
+    .replaceAll('</style', '<\\/style');
   const browser = await puppeteer.launch({
     executablePath, headless: true, timeout: 15000, protocolTimeout: 15000,
     args: ['--disable-gpu', '--no-first-run', '--no-sandbox'],
@@ -368,7 +376,7 @@ test('native Chromium keeps manual password editing revealable without accepting
   try {
     const page = await browser.newPage();
     const mount = async (extraScript = '') => {
-      await page.setContent(`<!doctype html><form id="pv-auth-form">
+      await page.setContent(`<!doctype html><style>${styles}</style><form id="pv-auth-form">
         <input id="pv-intent" value="submit"><input id="pv-target-mode"><input id="pv-device-id">
         <span class="pv-password-wrap"><input id="pv-password" name="password" type="password" maxlength="128">
         <span data-password-reveal-output aria-hidden="true" hidden></span>
@@ -390,6 +398,12 @@ test('native Chromium keeps manual password editing revealable without accepting
     }));
 
     await mount();
+    assert.ok(
+      await page.evaluate(() => Array.from(document.styleSheets)
+        .flatMap(sheet => Array.from(sheet.cssRules))
+        .some(rule => rule.selectorText === '.pv-password-wrap input::-ms-reveal' && rule.style.display === 'none')),
+      'Chromium must retain the independent native Edge password reveal rule in the CSSOM',
+    );
     await page.focus('#pv-password');
     await page.keyboard.type('typed-secret');
     assert.equal((await state()).eyeHidden, false, 'native typing must make the reveal control available');
