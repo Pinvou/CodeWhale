@@ -230,9 +230,9 @@ test('connection is integrated into the remote-control page instead of a detache
   assert.ok(settingsPage.includes("event.key === 'ArrowRight'"));
   assert.ok(settingsPage.includes('aria-labelledby="remote-control-tab-controller"'));
   assert.ok(settingsPage.includes('roleStatusLabel'));
-  assert.ok(settingsPage.includes('controlledLocalState'));
   assert.ok(settingsPage.includes('controlledSeconds'));
-  assert.ok(settingsPage.includes('onLocalStateChange={setControlledLocalState}'));
+  assert.ok(settingsPage.includes('controlledDeviceUiState(controlledDevice, controlledSeconds)'));
+  assert.ok(!settingsPage.includes('onLocalStateChange'), 'B status must be authoritative, not fabricated by UI progress');
   assert.ok(panel.includes('<RemoteConnectForm'));
   assert.ok(!panel.includes('<RemoteConnectionShell'));
   assert.ok(main.includes('LazyRemoteConnectionShell'));

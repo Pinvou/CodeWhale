@@ -7,16 +7,19 @@ export const CODE_LENGTH = 7;
 
 export const CONTROLLED_UI_STATES = [
   'off',
-  'reserving',
-  'waiting',
+  'registering',
+  'waiting_for_pairing',
   'expiring',
   'expired',
-  'reserved',
-  'handshake',
+  'pairing_reserved',
+  'handshake_pending',
   'connected',
   'reconnecting',
-  'refreshing',
+  'resume_provisional',
+  'resume_activated_pending_liveness',
+  'retiring_generation',
   'stopping',
+  'stopped',
   'error',
 ];
 
@@ -93,23 +96,16 @@ export function groupPairingCode(code) {
   return normalized.slice(0, 4) + ' ' + normalized.slice(4);
 }
 
-/** Maps the B-side protocol state into the twelve observable settings states. */
-export function controlledDeviceUiState(device, secondsRemaining = 0, localState = null) {
-  if (localState === 'error') return 'error';
-  if (['reserving', 'reserved', 'refreshing', 'stopping'].includes(localState)) return localState;
+/** Maps only authoritative B states; unknown phases fail closed in the UI. */
+export function controlledDeviceUiState(device, secondsRemaining = 0) {
   const status = String(device?.status || 'idle');
-  if (status === 'error') return 'error';
-  if (status === 'refreshing') return 'refreshing';
-  if (status === 'reserving') return 'reserving';
-  if (status === 'safety_handshake') return 'handshake';
-  if (status === 'reconnecting') return 'reconnecting';
-  if (status === 'connected') return 'connected';
-  if (status === 'waiting_connection') {
+  if (status === 'waiting_for_pairing') {
     if (!device?.pairingCode || Number(secondsRemaining) <= 0) return 'expired';
     if (Number(secondsRemaining) <= 60) return 'expiring';
-    return 'waiting';
+    return 'waiting_for_pairing';
   }
-  return 'off';
+  if (CONTROLLED_UI_STATES.includes(status)) return status;
+  return status === 'idle' || status === 'disabled' ? 'off' : 'error';
 }
 
 export function controlledAuthorityKey(device) {
@@ -118,7 +114,10 @@ export function controlledAuthorityKey(device) {
 
 export function remoteControlTabTone(state) {
   if (state === 'connected') return 'success';
-  if (['reserving', 'waiting', 'expiring', 'reserved', 'handshake', 'connecting', 'safety_handshake', 'reconnecting', 'refreshing', 'stopping'].includes(state)) return 'waiting';
+  if (['registering', 'waiting_for_pairing', 'expiring', 'pairing_reserved',
+    'handshake_pending', 'connecting', 'safety_handshake', 'reconnecting',
+    'resume_provisional', 'resume_activated_pending_liveness',
+    'retiring_generation', 'stopping'].includes(state)) return 'waiting';
   if (['error', 'invalid', 'busy', 'offline', 'version', 'protocol', 'unsupported', 'local_busy', 'failed'].includes(state)) return 'error';
   return 'off';
 }
@@ -260,7 +259,8 @@ export function isTaskTerminal(status) {
  */
 export function isControlledDeviceChatActive(controlledDevice) {
   const status = controlledDevice && controlledDevice.status;
-  return status === 'connected' || status === 'reconnecting';
+  return ['connected', 'reconnecting', 'resume_provisional',
+    'resume_activated_pending_liveness'].includes(status);
 }
 
 /**

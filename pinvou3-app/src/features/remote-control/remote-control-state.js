@@ -28,9 +28,10 @@
       status: "idle",
       generation: null,
       pairingCode: null,
-      expiresAtMs: null,
+      pairingRemainingMs: null,
       deviceName: null,
       controllerDeviceName: null,
+      connectedDurationMs: null,
       workspaces: [],
       lastError: null,
     };
@@ -150,14 +151,16 @@
     var payload = envelope || {};
     if (!isCurrentIntent(state, "controlled", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
-    if (!["disabled", "reserving", "waiting_connection", "safety_handshake",
-      "connected", "reconnecting", "refreshing", "stopped", "error"].includes(status)) return state;
+    if (!["disabled", "registering", "waiting_for_pairing", "pairing_reserved",
+      "handshake_pending", "connected", "reconnecting", "resume_provisional",
+      "resume_activated_pending_liveness", "retiring_generation", "stopping",
+      "stopped", "error"].includes(status)) return state;
     var generation = payload.generation ? String(payload.generation) : null;
     if (!CONTROLLED_TERMINAL[status] && !generation) return state;
     var current = state.controlledDevice;
     // Only the current Rust ControlledStatus enum may open a generation.
-    var starting = status === "reserving" || status === "waiting_connection";
-    var waiting = status === "waiting_connection";
+    var starting = status === "registering" || status === "waiting_for_pairing";
+    var waiting = status === "waiting_for_pairing";
     var pendingOpen = state.controlledOpenIntent === state.intents.controlled;
     if (CONTROLLED_TERMINAL[status] && !state.controlledFenced
       && current.generation && !generation && payload.intent == null) return state;
@@ -186,9 +189,15 @@
       status: status,
       generation: generation || (starting ? current.generation : null),
       pairingCode: payload.pairingCode || (waiting ? current.pairingCode : null),
-      expiresAtMs: payload.expiresAtMs || (waiting ? current.expiresAtMs : null),
+      pairingRemainingMs: Number.isSafeInteger(payload.pairingRemainingMs)
+        && payload.pairingRemainingMs >= 0 ? payload.pairingRemainingMs : null,
       deviceName: payload.deviceName || current.deviceName,
-      controllerDeviceName: payload.controllerDeviceName || current.controllerDeviceName,
+      controllerDeviceName: ["connected", "reconnecting", "resume_provisional",
+        "resume_activated_pending_liveness"].includes(status)
+        ? (payload.controllerDeviceName || (startsNewGeneration ? null : current.controllerDeviceName))
+        : null,
+      connectedDurationMs: Number.isSafeInteger(payload.connectedDurationMs)
+        && payload.connectedDurationMs >= 0 ? payload.connectedDurationMs : null,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.error || null,
     };
@@ -220,7 +229,9 @@
       || state.intents.controlled !== intent || !generation
       || generation !== String(expectedGeneration || "")
       || state.retiredControlledGenerations.indexOf(generation) >= 0
-      || ["reserving", "waiting_connection", "safety_handshake", "connected", "reconnecting", "refreshing"].indexOf(payload.status) < 0) {
+      || ["registering", "waiting_for_pairing", "pairing_reserved", "handshake_pending",
+        "connected", "reconnecting", "resume_provisional",
+        "resume_activated_pending_liveness", "retiring_generation"].indexOf(payload.status) < 0) {
       return state;
     }
     var candidate = shallowCopy(state);
@@ -836,14 +847,27 @@
         break;
       }
     }
-    if (index >= 0 && TASK_TERMINAL[tasks[index].status]) return state;
+    var source = payload.modelSource;
+    var modelSource = source === "controlled_device" || source === "controller_temporary"
+      ? source : null;
+    if (index >= 0 && TASK_TERMINAL[tasks[index].status]) {
+      if (!modelSource || tasks[index].modelSource) return state;
+      tasks[index] = Object.assign({}, tasks[index], { modelSource: modelSource });
+      var terminalEnriched = shallowCopy(state);
+      terminalEnriched[tasksField] = tasks;
+      terminalEnriched.revision = state.revision + 1;
+      return terminalEnriched;
+    }
     // An admitted acknowledgement may arrive after the executor's running
     // event on a multi-thread runtime. Keep the newer lifecycle state while
     // still accepting prompt text that only the admitted projection carries.
     if (index >= 0 && status === "admitted" && tasks[index].status !== "admitted") {
       var lateText = payload.text ? String(payload.text).slice(0, 8192) : null;
       if (!lateText || tasks[index].text) return state;
-      tasks[index] = Object.assign({}, tasks[index], { text: lateText });
+      tasks[index] = Object.assign({}, tasks[index], {
+        text: lateText,
+        modelSource: modelSource || tasks[index].modelSource || null,
+      });
       var promptUpdated = shallowCopy(state);
       promptUpdated[tasksField] = tasks;
       promptUpdated.revision = state.revision + 1;
@@ -855,6 +879,7 @@
         ? String(payload.sessionId || payload.session_id)
         : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
+      modelSource: modelSource || (index >= 0 ? tasks[index].modelSource || null : null),
       text: payload.text
         ? String(payload.text).slice(0, 8192)
         : (index >= 0 ? tasks[index].text || null : null),
@@ -875,6 +900,7 @@
     if (index >= 0) {
       if (
         tasks[index].status === status
+        && tasks[index].modelSource === entry.modelSource
         && tasks[index].text === entry.text
         && tasks[index].messageIndex === entry.messageIndex
         && tasks[index].assistantText === entry.assistantText
@@ -901,6 +927,9 @@
     if (!session.sessionId || String(sessionId || "") !== String(session.sessionId)) {
       return state;
     }
+    var generation = payload.generation || payload.remoteControlGeneration
+      || payload.remote_control_generation;
+    if (generation && String(generation) !== String(session.generation || "")) return state;
     return applyTaskEventTo(state, payload, "controlledTasks");
   }
 

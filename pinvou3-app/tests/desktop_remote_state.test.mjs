@@ -34,7 +34,7 @@ test('late controlled-device results never revive an older intent', () => {
 
   const stale = logic.applyControlledStatus(state, {
     intent: firstIntent,
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '2345678',
     generation: 'gen-1',
   });
@@ -42,13 +42,13 @@ test('late controlled-device results never revive an older intent', () => {
 
   const fresh = logic.applyControlledStatus(state, {
     intent: secondIntent,
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '3456789',
     generation: 'gen-2',
   });
-  assert.equal(fresh.controlledDevice.status, 'waiting_connection');
+  assert.equal(fresh.controlledDevice.status, 'waiting_for_pairing');
   assert.equal(fresh.controlledDevice.pairingCode, '3456789');
-  assert.equal(fresh.controlledDevice.expiresAtMs, null);
+  assert.equal(fresh.controlledDevice.pairingRemainingMs, null);
 
   const oldGeneration = logic.applyControlledStatus(fresh, {
     status: 'connected',
@@ -57,20 +57,21 @@ test('late controlled-device results never revive an older intent', () => {
   assert.equal(oldGeneration, fresh, 'a replaced generation must not overwrite state');
 });
 
-test('a relay registration result carries the pairing expiry into the UI state', () => {
+test('a relay registration result carries only the relative pairing countdown', () => {
   const state = logic.applyControlledStatus(logic.createState(), {
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '3456789',
-    expiresAtMs: 1_800_000_000_000,
+    pairingRemainingMs: 30_000,
     generation: 'gen-1',
   });
-  assert.equal(state.controlledDevice.expiresAtMs, 1_800_000_000_000);
+  assert.equal(state.controlledDevice.pairingRemainingMs, 30_000);
+  assert.equal('expiresAtMs' in state.controlledDevice, false);
 });
 
 test('a stopped controlled device clears the pairing code', () => {
   let state = logic.createState();
   state = logic.applyControlledStatus(state, {
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '3456789',
     generation: 'gen-1',
   });
@@ -288,7 +289,7 @@ test('B-side projections reject stale sessions and reset with the controlled gen
   state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, {
     intent: state.intents.controlled,
-    status: 'reserving',
+    status: 'registering',
     generation: 'generation-2',
   });
   assert.equal(state.controlledSession.sessionId, null);
@@ -358,7 +359,7 @@ test('a new controlled-device generation drops old task projections', () => {
   state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, {
     intent: state.intents.controlled,
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     generation: 'generation-2',
   });
   assert.equal(state.controlledTasks.length, 0);
@@ -401,8 +402,10 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
 test('B live status without a generation cannot open the controlled chat', () => {
   const initial = logic.createState();
   assert.equal(logic.applyControlledStatus(initial, { status: 'connected' }), initial);
-  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_connection', pairingCode: '2345678' }), initial);
-  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', generation: 'old' }), initial);
+  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', pairingCode: '2345678' }), initial);
+  const waiting = logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', generation: 'old' });
+  assert.equal(waiting.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(waiting.controlledSession.sessionId, null);
 });
 
 test('authenticated RemoteProxy notifications require the exact live lease and never carry body text', () => {
@@ -493,7 +496,7 @@ test('terminal events from replaced A/B generations cannot clear the current UI'
     status: 'disconnected', connectionId: 'old', leaseEpoch: '2', generation: 'old-generation',
   }), a);
   let b = logic.applyControlledStatus(logic.createState(), {
-    status: 'waiting_connection', generation: 'new-generation',
+    status: 'waiting_for_pairing', generation: 'new-generation',
   });
   assert.equal(logic.applyControlledStatus(b, {
     status: 'stopped', generation: 'old-generation',
@@ -545,22 +548,22 @@ test('B terminal tombstones an old generation until an explicit start opens a fr
     status: 'connected', generation: 'generation-old',
   }), state);
   assert.equal(logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-new',
+    status: 'waiting_for_pairing', generation: 'generation-new',
   }), state, 'an event cannot initiate a generation after terminal');
   state = logic.beginControlledIntent(state, true);
   assert.equal(logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-new',
+    status: 'waiting_for_pairing', generation: 'generation-new',
   }), state, 'an event cannot consume an in-flight start intent');
   assert.equal(logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-old',
+    status: 'waiting_for_pairing', generation: 'generation-old',
   }), state, 'even a pending start cannot reuse a retired generation');
   state = logic.applyControlledStatus(state, {
-    intent: state.intents.controlled, status: 'waiting_connection', generation: 'generation-new',
+    intent: state.intents.controlled, status: 'waiting_for_pairing', generation: 'generation-new',
   });
   assert.equal(state.controlledDevice.generation, 'generation-new');
   assert.equal(state.controlledFenced, false);
   const unrequestedStart = logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-other',
+    status: 'waiting_for_pairing', generation: 'generation-other',
   });
   assert.equal(unrequestedStart, state, 'a late starting event cannot replace an active generation');
 });
@@ -633,12 +636,12 @@ test('identity-less B terminal during start suppresses that reply but not a late
   state = logic.applyControlledStatus(state, { status: 'stopped' });
   assert.equal(state.controlledTerminatedOpenIntent, first);
   assert.equal(logic.applyControlledStatus(state, {
-    intent: first, status: 'waiting_connection', generation: 'dead-generation', pairingCode: '1234567',
+    intent: first, status: 'waiting_for_pairing', generation: 'dead-generation', pairingCode: '1234567',
   }), state);
   state = logic.beginControlledIntent(state, true);
   const second = state.intents.controlled;
   state = logic.applyControlledStatus(state, {
-    intent: second, status: 'waiting_connection', generation: 'live-generation', pairingCode: '7654321',
+    intent: second, status: 'waiting_for_pairing', generation: 'live-generation', pairingCode: '7654321',
   });
   assert.equal(state.controlledDevice.generation, 'live-generation');
   assert.equal(state.controlledDevice.pairingCode, '7654321');
@@ -671,13 +674,13 @@ test('B pending-terminal fence opens only for a current authoritative generation
     status: 'stopped', generation: 'new-generation',
   }, 'new-generation'), state);
   assert.equal(logic.reconcileControlledOpenStatus(state, first, {
-    status: 'waiting_connection', generation: null,
+    status: 'waiting_for_pairing', generation: null,
   }, 'new-generation'), state);
   assert.equal(logic.reconcileControlledOpenStatus(state, first, {
-    status: 'waiting_connection', generation: 'other-generation',
+    status: 'waiting_for_pairing', generation: 'other-generation',
   }, 'new-generation'), state);
   state = logic.reconcileControlledOpenStatus(state, first, {
-    status: 'waiting_connection', generation: 'new-generation', pairingCode: '1234567',
+    status: 'waiting_for_pairing', generation: 'new-generation', pairingCode: '1234567',
   }, 'new-generation');
   assert.equal(state.controlledFenced, false);
   assert.equal(state.controlledDevice.pairingCode, '1234567');

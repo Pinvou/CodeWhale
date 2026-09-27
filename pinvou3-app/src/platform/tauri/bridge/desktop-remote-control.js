@@ -53,7 +53,7 @@
     // 域切片（bridge.js 的 STATE_SLICE_FIELDS.desktopRemoteControl）读的是**顶层键**
     // （controlledDevice / controllerConnection / …），而本 feature 过去只把整份状态挂在
     // 嵌套键 state.desktopRemoteControl 上，导致 UI 的 bs.controlledDevice 恒为
-    // undefined——后端已 waiting_connection 且带连接码，面板却显示未开启（2026-09-20 实测）。
+    // undefined——后端已 waiting_for_pairing 且带连接码，面板却显示未开启（2026-09-20 实测）。
     var STATE_SLICES = [
       "controlledDevice",
       "controlledSession",
@@ -107,7 +107,7 @@
         noteControlledTerminal(payload);
         clientLog(
           "event status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
-          + " expires=" + String(payload.pairingExpiresAtMs || "")
+          + " remaining=" + String(payload.pairingRemainingMs || "")
           + " gen=" + String(payload.generation || ""),
         );
         publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
@@ -120,7 +120,7 @@
         var controlledSession = state.controlledSession || {};
         // This event is the current frozen task_status protocol projection.
         // The separate local task-event channel uses camelCase.
-        var sessionId = payload.session_id || "";
+        var sessionId = payload.sessionId || payload.session_id || "";
         if (controlledSession.sessionId && String(controlledSession.sessionId) === String(sessionId)) {
           publish(logic.applyControlledTaskEvent(state, payload));
         }
@@ -222,7 +222,7 @@
       noteControlledTerminal(payload);
       clientLog(
         "result status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
-        + " expires=" + String(payload.pairingExpiresAtMs || "")
+        + " remaining=" + String(payload.pairingRemainingMs || "")
         + " gen=" + String(payload.generation || ""),
       );
       publish(logic.applyControlledStatus(current(), Object.assign(
@@ -238,9 +238,12 @@
         status: wire.status || "idle",
         generation: wire.generation || null,
         pairingCode: wire.pairingCode || null,
-        expiresAtMs: wire.pairingExpiresAtMs || null,
+        pairingRemainingMs: Number.isSafeInteger(wire.pairingRemainingMs)
+          && wire.pairingRemainingMs >= 0 ? wire.pairingRemainingMs : null,
         deviceName: wire.deviceName || null,
         controllerDeviceName: wire.controllerDeviceName || null,
+        connectedDurationMs: Number.isSafeInteger(wire.connectedDurationMs)
+          && wire.connectedDurationMs >= 0 ? wire.connectedDurationMs : null,
         error: wire.errorCode || null,
       };
     }
@@ -318,7 +321,7 @@
 
     /**
      * 主动拉取一次被控端状态并投影到本地状态：事件或命令回包一旦丢失，
-     * 面板仍能通过它拿回真实状态（例如后端已 waiting_connection 与连接码）。
+     * 面板仍能通过它拿回真实状态（例如后端已 waiting_for_pairing 与连接码）。
      */
     function controlledSync() {
       ensureAvailable();
@@ -357,11 +360,6 @@
     function controlledListWorkspaces() {
       ensureAvailable();
       return invoke("desktop_remote_controlled_list_workspaces", {});
-    }
-
-    function controlledAuthorizeWorkspace(workspace) {
-      ensureAvailable();
-      return invoke("desktop_remote_controlled_authorize_workspace", { workspace: workspace });
     }
 
     function controllerConnect(code) {
@@ -593,6 +591,8 @@
           publish(logic.applyControlledTaskEvent(current(), {
             taskId: taskId,
             sessionId: projection.session_id,
+            generation: projection.generation,
+            modelSource: projection.modelSource,
             status: projection.task_status,
             text: visibleText,
           }));
@@ -659,6 +659,37 @@
         if (next !== current()) publish(next);
         return next.remoteModels;
       });
+    }
+
+    function controlledStopTask(taskId) {
+      ensureAvailable();
+      var before = current();
+      var device = before.controlledDevice || {};
+      var session = before.controlledSession || {};
+      var target = (before.controlledTasks || []).find(function (task) {
+        return task && task.taskId === taskId && task.sessionId === session.sessionId;
+      });
+      if (!requiredOpaqueId(taskId) || ["connected", "reconnecting",
+        "resume_provisional", "resume_activated_pending_liveness"].indexOf(device.status) < 0
+        || !device.generation || session.generation !== device.generation || !target) {
+        return Promise.reject(asBoundedError("task_binding_stale"));
+      }
+      return invoke("desktop_remote_controlled_task_stop", { taskId: taskId })
+        .catch(function (failure) { throw asBoundedError(failure); })
+        .then(function (result) {
+          var latest = current();
+          var active = latest.controlledSession || {};
+          if (["connected", "reconnecting", "resume_provisional",
+            "resume_activated_pending_liveness"].indexOf(latest.controlledDevice.status) >= 0
+            && latest.controlledDevice.generation === device.generation
+            && active.sessionId === session.sessionId
+            && active.generation === session.generation
+            && result && result.sessionId === session.sessionId
+            && result.generation === session.generation) {
+            publish(logic.applyControlledTaskEvent(latest, result));
+          }
+          return result;
+        });
     }
 
     function listRemoteProxyHistory() {
@@ -960,12 +991,12 @@
       endpointProfiles: endpointProfiles,
       setEndpointProfile: setEndpointProfile,
       controlledListWorkspaces: controlledListWorkspaces,
-      controlledAuthorizeWorkspace: controlledAuthorizeWorkspace,
       controllerConnect: controllerConnect,
       controllerDisconnect: controllerDisconnect,
       controllerStatus: controllerStatus,
       controllerCapabilitySend: controllerCapabilitySend,
       controlledTaskSend: controlledTaskSend,
+      controlledStopTask: controlledStopTask,
       capabilitiesSnapshot: capabilitiesSnapshot,
       listExportableModels: listExportableModels,
       listRemoteProxyHistory: listRemoteProxyHistory,
