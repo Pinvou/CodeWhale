@@ -8,17 +8,20 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{Emitter as _, State};
+use tauri::State;
 
+use crate::app::commands::desktop_remote_task::DesktopRemoteTaskRuntime;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::history::{
     RemoteHistoryRecord, RemoteHistoryStore,
 };
+#[cfg(test)]
+use crate::features::remote_control::controller::journal::ReplayOutcome;
 use crate::features::remote_control::controller::journal::{
-    JournalEvent, JournalSnapshot, RemoteJournal, ReplayOutcome,
+    JournalEvent, JournalSnapshot, RemoteJournal,
 };
+use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{RemoteTaskEvent, RemoteTaskEventSink};
-use crate::app::commands::desktop_remote_task::DesktopRemoteTaskRuntime;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
@@ -59,7 +62,7 @@ const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
 pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &RemoteTaskEvent) {
     use tauri::Manager as _;
     let device = app.state::<ControlledDeviceManager>();
-    let Ok((_lease, capabilities)) = device.live_runtime_context() else {
+    let Ok((lease, capabilities)) = device.live_runtime_context() else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
             "task_status_not_sent",
             "lease_unavailable",
@@ -74,6 +77,14 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
+    if runtime
+        .service()
+        .session_for(&session_ref, &lease.remote_control_generation)
+        .as_deref()
+        != Some(event.session_id.as_str())
+    {
+        return;
+    }
     let Ok(mut payload) = runtime.service().status_payload(&event.task_id) else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
             "task_status_not_sent",
@@ -95,9 +106,9 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
-    let lane = app.state::<
-        crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
-    >();
+    let lane = app
+        .state::<crate::features::remote_control::controller::encrypted_lane::ControlledLaneState>(
+        );
     let Ok(frame) = lane.seal("task_status", &payload, &capabilities) else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
             "task_status_not_sent",
@@ -117,9 +128,48 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         use tauri::Emitter as _;
         let _ = self.app.emit(TASK_STATUS_EVENT, event);
         publish_authoritative_task_status(&self.app, event);
-        // E2E-05：先落权威 journal，再把落库后的事件经加密通道回传 A。
-        if let Some(stored) = self.journal.record_task_event(event) {
-            publish_authoritative_event(&self.app, &stored);
+        // Only the current authenticated B session/generation can allocate a
+        // visible journal sequence. Ordinary local sessions remain local.
+        use tauri::Manager as _;
+        let Some((lease, _)) = self
+            .app
+            .state::<ControlledDeviceManager>()
+            .live_runtime_context()
+            .ok()
+        else {
+            return;
+        };
+        let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
+        let Some(remote_ref) = runtime.service().remote_ref_for(&event.session_id) else {
+            return;
+        };
+        if runtime
+            .service()
+            .session_for(&remote_ref, &lease.remote_control_generation)
+            .as_deref()
+            != Some(event.session_id.as_str())
+        {
+            return;
+        }
+        let Ok(record) = runtime.service().status(&event.task_id) else {
+            return;
+        };
+        if record.lease.remote_control_generation != lease.remote_control_generation {
+            return;
+        }
+        if self
+            .journal
+            .bind_generation(&lease.remote_control_generation)
+            .is_err()
+        {
+            return;
+        }
+        // E2E-05：先落 B 权威 journal，再经同代加密通道回传 A。
+        if let Some(stored) = self
+            .journal
+            .record_task_event_for_generation(&lease.remote_control_generation, event)
+        {
+            publish_authoritative_event(&self.app, &lease.remote_control_generation, &stored);
         }
     }
 }
@@ -127,8 +177,28 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
 /// 把一条权威 journal 事件回传当前主控端（E2E-05）：会话身份改写回 A 的引用，
 /// 用 B 的加密通道封装，经同一代 endpoint lane 发送。未连接、未协商
 /// `snapshot_journal_v1`、非远程会话或通道未就位时静默跳过（本地 B 事件照常）。
+fn publish_if_current<T>(
+    journal: &RemoteJournal,
+    appended_generation: &str,
+    lease: &LeaseContext,
+    event: &JournalEvent,
+    mapped_session: Option<&str>,
+    send: impl FnOnce() -> T,
+) -> Option<T> {
+    if lease.remote_control_generation != appended_generation
+        || mapped_session != Some(event.session_id.as_str())
+        || journal
+            .require_current_event_for_generation(appended_generation, event)
+            .is_err()
+    {
+        return None;
+    }
+    Some(send())
+}
+
 pub(crate) fn publish_authoritative_event(
     app: &tauri::AppHandle,
+    appended_generation: &str,
     event: &JournalEvent,
 ) {
     use tauri::Manager as _;
@@ -148,6 +218,37 @@ pub(crate) fn publish_authoritative_event(
         );
         return;
     };
+    let mapped_session = runtime
+        .service()
+        .session_for(&session_ref, appended_generation);
+    let history = app.state::<Arc<DesktopRemoteHistoryRuntime>>();
+    if publish_if_current(
+        history.journal(),
+        appended_generation,
+        &lease,
+        event,
+        mapped_session.as_deref(),
+        || {
+            publish_current_authoritative_event(app, &lease, &capabilities, &session_ref, event);
+        },
+    )
+    .is_none() {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "generation_or_binding_stale",
+        );
+        return;
+    }
+}
+
+fn publish_current_authoritative_event(
+    app: &tauri::AppHandle,
+    lease: &LeaseContext,
+    capabilities: &[String],
+    session_ref: &str,
+    event: &JournalEvent,
+) {
+    use tauri::Manager as _;
     let outbound = app.state::<
         crate::features::remote_control::controller::relay_runtime::ControlledOutboundState,
     >();
@@ -158,10 +259,13 @@ pub(crate) fn publish_authoritative_event(
         );
         return;
     };
+    if sender.generation() != lease.remote_control_generation {
+        return;
+    }
     let Some(payload) =
         crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
-            &lease,
-            &session_ref,
+            lease,
+            session_ref,
             event,
         )
     else {
@@ -171,9 +275,9 @@ pub(crate) fn publish_authoritative_event(
         );
         return;
     };
-    let lane = app.state::<
-        crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
-    >();
+    let lane = app
+        .state::<crate::features::remote_control::controller::encrypted_lane::ControlledLaneState>(
+        );
     let Ok(frame) = lane.seal("journal_event", &payload, &capabilities) else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
             "journal_event_not_sent",
@@ -221,70 +325,30 @@ type HistoryState<'a> = State<'a, Arc<DesktopRemoteHistoryRuntime>>;
 
 /// E2E-05：A 端 journal 落库端口。把解密校验后的权威事件写进对应的本地历史
 /// （按会话引用定位；未绑定时只投影事件），并广播给前端渲染正文。
-pub(crate) struct DesktopControllerJournalSink {
-    app: tauri::AppHandle,
-    runtime: Arc<DesktopRemoteHistoryRuntime>,
-}
+pub(crate) struct DesktopControllerJournalSink {}
 
 impl DesktopControllerJournalSink {
-    pub(crate) fn new(
-        app: tauri::AppHandle,
-        runtime: Arc<DesktopRemoteHistoryRuntime>,
-    ) -> Self {
-        Self { app, runtime }
+    pub(crate) fn new(_app: tauri::AppHandle, _runtime: Arc<DesktopRemoteHistoryRuntime>) -> Self {
+        Self {}
     }
 }
 
 impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
     for DesktopControllerJournalSink
 {
-    fn publish(&self, event: &JournalEvent) {
-        let history_id = self
-            .runtime
-            .store()
-            .find_by_session_reference(&event.session_id);
-        if let Some(history_id) = &history_id {
-            let _ = self.runtime.store().append_authenticated(
-                history_id,
-                event,
-                monotonic_millis(),
-            );
-        }
-        let _ = self.app.emit(
-            crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,
-            serde_json::json!({
-                "historyId": history_id,
-                "event": event,
-            }),
-        );
+    fn publish(&self, _event: &JournalEvent) -> Result<(), String> {
+        // This legacy history store is an offline compatibility copy, not the
+        // new authenticated RemoteProxy authority. DEV-20 replaces this sink
+        // with the DEV-30 projection adapter and durable cursor confirmation.
+        Err("remote_projection_not_configured".to_owned())
     }
 
     /// E2E-05 缺口恢复：把权威快照原子应用到对应历史（未绑定历史时只广播）。
     fn publish_snapshot(
         &self,
-        snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
-    ) {
-        let session_ref = snapshot
-            .events
-            .first()
-            .map(|event| event.session_id.clone());
-        let history_id = session_ref
-            .as_deref()
-            .and_then(|session| self.runtime.store().find_by_session_reference(session));
-        if let Some(history_id) = &history_id {
-            let _ = self.runtime.store().apply_snapshot(
-                history_id,
-                snapshot,
-                monotonic_millis(),
-            );
-        }
-        let _ = self.app.emit(
-            crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,
-            serde_json::json!({
-                "historyId": history_id,
-                "snapshot": snapshot,
-            }),
-        );
+        _snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
+    ) -> Result<(), String> {
+        Err("remote_projection_not_configured".to_owned())
     }
 }
 
@@ -350,7 +414,12 @@ pub fn desktop_remote_history_create(
     ensure_supported(&controlled)?;
     runtime
         .store()
-        .create(&title, &device_display_name, &session_ref, monotonic_millis())
+        .create(
+            &title,
+            &device_display_name,
+            &session_ref,
+            monotonic_millis(),
+        )
         .map_err(|error| error.code.to_owned())
 }
 
@@ -374,77 +443,57 @@ pub fn desktop_remote_history_mark_offline(
 /// Applies one authenticated event to the A copy.
 #[tauri::command]
 pub fn desktop_remote_history_apply_event(
-    history_id: String,
-    event: Value,
+    _history_id: String,
+    _event: Value,
     controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
+    _runtime: HistoryState<'_>,
 ) -> Result<bool, String> {
     ensure_supported(&controlled)?;
-    let event: JournalEvent =
-        serde_json::from_value(event).map_err(|_| "history_event_invalid".to_owned())?;
-    runtime
-        .store()
-        .append_authenticated(&history_id, &event, monotonic_millis())
-        .map_err(|error| error.code.to_owned())
+    Err("history_authentication_required".to_owned())
 }
 
 /// Applies an authoritative snapshot atomically.
 #[tauri::command]
 pub fn desktop_remote_history_apply_snapshot(
-    history_id: String,
-    snapshot: Value,
+    _history_id: String,
+    _snapshot: Value,
     controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
+    _runtime: HistoryState<'_>,
 ) -> Result<usize, String> {
     ensure_supported(&controlled)?;
-    let snapshot: JournalSnapshot =
-        serde_json::from_value(snapshot).map_err(|_| "history_snapshot_invalid".to_owned())?;
-    runtime
-        .store()
-        .apply_snapshot(&history_id, &snapshot, monotonic_millis())
-        .map_err(|error| error.code.to_owned())
+    Err("history_authentication_required".to_owned())
 }
 
 #[tauri::command]
 pub fn desktop_remote_journal_replay(
-    epoch: String,
-    sequence: u64,
+    _epoch: String,
+    _sequence: u64,
     controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
+    _runtime: HistoryState<'_>,
 ) -> Result<DesktopRemoteJournalReplay, String> {
     ensure_supported(&controlled)?;
-    Ok(match runtime.journal().replay_after(&epoch, sequence) {
-        ReplayOutcome::Events(events) => DesktopRemoteJournalReplay {
-            kind: "events".into(),
-            events: Some(events),
-            snapshot: None,
-        },
-        ReplayOutcome::Gap(snapshot) => DesktopRemoteJournalReplay {
-            kind: "snapshot".into(),
-            events: None,
-            snapshot: Some(snapshot),
-        },
-    })
+    // Compatibility command has no authenticated session scope. It must not
+    // select a journal implicitly; DEV-20 will expose a scoped bridge.
+    Err("journal_scope_required".to_owned())
 }
 
 #[tauri::command]
 pub fn desktop_remote_journal_snapshot(
     controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
+    _runtime: HistoryState<'_>,
 ) -> Result<JournalSnapshot, String> {
     ensure_supported(&controlled)?;
-    Ok(runtime.journal().snapshot())
+    Err("journal_scope_required".to_owned())
 }
 
 #[tauri::command]
 pub fn desktop_remote_journal_acknowledge(
-    sequence: u64,
+    _sequence: u64,
     controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
+    _runtime: HistoryState<'_>,
 ) -> Result<u64, String> {
     ensure_supported(&controlled)?;
-    runtime.journal().acknowledge(sequence);
-    Ok(runtime.journal().acknowledged())
+    Err("journal_scope_required".to_owned())
 }
 
 #[cfg(test)]
@@ -459,6 +508,58 @@ mod tests {
             Arc::new(RemoteHistoryStore::in_memory()),
             Arc::new(RemoteJournal::new("epoch-1")),
         )
+    }
+
+    #[test]
+    fn old_generation_publish_cannot_send_after_same_b_session_rebind() {
+        use std::cell::Cell;
+
+        let journal = RemoteJournal::new("boot");
+        journal.bind_generation("generation-1").unwrap();
+        let old = journal
+            .append_for_generation(
+                "generation-1",
+                "event-old",
+                JournalKind::UserMessage,
+                "b-session",
+                None,
+                json!({"text":"old"}),
+            )
+            .unwrap();
+        let lease = |generation: &str| LeaseContext {
+            connection_id: "connection-1".into(),
+            controller_lease_id: "lease-1".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-1".into(),
+            remote_control_generation: generation.into(),
+        };
+        let sent = Cell::new(0);
+        let old_owner = lease("generation-1");
+        journal.bind_generation("generation-2").unwrap();
+        let new_owner = lease("generation-2");
+        // The new ref maps to the same B session. Neither a captured old
+        // lease nor reinterpreting the old event under the new lease may send.
+        assert!(publish_if_current(
+            &journal, "generation-1", &new_owner, &old, Some("b-session"),
+            || sent.set(sent.get() + 1),
+        ).is_none());
+        assert!(publish_if_current(
+            &journal, "generation-1", &old_owner, &old, Some("b-session"),
+            || sent.set(sent.get() + 1),
+        ).is_none());
+        assert_eq!(sent.get(), 0);
+
+        let current = journal
+            .append_for_generation(
+                "generation-2", "event-current", JournalKind::UserMessage,
+                "b-session", None, json!({"text":"new"}),
+            )
+            .unwrap();
+        assert!(publish_if_current(
+            &journal, "generation-2", &new_owner, &current, Some("b-session"),
+            || sent.set(sent.get() + 1),
+        ).is_some());
+        assert_eq!(sent.get(), 1);
     }
 
     #[test]
@@ -480,11 +581,7 @@ mod tests {
             .unwrap();
         runtime
             .store()
-            .append_authenticated(
-                &id,
-                &runtime.journal().snapshot().events[0],
-                1_100,
-            )
+            .append_authenticated(&id, &runtime.journal().snapshot().events[0], 1_100)
             .unwrap();
         runtime.store().mark_offline(&id, 1_200).unwrap();
         let listed = runtime.store().list();

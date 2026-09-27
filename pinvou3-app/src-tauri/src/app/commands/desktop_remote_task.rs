@@ -156,10 +156,49 @@ impl ControllerTaskEventSink for TaskEventBridge {
         let history = self
             .app
             .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let Ok((lease, _)) = self.app.state::<
+            crate::features::remote_control::controller::controlled::ControlledDeviceManager,
+        >().live_runtime_context() else { return; };
+        let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
+        let Some(remote_ref) = runtime.service().remote_ref_for(session_id) else {
+            return;
+        };
+        if runtime
+            .service()
+            .session_for(&remote_ref, &lease.remote_control_generation)
+            .as_deref()
+            != Some(session_id)
+        {
+            return;
+        }
+        if let Some(task_id) = task_id {
+            let Ok(record) = runtime.service().status(task_id) else {
+                return;
+            };
+            if record.session_id != session_id
+                || record.lease.remote_control_generation != lease.remote_control_generation
+            {
+                return;
+            }
+        }
+        if history
+            .journal()
+            .bind_generation(&lease.remote_control_generation)
+            .is_err()
+        {
+            return;
+        }
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
         match history
             .journal()
-            .append(&event_id, kind, session_id, task_id, payload)
+            .append_for_generation(
+                &lease.remote_control_generation,
+                &event_id,
+                kind,
+                session_id,
+                task_id,
+                payload,
+            )
         {
             Ok(event) => {
                 // B owns the authoritative event, so project it to B's UI as
@@ -187,7 +226,11 @@ impl ControllerTaskEventSink for TaskEventBridge {
                     "journal_event_projected",
                     &event.kind,
                 );
-                super::desktop_remote_history::publish_authoritative_event(&self.app, &event);
+                super::desktop_remote_history::publish_authoritative_event(
+                    &self.app,
+                    &lease.remote_control_generation,
+                    &event,
+                );
             }
             Err(error) => {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(

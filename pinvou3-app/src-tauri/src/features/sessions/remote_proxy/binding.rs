@@ -283,7 +283,7 @@ pub(super) fn require_live_locked(
 /// Terminal correlation must bind the exact B-owned Session in the same lock
 /// acquisition as the current A lease/opening check. A prior read-only check
 /// is not authority after disconnect, resume, or re-pair.
-pub(super) fn require_live_mapping_locked(
+pub(crate) fn require_live_mapping_locked(
     state: &RemoteProxyState,
     id: &str,
     remote_ref: &str,

@@ -1204,7 +1204,8 @@ pub(crate) fn build_journal_event_payload(
     session_ref: &str,
     event: &super::journal::JournalEvent,
 ) -> Option<Value> {
-    let wire_kind = wire_event_kind(event)?;
+    event.validate_exportable().ok()?;
+    let wire_kind = event.wire_kind()?;
     // B owns the local session id while the wire contract owns A's opaque
     // session id. Envelope and authenticated body must use the same identity.
     let mut wire_event = event.clone();
@@ -1228,22 +1229,6 @@ pub(crate) fn build_journal_event_payload(
         "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "event_bytes": raw.len().to_string(),
     }))
-}
-
-/// 内部 journal 类型 → 冻结 wire 闭集；无对应项时返回 None（不回传）。
-fn wire_event_kind(event: &super::journal::JournalEvent) -> Option<&'static str> {
-    match event.kind.as_str() {
-        "user_message" => Some("user_message"),
-        "assistant_delta" => Some("assistant_delta"),
-        "reasoning" => Some("reasoning"),
-        "tool" => Some("tool"),
-        "permission" => Some("permission"),
-        "error" => Some("error"),
-        "artifact" => Some("artifact"),
-        // 只有终态任务状态走 journal 回传；进行中状态由 task_status 帧投影。
-        "task_status" if event.terminal_status.is_some() => Some("terminal"),
-        _ => None,
-    }
 }
 
 /// B 端出站旁路：权威 journal 事件需要经同一代 endpoint lane 回传 A，而 lane 的
