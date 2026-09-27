@@ -270,7 +270,7 @@
         "timeSourceCidrs": { "$ref": "#/definitions/cidrs" }
       }
     },
-	"ingress": { "type": "object", "required": ["enabled", "portalHost", "keycloakHost", "identityHost", "tlsSecretName", "tokenAdminMaxTimeoutSeconds", "tokenAdminPath"], "properties": { "enabled": { "type": "boolean" }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" }, "tokenAdminMaxTimeoutSeconds": { "type": "integer", "const": 14 }, "tokenAdminPath": { "type": "string", "const": "/api/admin/token" } } },
+	"ingress": { "type": "object", "required": ["enabled", "className", "portalHost", "keycloakHost", "identityHost", "tlsSecretName", "tokenAdminMaxTimeoutSeconds", "tokenAdminPath"], "properties": { "enabled": { "type": "boolean" }, "className": { "type": "string", "enum": ["", "nginx"] }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" }, "tokenAdminMaxTimeoutSeconds": { "type": "integer", "const": 14 }, "tokenAdminPath": { "type": "string", "const": "/api/admin/token" } } },
     "keycloak": {
       "type": "object",
       "required": ["hostname", "adminHostname", "realmUpgradeEnabled", "oidcClientId"],

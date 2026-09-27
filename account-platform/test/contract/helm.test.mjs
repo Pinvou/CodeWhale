@@ -33,6 +33,7 @@ test('Helm production-new values contain references, not secret material or simu
   assert.ok(values.tokenGateway.secretRotationIntervalSeconds >= 60);
   assert.equal(values.keycloak.adminHostname, 'http://127.0.0.1:18081');
   assert.equal(values.keycloak.oidcClientId, 'pinvou-desktop');
+  assert.equal(values.ingress.className, 'nginx');
   assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
   assert.equal(values.availability.enabled, true);
 	assert.equal(values.security.authRiskEnabled, true);
@@ -103,6 +104,9 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.match(combined, /kind: Service[\s\S]*name: \{\{ \$fullname \}\}-\{\{ \$source \}\}-event-relay/);
   assert.match(combined, /name: monitor, port: 8222/);
   assert.match(combined, /name: KC_HOSTNAME_ADMIN/);
+  assert.match(combined, /name: management, containerPort: 9000/);
+  assert.match(combined, /startupProbe:[\s\S]*path: \/health\/started, port: management, scheme: HTTP/);
+  assert.match(combined, /readinessProbe:[\s\S]*path: \/health\/ready, port: management, scheme: HTTP/);
   assert.match(combined, /kind: PodDisruptionBudget/);
   assert.match(combined, /topologySpreadConstraints/);
   assert.match(combined, /maxUnavailable: 0/);
@@ -112,11 +116,31 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
 
 test('Helm exposes only public authentication paths and keeps Keycloak administration tunneled', async () => {
   const ingress = await readFile(path.join(chart, 'templates/ingress.yaml'), 'utf8');
-  const keycloakRule = ingress.slice(ingress.indexOf('- host: {{ .Values.ingress.keycloakHost'));
-  assert.match(ingress, /^\s*- path: \/realms\s*$/m);
-	assert.match(keycloakRule, /path: \/realms\/pinvou\/protocol\/openid-connect\/token[\s\S]*pathType: Exact[\s\S]*identity-service/);
-  assert.match(ingress, /^\s*- path: \/resources\s*$/m);
-  assert.doesNotMatch(keycloakRule, /path:\s*\/(?=\s*[,}\n])/);
-  assert.doesNotMatch(keycloakRule, /\/admin/);
+  const documents = ingress.split(/^---$/m);
+  const sticky = documents.find(document => document.includes('-keycloak-session'));
+  const shared = documents.find(document => !document.includes('-keycloak-session') && !document.includes('-token-admin'));
+  assert.match(sticky, /nginx\.ingress\.kubernetes\.io\/affinity: "cookie"/);
+  assert.match(ingress, /fail "ingress\.className must be nginx/);
+  assert.match(sticky, /nginx\.ingress\.kubernetes\.io\/affinity-mode: "persistent"/);
+  assert.match(sticky, /nginx\.ingress\.kubernetes\.io\/session-cookie-name: "pinvou-keycloak-route"/);
+  assert.match(sticky, /nginx\.ingress\.kubernetes\.io\/session-cookie-path: "\/"/);
+  assert.match(sticky, /^\s*- path: \/realms\s*$/m);
+  assert.match(sticky, /^\s*- path: \/resources\s*$/m);
+  assert.doesNotMatch(sticky, /identity-service|portalHost|identityHost|\/admin/);
+	assert.match(shared, /path: \/realms\/pinvou\/protocol\/openid-connect\/token[\s\S]*pathType: Exact[\s\S]*identity-service/);
+  assert.doesNotMatch(shared, /^\s*- path: \/(?:realms|resources)\s*$/m);
+  assert.doesNotMatch(shared, /nginx\.ingress\.kubernetes\.io\/affinity/);
   assert.match(ingress, /path: \/v1\/registration\/password-prechecks/);
+});
+
+test('CI validates rendered Keycloak probes and session affinity', async () => {
+  const [workflow, verifier] = await Promise.all([
+    readFile(path.join(root, '../.github/workflows/pr-check.yml'), 'utf8'),
+    readFile(path.join(root, '../scripts/account-platform-keycloak-helm-check.mjs'), 'utf8'),
+  ]);
+  assert.match(workflow, /helm:4\.2\.3 template pinvou[\s\S]*account-platform-keycloak-helm-check\.mjs \/tmp\/account-platform-production\.yaml/);
+  assert.match(verifier, /\/health\/started[\s\S]*\/health\/ready/);
+  assert.match(verifier, /pinvou-keycloak-route/);
+  assert.match(verifier, /\[\['\/realms', 'Prefix'\], \['\/resources', 'Prefix'\]\]/);
+  assert.match(verifier, /shared\.metadata\.annotations\?\.\['nginx\.ingress\.kubernetes\.io\/affinity'\]/);
 });

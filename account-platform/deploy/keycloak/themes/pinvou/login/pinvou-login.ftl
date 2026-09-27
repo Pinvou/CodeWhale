@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>${msg("pinvouLoginTitle")}</title>
-  <link rel="stylesheet" href="${url.resourcesPath}/css/pinvou-login.css">
+  <link rel="stylesheet" href="${url.resourcesPath}/${properties.styles}">
 </head>
 <body>
   <main class="pv-auth-page">
@@ -150,6 +150,6 @@
       </form>
     </section>
   </main>
-  <script src="${url.resourcesPath}/js/pinvou-login.js"></script>
+  <script src="${url.resourcesPath}/${properties.scripts}"></script>
 </body>
 </html>

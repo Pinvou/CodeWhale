@@ -97,6 +97,7 @@ external:
 
 ingress:
   enabled: true
+  className: nginx
   portalHost: tokens.example.com
   keycloakHost: accounts.example.com
   identityHost: identity.example.com

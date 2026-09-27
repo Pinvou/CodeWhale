@@ -10,7 +10,7 @@ KEYCLOAK_DOCKERFILE = ROOT / 'account-platform/deploy/keycloak/Dockerfile'
 class KeycloakProductionConfigTests(unittest.TestCase):
     def test_optimized_image_enables_standard_token_exchange(self):
         dockerfile = KEYCLOAK_DOCKERFILE.read_text()
-        feature = 'KC_FEATURES=token-exchange-standard:v2'
+        feature = 'KC_FEATURES=token-exchange-standard:v2,rolling-updates:v2'
         self.assertEqual(dockerfile.count(feature), 2)
         self.assertIn('RUN /opt/keycloak/bin/kc.sh build', dockerfile)
 

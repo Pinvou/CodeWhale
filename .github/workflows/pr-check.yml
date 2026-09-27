@@ -1234,6 +1234,7 @@ jobs:
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-staging.yaml
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-production-new.yaml
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-production-new.yaml > /tmp/account-platform-production.yaml
+          node scripts/account-platform-keycloak-helm-check.mjs /tmp/account-platform-production.yaml
           ! grep -E 'payment-simulator|mock-newapi|TOKEN_LOCAL_KEK_BASE64|kind: Secret' /tmp/account-platform-production.yaml
 
       - name: 新治理 profile 的真实配置与镜像门禁
@@ -2429,6 +2430,35 @@ jobs:
       - name: macOS Codex 与 Claude Runtime 原生打包冒烟
         run: npm --prefix pinvou3-app run test:codex-acp-macos-runtime
 
+  account-platform-edge-test:
+    name: account-platform-edge-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            account-platform/package-lock.json
+            pinvou3-app/package-lock.json
+      - name: 安装登录主题浏览器测试依赖
+        shell: pwsh
+        run: |
+          npm --prefix account-platform ci --prefer-offline --no-audit --ignore-scripts
+          npm --prefix pinvou3-app ci --prefer-offline --no-audit --ignore-scripts
+      - name: Windows Edge 密码显隐视觉门禁
+        shell: pwsh
+        env:
+          CHROME: C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+          EDGE: C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+          PINVOU_REQUIRE_PASSWORD_BROWSER_TEST: "1"
+          PINVOU_REQUIRE_PASSWORD_EDGE_VISUAL_TEST: "1"
+        run: node --test account-platform/test/contract/browser-login-theme.test.mjs
+
   required-gate:
     name: required-gate
     needs:
@@ -2441,6 +2471,7 @@ jobs:
       - relay-test
       - team-relay-hub-test
       - account-platform-test
+      - account-platform-edge-test
       - release-contract-test
       - knowledge-rust
       - rust-lint
@@ -2473,6 +2504,7 @@ jobs:
           RELAY_RESULT: ${{ needs.relay-test.result }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          ACCOUNT_PLATFORM_EDGE_RESULT: ${{ needs.account-platform-edge-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
           KNOWLEDGE_RUST_RESULT: ${{ needs.knowledge-rust.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
@@ -2510,6 +2542,7 @@ jobs:
             "relay-test:$RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
+            "account-platform-edge-test:$ACCOUNT_PLATFORM_EDGE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
             "knowledge-rust:$KNOWLEDGE_RUST_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \

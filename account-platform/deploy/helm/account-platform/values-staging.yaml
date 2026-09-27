@@ -47,6 +47,7 @@ external:
 
 ingress:
   enabled: true
+  className: nginx
   portalHost: tokens.staging.example.com
   keycloakHost: accounts.staging.example.com
   identityHost: identity.staging.example.com

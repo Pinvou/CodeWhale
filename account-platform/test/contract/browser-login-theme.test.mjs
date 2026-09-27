@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -28,6 +29,15 @@ function nativeChromium() {
   return candidates.find(candidate => candidate && path.isAbsolute(candidate) && existsSync(candidate)) || '';
 }
 
+function nativeEdge() {
+  if (process.platform !== 'win32') return '';
+  return [
+    process.env.EDGE,
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ].find(candidate => candidate && path.isAbsolute(candidate) && existsSync(candidate)) || '';
+}
+
 function nativePuppeteer() {
   try {
     return createRequire(path.join(root, '../pinvou3-app/package.json'))('puppeteer-core');
@@ -38,6 +48,27 @@ function nativePuppeteer() {
 
 function messageKeys(source) {
   return new Set(source.split(/\r?\n/).filter(line => line && !line.startsWith('#')).map(line => line.split('=', 1)[0]));
+}
+
+function themeProperties(source) {
+  return new Map(source.split(/\r?\n/)
+    .filter(line => line && !line.startsWith('#') && line.includes('='))
+    .map(line => {
+      const separator = line.indexOf('=');
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }));
+}
+
+async function loginThemeAssets() {
+  const themeSource = await read('deploy/keycloak/themes/pinvou/login/theme.properties');
+  const properties = themeProperties(themeSource);
+  const stylesPath = properties.get('styles');
+  const scriptsPath = properties.get('scripts');
+  return {
+    themeSource, properties, stylesPath, scriptsPath,
+    styles: await read(`deploy/keycloak/themes/pinvou/login/resources/${stylesPath}`),
+    script: await read(`deploy/keycloak/themes/pinvou/login/resources/${scriptsPath}`),
+  };
 }
 
 class LoginThemeElement {
@@ -63,7 +94,7 @@ class LoginThemeElement {
 }
 
 async function loginPasswordControls(initialPassword = '') {
-  const source = await read('deploy/keycloak/themes/pinvou/login/resources/js/pinvou-login.js');
+  const { script: source } = await loginThemeAssets();
   const password = new LoginThemeElement({
     type: 'password', value: initialPassword,
     selectionStart: initialPassword.length, selectionEnd: initialPassword.length,
@@ -174,11 +205,19 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
 });
 
 test('saved browser passwords stay masked while passwords typed from empty can be revealed', async () => {
-  const [template, styles, script] = await Promise.all([
+  const [template, assets] = await Promise.all([
     read('deploy/keycloak/themes/pinvou/login/pinvou-login.ftl'),
-    read('deploy/keycloak/themes/pinvou/login/resources/css/pinvou-login.css'),
-    read('deploy/keycloak/themes/pinvou/login/resources/js/pinvou-login.js'),
+    loginThemeAssets(),
   ]);
+  const { properties, stylesPath, scriptsPath, styles, script } = assets;
+  const pattern = new RegExp(properties.get('contentHashPattern'));
+  for (const [assetPath, source] of [[stylesPath, styles], [scriptsPath, script]]) {
+    const digest = createHash('sha256').update(source).digest('hex');
+    assert.ok(assetPath.includes(`.${digest}.`), `${assetPath} must contain its actual content hash`);
+    assert.ok(pattern.test(assetPath), `${assetPath} must match Keycloak contentHashPattern`);
+  }
+  assert.ok(template.includes('href="${url.resourcesPath}/${properties.styles}"'));
+  assert.ok(template.includes('src="${url.resourcesPath}/${properties.scripts}"'));
   assert.match(template, /data-toggle-password[^>]+aria-pressed="false" disabled hidden/);
   assert.match(template, /<input id="pv-password" name="password" type="password"[^>]*>\s*<span class="pv-password-reveal-output" data-password-reveal-output role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" hidden><\/span>/);
   assert.doesNotMatch(template, /data-password-reveal-output[^>]+name=/);
@@ -359,8 +398,9 @@ test('native Chromium keeps manual password editing revealable without accepting
     return;
   }
 
-  const source = (await read('deploy/keycloak/themes/pinvou/login/resources/js/pinvou-login.js'))
-    .replaceAll('</script', '<\\/script');
+  const assets = await loginThemeAssets();
+  const source = assets.script.replaceAll('</script', '<\\/script');
+  const styles = assets.styles.replaceAll('</style', '<\\/style');
   const browser = await puppeteer.launch({
     executablePath, headless: true, timeout: 15000, protocolTimeout: 15000,
     args: ['--disable-gpu', '--no-first-run', '--no-sandbox'],
@@ -368,7 +408,7 @@ test('native Chromium keeps manual password editing revealable without accepting
   try {
     const page = await browser.newPage();
     const mount = async (extraScript = '') => {
-      await page.setContent(`<!doctype html><form id="pv-auth-form">
+      await page.setContent(`<!doctype html><style>${styles}.pv-password-wrap{width:420px}.pv-password-wrap input{width:100%;height:44px}</style><form id="pv-auth-form">
         <input id="pv-intent" value="submit"><input id="pv-target-mode"><input id="pv-device-id">
         <span class="pv-password-wrap"><input id="pv-password" name="password" type="password" maxlength="128">
         <span data-password-reveal-output aria-hidden="true" hidden></span>
@@ -393,6 +433,8 @@ test('native Chromium keeps manual password editing revealable without accepting
     await page.focus('#pv-password');
     await page.keyboard.type('typed-secret');
     assert.equal((await state()).eyeHidden, false, 'native typing must make the reveal control available');
+    assert.equal(await page.evaluate(() => Array.from(document.querySelectorAll('.pv-password-wrap > [data-toggle-password]'))
+      .filter(control => getComputedStyle(control).display !== 'none').length), 1);
     await page.click('[data-toggle-password]');
     assert.deepEqual(await state(), { value: 'typed-secret', type: 'password', eyeHidden: false, reveal: 'typed-secret' });
     await page.focus('#pv-password');
@@ -486,6 +528,44 @@ test('native Chromium keeps manual password editing revealable without accepting
     assert.equal(raced.type, 'password');
     assert.equal(raced.eyeHidden, true, 'a maxlength microtask injection must revoke revealability');
     assert.equal(raced.reveal, '');
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Microsoft Edge renders exactly one password reveal icon', async t => {
+  const executablePath = nativeEdge();
+  const puppeteer = nativePuppeteer();
+  if (!executablePath || !puppeteer) {
+    if (process.env.PINVOU_REQUIRE_PASSWORD_EDGE_VISUAL_TEST === '1') {
+      assert.fail(`required Edge password visual test is unavailable: edge=${Boolean(executablePath)} puppeteer=${Boolean(puppeteer)}`);
+    }
+    t.skip('Microsoft Edge or puppeteer-core is unavailable');
+    return;
+  }
+  const { styles } = await loginThemeAssets();
+  const browser = await puppeteer.launch({
+    executablePath, headless: true, timeout: 15000, protocolTimeout: 15000,
+    args: ['--disable-gpu', '--no-first-run', '--no-sandbox'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<!doctype html><style>${styles}.pv-password-wrap{width:420px}.pv-password-wrap input{width:100%;height:44px}</style>
+      <span class="pv-password-wrap"><input id="pv-password" type="password">
+      <button type="button" class="pv-eye" data-toggle-password aria-label="reveal"><svg viewBox="0 0 24 24"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg></button></span>`);
+    await page.focus('#pv-password');
+    await page.keyboard.type('typed-secret');
+    assert.equal(await page.evaluate(() => Array.from(document.querySelectorAll('.pv-password-wrap > [data-toggle-password]'))
+      .filter(control => getComputedStyle(control).display !== 'none').length), 1);
+    const revealClip = await page.$eval('.pv-password-wrap', element => {
+      const box = element.getBoundingClientRect();
+      return { x: box.right - 96, y: box.top, width: 96, height: box.height };
+    });
+    const passwordTrailingPixels = await page.screenshot({ clip: revealClip });
+    await page.$eval('#pv-password', input => { input.type = 'text'; });
+    const textTrailingPixels = await page.screenshot({ clip: revealClip });
+    assert.deepEqual(passwordTrailingPixels, textTrailingPixels,
+      'Edge must render only the custom control, with no native reveal icon');
   } finally {
     await browser.close();
   }

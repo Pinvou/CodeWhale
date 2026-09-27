@@ -70,7 +70,19 @@ spec:
         - name: keycloak
           image: "{{ .Values.images.keycloak.repository }}:{{ .Values.images.keycloak.tag }}"
           args: ["start", "--health-enabled=true", "--http-enabled=true"]
-          ports: [{ name: http, containerPort: 8080 }]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: management, containerPort: 9000 }
+          startupProbe:
+            httpGet: { path: /health/started, port: management, scheme: HTTP }
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health/ready, port: management, scheme: HTTP }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           env:
             - { name: PINVOU_ACCOUNT_AUTH_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }

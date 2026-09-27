@@ -74,7 +74,9 @@ test('deployment templates keep the gate closed and reserve the 14-second transp
   const ingress = await read('deploy/helm/account-platform/templates/ingress.yaml');
   const nginx = await read('deploy/nginx/account-platform.conf.template');
   assert.match(ingress, /proxy-read-timeout: \{\{ \.Values\.ingress\.tokenAdminMaxTimeoutSeconds \| quote \}\}/);
-  const [sharedIngress, tokenAdminIngress] = ingress.split(/^---$/m);
+  const ingressDocuments = ingress.split(/^---$/m);
+  const sharedIngress = ingressDocuments.find(document => !document.includes('-keycloak-session') && !document.includes('-token-admin'));
+  const tokenAdminIngress = ingressDocuments.find(document => document.includes('-token-admin'));
   assert.doesNotMatch(sharedIngress, /proxy-(read|send)-timeout/);
   assert.match(tokenAdminIngress, /name: \{\{ include "pinvou\.fullname" \. \}\}-token-admin/);
   assert.match(tokenAdminIngress, /path: \{\{ \.Values\.ingress\.tokenAdminPath \}\}/);

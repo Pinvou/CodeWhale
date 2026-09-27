@@ -425,8 +425,8 @@ def probe_issuer(ip, directory, admin):
                                     "redirect_uri": "https://localhost:8443/fixture/callback", "state": "fixture-state"})
     status, page = request("GET", "/realms/pinvou-fixture-users/protocol/openid-connect/auth?" + params)
     require(status == 200, "CUSTOM_LOGIN_FORM_HTTP_STATUS_" + str(status))
-    require(b'pv-auth-form' in page and b'pinvou-login.css' in page, "CUSTOM_LOGIN_FORM_NOT_RENDERED")
-    assets = re.findall(rb'(?:href|src)="([^"]+pinvou-login\.(?:css|js))"', page)
+    require(b'pv-auth-form' in page and b'pinvou-login.' in page, "CUSTOM_LOGIN_FORM_NOT_RENDERED")
+    assets = re.findall(rb'(?:href|src)="([^"]+pinvou-login\.[0-9a-f]{64}\.(?:css|js))"', page)
     require(len(assets) == 2, "BOTH_THEME_ASSETS_REQUIRED")
     for asset in assets:
         url = urllib.parse.urlsplit(asset.decode())
