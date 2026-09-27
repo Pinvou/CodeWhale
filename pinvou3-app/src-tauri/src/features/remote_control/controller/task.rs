@@ -1067,6 +1067,18 @@ impl RemoteSessionMap {
             .map(|binding| binding.2)
     }
 
+    fn binding_for_session(
+        &self,
+        session_id: &str,
+        generation: &str,
+    ) -> Option<(String, RemoteSessionLane)> {
+        self.reverse
+            .lock()
+            .get(session_id)
+            .filter(|binding| binding.1 == generation)
+            .map(|binding| (binding.0.clone(), binding.2))
+    }
+
     /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
     pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
         self.reverse
@@ -1589,18 +1601,59 @@ impl RemoteTaskService {
         now_b: u64,
         install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
     ) -> Result<AdmissionOutcome> {
+        self.submit_bound_with_expected_ref(live, payload, now_b, None, install)
+    }
+
+    /// The B-local path must keep the expected A reference authoritative up
+    /// to the exact admission point. A preflight lookup is not sufficient:
+    /// switch/close/rebind can change the reverse binding before ledger admit.
+    pub(crate) fn submit_bound_for_ref_with_admission(
+        &self,
+        live: &LeaseContext,
+        expected_remote_ref: &str,
+        payload: &Value,
+        now_b: u64,
+        install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
+    ) -> Result<AdmissionOutcome> {
+        validate_identifier(expected_remote_ref)?;
+        self.submit_bound_with_expected_ref(
+            live,
+            payload,
+            now_b,
+            Some(expected_remote_ref),
+            install,
+        )
+    }
+
+    fn submit_bound_with_expected_ref(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+        expected_remote_ref: Option<&str>,
+        install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
+    ) -> Result<AdmissionOutcome> {
         let request = RemoteTaskRequest::from_payload(payload)?;
         let _guard = self.session_open_lock.lock();
-        let lane = self
+        let binding = self
             .sessions
-            .lane_for_session(&request.session_id, &live.remote_control_generation)
-            .ok_or_else(|| error("task_session_not_found"))?;
+            .binding_for_session(&request.session_id, &live.remote_control_generation)
+            .ok_or_else(|| {
+                error(if expected_remote_ref.is_some() {
+                    "task_session_binding_mismatch"
+                } else {
+                    "task_session_not_found"
+                })
+            })?;
+        if expected_remote_ref.is_some_and(|expected| binding.0 != expected) {
+            return Err(error("task_session_binding_mismatch"));
+        }
         let requested_lane = if request.mode == TASK_MODE_CHAT {
             RemoteSessionLane::Chat
         } else {
             RemoteSessionLane::Code
         };
-        if lane != requested_lane {
+        if binding.1 != requested_lane {
             return Err(error("task_session_lane_mismatch"));
         }
         let outcome = self.ledger.admit(live, &request, now_b)?;
@@ -3210,6 +3263,130 @@ mod tests {
     }
 
     #[test]
+    fn expected_ref_admission_rejects_wrong_closed_and_rebound_refs_without_ledger_entry() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        let sessions = Arc::new(FakeSessions::default());
+        sessions.existing.lock().push("session-0001".into());
+        service.set_session_provisioner(sessions);
+        service
+            .ensure_remote_session("ref-original", "Chat", false, "generation-0001")
+            .unwrap();
+
+        let wrong = payload(
+            "session-0001",
+            "task-wrong-ref",
+            "request-wrong-ref",
+            &digest(1),
+        );
+        assert_eq!(
+            service
+                .submit_bound_for_ref_with_admission(
+                    &context("generation-0001"),
+                    "ref-other",
+                    &wrong,
+                    1_000,
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "task_session_binding_mismatch"
+        );
+        assert_eq!(
+            service.status("task-wrong-ref").unwrap_err().code,
+            "task_not_found"
+        );
+        assert_eq!(
+            service
+                .submit_bound_for_ref_with_admission(
+                    &context("generation-0001"),
+                    "not a valid ref",
+                    &wrong,
+                    1_000,
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "task_request_invalid"
+        );
+
+        service
+            .close_remote_session("ref-original", "generation-0001")
+            .unwrap();
+        let closed = payload(
+            "session-0001",
+            "task-closed-ref",
+            "request-closed-ref",
+            &digest(2),
+        );
+        assert_eq!(
+            service
+                .submit_bound_for_ref_with_admission(
+                    &context("generation-0001"),
+                    "ref-original",
+                    &closed,
+                    1_001,
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "task_session_binding_mismatch"
+        );
+        assert_eq!(
+            service.status("task-closed-ref").unwrap_err().code,
+            "task_not_found"
+        );
+
+        service
+            .switch_remote_session("ref-new", "session-0001", "generation-0001")
+            .unwrap();
+        service
+            .ensure_authenticated_task_session(
+                &request(&payload(
+                    "ref-new",
+                    "task-claim-rebound",
+                    "request-claim-rebound",
+                    &digest(3),
+                )),
+                &context("generation-0001"),
+                "Chat",
+            )
+            .unwrap();
+        let rebound = payload(
+            "session-0001",
+            "task-rebound-ref",
+            "request-rebound-ref",
+            &digest(4),
+        );
+        assert_eq!(
+            service
+                .submit_bound_for_ref_with_admission(
+                    &context("generation-0001"),
+                    "ref-original",
+                    &rebound,
+                    1_002,
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "task_session_binding_mismatch"
+        );
+        assert_eq!(
+            service.status("task-rebound-ref").unwrap_err().code,
+            "task_not_found"
+        );
+        assert!(matches!(
+            service.submit_bound_for_ref_with_admission(
+                &context("generation-0001"),
+                "ref-new",
+                &rebound,
+                1_003,
+                |_| Ok(())
+            ),
+            Ok(AdmissionOutcome::Admitted(_))
+        ));
+    }
+
+    #[test]
     fn bound_admission_and_lane_switch_serialize_on_session_open_lock() {
         let service = Arc::new(RemoteTaskService::new(Arc::new(
             RemoteTaskLedger::in_memory(),
@@ -3230,8 +3407,9 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let submit_service = service.clone();
         let submit = std::thread::spawn(move || {
-            submit_service.submit_bound_with_admission(
+            submit_service.submit_bound_for_ref_with_admission(
                 &context("generation-0001"),
+                "ref-chat",
                 &first,
                 1_000,
                 |_| {
@@ -3261,20 +3439,111 @@ mod tests {
             Some(RemoteSessionLane::Unknown)
         );
         let late = payload(
-            "session-0002",
+            "session-0001",
             "task-after-switch",
             "client-after-switch",
             &digest(2),
         );
         assert_eq!(
             service
-                .submit_bound(&context("generation-0001"), &late, 1_100)
+                .submit_bound_for_ref_with_admission(
+                    &context("generation-0001"),
+                    "ref-chat",
+                    &late,
+                    1_100,
+                    |_| Ok(())
+                )
                 .unwrap_err()
                 .code,
-            "task_session_lane_mismatch"
+            "task_session_binding_mismatch"
         );
         assert_eq!(
             service.status("task-after-switch").unwrap_err().code,
+            "task_not_found"
+        );
+    }
+
+    #[test]
+    fn expected_ref_admission_and_close_serialize_without_losing_the_binding() {
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        service
+            .ensure_remote_session("ref-chat", "Chat", false, "generation-0001")
+            .unwrap();
+        let first = payload(
+            "session-0001",
+            "task-before-close",
+            "request-before-close",
+            &digest(1),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let submit_service = service.clone();
+        let submit = std::thread::spawn(move || {
+            submit_service.submit_bound_for_ref_with_admission(
+                &context("generation-0001"),
+                "ref-chat",
+                &first,
+                1_000,
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+        let close_service = service.clone();
+        let close = std::thread::spawn(move || {
+            close_service.close_remote_session("ref-chat", "generation-0001")
+        });
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            submit.join().unwrap(),
+            Ok(AdmissionOutcome::Admitted(_))
+        ));
+        assert_eq!(close.join().unwrap().unwrap_err().code, "task_session_busy");
+        assert_eq!(
+            service
+                .session_for("ref-chat", "generation-0001")
+                .as_deref(),
+            Some("session-0001")
+        );
+
+        service
+            .complete(
+                "task-before-close",
+                RemoteTaskTerminal::Succeeded,
+                None,
+                1_100,
+            )
+            .unwrap();
+        service
+            .close_remote_session("ref-chat", "generation-0001")
+            .unwrap();
+        let after = payload(
+            "session-0001",
+            "task-after-close",
+            "request-after-close",
+            &digest(2),
+        );
+        assert_eq!(
+            service
+                .submit_bound_for_ref_with_admission(
+                    &context("generation-0001"),
+                    "ref-chat",
+                    &after,
+                    1_200,
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .code,
+            "task_session_binding_mismatch"
+        );
+        assert_eq!(
+            service.status("task-after-close").unwrap_err().code,
             "task_not_found"
         );
     }
