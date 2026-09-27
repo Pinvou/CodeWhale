@@ -2167,3 +2167,4 @@ dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
 // （「ヘルプとフィードバック → 行動分析」と同じパターン）。
 dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
 dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';
+dictJa.remoteConversation.migrationRequired = 'リモート会話を移行中です。しばらくしてから再試行してください。';

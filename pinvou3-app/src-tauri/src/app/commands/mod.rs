@@ -34,6 +34,9 @@ pub(crate) mod desktop_remote_controller_session;
 pub(crate) mod desktop_remote_history;
 pub(crate) mod desktop_remote_model;
 pub(crate) mod desktop_remote_permission;
+// DEV-20 RemoteProxy history surface is a dedicated guarded command module.
+// This single declaration does not change any frozen DEV-07 command behavior.
+pub(crate) mod desktop_remote_proxy;
 pub(crate) mod desktop_remote_task;
 pub(crate) mod diagnostics;
 pub(crate) mod files;

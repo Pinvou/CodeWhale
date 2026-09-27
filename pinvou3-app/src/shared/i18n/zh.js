@@ -2133,3 +2133,4 @@ dictZh.uiSettings.remoteControl = '桌面远程控制';
 // 「通用 → 桌面远程控制」二级菜单的入口说明与返回文案（口径同「帮助 → 行为分析」）。
 dictZh.uiSettingsDetail.desktopRemoteControlEntryDesc = '允许他人输入连接码连接本机，使用本机模型执行任务；可随时查看并断开。';
 dictZh.uiSettingsDetail.desktopRemoteControlBack = '返回通用';
+dictZh.remoteConversation.migrationRequired = '远程会话正在迁移，请稍后重试。';

@@ -13,7 +13,7 @@
 (function (root) {
   "use strict";
 
-  var CONTROLLED_TERMINAL = { stopped: true, error: true };
+  var CONTROLLED_TERMINAL = { disabled: true, stopped: true, error: true };
   var CONTROLLER_TERMINAL = { idle: true, disconnected: true, error: true };
   var TASK_TERMINAL = {
     succeeded: true,
@@ -40,7 +40,10 @@
     return {
       status: "idle",
       connectionId: null,
+      controllerLeaseId: null,
       leaseEpoch: null,
+      relayEpoch: null,
+      generation: null,
       deviceName: null,
       lastError: null,
       // E2E-03：A 端远程会话身份与能力版本由 Rust 构造后投影到这里，视图不再
@@ -69,6 +72,18 @@
       remoteCapabilities: null,
       remoteModels: [],
       remoteHistories: [],
+      remoteProxyHistories: [],
+      remoteProxyHistory: null,
+      remoteProxyNotice: null,
+      remoteProxyCapabilityRevisions: {},
+      retiredControlledGenerations: [],
+      retiredControllerLeases: [],
+      controlledFenced: false,
+      controllerFenced: false,
+      controlledOpenIntent: null,
+      controllerOpenIntent: null,
+      controlledTerminatedOpenIntent: null,
+      controllerTerminatedOpenIntent: null,
       tasks: [],
       transcript: [],
       controlledTasks: [],
@@ -86,12 +101,31 @@
     return next;
   }
 
-  function beginControlledIntent(state) {
-    return bump(state, "controlled");
+  function beginControlledIntent(state, openNewGeneration) {
+    var next = bump(state, "controlled");
+    if (openNewGeneration === true) {
+      next.controlledOpenIntent = next.intents.controlled;
+      next.controlledTerminatedOpenIntent = null;
+    }
+    return next;
   }
 
-  function beginControllerIntent(state) {
-    return bump(state, "controller");
+  function beginControllerIntent(state, openNewConnection) {
+    var next = bump(state, "controller");
+    if (openNewConnection === true) {
+      next.controllerOpenIntent = next.intents.controller;
+      next.controllerTerminatedOpenIntent = null;
+    }
+    return next;
+  }
+
+  function retireIdentity(items, identity) {
+    if (!identity || items.indexOf(identity) >= 0) return items;
+    return items.concat([identity]).slice(-32);
+  }
+
+  function leaseIdentity(connectionId, leaseEpoch) {
+    return connectionId && leaseEpoch ? String(connectionId) + "\u0000" + String(leaseEpoch) : null;
   }
 
   function shallowCopy(value) {
@@ -129,14 +163,18 @@
       || status === "waiting_connection"
       || status === "waiting_for_pairing";
     var waiting = status === "waiting_connection" || status === "waiting_for_pairing";
-    if (
-      generation &&
-      current.generation &&
-      generation !== current.generation &&
-      !starting &&
-      !CONTROLLED_TERMINAL[status]
-    ) {
-      return state;
+    var pendingOpen = state.controlledOpenIntent === state.intents.controlled;
+    if (CONTROLLED_TERMINAL[status] && !state.controlledFenced
+      && current.generation && !generation && payload.intent == null) return state;
+    if (state.controlledFenced && CONTROLLED_TERMINAL[status] && payload.intent == null && !pendingOpen) return state;
+    if (payload.intent != null && payload.intent === state.controlledTerminatedOpenIntent) return state;
+    if (generation && state.retiredControlledGenerations.indexOf(generation) >= 0) return state;
+    if (state.controlledFenced && !CONTROLLED_TERMINAL[status]) {
+      if (state.controlledOpenIntent !== state.intents.controlled
+        || payload.intent !== state.controlledOpenIntent) return state;
+    }
+    if (generation && current.generation && generation !== current.generation) {
+      if (!starting || payload.intent == null || payload.intent !== state.controlledOpenIntent) return state;
     }
     var next = shallowCopy(state);
     var startsNewGeneration = starting
@@ -144,6 +182,7 @@
       && current.generation
       && generation !== current.generation;
     if (startsNewGeneration) {
+      next.retiredControlledGenerations = retireIdentity(state.retiredControlledGenerations, current.generation);
       next.controlledSession = { sessionId: null, sessionRef: null, generation: generation };
       next.controlledTasks = [];
       next.controlledTranscript = [];
@@ -158,13 +197,42 @@
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.error || payload.errorCode || null,
     };
+    if (generation && !CONTROLLED_TERMINAL[status]) {
+      next.controlledFenced = false;
+      if (payload.intent != null && payload.intent === state.controlledOpenIntent) {
+        next.controlledOpenIntent = null;
+      }
+    }
     if (CONTROLLED_TERMINAL[status]) {
+      if (pendingOpen) next.controlledTerminatedOpenIntent = state.controlledOpenIntent;
+      next.retiredControlledGenerations = retireIdentity(
+        next.retiredControlledGenerations, current.generation || generation,
+      );
+      next.controlledFenced = true;
+      next.controlledOpenIntent = null;
       next.controlledSession = { sessionId: null, sessionRef: null, generation: null };
       next.controlledTasks = [];
       next.controlledTranscript = [];
     }
     next.revision = state.revision + 1;
     return next;
+  }
+
+  function reconcileControlledOpenStatus(state, intent, envelope, expectedGeneration) {
+    var payload = envelope || {};
+    var generation = payload.generation ? String(payload.generation) : "";
+    if (!state.controlledFenced || state.controlledTerminatedOpenIntent !== intent
+      || state.intents.controlled !== intent || !generation
+      || generation !== String(expectedGeneration || "")
+      || state.retiredControlledGenerations.indexOf(generation) >= 0
+      || ["reserving", "waiting_connection", "waiting_for_pairing", "safety_handshake", "connected", "reconnecting", "refreshing"].indexOf(payload.status) < 0) {
+      return state;
+    }
+    var candidate = shallowCopy(state);
+    candidate.controlledOpenIntent = intent;
+    candidate.controlledTerminatedOpenIntent = null;
+    var applied = applyControlledStatus(candidate, Object.assign({}, payload, { intent: intent }));
+    return applied === candidate ? state : applied;
   }
 
   /** Bind B's visible composer and transcript to the authoritative session
@@ -204,12 +272,31 @@
     if (!status) return state;
     var connectionId = payload.connectionId ? String(payload.connectionId) : null;
     var leaseEpoch = payload.leaseEpoch === 0 || payload.leaseEpoch ? String(payload.leaseEpoch) : null;
+    var controllerLeaseId = payload.controllerLeaseId ? String(payload.controllerLeaseId) : null;
+    var relayEpoch = payload.relayEpoch ? String(payload.relayEpoch) : null;
+    var generation = payload.generation ? String(payload.generation) : null;
     var current = state.controllerConnection;
+    var identity = leaseIdentity(connectionId, leaseEpoch);
+    var pendingOpen = state.controllerOpenIntent === state.intents.controller;
+    if (CONTROLLER_TERMINAL[status] && current.connectionId && payload.intent == null
+      && payload.authoritativeRead !== true
+      && (!connectionId || !controllerLeaseId || !leaseEpoch || !relayEpoch || !generation)) return state;
+    if (state.controllerFenced && CONTROLLER_TERMINAL[status] && payload.intent == null && !pendingOpen) return state;
+    if (payload.intent != null && payload.intent === state.controllerTerminatedOpenIntent) return state;
+    if (identity && state.retiredControllerLeases.indexOf(identity) >= 0) return state;
+    if (state.controllerFenced && !CONTROLLER_TERMINAL[status]) {
+      if (state.controllerOpenIntent !== state.intents.controller
+        || payload.intent !== state.controllerOpenIntent) return state;
+    }
+    var liveStatus = status === "connected" || status === "reconnecting";
+    if (liveStatus && (!connectionId || !controllerLeaseId || !leaseEpoch || !relayEpoch || !generation)) {
+      return state;
+    }
+    if (!CONTROLLER_TERMINAL[status] && !liveStatus && current.connectionId) return state;
     if (
       connectionId &&
       current.connectionId &&
-      connectionId !== current.connectionId &&
-      !CONTROLLER_TERMINAL[status]
+      connectionId !== current.connectionId
     ) {
       return state;
     }
@@ -217,16 +304,22 @@
       leaseEpoch &&
       current.leaseEpoch &&
       connectionId === current.connectionId &&
-      Number(leaseEpoch) < Number(current.leaseEpoch) &&
-      !CONTROLLER_TERMINAL[status]
+      leaseEpoch !== current.leaseEpoch
     ) {
       return state;
     }
+    if (controllerLeaseId && current.controllerLeaseId && controllerLeaseId !== current.controllerLeaseId) return state;
+    if (relayEpoch && current.relayEpoch && relayEpoch !== current.relayEpoch) return state;
+    if (connectionId && connectionId === current.connectionId && leaseEpoch === current.leaseEpoch
+      && current.generation && generation && generation !== current.generation) return state;
     var next = shallowCopy(state);
     next.controllerConnection = {
       status: status,
       connectionId: connectionId || current.connectionId,
+      controllerLeaseId: controllerLeaseId || current.controllerLeaseId,
       leaseEpoch: leaseEpoch || current.leaseEpoch,
+      relayEpoch: relayEpoch || current.relayEpoch,
+      generation: generation || current.generation,
       deviceName: payload.deviceName || current.deviceName,
       lastError: payload.error || payload.errorCode || null,
       sessionRef: current.sessionRef,
@@ -239,9 +332,29 @@
       capabilityValidForMs: current.capabilityValidForMs,
       temporaryModelAvailable: current.temporaryModelAvailable === true,
     };
+    if (identity && !CONTROLLER_TERMINAL[status]) {
+      next.controllerFenced = false;
+      if (payload.intent != null && payload.intent === state.controllerOpenIntent) {
+        next.controllerOpenIntent = null;
+      }
+    }
     if (CONTROLLER_TERMINAL[status]) {
+      if (pendingOpen) next.controllerTerminatedOpenIntent = state.controllerOpenIntent;
+      next.retiredControllerLeases = retireIdentity(
+        next.retiredControllerLeases,
+        leaseIdentity(current.connectionId, current.leaseEpoch) || identity,
+      );
+      next.controllerFenced = true;
+      next.controllerOpenIntent = null;
       next.remoteCapabilities = null;
+      next.remoteProxyNotice = null;
+      next.remoteProxyCapabilityRevisions = {};
       next.tasks = [];
+      next.controllerConnection.connectionId = null;
+      next.controllerConnection.controllerLeaseId = null;
+      next.controllerConnection.leaseEpoch = null;
+      next.controllerConnection.relayEpoch = null;
+      next.controllerConnection.generation = null;
       // 终端状态清空会话身份：旧 sessionId 不得被下一次连接复用。
       next.controllerConnection.sessionRef = null;
       next.controllerConnection.sessionId = null;
@@ -252,6 +365,65 @@
       next.controllerConnection.capabilityRequestId = null;
       next.controllerConnection.capabilityValidForMs = null;
       next.controllerConnection.temporaryModelAvailable = false;
+    }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function reconcileControllerOpenStatus(state, intent, envelope) {
+    var payload = envelope || {};
+    if (!state.controllerFenced || state.controllerTerminatedOpenIntent !== intent
+      || state.intents.controller !== intent
+      || (payload.status !== "connected" && payload.status !== "reconnecting")
+      || !payload.connectionId || !payload.controllerLeaseId || !payload.leaseEpoch
+      || !payload.relayEpoch || !payload.generation) return state;
+    var candidate = shallowCopy(state);
+    candidate.controllerOpenIntent = intent;
+    candidate.controllerTerminatedOpenIntent = null;
+    var applied = applyControllerStatus(candidate, Object.assign({}, payload, { intent: intent }));
+    return applied === candidate ? state : applied;
+  }
+
+  /** Rust's authenticated projection event is an invalidation notice only.
+   * Journal contents must be read from SessionStore by the RemoteProxy API;
+   * transport events never become display text directly. */
+  function applyRemoteProxyNotice(state, envelope) {
+    var item = envelope && typeof envelope === "object" ? envelope : {};
+    var live = state.controllerConnection;
+    if (live.status !== "connected" && live.status !== "reconnecting") return state;
+    var fields = ["connectionId", "controllerLeaseId", "leaseEpoch", "relayEpoch", "generation"];
+    if (fields.some(function (field) {
+      return !live[field] || !item[field] || String(item[field]) !== String(live[field]);
+    })) return state;
+    if (!/^remote-[A-Za-z0-9._:-]+$/.test(item.localSessionId || "")
+      || !item.remoteSessionRef || !item.controlledSessionId
+      || ["journal", "snapshot", "terminal", "capability"].indexOf(item.kind) < 0) return state;
+    var detail = item.fields && typeof item.fields === "object" ? item.fields : {};
+    var revision = Number(detail.capabilityRevision);
+    if (item.kind === "capability" && (!Number.isSafeInteger(revision) || revision <= 0)) return state;
+    var knownRevision = (state.remoteProxyCapabilityRevisions || {})[item.localSessionId] || 0;
+    if (item.kind === "capability" && revision <= knownRevision) return state;
+    var previous = state.remoteProxyNotice;
+    if (previous && previous.localSessionId === item.localSessionId
+      && previous.connectionId === item.connectionId
+      && previous.leaseEpoch === String(item.leaseEpoch)
+      && previous.kind === item.kind
+      && previous.sequence === detail.sequence
+      && previous.capabilityRevision === (item.kind === "capability" ? revision : null)) return state;
+    var next = shallowCopy(state);
+    next.remoteProxyNotice = {
+      kind: item.kind,
+      localSessionId: String(item.localSessionId),
+      remoteSessionRef: String(item.remoteSessionRef),
+      connectionId: String(item.connectionId),
+      leaseEpoch: String(item.leaseEpoch),
+      capabilityRevision: item.kind === "capability" ? revision : null,
+      journalEpoch: typeof detail.journalEpoch === "string" ? detail.journalEpoch.slice(0, 128) : null,
+      sequence: Number.isSafeInteger(detail.sequence) && detail.sequence >= 0 ? detail.sequence : null,
+    };
+    if (item.kind === "capability") {
+      next.remoteProxyCapabilityRevisions = shallowCopy(state.remoteProxyCapabilityRevisions || {});
+      next.remoteProxyCapabilityRevisions[item.localSessionId] = revision;
     }
     next.revision = state.revision + 1;
     return next;
@@ -341,24 +513,31 @@
     var connection = state.controllerConnection;
     if (!connection.connectionId || connection.status !== "connected") return state;
     if (String(payload.connectionId || "") !== String(connection.connectionId)) return state;
+    if (connection.controllerLeaseId && String(payload.controllerLeaseId || "") !== connection.controllerLeaseId) return state;
     if (String(payload.leaseEpoch || "") !== String(connection.leaseEpoch)) return state;
+    if (connection.relayEpoch && String(payload.relayEpoch || "") !== connection.relayEpoch) return state;
+    if (connection.generation && String(payload.remoteControlGeneration || "") !== connection.generation) return state;
     var revision = Number(payload.capabilityRevision);
-    if (!isFinite(revision) || revision <= 0) return state;
+    if (!Number.isSafeInteger(revision) || revision <= 0) return state;
     if (state.remoteCapabilities && revision <= Number(state.remoteCapabilities.capabilityRevision)) {
       return state;
     }
     var next = shallowCopy(state);
     next.remoteCapabilities = {
       connectionId: payload.connectionId,
+      controllerLeaseId: payload.controllerLeaseId || null,
       leaseEpoch: payload.leaseEpoch,
       relayEpoch: payload.relayEpoch || null,
       remoteControlGeneration: payload.remoteControlGeneration || null,
       capabilityRevision: revision,
-      modes: Array.isArray(payload.modes) ? payload.modes.slice(0, 2) : [],
-      tools: Array.isArray(payload.tools) ? payload.tools.slice(0, 256) : [],
-      skills: Array.isArray(payload.skills) ? payload.skills.slice(0, 256) : [],
-      workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 16) : [],
-      expiresAtMs: payload.expiresAtMs || null,
+      modes: Array.isArray(payload.modes) ? payload.modes.filter(function (mode) {
+        return mode === "chat" || mode === "code";
+      }).slice(0, 2) : [],
+      tools: capabilityDescriptors(payload.tools, "toolId", 256),
+      skills: capabilityDescriptors(payload.skills, "skillId", 256),
+      workspaces: capabilityDescriptors(payload.workspaces, "workspaceId", 16, true),
+      expiresAtMs: typeof payload.expiresAtMs === "string" || Number.isSafeInteger(payload.expiresAtMs)
+        ? payload.expiresAtMs : null,
     };
     next.revision = state.revision + 1;
     return next;
@@ -450,14 +629,15 @@
     if (!Array.isArray(models)) return state;
     var next = shallowCopy(state);
     next.remoteModels = models.slice(0, 128).map(function (model) {
+      var item = model && typeof model === "object" ? model : {};
       return {
-        modelId: String(model && model.modelId ? model.modelId : ""),
-        displayName: String(model && model.displayName ? model.displayName : ""),
-        exportable: !!(model && model.exportable),
-        reason: model && model.reason ? String(model.reason) : null,
-        visionModelId: model && model.visionModelId ? String(model.visionModelId) : null,
+        modelId: typeof item.modelId === "string" ? item.modelId.slice(0, 128) : "",
+        displayName: typeof item.displayName === "string" ? item.displayName.slice(0, 256) : "",
+        exportable: item.exportable === true,
+        reason: typeof item.reason === "string" ? item.reason.slice(0, 128) : null,
+        visionModelId: typeof item.visionModelId === "string" ? item.visionModelId.slice(0, 128) : null,
       };
-    });
+    }).filter(function (item) { return item.modelId.length > 0; });
     next.revision = state.revision + 1;
     return next;
   }
@@ -475,6 +655,114 @@
         lastTerminalStatus: record && record.lastTerminalStatus ? String(record.lastTerminalStatus) : null,
       };
     });
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function capabilityDescriptors(entries, idField, limit, workspace) {
+    if (!Array.isArray(entries)) return [];
+    return entries.slice(0, limit).filter(function (entry) {
+      return entry && typeof entry === "object"
+        && typeof entry[idField] === "string" && !!entry[idField]
+        && typeof entry.displayName === "string";
+    }).map(function (entry) {
+      var safe = { displayName: entry.displayName.slice(0, 256) };
+      safe[idField] = entry[idField].slice(0, 128);
+      if (workspace) safe.codeAllowed = entry.codeAllowed === true;
+      return safe;
+    });
+  }
+
+  function remoteProxyId(value) {
+    return typeof value === "string" && /^remote-[A-Za-z0-9._:-]+$/.test(value)
+      && value.length <= 128;
+  }
+
+  function projectionText(value, maximum) {
+    return typeof value === "string" ? value.slice(0, maximum) : "";
+  }
+
+  function projectRemoteProxyList(state, records) {
+    if (!Array.isArray(records)) return state;
+    var next = shallowCopy(state);
+    next.remoteProxyHistories = records.slice(0, 256).filter(function (item) {
+      return item && remoteProxyId(item.localSessionId);
+    }).map(function (item) {
+      return {
+        localSessionId: item.localSessionId,
+        title: projectionText(item.title, 120),
+        pinned: item.pinned === true,
+        lastOpenedAt: projectionText(item.lastOpenedAt, 64) || null,
+        projectedEntryCount: Number.isSafeInteger(item.projectedEntryCount)
+          && item.projectedEntryCount >= 0 ? item.projectedEntryCount : 0,
+      };
+    });
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  var PROJECTION_KINDS = {
+    user_message: true, assistant_message: true, reasoning: true, tool: true,
+    approval: true, status: true, error: true, attachment: true,
+    artifact: true, snapshot_marker: true,
+  };
+
+  function projectRemoteProxyRead(state, record) {
+    if (!record || !remoteProxyId(record.localSessionId)
+      || !Array.isArray(record.entries) || record.entries.length > 512) return state;
+    var next = shallowCopy(state);
+    next.remoteProxyHistory = {
+      localSessionId: record.localSessionId,
+      title: projectionText(record.title, 120),
+      pinned: record.pinned === true,
+      lastOpenedAt: projectionText(record.lastOpenedAt, 64) || null,
+      authenticatedCursor: record.authenticatedCursor
+        && typeof record.authenticatedCursor.journalEpoch === "string"
+        && Number.isSafeInteger(record.authenticatedCursor.sequence)
+        ? {
+            journalEpoch: projectionText(record.authenticatedCursor.journalEpoch, 128),
+            sequence: record.authenticatedCursor.sequence,
+          } : null,
+      pendingUnknownCount: Number.isSafeInteger(record.pendingUnknownCount)
+        && record.pendingUnknownCount >= 0 ? record.pendingUnknownCount : 0,
+      entries: record.entries.filter(function (entry) {
+        return entry && typeof entry.journalEpoch === "string"
+          && Number.isSafeInteger(entry.sequence) && entry.sequence >= 0
+          && typeof entry.eventId === "string" && PROJECTION_KINDS[entry.kind] === true;
+      }).map(function (entry) {
+        return {
+          journalEpoch: projectionText(entry.journalEpoch, 128),
+          sequence: entry.sequence,
+          eventId: projectionText(entry.eventId, 128),
+          kind: entry.kind,
+          taskId: projectionText(entry.taskId, 128) || null,
+          body: typeof entry.body === "string" ? entry.body.slice(0, 16384) : null,
+          attachments: Array.isArray(entry.attachments) ? entry.attachments.slice(0, 16).map(function (attachment) {
+            var value = attachment && typeof attachment === "object" ? attachment : {};
+            return {
+              id: projectionText(value.id, 128),
+              displayName: projectionText(value.displayName, 256),
+              contentType: projectionText(value.contentType, 128),
+              byteLength: Number.isSafeInteger(value.byteLength) && value.byteLength >= 0 ? value.byteLength : 0,
+              checksumSha256: /^[a-fA-F0-9]{64}$/.test(value.checksumSha256 || "")
+                ? value.checksumSha256 : "",
+            };
+          }) : [],
+        };
+      }),
+    };
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function hideRemoteProxyHistory(state, localSessionId) {
+    var next = shallowCopy(state);
+    next.remoteProxyHistories = (state.remoteProxyHistories || []).filter(function (item) {
+      return item.localSessionId !== localSessionId;
+    });
+    if (next.remoteProxyHistory && next.remoteProxyHistory.localSessionId === localSessionId) {
+      next.remoteProxyHistory = null;
+    }
     next.revision = state.revision + 1;
     return next;
   }
@@ -642,8 +930,11 @@
     beginControllerIntent: beginControllerIntent,
     isCurrentIntent: isCurrentIntent,
     applyControlledStatus: applyControlledStatus,
+    reconcileControlledOpenStatus: reconcileControlledOpenStatus,
     applyControlledSession: applyControlledSession,
     applyControllerStatus: applyControllerStatus,
+    reconcileControllerOpenStatus: reconcileControllerOpenStatus,
+    applyRemoteProxyNotice: applyRemoteProxyNotice,
     applyControllerSession: applyControllerSession,
     applyCapabilityPending: applyCapabilityPending,
     applyCapabilityFailure: applyCapabilityFailure,
@@ -652,6 +943,9 @@
     applyControlledJournalEvent: applyControlledJournalEvent,
     applyModels: applyModels,
     applyHistories: applyHistories,
+    projectRemoteProxyList: projectRemoteProxyList,
+    projectRemoteProxyRead: projectRemoteProxyRead,
+    hideRemoteProxyHistory: hideRemoteProxyHistory,
     applyTaskEvent: applyTaskEvent,
     applyControlledTaskEvent: applyControlledTaskEvent,
     applyTaskContent: applyTaskContent,

@@ -2166,3 +2166,4 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 // (same pattern as "Help & Feedback → Behavior analytics").
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
+dictEn.remoteConversation.migrationRequired = 'This remote conversation is being migrated. Please try again later.';

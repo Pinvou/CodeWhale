@@ -722,7 +722,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             input_digest: field("input_digest"),
             payload: payload.clone(),
         };
-        let port = DesktopControlledExecutionAdapter::new(self.app.clone());
+        let port = self
+            .app
+            .state::<crate::app::desktop_remote_composition::DesktopControlledExecutionPort>();
         let result = port
             .execute_controlled(request)
             .await
@@ -883,8 +885,7 @@ fn build_session_snapshot_payload(
     let wire_len = serde_json::to_vec(&payload)
         .map_err(|_| "journal_snapshot_invalid".to_owned())?
         .len();
-    if wire_len
-        > crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES
+    if wire_len > crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES
     {
         return Err("journal_snapshot_too_large".to_owned());
     }
@@ -981,12 +982,14 @@ mod dev19_replay_tests {
                 .unwrap();
         }
         let retained = journal.snapshot_for("b-session").unwrap();
-        let near_wire = build_session_snapshot_payload(
-            &lease(), &"r".repeat(128), &"q".repeat(128), &retained,
-        )
-        .unwrap();
+        let near_wire =
+            build_session_snapshot_payload(&lease(), &"r".repeat(128), &"q".repeat(128), &retained)
+                .unwrap();
         let near_bytes = serde_json::to_vec(&near_wire).unwrap().len();
-        assert!(near_bytes > 300 * 1024, "test must approach the wire ceiling");
+        assert!(
+            near_bytes > 300 * 1024,
+            "test must approach the wire ceiling"
+        );
         assert!(
             near_bytes
                 <= crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES

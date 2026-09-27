@@ -73,16 +73,21 @@
 
   async function loadPlatformCapabilities() {
     try {
+      var detected = await invoke("get_platform_capabilities");
       state.platformCapabilities = Object.assign(
         {},
         state.platformCapabilities,
-        await invoke("get_platform_capabilities"),
-        { loaded: true }
+        detected,
+        { loaded: true, desktopRemoteControl: detected && detected.os === "windows" && detected.desktopRemoteControlSupported === true }
       );
     } catch (error) {
       console.warn("[platform] capability detection failed", error);
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
-    notify();
+    notify("platform");
+    if (state.platformCapabilities.desktopRemoteControl === true && desktopRemoteControlFeature) {
+      desktopRemoteControlFeature.controllerStatus().catch(function () {});
+    }
     return state.platformCapabilities;
   }
 
@@ -233,6 +238,7 @@
     platformCapabilities: {
       loaded: false,
       os: "unknown",
+      desktopRemoteControl: false,
       showMegacubeSite: false,
       showSuperPermissionSettings: false,
       usesBundledDependencyInstaller: false,
@@ -1607,6 +1613,9 @@
       "remoteCapabilities",
       "remoteModels",
       "remoteHistories",
+      "remoteProxyHistories",
+      "remoteProxyHistory",
+      "remoteProxyNotice",
       "tasks",
       "transcript",
       "controlledTasks",
@@ -2569,6 +2578,10 @@
     listen: listen,
     bt: bt,
     can: function (capability) {
+      if (capability === "desktopRemoteControl") {
+        var detected = state.platformCapabilities || {};
+        return detected.loaded === true && detected.os === "windows" && detected.desktopRemoteControl === true;
+      }
       // 与 UI 侧（shared/platform.js 的 can）保持同一语义：桌面端「能力表里没有
       // 明确 false 就允许」，只有显式 false 才拒绝。此前这里要求「必须显式为
       // true」，与面板可见性判定不一致：面板显示可用、bridge 却抛
@@ -2954,21 +2967,20 @@
       controllerSessionOpen: desktopRemoteControlFeature.controllerSessionOpen,
       controllerSessionState: desktopRemoteControlFeature.controllerSessionState,
       controllerSessionClose: desktopRemoteControlFeature.controllerSessionClose,
-      controllerCapabilityRequest: desktopRemoteControlFeature.controllerCapabilityRequest,
       controllerCapabilitySend: desktopRemoteControlFeature.controllerCapabilitySend,
-      controllerApplyCapabilitySnapshot: desktopRemoteControlFeature.controllerApplyCapabilitySnapshot,
-      controllerTaskIntent: desktopRemoteControlFeature.controllerTaskIntent,
-      controllerTaskCancelIntent: desktopRemoteControlFeature.controllerTaskCancelIntent,
-      controllerTaskSend: desktopRemoteControlFeature.controllerTaskSend,
       controllerTaskCancelSend: desktopRemoteControlFeature.controllerTaskCancelSend,
       controlledTaskSend: desktopRemoteControlFeature.controlledTaskSend,
       controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
       controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
       capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,
       listExportableModels: desktopRemoteControlFeature.listExportableModels,
+      listRemoteProxyHistory: desktopRemoteControlFeature.listRemoteProxyHistory,
+      readRemoteProxyHistory: desktopRemoteControlFeature.readRemoteProxyHistory,
+      deleteRemoteProxyHistory: desktopRemoteControlFeature.deleteRemoteProxyHistory,
       openRemoteSession: desktopRemoteControlFeature.openRemoteSession,
       switchRemoteSession: desktopRemoteControlFeature.switchRemoteSession,
       submitRemoteTask: desktopRemoteControlFeature.submitRemoteTask,
+      abandonLostRemoteTask: desktopRemoteControlFeature.abandonLostRemoteTask,
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
       remoteTaskStatus: desktopRemoteControlFeature.remoteTaskStatus,
       permissionList: desktopRemoteControlFeature.permissionList,

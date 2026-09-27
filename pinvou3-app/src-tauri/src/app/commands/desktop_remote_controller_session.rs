@@ -4,6 +4,7 @@
 //! 构造 payload（含输入摘要）并返回；任何上下文不符（未连接、lease 变更、
 //! 未取到能力快照、模式未开放）都失败关闭，绝不构造半合法请求。
 
+use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
@@ -11,8 +12,8 @@ use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingStateError,
 };
 use crate::features::remote_control::controller::controlling_session::{
-    ControllingIntentProjection, ControllingSessionManager, ControllingSessionProjection,
-    SessionError,
+    ControllerCapabilityProjection, ControllingIntentProjection, ControllingSessionManager,
+    ControllingSessionProjection, SessionError,
 };
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
 use crate::features::remote_control::controller::relay_runtime::log_controller_event;
@@ -24,6 +25,42 @@ use super::desktop_remote_model::build_active_task_package;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const SESSION_EVENT: &str = "desktop-remote-controller-session";
 const DEFAULT_MODE: &str = "chat";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilitySendAck {
+    request_id: String,
+    session_id: String,
+}
+
+impl From<ControllingIntentProjection> for CapabilitySendAck {
+    fn from(intent: ControllingIntentProjection) -> Self {
+        Self {
+            request_id: intent.request_id,
+            session_id: intent.session_id,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCancelSendAck {
+    request_id: String,
+    session_id: String,
+    task_id: Option<String>,
+    client_request_id: Option<String>,
+}
+
+impl From<ControllingIntentProjection> for TaskCancelSendAck {
+    fn from(intent: ControllingIntentProjection) -> Self {
+        Self {
+            request_id: intent.request_id,
+            session_id: intent.session_id,
+            task_id: intent.task_id,
+            client_request_id: intent.client_request_id,
+        }
+    }
+}
 
 fn ensure_supported(manager: &ControllingDeviceManager) -> Result<(), String> {
     if manager.is_supported() {
@@ -114,6 +151,40 @@ pub fn desktop_remote_controller_session_state(
     sessions.state(&remote_ref, &lease).map_err(session_error)
 }
 
+/// A-only, read-only projection of the authenticated B snapshot associated
+/// with this exact remote session and the controller's current live lease.
+#[tauri::command]
+pub fn desktop_remote_controller_capability_snapshot(
+    manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
+    remote_ref: String,
+) -> Result<ControllerCapabilityProjection, String> {
+    ensure_supported(&manager)?;
+    let (lease, _) = live_context(&manager)?;
+    let projection = sessions
+        .capability_projection(&remote_ref, &lease)
+        .map_err(session_error)?;
+    let (still_live, _) = live_context(&manager)?;
+    if still_live != lease {
+        return Err("session_context_stale".to_owned());
+    }
+    Ok(projection)
+}
+
+#[cfg(test)]
+mod controller_capability_command_contract {
+    #[test]
+    fn a_capability_read_has_one_handler() {
+        let root = include_str!("../../lib.rs");
+        let command = "commands::desktop_remote_controller_session::desktop_remote_controller_capability_snapshot,";
+        assert_eq!(root.matches(command).count(), 1);
+        assert!(!root.contains("commands::desktop_remote_controller_session::desktop_remote_controller_capability_request,"));
+        assert!(!root.contains(
+            "commands::desktop_remote_controller::desktop_remote_controller_live_context,"
+        ));
+    }
+}
+
 #[tauri::command]
 pub fn desktop_remote_controller_session_close(
     manager: State<'_, ControllingDeviceManager>,
@@ -194,7 +265,7 @@ pub fn desktop_remote_controller_capability_send(
     sessions: State<'_, ControllingSessionManager>,
     business: State<'_, ControllingLaneState>,
     remote_ref: String,
-) -> Result<ControllingIntentProjection, String> {
+) -> Result<CapabilitySendAck, String> {
     ensure_supported(&manager)?;
     let (lease, capabilities) = live_context(&manager)?;
     let intent = sessions
@@ -210,7 +281,7 @@ pub fn desktop_remote_controller_capability_send(
     manager
         .send_authenticated_business(&frame)
         .map_err(send_error_code)?;
-    Ok(intent)
+    Ok(intent.into())
 }
 
 /// 发送任务：构造意图 → 加密 → 经认证 transport 发出（E2E-04）。
@@ -270,7 +341,7 @@ pub fn desktop_remote_controller_task_cancel_send(
     business: State<'_, ControllingLaneState>,
     remote_ref: String,
     task_id: String,
-) -> Result<ControllingIntentProjection, String> {
+) -> Result<TaskCancelSendAck, String> {
     ensure_supported(&manager)?;
     let (lease, capabilities) = live_context(&manager)?;
     let intent = sessions
@@ -282,7 +353,7 @@ pub fn desktop_remote_controller_task_cancel_send(
     manager
         .send_authenticated_business(&frame)
         .map_err(send_error_code)?;
-    Ok(intent)
+    Ok(intent.into())
 }
 
 #[cfg(test)]
@@ -314,5 +385,28 @@ mod tests {
         let encoded = serde_json::to_string(&projection).unwrap();
         assert!(!encoded.contains("temporary_model_package"));
         assert!(!encoded.contains("must-not-cross"));
+    }
+
+    #[test]
+    fn send_ack_does_not_expose_wire_payload_or_binding() {
+        let intent = super::ControllingIntentProjection {
+            request_id: "request-1".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            client_request_id: Some("client-1".into()),
+            payload: json!({"type":"task_cancel", "secret":"never-export"}),
+        };
+        let capability =
+            serde_json::to_value(super::CapabilitySendAck::from(intent.clone())).unwrap();
+        assert_eq!(
+            capability,
+            json!({"requestId":"request-1","sessionId":"session-1"})
+        );
+        let cancel = serde_json::to_value(super::TaskCancelSendAck::from(intent)).unwrap();
+        assert_eq!(
+            cancel,
+            json!({"requestId":"request-1","sessionId":"session-1","taskId":"task-1","clientRequestId":"client-1"})
+        );
+        assert!(!cancel.to_string().contains("never-export"));
     }
 }

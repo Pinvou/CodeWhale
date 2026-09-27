@@ -151,3 +151,19 @@ test('web domain-adapter fields registry covers every subscribed domain', () => 
     );
   }
 });
+
+test('Web mirrors RemoteProxy state only as inert empty fields', () => {
+  const webBridge = read('platform/web/bridge.js');
+  const webAdapter = read('platform/web/bridge/domain-adapter.js');
+  const webFields = parseWebFields(webAdapter).desktopRemoteControl;
+  for (const [field, initialValue] of [
+    ['remoteProxyHistories', '[]'],
+    ['remoteProxyHistory', 'null'],
+    ['remoteProxyNotice', 'null'],
+  ]) {
+    assert.ok(webFields.includes(field), `${field} must be present in the Web state slice`);
+    assert.match(webBridge, new RegExp(`^\\s+${field}:\\s*${initialValue.replace(/[\[\]]/g, '\\$&')},`, 'm'));
+  }
+  assert.doesNotMatch(webBridge, /desktop_remote_proxy_history_(?:list|read|delete)/);
+  assert.doesNotMatch(webAdapter, /desktop_remote_proxy_history_(?:list|read|delete)/);
+});

@@ -52,7 +52,8 @@ test('the A view opens the session, requests capabilities and renders the transc
   const view = read('features/remote-control/RemoteConversationView.jsx');
   assert.ok(view.includes('controllerSessionOpen'));
   assert.ok(view.includes('controllerCapabilitySend'));
-  assert.ok(view.includes('controllerTaskSend'));
+  assert.ok(view.includes('remote_legacy_migration_required'));
+  assert.ok(!view.includes('controllerTaskSend'));
   assert.ok(view.includes('controllerTaskCancelSend'));
   assert.ok(view.includes('transcript'), 'the view renders the authoritative transcript');
   assert.ok(view.includes('localBadge') && view.includes('remoteBadge'));
@@ -155,7 +156,7 @@ test('the bridge subscribes the journal stream and exposes the A-side commands',
   const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
   assert.ok(bridge.includes('"desktop-remote-controller-journal"'));
   assert.ok(bridge.includes('applyJournalEvent'));
-  for (const method of ['controllerCapabilitySend', 'controllerTaskSend', 'controllerTaskCancelSend']) {
+  for (const method of ['controllerCapabilitySend', 'controllerTaskCancelSend', 'submitRemoteTask']) {
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
   assert.ok(bridge.includes('desktop_remote_controller_capability_send'));
@@ -167,7 +168,7 @@ test('the controlled-side authoritative journal is projected locally before forw
   const lib = read('../src-tauri/src/lib.rs');
   assert.ok(task.includes('"journal_event_projected"'));
   assert.ok(task.includes('CONTROLLED_JOURNAL_EVENT'));
-  assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event(&self.app, &event)'));
+  assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event('));
   assert.ok(history.includes('publish_authoritative_task_status(&self.app, event)'));
   assert.ok(lib.includes('DesktopTaskEventSink::new('));
   assert.ok(task.indexOf('app.emit(TASK_EVENT, &status)') < task.indexOf('tauri::async_runtime::spawn(async move'));
@@ -194,9 +195,11 @@ test('temporary model capability mismatches have actionable localized feedback',
   assert.ok(chat.includes("currentRemoteSendError === 'temporary_model_capability_required'"));
   assert.ok(chat.includes('t.remoteConversation.temporaryModelCapabilityRequired'));
   assert.ok(chat.includes('remoteTemporaryModelAvailable &&'));
-  assert.ok(chat.includes('controllerTaskSend(sessionRef, outgoing, effectiveRemoteModelSource)'));
+  assert.ok(chat.includes("code: 'remote_legacy_migration_required'"));
+  assert.ok(!chat.includes('controllerTaskSend('));
   assert.ok(legacyView.includes('temporaryModelAvailable &&'));
-  assert.ok(legacyView.includes('controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource)'));
+  assert.ok(legacyView.includes("setError('remote_legacy_migration_required')"));
+  assert.ok(!legacyView.includes('controllerTaskSend('));
   assert.ok(main.includes('modelSourceForLease('));
   assert.ok(main.includes('setRemoteModelSource(nextModelSource)'));
   for (const locale of ['zh', 'en', 'ja']) {
@@ -215,9 +218,7 @@ test('bounded command failures keep their code for the UI copy', () => {
     'desktop_remote_controller_disconnect',
     'desktop_remote_controller_session_open',
     'desktop_remote_controller_capability_send',
-    'desktop_remote_controller_task_send',
     'desktop_remote_controller_task_cancel_send',
-    'desktop_remote_controller_apply_capability_snapshot',
   ]) {
     const index = bridge.indexOf(`"${command}"`);
     assert.ok(index >= 0, `${command} must be invoked`);

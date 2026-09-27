@@ -55,7 +55,6 @@ test('the view only uses the desktop bridge API', () => {
         'artifactDownloadBegin',
         'controllerSessionOpen',
         'controllerCapabilitySend',
-        'controllerTaskSend',
         'controllerTaskCancelSend',
         'controllerProfile',
       ].includes(method),
@@ -93,15 +92,16 @@ test('the view is keyboard reachable with labelled controls', () => {
   assert.ok(view.includes('type="radio"'));
 });
 
-test('the connected conversation has an inline composer', () => {
+test('the legacy connected composer is visible but cannot dispatch before RemoteProxy migration', () => {
   assert.ok(view.includes('remote-conversation-composer'));
   assert.ok(view.includes('type="submit"'));
-  assert.ok(view.includes('controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource)'));
+  assert.ok(view.includes("setError('remote_legacy_migration_required')"));
+  assert.ok(!view.includes('controllerTaskSend('));
   assert.ok(view.includes('composerPlaceholder'));
 });
 
 test('the composer stays disabled until the capability snapshot is applied', () => {
   assert.ok(view.includes('const capabilityReady = !!sessionRef && connection.capabilityRevision != null'));
   assert.ok(view.includes('!draft.trim() || !capabilityReady'));
-  assert.ok(view.includes('disabled={busy || sessionBusy || !draft.trim() || !capabilityReady}'));
+  assert.ok(view.includes('disabled={sessionBusy || !draft.trim() || !capabilityReady}'));
 });

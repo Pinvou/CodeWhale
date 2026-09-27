@@ -26,6 +26,10 @@ use tauri::Manager;
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
 use crate::app::commands;
+use crate::app::desktop_remote_composition::{
+    DesktopControlledExecutionPort, DesktopLocalExecutionPort, DesktopRemoteApplicationEvents,
+    DesktopRemoteEventFreshness, DesktopRemoteProjectionPort,
+};
 use crate::features::{
     assistant::{engine_pool::EnginePool, platform::bridge},
     connectors::{connector_cli, eip, zhidao},
@@ -1133,6 +1137,53 @@ pub fn run() {
                     handle.manage(desktop_attachments);
                     handle.manage(desktop_artifacts);
                     handle.manage(desktop_history);
+                    // DEV-20 composition: one B execution port for both
+                    // authenticated network ingress and B-local ChatView.
+                    let controlled_owner = std::sync::Arc::new(
+                        commands::desktop_remote_controller_business::DesktopControlledExecutionAdapter::new(
+                            handle.clone(),
+                        ),
+                    );
+                    let controlled_execution: DesktopControlledExecutionPort = controlled_owner.clone();
+                    let local_execution: DesktopLocalExecutionPort = controlled_owner;
+                    handle.manage(controlled_execution);
+                    handle.manage(local_execution);
+                    // The typed A projection port and the host event adapter
+                    // share the existing SessionStore and live role owners.
+                    // DEV-31 will feed AuthenticatedProxyEvent from verified
+                    // ingress; the legacy untyped history sink remains closed.
+                    let host_events: std::sync::Arc<
+                        dyn features::sessions::application::ports::ApplicationEventPort,
+                    > = std::sync::Arc::new(DesktopRemoteApplicationEvents(handle.clone()));
+                    let freshness: std::sync::Arc<
+                        dyn app::remote_projection_adapter::ControllerEventFreshnessPort,
+                    > = std::sync::Arc::new(DesktopRemoteEventFreshness);
+                    handle.manage(std::sync::Arc::new(
+                        app::remote_projection_adapter::ControllerHostEventAdapter::new(
+                            host_events.clone(),
+                            freshness,
+                        ),
+                    ));
+                    let projector = std::sync::Arc::new(
+                        features::sessions::application::project_remote::RemoteProjectionService::new(
+                            store_for_engine.clone(),
+                            host_events,
+                        ),
+                    );
+                    let projection: DesktopRemoteProjectionPort = std::sync::Arc::new(
+                        app::remote_projection_adapter::RemoteProjectionAdapter::new(projector),
+                    );
+                    handle.manage(projection);
+                    handle.manage(
+                        features::sessions::application::dispatch_remote::RemoteDispatchService::new(
+                            store_for_engine.clone(),
+                            std::sync::Arc::new(
+                                commands::desktop_remote_task::DesktopRemoteTaskDispatchPort::new(
+                                    handle.clone(),
+                                ),
+                            ),
+                        ),
+                    );
                     eprintln!("[pinvou3-app] Windows desktop remote control ready");
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
@@ -1508,28 +1559,27 @@ pub fn run() {
             commands::desktop_remote_controller::desktop_remote_controller_connect,
             commands::desktop_remote_controller::desktop_remote_controller_disconnect,
             commands::desktop_remote_controller::desktop_remote_controller_status,
-            commands::desktop_remote_controller::desktop_remote_controller_live_context,
             commands::desktop_remote_controller::desktop_remote_controller_create_history,
             commands::desktop_remote_controller::desktop_remote_controller_list_history,
             commands::desktop_remote_controller_session::desktop_remote_controller_session_open,
             commands::desktop_remote_controller_session::desktop_remote_controller_session_state,
+            commands::desktop_remote_controller_session::desktop_remote_controller_capability_snapshot,
             commands::desktop_remote_controller_session::desktop_remote_controller_session_close,
-            commands::desktop_remote_controller_session::desktop_remote_controller_capability_request,
-            commands::desktop_remote_controller_session::desktop_remote_controller_apply_capability_snapshot,
-            commands::desktop_remote_controller_session::desktop_remote_controller_task_intent,
-            commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_intent,
-            commands::desktop_remote_controller_session::desktop_remote_controller_task_send,
             commands::desktop_remote_controller_session::desktop_remote_controller_task_cancel_send,
             commands::desktop_remote_controller_session::desktop_remote_controller_capability_send,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
             commands::desktop_remote_task::desktop_remote_task_open_session,
             commands::desktop_remote_task::desktop_remote_task_switch_session,
             commands::desktop_remote_task::desktop_remote_task_close_session,
-            commands::desktop_remote_task::desktop_remote_task_submit,
             commands::desktop_remote_task::desktop_remote_controlled_task_send,
             commands::desktop_remote_task::desktop_remote_task_cancel,
             commands::desktop_remote_task::desktop_remote_task_status,
             commands::desktop_remote_task::desktop_remote_task_interrupt_all,
+            commands::desktop_remote_task::desktop_remote_task_dispatch_a,
+            commands::desktop_remote_task::desktop_remote_task_abandon_lost_a,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_list,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
             commands::desktop_remote_model::desktop_remote_model_list_exportable,
             commands::desktop_remote_model::desktop_remote_model_install,
             commands::desktop_remote_model::desktop_remote_model_release,

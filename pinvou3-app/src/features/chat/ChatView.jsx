@@ -1729,21 +1729,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           // 构造 task intent。发送按钮、回车、语音与欢迎卡片最终都经过这里，
           // 因此必须在统一入口拦截，不能只依赖按钮 disabled。
           if (!remoteLinkReady) return false;
-          const sessionRef = remoteConnection.sessionRef;
           const sendIdentity = remoteSendIdentity;
-          try {
-            await bridge.desktopRemoteControl.controllerTaskSend(sessionRef, outgoing, effectiveRemoteModelSource);
-            setRemoteSendError(current => (
-              current && current.identity === sendIdentity ? null : current
-            ));
-          } catch (failure) {
-            setRemoteSendError({
-              identity: sendIdentity,
-              code: String((failure && failure.code) || 'errorGeneric'),
-            });
-            throw failure;
-          }
-          return true;
+          // DEV-31 will atomically bind this view to a SessionStore RemoteProxy.
+          // The legacy sessionRef is not a localSessionId and must never enter
+          // either the old direct sender or the new durable outbox command.
+          setRemoteSendError({ identity: sendIdentity, code: 'remote_legacy_migration_required' });
+          return false;
         }
         const matchedPersonalWorkbenchDraft = findPersonalWorkbenchTemplateDraft(outgoing);
         const templateId = personalWorkbenchTemplateIdRef.current
@@ -1915,7 +1906,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         ? t.remoteConversation.sessionBusy
         : (currentRemoteSendError === 'temporary_model_capability_required'
           ? t.remoteConversation.temporaryModelCapabilityRequired
-          : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null));
+          : (currentRemoteSendError === 'remote_legacy_migration_required'
+            ? t.remoteConversation.migrationRequired
+            : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null)));
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');

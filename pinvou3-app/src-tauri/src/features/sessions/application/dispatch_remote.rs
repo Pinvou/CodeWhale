@@ -225,7 +225,14 @@ impl RemoteDispatchService {
             || semantics.mode.is_empty()
             || semantics.model_source.is_empty()
             || semantics.input_digest.len() != 64
-            || semantics.model_profile_id.is_some()
+            || match semantics.model_source.as_str() {
+                "controller_temporary" => semantics
+                    .model_profile_id
+                    .as_deref()
+                    .is_none_or(|id| !valid_remote_identifier(id)),
+                "controlled_device" => semantics.model_profile_id.is_some(),
+                _ => true,
+            }
             || !semantics.model_execution_digest.is_empty()
         {
             return Err(error("remote_request_invalid"));
@@ -276,6 +283,9 @@ impl RemoteDispatchService {
         // DEV-15 performs the only package build. Nothing can be persisted or
         // sent until the exact returned wire payload is validated.
         let prepared = self.port.prepare(&request)?;
+        if prepared.model_profile_id != request.semantics.model_profile_id {
+            return Err(error("remote_model_profile_mismatch"));
+        }
         request.semantics.model_profile_id = prepared.model_profile_id;
         let payload = prepared.payload;
         validate_prepared_payload(&payload, &request)?;
@@ -763,7 +773,7 @@ mod tests {
                 capability_revision: 3,
                 mode: "chat".into(),
                 model_source: "controller_temporary".into(),
-                model_profile_id: None,
+                model_profile_id: Some("model-1".into()),
                 model_execution_digest: String::new(),
                 text: "hello".into(),
                 input_digest: "a".repeat(64),
@@ -782,6 +792,26 @@ mod tests {
             live: request.live.clone(),
             semantics: request.semantics.clone(),
         }
+    }
+
+    #[test]
+    fn selected_profile_mismatch_fails_before_outbox_or_send() {
+        let (_temp, store, mut request) = setup();
+        let local_id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        request.semantics.model_profile_id = Some("different-model".into());
+        let error = service.dispatch_new(request).err().unwrap();
+        assert_eq!(error.code(), "remote_model_profile_mismatch");
+        assert!(
+            store
+                .remote_proxy_snapshot(&local_id)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+        assert_eq!(port.prepare_count.load(Ordering::SeqCst), 1);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
     }
 
     fn handle(store: &SessionStore, request: &RemoteDispatchRequest) -> RemoteRetryHandle {
@@ -955,6 +985,7 @@ mod tests {
     fn controlled_device_new_has_no_profile_or_temporary_package() {
         let (_temp, store, mut request) = setup();
         request.semantics.model_source = "controlled_device".into();
+        request.semantics.model_profile_id = None;
         let port = Arc::new(FakePort::new(
             store.clone(),
             request.semantics.local_session_id.clone(),

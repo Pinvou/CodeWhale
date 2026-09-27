@@ -17,6 +17,14 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(logicPath, 'utf8'), context, { filename: logicPath });
 const logic = context.window.__PINVOU_REMOTE_CONTROL_STATE__;
 
+function liveController(connectionId, leaseEpoch) {
+  return {
+    status: 'connected', connectionId, controllerLeaseId: `lease-${connectionId}`,
+    leaseEpoch, relayEpoch: `relay-${connectionId}`,
+    generation: `generation-${connectionId}`,
+  };
+}
+
 test('late controlled-device results never revive an older intent', () => {
   let state = logic.createState();
   state = logic.beginControlledIntent(state);
@@ -83,27 +91,24 @@ test('controlled status preserves the bounded Rust error code for diagnostics', 
 test('controller status is gated by connection and lease epoch', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
-    status: 'connected',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
+    ...liveController('connection-1', '2'),
   });
   assert.equal(state.controllerConnection.connectionId, 'connection-1');
 
   const otherConnection = logic.applyControllerStatus(state, {
-    status: 'connected',
-    connectionId: 'connection-2',
-    leaseEpoch: '1',
+    ...liveController('connection-2', '1'),
   });
   assert.equal(otherConnection, state, 'another connection must not take over the shell');
 
   const olderLease = logic.applyControllerStatus(state, {
-    status: 'connected',
-    connectionId: 'connection-1',
+    ...liveController('connection-1', '2'),
     leaseEpoch: '1',
   });
   assert.equal(olderLease, state, 'an older lease epoch must not overwrite the live one');
 
-  const disconnected = logic.applyControllerStatus(state, { status: 'idle' });
+  const disconnected = logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '2'), status: 'idle',
+  });
   assert.equal(disconnected.controllerConnection.status, 'idle');
   assert.equal(disconnected.remoteCapabilities, null);
 });
@@ -111,15 +116,14 @@ test('controller status is gated by connection and lease epoch', () => {
 test('capability snapshots are bound to connection, lease and revision', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
-    status: 'connected',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
+    ...liveController('connection-1', '2'),
   });
   const snapshot = {
     connectionId: 'connection-1',
+    controllerLeaseId: 'lease-connection-1',
     leaseEpoch: '2',
-    relayEpoch: 'relay-1',
-    remoteControlGeneration: 'gen-1',
+    relayEpoch: 'relay-connection-1',
+    remoteControlGeneration: 'generation-connection-1',
     capabilityRevision: 4,
     modes: ['chat', 'code'],
     tools: [{ toolId: 'browser', displayName: 'Browser' }],
@@ -146,9 +150,7 @@ test('capability snapshots are bound to connection, lease and revision', () => {
 test('capability preparation exposes pending and bounded failure states', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
-    status: 'connected',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
+    ...liveController('connection-1', '2'),
   });
   state = logic.applyControllerSession(state, {
     sessionRef: 'session-ref-1',
@@ -313,7 +315,9 @@ test('B-side projections reject stale sessions and reset with the controlled gen
   assert.equal(state.controlledTasks.length, 1);
   assert.equal(state.controlledTranscript.length, 1);
 
+  state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, {
+    intent: state.intents.controlled,
     status: 'reserving',
     generation: 'generation-2',
   });
@@ -379,9 +383,11 @@ test('a new controlled-device generation drops old task projections', () => {
     status: 'failed',
     text: 'old prompt',
   });
-  state = logic.applyControlledStatus(state, { status: 'stopped' });
+  state = logic.applyControlledStatus(state, { status: 'stopped', generation: 'generation-1' });
   assert.equal(state.controlledTasks.length, 0);
+  state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, {
+    intent: state.intents.controlled,
     status: 'waiting_connection',
     generation: 'generation-2',
   });
@@ -391,9 +397,7 @@ test('a new controlled-device generation drops old task projections', () => {
 test('live-context matching rejects foreign connections and leases', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
-    status: 'connected',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
+    ...liveController('connection-1', '2'),
   });
   assert.equal(logic.matchesLiveContext(state, { connectionId: 'connection-1', leaseEpoch: '2' }), true);
   assert.equal(logic.matchesLiveContext(state, { connectionId: 'connection-2', leaseEpoch: '2' }), false);
@@ -421,4 +425,247 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
       `unexpected command forwarded from the desktop bridge: ${command}`,
     );
   }
+});
+
+test('authenticated RemoteProxy notifications require the exact live lease and never carry body text', () => {
+  let state = logic.applyControllerStatus(logic.createState(), {
+    status: 'connected', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  const event = {
+    kind: 'journal', localSessionId: 'remote-abc', remoteSessionRef: 'ref-1',
+    controlledSessionId: 'session-b', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+    fields: { journalEpoch: 'journal-1', sequence: 1, body: 'not from SessionStore' },
+  };
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...event, generation: 'old' }), state);
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...event, leaseEpoch: '1' }), state);
+  assert.equal(logic.applyRemoteProxyNotice(state, { ...event, controllerLeaseId: 'other' }), state);
+  state = logic.applyRemoteProxyNotice(state, event);
+  assert.equal(state.remoteProxyNotice.localSessionId, 'remote-abc');
+  assert.equal(state.remoteProxyNotice.sequence, 1);
+  assert.equal(JSON.stringify(state.remoteProxyNotice).includes('not from SessionStore'), false);
+  assert.equal(state.transcript.length, 0, 'event is only an invalidation, not journal content');
+  assert.equal(logic.applyRemoteProxyNotice(state, event), state, 'duplicate notice is ignored');
+  const capability = { ...event, kind: 'capability', fields: { capabilityRevision: 5 } };
+  state = logic.applyRemoteProxyNotice(state, capability);
+  assert.equal(state.remoteProxyNotice.capabilityRevision, 5);
+  assert.equal(logic.applyRemoteProxyNotice(state, {
+    ...capability, fields: { capabilityRevision: 4 },
+  }), state, 'an older capability revision cannot replace the notice');
+  const disconnected = logic.applyControllerStatus(state, {
+    status: 'disconnected', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  assert.equal(disconnected.remoteProxyNotice, null);
+  assert.equal(logic.applyRemoteProxyNotice(disconnected, event), disconnected);
+});
+
+test('terminal events from replaced A/B generations cannot clear the current UI', () => {
+  let a = logic.applyControllerStatus(logic.createState(), {
+    ...liveController('new', '3'),
+  });
+  assert.equal(logic.applyControllerStatus(a, {
+    status: 'disconnected', connectionId: 'old', leaseEpoch: '2', generation: 'old-generation',
+  }), a);
+  let b = logic.applyControlledStatus(logic.createState(), {
+    status: 'waiting_connection', generation: 'new-generation',
+  });
+  assert.equal(logic.applyControlledStatus(b, {
+    status: 'stopped', generation: 'old-generation',
+  }), b);
+});
+
+test('a new A connection after terminal drops old RemoteProxy revision gates and session identity', () => {
+  let state = logic.applyControllerStatus(logic.createState(), {
+    status: 'connected', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  state = logic.applyControllerSession(state, {
+    sessionRef: 'ref-old', sessionId: 'session-old', connectionId: 'connection-1', leaseEpoch: '1',
+  });
+  state = logic.applyRemoteProxyNotice(state, {
+    kind: 'capability', localSessionId: 'remote-one', remoteSessionRef: 'ref-old',
+    controlledSessionId: 'session-old', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', generation: 'generation-1',
+    fields: { capabilityRevision: 9 },
+  });
+  assert.equal(logic.applyControllerStatus(state, {
+    status: 'connected', connectionId: 'connection-1', controllerLeaseId: 'lease-2',
+    leaseEpoch: '2', relayEpoch: 'relay-2', generation: 'generation-2',
+  }), state, 'an unsolicited replacement lease must not overwrite the active connection');
+  state = logic.applyControllerStatus(state, {
+    status: 'disconnected', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', generation: 'generation-1',
+  });
+  state = logic.beginControllerIntent(state, true);
+  state = logic.applyControllerStatus(state, {
+    intent: state.intents.controller, status: 'connected', connectionId: 'connection-2',
+    controllerLeaseId: 'lease-2', leaseEpoch: '2', relayEpoch: 'relay-2', generation: 'generation-2',
+  });
+  assert.equal(state.controllerConnection.sessionRef, null);
+  assert.equal(state.remoteProxyNotice, null);
+  assert.equal(state.remoteProxyCapabilityRevisions['remote-one'], undefined);
+});
+
+test('B terminal tombstones an old generation until an explicit start opens a fresh one', () => {
+  let state = logic.applyControlledStatus(logic.createState(), {
+    status: 'connected', generation: 'generation-old',
+  });
+  state = logic.applyControlledStatus(state, { status: 'stopped', generation: 'generation-old' });
+  assert.equal(state.controlledFenced, true);
+  assert.equal(logic.applyControlledStatus(state, {
+    status: 'connected', generation: 'generation-old',
+  }), state);
+  assert.equal(logic.applyControlledStatus(state, {
+    status: 'waiting_connection', generation: 'generation-new',
+  }), state, 'an event cannot initiate a generation after terminal');
+  state = logic.beginControlledIntent(state, true);
+  assert.equal(logic.applyControlledStatus(state, {
+    status: 'waiting_connection', generation: 'generation-new',
+  }), state, 'an event cannot consume an in-flight start intent');
+  assert.equal(logic.applyControlledStatus(state, {
+    status: 'waiting_connection', generation: 'generation-old',
+  }), state, 'even a pending start cannot reuse a retired generation');
+  state = logic.applyControlledStatus(state, {
+    intent: state.intents.controlled, status: 'waiting_connection', generation: 'generation-new',
+  });
+  assert.equal(state.controlledDevice.generation, 'generation-new');
+  assert.equal(state.controlledFenced, false);
+  const unrequestedStart = logic.applyControlledStatus(state, {
+    status: 'waiting_connection', generation: 'generation-other',
+  });
+  assert.equal(unrequestedStart, state, 'a late starting event cannot replace an active generation');
+});
+
+test('A terminal tombstones connection plus lease and requires a new connect intent', () => {
+  let state = logic.applyControllerStatus(logic.createState(), {
+    ...liveController('connection-1', '1'),
+  });
+  state = logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '1'), status: 'disconnected',
+  });
+  assert.equal(state.controllerFenced, true);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '1'),
+  }), state);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-2', '1'),
+  }), state, 'a foreign event cannot start a new connection');
+  state = logic.beginControllerIntent(state, true);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-2', '1'),
+  }), state, 'an event cannot consume an in-flight connect intent');
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '1'),
+  }), state);
+  state = logic.applyControllerStatus(state, {
+    ...liveController('connection-2', '1'), intent: state.intents.controller,
+  });
+  assert.equal(state.controllerConnection.connectionId, 'connection-2');
+  assert.equal(state.controllerFenced, false);
+});
+
+test('A live status requires its full matching lease and accepts a same-lease reconnect', () => {
+  let state = logic.applyControllerStatus(logic.createState(), liveController('connection-1', '2'));
+  assert.equal(logic.applyControllerStatus(state, { status: 'connected' }), state);
+  assert.equal(logic.applyControllerStatus(state, { status: 'disconnected' }), state,
+    'an unbound terminal event cannot clear an established A lease');
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '2'), controllerLeaseId: null,
+  }), state);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '2'), controllerLeaseId: 'foreign-lease',
+  }), state);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '2'), relayEpoch: 'foreign-relay',
+  }), state);
+  assert.equal(logic.applyControllerStatus(state, { status: 'safety_handshake' }), state);
+  state = logic.applyControllerStatus(state, {
+    ...liveController('connection-1', '2'), status: 'reconnecting',
+  });
+  assert.equal(state.controllerConnection.status, 'reconnecting');
+  state = logic.applyControllerStatus(state, liveController('connection-1', '2'));
+  assert.equal(state.controllerConnection.status, 'connected');
+});
+
+test('an unbound B terminal event cannot clear an established generation', () => {
+  const state = logic.applyControlledStatus(logic.createState(), {
+    status: 'connected', generation: 'generation-1',
+  });
+  assert.equal(logic.applyControlledStatus(state, { status: 'stopped' }), state);
+  assert.equal(logic.applyControlledStatus(state, {
+    status: 'stopped', generation: 'generation-old',
+  }), state);
+});
+
+test('identity-less B terminal during start suppresses that reply but not a later start', () => {
+  let state = logic.applyControlledStatus(logic.createState(), { status: 'stopped' });
+  state = logic.beginControlledIntent(state, true);
+  const first = state.intents.controlled;
+  state = logic.applyControlledStatus(state, { status: 'stopped' });
+  assert.equal(state.controlledTerminatedOpenIntent, first);
+  assert.equal(logic.applyControlledStatus(state, {
+    intent: first, status: 'waiting_connection', generation: 'dead-generation', pairingCode: '1234567',
+  }), state);
+  state = logic.beginControlledIntent(state, true);
+  const second = state.intents.controlled;
+  state = logic.applyControlledStatus(state, {
+    intent: second, status: 'waiting_connection', generation: 'live-generation', pairingCode: '7654321',
+  });
+  assert.equal(state.controlledDevice.generation, 'live-generation');
+  assert.equal(state.controlledDevice.pairingCode, '7654321');
+});
+
+test('identity-less A terminal during connect suppresses that reply but not a later connect', () => {
+  let state = logic.applyControllerStatus(logic.createState(), { status: 'disconnected' });
+  state = logic.beginControllerIntent(state, true);
+  const first = state.intents.controller;
+  state = logic.applyControllerStatus(state, { status: 'error' });
+  assert.equal(state.controllerTerminatedOpenIntent, first);
+  assert.equal(logic.applyControllerStatus(state, {
+    ...liveController('dead-connection', '1'), intent: first,
+  }), state);
+  state = logic.beginControllerIntent(state, true);
+  const second = state.intents.controller;
+  state = logic.applyControllerStatus(state, {
+    ...liveController('live-connection', '1'), intent: second,
+  });
+  assert.equal(state.controllerConnection.connectionId, 'live-connection');
+  assert.equal(state.controllerFenced, false);
+});
+
+test('B pending-terminal fence opens only for a current authoritative generation', () => {
+  let state = logic.applyControlledStatus(logic.createState(), { status: 'stopped' });
+  state = logic.beginControlledIntent(state, true);
+  const first = state.intents.controlled;
+  state = logic.applyControlledStatus(state, { status: 'stopped' });
+  assert.equal(logic.reconcileControlledOpenStatus(state, first, {
+    status: 'stopped', generation: 'new-generation',
+  }, 'new-generation'), state);
+  assert.equal(logic.reconcileControlledOpenStatus(state, first, {
+    status: 'waiting_connection', generation: null,
+  }, 'new-generation'), state);
+  assert.equal(logic.reconcileControlledOpenStatus(state, first, {
+    status: 'waiting_connection', generation: 'other-generation',
+  }, 'new-generation'), state);
+  state = logic.reconcileControlledOpenStatus(state, first, {
+    status: 'waiting_connection', generation: 'new-generation', pairingCode: '1234567',
+  }, 'new-generation');
+  assert.equal(state.controlledFenced, false);
+  assert.equal(state.controlledDevice.pairingCode, '1234567');
+});
+
+test('A pending-terminal fence opens only for a complete authoritative live lease', () => {
+  let state = logic.applyControllerStatus(logic.createState(), { status: 'disconnected' });
+  state = logic.beginControllerIntent(state, true);
+  const first = state.intents.controller;
+  state = logic.applyControllerStatus(state, { status: 'error' });
+  assert.equal(logic.reconcileControllerOpenStatus(state, first, { status: 'disconnected' }), state);
+  assert.equal(logic.reconcileControllerOpenStatus(state, first, {
+    status: 'connected', connectionId: 'new-connection', leaseEpoch: '2',
+  }), state);
+  state = logic.reconcileControllerOpenStatus(state, first, liveController('new-connection', '2'));
+  assert.equal(state.controllerFenced, false);
+  assert.equal(state.controllerConnection.connectionId, 'new-connection');
 });

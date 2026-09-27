@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::desktop_remote_model::prepare_active_task_package_snapshot;
+use super::desktop_remote_model::prepare_selected_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::codex_acp::AcpPool;
@@ -189,17 +189,14 @@ impl ControllerTaskEventSink for TaskEventBridge {
             return;
         }
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        match history
-            .journal()
-            .append_for_generation(
-                &lease.remote_control_generation,
-                &event_id,
-                kind,
-                session_id,
-                task_id,
-                payload,
-            )
-        {
+        match history.journal().append_for_generation(
+            &lease.remote_control_generation,
+            &event_id,
+            kind,
+            session_id,
+            task_id,
+            payload,
+        ) {
             Ok(event) => {
                 // B owns the authoritative event, so project it to B's UI as
                 // well as forwarding the session-ref-rewritten copy to A.
@@ -656,7 +653,7 @@ pub async fn desktop_remote_controlled_task_send(
         text,
         lease.remote_control_generation,
     )?;
-    super::desktop_remote_controller_business::DesktopControlledExecutionAdapter::new(app)
+    app.state::<crate::app::desktop_remote_composition::DesktopLocalExecutionPort>()
         .submit_local(input)
         .await
         .map(|result| result.status)
@@ -1048,10 +1045,20 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
         }
         let temporary = match semantics.model_source.as_str() {
             TASK_MODEL_SOURCE_CONTROLLED if semantics.model_profile_id.is_none() => None,
-            TASK_MODEL_SOURCE_TEMPORARY if session.temporary_model_available => Some(
-                prepare_active_task_package_snapshot(&lease, &request.task_id)
+            TASK_MODEL_SOURCE_TEMPORARY if session.temporary_model_available => {
+                let selected_model_id = semantics
+                    .model_profile_id
+                    .as_deref()
+                    .ok_or_else(|| dispatch_error("remote_model_profile_required"))?;
+                Some(
+                    prepare_selected_task_package_snapshot(
+                        &lease,
+                        &request.task_id,
+                        selected_model_id,
+                    )
                     .map_err(|error| dispatch_error(error.code))?,
-            ),
+                )
+            }
             _ => return Err(dispatch_error("remote_model_source_invalid")),
         };
         let input = json!({
@@ -1130,8 +1137,16 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RemoteTaskSubmitIntent {
-    New { text: String, model_source: String },
-    Retry { handle: RemoteRetryHandle },
+    New {
+        text: String,
+        #[serde(rename = "modelSource")]
+        model_source: String,
+        #[serde(rename = "selectedModelId")]
+        selected_model_id: Option<String>,
+    },
+    Retry {
+        handle: RemoteRetryHandle,
+    },
 }
 
 #[tauri::command]
@@ -1150,8 +1165,12 @@ pub fn desktop_remote_task_dispatch_a(
     // Retry cannot carry task text, model choice, mode or any other mutable
     // semantics. The service authenticates this handle against durable pending
     // state and the live binding before replaying the original cached bytes.
-    let (text, model_source) = match intent {
-        RemoteTaskSubmitIntent::New { text, model_source } => (text, model_source),
+    let (text, model_source, selected_model_id) = match intent {
+        RemoteTaskSubmitIntent::New {
+            text,
+            model_source,
+            selected_model_id,
+        } => (text, model_source, selected_model_id),
         RemoteTaskSubmitIntent::Retry { handle } => {
             return service
                 .dispatch_retry(&local_session_id, &remote_ref, handle)
@@ -1181,9 +1200,28 @@ pub fn desktop_remote_task_dispatch_a(
         return Err("task_input_invalid".to_owned());
     }
     match model_source.as_str() {
-        TASK_MODEL_SOURCE_CONTROLLED => {}
-        TASK_MODEL_SOURCE_TEMPORARY if session.temporary_model_available => {}
+        TASK_MODEL_SOURCE_CONTROLLED if selected_model_id.is_none() => {}
+        TASK_MODEL_SOURCE_TEMPORARY
+            if session.temporary_model_available
+                && selected_model_id.as_deref().is_some_and(
+                    crate::features::sessions::remote_proxy::schema::valid_remote_identifier,
+                ) => {}
         _ => return Err("remote_model_source_invalid".to_owned()),
+    }
+    // Fresh A-authenticated capability is a prerequisite for NEW durable
+    // outbox reservation. Retry is deliberately handled above using only the
+    // frozen handle and never re-reads mutable capability/configuration.
+    let capability_revision = sessions
+        .capability_projection(&remote_ref, &lease)
+        .map_err(|error| match error.code {
+            "capability_snapshot_expired" | "session_context_stale" => {
+                "capability_snapshot_stale".to_owned()
+            }
+            code => code.to_owned(),
+        })?
+        .revision();
+    if session.capability_revision != Some(capability_revision) {
+        return Err("capability_snapshot_stale".to_owned());
     }
     let request = RemoteDispatchRequest {
         task_id: format!("task-{}", Uuid::new_v4().simple()),
@@ -1194,12 +1232,10 @@ pub fn desktop_remote_task_dispatch_a(
             remote_session_ref: remote_ref,
             controlled_session_id,
             session_id: session.session_id,
-            capability_revision: session
-                .capability_revision
-                .ok_or_else(|| "capability_snapshot_required".to_owned())?,
+            capability_revision,
             mode: session.mode,
             model_source,
-            model_profile_id: None,
+            model_profile_id: selected_model_id,
             model_execution_digest: String::new(),
             input_digest: task_input_digest(&text),
             text,
@@ -1245,6 +1281,45 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn new_intent_accepts_only_narrow_model_selection() {
+        let intent = serde_json::from_value::<RemoteTaskSubmitIntent>(json!({
+            "kind": "new",
+            "text": "hello",
+            "modelSource": "controller_temporary",
+            "selectedModelId": "model-1",
+        }))
+        .unwrap();
+        assert!(matches!(intent, RemoteTaskSubmitIntent::New {
+            model_source, selected_model_id: Some(id), ..
+        } if model_source == "controller_temporary" && id == "model-1"));
+        assert!(
+            serde_json::from_value::<RemoteTaskSubmitIntent>(json!({
+                "kind": "new", "text": "hello", "modelSource": "controller_temporary",
+                "selectedModelId": "model-1", "taskId": "ui-forged",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn new_dispatch_checks_authenticated_capability_before_outbox_reservation() {
+        let source = include_str!("desktop_remote_task.rs");
+        let start = source
+            .find("pub fn desktop_remote_task_dispatch_a(")
+            .unwrap();
+        let end = source[start..]
+            .find("pub fn desktop_remote_task_abandon_lost_a(")
+            .map(|offset| start + offset)
+            .unwrap();
+        let command = &source[start..end];
+        let retry = command.find("RemoteTaskSubmitIntent::Retry").unwrap();
+        let fresh = command.find(".capability_projection(").unwrap();
+        let reserve = command.find(".dispatch_new(request)").unwrap();
+        assert!(retry < fresh && fresh < reserve);
+        assert!(command.contains("capability_snapshot_stale"));
     }
 
     #[test]

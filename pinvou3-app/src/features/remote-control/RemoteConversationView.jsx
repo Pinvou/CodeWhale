@@ -27,7 +27,6 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   const [mode, setMode] = useState('chat');
   const [draft, setDraft] = useState('');
   const [error, setError] = useState(null);
-  const [busy, setBusy] = useState(false);
   const [artifacts, setArtifacts] = useState([]);
 
   const exportableModels = useMemo(
@@ -89,17 +88,9 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
 
   const send = async () => {
     if (!remote || !draft.trim() || !capabilityReady) return;
-    setBusy(true);
-    setError(null);
-    try {
-      // E2E-04：只传会话引用与正文；协议字段与输入摘要全部由 Rust 构造并加密。
-      await remote.controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource);
-      setDraft('');
-    } catch (failure) {
-      setError((failure && failure.code) || 'errorGeneric');
-    } finally {
-      setBusy(false);
-    }
+    // DEV-31 owns the atomic migration to a SessionStore RemoteProxy ID.
+    // This legacy view has only a sessionRef, so it must not dispatch a task.
+    setError('remote_legacy_migration_required');
   };
 
   const decide = async (permission, decision) => {
@@ -206,10 +197,10 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
         <button
           type="submit"
           data-testid="remote-conversation-send"
-          disabled={busy || sessionBusy || !draft.trim() || !capabilityReady}
+          disabled={sessionBusy || !draft.trim() || !capabilityReady}
           className="shrink-0 rounded-full bg-[#1A73E8] px-4 py-2 text-[13px] text-white disabled:opacity-60"
         >
-          {busy ? copy.sending : copy.send}
+          {copy.send}
         </button>
       </form>
       {!sessionRef && !sessionBusy && !sessionError && connected && (
@@ -321,7 +312,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
           {copy.cancel}
         </button>
       )}
-      {error && <p role="alert" className="mt-1 text-[12px] text-[#EA4335]">{copy.errorGeneric}</p>}
+      {error && <p role="alert" className="mt-1 text-[12px] text-[#EA4335]">{error === 'remote_legacy_migration_required' ? copy.migrationRequired : copy.errorGeneric}</p>}
     </div>
   );
 }
