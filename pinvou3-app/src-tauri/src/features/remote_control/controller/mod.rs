@@ -7,6 +7,7 @@ pub(crate) mod controlling_runtime;
 pub(crate) mod controlling_service;
 pub(crate) mod controlling_session;
 pub(crate) mod encrypted_lane;
+pub(crate) mod event_envelope;
 pub(crate) mod crypto;
 pub(crate) mod history;
 pub(crate) mod journal;
