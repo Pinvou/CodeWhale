@@ -62,6 +62,7 @@ pub struct PlatformCapabilities {
     pub browser_agent_automation: bool,
     pub browser_cdp: bool,
     pub voice_shortcut_native: bool,
+    pub paste_image_clipboard_read: bool,
 }
 
 impl PlatformCapabilities {
@@ -96,6 +97,7 @@ impl PlatformCapabilities {
             browser_agent_automation: browser_ready,
             browser_cdp: capabilities.browser_cdp,
             voice_shortcut_native: capabilities.voice_shortcut_native,
+            paste_image_clipboard_read: capabilities.paste_image_clipboard_read,
         }
     }
 }
@@ -172,6 +174,10 @@ mod platform_capability_tests {
         assert_eq!(
             capabilities.voice_shortcut_native,
             expected.voice_shortcut_native
+        );
+        assert_eq!(
+            capabilities.paste_image_clipboard_read,
+            expected.paste_image_clipboard_read
         );
     }
 

@@ -88,7 +88,12 @@ const expectedProtocolHashes = {
   orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
-  artifacts: 'de912dc47531a442428f1649d933c8b91d0616196a1b7ac6176bf0f59939fa12',
+  // Recomputed again for the Linux clipboard-image paste fallback (community
+  // #578 backflow): artifacts.js gains the addPasteImageFromClipboard invoke
+  // wrapping the paste_clipboard_image command (the native layer reads the
+  // WebKitGTK-invisible clipboard image and saves it server-side; web lane
+  // intentionally has no such backend).
+  artifacts: 'bb1974a6cff526075dc98813ee75dd7253ec970203ef59cb133d2c443ec5ed71',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
