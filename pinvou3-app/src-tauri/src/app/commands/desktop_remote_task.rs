@@ -9,17 +9,24 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use deepseek_tui::models::{ContentBlock, Message, Role};
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
+use super::desktop_remote_model::prepare_active_task_package_snapshot;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+use crate::features::remote_control::controller::controlling::ControllingDeviceManager;
+use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::controlling_session::task_input_digest;
+use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
+use crate::features::remote_control::controller::protocol::MAX_TASK_INPUT_TEXT_BYTES;
 use crate::features::remote_control::controller::protocol::{
     LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
@@ -33,6 +40,12 @@ use crate::features::remote_control::controller::task::{
 use crate::features::remote_control::controller::temporary_model::{
     SharedTemporaryModelStore, TemporaryModelPackageV1,
 };
+use crate::features::sessions::application::dispatch_remote::{
+    PreparedRemoteTask, RemoteDispatchReport, RemoteDispatchRequest, RemoteDispatchService,
+    RemoteRetryHandle, RemoteTaskDispatchPort,
+};
+use crate::features::sessions::application::ports::UseCaseError;
+use crate::features::sessions::remote_proxy::outbox::RemoteRequestSemantics;
 use crate::features::sessions::{SessionStore, transcript_revision};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -920,9 +933,257 @@ pub fn desktop_remote_task_interrupt_all(
     Ok(records.into_iter().map(|record| record.task_id).collect())
 }
 
+/// DEV-29 host adapter. Registration and replacement of the legacy A command
+/// belong to DEV-20/DEV-31; this adapter itself owns no outbox state.
+pub(crate) struct DesktopRemoteTaskDispatchPort {
+    app: AppHandle,
+}
+
+impl DesktopRemoteTaskDispatchPort {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+fn dispatch_error(code: &'static str) -> UseCaseError {
+    UseCaseError::new(code, false)
+}
+
+fn lease_matches_remote_binding(
+    lease: &LeaseContext,
+    live: &crate::features::sessions::remote_proxy::binding::LiveRemoteContext,
+) -> bool {
+    lease.connection_id == live.connection_id
+        && lease.controller_lease_id == live.controller_lease_id
+        && lease.lease_epoch == live.lease_epoch
+        && lease.relay_epoch == live.relay_epoch
+        && lease.remote_control_generation == live.generation
+}
+
+impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
+    fn prepare(&self, request: &RemoteDispatchRequest) -> Result<PreparedRemoteTask, UseCaseError> {
+        let manager = self.app.state::<ControllingDeviceManager>();
+        let sessions = self.app.state::<ControllingSessionManager>();
+        let (lease, capabilities) = manager
+            .live_runtime_context()
+            .map_err(|_| dispatch_error("controller_not_connected"))?;
+        if !lease_matches_remote_binding(&lease, &request.live) {
+            return Err(dispatch_error("remote_binding_mismatch"));
+        }
+        let semantics = &request.semantics;
+        let session = sessions
+            .state(&semantics.remote_session_ref, &lease)
+            .map_err(|_| dispatch_error("remote_session_unavailable"))?;
+        if session.session_id != semantics.session_id
+            || session.mode != semantics.mode
+            || session.capability_revision != Some(semantics.capability_revision)
+            || semantics.mode != "chat"
+            || !semantics.attachment_ids.is_empty()
+            || !semantics.skill_ids.is_empty()
+            || !semantics.workspace_ids.is_empty()
+        {
+            return Err(dispatch_error("remote_request_invalid"));
+        }
+        let temporary = match semantics.model_source.as_str() {
+            TASK_MODEL_SOURCE_CONTROLLED if semantics.model_profile_id.is_none() => None,
+            TASK_MODEL_SOURCE_TEMPORARY if session.temporary_model_available => Some(
+                prepare_active_task_package_snapshot(&lease, &request.task_id)
+                    .map_err(|error| dispatch_error(error.code))?,
+            ),
+            _ => return Err(dispatch_error("remote_model_source_invalid")),
+        };
+        let input = json!({
+            "text": semantics.text,
+            "attachment_ids": semantics.attachment_ids,
+            "skill_ids": semantics.skill_ids,
+        });
+        let mut payload = json!({
+            "v": 1,
+            "type": "task_submit",
+            "connection_id": lease.connection_id,
+            "controller_lease_id": lease.controller_lease_id,
+            "lease_epoch": lease.lease_epoch,
+            "relay_epoch": lease.relay_epoch,
+            "remote_control_generation": lease.remote_control_generation,
+            "request_id": format!("request-{}", Uuid::new_v4().simple()),
+            "task_id": request.task_id,
+            "client_request_id": request.client_request_id,
+            "session_id": semantics.session_id,
+            "capability_revision": semantics.capability_revision.to_string(),
+            "model_source": semantics.model_source,
+            "mode": semantics.mode,
+            "input_digest": semantics.input_digest,
+            "input": input,
+        });
+        let model_profile_id = temporary
+            .as_ref()
+            .map(|prepared| prepared.model_profile_id.clone());
+        if let Some(prepared) = temporary {
+            payload["temporary_model_package"] = prepared.package;
+        }
+        validate_controller_runtime_payload_json(
+            &payload.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease),
+                negotiated_capabilities: capabilities,
+            }),
+        )
+        .map_err(|_| dispatch_error("remote_request_invalid"))?;
+        Ok(PreparedRemoteTask {
+            model_profile_id,
+            payload,
+        })
+    }
+
+    fn send_encrypted(&self, payload: &Value) -> Result<(), UseCaseError> {
+        let manager = self.app.state::<ControllingDeviceManager>();
+        let business = self.app.state::<ControllingLaneState>();
+        let (lease, capabilities) = manager
+            .live_runtime_context()
+            .map_err(|_| dispatch_error("controller_not_connected"))?;
+        // Revalidate at the actual send point; a lease rotation between
+        // prepare and barrier must become outcome_unknown, never a new send.
+        validate_controller_runtime_payload_json(
+            &payload.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease),
+                negotiated_capabilities: capabilities.clone(),
+            }),
+        )
+        .map_err(|_| dispatch_error("remote_binding_mismatch"))?;
+        let frame = business
+            .seal("task_submit", payload, &capabilities)
+            .map_err(|_| dispatch_error("remote_encrypt_failed"))?;
+        manager
+            .send_authenticated_business(&frame)
+            .map_err(|_| dispatch_error("remote_send_uncertain"))
+    }
+}
+
+/// New unregistered A command boundary. The trusted live context comes from
+/// SessionStore, never from UI-supplied lease fields. The returned status and
+/// IDs are non-sensitive; no temporary package is projected to WebView.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RemoteTaskSubmitIntent {
+    New { text: String, model_source: String },
+    Retry { handle: RemoteRetryHandle },
+}
+
+#[tauri::command]
+pub fn desktop_remote_task_dispatch_a(
+    service: State<'_, RemoteDispatchService>,
+    store: State<'_, SessionStore>,
+    manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
+    local_session_id: String,
+    remote_ref: String,
+    intent: RemoteTaskSubmitIntent,
+) -> Result<RemoteDispatchReport, String> {
+    if !manager.is_supported() {
+        return Err(UNSUPPORTED.to_owned());
+    }
+    // Retry cannot carry task text, model choice, mode or any other mutable
+    // semantics. The service authenticates this handle against durable pending
+    // state and the live binding before replaying the original cached bytes.
+    let (text, model_source) = match intent {
+        RemoteTaskSubmitIntent::New { text, model_source } => (text, model_source),
+        RemoteTaskSubmitIntent::Retry { handle } => {
+            return service
+                .dispatch_retry(&local_session_id, &remote_ref, handle)
+                .map_err(|error| error.code().to_owned());
+        }
+    };
+    let live = store
+        .remote_dispatch_live_context(&local_session_id, &remote_ref)
+        .map_err(|_| "remote_binding_mismatch".to_owned())?;
+    let (lease, _) = manager
+        .live_runtime_context()
+        .map_err(|_| "controller_not_connected".to_owned())?;
+    if !lease_matches_remote_binding(&lease, &live) {
+        return Err("remote_binding_mismatch".to_owned());
+    }
+    let session = sessions
+        .state(&remote_ref, &lease)
+        .map_err(|_| "remote_session_unavailable".to_owned())?;
+    let record = store
+        .remote_proxy_snapshot(&local_session_id)
+        .ok_or_else(|| "remote_proxy_not_found".to_owned())?;
+    let controlled_session_id = record
+        .controlled_session_id
+        .ok_or_else(|| "remote_mapping_unconfirmed".to_owned())?;
+    let text = text.trim().to_owned();
+    if text.is_empty() || text.len() > MAX_TASK_INPUT_TEXT_BYTES {
+        return Err("task_input_invalid".to_owned());
+    }
+    match model_source.as_str() {
+        TASK_MODEL_SOURCE_CONTROLLED => {}
+        TASK_MODEL_SOURCE_TEMPORARY if session.temporary_model_available => {}
+        _ => return Err("remote_model_source_invalid".to_owned()),
+    }
+    let request = RemoteDispatchRequest {
+        task_id: format!("task-{}", Uuid::new_v4().simple()),
+        client_request_id: format!("client-request-{}", Uuid::new_v4().simple()),
+        live,
+        semantics: RemoteRequestSemantics {
+            local_session_id,
+            remote_session_ref: remote_ref,
+            controlled_session_id,
+            session_id: session.session_id,
+            capability_revision: session
+                .capability_revision
+                .ok_or_else(|| "capability_snapshot_required".to_owned())?,
+            mode: session.mode,
+            model_source,
+            model_profile_id: None,
+            model_execution_digest: String::new(),
+            input_digest: task_input_digest(&text),
+            text,
+            attachment_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workspace_ids: Vec::new(),
+        },
+    };
+    service
+        .dispatch_new(request)
+        .map_err(|error| error.code().to_owned())
+}
+#[tauri::command]
+pub fn desktop_remote_task_abandon_lost_a(
+    service: State<'_, RemoteDispatchService>,
+    local_session_id: String,
+    client_request_id: String,
+    task_id: String,
+) -> Result<(), String> {
+    service
+        .abandon_lost_payload(&local_session_id, &client_request_id, &task_id)
+        .map_err(|error| error.code().to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_intent_rejects_mutable_task_semantics() {
+        let handle = json!({
+            "taskId": "task-1",
+            "clientRequestId": "request-1",
+            "requestFingerprint": "a".repeat(64),
+        });
+        let valid = serde_json::from_value::<RemoteTaskSubmitIntent>(json!({
+            "kind": "retry", "handle": handle.clone(),
+        }));
+        assert!(matches!(valid, Ok(RemoteTaskSubmitIntent::Retry { .. })));
+        assert!(
+            serde_json::from_value::<RemoteTaskSubmitIntent>(json!({
+                "kind": "retry", "handle": handle, "text": "new task",
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn controlled_provisioner_never_reuses_a_remote_proxy_as_b_authority() {
