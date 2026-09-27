@@ -168,7 +168,8 @@ command_protocol!(
         "reveal_conversation_attachment",
         "detect_system_tools",
         "save_paste_image",
-        "verify_upload"
+        "verify_upload",
+        "paste_clipboard_image",
     ]
 );
 command_protocol!(

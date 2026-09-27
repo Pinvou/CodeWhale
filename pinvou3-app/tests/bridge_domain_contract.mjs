@@ -18,7 +18,7 @@ export const desktopBridgeApi = {
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'resetWebRelayAddress', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
   artifacts: ['artifactInfo', 'downloadArtifact', 'listDeliverableIndex', 'openArtifactExternal', 'openContainingFolder', 'openExternalUrl', 'openInSystem', 'openScheduledTaskFolder', 'openUserExternalUrl', 'readArtifactImageB64', 'readArtifactText', 'readArtifactThumbnail', 'renderArtifactVisual', 'revealSessionFolder', 'writeArtifactText'],
-  attachments: ['addAttachmentByPath', 'addPasteImage', 'clearAttachments', 'openConversationAttachment', 'pickAndAttach', 'removeAttachment', 'resolveConversationAttachment', 'revealConversationAttachment', 'uploadDeviceFiles'],
+  attachments: ['addAttachmentByPath', 'addPasteImage', 'addPasteImageFromClipboard', 'clearAttachments', 'openConversationAttachment', 'pickAndAttach', 'removeAttachment', 'resolveConversationAttachment', 'revealConversationAttachment', 'uploadDeviceFiles'],
   resolutions: ['markResolved'],
   files: ['pickFeedbackFiles', 'pickFiles', 'pickFolders', 'pickRebindFolder'],
   personas: ['createPersona', 'deletePersona', 'equipPersona', 'getPersonas', 'loadPersonas', 'postCardCreatorIntro', 'readPersonaBody', 'unequipPersona', 'updatePersona'],
@@ -52,6 +52,10 @@ export const desktopOnlyBridgeApi = {
   // zap-send go through the foundation EnginePool and need the Tauri command
   // channel; web has no such backend.
   chat: ['steer', 'interruptAndSend', 'interruptAndSendQueued'],
+  // Clipboard-image paste fallback reads the machine the app window runs on.
+  // In a web relay session that is the remote desktop, not the browser user's
+  // machine — pasting must stay on the browser's own clipboardData there.
+  attachments: ['addPasteImageFromClipboard'],
 };
 
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。

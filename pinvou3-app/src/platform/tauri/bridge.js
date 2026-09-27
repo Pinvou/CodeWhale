@@ -2592,6 +2592,7 @@
   var openUserExternalUrl = artifactsFeature.openUserExternalUrl;
   var addAttachmentByPath = artifactsFeature.addAttachmentByPath;
   var addPasteImage = artifactsFeature.addPasteImage;
+  var addPasteImageFromClipboard = artifactsFeature.addPasteImageFromClipboard;
   var removeAttachment = artifactsFeature.removeAttachment;
   var clearAttachments = artifactsFeature.clearAttachments;
   var pickAndAttach = artifactsFeature.pickAndAttach;
@@ -3055,6 +3056,7 @@
     attachments: {
       addAttachmentByPath: addAttachmentByPath,
       addPasteImage: addPasteImage,
+      addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
       clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
