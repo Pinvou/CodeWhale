@@ -129,6 +129,13 @@ impl VerifiedRemoteTerminal {
         verifier.verify_terminal(&candidate)?;
         Ok(Self { candidate })
     }
+
+    /// Transfer the already verified terminal binding to a single projection
+    /// or reconciliation consumer. The proof cannot be cloned or reconstructed
+    /// from its fields, so this consumes it exactly once.
+    pub(crate) fn into_candidate(self) -> RemoteTerminalCandidate {
+        self.candidate
+    }
 }
 
 type OutboxKey = (String, String, String);
@@ -155,7 +162,7 @@ impl RemoteDispatchService {
         &self,
         verified: VerifiedRemoteTerminal,
     ) -> Result<(), UseCaseError> {
-        let terminal = verified.candidate;
+        let terminal = verified.into_candidate();
         let live = self
             .store
             .remote_dispatch_live_context(&terminal.local_session_id, &terminal.remote_session_ref)
@@ -1196,6 +1203,74 @@ mod tests {
             authenticated_event_id: "authenticated-event-1".into(),
             live: request.live.clone(),
         }
+    }
+
+    #[test]
+    fn terminal_proof_only_exposes_the_original_candidate_by_consuming_it() {
+        struct CountingVerifier(AtomicUsize);
+        impl RemoteTerminalVerificationPort for CountingVerifier {
+            fn verify_terminal(
+                &self,
+                candidate: &RemoteTerminalCandidate,
+            ) -> Result<(), UseCaseError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                if candidate.authenticated_event_id == "authenticated-event-1" {
+                    Ok(())
+                } else {
+                    Err(error("terminal_not_authenticated"))
+                }
+            }
+        }
+
+        let (_temp, _store, request) = setup();
+        let verifier = CountingVerifier(AtomicUsize::new(0));
+        let fingerprint = "a".repeat(64);
+        let mut malformed = terminal_candidate(&request, fingerprint.clone());
+        malformed.request_fingerprint = "not-a-digest".into();
+        assert_eq!(
+            VerifiedRemoteTerminal::verify(malformed, &verifier)
+                .err()
+                .unwrap()
+                .code(),
+            "remote_terminal_invalid"
+        );
+        assert_eq!(verifier.0.load(Ordering::SeqCst), 0);
+
+        let mut unauthenticated = terminal_candidate(&request, fingerprint.clone());
+        unauthenticated.authenticated_event_id = "unverified".into();
+        assert_eq!(
+            VerifiedRemoteTerminal::verify(unauthenticated, &verifier)
+                .err()
+                .unwrap()
+                .code(),
+            "terminal_not_authenticated"
+        );
+        assert_eq!(verifier.0.load(Ordering::SeqCst), 1);
+
+        let proof: VerifiedRemoteTerminal = VerifiedRemoteTerminal::verify(
+            terminal_candidate(&request, fingerprint.clone()),
+            &verifier,
+        )
+        .unwrap();
+        let recovered: RemoteTerminalCandidate = proof.into_candidate();
+        assert_eq!(verifier.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            recovered.local_session_id,
+            request.semantics.local_session_id
+        );
+        assert_eq!(
+            recovered.remote_session_ref,
+            request.semantics.remote_session_ref
+        );
+        assert_eq!(
+            recovered.controlled_session_id,
+            request.semantics.controlled_session_id
+        );
+        assert_eq!(recovered.task_id, request.task_id);
+        assert_eq!(recovered.client_request_id, request.client_request_id);
+        assert_eq!(recovered.request_fingerprint, fingerprint);
+        assert_eq!(recovered.authenticated_event_id, "authenticated-event-1");
+        assert_eq!(recovered.live, request.live);
     }
 
     #[test]
