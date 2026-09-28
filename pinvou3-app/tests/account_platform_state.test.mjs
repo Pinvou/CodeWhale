@@ -1199,6 +1199,35 @@ test('BFF logout refreshes a stale CSRF token once before ending the session', a
   }
 });
 
+test('personal and admin logout treat another tab already ending the session as success', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith('/api/logout')) return new Response(JSON.stringify({ code: 'CSRF_REJECTED' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ authenticated: false }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const personal = new AccountPlatformBffClient('https://portal.example');
+    personal.csrfToken = 'p'.repeat(32);
+    assert.equal(await personal.logout(), null);
+    assert.equal(personal.csrfToken, '');
+
+    const admin = new AdminPlatformClient('https://portal.example');
+    admin.csrfToken = 'a'.repeat(32);
+    assert.equal(await admin.logout(), null);
+    assert.equal(admin.csrfToken, '');
+    assert.deepEqual(calls, [
+      'https://portal.example/api/logout',
+      'https://portal.example/api/session',
+      'https://portal.example/api/logout',
+      'https://portal.example/api/session',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('BFF client restores the recent order without browser persistence', async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;

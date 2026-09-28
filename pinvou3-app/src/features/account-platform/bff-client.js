@@ -268,6 +268,10 @@ export class AccountPlatformBffClient {
     let { response, payload } = await send();
     if (response.status === 403 && payload?.code === 'CSRF_REJECTED') {
       const session = await this.session();
+      if (!session.authenticated) {
+        this.csrfToken = '';
+        return null;
+      }
       if (session.authenticated && this.csrfToken) ({ response, payload } = await send());
     }
     if (!response.ok) throw errorFromResponse(response, payload);

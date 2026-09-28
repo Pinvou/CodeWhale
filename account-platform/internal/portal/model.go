@@ -7,6 +7,7 @@ type LoginFlow struct {
 	Nonce           string    `json:"nonce"`
 	ReturnTo        string    `json:"return_to"`
 	PreviousSession string    `json:"previous_session,omitempty"`
+	LineageRoot     string    `json:"lineage_root,omitempty"`
 	ExpiresAt       time.Time `json:"expires_at"`
 }
 
@@ -17,6 +18,7 @@ type SessionHandoff struct {
 
 type Session struct {
 	ID               string    `json:"id"`
+	LineageRoot      string    `json:"lineage_root,omitempty"`
 	AccessToken      string    `json:"access_token"`
 	RefreshToken     string    `json:"refresh_token"`
 	AccessExpiresAt  time.Time `json:"access_expires_at"`

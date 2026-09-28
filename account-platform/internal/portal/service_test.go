@@ -27,6 +27,9 @@ type memoryStore struct {
 	approvalClassifications map[string]ApprovalClassification
 	approvalWires           map[string]int
 	handoffs                map[string]SessionHandoff
+	logoutMarkers           map[string]time.Time
+	sessionRoots            map[string]string
+	lineageMembers          map[string]map[string]struct{}
 }
 
 type unavailableSessionStore struct{ *memoryStore }
@@ -37,12 +40,24 @@ func (s *unavailableSessionStore) GetSession(context.Context, string) (Session, 
 
 type deleteFailingSessionStore struct{ *memoryStore }
 
-func (s *deleteFailingSessionStore) DeleteSession(context.Context, string) error {
+func (s *deleteFailingSessionStore) LogoutSession(context.Context, string, string, time.Time) error {
 	return errors.New("session store unavailable")
 }
 
+type logoutBeforeRefreshSaveStore struct {
+	*memoryStore
+	markerExpiresAt time.Time
+}
+
+func (s *logoutBeforeRefreshSaveStore) SaveSession(ctx context.Context, session Session) error {
+	if err := s.memoryStore.LogoutSession(ctx, session.ID, sessionLineageRoot(session), s.markerExpiresAt); err != nil {
+		return err
+	}
+	return s.memoryStore.SaveSession(ctx, session)
+}
+
 func newMemoryStore() *memoryStore {
-	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}, approvalWires: map[string]int{}, handoffs: map[string]SessionHandoff{}}
+	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}, approvalWires: map[string]int{}, handoffs: map[string]SessionHandoff{}, logoutMarkers: map[string]time.Time{}, sessionRoots: map[string]string{}, lineageMembers: map[string]map[string]struct{}{}}
 }
 func (s *memoryStore) SaveFlow(_ context.Context, key string, value LoginFlow) error {
 	s.mu.Lock()
@@ -81,7 +96,58 @@ func (s *memoryStore) TakeSessionHandoff(_ context.Context, key string) (Session
 func (s *memoryStore) SaveSession(_ context.Context, value Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	root := sessionLineageRoot(value)
+	if mapped := s.sessionRoots[value.ID]; mapped != "" && mapped != root {
+		return ErrLoginFlowInvalidated
+	}
+	if _, invalidated := s.logoutMarkers[root]; invalidated {
+		return ErrLoginFlowInvalidated
+	}
+	value.LineageRoot = root
 	s.sessions[value.ID] = value
+	s.sessionRoots[value.ID] = root
+	s.addLineageMember(root, value.ID)
+	return nil
+}
+func (s *memoryStore) CommitLoginSession(_ context.Context, previousID string, value Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	root := sessionLineageRoot(value)
+	if mapped := s.sessionRoots[previousID]; previousID != "" && mapped != "" {
+		if value.LineageRoot != "" && root != mapped {
+			return ErrLoginFlowInvalidated
+		}
+		root = mapped
+	}
+	if _, invalidated := s.logoutMarkers[root]; invalidated {
+		return ErrLoginFlowInvalidated
+	}
+	value.LineageRoot = root
+	s.sessions[value.ID] = value
+	s.sessionRoots[value.ID] = root
+	s.addLineageMember(root, value.ID)
+	if previousID != "" {
+		delete(s.sessions, previousID)
+		delete(s.approvalWires, previousID)
+	}
+	return nil
+}
+func (s *memoryStore) ReplaceSessionFromHandoff(_ context.Context, previousID string, value Session, markerExpiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if previousID != "" {
+		oldRoot := s.sessionRoots[previousID]
+		if oldRoot == "" {
+			oldRoot = previousID
+		}
+		s.logoutMarkers[oldRoot] = markerExpiresAt
+		s.deleteLineage(oldRoot)
+	}
+	root := sessionLineageRoot(value)
+	value.LineageRoot = root
+	s.sessions[value.ID] = value
+	s.sessionRoots[value.ID] = root
+	s.addLineageMember(root, value.ID)
 	return nil
 }
 func (s *memoryStore) GetSession(_ context.Context, key string) (Session, error) {
@@ -93,12 +159,50 @@ func (s *memoryStore) GetSession(_ context.Context, key string) (Session, error)
 	}
 	return value, nil
 }
+func (s *memoryStore) ResolveSessionLineageRoot(_ context.Context, key string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	root := s.sessionRoots[key]
+	if root == "" {
+		return "", ErrSessionNotFound
+	}
+	return root, nil
+}
 func (s *memoryStore) DeleteSession(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, key)
 	delete(s.approvalWires, key)
 	return nil
+}
+func (s *memoryStore) LogoutSession(_ context.Context, key, rootHint string, markerExpiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	root := rootHint
+	if mapped := s.sessionRoots[key]; mapped != "" {
+		root = mapped
+	}
+	if root == "" {
+		root = key
+	}
+	s.logoutMarkers[root] = markerExpiresAt
+	s.deleteLineage(root)
+	return nil
+}
+
+func (s *memoryStore) addLineageMember(root, id string) {
+	if s.lineageMembers[root] == nil {
+		s.lineageMembers[root] = map[string]struct{}{}
+	}
+	s.lineageMembers[root][id] = struct{}{}
+}
+
+func (s *memoryStore) deleteLineage(root string) {
+	for member := range s.lineageMembers[root] {
+		delete(s.sessions, member)
+		delete(s.approvalWires, member)
+	}
+	delete(s.lineageMembers, root)
 }
 
 func (s *memoryStore) LockApprovalWireVersion(_ context.Context, session Session, preferred int) (int, error) {
@@ -153,7 +257,7 @@ func testService(t *testing.T, store Store) *Service {
 		}
 		return parsed
 	}
-	service, err := NewService(Config{PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.internal/token"), ClientID: "portal", AccountURL: parse("https://account.internal"), BillingURL: parse("https://billing.internal"), TokenGatewayURL: parse("https://token.internal"), SecureCookies: true}, store)
+	service, err := NewService(Config{PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.internal/token"), ClientID: "portal", AccountURL: parse("https://account.internal"), BillingURL: parse("https://billing.internal"), TokenGatewayURL: parse("https://token.internal"), SecureCookies: true, SessionLineageLogoutEnabled: true}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +283,22 @@ func TestLoginCreatesServerSidePKCEFlow(t *testing.T) {
 	}
 	if !strings.Contains(response.Header().Get("Set-Cookie"), "__Host-portal_flow=") || strings.Contains(response.Header().Get("Set-Cookie"), flow.Verifier) {
 		t.Fatal("flow cookie must contain only the opaque state")
+	}
+}
+
+func TestSessionLineageCapabilityStatusIsMachineReadable(t *testing.T) {
+	service := testService(t, newMemoryStore())
+	response := httptest.NewRecorder()
+	service.Handler(http.NotFoundHandler()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/session-lineage", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status = %d, headers = %#v", response.Code, response.Header())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["schema_version"] != float64(1) || body["capable"] != true || body["enabled"] != true {
+		t.Fatalf("status body = %#v", body)
 	}
 }
 
@@ -534,6 +654,217 @@ func TestLogoutFailsClosedWhenSessionCannotBeDeleted(t *testing.T) {
 		if cookie.Name == service.loggedOutCookieName() {
 			t.Fatalf("failed logout must not set a logout marker: %+v", cookie)
 		}
+	}
+}
+
+func TestLogoutDoesNotRefreshAndMissingSessionRetryIsIdempotent(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	now := time.Now().UTC()
+	service.now = func() time.Time { return now }
+	session := Session{
+		ID: "expired-access-session", AccessToken: "expired", RefreshToken: "would-refresh",
+		AccessExpiresAt: now.Add(-time.Minute), RefreshExpiresAt: now.Add(time.Hour),
+		CSRFToken: strings.Repeat("r", 32), CreatedAt: now.Add(-time.Hour),
+	}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	logout := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "https://portal.example/api/logout", nil)
+		request.Header.Set("Origin", "https://portal.example")
+		request.Header.Set("X-CSRF-Token", session.CSRFToken)
+		request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+		request.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: session.CSRFToken})
+		response := httptest.NewRecorder()
+		service.Handler(nil).ServeHTTP(response, request)
+		return response
+	}
+	if response := logout(); response.Code != http.StatusNoContent {
+		t.Fatalf("initial logout = %d %s", response.Code, response.Body.String())
+	}
+	if response := logout(); response.Code != http.StatusNoContent {
+		t.Fatalf("idempotent logout = %d %s", response.Code, response.Body.String())
+	}
+	if _, ok := store.logoutMarkers[session.ID]; !ok {
+		t.Fatal("logout tombstone was not retained")
+	}
+}
+
+func TestLogoutDistinguishesSessionStoreFailureFromMissingSession(t *testing.T) {
+	service := testService(t, &unavailableSessionStore{memoryStore: newMemoryStore()})
+	csrf := strings.Repeat("s", 32)
+	request := httptest.NewRequest(http.MethodPost, "https://portal.example/api/logout", nil)
+	request.Header.Set("Origin", "https://portal.example")
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: "opaque-session"})
+	request.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: csrf})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "LOGOUT_UNAVAILABLE") {
+		t.Fatalf("store failure = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestOIDCFlowStartedBeforeLogoutCannotRecreateSession(t *testing.T) {
+	store := newMemoryStore()
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":300,"refresh_expires_in":3600}`)
+	}))
+	defer tokenServer.Close()
+	service := testService(t, store)
+	tokenURL, _ := url.Parse(tokenServer.URL)
+	service.config.TokenURL = tokenURL
+	now := time.Now().UTC()
+	service.now = func() time.Time { return now }
+	old := Session{ID: "old-session", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("o", 32)}
+	if err := store.SaveSession(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	store.flows["pre-logout-flow"] = LoginFlow{Verifier: "verifier", ReturnTo: "/", PreviousSession: old.ID, ExpiresAt: now.Add(time.Minute)}
+
+	logoutRequest := httptest.NewRequest(http.MethodPost, "https://portal.example/api/logout", nil)
+	logoutRequest.Header.Set("Origin", "https://portal.example")
+	logoutRequest.Header.Set("X-CSRF-Token", old.CSRFToken)
+	logoutRequest.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: old.ID})
+	logoutRequest.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: old.CSRFToken})
+	logoutResponse := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(logoutResponse, logoutRequest)
+	if logoutResponse.Code != http.StatusNoContent {
+		t.Fatalf("logout = %d %s", logoutResponse.Code, logoutResponse.Body.String())
+	}
+
+	callback := httptest.NewRequest(http.MethodGet, "/auth/callback?state=pre-logout-flow&code=code", nil)
+	callback.AddCookie(&http.Cookie{Name: service.flowCookieName(), Value: "pre-logout-flow"})
+	callbackResponse := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(callbackResponse, callback)
+	if callbackResponse.Code != http.StatusConflict || !strings.Contains(callbackResponse.Body.String(), "LOGIN_FLOW_INVALIDATED") {
+		t.Fatalf("callback = %d %s", callbackResponse.Code, callbackResponse.Body.String())
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("invalidated callback recreated %d session(s)", len(store.sessions))
+	}
+}
+
+func TestLogoutRemovesOIDCCallbackSuccessorCommittedDuringLogout(t *testing.T) {
+	store := newMemoryStore()
+	now := time.Now().UTC()
+	old := Session{ID: "old-session", RefreshExpiresAt: now.Add(time.Hour)}
+	successor := Session{ID: "callback-session", LineageRoot: old.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveSession(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitLoginSession(context.Background(), old.ID, successor); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LogoutSession(context.Background(), old.ID, sessionLineageRoot(old), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("logout left callback successor sessions: %#v", store.sessions)
+	}
+}
+
+func TestLogoutOfAnyGenerationInvalidatesTheEntireSessionLineage(t *testing.T) {
+	store := newMemoryStore()
+	now := time.Now().UTC()
+	root := Session{ID: "root", RefreshExpiresAt: now.Add(time.Hour)}
+	first := Session{ID: "first", LineageRoot: root.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	second := Session{ID: "second", LineageRoot: root.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveSession(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitLoginSession(context.Background(), root.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitLoginSession(context.Background(), first.ID, second); err != nil {
+		t.Fatal(err)
+	}
+	// The first generation has already been replaced, so this also covers an
+	// idempotent logout request that resolves its immutable root mapping.
+	if err := store.LogoutSession(context.Background(), first.ID, "", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("lineage logout left sessions: %#v", store.sessions)
+	}
+	late := Session{ID: "late", LineageRoot: root.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.CommitLoginSession(context.Background(), second.ID, late); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatalf("late lineage callback error = %v", err)
+	}
+}
+
+func TestRefreshCannotSaveAfterLogoutWinsTheExchangeRace(t *testing.T) {
+	store := newMemoryStore()
+	now := time.Now().UTC()
+	session := Session{ID: "refresh-race", RefreshToken: "refresh", AccessExpiresAt: now.Add(-time.Minute), RefreshExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour)}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":300,"refresh_expires_in":3600}`)
+	}))
+	defer tokenServer.Close()
+	service := testService(t, &logoutBeforeRefreshSaveStore{memoryStore: store, markerExpiresAt: now.Add(time.Hour)})
+	tokenURL, _ := url.Parse(tokenServer.URL)
+	service.config.TokenURL = tokenURL
+	service.now = func() time.Time { return now }
+	if _, err := service.refreshSession(context.Background(), session); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatalf("refresh race error = %v", err)
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("refresh revived logged-out session: %#v", store.sessions)
+	}
+}
+
+func TestStaleDescendantCookieResolvesAuthoritativeRootAfterLostLogoutResponse(t *testing.T) {
+	store := newMemoryStore()
+	now := time.Now().UTC()
+	root := Session{ID: "root", RefreshExpiresAt: now.Add(time.Hour)}
+	first := Session{ID: "first", LineageRoot: root.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	second := Session{ID: "second", LineageRoot: root.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	_ = store.SaveSession(context.Background(), root)
+	_ = store.CommitLoginSession(context.Background(), root.ID, first)
+	_ = store.CommitLoginSession(context.Background(), first.ID, second)
+	if err := store.LogoutSession(context.Background(), second.ID, "", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.ResolveSessionLineageRoot(context.Background(), second.ID)
+	if err != nil || resolved != root.ID {
+		t.Fatalf("resolved stale root = %q, %v", resolved, err)
+	}
+	staleLogin := Session{ID: "stale-login", LineageRoot: resolved, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.CommitLoginSession(context.Background(), second.ID, staleLogin); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatalf("stale descendant login error = %v", err)
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("stale descendant revived lineage: %#v", store.sessions)
+	}
+}
+
+func TestLogoutUsesStoredRootForLegacySessionJSON(t *testing.T) {
+	store := newMemoryStore()
+	now := time.Now().UTC()
+	root := Session{ID: "root", RefreshExpiresAt: now.Add(time.Hour)}
+	legacy := Session{ID: "legacy-child", RefreshExpiresAt: now.Add(time.Hour)} // no JSON lineage_root
+	_ = store.SaveSession(context.Background(), root)
+	store.sessions[legacy.ID] = legacy
+	store.sessionRoots[legacy.ID] = root.ID
+	store.addLineageMember(root.ID, legacy.ID)
+	if err := store.LogoutSession(context.Background(), legacy.ID, legacy.ID, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.logoutMarkers[root.ID]; !ok {
+		t.Fatal("logout did not tombstone the authoritative stored root")
+	}
+	if len(store.sessions) != 0 {
+		t.Fatalf("logout left lineage sessions: %#v", store.sessions)
+	}
+	late := Session{ID: "late-root-flow", LineageRoot: root.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.CommitLoginSession(context.Background(), root.ID, late); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatalf("late root flow error = %v", err)
 	}
 }
 

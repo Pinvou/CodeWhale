@@ -1,0 +1,4 @@
+services:
+  token-portal:
+    environment:
+      PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED: "true"

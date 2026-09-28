@@ -36,9 +36,21 @@ func (s *failingSessionHandoffStore) SaveSession(ctx context.Context, session Se
 
 func (s *failingSessionHandoffStore) DeleteSession(ctx context.Context, id string) error {
 	if s.deleteErr != nil {
-		return s.deleteErr
+		err := s.deleteErr
+		s.deleteErr = nil
+		return err
 	}
 	return s.memoryStore.DeleteSession(ctx, id)
+}
+
+func (s *failingSessionHandoffStore) ReplaceSessionFromHandoff(ctx context.Context, previousID string, session Session, markerExpiresAt time.Time) error {
+	if s.saveSessionErr != nil {
+		return s.saveSessionErr
+	}
+	if previousID != "" && s.deleteErr != nil {
+		return s.deleteErr
+	}
+	return s.memoryStore.ReplaceSessionFromHandoff(ctx, previousID, session, markerExpiresAt)
 }
 
 func newSessionHandoffTestService(t *testing.T, refreshedUser string) (*Service, *memoryStore) {
@@ -81,7 +93,7 @@ func newSessionHandoffTestService(t *testing.T, refreshedUser string) (*Service,
 		PublicURL: publicURL, AccountURL: accountURL, BillingURL: accountURL,
 		TokenGatewayURL: accountURL, TokenURL: tokenURL, AuthorizationURL: tokenURL,
 		ClientID: "portal", HandoffClientID: "portal-handoff", HandoffClientSecret: "handoff-secret",
-		HandoffSubjectTokenEnabled: true, SessionHandoffTTL: 30 * time.Second,
+		HandoffSubjectTokenEnabled: true, SessionHandoffTTL: 30 * time.Second, SessionLineageLogoutEnabled: true,
 		SessionMaxAge: 30 * 24 * time.Hour,
 	}, store)
 	if err != nil {
@@ -475,6 +487,7 @@ func TestSessionHandoffConsumeReplacesPreviousSessionAndSetsSecureCookies(t *tes
 	if err := store.SaveSession(context.Background(), previous); err != nil {
 		t.Fatal(err)
 	}
+	store.logoutMarkers[previous.ID] = time.Now().Add(time.Hour)
 	ticket := createSessionHandoffTicket(t, service)
 	request := httptest.NewRequest(http.MethodPost, "/portal-session-handoff/consume", strings.NewReader(`{"ticket":"`+ticket+`"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -490,6 +503,16 @@ func TestSessionHandoffConsumeReplacesPreviousSessionAndSetsSecureCookies(t *tes
 	}
 	if len(store.sessions) != 1 {
 		t.Fatalf("session count = %d", len(store.sessions))
+	}
+	if _, exists := store.logoutMarkers[previous.ID]; !exists {
+		t.Fatal("desktop handoff removed the previous lineage tombstone")
+	}
+	lateA := Session{ID: "late-a", LineageRoot: previous.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.CommitLoginSession(context.Background(), previous.ID, lateA); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatalf("old A callback after handoff error = %v", err)
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("old A callback changed B session count = %d", len(store.sessions))
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) != 3 {
@@ -511,8 +534,32 @@ func TestSessionHandoffConsumeReplacesPreviousSessionAndSetsSecureCookies(t *tes
 	}
 }
 
+func TestSessionHandoffInvalidatesOlderFlowWithoutPriorLogout(t *testing.T) {
+	store := newMemoryStore()
+	now := time.Now().UTC()
+	accountA := Session{ID: "account-a", RefreshExpiresAt: now.Add(time.Hour)}
+	accountB := Session{ID: "account-b", LineageRoot: "account-b", RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveSession(context.Background(), accountA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSessionFromHandoff(context.Background(), accountA.ID, accountB, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	lateA := Session{ID: "late-account-a", LineageRoot: accountA.ID, RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.CommitLoginSession(context.Background(), accountA.ID, lateA); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatalf("old A callback error = %v", err)
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("session count = %d", len(store.sessions))
+	}
+	if _, err := store.GetSession(context.Background(), accountB.ID); err != nil {
+		t.Fatalf("desktop B session missing: %v", err)
+	}
+}
+
 func TestSessionHandoffSaveSessionFailureConsumesTicketWithoutPartialSession(t *testing.T) {
 	service, store := newSessionHandoffTestService(t, "11111111-1111-4111-8111-111111111111")
+	service.config.SessionLineageLogoutEnabled = false
 	ticket := createSessionHandoffTicket(t, service)
 	service.store = &failingSessionHandoffStore{memoryStore: store, saveSessionErr: errors.New("save failed")}
 
@@ -522,6 +569,36 @@ func TestSessionHandoffSaveSessionFailureConsumesTicketWithoutPartialSession(t *
 	}
 	if len(store.handoffs) != 0 || len(store.sessions) != 0 {
 		t.Fatal("a failed session save must leave no replayable or partial session")
+	}
+}
+
+func TestCapabilityPhaseHandoffDeleteFailureCompensatesNewSession(t *testing.T) {
+	service, store := newSessionHandoffTestService(t, "11111111-1111-4111-8111-111111111111")
+	service.config.SessionLineageLogoutEnabled = false
+	now := time.Now().UTC()
+	previous := Session{ID: "previous", RefreshExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveSession(context.Background(), previous); err != nil {
+		t.Fatal(err)
+	}
+	ticket := createSessionHandoffTicket(t, service)
+	service.store = &failingSessionHandoffStore{memoryStore: store, deleteErr: errors.New("delete failed")}
+	request := httptest.NewRequest(http.MethodPost, "/portal-session-handoff/consume", strings.NewReader(`{"ticket":"`+ticket+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", service.config.PublicURL.String())
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: previous.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if len(store.handoffs) != 0 {
+		t.Fatal("failed replacement left a replayable ticket")
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("compensation left B orphan: %#v", store.sessions)
+	}
+	if _, err := store.GetSession(context.Background(), previous.ID); err != nil {
+		t.Fatalf("previous A session was not preserved: %v", err)
 	}
 }
 

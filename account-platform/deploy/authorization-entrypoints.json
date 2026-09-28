@@ -108,6 +108,7 @@
     { "source": "account-platform/internal/identityadapter/service.go", "receiver": "router", "method": "POST", "path": "/realms/pinvou/protocol/openid-connect/token", "scope": "public", "strategy": "protocol.oidc.risk-admitted-token" },
     { "source": "account-platform/internal/portal/service.go", "receiver": "router", "method": "GET", "path": "/auth/login", "scope": "public", "strategy": "protocol.oidc.pkce-start" },
     { "source": "account-platform/internal/portal/service.go", "receiver": "router", "method": "GET", "path": "/auth/callback", "scope": "public", "strategy": "protocol.oidc.pkce-callback" },
+    { "source": "account-platform/internal/portal/service.go", "receiver": "router", "method": "GET", "path": "/health/session-lineage", "scope": "public", "strategy": "protocol.read-only-session-lineage-rollout-status" },
     { "source": "account-platform/internal/portal/service.go", "receiver": "router", "method": "GET", "path": "/portal-session-handoff", "scope": "public", "strategy": "protocol.desktop-session-handoff-page" },
     { "source": "account-platform/internal/portal/service.go", "receiver": "router", "method": "POST", "path": "/portal-session-handoff", "scope": "authenticated", "strategy": "authenticated.desktop-access-token-exchange" },
     { "source": "account-platform/internal/portal/service.go", "receiver": "router", "method": "POST", "path": "/portal-session-handoff/consume", "scope": "public", "strategy": "protocol.one-time-session-handoff-consumption" },

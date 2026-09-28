@@ -39,6 +39,7 @@ type Config struct {
 	BillingURL                          *url.URL
 	TokenGatewayURL                     *url.URL
 	HandoffSubjectTokenEnabled          bool
+	SessionLineageLogoutEnabled         bool
 	SessionHandoffTTL                   time.Duration
 	ClientVersion                       string
 	TokenAdminProxyHMACKey              []byte
@@ -135,6 +136,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.Any("/api/admin/approvals/requests/*resource", httpserver.AdaptFunc(s.adminApprovalRequests))
 	router.POST("/api/admin/approvals/prechecks", httpserver.AdaptFunc(s.adminApprovalPrechecks))
 	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
+	router.GET("/health/session-lineage", httpserver.AdaptFunc(s.sessionLineageStatus))
 	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
 	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
 	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
@@ -165,7 +167,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
 		isSessionHandoffRoute := r.URL.Path == "/portal-session-handoff" || r.URL.Path == "/portal-session-handoff/consume"
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || isSessionHandoffRoute || static == nil {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/health/") || isSessionHandoffRoute || static == nil {
 			router.ServeHTTP(w, r)
 			return
 		}
@@ -197,6 +199,15 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		static.ServeHTTP(w, r)
 	})
 	return s.tokenAdminIngressDeadline(application)
+}
+
+func (s *Service) sessionLineageStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{
+		"schema_version": 1,
+		"capable":        true,
+		"enabled":        s.config.SessionLineageLogoutEnabled,
+	})
 }
 
 func (s *Service) tokenAdminIngressDeadline(next http.Handler) http.Handler {
@@ -238,6 +249,22 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	forceLogin := forceLoginRequested || loggedOut
 	locale := portalLocale(r.URL.Query().Get("locale"))
 	previousSession := ""
+	lineageRoot := ""
+	if cookie, cookieErr := r.Cookie(s.sessionCookieName()); cookieErr == nil {
+		previousSession = strings.TrimSpace(cookie.Value)
+		if previousSession != "" {
+			resolvedRoot, previousErr := s.store.ResolveSessionLineageRoot(r.Context(), previousSession)
+			switch {
+			case previousErr == nil:
+				lineageRoot = resolvedRoot
+			case errors.Is(previousErr, ErrSessionNotFound):
+				lineageRoot = previousSession
+			case previousErr != nil:
+				api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_UNAVAILABLE", "the previous login session could not be checked", httpserver.RequestID(r.Context()))
+				return
+			}
+		}
+	}
 	if reauthenticate {
 		session, sessionErr := s.authenticatedSession(r.Context(), r)
 		if sessionErr != nil {
@@ -245,11 +272,13 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		previousSession = session.ID
+		lineageRoot = sessionLineageRoot(session)
 	} else if forceLoginRequested {
 		session, sessionErr := s.authenticatedSession(r.Context(), r)
 		switch {
 		case sessionErr == nil:
 			previousSession = session.ID
+			lineageRoot = sessionLineageRoot(session)
 		case errors.Is(sessionErr, ErrSessionNotFound):
 			// A forced desktop fallback must also work in a fresh browser.
 		case sessionErr != nil:
@@ -266,7 +295,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
-	flow := LoginFlow{Verifier: verifier, Nonce: nonce, ReturnTo: returnTo, PreviousSession: previousSession, ExpiresAt: s.now().Add(10 * time.Minute)}
+	flow := LoginFlow{Verifier: verifier, Nonce: nonce, ReturnTo: returnTo, PreviousSession: previousSession, LineageRoot: lineageRoot, ExpiresAt: s.now().Add(10 * time.Minute)}
 	if err := s.store.SaveFlow(r.Context(), state, flow); err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_UNAVAILABLE", "login could not be started", httpserver.RequestID(r.Context()))
 		return
@@ -324,17 +353,26 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 	sessionID, sessionIDErr := randomToken(32)
 	csrfToken, csrfErr := randomToken(32)
 	session := Session{ID: sessionID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, AccessExpiresAt: now.Add(time.Duration(tokens.ExpiresIn) * time.Second), RefreshExpiresAt: s.refreshExpiry(now, tokens.RefreshExpiresIn, now.Add(s.config.SessionMaxAge)), CSRFToken: csrfToken, CreatedAt: now, ApprovalV2Eligible: true}
+	session.LineageRoot = strings.TrimSpace(flow.LineageRoot)
+	if session.LineageRoot == "" && flow.PreviousSession != "" {
+		session.LineageRoot = flow.PreviousSession
+	}
+	if session.LineageRoot == "" {
+		session.LineageRoot = session.ID
+	}
 	session.OIDCClientID = s.config.ClientID
-	if sessionIDErr != nil || csrfErr != nil || session.AccessToken == "" || session.RefreshToken == "" || tokens.ExpiresIn <= 0 || !strings.EqualFold(tokens.TokenType, "Bearer") || s.store.SaveSession(r.Context(), session) != nil {
+	if sessionIDErr != nil || csrfErr != nil || session.AccessToken == "" || session.RefreshToken == "" || tokens.ExpiresIn <= 0 || !strings.EqualFold(tokens.TokenType, "Bearer") {
 		api.WriteError(w, http.StatusBadGateway, "LOGIN_SESSION_FAILED", "login session could not be created", httpserver.RequestID(r.Context()))
 		return
 	}
-	if flow.PreviousSession != "" && flow.PreviousSession != session.ID {
-		if err := s.store.DeleteSession(r.Context(), flow.PreviousSession); err != nil {
-			_ = s.store.DeleteSession(r.Context(), session.ID)
-			api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_SESSION_FAILED", "previous login session could not be replaced", httpserver.RequestID(r.Context()))
+	if err := s.store.CommitLoginSession(r.Context(), flow.PreviousSession, session); err != nil {
+		s.expireCookie(w, s.flowCookieName(), true)
+		if errors.Is(err, ErrLoginFlowInvalidated) {
+			api.WriteError(w, http.StatusConflict, "LOGIN_FLOW_INVALIDATED", "login was cancelled by an explicit logout", httpserver.RequestID(r.Context()))
 			return
 		}
+		api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_SESSION_FAILED", "login session could not be created", httpserver.RequestID(r.Context()))
+		return
 	}
 	s.expireCookie(w, s.flowCookieName(), true)
 	s.expireCookie(w, s.loggedOutCookieName(), true)
@@ -397,12 +435,41 @@ func credentialOriginProjection(config Config) string {
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
-	session, err := s.authenticatedSession(r.Context(), r)
-	if err != nil || !s.validMutation(r, session) {
+	if !s.validLogoutRequest(r) {
 		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := s.store.DeleteSession(r.Context(), session.ID); err != nil {
+	sessionCookie, err := r.Cookie(s.sessionCookieName())
+	if err != nil || strings.TrimSpace(sessionCookie.Value) == "" {
+		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	sessionID := strings.TrimSpace(sessionCookie.Value)
+	session, err := s.store.GetSession(r.Context(), sessionID)
+	lineageRoot := ""
+	switch {
+	case err == nil:
+		lineageRoot = sessionLineageRoot(session)
+		csrfHeader := r.Header.Get("X-CSRF-Token")
+		if subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(session.CSRFToken)) != 1 {
+			api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+	case errors.Is(err, ErrSessionNotFound):
+		// A previous logout may have deleted the session while its response was
+		// lost. The same-origin double-submit proof still authorizes only the
+		// idempotent cleanup of the opaque session ID already in this browser.
+	case err != nil:
+		api.WriteError(w, http.StatusServiceUnavailable, "LOGOUT_UNAVAILABLE", "the login session could not be checked", httpserver.RequestID(r.Context()))
+		return
+	}
+	var logoutErr error
+	if s.config.SessionLineageLogoutEnabled {
+		logoutErr = s.store.LogoutSession(r.Context(), sessionID, lineageRoot, s.now().Add(s.config.SessionMaxAge))
+	} else {
+		logoutErr = s.store.DeleteSession(r.Context(), sessionID)
+	}
+	if logoutErr != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "LOGOUT_UNAVAILABLE", "the login session could not be ended", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -410,6 +477,18 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
 	s.expireCookie(w, s.csrfCookieName(), false)
 	s.setCookie(w, s.loggedOutCookieName(), "1", s.now().Add(s.config.SessionMaxAge), true)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) validLogoutRequest(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	parsed, err := url.Parse(origin)
+	if err != nil || origin == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Scheme != s.config.PublicURL.Scheme || parsed.Host != s.config.PublicURL.Host {
+		return false
+	}
+	csrfCookie, err := r.Cookie(s.csrfCookieName())
+	header := r.Header.Get("X-CSRF-Token")
+	return err == nil && len(header) >= 32 && subtle.ConstantTimeCompare([]byte(header), []byte(csrfCookie.Value)) == 1
 }
 
 func (s *Service) proxyAccount(w http.ResponseWriter, r *http.Request) {

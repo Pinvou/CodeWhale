@@ -327,6 +327,8 @@ services:
       PORTAL_HANDOFF_OIDC_CLIENT_ID: "pinvou-token-portal-handoff"
       PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE: "/var/run/secrets/pinvou/portal-handoff/client-secret"
       PORTAL_SESSION_HANDOFF: "true"
+      # Phase 1 capability rollout default. Enable only in a later deployment.
+      PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED: "false"
       REDIS_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
       ACCOUNT_HTTP_URL: "http://account-service:8080"
       BILLING_HTTP_URL: "http://billing-service:8080"

@@ -102,6 +102,7 @@ func (s *Service) createSessionHandoff(w http.ResponseWriter, r *http.Request) {
 		RefreshExpiresAt: accessExpiresAt,
 		CSRFToken:        csrfToken, CreatedAt: now, ApprovalV2Eligible: true,
 	}
+	session.LineageRoot = session.ID
 	session.OIDCClientID = s.config.HandoffClientID
 	if sessionIDErr != nil || csrfTokenErr != nil || ticketErr != nil {
 		api.WriteError(w, http.StatusInternalServerError, "SESSION_HANDOFF_FAILED", "the session handoff could not be created", httpserver.RequestID(r.Context()))
@@ -157,17 +158,26 @@ func (s *Service) consumeSessionHandoff(w http.ResponseWriter, r *http.Request) 
 		api.WriteError(w, http.StatusUnauthorized, "SESSION_HANDOFF_INVALID", "the session handoff ticket is invalid or expired", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := s.store.SaveSession(r.Context(), handoff.Session); err != nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "SESSION_HANDOFF_UNAVAILABLE", "the portal session could not be created", httpserver.RequestID(r.Context()))
-		return
-	}
 	previousSession, previousErr := r.Cookie(s.sessionCookieName())
-	if previousErr == nil && previousSession.Value != "" && previousSession.Value != handoff.Session.ID {
-		if err := s.store.DeleteSession(r.Context(), previousSession.Value); err != nil {
-			_ = s.store.DeleteSession(r.Context(), handoff.Session.ID)
-			api.WriteError(w, http.StatusServiceUnavailable, "SESSION_HANDOFF_UNAVAILABLE", "the previous portal session could not be replaced", httpserver.RequestID(r.Context()))
-			return
+	previousSessionID := ""
+	if previousErr == nil && previousSession.Value != handoff.Session.ID {
+		previousSessionID = strings.TrimSpace(previousSession.Value)
+	}
+	var replaceErr error
+	if s.config.SessionLineageLogoutEnabled {
+		replaceErr = s.store.ReplaceSessionFromHandoff(r.Context(), previousSessionID, handoff.Session, s.now().Add(s.config.SessionMaxAge))
+	} else {
+		replaceErr = s.store.SaveSession(r.Context(), handoff.Session)
+		if replaceErr == nil && previousSessionID != "" {
+			replaceErr = s.store.DeleteSession(r.Context(), previousSessionID)
+			if replaceErr != nil {
+				_ = s.store.DeleteSession(r.Context(), handoff.Session.ID)
+			}
 		}
+	}
+	if replaceErr != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "SESSION_HANDOFF_UNAVAILABLE", "the previous portal session could not be replaced", httpserver.RequestID(r.Context()))
+		return
 	}
 	s.setCookie(w, s.sessionCookieName(), handoff.Session.ID, handoff.Session.RefreshExpiresAt, true)
 	s.setCookie(w, s.csrfCookieName(), handoff.Session.CSRFToken, handoff.Session.RefreshExpiresAt, false)

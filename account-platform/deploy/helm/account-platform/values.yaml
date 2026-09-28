@@ -46,6 +46,9 @@ images:
   nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
 
 portal:
+  # Phase 2 only: keep false during the capable-binary rollout, then enable in
+  # a separate rollout after every Portal replica reports the new version.
+  sessionLineageLogoutEnabled: false
   adminModelTokenIAEnabled: false
   adminTokenResourceFormsEnabled: false
   adminModelOperationsDetailsEnabled: false

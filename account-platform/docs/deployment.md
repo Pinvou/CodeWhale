@@ -169,6 +169,36 @@ Portal 的浏览器授权地址使用公开 issuer；服务端授权码交换使
 `PORTAL_PRIVATE_CA_FILE` 在 Portal 专用 HTTP 客户端中扩展系统信任。不得把授权码交换发送到只允许密码和刷新令牌的公网风控入口。
 `PORTAL_SESSION_HANDOFF=true` 仅在用户 Realm 已创建独立 confidential 客户端 `pinvou-token-portal-handoff`、仅为该客户端开启标准 Token Exchange、桌面令牌显式包含该客户端 audience、普通 Portal 与 Credential Portal 均保持 Token Exchange 关闭，并且 Portal Redis ACL 精确包含 `portal:session-handoff:*` 后启用。Compose 从独立只读目录挂载 client secret；Helm 从 `global.runtimeSecret` 的 `portal-handoff-oidc-client-secret` 键投射文件。交接只交换短时 access token，不请求或保存 refresh token；Portal Cookie 会话不得超过交换 token 的剩余有效期。交接票据固定为单次消费且最长 60 秒，生产配置使用 30 秒。
 
+Portal 会话 lineage 退出协议必须分两次部署，禁止在同一次滚动中直接启用：
+
+1. 能力阶段保持 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED=false`，先滚动全部 Portal 副本。该版本会兼容地写入 `portal:session-root:*` / `portal:lineage-members:*`，并阻止 refresh 覆盖已经存在的退出墓碑，但显式退出仍沿用旧删除语义。
+2. 通过部署清单确认所有 Portal Pod 均已运行能力版本且第一轮 rollout 完成后，单独把 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED=true` 发起第二次 rollout。此时任一代会话退出和桌面账号交接才会写 lineage 墓碑并清理整个 lineage。
+3. 回滚功能时只关闭开关，不先回滚二进制；待所有副本都关闭新语义且现有墓碑自然过期后，才允许回滚到不具备 lineage 能力的版本。不得让旧进程与已启用新语义的进程并存，否则旧进程可能在退出后写回会话。
+
+Compose 与 Helm 默认值均固定为 `false`，生产配置也不得预置为 `true`。墓碑保留期使用 Portal 最大会话期，长于 OIDC flow 的 10 分钟自然 TTL。
+
+Kubernetes 必须通过受审计脚本执行上述顺序：
+
+```bash
+./deploy/runbooks/session-lineage-rollout.sh phase1 <namespace> <release> <repository> <tag> sha256:<digest>
+./deploy/runbooks/session-lineage-rollout.sh phase2 <namespace> <release> <repository> <tag> sha256:<digest>
+```
+
+脚本使用 Kubernetes `Lease` 作为互斥锁，陈旧锁接管通过 `resourceVersion` 的 `replace` 实现 CAS；释放通过本地 `kubectl proxy` 向 API Server 发送同时带 UID 与 resourceVersion precondition 的 `DeleteOptions`，对象被更新或替换时都不会误删新锁。普通 Kubernetes 请求限制为 45 秒，Pod 删除等待限制为 330 秒；正常与补偿 Helm 均由 660 秒进程硬时限、30 秒终止宽限和 `--timeout 10m` 约束，组合上界短于 1800 秒 Lease TTL，且没有环境变量绕过入口。运维身份至少需要目标命名空间内 Deployment 的 get/patch（含 scale）、Pod 的 get/list 及 `pods/portforward` create、ConfigMap 的 get/create/delete、Lease 的 get/create/update/delete、Helm release Secret 的 get/list/create/update/patch，以及 Chart 所含 Deployment/Service/ServiceAccount/NetworkPolicy 等资源的 get/list/create/update/patch/delete；还需要本机建立 `kubectl proxy`。脚本要求已有 Helm 3 release，并依赖经验证版本的 Kubernetes `kubectl`、Helm 3、`curl`、`node`、GNU `timeout`/`sha256sum`/`stat`、`sed`、`head`、`od`、`mktemp`、`chmod`。生产角色必须预先用 `kubectl auth can-i` 验证上述精确动词和子资源。所有 `helm upgrade` 使用 `--reuse-values`，不会以 Chart 默认值重建生产配置。
+
+阶段 1 会以固定 digest 和 `--atomic` 部署、逐 Pod 记录 UID 与 `imageID`、逐 Pod 探测 `GET /health/session-lineage` 得到 `{"schema_version":1,"capable":true,"enabled":false}`，并以 create-only ConfigMap 保存集合哈希；其 `metadata.creationTimestamp` 是 600 秒排空门槛的唯一时间基准，不信任执行机时钟。阶段 2 强制校验该证据、当前完整 Pod 集合及 digest，先记录副本数并安装失败补偿，再缩容到 0、确认旧 Pod 全部消失，最后以独立 `--atomic` Helm upgrade 恢复副本并打开开关，因而不存在 false/true Pod 重叠。四个动作均持有集群互斥锁。回滚证据绑定本次 activation generation；重新启用会使旧证据失效。二进制回滚前必须执行 `binary-rollback-check` 并满足固定 2592000 秒等待期，不得通过环境变量缩短。
+
+Compose 单实例使用同一可执行编排入口；它要求 Docker Compose v2、`flock`、`curl` 和 `node`，固定并验证镜像 RepoDigest，持有文件锁，且拒绝非当前用户所有、符号链接或非 `0700` 的证据目录。脚本保存容器 ID、不可变 image ID 和启动时间，在阶段 2 强制校验同一容器已稳定 600 秒；所有启动及恢复都使用有界 `--wait`，所有阶段显式传递 `TOKEN_PORTAL_IMAGE`：
+
+```bash
+./deploy/runbooks/session-lineage-compose-rollout.sh phase1 <repository>@sha256:<digest> <受保护证据目录>
+./deploy/runbooks/session-lineage-compose-rollout.sh phase2 <repository>@sha256:<digest> <受保护证据目录>
+./deploy/runbooks/session-lineage-compose-rollout.sh rollback <repository>@sha256:<digest> <受保护证据目录>
+./deploy/runbooks/session-lineage-compose-rollout.sh binary-rollback-check <repository>@sha256:<digest> <受保护证据目录>
+```
+
+不得直接修改 `compose.business.yaml` 中固定的 `false`；关闭时去掉 override 并重新创建 `token-portal`，确认状态端点返回 `enabled:false`。
+
 ### 6.3 手机认证
 
 - `MOBILE_AUTH_ENABLED`

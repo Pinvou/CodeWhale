@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/redisconnection"
@@ -13,6 +14,7 @@ import (
 )
 
 var ErrSessionNotFound = errors.New("portal session not found")
+var ErrLoginFlowInvalidated = errors.New("portal login flow invalidated by logout")
 var ErrApprovalWireUnavailable = errors.New("approval wire selection unavailable")
 
 type ApprovalWireLocker interface {
@@ -30,8 +32,12 @@ type Store interface {
 	SaveSessionHandoff(context.Context, string, SessionHandoff) error
 	TakeSessionHandoff(context.Context, string) (SessionHandoff, error)
 	SaveSession(context.Context, Session) error
+	CommitLoginSession(context.Context, string, Session) error
+	ReplaceSessionFromHandoff(context.Context, string, Session, time.Time) error
 	GetSession(context.Context, string) (Session, error)
+	ResolveSessionLineageRoot(context.Context, string) (string, error)
 	DeleteSession(context.Context, string) error
+	LogoutSession(context.Context, string, string, time.Time) error
 	SaveApprovalClassification(context.Context, ApprovalClassification) error
 	GetApprovalClassification(context.Context, string, string) (ApprovalClassification, error)
 	TryRefreshLock(context.Context, string) (bool, error)
@@ -95,15 +101,138 @@ func (s *RedisStore) TakeSessionHandoff(ctx context.Context, hash string) (Sessi
 }
 
 func (s *RedisStore) SaveSession(ctx context.Context, session Session) error {
-	body, err := json.Marshal(session)
+	root := sessionLineageRoot(session)
+	session.LineageRoot = root
+	body, ttl, err := marshalSession(session)
 	if err != nil {
 		return err
 	}
+	result, err := s.client.Eval(ctx, `
+local root = redis.call('GET', KEYS[2]) or ARGV[3]
+if root ~= ARGV[3] or redis.call('EXISTS', 'portal:logout:' .. root) == 1 then
+  return 0
+end
+local lineage_key = 'portal:lineage-members:' .. root
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('SET', KEYS[2], root, 'PX', ARGV[2])
+redis.call('SADD', lineage_key, ARGV[4])
+redis.call('PEXPIRE', lineage_key, ARGV[2])
+local members = redis.call('SMEMBERS', lineage_key)
+for _, member in ipairs(members) do
+  redis.call('SET', 'portal:session-root:' .. member, root, 'PX', ARGV[2])
+end
+return 1
+`, []string{sessionKey(session.ID), sessionRootKey(session.ID)}, body, ttl.Milliseconds(), root, session.ID).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return ErrLoginFlowInvalidated
+	}
+	return nil
+}
+
+func sessionKey(id string) string          { return "portal:session:" + id }
+func sessionRootKey(id string) string      { return "portal:session-root:" + id }
+func logoutMarkerKey(root string) string   { return "portal:logout:" + root }
+func lineageMembersKey(root string) string { return "portal:lineage-members:" + root }
+
+func sessionLineageRoot(session Session) string {
+	if root := strings.TrimSpace(session.LineageRoot); root != "" {
+		return root
+	}
+	return session.ID
+}
+
+func marshalSession(session Session) ([]byte, time.Duration, error) {
+	body, err := json.Marshal(session)
+	if err != nil {
+		return nil, 0, err
+	}
 	ttl := time.Until(session.RefreshExpiresAt)
 	if ttl <= 0 {
+		return nil, 0, ErrSessionNotFound
+	}
+	return body, ttl, nil
+}
+
+// CommitLoginSession atomically rejects an OIDC callback whose predecessor was
+// explicitly logged out. This closes the callback-after-logout race without
+// reviving the old browser identity.
+func (s *RedisStore) CommitLoginSession(ctx context.Context, previousID string, session Session) error {
+	root := sessionLineageRoot(session)
+	session.LineageRoot = root
+	body, ttl, err := marshalSession(session)
+	if err != nil {
+		return err
+	}
+	result, err := s.client.Eval(ctx, `
+local root = ARGV[3]
+if ARGV[5] ~= '' then
+  local mapped = redis.call('GET', KEYS[1])
+  if mapped then
+    if root ~= '' and root ~= mapped then
+      return 0
+    end
+    root = mapped
+  end
+end
+if root == '' then root = ARGV[6] end
+if redis.call('EXISTS', 'portal:logout:' .. root) == 1 then
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+redis.call('SET', KEYS[5], root, 'PX', ARGV[2])
+local lineage_key = 'portal:lineage-members:' .. root
+redis.call('SADD', lineage_key, ARGV[4])
+redis.call('PEXPIRE', lineage_key, ARGV[2])
+local members = redis.call('SMEMBERS', lineage_key)
+for _, member in ipairs(members) do
+  redis.call('SET', 'portal:session-root:' .. member, root, 'PX', ARGV[2])
+end
+if ARGV[5] ~= '' then
+  redis.call('DEL', KEYS[3], KEYS[4])
+end
+return 1
+`, []string{sessionRootKey(previousID), sessionKey(session.ID), sessionKey(previousID), approvalWireKey(previousID), sessionRootKey(session.ID)}, body, ttl.Milliseconds(), root, session.ID, previousID, session.ID).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return ErrLoginFlowInvalidated
+	}
+	return nil
+}
+
+// ReplaceSessionFromHandoff intentionally supersedes the browser identity with
+// the desktop-authenticated identity, even after an explicit browser logout.
+func (s *RedisStore) ReplaceSessionFromHandoff(ctx context.Context, previousID string, session Session, markerExpiresAt time.Time) error {
+	root := sessionLineageRoot(session)
+	session.LineageRoot = root
+	body, ttl, err := marshalSession(session)
+	if err != nil {
+		return err
+	}
+	markerTTL := time.Until(markerExpiresAt)
+	if markerTTL <= 0 {
 		return ErrSessionNotFound
 	}
-	return s.client.Set(ctx, "portal:session:"+session.ID, body, ttl).Err()
+	return s.client.Eval(ctx, `
+if ARGV[1] ~= '' then
+  local old_root = redis.call('GET', KEYS[1]) or ARGV[1]
+  redis.call('SET', 'portal:logout:' .. old_root, '1', 'PX', ARGV[5])
+  local members = redis.call('SMEMBERS', 'portal:lineage-members:' .. old_root)
+  for _, member in ipairs(members) do
+    redis.call('DEL', 'portal:session:' .. member, 'portal:approval-wire:' .. member)
+  end
+  redis.call('DEL', 'portal:lineage-members:' .. old_root)
+end
+redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+redis.call('SET', KEYS[3], ARGV[4], 'PX', ARGV[3])
+redis.call('SADD', KEYS[4], ARGV[6])
+redis.call('PEXPIRE', KEYS[4], ARGV[3])
+return 1
+`, []string{sessionRootKey(previousID), sessionKey(session.ID), sessionRootKey(session.ID), lineageMembersKey(root)}, previousID, body, ttl.Milliseconds(), root, markerTTL.Milliseconds(), session.ID).Err()
 }
 
 func (s *RedisStore) GetSession(ctx context.Context, id string) (Session, error) {
@@ -118,8 +247,44 @@ func (s *RedisStore) GetSession(ctx context.Context, id string) (Session, error)
 	return session, err
 }
 
+func (s *RedisStore) ResolveSessionLineageRoot(ctx context.Context, id string) (string, error) {
+	root, err := s.client.Get(ctx, sessionRootKey(id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrSessionNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if root = strings.TrimSpace(root); root == "" {
+		return "", ErrSessionNotFound
+	}
+	return root, nil
+}
+
 func (s *RedisStore) DeleteSession(ctx context.Context, id string) error {
 	return s.client.Del(ctx, "portal:session:"+id, approvalWireKey(id)).Err()
+}
+
+// LogoutSession is idempotent: it leaves a tombstone even when the session was
+// already deleted, so a pre-logout OIDC callback cannot recreate it.
+func (s *RedisStore) LogoutSession(ctx context.Context, id, rootHint string, markerExpiresAt time.Time) error {
+	ttl := time.Until(markerExpiresAt)
+	if ttl <= 0 {
+		return ErrSessionNotFound
+	}
+	return s.client.Eval(ctx, `
+local root = ARGV[2]
+local mapped = redis.call('GET', KEYS[1])
+if mapped then root = mapped end
+if root == '' then root = ARGV[3] end
+redis.call('SET', 'portal:logout:' .. root, '1', 'PX', ARGV[1])
+local members = redis.call('SMEMBERS', 'portal:lineage-members:' .. root)
+for _, member in ipairs(members) do
+  redis.call('DEL', 'portal:session:' .. member, 'portal:approval-wire:' .. member)
+end
+redis.call('DEL', 'portal:lineage-members:' .. root, KEYS[2], KEYS[3])
+return 1
+`, []string{sessionRootKey(id), sessionKey(id), approvalWireKey(id)}, ttl.Milliseconds(), rootHint, id).Err()
 }
 
 func approvalWireKey(id string) string { return "portal:approval-wire:" + id }

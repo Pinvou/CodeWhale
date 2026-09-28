@@ -1030,6 +1030,13 @@ export class AdminPlatformClient {
       credentials: 'same-origin',
     });
     const payload = response.status === 204 ? null : await response.json().catch(() => ({}));
+    if (response.status === 403 && payload?.code === 'CSRF_REJECTED') {
+      const confirmation = await fetch(`${this.baseURL}/api/session`, { credentials: 'same-origin', cache: 'no-store' });
+      if (confirmation.status === 401) {
+        this.csrfToken = '';
+        return null;
+      }
+    }
     if (!response.ok) throw errorFromResponse(response, payload);
     this.csrfToken = '';
     return payload;

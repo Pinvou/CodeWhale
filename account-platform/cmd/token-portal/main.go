@@ -113,6 +113,13 @@ func main() {
 			log.Fatal("PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED must be a boolean")
 		}
 	}
+	sessionLineageLogoutEnabled := false
+	if raw := strings.TrimSpace(os.Getenv("PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED")); raw != "" {
+		sessionLineageLogoutEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatal("PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED must be a boolean")
+		}
+	}
 	service, err := portal.NewService(portal.Config{
 		PublicURL:                           publicURL,
 		AuthorizationURL:                    mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
@@ -126,6 +133,7 @@ func main() {
 		TokenGatewayURL:                     mustURL("TOKEN_GATEWAY_HTTP_URL"),
 		ClientVersion:                       compatibility.Manifest().CurrentClientVersion,
 		HandoffSubjectTokenEnabled:          os.Getenv("PORTAL_SESSION_HANDOFF") == "true",
+		SessionLineageLogoutEnabled:         sessionLineageLogoutEnabled,
 		SessionHandoffTTL:                   30 * time.Second,
 		TokenAdminProxyHMACKey:              proxyHMACKey,
 		AdminModelTokenIAEnabled:            adminModelTokenIAEnabled,
