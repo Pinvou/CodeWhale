@@ -79,3 +79,18 @@ export function compactOrderID(value) {
   const text = String(value || '');
   return text.length > 14 ? `${text.slice(0, 8)}…` : text || '—';
 }
+
+export function paymentOrderDisplayName(item, language) {
+  const normalizedLanguage = String(language || '').trim().toLowerCase();
+  const languageKey = normalizedLanguage.startsWith('zh') ? 'zh' : normalizedLanguage.startsWith('ja') ? 'ja' : 'en';
+  const currentNames = {
+    zh: item?.current_plan_name_zh_cn,
+    en: item?.current_plan_name_en,
+    ja: item?.current_plan_name_ja,
+  };
+  for (const candidate of [currentNames[languageKey], item?.plan_name, item?.product_id]) {
+    const value = String(candidate || '').trim();
+    if (value) return value;
+  }
+  return '';
+}

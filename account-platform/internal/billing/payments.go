@@ -58,6 +58,9 @@ type PaymentOrderHistoryItem struct {
 	ProviderOrderReference string     `json:"provider_order_reference"`
 	ProductID              string     `json:"product_id"`
 	PlanName               string     `json:"plan_name"`
+	CurrentPlanNameZhCN    string     `json:"current_plan_name_zh_cn,omitempty"`
+	CurrentPlanNameEN      string     `json:"current_plan_name_en,omitempty"`
+	CurrentPlanNameJA      string     `json:"current_plan_name_ja,omitempty"`
 	SKUCode                string     `json:"sku_code"`
 	OrderType              string     `json:"order_type"`
 	AmountFen              int64      `json:"amount_fen"`

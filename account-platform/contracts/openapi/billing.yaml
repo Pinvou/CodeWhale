@@ -1218,6 +1218,12 @@ components:
           type: string
         plan_name:
           type: string
+        current_plan_name_zh_cn:
+          type: string
+        current_plan_name_en:
+          type: string
+        current_plan_name_ja:
+          type: string
         sku_code:
           type: string
         order_type:

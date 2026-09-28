@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementPackageDisplayName, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
-import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
+import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderDisplayName, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -86,6 +86,26 @@ test('benefit packages use the current catalog name for the active language and 
   assert.equal(entitlementPackageDisplayName({ plan_name: 'Legacy snapshot', plan_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
   assert.equal(entitlementPackageDisplayName({ current_plan_name_en: ' ', plan_name: 'Legacy snapshot', plan_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
   assert.equal(entitlementPackageDisplayName({ plan_id: 'LEGACY' }, 'en'), 'LEGACY');
+});
+
+test('payment orders use the current catalog name for the active language and preserve the purchase snapshot as fallback', async () => {
+  const item = {
+    product_id: 'PLAN_STANDARD',
+    plan_name: 'Purchase-time snapshot',
+    current_plan_name_zh_cn: '标准版（新）',
+    current_plan_name_en: 'Standard (New)',
+    current_plan_name_ja: 'スタンダード（新）',
+  };
+  assert.equal(paymentOrderDisplayName(item, 'zh-CN'), '标准版（新）');
+  assert.equal(paymentOrderDisplayName(item, 'en-US'), 'Standard (New)');
+  assert.equal(paymentOrderDisplayName(item, 'ja-JP'), 'スタンダード（新）');
+  assert.equal(paymentOrderDisplayName({ plan_name: 'Legacy snapshot', product_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
+  assert.equal(paymentOrderDisplayName({ current_plan_name_en: ' ', plan_name: 'Legacy snapshot', product_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
+  assert.equal(paymentOrderDisplayName({ product_id: 'LEGACY' }, 'en'), 'LEGACY');
+
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /PendingPaymentOrders copy=\{copy\} language=\{language\}/);
+  assert.ok((view.match(/paymentOrderDisplayName\(item, language\)/g) || []).length >= 5);
 });
 
 test('Web account synchronization updates profile fields without reloading unchanged context resources', () => {

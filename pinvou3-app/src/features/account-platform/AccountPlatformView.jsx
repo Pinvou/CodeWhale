@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementPackageDisplayName, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
+import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderDisplayName, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { createAccountSynchronizationQueue, resolveAccountSynchronization } from './account-synchronization.js';
@@ -2294,7 +2294,7 @@ function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WA
             {copy.createRecharge}
           </button>
         </div>
-        {pendingOrders.length > 0 && <PendingPaymentOrders copy={copy} orders={pendingOrders} now={now} busy={busy} onActivate={activateAndOpenPayment} />}
+        {pendingOrders.length > 0 && <PendingPaymentOrders copy={copy} language={language} orders={pendingOrders} now={now} busy={busy} onActivate={activateAndOpenPayment} />}
       </div>
       {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} scanApps={paymentScanApps} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
       <EntitlementSummary copy={copy} language={language} packages={packages} detailsUnavailable={detailsUnavailable} />
@@ -2363,17 +2363,18 @@ function formatPaymentCountdown(seconds) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function PendingPaymentOrders({ copy, orders, now, busy, onActivate }) {
+function PendingPaymentOrders({ copy, language, orders, now, busy, onActivate }) {
   return (
     <section className="ap-pending-payments" aria-label={copy.pendingPayments}>
       <h4>{copy.pendingPayments}</h4>
       <div className="ap-pending-payment-list">
         {orders.map((item) => {
           const remaining = paymentOrderRemainingSeconds(item, now);
+          const displayName = paymentOrderDisplayName(item, language);
           return (
-            <button type="button" key={item.order_id} disabled={busy} onClick={() => onActivate(item.order_id)} aria-label={copy.continuePaymentFor(item.plan_name)}>
+            <button type="button" key={item.order_id} disabled={busy} onClick={() => onActivate(item.order_id)} aria-label={copy.continuePaymentFor(displayName)}>
               <span>
-                <strong>{item.plan_name}</strong>
+                <strong>{displayName}</strong>
                 <small>¥{(item.amount_fen / 100).toFixed(2)}</small>
               </span>
               <span>
@@ -2499,11 +2500,12 @@ function Orders({ copy, language, orders, unavailable, summary = false, embedded
         <OrderSummaryList copy={copy} language={language} orders={visibleOrders} onOpen={setSelectedOrder} />
       ) : visibleOrders.length ? (
         <div className="ap-order-list">
-          {visibleOrders.map((item) => (
-            <article className="ap-trace-card" key={item.order_id}>
+          {visibleOrders.map((item) => {
+            const displayName = paymentOrderDisplayName(item, language);
+            return <article className="ap-trace-card" key={item.order_id}>
               <header>
                 <div>
-                  <strong>{item.plan_name}</strong>
+                  <strong>{displayName}</strong>
                   <small>
                     {item.sku_code} · {copy.channels[item.channel] || item.channel}
                   </small>
@@ -2525,8 +2527,8 @@ function Orders({ copy, language, orders, unavailable, summary = false, embedded
                   [copy.invoiceStatus, copy.invoiceStatuses?.[item.invoice_status] || item.invoice_status],
                 ]}
               />
-            </article>
-          ))}
+            </article>;
+          })}
         </div>
       ) : (
         <Empty>{copy.noOrders}</Empty>
@@ -2567,9 +2569,10 @@ function OrderSummaryList({ copy, language, orders, onOpen }) {
             {orders.map((item) => {
               const orderID = item.pinvou_order_id || item.order_id;
               const duration = orderDurationDays(item);
+              const displayName = paymentOrderDisplayName(item, language);
               return (
-                <tr key={item.order_id} tabIndex="0" onClick={() => onOpen(item)} onKeyDown={(event) => openWithKeyboard(event, item)} aria-label={copy.openOrderDetails(item.plan_name)}>
-                  <td><strong>{item.plan_name}</strong></td>
+                <tr key={item.order_id} tabIndex="0" onClick={() => onOpen(item)} onKeyDown={(event) => openWithKeyboard(event, item)} aria-label={copy.openOrderDetails(displayName)}>
+                  <td><strong>{displayName}</strong></td>
                   <td>{copy.orderTypeRecharge}</td>
                   <td>{formatMoney(item.amount_fen)}</td>
                   <td>{formatUsageTime(orderHistoryTimestamp(item), language)}</td>
@@ -2584,23 +2587,25 @@ function OrderSummaryList({ copy, language, orders, onOpen }) {
         </table>
       </div>
       <div className="ap-order-summary-cards">
-        {orders.map((item) => (
-          <button type="button" key={item.order_id} onClick={() => onOpen(item)} aria-label={copy.openOrderDetails(item.plan_name)}>
-            <span><strong>{item.plan_name}</strong><small>{formatUsageTime(orderHistoryTimestamp(item), language)}</small></span>
+        {orders.map((item) => {
+          const displayName = paymentOrderDisplayName(item, language);
+          return <button type="button" key={item.order_id} onClick={() => onOpen(item)} aria-label={copy.openOrderDetails(displayName)}>
+            <span><strong>{displayName}</strong><small>{formatUsageTime(orderHistoryTimestamp(item), language)}</small></span>
             <span><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{orderStatusLabel(copy, item)}</span></span>
-          </button>
-        ))}
+          </button>;
+        })}
       </div>
     </>
   );
 }
 
 function OrderDetails({ copy, language, item }) {
+  const displayName = paymentOrderDisplayName(item, language);
   return (
     <div className="ap-order-detail">
       <header>
         <div>
-          <strong>{item.plan_name}</strong>
+          <strong>{displayName}</strong>
           <small>{item.sku_code}</small>
         </div>
         <strong>{formatMoney(item.amount_fen)}</strong>
