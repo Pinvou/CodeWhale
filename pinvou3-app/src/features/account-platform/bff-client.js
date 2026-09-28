@@ -256,11 +256,22 @@ export class AccountPlatformBffClient {
   cancelUsage(usageRequestId, key) {
     return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}/cancel`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: {} });
   }
-  logout() {
-    return fetch(`${this.baseURL}/api/logout`, {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': this.csrfToken },
-      credentials: 'same-origin',
-    });
+  async logout() {
+    const send = async () => {
+      const response = await fetch(`${this.baseURL}/api/logout`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': this.csrfToken },
+        credentials: 'same-origin',
+      });
+      return { response, payload: response.status === 204 ? null : await response.json().catch(() => ({})) };
+    };
+    let { response, payload } = await send();
+    if (response.status === 403 && payload?.code === 'CSRF_REJECTED') {
+      const session = await this.session();
+      if (session.authenticated && this.csrfToken) ({ response, payload } = await send());
+    }
+    if (!response.ok) throw errorFromResponse(response, payload);
+    this.csrfToken = '';
+    return payload;
   }
 }

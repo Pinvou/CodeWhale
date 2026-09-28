@@ -232,7 +232,10 @@ func (s *Service) tokenAdminIngressDeadline(next http.Handler) http.Handler {
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	reauthenticate := r.URL.Query().Get("reauthenticate") == "1"
-	forceLogin := r.URL.Query().Get("force_login") == "1"
+	forceLoginRequested := r.URL.Query().Get("force_login") == "1"
+	loggedOutCookie, loggedOutErr := r.Cookie(s.loggedOutCookieName())
+	loggedOut := loggedOutErr == nil && loggedOutCookie.Value == "1"
+	forceLogin := forceLoginRequested || loggedOut
 	locale := portalLocale(r.URL.Query().Get("locale"))
 	previousSession := ""
 	if reauthenticate {
@@ -242,7 +245,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		previousSession = session.ID
-	} else if forceLogin {
+	} else if forceLoginRequested {
 		session, sessionErr := s.authenticatedSession(r.Context(), r)
 		switch {
 		case sessionErr == nil:
@@ -334,6 +337,7 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.expireCookie(w, s.flowCookieName(), true)
+	s.expireCookie(w, s.loggedOutCookieName(), true)
 	s.setCookie(w, s.sessionCookieName(), session.ID, session.RefreshExpiresAt, true)
 	s.setCookie(w, s.csrfCookieName(), session.CSRFToken, session.RefreshExpiresAt, false)
 	http.Redirect(w, r, flow.ReturnTo, http.StatusFound)
@@ -398,9 +402,13 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	_ = s.store.DeleteSession(r.Context(), session.ID)
+	if err := s.store.DeleteSession(r.Context(), session.ID); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "LOGOUT_UNAVAILABLE", "the login session could not be ended", httpserver.RequestID(r.Context()))
+		return
+	}
 	s.expireCookie(w, s.sessionCookieName(), true)
 	s.expireCookie(w, s.csrfCookieName(), false)
+	s.setCookie(w, s.loggedOutCookieName(), "1", s.now().Add(s.config.SessionMaxAge), true)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -965,6 +973,9 @@ func (s *Service) sessionCookieName() string {
 }
 func (s *Service) flowCookieName() string { return cookieName(s.config.SecureCookies, "portal_flow") }
 func (s *Service) csrfCookieName() string { return cookieName(s.config.SecureCookies, "portal_csrf") }
+func (s *Service) loggedOutCookieName() string {
+	return cookieName(s.config.SecureCookies, "portal_logged_out")
+}
 
 func cookieName(secure bool, name string) string {
 	if secure {

@@ -492,7 +492,7 @@ func TestSessionHandoffConsumeReplacesPreviousSessionAndSetsSecureCookies(t *tes
 		t.Fatalf("session count = %d", len(store.sessions))
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 2 {
+	if len(cookies) != 3 {
 		t.Fatalf("cookie count = %d", len(cookies))
 	}
 	for _, cookie := range cookies {
@@ -504,6 +504,9 @@ func TestSessionHandoffConsumeReplacesPreviousSessionAndSetsSecureCookies(t *tes
 		}
 		if strings.HasSuffix(cookie.Name, "portal_csrf") && cookie.HttpOnly {
 			t.Fatal("CSRF cookie must remain readable")
+		}
+		if strings.HasSuffix(cookie.Name, "portal_logged_out") && cookie.MaxAge != -1 {
+			t.Fatal("session handoff must clear the explicit logout marker")
 		}
 	}
 }

@@ -1156,6 +1156,49 @@ test('BFF session distinguishes an expired login from a temporary service failur
   }
 });
 
+test('BFF logout reports server failures and clears CSRF only after success', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const client = new AccountPlatformBffClient('https://portal.example');
+    client.csrfToken = 'c'.repeat(32);
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: 'LOGOUT_UNAVAILABLE', message: 'temporary failure' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    await assert.rejects(client.logout(), error => error.status === 503 && error.code === 'LOGOUT_UNAVAILABLE');
+    assert.equal(client.csrfToken, 'c'.repeat(32));
+
+    globalThis.fetch = async () => new Response(null, { status: 204 });
+    assert.equal(await client.logout(), null);
+    assert.equal(client.csrfToken, '');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('BFF logout refreshes a stale CSRF token once before ending the session', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (calls.length === 1) return new Response(JSON.stringify({ code: 'CSRF_REJECTED' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    if (calls.length === 2) return new Response(JSON.stringify({ authenticated: true, csrf_token: 'n'.repeat(32) }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const client = new AccountPlatformBffClient('https://portal.example');
+    client.csrfToken = 'o'.repeat(32);
+    await client.logout();
+    assert.equal(calls.length, 3);
+    assert.equal(calls[0].options.headers['X-CSRF-Token'], 'o'.repeat(32));
+    assert.equal(calls[1].url, 'https://portal.example/api/session');
+    assert.equal(calls[2].options.headers['X-CSRF-Token'], 'n'.repeat(32));
+    assert.equal(client.csrfToken, '');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('BFF client restores the recent order without browser persistence', async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;

@@ -35,6 +35,12 @@ func (s *unavailableSessionStore) GetSession(context.Context, string) (Session, 
 	return Session{}, errors.New("session store unavailable")
 }
 
+type deleteFailingSessionStore struct{ *memoryStore }
+
+func (s *deleteFailingSessionStore) DeleteSession(context.Context, string) error {
+	return errors.New("session store unavailable")
+}
+
 func newMemoryStore() *memoryStore {
 	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}, approvalWires: map[string]int{}, handoffs: map[string]SessionHandoff{}}
 }
@@ -453,6 +459,81 @@ func TestMutationRequiresExactOriginAndCSRF(t *testing.T) {
 	request.Header.Set("Origin", "https://evil.example")
 	if service.validMutation(request, session) {
 		t.Fatal("cross-origin request must be rejected")
+	}
+}
+
+func TestLogoutDeletesPortalSessionAndForcesCredentialPrompt(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	now := time.Now().UTC()
+	service.now = func() time.Time { return now }
+	session := Session{
+		ID: "logout-session", AccessToken: "access", RefreshToken: "refresh",
+		AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour),
+		CSRFToken: strings.Repeat("l", 32), CreatedAt: now,
+	}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://portal.example/api/logout", nil)
+	request.Header.Set("Origin", "https://portal.example")
+	request.Header.Set("X-CSRF-Token", session.CSRFToken)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	request.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: session.CSRFToken})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if _, err := store.GetSession(context.Background(), session.ID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("logout session still exists: %v", err)
+	}
+	var loggedOut *http.Cookie
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == service.loggedOutCookieName() {
+			loggedOut = cookie
+		}
+	}
+	if loggedOut == nil || loggedOut.Value != "1" || !loggedOut.HttpOnly || !loggedOut.Secure {
+		t.Fatalf("logout marker cookie = %+v", loggedOut)
+	}
+
+	loginRequest := httptest.NewRequest(http.MethodGet, "https://portal.example/auth/login?return_to=%2F", nil)
+	loginRequest.AddCookie(loggedOut)
+	loginResponse := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(loginResponse, loginRequest)
+	location, err := url.Parse(loginResponse.Header().Get("Location"))
+	if err != nil || loginResponse.Code != http.StatusFound || location.Query().Get("prompt") != "login" {
+		t.Fatalf("logout follow-up redirect = %d %q (%v)", loginResponse.Code, loginResponse.Header().Get("Location"), err)
+	}
+}
+
+func TestLogoutFailsClosedWhenSessionCannotBeDeleted(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, &deleteFailingSessionStore{memoryStore: store})
+	now := time.Now().UTC()
+	session := Session{
+		ID: "logout-session", AccessToken: "access", RefreshToken: "refresh",
+		AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour),
+		CSRFToken: strings.Repeat("l", 32), CreatedAt: now,
+	}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://portal.example/api/logout", nil)
+	request.Header.Set("Origin", "https://portal.example")
+	request.Header.Set("X-CSRF-Token", session.CSRFToken)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	request.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: session.CSRFToken})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "LOGOUT_UNAVAILABLE") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == service.loggedOutCookieName() {
+			t.Fatalf("failed logout must not set a logout marker: %+v", cookie)
+		}
 	}
 }
 

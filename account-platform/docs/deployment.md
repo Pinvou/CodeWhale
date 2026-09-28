@@ -305,6 +305,8 @@ Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Cod
 
 Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、短信登录与手机注册表单由 Keycloak 的 `pinvou` 主题和 `pinvou-browser-authenticator` 承载。Keycloak 镜像必须由 `deploy/keycloak/Dockerfile` 构建并包含 Authenticator JAR 与主题，且 optimized build 与运行时都必须显式启用 `token-exchange-standard:v2`；不能把 Helm 的 `images.keycloak` 指向未包含扩展或标准 Token Exchange 能力的官方裸镜像。运行时必须配置 `PINVOU_ACCOUNT_AUTH_URL`、与 Account `OIDC_ISSUER` 完全一致的 `PINVOU_OIDC_ISSUER`、`PINVOU_IDENTITY_AUTH_URL`、`PINVOU_SMS_VERIFY_URL` 及既有工作负载身份；Account 的工作负载规则只向 Keycloak 开放 `POST /internal/v1/auth/sms/verify` 和 `POST /internal/v1/authorization/check`，缺失或超出路径时认证失败关闭。发布后需分别验证密码登录、手机号密码登录、短信滑块与验证码登录、注册滑块与验证码注册、三语和手机号/来源/设备限流；再撤销 `PERSONAL_USER` 的测试副本、停用测试主体并阻断 Account，逐项确认密码及短信路径都不会签发新客户端/Portal 会话。既有 Cookie SSO 不替代凭据路径的 ID-19 检查，其撤权收敛仍按会话撤销和授权版本失效策略执行。
 
+Portal 主动退出必须在服务端会话删除成功后才返回成功，并写入仅同源可用的退出标记；该标记在下一次授权码登录时强制 `prompt=login`，防止仍存续的浏览器 SSO Cookie 将刚退出的账号静默带回。授权码回调成功或桌面会话交接成功后必须清除该标记。桌面打开 Web 个人中心时应始终优先使用一次性交接票据，以当前桌面账号原子替换浏览器中的旧 Portal 会话。
+
 工作负载令牌 Agent 与业务服务连接同一个内部依赖网络时，Compose 服务名和显式网络别名必须与全部业务服务发现名完全不相交。Agent 使用 `<业务服务名>-workload-agent`，但其 OIDC `client_id`、subject 和投射目录仍使用原业务服务名；不得为了目录或身份一致而复用业务 DNS 名。发布前后必须分别检查业务名只解析到对应业务容器、Agent 名只解析到对应 Agent 容器，并连续验证认证依赖健康，避免 Docker DNS 轮询把认证请求发送到不监听业务端口的 Agent。
 
 ### 6.7 配置完整性与环境分级

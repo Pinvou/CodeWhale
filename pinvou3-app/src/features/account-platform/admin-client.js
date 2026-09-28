@@ -1023,11 +1023,15 @@ export class AdminPlatformClient {
     return this.request('system', '/status', signal);
   }
 
-  logout() {
-    return fetch(`${this.baseURL}/api/logout`, {
+  async logout() {
+    const response = await fetch(`${this.baseURL}/api/logout`, {
       method: 'POST',
       headers: { 'X-CSRF-Token': this.csrfToken },
       credentials: 'same-origin',
     });
+    const payload = response.status === 204 ? null : await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, payload);
+    this.csrfToken = '';
+    return payload;
   }
 }

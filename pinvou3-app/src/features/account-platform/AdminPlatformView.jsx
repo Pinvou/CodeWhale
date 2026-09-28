@@ -729,9 +729,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     if (!sectionHasData(key, data)) load(key, undefined, authorization);
   };
   const logout = async () => {
-    setAuth('guest');
-    await client.logout();
-    window.location.assign('/admin.html');
+    setError('');
+    try {
+      await client.logout();
+      setAuth('guest');
+      window.location.assign('/admin.html');
+    } catch {
+      setError(copy.failed);
+    }
   };
 
   if (auth === 'loading') return <StatePage copy={copy} kind="loading" />;

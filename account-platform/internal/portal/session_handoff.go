@@ -171,6 +171,7 @@ func (s *Service) consumeSessionHandoff(w http.ResponseWriter, r *http.Request) 
 	}
 	s.setCookie(w, s.sessionCookieName(), handoff.Session.ID, handoff.Session.RefreshExpiresAt, true)
 	s.setCookie(w, s.csrfCookieName(), handoff.Session.CSRFToken, handoff.Session.RefreshExpiresAt, false)
+	s.expireCookie(w, s.loggedOutCookieName(), true)
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]string{"redirect_to": "/"})
 }
