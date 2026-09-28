@@ -859,6 +859,11 @@ assert.equal(
   "runtime/asr/LICENSE-SenseVoice.cpp",
 );
 assert.equal(
+  linux.bundle.resources["resources/platforms/linux/asr/"],
+  undefined,
+  "the shared Linux overlay must not package the whole asr/ directory",
+);
+assert.equal(
   linux.bundle.resources["resources/platforms/linux/knowledge-host/"],
   "runtime/knowledge-host",
 );
