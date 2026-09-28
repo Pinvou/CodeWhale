@@ -982,12 +982,14 @@ class CiGatePolicyTests(unittest.TestCase):
         source = (ROOT / "scripts" / "fetch-connectors.sh").read_text(
             encoding="utf-8"
         )
-        # 失配必须携带期望/实际值(文件缺失单列),并显式 return 1。
+        # 失配必须携带期望/实际值(文件缺失/不可读单列,不可读属 I/O 故障
+        # 而非哈希差异),并显式 return 1。
         self.assertIn(
             'echo "sha256 校验失败: $1（期望 $2，实际 $(compute_sha256 "$1")）"',
             source,
         )
         self.assertIn('echo "sha256 校验失败: $1（文件缺失，期望 $2）"', source)
+        self.assertIn('echo "sha256 校验失败: $1（文件不可读，期望 $2）"', source)
         self.assertIn('[[ "$(compute_sha256 "$1")" == "$2" ]]', source)
         self.assertIn("return 1", source)
         # 三处裸调 + 下载前探测调用,校验点不得悄悄减少。
