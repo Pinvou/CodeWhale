@@ -17,9 +17,11 @@ import {
 import {
   classifyAcpServiceFailure,
   isAcpAuthenticationFailure,
+  latestAgentRuntimeNotice,
   runtimeOperationFor,
 } from './runtimeNoticeState.js';
 import {
+  AgentRuntimeNotice,
   AgentServiceFailureNotice,
   RuntimeNotice,
   runtimeSourceLabel,
@@ -44,6 +46,7 @@ import {
   mergeAcpTimelineSnapshot,
   updateAcpAttachmentDraft,
   projectAcpTimeline,
+  redactDisplayError,
   resolveAcpSessionControls,
 } from './acp-state.js';
 import {
@@ -788,6 +791,7 @@ export function CodexAcpView({
     await checkoutWorkspaceBranch(branch, 'carry');
   }
   const [dismissedFailureKey, setDismissedFailureKey] = useState('');
+  const [dismissedNoticeKey, setDismissedNoticeKey] = useState('');
   const [draftWorkspacePath, setDraftWorkspacePath] = useState(null);
   // 会话内用 sessionId 解析工作区；草稿态（会话未创建）直接扫描已选目录。
   const branchWorkspacePath = activeId ? null : draftWorkspacePath;
@@ -1251,6 +1255,18 @@ export function CodexAcpView({
   const visibleServiceFailure = serviceFailure?.key === dismissedFailureKey
     ? null
     : serviceFailure;
+  // Adapter stderr can appear here; always redact it before display, as for turn errors.
+  const runtimeNotice = useMemo(() => {
+    const notice = latestAgentRuntimeNotice(events);
+    if (!notice) return null;
+    return {
+      ...notice,
+      detail: redactDisplayError(notice.detail, acpModelServiceLanguage) || '',
+    };
+  }, [events, acpModelServiceLanguage]);
+  const visibleRuntimeNotice = runtimeNotice?.key === dismissedNoticeKey
+    ? null
+    : runtimeNotice;
   const workspaceUnavailable = Boolean(
     activeSession
       && activeSession.workspace_kind === 'project'
@@ -3508,6 +3524,12 @@ export function CodexAcpView({
                     providerCopy={t.uiAcpProviders}
                   />
                 )}
+                <AgentRuntimeNotice
+                  notice={visibleRuntimeNotice}
+                  agentName={activeAgentName}
+                  onDismiss={() => setDismissedNoticeKey(runtimeNotice?.key || '')}
+                  copy={codexCopy}
+                />
               </>
             )}
             {!visibleTurns.length && (
@@ -4139,7 +4161,7 @@ export function CodexAcpView({
                   )}
                 </div>
                 {busy ? (
-                  <button onClick={cancel} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
+                  <button onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
                   <>
                     <VoiceComposerButton
