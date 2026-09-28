@@ -322,7 +322,7 @@ export function applyNativeChatEvent(lane, name, payload, options = {}) {
   switch (name) {
     case 'chat:billing_notice': {
       const notice = p.billing_notice;
-      if (!notice || notice.code !== 'WALLET_INSUFFICIENT') return false;
+      if (!notice || (notice.code !== 'WALLET_INSUFFICIENT' && notice.code !== 'MEMBER_QUOTA_INSUFFICIENT')) return false;
       lane.pendingBillingNotices[String(Number(p.turn_generation || 0))] = notice;
       return false;
     }

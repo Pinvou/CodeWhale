@@ -141,7 +141,7 @@ export function timelineUserError(event, options = {}) {
   const existing = event && (event.user_error || event.userError);
   if (existing && typeof existing === 'object') return existing;
   const notice = event && event.billing_notice;
-  if (notice && notice.schema_version === 1 && notice.code === 'WALLET_INSUFFICIENT') {
+  if (notice && notice.schema_version === 1 && (notice.code === 'WALLET_INSUFFICIENT' || notice.code === 'MEMBER_QUOTA_INSUFFICIENT')) {
     const contextType = notice.context_type || '';
     const organizationId = String(notice.organization_id || '').trim();
     const action = contextType === 'PERSONAL' && notice.action === 'OPEN_RECHARGE'

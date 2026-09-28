@@ -52,3 +52,28 @@ test('organization quota contract exposes permission-gated purchase, batch alloc
   assert.match(copy, /Purchase organization benefits/);
   assert.match(copy, /組織特典を購入/);
 });
+
+test('organization authorization context requires the per-organization membership version', async () => {
+  const accountContract = YAML.parse(await read('contracts/openapi/account.yaml'));
+  const schema = accountContract.paths['/me/authorization-context'].get.responses['200'].content['application/json'].schema;
+  const organizationRule = schema.allOf.find(rule => rule.if?.properties?.context_type?.const === 'ORGANIZATION');
+  assert.ok(organizationRule);
+  assert.deepEqual(organizationRule.then.required, ['organization_id', 'organization_membership_version']);
+  assert.equal(organizationRule.then.properties.organization_id.type, 'string');
+  assert.equal(organizationRule.then.properties.organization_membership_version.minimum, 1);
+});
+
+test('member quota reconciliation migration locks grants before audit DDL', async () => {
+  const migration = await read('migrations/billing/000078_member_quota_membership_version_audit.up.sql');
+  const grantLock = migration.indexOf('LOCK TABLE public.member_quota_grants IN ACCESS EXCLUSIVE MODE');
+  const auditLock = migration.indexOf('LOCK TABLE public.member_quota_grant_audits IN ACCESS EXCLUSIVE MODE');
+  const auditDDL = migration.indexOf('ALTER TABLE public.member_quota_grant_audits DROP CONSTRAINT');
+  const lifecycleRead = migration.indexOf('FROM public.organization_member_lifecycle_states lifecycle');
+  const outboxWrite = migration.indexOf('INSERT INTO public.outbox_events');
+  assert.ok(grantLock >= 0);
+  assert.ok(grantLock < auditLock);
+  assert.ok(auditLock < auditDDL);
+  assert.ok(auditDDL < lifecycleRead);
+  assert.ok(lifecycleRead < outboxWrite);
+  assert.doesNotMatch(migration, /LOCK TABLE public\.(?:organization_member_lifecycle_states|outbox_events)/);
+});

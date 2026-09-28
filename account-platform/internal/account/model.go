@@ -61,6 +61,7 @@ type AuthorizationContext struct {
 	ContextType                      string                     `json:"context_type"`
 	OrganizationID                   *uuid.UUID                 `json:"organization_id,omitempty"`
 	MembershipVersion                int64                      `json:"membership_version"`
+	OrganizationMembershipVersion    *int64                     `json:"organization_membership_version,omitempty"`
 	ContextVersion                   int64                      `json:"context_version"`
 	AuthorizationVersion             int64                      `json:"authorization_version"`
 	PersonalAuthorizationVersion     int64                      `json:"personal_authorization_version"`

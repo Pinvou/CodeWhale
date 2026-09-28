@@ -34,6 +34,9 @@ components:
             - INVITATION_EXPIRED
             - SERVICE_AUTH_REQUIRED
             - BILLING_CONFLICT
+            - MEMBER_LIFECYCLE_CONFLICT
+            - MEMBER_QUOTA_INSUFFICIENT
+            - ORGANIZATION_MEMBERSHIP_CONTEXT_INVALID
             - WALLET_UNAVAILABLE
             - CLIENT_UPGRADE_REQUIRED
             - INTERNAL_ERROR
@@ -58,6 +61,7 @@ components:
         membership_version:
           type: integer
           minimum: 1
+          description: Global user membership invalidation version; it is not the version of one organization membership.
         context_version:
           type: integer
           minimum: 1

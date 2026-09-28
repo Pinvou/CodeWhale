@@ -1,7 +1,10 @@
 package billing
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -27,6 +30,29 @@ func TestMemberQuotaAllocationFingerprintIsStableAndRequestBound(t *testing.T) {
 	_, changedActor, err := normalizeMemberQuotaAllocation(request)
 	if err != nil || changedActor == first {
 		t.Fatal("changed actor must change the request fingerprint")
+	}
+}
+
+func TestMemberQuotaReservationErrorsRemainSpecific(t *testing.T) {
+	cases := []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{err: ErrMemberLifecycleConflict, status: http.StatusConflict, code: "MEMBER_LIFECYCLE_CONFLICT"},
+		{err: ErrMemberQuotaInsufficient, status: http.StatusPaymentRequired, code: "MEMBER_QUOTA_INSUFFICIENT"},
+	}
+	service := &Service{}
+	for _, test := range cases {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/internal/v1/holds/reserve", nil)
+		service.writeError(recorder, request, test.err)
+		var payload struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || recorder.Code != test.status || payload.Code != test.code {
+			t.Fatalf("error=%v status=%d payload=%q decode=%v", test.err, recorder.Code, recorder.Body.String(), err)
+		}
 	}
 }
 

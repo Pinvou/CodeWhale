@@ -303,6 +303,7 @@ flowchart TD
 
 - `POST /v1/sessions/current/active-context`。
 - 每会话唯一活动组织，`membership_version` 失效机制。
+- 区分用户全局 `membership_version` 与组织成员 `organization_membership_version`；组织额度预占只接受后者且缺失时 fail closed。
 - 高风险操作实时回源；普通 Token 请求缓存最长 30 秒。
 - 管理、财务、成员和上下文切换审计。
 
@@ -312,6 +313,17 @@ flowchart TD
 - 组织 A 的请求不能读取或修改组织 B 资源。
 - 撤权后管理/财务操作立即失败，普通 Token 权限在 30 秒内失效。
 - Account 不可用时组织 Token fail closed。
+- 角色变化后 ACTIVE 成员额度仍可按新组织成员版本消费，余额组成保持不变；旧快照、新旧版本冲突和成员额度不足均确定性终结，不得停留在 `HOLD_RESERVING`。
+
+上线顺序与回滚边界：
+
+1. 先执行 Billing 数据库迁移 `000078`，完成 ACTIVE 存量授予的成员版本对齐，并确认审计、Outbox 和余额守恒；迁移会先按“授予表→审计表”的业务锁序取得显式锁，执行窗口需监控锁等待。
+2. 再部署能够识别 `MEMBERSHIP_VERSION_ADVANCED` 且返回精确额度错误码的 Billing；新 Billing 不得先于 `000078`，否则新审计动作会被旧约束拒绝。
+3. 再部署 Account，使组织授权上下文稳定返回当前 `memberships.version` 对应的 `organization_membership_version`；旧 Token 会忽略新增字段，仍可运行。
+4. 再部署 Token，使新请求冻结并只使用 `organization_membership_version`；新 Token 不得先于新 Account，否则组织请求会按 fail closed 被拒绝。上线前产生且缺少该字段的组织请求快照保持 fail closed，不篡改历史快照。
+5. 最后部署桌面/Web 客户端，使 `MEMBER_QUOTA_INSUFFICIENT` 显示联系组织管理员的明确提示；旧客户端仍可收到标准 HTTP 402，但不会获得新增的精确引导。
+
+`000078` 是 forward-only 迁移：已经写入 `MEMBERSHIP_VERSION_ADVANCED` 审计后不能恢复旧 CHECK，也不能回退数据库。发生故障时只能按上述顺序反向回退客户端和服务；数据库保留在 `000078`，并在继续部署前验证旧二进制会忽略新增响应字段/错误详情。若必须回退 Account，则 Token 必须先回退；若必须回退 Billing，则所有可能写入新审计动作的 Token/Billing 实例必须先下线或回退，禁止用 down migration 删除已产生的事实。
 
 ### 任务组 3：Billing 钱包、账本和 Token 结算
 

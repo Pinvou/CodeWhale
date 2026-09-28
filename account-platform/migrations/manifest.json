@@ -1614,6 +1614,16 @@
         "file": "000077_payment_order_repairs_requester.up.sql",
         "version": 77,
         "sha256": "7432efde3c5dfa6a0c54ebdf39c862e147312830de494a06e125684ddc740564"
+      },
+      {
+        "file": "000078_member_quota_membership_version_audit.down.sql",
+        "version": 78,
+        "sha256": "65d9aa99fcf197121ef82bddaf5c8fca2b5aa5548c28f0c2e630677b775af2b6"
+      },
+      {
+        "file": "000078_member_quota_membership_version_audit.up.sql",
+        "version": 78,
+        "sha256": "7bfd7954dcafb71ee711f8cd41df7e0b9b406c9fb88d3e6afd905382da907d5c"
       }
     ],
     "payment-simulator": [

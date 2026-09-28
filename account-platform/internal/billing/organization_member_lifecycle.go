@@ -39,15 +39,16 @@ func (r *PostgresRepository) ApplyOrganizationMemberLifecycle(ctx context.Contex
 	if err == nil && (membershipVersion < currentVersion || (membershipVersion == currentVersion && status != currentStatus)) {
 		return OrganizationMemberLifecycleState{}, ErrConflict
 	}
-	changed := errors.Is(err, pgx.ErrNoRows) || status != currentStatus || membershipVersion != currentVersion
 	now := r.now()
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_member_lifecycle_states(organization_id,user_id,status,membership_version,updated_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(organization_id,user_id) DO UPDATE SET status=EXCLUDED.status,membership_version=EXCLUDED.membership_version,updated_at=EXCLUDED.updated_at`, organizationID, userID, status, membershipVersion, now); err != nil {
 		return OrganizationMemberLifecycleState{}, err
 	}
-	if changed {
-		if err := r.applyMemberQuotaLifecycle(ctx, tx, organizationID, userID, status, membershipVersion, now); err != nil {
-			return OrganizationMemberLifecycleState{}, err
-		}
+	// Re-run the quota projection even for an idempotent lifecycle replay. This
+	// repairs grants written by older versions that recorded the user's global
+	// membership version, while the grant predicate keeps an already-aligned
+	// replay free of duplicate audit/outbox rows.
+	if err := r.applyMemberQuotaLifecycle(ctx, tx, organizationID, userID, status, membershipVersion, now); err != nil {
+		return OrganizationMemberLifecycleState{}, err
 	}
 	state := OrganizationMemberLifecycleState{OrganizationID: organizationID, UserID: userID, Status: status, MembershipVersion: membershipVersion}
 	return state, tx.Commit(ctx)
@@ -60,8 +61,10 @@ func (r *PostgresRepository) applyMemberQuotaLifecycle(ctx context.Context, tx p
 	}
 	rows, err := tx.Query(ctx, `SELECT id FROM member_quota_grants
 WHERE organization_id=$1 AND member_user_id=$2
-  AND (($3='SUSPENDED' AND status='ACTIVE') OR ($3='ACTIVE' AND status='SUSPENDED' AND suspension_reason='MEMBER_REMOVED'))
-ORDER BY component_id,id FOR UPDATE`, organizationID, userID, wantedStatus)
+  AND (($3='SUSPENDED' AND status='ACTIVE')
+    OR ($3='ACTIVE' AND status='SUSPENDED' AND suspension_reason='MEMBER_REMOVED')
+    OR ($3='ACTIVE' AND status='ACTIVE' AND membership_version<>$4 AND expires_at>$5))
+ORDER BY component_id,id FOR UPDATE`, organizationID, userID, wantedStatus, membershipVersion, now)
 	if err != nil {
 		return err
 	}
@@ -79,6 +82,25 @@ ORDER BY component_id,id FOR UPDATE`, organizationID, userID, wantedStatus)
 		grant, _, err := loadMemberQuotaGrant(ctx, tx, grantID, false)
 		if err != nil {
 			return err
+		}
+		// An ACTIVE -> ACTIVE lifecycle update represents a membership version
+		// advance (for example, a role change), not a quota suspension/restoration.
+		// Keep all balances and the grant status unchanged while moving the live
+		// grant onto the authoritative organization-membership version.
+		if lifecycleStatus == "ACTIVE" && grant.Status == "ACTIVE" {
+			if _, err := tx.Exec(ctx, `UPDATE member_quota_grants SET membership_version=$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE'`, grant.ID, membershipVersion, now); err != nil {
+				return err
+			}
+			grant.MembershipVersion = membershipVersion
+			grant.AllocationVersion++
+			grant.UpdatedAt = now
+			if err := appendMemberQuotaAudit(ctx, tx, grant, "MEMBERSHIP_VERSION_ADVANCED", nil, 0, now); err != nil {
+				return err
+			}
+			if err := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.membership-version-advanced.v1", now); err != nil {
+				return err
+			}
+			continue
 		}
 		if _, err := tx.Exec(ctx, `SELECT id FROM entitlement_components WHERE id=$1 FOR UPDATE`, grant.ComponentID); err != nil {
 			return err

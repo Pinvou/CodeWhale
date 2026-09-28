@@ -19,6 +19,7 @@ var (
 	ErrAccountProvisioning           = errors.New("account is provisioning")
 	ErrAccountRepairRequired         = errors.New("account provisioning requires repair")
 	ErrAccountClosing                = errors.New("account closure is in progress")
+	ErrOrganizationMembershipContext = errors.New("organization membership context is missing or invalid")
 	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
 	ErrCancellationRequested         = errors.New("usage cancellation was requested before dispatch")
 	ErrRateLimited                   = errors.New("model request rate or concurrency limit reached")
@@ -38,21 +39,22 @@ type UnitAuthorizationBinding struct {
 }
 
 type AuthorizationContext struct {
-	UserID                    uuid.UUID
-	SessionID                 string
-	ContextType               string
-	OrganizationID            *uuid.UUID
-	MembershipVersion         int64
-	ContextVersion            int64
-	AuthorizationVersion      int64
-	UnitIDs                   []uuid.UUID
-	AncestorUnitIDs           []uuid.UUID
-	Roles                     []string
-	Permissions               []string
-	UnitAuthorizationBindings []UnitAuthorizationBinding
-	Mobile                    *string
-	MobileVerified            bool
-	Closing                   bool
+	UserID                        uuid.UUID
+	SessionID                     string
+	ContextType                   string
+	OrganizationID                *uuid.UUID
+	MembershipVersion             int64
+	OrganizationMembershipVersion *int64
+	ContextVersion                int64
+	AuthorizationVersion          int64
+	UnitIDs                       []uuid.UUID
+	AncestorUnitIDs               []uuid.UUID
+	Roles                         []string
+	Permissions                   []string
+	UnitAuthorizationBindings     []UnitAuthorizationBinding
+	Mobile                        *string
+	MobileVerified                bool
+	Closing                       bool
 }
 
 type Candidate struct {

@@ -81,12 +81,19 @@ struct BillingNotice {
 impl BillingNotice {
     fn is_valid(&self) -> bool {
         self.schema_version == 1
-            && self.code == "WALLET_INSUFFICIENT"
-            && match (self.context_type.as_str(), self.action.as_str()) {
-                ("PERSONAL", "OPEN_RECHARGE") => self.organization_id.is_empty(),
-                ("ORGANIZATION", "CONTACT_ORG_ADMIN")
-                | ("ORGANIZATION", "OPEN_ORGANIZATION_RECHARGE") => {
-                    uuid::Uuid::parse_str(&self.organization_id).is_ok()
+            && match self.code.as_str() {
+                "WALLET_INSUFFICIENT" => match (self.context_type.as_str(), self.action.as_str()) {
+                    ("PERSONAL", "OPEN_RECHARGE") => self.organization_id.is_empty(),
+                    ("ORGANIZATION", "CONTACT_ORG_ADMIN")
+                    | ("ORGANIZATION", "OPEN_ORGANIZATION_RECHARGE") => {
+                        uuid::Uuid::parse_str(&self.organization_id).is_ok()
+                    }
+                    _ => false,
+                },
+                "MEMBER_QUOTA_INSUFFICIENT" => {
+                    self.context_type == "ORGANIZATION"
+                        && self.action == "CONTACT_ORG_ADMIN"
+                        && uuid::Uuid::parse_str(&self.organization_id).is_ok()
                 }
                 _ => false,
             }
@@ -572,7 +579,7 @@ fn billing_notice_from_headers(headers: &reqwest::header::HeaderMap) -> Option<B
             .to_string()
     };
     let code = value("x-pinvou-billing-code");
-    if code != "WALLET_INSUFFICIENT" {
+    if code != "WALLET_INSUFFICIENT" && code != "MEMBER_QUOTA_INSUFFICIENT" {
         return None;
     }
     let notice = BillingNotice {
@@ -692,7 +699,7 @@ mod tests {
 
     use super::{
         ModelGatewayProxy, billing_notice_from_body, billing_notice_from_headers, logical_turn_id,
-        prepare_chat_body, request_idempotency_key, require_sse_done,
+        observe_sse_lines, prepare_chat_body, request_idempotency_key, require_sse_done,
     };
 
     #[tokio::test]
@@ -767,6 +774,47 @@ mod tests {
 
         assert!(billing_notice_from_body(br#"{"message":"insufficient balance"}"#).is_none());
         assert!(billing_notice_from_body(br#"{"billing_notice":{"schema_version":1,"code":"WALLET_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_RECHARGE","context_type":"ORGANIZATION","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#).is_none());
+
+        let member = billing_notice_from_body(br#"{"code":"MEMBER_QUOTA_INSUFFICIENT","billing_notice":{"schema_version":1,"code":"MEMBER_QUOTA_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"CONTACT_ORG_ADMIN","context_type":"ORGANIZATION","organization_id":"0199a100-0001-7000-8000-000000000201","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#).expect("member quota body notice");
+        assert_eq!(member.code, "MEMBER_QUOTA_INSUFFICIENT");
+        assert!(billing_notice_from_body(br#"{"billing_notice":{"schema_version":1,"code":"MEMBER_QUOTA_INSUFFICIENT","stage":"INITIAL_RESERVATION","turn_outcome":"REJECTED","settlement_status":"NOT_STARTED","action":"OPEN_ORGANIZATION_RECHARGE","context_type":"ORGANIZATION","organization_id":"0199a100-0001-7000-8000-000000000201","usage_request_id":"0199a100-0001-7000-8000-000000000106"}}"#).is_none());
+
+        headers.insert(
+            "x-pinvou-billing-code",
+            "MEMBER_QUOTA_INSUFFICIENT".parse().unwrap(),
+        );
+        headers.insert(
+            "x-pinvou-billing-action",
+            "CONTACT_ORG_ADMIN".parse().unwrap(),
+        );
+        headers.insert(
+            "x-pinvou-billing-context-type",
+            "ORGANIZATION".parse().unwrap(),
+        );
+        headers.insert(
+            "x-pinvou-billing-organization-id",
+            "0199a100-0001-7000-8000-000000000201".parse().unwrap(),
+        );
+        let member_header =
+            billing_notice_from_headers(&headers).expect("member quota header notice");
+        assert_eq!(member_header.code, "MEMBER_QUOTA_INSUFFICIENT");
+
+        let mut line = Vec::new();
+        let mut overflow = false;
+        let mut saw_done = false;
+        let mut saw_terminal_error = false;
+        let mut event_name = String::new();
+        let sse = b"event: billing_notice\ndata: {\"schema_version\":1,\"code\":\"MEMBER_QUOTA_INSUFFICIENT\",\"stage\":\"ADDITIONAL_RESERVATION\",\"turn_outcome\":\"COMPLETED\",\"settlement_status\":\"SETTLED\",\"action\":\"CONTACT_ORG_ADMIN\",\"context_type\":\"ORGANIZATION\",\"organization_id\":\"0199a100-0001-7000-8000-000000000201\",\"usage_request_id\":\"0199a100-0001-7000-8000-000000000106\"}\n\n";
+        let notices = observe_sse_lines(
+            &mut line,
+            &mut overflow,
+            &mut saw_done,
+            &mut saw_terminal_error,
+            &mut event_name,
+            sse,
+        );
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].code, "MEMBER_QUOTA_INSUFFICIENT");
     }
 
     #[test]

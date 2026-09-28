@@ -976,6 +976,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
 	case errors.Is(err, ErrAccountClosing):
 		status, code, message = http.StatusConflict, "ACCOUNT_CLOSING", "the account is in its closure quiet period"
+	case errors.Is(err, ErrOrganizationMembershipContext):
+		status, code, message = http.StatusConflict, "ORGANIZATION_MEMBERSHIP_CONTEXT_INVALID", "the active organization membership context is unavailable"
 	case errors.Is(err, ErrOrganizationLifecycleConflict):
 		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle version or state conflicts with current facts"
 	case errors.Is(err, ErrCatalogVersionConflict):
@@ -1045,28 +1047,32 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		return AuthorizationContext{}, ErrForbidden
 	}
 	var body struct {
-		UserID                    uuid.UUID                  `json:"user_id"`
-		SessionID                 string                     `json:"session_id"`
-		ContextType               string                     `json:"context_type"`
-		OrganizationID            *uuid.UUID                 `json:"organization_id"`
-		MembershipVersion         int64                      `json:"membership_version"`
-		ContextVersion            int64                      `json:"context_version"`
-		AuthorizationVersion      int64                      `json:"authorization_version"`
-		UnitIDs                   []uuid.UUID                `json:"unit_ids"`
-		AncestorUnitIDs           []uuid.UUID                `json:"ancestor_unit_ids"`
-		Roles                     []string                   `json:"roles"`
-		Permissions               []string                   `json:"permissions"`
-		PersonalRoles             []string                   `json:"personal_roles"`
-		PersonalPermissions       []string                   `json:"personal_permissions"`
-		UnitAuthorizationBindings []UnitAuthorizationBinding `json:"unit_authorization_bindings"`
-		Mobile                    *string                    `json:"mobile"`
-		MobileVerified            bool                       `json:"mobile_verified"`
+		UserID                        uuid.UUID                  `json:"user_id"`
+		SessionID                     string                     `json:"session_id"`
+		ContextType                   string                     `json:"context_type"`
+		OrganizationID                *uuid.UUID                 `json:"organization_id"`
+		MembershipVersion             int64                      `json:"membership_version"`
+		OrganizationMembershipVersion *int64                     `json:"organization_membership_version"`
+		ContextVersion                int64                      `json:"context_version"`
+		AuthorizationVersion          int64                      `json:"authorization_version"`
+		UnitIDs                       []uuid.UUID                `json:"unit_ids"`
+		AncestorUnitIDs               []uuid.UUID                `json:"ancestor_unit_ids"`
+		Roles                         []string                   `json:"roles"`
+		Permissions                   []string                   `json:"permissions"`
+		PersonalRoles                 []string                   `json:"personal_roles"`
+		PersonalPermissions           []string                   `json:"personal_permissions"`
+		UnitAuthorizationBindings     []UnitAuthorizationBinding `json:"unit_authorization_bindings"`
+		Mobile                        *string                    `json:"mobile"`
+		MobileVerified                bool                       `json:"mobile_verified"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
 		return AuthorizationContext{}, err
 	}
+	if body.ContextType == "ORGANIZATION" && (body.OrganizationID == nil || body.OrganizationMembershipVersion == nil || *body.OrganizationMembershipVersion < 1) {
+		return AuthorizationContext{}, ErrOrganizationMembershipContext
+	}
 	roles, permissions := activeScopeAuthorization(body.ContextType, body.Roles, body.Permissions, body.PersonalRoles, body.PersonalPermissions)
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: roles, Permissions: permissions, UnitAuthorizationBindings: body.UnitAuthorizationBindings, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, OrganizationMembershipVersion: body.OrganizationMembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: roles, Permissions: permissions, UnitAuthorizationBindings: body.UnitAuthorizationBindings, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
 }
 
 func activeScopeAuthorization(contextType string, roles, permissions, personalRoles, personalPermissions []string) ([]string, []string) {

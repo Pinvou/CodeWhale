@@ -66,7 +66,7 @@
     }
 
     function billingUserError(notice) {
-      if (!notice || notice.code !== "WALLET_INSUFFICIENT") return null;
+      if (!notice || (notice.code !== "WALLET_INSUFFICIENT" && notice.code !== "MEMBER_QUOTA_INSUFFICIENT")) return null;
       var completed = notice.turn_outcome === "COMPLETED";
       var contextType = notice.context_type || "";
       var organizationId = String(notice.organization_id || "").trim();
@@ -1482,7 +1482,7 @@
     var payload = e && e.payload || {};
     var sid = payload.session_id;
     var notice = payload.billing_notice;
-    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT") return;
+    if (!sid || !notice || (notice.code !== "WALLET_INSUFFICIENT" && notice.code !== "MEMBER_QUOTA_INSUFFICIENT")) return;
     pendingBillingNotices[billingNoticeKey(sid, payload.turn_generation)] = notice;
   });
 

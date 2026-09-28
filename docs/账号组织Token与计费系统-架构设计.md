@@ -215,6 +215,9 @@ session.active_org_id = <org_id>   -> 单一组织上下文
 - 邀请使用一次性、短有效期、哈希存储的 Token，并绑定目标组织、角色和可选邮箱。
 - 接受邀请前再次检查邀请状态、组织状态和用户身份；重复接受必须幂等。
 - 成员停用后 Account Service 立即增加组织的 `membership_version` 并发事件，Token Gateway 清除授权缓存。
+- 授权上下文中的全局 `membership_version` 用于用户级会话失效；组织上下文另行返回 `organization_membership_version`，其值来自当前 `memberships.version`。Token Gateway 必须把后者冻结到用量请求并用于成员额度预占，不得用全局版本代替或在字段缺失时回退。
+- 组织成员仍为 `ACTIVE` 但版本因角色等事实变化而递增时，Billing 同步推进所有未过期 ACTIVE 成员额度授予的成员版本，不移动余额；该推进必须写审计和 Outbox。
+- Billing `000078` 对上线前已存在的 ACTIVE 错版授予执行一次同规则对齐；相同生命周期事件的幂等重放也会补齐遗漏投影，已对齐授予不会重复生成审计或 Outbox。
 - 管理员、计费和密钥操作实时回源校验；普通调用的撤权传播目标不超过 30 秒。
 - 若权限事实不可确认，组织 Token 请求必须拒绝，不以旧缓存放行。
 - 用户注销先停用登录和个人 Token，再处理组织所有权；账本和支付订单保留，个人信息按合规策略去标识化。

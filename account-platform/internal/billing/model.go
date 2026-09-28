@@ -18,6 +18,8 @@ var (
 	ErrUsagePlatformLossReview       = errors.New("usage arrived after entitlement expiry and requires platform-loss review")
 	ErrCommerceCustomerNotReady      = errors.New("commerce customer mapping is not ready")
 	ErrInsufficientComponentCapacity = errors.New("entitlement component has insufficient allocatable capacity")
+	ErrMemberLifecycleConflict       = errors.New("organization member lifecycle conflicts with the quota request")
+	ErrMemberQuotaInsufficient       = errors.New("organization member quota is insufficient")
 	ErrIdempotencyConflict           = errors.New("idempotency key was used with a different request")
 	ErrPriceMissing                  = errors.New("price is missing")
 	ErrPriceAmbiguous                = errors.New("price is ambiguous")

@@ -748,6 +748,22 @@ paths:
                 type: object
                 additionalProperties: false
                 required: [user_id, session_id, context_type, membership_version, context_version, authorization_version, personal_authorization_version, platform_authorization_version, organization_authorization_version, unit_ids, ancestor_unit_ids, roles, permissions, unit_authorization_bindings, personal_roles, personal_permissions, platform_roles, platform_permissions]
+                allOf:
+                  - if:
+                      properties:
+                        context_type:
+                          const: ORGANIZATION
+                      required: [context_type]
+                    then:
+                      required: [organization_id, organization_membership_version]
+                      properties:
+                        organization_id:
+                          type: string
+                          format: uuid
+                        organization_membership_version:
+                          type: integer
+                          format: int64
+                          minimum: 1
                 properties:
                   user_id:
                     type: string
@@ -764,6 +780,12 @@ paths:
                     type: integer
                     format: int64
                     minimum: 1
+                    description: Global user membership invalidation version; it is not the version of one organization membership.
+                  organization_membership_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                    description: Version of the active organization membership. Required when context_type is ORGANIZATION and omitted from PERSONAL responses.
                   context_version:
                     type: integer
                     format: int64

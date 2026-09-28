@@ -896,6 +896,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		}
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the billing resource was not found"
+	case errors.Is(err, ErrMemberLifecycleConflict):
+		status, code, message = http.StatusConflict, "MEMBER_LIFECYCLE_CONFLICT", "the organization membership changed or is no longer active"
+	case errors.Is(err, ErrMemberQuotaInsufficient):
+		status, code, message = http.StatusPaymentRequired, "MEMBER_QUOTA_INSUFFICIENT", "the organization member has insufficient granted quota"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "BILLING_CONFLICT", "the billing request conflicts with existing state"
 	case errors.Is(err, payment.ErrUnsupported):

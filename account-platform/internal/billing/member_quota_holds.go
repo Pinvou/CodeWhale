@@ -57,7 +57,7 @@ func (r *PostgresRepository) reserveMemberQuota(ctx context.Context, usageReques
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return Hold{}, err
 		}
-		return Hold{}, ErrConflict
+		return Hold{}, ErrMemberLifecycleConflict
 	}
 	wallet, err := getWallet(ctx, tx, walletID, true)
 	if err != nil {
@@ -99,7 +99,7 @@ FOR UPDATE OF grant,component`, organizationID, memberUserID, membershipVersion,
 	}
 	rows.Close()
 	if remaining != 0 {
-		return Hold{}, ErrInsufficientComponentCapacity
+		return Hold{}, ErrMemberQuotaInsufficient
 	}
 	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, walletID, maxAmount, now)
 	if err != nil || command.RowsAffected() != 1 {
@@ -172,7 +172,7 @@ func (r *PostgresRepository) extendMemberQuotaHold(ctx context.Context, tx pgx.T
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		return ErrConflict
+		return ErrMemberLifecycleConflict
 	}
 	wallet, err := getWallet(ctx, tx, hold.WalletID, true)
 	if err != nil {
@@ -207,7 +207,7 @@ func (r *PostgresRepository) extendMemberQuotaHold(ctx context.Context, tx pgx.T
 	}
 	rows.Close()
 	if remaining != 0 {
-		return ErrInsufficientComponentCapacity
+		return ErrMemberQuotaInsufficient
 	}
 	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
 	if err != nil {

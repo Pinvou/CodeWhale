@@ -594,7 +594,7 @@ paths:
               schema:
                 type: string
                 format: uuid
-            X-Pinvou-Billing-Code: { schema: { type: string, enum: [WALLET_INSUFFICIENT] } }
+            X-Pinvou-Billing-Code: { schema: { type: string, enum: [WALLET_INSUFFICIENT, MEMBER_QUOTA_INSUFFICIENT] } }
             X-Pinvou-Billing-Stage: { schema: { type: string, enum: [ADDITIONAL_RESERVATION] } }
             X-Pinvou-Billing-Turn-Outcome: { schema: { type: string, enum: [COMPLETED] } }
             X-Pinvou-Billing-Settlement-Status: { schema: { type: string, enum: [SETTLED] } }
@@ -1095,7 +1095,7 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
     WalletReservationRejected:
-      description: The initial model-usage reservation was definitively rejected; WALLET_INSUFFICIENT carries a structured notice, while other definitive reserve failures use WALLET_RESERVE_FAILED. The upstream provider was not called.
+      description: The initial model-usage reservation was definitively rejected; WALLET_INSUFFICIENT and MEMBER_QUOTA_INSUFFICIENT carry a structured notice, while other definitive reserve failures use WALLET_RESERVE_FAILED. The upstream provider was not called.
       content:
         application/json:
           schema:
@@ -1105,6 +1105,14 @@ components:
                 required: [code, message, request_id, billing_notice]
                 properties:
                   code: { type: string, const: WALLET_INSUFFICIENT }
+                  message: { type: string }
+                  request_id: { type: string }
+                  billing_notice: { $ref: "#/components/schemas/BillingNotice" }
+              - type: object
+                additionalProperties: false
+                required: [code, message, request_id, billing_notice]
+                properties:
+                  code: { type: string, const: MEMBER_QUOTA_INSUFFICIENT }
                   message: { type: string }
                   request_id: { type: string }
                   billing_notice: { $ref: "#/components/schemas/BillingNotice" }
@@ -1142,7 +1150,7 @@ components:
       required: [schema_version, code, stage, turn_outcome, settlement_status, action, context_type, usage_request_id]
       properties:
         schema_version: { type: integer, const: 1 }
-        code: { type: string, const: WALLET_INSUFFICIENT }
+        code: { type: string, enum: [WALLET_INSUFFICIENT, MEMBER_QUOTA_INSUFFICIENT] }
         stage: { type: string, enum: [INITIAL_RESERVATION, ADDITIONAL_RESERVATION] }
         turn_outcome: { type: string, enum: [REJECTED, COMPLETED] }
         settlement_status: { type: string, enum: [NOT_STARTED, SETTLED] }
@@ -1151,6 +1159,12 @@ components:
         organization_id: { type: string, format: uuid, description: Stable target organization; required for ORGANIZATION notices and forbidden for PERSONAL notices }
         usage_request_id: { type: string, format: uuid }
       allOf:
+        - if:
+            properties: { code: { const: MEMBER_QUOTA_INSUFFICIENT } }
+          then:
+            properties:
+              action: { const: CONTACT_ORG_ADMIN }
+              context_type: { const: ORGANIZATION }
         - if:
             properties: { context_type: { const: ORGANIZATION } }
           then:

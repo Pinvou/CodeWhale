@@ -55,19 +55,25 @@ type chatCompletionRequest struct {
 }
 
 func newWalletInsufficientNotice(stage, outcome, settlement, contextType string, organizationID *uuid.UUID, canPurchaseOrganizationEntitlements bool, usageID uuid.UUID) billingNotice {
+	return newInsufficientNotice("WALLET_INSUFFICIENT", stage, outcome, settlement, contextType, organizationID, canPurchaseOrganizationEntitlements, usageID)
+}
+
+func newInsufficientNotice(code, stage, outcome, settlement, contextType string, organizationID *uuid.UUID, canPurchaseOrganizationEntitlements bool, usageID uuid.UUID) billingNotice {
 	contextType = strings.ToUpper(strings.TrimSpace(contextType))
 	action := ""
 	switch contextType {
 	case "PERSONAL":
 		action = "OPEN_RECHARGE"
 	case "ORGANIZATION":
-		if organizationID != nil && canPurchaseOrganizationEntitlements {
+		if code == "MEMBER_QUOTA_INSUFFICIENT" {
+			action = "CONTACT_ORG_ADMIN"
+		} else if organizationID != nil && canPurchaseOrganizationEntitlements {
 			action = "OPEN_ORGANIZATION_RECHARGE"
 		} else {
 			action = "CONTACT_ORG_ADMIN"
 		}
 	}
-	return billingNotice{SchemaVersion: 1, Code: "WALLET_INSUFFICIENT", Stage: stage, TurnOutcome: outcome, SettlementStatus: settlement, Action: action, ContextType: contextType, OrganizationID: organizationID, UsageRequestID: usageID}
+	return billingNotice{SchemaVersion: 1, Code: code, Stage: stage, TurnOutcome: outcome, SettlementStatus: settlement, Action: action, ContextType: contextType, OrganizationID: organizationID, UsageRequestID: usageID}
 }
 
 func supportsBillingNotice(r *http.Request) bool {
@@ -226,7 +232,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	modelID, capabilityID, protocolID := catalogModel.ModelID, catalogModel.ModelCapabilityVersionID, catalogModel.ProtocolDefinitionID
 	usageRequest := UsageRequest{ID: usageID, IdempotencyKeyDigest: keyDigest, IdempotencyNamespace: "model-inference", CanonicalVersion: 1, RequestFingerprint: requestFingerprint, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: catalogModel.ModelID.String(), ModelID: &modelID, CatalogVersion: &catalogVersion, CapabilityVersionID: &capabilityID, ProtocolDefinitionID: &protocolID, RouteGeneration: &routeGeneration, ModelSnapshot: modelSnapshot, MaximumMicrocredits: maximumCost}
 	pricingSnapshot, _ := json.Marshal(price)
-	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model_id": catalogModel.ModelID, "upstream_model_ref": catalogModel.UpstreamModelRef, "catalog_version": catalogModel.CatalogVersion, "model_capability_version_id": catalogModel.ModelCapabilityVersionID, "protocol_definition_id": catalogModel.ProtocolDefinitionID, "protocol_code": "CHAT", "protocol_version": catalogModel.ProtocolVersion, "route_generation": route.RouteGeneration, "lifecycle_status": catalogModel.LifecycleStatus, "deprecation_effective_at": catalogModel.DeprecationEffectiveAt, "display_name": catalogModel.DisplayName, "context_length": catalogModel.ContextLength, "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "can_purchase_organization_entitlements": slices.Contains(resolved.Permissions, "org.entitlements.purchase"), "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
+	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model_id": catalogModel.ModelID, "upstream_model_ref": catalogModel.UpstreamModelRef, "catalog_version": catalogModel.CatalogVersion, "model_capability_version_id": catalogModel.ModelCapabilityVersionID, "protocol_definition_id": catalogModel.ProtocolDefinitionID, "protocol_code": "CHAT", "protocol_version": catalogModel.ProtocolVersion, "route_generation": route.RouteGeneration, "lifecycle_status": catalogModel.LifecycleStatus, "deprecation_effective_at": catalogModel.DeprecationEffectiveAt, "display_name": catalogModel.DisplayName, "context_length": catalogModel.ContextLength, "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "can_purchase_organization_entitlements": slices.Contains(resolved.Permissions, "org.entitlements.purchase"), "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "organization_membership_version": resolved.OrganizationMembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
 	if logicalTurnID != "" {
 		requestSnapshot["logical_turn_id"] = logicalTurnID
 	}
@@ -445,14 +451,14 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		return
 	}
 	background := context.WithoutCancel(r.Context())
-	_, insufficient, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
+	_, insufficientCode, ok := s.authorizeAdditional(background, usageRequest.ID, holdID, envelope.Price, usage, envelope.MaximumCost)
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "SETTLEMENT_PENDING", "the final response is awaiting usage settlement", httpserver.RequestID(r.Context()))
 		return
 	}
 	var notice *billingNotice
-	if insufficient {
-		value := newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", envelope.ContextType, envelope.OrganizationID, envelope.CanPurchaseOrganizationEntitlements, usageRequest.ID)
+	if insufficientCode != "" {
+		value := newInsufficientNotice(insufficientCode, "ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", envelope.ContextType, envelope.OrganizationID, envelope.CanPurchaseOrganizationEntitlements, usageRequest.ID)
 		notice = &value
 	}
 	actual, settlementSnapshot, err := settlementRecord(envelope.Price, usage, notice)
@@ -641,13 +647,13 @@ func (s *Service) recoverInitialReservationFailure(w http.ResponseWriter, r *htt
 	if err != nil {
 		return false, err
 	}
-	if snapshot.Result == nil || snapshot.Result.Kind != "JSON" || snapshot.Result.HTTPStatus != http.StatusPaymentRequired {
+	if snapshot.Result == nil || snapshot.Result.Kind != "JSON" || (snapshot.Result.HTTPStatus != http.StatusPaymentRequired && snapshot.Result.HTTPStatus != http.StatusConflict) {
 		return false, nil
 	}
 	var payload struct {
 		Code string `json:"code"`
 	}
-	if json.Unmarshal(snapshot.Result.Payload, &payload) != nil || (payload.Code != "WALLET_INSUFFICIENT" && payload.Code != "WALLET_RESERVE_FAILED") {
+	if json.Unmarshal(snapshot.Result.Payload, &payload) != nil || !initialReservationFailureCode(snapshot.Result.HTTPStatus, payload.Code) {
 		return false, nil
 	}
 	if err := s.repository.MarkReleased(context.WithoutCancel(r.Context()), usageID, "reserve_failed"); err != nil {
@@ -745,6 +751,7 @@ type frozenUsageSnapshot struct {
 	OrganizationID                      *uuid.UUID      `json:"organization_id,omitempty"`
 	CanPurchaseOrganizationEntitlements bool            `json:"can_purchase_organization_entitlements,omitempty"`
 	MembershipVersion                   int64           `json:"membership_version"`
+	OrganizationMembershipVersion       *int64          `json:"organization_membership_version,omitempty"`
 	MaximumOutput                       int64           `json:"maximum_output_tokens"`
 	Stream                              bool            `json:"stream"`
 	PricingSnapshot                     json.RawMessage `json:"pricing_snapshot"`
@@ -794,15 +801,18 @@ func (s *Service) ensureUsageHold(ctx context.Context, usage UsageRequest, envel
 		return BillingHold{}, err
 	}
 	pricing := HoldPricingContext{ModelID: usage.Model, ProtocolCode: "CHAT", FormulaVersionID: envelope.Price.FormulaVersionID, PricingSnapshot: pricingSnapshot, RequestSnapshot: usage.RequestSnapshot}
-	if snapshot.ContextType == "ORGANIZATION" && usage.OrganizationID != nil {
+	if snapshot.ContextType == "ORGANIZATION" {
+		if usage.OrganizationID == nil || snapshot.OrganizationID == nil || *usage.OrganizationID != *snapshot.OrganizationID || snapshot.OrganizationMembershipVersion == nil || *snapshot.OrganizationMembershipVersion < 1 {
+			return BillingHold{}, ErrOrganizationMembershipContext
+		}
 		if client, ok := s.billing.(SnapshotOrganizationBillingClient); ok {
-			return client.ReserveMemberQuotaPriced(ctx, usage.ID, usage.WalletID, *usage.OrganizationID, usage.UserID, snapshot.MembershipVersion, usage.MaximumMicrocredits, envelope.Price.ID, pricing)
+			return client.ReserveMemberQuotaPriced(ctx, usage.ID, usage.WalletID, *usage.OrganizationID, usage.UserID, *snapshot.OrganizationMembershipVersion, usage.MaximumMicrocredits, envelope.Price.ID, pricing)
 		}
 		client, ok := s.billing.(OrganizationBillingClient)
 		if !ok {
 			return BillingHold{}, ErrForbidden
 		}
-		return client.ReserveMemberQuota(ctx, usage.ID, usage.WalletID, *usage.OrganizationID, usage.UserID, snapshot.MembershipVersion, usage.MaximumMicrocredits, envelope.Price.ID)
+		return client.ReserveMemberQuota(ctx, usage.ID, usage.WalletID, *usage.OrganizationID, usage.UserID, *snapshot.OrganizationMembershipVersion, usage.MaximumMicrocredits, envelope.Price.ID)
 	}
 	if client, ok := s.billing.(SnapshotBillingClient); ok {
 		return client.ReservePriced(ctx, usage.ID, usage.WalletID, usage.MaximumMicrocredits, envelope.Price.ID, pricing)
@@ -811,6 +821,9 @@ func (s *Service) ensureUsageHold(ctx context.Context, usage UsageRequest, envel
 }
 
 func definitiveBillingFailure(err error) bool {
+	if errors.Is(err, ErrOrganizationMembershipContext) {
+		return true
+	}
 	var failure *BillingHTTPError
 	if !errors.As(err, &failure) {
 		return false
@@ -818,6 +831,8 @@ func definitiveBillingFailure(err error) bool {
 	switch failure.Status {
 	case http.StatusBadRequest, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
 		return true
+	case http.StatusConflict:
+		return strings.EqualFold(failure.Code, "MEMBER_LIFECYCLE_CONFLICT")
 	default:
 		return false
 	}
@@ -828,20 +843,51 @@ func walletInsufficient(err error) bool {
 	return errors.As(err, &failure) && failure.Status == http.StatusPaymentRequired && strings.EqualFold(strings.TrimSpace(failure.Code), "WALLET_INSUFFICIENT")
 }
 
+func memberQuotaInsufficient(err error) bool {
+	var failure *BillingHTTPError
+	return errors.As(err, &failure) && failure.Status == http.StatusPaymentRequired && strings.EqualFold(strings.TrimSpace(failure.Code), "MEMBER_QUOTA_INSUFFICIENT")
+}
+
+func initialReservationFailureCode(status int, code string) bool {
+	switch status {
+	case http.StatusPaymentRequired:
+		return code == "WALLET_INSUFFICIENT" || code == "WALLET_RESERVE_FAILED" || code == "MEMBER_QUOTA_INSUFFICIENT"
+	case http.StatusConflict:
+		return code == "MEMBER_LIFECYCLE_CONFLICT" || code == "ORGANIZATION_MEMBERSHIP_CONTEXT_INVALID"
+	default:
+		return false
+	}
+}
+
 func (s *Service) writeInitialReservationFailure(w http.ResponseWriter, r *http.Request, usageID uuid.UUID, envelope DispatchEnvelope, failure error) {
+	status := http.StatusPaymentRequired
 	response := map[string]any{
 		"code":       "WALLET_RESERVE_FAILED",
 		"message":    "the wallet could not reserve enough credits",
 		"request_id": httpserver.RequestID(r.Context()),
 	}
-	if walletInsufficient(failure) {
+	var billingFailure *BillingHTTPError
+	switch {
+	case errors.Is(failure, ErrOrganizationMembershipContext):
+		status = http.StatusConflict
+		response["code"] = "ORGANIZATION_MEMBERSHIP_CONTEXT_INVALID"
+		response["message"] = "the active organization membership context is unavailable"
+	case errors.As(failure, &billingFailure) && strings.EqualFold(strings.TrimSpace(billingFailure.Code), "MEMBER_LIFECYCLE_CONFLICT"):
+		status = http.StatusConflict
+		response["code"] = "MEMBER_LIFECYCLE_CONFLICT"
+		response["message"] = "the organization membership changed or is no longer active"
+	case errors.As(failure, &billingFailure) && strings.EqualFold(strings.TrimSpace(billingFailure.Code), "MEMBER_QUOTA_INSUFFICIENT"):
+		response["code"] = "MEMBER_QUOTA_INSUFFICIENT"
+		response["message"] = "the organization member has insufficient granted quota"
+		response["billing_notice"] = newInsufficientNotice("MEMBER_QUOTA_INSUFFICIENT", "INITIAL_RESERVATION", "REJECTED", "NOT_STARTED", envelope.ContextType, envelope.OrganizationID, false, usageID)
+	case walletInsufficient(failure):
 		response["code"] = "WALLET_INSUFFICIENT"
 		response["message"] = "the wallet has insufficient available credits"
 		response["billing_notice"] = newWalletInsufficientNotice("INITIAL_RESERVATION", "REJECTED", "NOT_STARTED", envelope.ContextType, envelope.OrganizationID, envelope.CanPurchaseOrganizationEntitlements, usageID)
 	}
 	payload, err := json.Marshal(response)
 	background := context.WithoutCancel(r.Context())
-	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "JSON", HTTPStatus: http.StatusPaymentRequired, ContentType: "application/json", Payload: payload}) != nil {
+	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "JSON", HTTPStatus: status, ContentType: "application/json", Payload: payload}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"billing_stage": "INITIAL_RESERVATION"})
 		api.WriteError(w, http.StatusServiceUnavailable, "RESULT_PERSISTENCE_FAILED", "the billing result could not be persisted", httpserver.RequestID(r.Context()))
 		return
@@ -851,7 +897,7 @@ func (s *Service) writeInitialReservationFailure(w http.ResponseWriter, r *http.
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusPaymentRequired)
+	w.WriteHeader(status)
 	_, _ = w.Write(payload)
 }
 
@@ -877,7 +923,7 @@ func billingNoticeFromUsageSnapshot(snapshot json.RawMessage) *billingNotice {
 	var payload struct {
 		BillingNotice *billingNotice `json:"billing_notice"`
 	}
-	if json.Unmarshal(snapshot, &payload) != nil || payload.BillingNotice == nil || payload.BillingNotice.SchemaVersion != 1 || payload.BillingNotice.Code != "WALLET_INSUFFICIENT" {
+	if json.Unmarshal(snapshot, &payload) != nil || payload.BillingNotice == nil || payload.BillingNotice.SchemaVersion != 1 || (payload.BillingNotice.Code != "WALLET_INSUFFICIENT" && payload.BillingNotice.Code != "MEMBER_QUOTA_INSUFFICIENT") {
 		return nil
 	}
 	return payload.BillingNotice
@@ -974,16 +1020,16 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, reason, map[string]any{"stream_error": streamErr != nil, "usage_found": usageFound, "done_found": doneFound})
 		return
 	}
-	_, insufficient, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
+	_, insufficientCode, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
 	if !authorized {
 		return
 	}
 	var noticePayload []byte
 	var noticeSequence int64
 	var persistedNotice *billingNotice
-	if insufficient {
+	if insufficientCode != "" {
 		context := billingNoticeContextValue(contexts)
-		value := newWalletInsufficientNotice("ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", context.ContextType, context.OrganizationID, context.CanPurchaseOrganizationEntitlements, usageID)
+		value := newInsufficientNotice(insufficientCode, "ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", context.ContextType, context.OrganizationID, context.CanPurchaseOrganizationEntitlements, usageID)
 		persistedNotice = &value
 	}
 	if persistedNotice != nil && supportsBillingNotice(r) {
@@ -1140,32 +1186,38 @@ func (s *Service) settlePrepared(ctx context.Context, usageID, holdID uuid.UUID,
 	return ""
 }
 
-func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, bool, bool) {
+func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, string, bool) {
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
-		return maximum, false, false
+		return maximum, "", false
 	}
 	if actual <= maximum {
-		return maximum, false, true
+		return maximum, "", true
 	}
 	additional := actual - maximum
 	client, ok := s.billing.(SnapshotBillingClient)
 	if !ok {
-		return actual, false, true
+		return actual, "", true
 	}
 	if err := client.Extend(ctx, usageID, holdID, additional); err != nil {
 		// Trusted final usage still converges through the idempotent Commit.
 		// Only a definite wallet-insufficient response becomes a user notice;
 		// uncertain failures become SETTLEMENT_PENDING only if Commit also fails.
-		return actual, walletInsufficient(err), true
+		if walletInsufficient(err) {
+			return actual, "WALLET_INSUFFICIENT", true
+		}
+		if memberQuotaInsufficient(err) {
+			return actual, "MEMBER_QUOTA_INSUFFICIENT", true
+		}
+		return actual, "", true
 	}
 	if repository, ok := s.repository.(interface {
 		IncreaseMaximum(context.Context, uuid.UUID, int64) error
 	}); ok {
 		if err := repository.IncreaseMaximum(ctx, usageID, additional); err != nil {
-			return actual, false, true
+			return actual, "", true
 		}
 	}
-	return actual, false, true
+	return actual, "", true
 }

@@ -106,6 +106,16 @@ type streamBillingFake struct {
 	releaseErr           error
 }
 
+type memberQuotaBillingFake struct {
+	BillingClient
+	membershipVersion int64
+}
+
+func (b *memberQuotaBillingFake) ReserveMemberQuotaPriced(_ context.Context, _, _, _, _ uuid.UUID, membershipVersion, _ int64, _ uuid.UUID, _ HoldPricingContext) (BillingHold, error) {
+	b.membershipVersion = membershipVersion
+	return BillingHold{ID: uuid.New()}, nil
+}
+
 type liveReplayRepositoryFake struct {
 	Repository
 	snapshots  []ReplaySnapshot
@@ -253,6 +263,43 @@ func TestBillingNoticeCapabilityAndWalletInsufficientClassification(t *testing.T
 	}
 }
 
+func TestOrganizationReservationUsesFrozenOrganizationMembershipVersion(t *testing.T) {
+	organizationID, userID := uuid.New(), uuid.New()
+	organizationMembershipVersion := int64(7)
+	snapshot, err := json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &organizationID, MembershipVersion: 19, OrganizationMembershipVersion: &organizationMembershipVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	billing := &memberQuotaBillingFake{}
+	service := &Service{billing: billing}
+	usage := UsageRequest{ID: uuid.New(), UserID: userID, OrganizationID: &organizationID, WalletID: uuid.New(), Model: "model", MaximumMicrocredits: 10, RequestSnapshot: snapshot}
+	_, err = service.ensureUsageHold(context.Background(), usage, DispatchEnvelope{Price: PriceVersion{ID: uuid.New(), FormulaVersionID: uuid.New()}})
+	if err != nil || billing.membershipVersion != organizationMembershipVersion {
+		t.Fatalf("organization membership version = %d, err=%v", billing.membershipVersion, err)
+	}
+
+	legacySnapshot, _ := json.Marshal(frozenUsageSnapshot{ContextType: "ORGANIZATION", OrganizationID: &organizationID, MembershipVersion: 19})
+	usage.RequestSnapshot = legacySnapshot
+	if _, err = service.ensureUsageHold(context.Background(), usage, DispatchEnvelope{Price: PriceVersion{ID: uuid.New(), FormulaVersionID: uuid.New()}}); !errors.Is(err, ErrOrganizationMembershipContext) || !definitiveBillingFailure(err) {
+		t.Fatalf("legacy organization snapshot did not fail closed: %v", err)
+	}
+}
+
+func TestMemberQuotaInsufficientIsClassifiedForAdditionalAuthorization(t *testing.T) {
+	repository := &streamRepositoryFake{}
+	billing := &streamBillingFake{extendErr: &BillingHTTPError{Status: http.StatusPaymentRequired, Code: "MEMBER_QUOTA_INSUFFICIENT"}}
+	service := &Service{repository: repository, billing: billing}
+	_, code, authorized := service.authorizeAdditional(context.Background(), uuid.New(), uuid.New(), PriceVersion{OutputPerMillion: 1_000_000}, Usage{OutputTokens: 10}, 1)
+	if !authorized || code != "MEMBER_QUOTA_INSUFFICIENT" {
+		t.Fatalf("additional member quota result: authorized=%v code=%q", authorized, code)
+	}
+	organizationID := uuid.New()
+	notice := newInsufficientNotice(code, "ADDITIONAL_RESERVATION", "COMPLETED", "SETTLED", "ORGANIZATION", &organizationID, true, uuid.New())
+	if notice.Action != "CONTACT_ORG_ADMIN" {
+		t.Fatalf("member quota action = %q", notice.Action)
+	}
+}
+
 func TestInitialWalletInsufficientIsPersistedBeforeTerminalReplay(t *testing.T) {
 	repository := &streamRepositoryFake{}
 	service := &Service{repository: repository}
@@ -308,6 +355,39 @@ func TestInitialWalletInsufficientRetryRecoversSavedResultBeforeReservingAgain(t
 	service.replayUsage(replayed, request, repository.replaySnapshot.Usage, nil)
 	if replayed.Code != http.StatusPaymentRequired || !bytes.Equal(replayed.Body.Bytes(), repository.savedResult.Payload) || !repository.released || repository.releaseCalls != 2 {
 		t.Fatalf("retry did not converge the saved 402 before reserve: code=%d body=%s repository=%#v", replayed.Code, replayed.Body.String(), repository)
+	}
+}
+
+func TestInitialMemberQuotaAndMembershipFailuresRecoverSavedTerminalResult(t *testing.T) {
+	cases := []struct {
+		name       string
+		failure    error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "member quota", failure: &BillingHTTPError{Status: http.StatusPaymentRequired, Code: "MEMBER_QUOTA_INSUFFICIENT"}, wantStatus: http.StatusPaymentRequired, wantCode: "MEMBER_QUOTA_INSUFFICIENT"},
+		{name: "membership changed", failure: &BillingHTTPError{Status: http.StatusConflict, Code: "MEMBER_LIFECYCLE_CONFLICT"}, wantStatus: http.StatusConflict, wantCode: "MEMBER_LIFECYCLE_CONFLICT"},
+		{name: "legacy snapshot", failure: ErrOrganizationMembershipContext, wantStatus: http.StatusConflict, wantCode: "ORGANIZATION_MEMBERSHIP_CONTEXT_INVALID"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &streamRepositoryFake{releaseErr: errors.New("database unavailable")}
+			service := &Service{repository: repository}
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			usageID, organizationID := uuid.New(), uuid.New()
+			first := httptest.NewRecorder()
+			service.writeInitialReservationFailure(first, request, usageID, DispatchEnvelope{ContextType: "ORGANIZATION", OrganizationID: &organizationID}, test.failure)
+			if first.Code != http.StatusServiceUnavailable || repository.savedResult.HTTPStatus != test.wantStatus || !strings.Contains(string(repository.savedResult.Payload), test.wantCode) {
+				t.Fatalf("saved terminal result = %#v first=%d", repository.savedResult, first.Code)
+			}
+			repository.replaySnapshot = ReplaySnapshot{Usage: UsageRequest{ID: usageID, ExecutionStatus: "HOLD_RESERVING"}, Result: &repository.savedResult}
+			repository.releaseErr = nil
+			replayed := httptest.NewRecorder()
+			handled, err := service.recoverInitialReservationFailure(replayed, request, usageID)
+			if err != nil || !handled || replayed.Code != test.wantStatus || !repository.released {
+				t.Fatalf("recovery handled=%v status=%d released=%v err=%v", handled, replayed.Code, repository.released, err)
+			}
+		})
 	}
 }
 

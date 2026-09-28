@@ -109,6 +109,32 @@ test('hydrated timeline restores a persisted organization notice without a perso
   }), true);
 });
 
+test('member quota notice stays in organization context and contacts an administrator', () => {
+  const organizationId = '0199a100-0001-7000-8000-000000000203';
+  const records = pairDeepSeekTimeline([
+    { event: 'user_start', turn_id: 'turn-member-quota', timestamp: 1, ui_turn_index: 0 },
+    {
+      event: 'assistant_done',
+      turn_id: 'turn-member-quota',
+      timestamp: 2,
+      status: 'Failed',
+      billing_notice: {
+        schema_version: 1,
+        code: 'MEMBER_QUOTA_INSUFFICIENT',
+        stage: 'INITIAL_RESERVATION',
+        turn_outcome: 'REJECTED',
+        settlement_status: 'NOT_STARTED',
+        action: 'CONTACT_ORG_ADMIN',
+        context_type: 'ORGANIZATION',
+        organization_id: organizationId,
+      },
+    },
+  ]);
+  assert.equal(records[0].userError.errorCode, 'MEMBER_QUOTA_INSUFFICIENT');
+  assert.equal(records[0].userError.action, 'CONTACT_ORG_ADMIN');
+  assert.equal(records[0].userError.organizationId, organizationId);
+});
+
 test('organization recharge action is permission-bound and never calls personal wallet APIs', async () => {
   const organizationId = '0199a100-0001-7000-8000-000000000202';
   const userError = {

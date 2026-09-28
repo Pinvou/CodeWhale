@@ -328,7 +328,8 @@ WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, pr
 func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, principal identity.Principal) (AuthorizationContext, error) {
 	var resolved AuthorizationContext
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id,s.session_id,active.context_type,active.organization_id,u.membership_version,active.context_version,
+SELECT u.id,s.session_id,active.context_type,active.organization_id,u.membership_version,
+       CASE WHEN active.organization_id IS NULL THEN NULL ELSE max(m.version) END,active.context_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
        COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ro.scope='ORGANIZATION' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
@@ -369,7 +370,7 @@ LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND
 WHERE i.issuer=$1 AND i.subject=$2 AND (active.organization_id IS NULL OR o.status='ACTIVE')
 GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.context_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
 		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID,
-		&resolved.MembershipVersion, &resolved.ContextVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs,
+		&resolved.MembershipVersion, &resolved.OrganizationMembershipVersion, &resolved.ContextVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs,
 		&resolved.Roles, &resolved.Permissions, &resolved.UnitAuthorizationBindings,
 		&resolved.PersonalRoles, &resolved.PersonalPermissions,
 		&resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion,
