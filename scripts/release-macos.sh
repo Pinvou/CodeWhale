@@ -2,6 +2,10 @@
 # pinvou3 macOS 发布脚本：构建 universal dmg → 合并 latest.json platforms.macos-universal + macos-arm64 → rsync 上传。
 # 用法: ./scripts/release-macos.sh "本次更新说明"
 #
+# ⚠️ 本脚本只发布到源站 8.218.49.20。pinvou.com 的 DNS 已指向 nginx-edge(8.138.39.140),
+# 两机无自动同步:发版后须按 docs/应用内升级-设计.md「服务端现状」把同名文件与
+# latest.json 手工镜像到 edge,否则公网仍是旧版/404(2026-09-28 0.10.5 发版实测)。
+#
 # 发版前置:
 #   1. bump 版本号(tauri.conf.json / Cargo.toml / package.json 三处,本脚本会校验一致)
 #   2. (可选)export MACOS_SIGNING_IDENTITY / APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
