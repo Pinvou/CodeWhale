@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
-import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
+import { activeEntitlementPackages, entitlementPackageDisplayName, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
 import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
@@ -70,6 +70,22 @@ test('personal account summaries prefer the current username over a stale displa
   assert.match(view, /const userLabel = accountDisplayLabel\(me, copy\.user\)/);
   assert.match(view, /copy\.welcome\(accountDisplayLabel\(me, copy\.user\)\)/);
   assert.match(popover, /const displayName = accountDisplayLabel\(me, copy\.user\)/);
+});
+
+test('benefit packages use the current catalog name for the active language and preserve the purchase snapshot as fallback', () => {
+  const item = {
+    plan_id: 'PLAN_STANDARD',
+    plan_name: 'Purchase-time snapshot',
+    current_plan_name_zh_cn: '标准版（新）',
+    current_plan_name_en: 'Standard (New)',
+    current_plan_name_ja: 'スタンダード（新）',
+  };
+  assert.equal(entitlementPackageDisplayName(item, 'zh'), '标准版（新）');
+  assert.equal(entitlementPackageDisplayName(item, 'en-US'), 'Standard (New)');
+  assert.equal(entitlementPackageDisplayName(item, 'ja-JP'), 'スタンダード（新）');
+  assert.equal(entitlementPackageDisplayName({ plan_name: 'Legacy snapshot', plan_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
+  assert.equal(entitlementPackageDisplayName({ current_plan_name_en: ' ', plan_name: 'Legacy snapshot', plan_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
+  assert.equal(entitlementPackageDisplayName({ plan_id: 'LEGACY' }, 'en'), 'LEGACY');
 });
 
 test('Web account synchronization updates profile fields without reloading unchanged context resources', () => {

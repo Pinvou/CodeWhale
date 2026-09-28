@@ -31,3 +31,18 @@ export function remainingEntitlementMicrocredits(items = []) {
     return sum + (Number.isFinite(value) && value > 0 ? value : 0);
   }, 0);
 }
+
+export function entitlementPackageDisplayName(item, language) {
+  const normalizedLanguage = String(language || '').trim().toLowerCase();
+  const languageKey = normalizedLanguage.startsWith('zh') ? 'zh' : normalizedLanguage.startsWith('ja') ? 'ja' : 'en';
+  const currentNames = {
+    zh: item?.current_plan_name_zh_cn,
+    en: item?.current_plan_name_en,
+    ja: item?.current_plan_name_ja,
+  };
+  for (const candidate of [currentNames[languageKey], item?.plan_name, item?.plan_id]) {
+    const value = String(candidate || '').trim();
+    if (value) return value;
+  }
+  return '';
+}

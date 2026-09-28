@@ -95,6 +95,9 @@ type EntitlementPackage struct {
 	SourceReference        string                 `json:"source_reference"`
 	ProductID              string                 `json:"plan_id"`
 	PlanName               string                 `json:"plan_name"`
+	CurrentPlanNameZhCN    string                 `json:"current_plan_name_zh_cn,omitempty"`
+	CurrentPlanNameEN      string                 `json:"current_plan_name_en,omitempty"`
+	CurrentPlanNameJA      string                 `json:"current_plan_name_ja,omitempty"`
 	SKUCode                string                 `json:"sku_code"`
 	AmountFen              int64                  `json:"amount_fen"`
 	PointsTotal            int64                  `json:"points_total_microcredits"`

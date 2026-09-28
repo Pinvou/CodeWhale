@@ -2,7 +2,7 @@ import { secureRequestID } from './request-id.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
-import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
+import { activeEntitlementPackages, allEntitlementPackages, entitlementPackageDisplayName, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
@@ -2133,7 +2133,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
               <select value={packageId} onChange={(event) => setPackageId(event.target.value)}>
                 {(packages.items || []).map((item) => (
                   <option key={item.package_id} value={item.package_id}>
-                    {item.plan_name} · {String(item.package_id).slice(0, 8)}
+                    {entitlementPackageDisplayName(item, language)} · {String(item.package_id).slice(0, 8)}
                   </option>
                 ))}
               </select>
@@ -2413,10 +2413,11 @@ function PaymentQRCodeDialog({ copy, order, qrData, scanApps, remainingSeconds, 
 
 function EntitlementPackageRow({ copy, language, item, onOpen }) {
   const progress = entitlementProgress(item);
+  const displayName = entitlementPackageDisplayName(item, language);
   return (
     <button type="button" className="ap-entitlement-row" data-points-format="integer" onClick={onOpen}>
       <span className="ap-entitlement-row-main">
-        <strong>{item.plan_name}</strong>
+        <strong>{displayName}</strong>
         <small>{copy.usedOfTotal(formatWholePoints(item.points_used_microcredits, language), formatWholePoints(item.points_total_microcredits, language))}</small>
       </span>
       <span className="ap-entitlement-row-meta">
@@ -2431,11 +2432,12 @@ function EntitlementPackageRow({ copy, language, item, onOpen }) {
 }
 
 function EntitlementPackageDetail({ copy, language, item }) {
+  const displayName = entitlementPackageDisplayName(item, language);
   return (
     <div className="ap-entitlement-detail">
       <header>
         <div>
-          <strong>{item.plan_name}</strong>
+          <strong>{displayName}</strong>
           <small>{item.sku_code || item.plan_id}</small>
         </div>
         <span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span>
