@@ -1573,6 +1573,19 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/refunds") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/usage-holds/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/late-payment-reviews") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/late-payment-reviews/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/late-payment-reviews/"+userID+"/query") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-imports") {
 		t.Fatal("admin portal must expose documented billing operations")
 	}
+	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/payment-orders/"+userID) {
+		t.Fatal("admin portal must expose payment order details")
+	}
+	for _, blocked := range []struct{ method, resource string }{
+		{http.MethodGet, "/admin/v1/payment-orders/not-a-uuid"},
+		{http.MethodGet, "/admin/v1/payment-orders/" + userID + "/extra"},
+		{http.MethodPut, "/admin/v1/payment-orders/" + userID},
+		{http.MethodDelete, "/admin/v1/payment-orders/" + userID},
+	} {
+		if billingAdminPathAllowed(blocked.method, blocked.resource) {
+			t.Fatalf("payment order detail allowlist accepted %s %s", blocked.method, blocked.resource)
+		}
+	}
 	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/metering-units") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/drafts") || !billingAdminPathAllowed(http.MethodPut, "/admin/v1/pricing/"+userID+"/draft") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/pricing/"+userID+"/preview") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/publish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/transition") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/metering-units/"+userID+"/deactivate") {
 		t.Fatal("admin portal must expose versioned metering and pricing lifecycle operations")
 	}
