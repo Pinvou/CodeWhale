@@ -146,6 +146,10 @@ func (s *Service) adminCreateRechargeProduct(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, ErrConflict)
 		return
 	}
+	if _, err := normalizeRechargeProductMicrocredits(&body.CreateRechargeProduct); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	hash := catalogRequestHash("CREATE", body)
 	if replay, err := s.replayCatalogCommand(w, r, hash); replay || err != nil {
 		if err != nil {

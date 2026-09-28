@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -131,7 +132,7 @@ type CreateRechargeProduct struct {
 	ReplacementProduct *string                     `json:"replacement_product_id,omitempty"`
 	BasePoints         int64                       `json:"base_points"`
 	BonusPoints        int64                       `json:"bonus_points"`
-	CreditMicrocredits int64                       `json:"credit_microcredits"`
+	CreditMicrocredits *int64                      `json:"credit_microcredits,omitempty"`
 	ValidityDays       int                         `json:"validity_days"`
 	InvoiceProductName string                      `json:"invoice_product_name"`
 	Mapping            RechargeProductMappingDraft `json:"mapping"`
@@ -375,13 +376,17 @@ func (r *PostgresRepository) CreateRechargeProduct(ctx context.Context, input Cr
 	input.Mapping.ExternalSKUBOM = strings.TrimSpace(input.Mapping.ExternalSKUBOM)
 	input.Mapping.Currency = strings.ToUpper(strings.TrimSpace(input.Mapping.Currency))
 	input.Mapping.AdmissionClass = strings.ToUpper(strings.TrimSpace(input.Mapping.AdmissionClass))
+	derivedCreditMicrocredits, err := normalizeRechargeProductMicrocredits(&input)
+	if err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
 	if input.ProductID == "" || input.DisplayNameZhCN == "" || input.DisplayNameEN == "" || input.DisplayNameJA == "" ||
-		input.InvoiceProductName == "" || input.BasePoints < 0 || input.BonusPoints < 0 || input.BasePoints+input.BonusPoints <= 0 ||
-		input.CreditMicrocredits <= 0 || input.ValidityDays <= 0 || input.Mapping.ProviderID == "" || input.Mapping.ProviderVersion == "" ||
+		input.InvoiceProductName == "" || input.ValidityDays <= 0 || input.Mapping.ProviderID == "" || input.Mapping.ProviderVersion == "" ||
 		input.Mapping.ExternalSKUBOM == "" || input.Mapping.AmountFen <= 0 || input.Mapping.Currency != "CNY" || len(input.Mapping.Channels) == 0 ||
 		(input.Mapping.AdmissionClass != "FORMAL" && input.Mapping.AdmissionClass != "TEST_ONLY") {
 		return RechargeProductCatalogItem{}, ErrConflict
 	}
+	displayPoints := input.BasePoints + input.BonusPoints
 	for index := range input.Mapping.Channels {
 		input.Mapping.Channels[index] = strings.ToUpper(strings.TrimSpace(input.Mapping.Channels[index]))
 		if !validPaymentChannel(input.Mapping.Channels[index]) {
@@ -401,9 +406,8 @@ func (r *PostgresRepository) CreateRechargeProduct(ctx context.Context, input Cr
 	}
 	now := r.now()
 	itemID := uuid.Must(uuid.NewV7())
-	displayPoints := input.BasePoints + input.BonusPoints
 	_, err = tx.Exec(ctx, `INSERT INTO recharge_products(product_id,amount_fen,credit_microcredits,display_points,currency,channels,catalog_version,enabled,created_at,plan_name,sku_code,base_points,bonus_points,validity_days,price_status,invoice_product_name)
-VALUES($1,$2,$3,$4,$5,$6,1,FALSE,$7,$8,'',$9,$10,$11,$12,$13)`, input.ProductID, input.Mapping.AmountFen, input.CreditMicrocredits, displayPoints, input.Mapping.Currency, input.Mapping.Channels, now, input.DisplayNameZhCN, input.BasePoints, input.BonusPoints, input.ValidityDays, map[bool]string{true: "FROZEN", false: "UAT_TENTATIVE"}[input.Mapping.AdmissionClass == "FORMAL"], input.InvoiceProductName)
+VALUES($1,$2,$3,$4,$5,$6,1,FALSE,$7,$8,'',$9,$10,$11,$12,$13)`, input.ProductID, input.Mapping.AmountFen, derivedCreditMicrocredits, displayPoints, input.Mapping.Currency, input.Mapping.Channels, now, input.DisplayNameZhCN, input.BasePoints, input.BonusPoints, input.ValidityDays, map[bool]string{true: "FROZEN", false: "UAT_TENTATIVE"}[input.Mapping.AdmissionClass == "FORMAL"], input.InvoiceProductName)
 	if err != nil {
 		return RechargeProductCatalogItem{}, err
 	}
@@ -420,6 +424,28 @@ VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`, itemID, input.Mapping.ProviderID, inpu
 		return RechargeProductCatalogItem{}, err
 	}
 	return r.RechargeProductCatalogItem(ctx, itemID)
+}
+
+func normalizeRechargeProductMicrocredits(input *CreateRechargeProduct) (int64, error) {
+	if input == nil {
+		return 0, ErrConflict
+	}
+	basePoints, bonusPoints := input.BasePoints, input.BonusPoints
+	if basePoints < 0 || bonusPoints < 0 || basePoints > math.MaxInt64-bonusPoints {
+		return 0, ErrConflict
+	}
+	totalPoints := basePoints + bonusPoints
+	if totalPoints <= 0 || totalPoints > math.MaxInt64/10000 {
+		return 0, ErrConflict
+	}
+	derived := totalPoints * 10000
+	// credit_microcredits remains accepted for compatibility with older admin
+	// clients, but it can no longer override the points-derived ledger value.
+	if input.CreditMicrocredits != nil && *input.CreditMicrocredits != derived {
+		return 0, ErrConflict
+	}
+	input.CreditMicrocredits = &derived
+	return derived, nil
 }
 
 func (r *PostgresRepository) RechargeProductCatalogItem(ctx context.Context, catalogItemID uuid.UUID) (RechargeProductCatalogItem, error) {

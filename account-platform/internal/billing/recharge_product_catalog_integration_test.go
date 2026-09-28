@@ -316,7 +316,6 @@ func createVerifiedRechargeProduct(t *testing.T, ctx context.Context, repository
 		DisplayNameJA:      suffix,
 		BasePoints:         100,
 		BonusPoints:        10,
-		CreditMicrocredits: 110000,
 		ValidityDays:       30,
 		InvoiceProductName: suffix,
 		Mapping: RechargeProductMappingDraft{

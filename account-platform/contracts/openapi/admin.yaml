@@ -4561,7 +4561,7 @@ components:
     RechargeProductCreate:
       type: object
       additionalProperties: false
-      required: [product_id, display_name_zh_cn, display_name_en, display_name_ja, display_order, base_points, bonus_points, credit_microcredits, validity_days, invoice_product_name, mapping, expected_version, reason]
+      required: [product_id, display_name_zh_cn, display_name_en, display_name_ja, display_order, base_points, bonus_points, validity_days, invoice_product_name, mapping, expected_version, reason]
       properties:
         product_id: { type: string, minLength: 1 }
         display_name_zh_cn: { type: string, minLength: 1 }
@@ -4571,7 +4571,7 @@ components:
         replacement_product_id: { type: string }
         base_points: { type: integer, minimum: 0 }
         bonus_points: { type: integer, minimum: 0 }
-        credit_microcredits: { type: integer, minimum: 1 }
+        credit_microcredits: { type: integer, minimum: 1, deprecated: true, description: "Deprecated compatibility field. When present it must equal (base_points + bonus_points) * 10000." }
         validity_days: { type: integer, minimum: 1 }
         invoice_product_name: { type: string, minLength: 1 }
         mapping: { $ref: "#/components/schemas/RechargeProductMappingCreate" }

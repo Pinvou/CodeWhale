@@ -45,6 +45,10 @@ test('portal proxy and OpenAPI expose only the exact product lifecycle', async (
     '/billing/admin/v1/recharge-products/{catalog_item_id}/admission-verifications/{verification_id}/retry',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/admission-verifications/{verification_id}/revoke',
   ]) assert.ok(openapi.paths[path], path);
+  const createSchema = openapi.components.schemas.RechargeProductCreate;
+  assert.equal(createSchema.properties.credit_microcredits.deprecated, true);
+  assert.equal(createSchema.properties.credit_microcredits.minimum, 1);
+  assert.ok(!createSchema.required.includes('credit_microcredits'));
 });
 
 test('admin product UI is permission driven, tri-lingual, and never auto-replays after step-up', async () => {
@@ -59,6 +63,7 @@ test('admin product UI is permission driven, tri-lingual, and never auto-replays
   assert.match(ui, /reauthenticate=1/);
   assert.match(ui, /refresh and confirm again|刷新状态后再次确认/);
   assert.doesNotMatch(ui, /auto.?replay|automaticSubmit|retryAfterLogin/i);
+  assert.doesNotMatch(ui, /name="credit_microcredits"|credit_microcredits:Number\(f\.credit_microcredits\)/);
   assert.match(portal, /prompt", "login"/);
   assert.match(portal, /max_age", "900"/);
 });
