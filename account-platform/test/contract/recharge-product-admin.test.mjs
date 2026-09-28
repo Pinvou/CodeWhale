@@ -37,6 +37,7 @@ test('portal proxy and OpenAPI expose only the exact product lifecycle', async (
   assert.doesNotMatch(portal, /recharge-products.*HasPrefix/);
   for (const path of [
     '/billing/admin/v1/recharge-products',
+    '/billing/admin/v1/recharge-product-create-options',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/publish',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/unpublish',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/delete',
@@ -64,6 +65,11 @@ test('admin product UI is permission driven, tri-lingual, and never auto-replays
   assert.match(ui, /refresh and confirm again|刷新状态后再次确认/);
   assert.doesNotMatch(ui, /auto.?replay|automaticSubmit|retryAfterLogin/i);
   assert.doesNotMatch(ui, /name="credit_microcredits"|credit_microcredits:Number\(f\.credit_microcredits\)/);
+  assert.match(ui, /name="provider_adapter"/);
+  assert.match(ui, /name="invoice_product_name"[^>]*required/);
+  assert.match(ui, /name="channels" value=/);
+  assert.match(ui, /recharge-product-create-options/);
+  assert.doesNotMatch(ui, /name="provider_version" placeholder|channels\.split\(/);
   assert.match(portal, /prompt", "login"/);
   assert.match(portal, /max_age", "900"/);
 });

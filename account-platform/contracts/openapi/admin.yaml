@@ -927,6 +927,14 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/recharge-product-create-options:
+    get:
+      operationId: getRechargeProductCreateOptions
+      summary: List the configured payment adapter, supported channels, and existing invoice names accepted for new recharge products
+      responses:
+        "200": { description: Authoritative create options, content: { application/json: { schema: { $ref: "#/components/schemas/RechargeProductCreateOptions" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/recharge-products/{catalog_item_id}/publish:
     post:
       operationId: publishRechargeProduct
@@ -4577,6 +4585,26 @@ components:
         mapping: { $ref: "#/components/schemas/RechargeProductMappingCreate" }
         expected_version: { type: integer, const: 0 }
         reason: { type: string, minLength: 1 }
+    RechargeProductCreateOptions:
+      type: object
+      additionalProperties: false
+      required: [adapters, invoice_product_names]
+      properties:
+        adapters:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [provider_id, provider_version, channels]
+            properties:
+              provider_id: { type: string, minLength: 1 }
+              provider_version: { type: string, minLength: 1 }
+              channels: { type: array, minItems: 1, uniqueItems: true, items: { type: string } }
+        invoice_product_names:
+          type: array
+          uniqueItems: true
+          items: { type: string, minLength: 1 }
     RechargeProductMappingCreate:
       type: object
       additionalProperties: false

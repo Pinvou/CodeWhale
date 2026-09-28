@@ -165,6 +165,30 @@ type RechargeProductCatalogRepository interface {
 	RecordRechargeProductCommand(context.Context, string, string, string, *uuid.UUID, string, string, int64, *int64, *int64, int, json.RawMessage) error
 }
 
+// RechargeProductCreateOptionsRepository is kept separate from the catalog
+// command interface so existing command adapters do not gain an unrelated
+// read dependency. The production Postgres repository implements both.
+type RechargeProductCreateOptionsRepository interface {
+	ListRechargeProductInvoiceNames(context.Context) ([]string, error)
+}
+
+func (r *PostgresRepository) ListRechargeProductInvoiceNames(ctx context.Context) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT btrim(invoice_product_name) FROM recharge_products WHERE btrim(invoice_product_name)<>'' ORDER BY btrim(invoice_product_name)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
 type RechargeProductDisplayNamesCommand struct {
 	CatalogItemID                                 uuid.UUID
 	ExpectedVersion                               int64

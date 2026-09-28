@@ -62,6 +62,36 @@ func TestRechargeProductCreateHashCanonicalizesLegacyMicrocredits(t *testing.T) 
 	}
 }
 
+func TestRechargeProductCreateSelectionUsesAuthoritativeOptions(t *testing.T) {
+	options := rechargeProductCreateOptions{
+		Adapters: []rechargeProductAdapterOption{{ProviderID: "provider-a", ProviderVersion: "adapter-v2", Channels: []string{"ALIPAY", "WECHAT"}}},
+		InvoiceProductNames: []string{"AI service"},
+	}
+	valid := CreateRechargeProduct{InvoiceProductName: "AI service", Mapping: RechargeProductMappingDraft{ProviderID: "provider-a", ProviderVersion: "adapter-v2", Channels: []string{"ALIPAY", "wechat"}}}
+	if err := validateRechargeProductCreateSelection(valid, options); err != nil {
+		t.Fatalf("valid selection rejected: %v", err)
+	}
+	for _, fixture := range []struct {
+		name   string
+		mutate func(*CreateRechargeProduct)
+	}{
+		{name: "free text invoice", mutate: func(value *CreateRechargeProduct) { value.InvoiceProductName = "new invoice" }},
+		{name: "unknown adapter version", mutate: func(value *CreateRechargeProduct) { value.Mapping.ProviderVersion = "adapter-v3" }},
+		{name: "unsupported channel", mutate: func(value *CreateRechargeProduct) { value.Mapping.Channels = []string{"CARD"} }},
+		{name: "duplicate channel", mutate: func(value *CreateRechargeProduct) { value.Mapping.Channels = []string{"ALIPAY", "alipay"} }},
+		{name: "empty channel", mutate: func(value *CreateRechargeProduct) { value.Mapping.Channels = nil }},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			input := valid
+			input.Mapping.Channels = append([]string(nil), valid.Mapping.Channels...)
+			fixture.mutate(&input)
+			if !errors.Is(validateRechargeProductCreateSelection(input, options), ErrConflict) {
+				t.Fatal("selection outside authoritative options was accepted")
+			}
+		})
+	}
+}
+
 func TestAdminUpdateRechargeProductDisplayNamesRejectsPathAndIdempotencyBeforeSideEffects(t *testing.T) {
 	service := &Service{} // A nil catalog makes accidental command execution fail loudly.
 	for _, fixture := range []struct {

@@ -34,6 +34,7 @@ type Service struct {
 	callbackProfiles            *paymentcallback.Profiles
 	humanDelegations            *humandelegation.Verifier
 	catalog                     RechargeProductCatalogRepository
+	catalogCreateOptions        RechargeProductCreateOptionsRepository
 	impactPricing               impactPriceRepository
 	modelPriceProjectionEnabled bool
 	modelPriceProjectionMetrics *modelPriceProjectionMetrics
@@ -43,6 +44,7 @@ type Service struct {
 
 func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
 	s.catalog = catalog
+	s.catalogCreateOptions, _ = catalog.(RechargeProductCreateOptionsRepository)
 	return s
 }
 
@@ -180,6 +182,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/metering-units/:unit_definition_id/deactivate", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_DEACTIVATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeactivateMeteringUnit))
 		if s.catalog != nil {
 			admin.GET("/recharge-products", s.authorizer.Require("platform.products.read"), httpserver.AdaptFunc(s.adminRechargeProducts))
+			admin.GET("/recharge-product-create-options", s.authorizer.Require("platform.products.create"), httpserver.AdaptFunc(s.adminRechargeProductCreateOptions))
 			admin.POST("/recharge-products", s.authorizer.Require("platform.products.create"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateRechargeProduct))
 			admin.GET("/recharge-products/:catalog_item_id/admission-verifications", s.authorizer.Require("platform.products.read"), httpserver.AdaptFunc(s.adminProductAdmissionVerifications))
 			admin.POST("/recharge-products/:catalog_item_id/admission-verifications", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminStartProductAdmissionVerification))

@@ -13,6 +13,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -125,6 +126,81 @@ func (s *Service) adminRechargeProducts(w http.ResponseWriter, r *http.Request) 
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
+type rechargeProductAdapterOption struct {
+	ProviderID      string   `json:"provider_id"`
+	ProviderVersion string   `json:"provider_version"`
+	Channels        []string `json:"channels"`
+}
+
+type rechargeProductCreateOptions struct {
+	Adapters            []rechargeProductAdapterOption `json:"adapters"`
+	InvoiceProductNames []string                       `json:"invoice_product_names"`
+}
+
+func (s *Service) rechargeProductCreateOptions(r *http.Request) (rechargeProductCreateOptions, error) {
+	if s.payments == nil || s.catalogCreateOptions == nil {
+		return rechargeProductCreateOptions{}, payment.ErrUnsupported
+	}
+	capabilities := s.payments.Capabilities()
+	names, err := s.catalogCreateOptions.ListRechargeProductInvoiceNames(r.Context())
+	if err != nil {
+		return rechargeProductCreateOptions{}, err
+	}
+	return rechargeProductCreateOptions{
+		Adapters: []rechargeProductAdapterOption{{
+			ProviderID:      capabilities.ProviderID,
+			ProviderVersion: capabilities.Version,
+			Channels:        append([]string(nil), capabilities.Channels...),
+		}},
+		InvoiceProductNames: names,
+	}, nil
+}
+
+func (s *Service) adminRechargeProductCreateOptions(w http.ResponseWriter, r *http.Request) {
+	options, err := s.rechargeProductCreateOptions(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, options)
+}
+
+func validateRechargeProductCreateSelection(input CreateRechargeProduct, options rechargeProductCreateOptions) error {
+	invoiceName := strings.TrimSpace(input.InvoiceProductName)
+	invoiceAllowed := false
+	for _, candidate := range options.InvoiceProductNames {
+		invoiceAllowed = invoiceAllowed || invoiceName == candidate
+	}
+	if !invoiceAllowed {
+		return ErrConflict
+	}
+	for _, adapter := range options.Adapters {
+		if strings.TrimSpace(input.Mapping.ProviderID) != adapter.ProviderID || strings.TrimSpace(input.Mapping.ProviderVersion) != adapter.ProviderVersion {
+			continue
+		}
+		if len(input.Mapping.Channels) == 0 {
+			return ErrConflict
+		}
+		seen := make(map[string]bool, len(input.Mapping.Channels))
+		for _, channel := range input.Mapping.Channels {
+			channel = strings.ToUpper(strings.TrimSpace(channel))
+			if channel == "" || seen[channel] {
+				return ErrConflict
+			}
+			seen[channel] = true
+			allowed := false
+			for _, candidate := range adapter.Channels {
+				allowed = allowed || strings.EqualFold(channel, candidate)
+			}
+			if !allowed {
+				return ErrConflict
+			}
+		}
+		return nil
+	}
+	return ErrConflict
+}
+
 type createRechargeProductRequest struct {
 	CreateRechargeProduct
 	ExpectedVersion int64  `json:"expected_version"`
@@ -155,6 +231,15 @@ func (s *Service) adminCreateRechargeProduct(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			s.writeError(w, r, err)
 		}
+		return
+	}
+	options, err := s.rechargeProductCreateOptions(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err = validateRechargeProductCreateSelection(body.CreateRechargeProduct, options); err != nil {
+		s.writeError(w, r, err)
 		return
 	}
 	item, err := s.catalog.CreateRechargeProduct(r.Context(), body.CreateRechargeProduct)

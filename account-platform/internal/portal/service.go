@@ -1305,6 +1305,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v1/recharge-product-create-options" && method == http.MethodGet {
+		return true
+	}
 	if resource == "/admin/v1/recharge-products" && (method == http.MethodGet || method == http.MethodPost) {
 		return true
 	}
