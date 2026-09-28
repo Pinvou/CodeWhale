@@ -1463,6 +1463,14 @@ class CiGatePolicyTests(unittest.TestCase):
             "- 'pinvou3-app/tests/knowledge_host_packaging.test.mjs'",
             release_contract_paths,
         )
+        # tauri_effective_config.test.js parses this script's --target dispatch to
+        # pin the cross-build Node architecture mapping, and it runs inside
+        # release-contract-test; without this entry a PR touching only the bridge
+        # script would silently skip that contract gate.
+        self.assertIn(
+            "- 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'",
+            release_contract_paths,
+        )
         # Keep the l1 section boundary load-bearing: if the split anchor stops
         # matching, this slice would silently grow and make the assertions above
         # vacuous instead of exposing the workflow drift.

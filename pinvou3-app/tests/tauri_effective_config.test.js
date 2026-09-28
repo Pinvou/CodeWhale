@@ -471,6 +471,16 @@ for (const machine of injectedBridgeMachines) {
   }
 }
 
+// 上面那组分派检查只证明「哪些目标词被接受」，证明不了 `$TARGET_MACHINE` 真是拿
+// 注入的变量喂的。哪天重构回落成只按 `uname -m` 推导，上面照样全绿，包里的
+// Bridge node 又变回宿主架构——正是交叉构建那个原始 bug。
+assert.match(
+  bridgeScriptSource,
+  /TARGET_MACHINE="\$\{PINVOU3_BRIDGE_TARGET_ARCH:-/u,
+  "备料脚本必须从 PINVOU3_BRIDGE_TARGET_ARCH（回落宿主）推导 TARGET_MACHINE，"
+    + "否则交叉构建会打出宿主架构的 Node",
+);
+
 // 扩展新架构时，build.js 的词表和 codex-bridge.js 的 machine 映射必须同步扩展。
 //
 // 上面那组用例把 arm64→aarch64 / x64→x86_64 逐项写死了，它钉的是**映射值对不对**；
@@ -709,6 +719,14 @@ assert.match(
   buildSource,
   /prepareCodexBridge\([^)]*targetArch/u,
   "Bridge 必须按解析出的目标架构备料，否则交叉构建会静默备一份宿主架构的料",
+);
+// 上面那条断言只要同一次调用里出现 targetArch 就过，所以 `{ targetArch: hostArch }`
+// 这种错值也能混过去。这里反向禁止宿主架构出现在调用里：main() 里能交给 Bridge
+// 的只能是解析出来的目标。
+assert.doesNotMatch(
+  buildSource,
+  /prepareCodexBridge\([^)]*hostArch/u,
+  "Bridge 不得按宿主架构备料，否则交叉构建会静默打出宿主架构的 Node",
 );
 const preparedBrowserPlatforms = [];
 for (const platform of ["win32", "darwin", "linux"]) {

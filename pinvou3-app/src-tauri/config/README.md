@@ -43,3 +43,21 @@ Windows 例外由统一构建入口先验证并 staging `private-runtimes/window
 
 基础配置的 `beforeBuildCommand` / `beforeBundleCommand` 会拒绝没有包装器标记的构建。
 不要直接运行 `npx tauri build` 或 `npx tauri bundle`，否则命令会在打包前明确失败。
+
+## Linux 交叉构建（`--target`）
+
+架构 overlay 跟随构建入口传入的 `--target <三元组>`（`--target X` 与 `--target=X`
+两种写法都认，最后一次出现生效），而不是宿主架构；不传 `--target` 时与原先一样按
+宿主架构。Linux 宿主交叉构建到 `build.js` 不认识的机器段会直接失败，不会静默回落
+宿主架构。一个例外：Linux 宿主自身的架构就不在表里（x86_64/aarch64 之外）时同样
+回落，因为这时构建无从判断是不是交叉。有两个侧车只能按**宿主**架构备料，交叉构建
+必须显式跳过两者，否则 `build.js` 在任何备料开始前就停止：
+
+- `PINVOU3_SKIP_LINUX_ASR=1`：跳过 SenseVoice 运行时（它只能在目标架构上原生
+  构建），并从架构 overlay 里摘掉它的资源声明；
+- `PINVOU3_SKIP_KNOWLEDGE_HOST=1`：跳过共享知识库服务（它的 cargo build 不认
+  `--target`），并从平台 overlay 里摘掉 `knowledge-host/`。
+
+只有值 `1` 会打开开关。产出的包不带 SenseVoice 引擎和共享知识库 server。Codex ACP
+Bridge 按目标架构备料（`PINVOU3_BRIDGE_TARGET_ARCH`），npm 由第二份宿主架构的
+Node 运行。

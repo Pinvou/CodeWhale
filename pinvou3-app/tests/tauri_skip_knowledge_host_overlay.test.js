@@ -122,3 +122,32 @@ test("不经 main() 的调用方：环境变量兜底仍然生效", () => {
     assert.equal(configSpecs(prepareTauriArgs(BASE, LINUX))[0], platformConfigPath("linux"));
   });
 });
+
+test("knowledge-host 的 marker 只摘 knowledge-host 那条，不能摘得更宽", () => {
+  // marker 是**子串**匹配。把它放宽（比如 `knowledge-host` 放宽成 `knowledge`）
+  // 会把平台 overlay 里名字沾边的声明一起误摘，而上面那条逐层比对的用例看不见
+  // 这种事：纳入版本控制的 overlay 里恰好没有近似的键。这份合成的 overlay 就是
+  // 来当这个「擦边证人」的。用例走生产包装函数，保证这里钉住的 marker 就是
+  // 构建真正用的那一个。
+  const { platformConfigWithoutKnowledgeHost } = require("../scripts/tauri/build.js");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou3-kb-marker-"));
+  try {
+    const overlay = path.join(dir, "tauri.conf.json");
+    const resources = {
+      "resources/platforms/linux/asr/": "runtime/asr",
+      "resources/platforms/linux/knowledge-host/": "runtime/knowledge-host",
+      "resources/platforms/linux/knowledge-assets/": "runtime/knowledge-assets",
+    };
+    fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }));
+    const result = JSON.parse(platformConfigWithoutKnowledgeHost(overlay));
+    assert.deepEqual(
+      Object.keys(result.bundle.resources),
+      ["resources/platforms/linux/asr/", "resources/platforms/linux/knowledge-assets/"],
+      "只许摘掉 knowledge-host 那条声明",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
