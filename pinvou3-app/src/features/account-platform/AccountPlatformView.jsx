@@ -1882,7 +1882,7 @@ function Organization({ copy, organization, units, members, models, modelPolicy,
       ) : (
         <h2>{organization.name}</h2>
       )}
-      <div className="ap-grid">
+      <div className="ap-grid ap-organization-grid">
         {canReadUnits && <article className="ap-card">
           <h3>{copy.organizationTree}</h3>
           {units.length ? (

@@ -1976,6 +1976,20 @@ test('Web personal center consolidates navigation while preserving context-sensi
   assert.match(view, /<nav>\s*\{navigationSections\.map/);
 });
 
+test('Web personal center stacks organization cards with consistent spacing', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
+  const builtScript = await readFile(new URL('../../account-platform/internal/portal/static/assets/account.js', import.meta.url), 'utf8');
+  const builtStyles = await readFile(new URL('../../account-platform/internal/portal/static/assets/account.css', import.meta.url), 'utf8');
+
+  assert.match(view, /className="ap-grid ap-organization-grid"/);
+  assert.match(styles, /\.ap-combined-section > \.ap-organization-grid \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(styles, /\.ap-combined-section > \.ap-organization-grid \+ \.ap-card \{ margin-top: 20px; \}/);
+  assert.match(builtScript, /ap-grid ap-organization-grid/);
+  assert.match(builtStyles, /\.ap-combined-section>\.ap-organization-grid\{grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(builtStyles, /\.ap-combined-section>\.ap-organization-grid\+\.ap-card\{margin-top:20px\}/);
+});
+
 test('personal center exposes only user-facing usage history instead of Token administration', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
