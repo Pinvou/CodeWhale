@@ -70,6 +70,12 @@ pub fn process_alive(pid: u32) -> bool {
 /// Windows user-profile ACLs provide the directory privacy boundary.
 pub fn make_private_dir(_path: &Path) {}
 
+/// WebView2 在 paste 事件中原生携带图像条目，前端无需原生剪贴板兜底，
+/// 恒返回 `None`（能力位 `pasteImageClipboardRead` 在 Windows 为 false）。
+pub fn read_clipboard_image(_app: &tauri::AppHandle) -> Option<Vec<u8>> {
+    None
+}
+
 pub fn open_target(target: impl AsRef<OsStr>, label: &str) -> Result<(), String> {
     HiddenCommand::new("cmd")
         .args(["/C", "start", ""])
@@ -447,7 +453,7 @@ pub fn startup_platform_env() {
     let current = std::env::var_os("PATH").unwrap_or_default();
     // Both the read (split_paths) and the write (set_var) happen inside the
     // single-threaded window; the dedup check avoids duplicate prepends.
-    if std::env::split_paths(&current).any(|path| same_path(&path, dir)) {
+    if std::env::split_paths(&current).any(|path| windows_path::same_path(&path, dir)) {
         return;
     }
     let mut paths = vec![dir.to_path_buf()];
@@ -457,12 +463,6 @@ pub fn startup_platform_env() {
         // function docs); no concurrent env readers.
         unsafe { std::env::set_var("PATH", joined) };
     }
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    left.as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
 }
 
 fn common_libreoffice_tool_path(command: &str) -> Option<PathBuf> {

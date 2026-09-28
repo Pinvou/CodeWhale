@@ -1,8 +1,9 @@
-// 低频视图懒加载:用户典型路径是聊天,Settings/Codex/卡池/工具商店/定时/知识库/
-// 监控/搜索视图切到才加载对应 chunk(rolldown 对动态 import 自动分割)。VIEW_LOADERS
-// 是唯一的动态 import 出口:main.jsx 的 React.lazy 与 NavItem 悬停/聚焦预取、
-// DetachedShell 的撕离窗视图共用同一工厂,保证命中同一模块缓存。
-// 本模块不得静态引入任何视图,否则对应视图会被钉回主 chunk。
+// 低频视图/浮层懒加载:用户典型路径是聊天,Settings/Codex/卡池/工具商店/
+// 定时/知识库/监控/搜索/团队协作视图以及项目管理弹窗仅在使用时加载。
+// VIEW_LOADERS 是唯一的动态 import 出口:main.jsx 的 React.lazy 与悬停、
+// 聚焦或打开前预取共用同一工厂,保证命中同一模块缓存。DetachedShell 的
+// 撕离窗视图也复用这里的视图工厂。本模块不得静态引入这些组件,否则它们
+// 会被钉回主 chunk。
 export const VIEW_LOADERS = {
   settings: () => import('../features/settings/SettingsView.jsx'),
   codex: () => import('../features/codex/CodexAcpView.jsx'),
@@ -10,8 +11,20 @@ export const VIEW_LOADERS = {
   toolStore: () => import('../features/tools/ToolStoreView.jsx'),
   scheduled: () => import('../features/scheduled/ScheduledTasksView.jsx'),
   knowledge: () => import('../features/knowledge/KnowledgeView.jsx'),
+  modelStore: () => import('../features/model-store/ModelStoreView.jsx'),
   monitor: () => import('../features/monitor/MonitorView.jsx'),
   search: () => import('../features/search/SearchView.jsx'),
+  teamRelay: () => import('../features/team-relay/TeamRelayView.jsx'),
+  accountPlatformPopover: () => import('../features/account-platform/AccountPlatformPopover.jsx'),
+  accountPlatformClient: () => import('../features/account-platform/desktop-client.js'),
+  searchOverlay: () => import('../features/search/SearchOverlay.jsx'),
+  moveToProjectDialog: () => import('../features/projects/MoveToProjectDialog.jsx'),
+  rebindFolderDialog: () => import('../features/projects/RebindFolderDialog.jsx'),
+  pinvouSummon: () => import('../features/tools/PinvouSummonCard.jsx'),
+  updateNotice: () => import('../features/updater/UpdateNoticeButton.jsx'),
+  savedPersonaConfirmDialog: () => import('../features/personas/SavedPersonaConfirmDialog.jsx'),
+  apiKeyGateDialog: () => import('../features/settings/ApiKeyGateDialog.jsx'),
+  archiveConfirmDialog: () => import('../features/sessions/ArchiveConfirmDialog.jsx'),
   // chat is not here: the main window renders ChatView at startup and imports
   // it statically in main.jsx; a dynamic import would not produce a separate
   // chunk (rolldown reports INEFFECTIVE_DYNAMIC_IMPORT). A detached window

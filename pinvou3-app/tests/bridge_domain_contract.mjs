@@ -17,7 +17,7 @@ export const desktopBridgeApi = {
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'resetWebRelayAddress', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
   artifacts: ['artifactInfo', 'downloadArtifact', 'listDeliverableIndex', 'openArtifactExternal', 'openContainingFolder', 'openExternalUrl', 'openInSystem', 'openScheduledTaskFolder', 'openUserExternalUrl', 'readArtifactImageB64', 'readArtifactText', 'readArtifactThumbnail', 'renderArtifactVisual', 'revealSessionFolder', 'writeArtifactText'],
-  attachments: ['addAttachmentByPath', 'addPasteImage', 'clearAttachments', 'openConversationAttachment', 'pickAndAttach', 'removeAttachment', 'resolveConversationAttachment', 'revealConversationAttachment', 'uploadDeviceFiles'],
+  attachments: ['addAttachmentByPath', 'addPasteImage', 'addPasteImageFromClipboard', 'clearAttachments', 'openConversationAttachment', 'pickAndAttach', 'removeAttachment', 'resolveConversationAttachment', 'revealConversationAttachment', 'uploadDeviceFiles'],
   resolutions: ['markResolved'],
   files: ['pickFeedbackFiles', 'pickFiles', 'pickFolders', 'pickRebindFolder'],
   personas: ['createPersona', 'deletePersona', 'equipPersona', 'getPersonas', 'loadPersonas', 'postCardCreatorIntro', 'readPersonaBody', 'unequipPersona', 'updatePersona'],
@@ -27,6 +27,10 @@ export const desktopBridgeApi = {
   accountPlatform: ['branchReplacementSession', 'createSliderCaptcha', 'login', 'loginSms', 'logout', 'modelCatalog', 'openPortal', 'precheckMobileRegistration', 'registerMobile', 'registrationStatus', 'request', 'resetPassword', 'selectCatalogModel', 'selectSessionCatalogModel', 'sendSms', 'session'],
   teamRelay: ['avatarSource', 'claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'dissolveTeam', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'leaveTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeAvatar', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'transferOwner', 'updateProfile', 'uploadAvatar', 'verifyAccess'],
   projects: ['createProject', 'deleteProject', 'loadProjects', 'moveSessionToProject', 'rebindWorkspaceRoot', 'renameProject'],
+  // Computer use drives the local machine: the desktop backend exposes it, the
+  // web surface carries only rejecting stubs (the RPC allowlist excludes the
+  // commands entirely, same policy as browser:*).
+  computerUse: ['confirm', 'deny', 'getStatus', 'grant', 'refreshStatus', 'requestPermissions', 'revoke', 'setEnabled', 'stop'],
 };
 
 // These methods intentionally depend on desktop lifecycle or local machine
@@ -48,6 +52,10 @@ export const desktopOnlyBridgeApi = {
   // channel; web has no such backend.
   chat: ['steer', 'interruptAndSend', 'interruptAndSendQueued'],
   accountPlatform: ['resetPassword'],
+  // Clipboard-image paste fallback reads the machine the app window runs on.
+  // In a web relay session that is the remote desktop, not the browser user's
+  // machine — pasting must stay on the browser's own clipboardData there.
+  attachments: ['addPasteImageFromClipboard'],
 };
 
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。

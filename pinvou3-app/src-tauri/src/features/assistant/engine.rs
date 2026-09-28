@@ -1110,9 +1110,10 @@ impl TurnLifecycle {
     }
 
     /// 测试专用：认领一个未提交 turn 的终态并立即重开闸门，等价于
-    /// `emit_unsubmitted_interrupted_terminal` 去掉发 `chat:done` 的副作用，
-    /// 供跨模块测试（engine_pool 的 cancel 并发测试）驱动 turn 收尾而无需 AppHandle。
-    /// 不发终态信号——这些测试只关心 lifecycle 状态机的轮次切换，不验证 emit。
+    /// `emit_unsubmitted_interrupted_terminal_for_epoch` with the epoch check and the
+    /// `chat:done` side effect removed, letting cross-module tests (engine_pool's cancel
+    /// concurrency tests) drive turn finalization without an AppHandle. No terminal
+    /// signals are emitted — these tests only care about lifecycle turn transitions, not emit verification.
     #[cfg(test)]
     pub(crate) fn finish_unsubmitted_once(&self) -> bool {
         if self.claim_unsubmitted_terminal() {
@@ -1245,51 +1246,16 @@ impl TurnLifecycle {
         true
     }
 
-    /// 认领一个未提交 turn 的终态并补发 `chat:done`，最后重置闸门。
-    ///
-    /// 给 cancel 在 engine 尚未 spawn（reservation 处于 reserved 未 submitted 阶段）
-    /// Atomic claim (closing the gate against re-entry) → reopen the gate →
-    /// emit the `Interrupted` terminal. Wrapped into one
-    /// 个方法是为了让调用方（`EnginePool::cancel`，跨模块）不必直接触碰私有的
-    /// 终态收尾逻辑，与权威终态路径一样自包含「发完即重置」。
-    ///
-    /// **Emit-last**: `finish_terminal_emission` must run before the emit so
-    /// that when `chat:done` arrives the reserve gate is already reopened
-    /// (P0-B contract: chat:done ⇒ slot released). The frontend's
-    /// interruptAndSend no longer needs a fixed sleep to cover the window.
-    /// The generation is read before finish (afterwards
-    /// `current_turn_generation` returns to None) and sent in the payload.
-    pub(crate) fn emit_unsubmitted_interrupted_terminal(
-        &self,
-        app: &AppHandle,
-        session_id: &str,
-    ) -> bool {
-        if !self.claim_unsubmitted_terminal() {
-            return false;
-        }
-        let generation = self.current_turn_generation().unwrap_or(0);
-        self.finish_terminal_emission();
-        emit_chat_terminal(
-            app,
-            session_id,
-            generation,
-            TurnOutcomeStatus::Interrupted,
-            None,
-            false,
-            false,
-        );
-        true
-    }
-
     /// 带目标 epoch 的未提交认领 + 补发 `chat:done`：认领在 state 锁内与
     /// `turn_epoch == target` 校验原子完成，目标轮已结束（新轮已 reserve）时
     /// 返回 `false` 且无副作用，避免把新轮 reservation 误认领为 Interrupted。
     ///
-    /// Structurally identical to [`emit_unsubmitted_interrupted_terminal`]:
-    /// reopen the gate before emitting the terminal (P0-B: chat:done ⇒ slot
-    /// released); the generation is the target (= the epoch of the turn the
-    /// cancel was initiated against, the claim check already guarantees they
-    /// match).
+    /// **Emit-last**: the gate is reopened before emitting the terminal
+    /// (P0-B: chat:done ⇒ slot released), so when `chat:done` arrives the
+    /// reserve gate is already open and the frontend's interruptAndSend needs
+    /// no fixed sleep to cover the window. The generation is the target (the
+    /// epoch of the turn the cancel was initiated against; the claim check
+    /// already guarantees they match).
     pub(crate) fn emit_unsubmitted_interrupted_terminal_for_epoch(
         &self,
         app: &AppHandle,
@@ -1312,17 +1278,20 @@ impl TurnLifecycle {
         true
     }
 
-    /// 标记「cancel 在 turn 已 submit 但尚未 TurnStarted 时发起」。
+    /// Marks a cancel issued after the turn was submitted but before `TurnStarted` arrived.
     ///
     /// The marker is set only when the turn is active, already `submitted`,
     /// and its `turn_id` is still `None` (`TurnStarted` not yet arrived),
     /// and `turn_epoch == epoch` (still the turn the cancel was issued for),
     /// recording `pending_cancel = Some((epoch, mode, submission_id))`:
-    /// - 必须 `submitted`：未提交的 reservation（消息尚未入队 engine）应由 cancel
-    ///   走未提交认领终态路径（`emit_unsubmitted_interrupted_terminal`）立即发
-    ///   `chat:done` 使 reservation 失效，而不是挂成 pending——否则空闲 engine 仍
-    ///   存在时 cancel 不发终态、reservation 仍有效，原 chat future 后续照常提交，
-    ///   前端 busy 在 cancel 后到 TurnStarted 之间无法复位。
+    /// - Must be `submitted`: an unsubmitted reservation (message not yet enqueued
+    ///   to the engine) is handled by the cancel path's unsubmitted-claim terminal
+    ///   (`emit_unsubmitted_interrupted_terminal_for_epoch`), which immediately
+    ///   emits `chat:done` to invalidate the reservation instead of leaving it
+    ///   pending — otherwise, while an idle engine still exists, cancel would not
+    ///   emit a terminal state and the reservation would stay valid; the original
+    ///   chat future would go on submitting as usual and the frontend busy flag
+    ///   could not reset between the cancel and TurnStarted.
     /// - A set `turn_id` means the forwarder already consumed `TurnStarted`:
     ///   the cancel closure dispatches turn-bound under that identity and
     ///   hits exactly this turn's own token, with no replay needed.
@@ -1833,9 +1802,15 @@ impl AppEngine {
 
     /// 发用户消息给 Engine。Engine 内部自管 session，多轮自然累积。
     ///
-    /// `mode` + `phase` 由 commands::chat 从 SessionStore 取当前 session 的
-    /// mode_state，注入 Op::SendMessage。底座按 mode 自动切工具白名单 + sandbox。
-    /// M1 弱模型加固:bridge 按 phase 在 user content 前 prepend `<system-reminder>`。
+    /// 仅测试入口（lib 单元测试与 `tests/` 集成 harness；生产发送走
+    /// `send_reserved_user_message`，其快照/候选来自
+    /// `prepare_delegation_turn` 的同源捕获）。不加 `#[cfg(test)]`：
+    /// 集成测试以外部 crate 视角链接本库，看不到 cfg(test) 条目。
+    ///
+    /// `mode` 由调用方从 SessionStore 取当前 session 的 mode_state，注入
+    /// Op::SendMessage。底座按 mode 自动切工具白名单 + sandbox。
+    /// M1 弱模型加固:bridge 按 mode 在多智能体轮的 user content 前
+    /// prepend `<system-reminder>` 信封。
     pub async fn send_user_message(
         &self,
         content: String,
@@ -1844,16 +1819,29 @@ impl AppEngine {
         restrict_tools: bool,
     ) -> Result<()> {
         let expert_snapshot = self.multi_agent_enabled.then(ExpertRosterSnapshot::capture);
+        // 候选行必须与快照同源（同一次 capture 产出），对齐
+        // commands::multiagent::prepare_delegation_turn 的计算；
+        // 带快照却传空候选会让该轮静默退化为名册兜底提示。注意：这里的
+        // 匹配输入是 `content` 本身——生产路径用 `MatchSource` 把「匹配看
+        // 原文、发送看组装稿」钉成编译期约束，本测试入口没有那层类型
+        // 保护，调用方必须传用户原文，传组装稿会复现「注入文本抬升无关
+        // 专家卡得分」的旧缺陷。
+        let expert_candidates = expert_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.available_role_lines(&content))
+            .unwrap_or_default();
         let op = self.build_interactive_send_message_op(
             content,
             mode,
             persona_reminder,
             restrict_tools,
             expert_snapshot,
+            expert_candidates,
         )?;
         self.send_turn_op(op).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_reserved_user_message(
         &self,
         content: String,
@@ -1861,6 +1849,7 @@ impl AppEngine {
         persona_reminder: Option<String>,
         restrict_tools: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        expert_candidates: Vec<String>,
         reservation: TurnReservation,
     ) -> Result<()> {
         let op = self.build_interactive_send_message_op(
@@ -1869,6 +1858,7 @@ impl AppEngine {
             persona_reminder,
             restrict_tools,
             expert_snapshot,
+            expert_candidates,
         )?;
         self.send_reserved_turn_op(op, reservation).await
     }
@@ -1893,6 +1883,7 @@ impl AppEngine {
         persona_reminder: Option<String>,
         restrict_tools: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        expert_candidates: Vec<String>,
     ) -> Result<Op> {
         if self.multi_agent_enabled {
             let snapshot = expert_snapshot
@@ -1906,11 +1897,15 @@ impl AppEngine {
                 restrict_tools,
                 &self.workspace,
                 snapshot,
+                &expert_candidates,
             )
         } else {
-            if expert_snapshot.is_some() {
-                anyhow::bail!("ordinary turn must not carry a multi-agent expert snapshot");
-            }
+            // 普通会话不吃候选行：候选只随多智能体快照同源产生。误传与快照
+            // 误传同等对待（hard-error），保持消息与普通对话逐字一致的不变式。
+            validate_ordinary_turn_has_no_expert_material(
+                expert_snapshot.is_some(),
+                expert_candidates.len(),
+            )?;
             self.bridge.build_send_message_op(
                 &self.session_id,
                 content,
@@ -2504,8 +2499,8 @@ mod turn_lifecycle_tests {
         // engine 时，cancel 第二阶段若按「engine 是否存在」分流会错误走 pending
         // 分支。arm_pending_cancel 必须显式要求 submitted——只有消息确实已入队
         // engine、需要防 reset_cancel_token 覆盖时才 arm；未提交 reservation 应由
-        // cancel 走未提交认领终态路径（emit_unsubmitted_interrupted_terminal）立即
-        // 发 chat:done 使其失效，而不是挂成 pending。
+        // cancel goes through the unsubmitted-claim terminal path (emit_unsubmitted_interrupted_terminal_for_epoch)
+        // which immediately emits chat:done to invalidate it, instead of hanging it as pending.
         let lifecycle = Arc::new(TurnLifecycle::default());
 
         // reserve 后 active=true 但 submitted=false → arm 不得置位。
@@ -4043,5 +4038,54 @@ mod live_tests {
             );
             assert!(s.tps_time_s > 0.0, "TPS 时长未记 seq={seq:?}");
         }
+    }
+}
+
+/// 普通引擎不得携带多智能体装配材料（快照或候选行）：候选只随多智能体快照
+/// 同源产生。误传与快照误传同等对待（hard-error），与多智能体 turn 缺快照的
+/// hard-error 双向对称（生产调用点：[`Self::build_interactive_send_message_op`]）。
+fn validate_ordinary_turn_has_no_expert_material(
+    carries_snapshot: bool,
+    candidate_lines: usize,
+) -> Result<()> {
+    if carries_snapshot {
+        anyhow::bail!("ordinary turn must not carry a multi-agent expert snapshot");
+    }
+    if candidate_lines > 0 {
+        anyhow::bail!("ordinary turn must not carry expert candidate lines");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod expert_turn_invariant_tests {
+    use super::validate_ordinary_turn_has_no_expert_material;
+
+    /// 普通轮 hard-error 不变式（双向对称性的普通侧）：不带任何专家材料时
+    /// 放行；带快照、带候选行分别硬错，且快照守卫先触发。
+    #[test]
+    fn ordinary_turn_rejects_snapshot_and_candidate_lines_symmetrically() {
+        assert!(
+            validate_ordinary_turn_has_no_expert_material(false, 0).is_ok(),
+            "普通轮不带专家材料必须放行"
+        );
+        let snapshot_error =
+            validate_ordinary_turn_has_no_expert_material(true, 0).expect_err("快照误传必须硬错");
+        assert!(
+            snapshot_error.to_string().contains("expert snapshot"),
+            "错误信息必须点明快照误传: {snapshot_error}"
+        );
+        let candidates_error = validate_ordinary_turn_has_no_expert_material(false, 2)
+            .expect_err("候选行误传必须硬错");
+        assert!(
+            candidates_error.to_string().contains("candidate lines"),
+            "错误信息必须点明候选行误传: {candidates_error}"
+        );
+        let both = validate_ordinary_turn_has_no_expert_material(true, 2)
+            .expect_err("双材料同传也必须硬错");
+        assert!(
+            both.to_string().contains("expert snapshot"),
+            "快照守卫必须先于候选行守卫（与生产装配顺序一致）: {both}"
+        );
     }
 }

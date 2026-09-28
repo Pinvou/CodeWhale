@@ -1759,16 +1759,21 @@ test('desktop account popover only loads the user and balance summary', async ()
 
 test('desktop recharge completes inside the account popover without opening a web page', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const rechargeTarget = await readFile(new URL('../src/features/account-platform/recharge-target.js', import.meta.url), 'utf8');
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   assert.match(popover, /copy\.balance[\s\S]*copy\.recharge/);
-  assert.match(popover, /client\.products\(controller\.signal\)/);
+  assert.match(popover, /loadRechargeTarget\(client, me, target, controller\.signal\)/);
+  assert.match(rechargeTarget, /client\.products\(signal\)/);
   assert.doesNotMatch(popover, /client\.recentRechargeOrder/);
-  assert.match(popover, /const openRecharge = \(\) => \{\s*if \(!personalSurfaceAccess\(me\)\.rechargeCreate\) \{\s*setError\(copy\.permissionDenied\);\s*return;\s*\}\s*setOrder\(null\)/);
-  assert.match(popover, /client\.createRecharge\(productId, channel, newIdempotencyKey\(\)\)/);
+  assert.match(popover, /const openRecharge = \(\) => \{[\s\S]*?if \(!rechargeTargetAllowed\(me, target\)\) \{\s*setError\(copy\.permissionDenied\);\s*return;\s*\}\s*setOrder\(null\)/);
+  assert.match(popover, /createRechargeForTarget\(client, me, rechargeTarget, productId, channel, newIdempotencyKey\(\)\)/);
+  assert.match(rechargeTarget, /client\.createRecharge\(productId, channel, key\)/);
   assert.match(popover, /order\?\.qr_data/);
   assert.doesNotMatch(popover, /import\('qrcode'\)/);
-  assert.match(popover, /client\.rechargeOrder\(order\.order_id\)/);
-  assert.match(popover, /refreshedBalance = await client\.balance\(\)/);
+  assert.match(popover, /rechargeOrderForTarget\(client, me, rechargeTarget, order\.order_id\)/);
+  assert.match(rechargeTarget, /client\.rechargeOrder\(orderId, signal\)/);
+  assert.match(popover, /refreshedBalance = await rechargeBalanceForTarget\(client, me, rechargeTarget\)/);
+  assert.match(rechargeTarget, /client\.balance\(signal\)/);
   assert.match(popover, /copy\.paymentReceived/);
   assert.doesNotMatch(popover, /target=["']_blank["']|window\.open|open_target|href=\{order\.(?:payment_url|qr_content)\}/);
   assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "products"\], None\)/);

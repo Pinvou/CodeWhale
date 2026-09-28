@@ -295,17 +295,91 @@ function copyRuntimeAssets() {
   };
 }
 
-function enforceAcpLazyChunk() {
+export const lazyChunkContracts = {
+  settings: ['features/settings/SettingsView.jsx', 'SettingsView'],
+  codex: ['features/codex/CodexAcpView.jsx', 'CodexAcpView'],
+  cardpool: ['features/personas/Personas.jsx', 'Personas'],
+  toolStore: ['features/tools/ToolStoreView.jsx', 'ToolStoreView'],
+  scheduled: ['features/scheduled/ScheduledTasksView.jsx', 'ScheduledTasksView'],
+  knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
+  modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
+  monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
+  search: ['features/search/SearchView.jsx', 'SearchView'],
+  teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
+  accountPlatformPopover: ['features/account-platform/AccountPlatformPopover.jsx', 'AccountPlatformPopover'],
+  accountPlatformClient: ['features/account-platform/desktop-client.js', 'AccountPlatformDesktopClient'],
+  searchOverlay: ['features/search/SearchOverlay.jsx', 'SearchOverlay'],
+  moveToProjectDialog: ['features/projects/MoveToProjectDialog.jsx', 'MoveToProjectDialog'],
+  rebindFolderDialog: ['features/projects/RebindFolderDialog.jsx', 'RebindFolderDialog'],
+  pinvouSummon: ['features/tools/PinvouSummonCard.jsx', 'PinvouSummonModal'],
+  updateNotice: ['features/updater/UpdateNoticeButton.jsx', 'UpdateNoticeButton'],
+  savedPersonaConfirmDialog: ['features/personas/SavedPersonaConfirmDialog.jsx', 'SavedPersonaConfirmDialog'],
+  apiKeyGateDialog: ['features/settings/ApiKeyGateDialog.jsx', 'ApiKeyGateDialog'],
+  archiveConfirmDialog: ['features/sessions/ArchiveConfirmDialog.jsx', 'ArchiveConfirmDialog'],
+};
+
+export function assertLazyChunks(bundle, contracts = lazyChunkContracts) {
+  for (const [modulePath, label] of Object.values(contracts)) {
+    const chunks = Object.values(bundle).filter(output => output.type === 'chunk'
+      && Object.keys(output.modules).some(moduleId => moduleId.replaceAll('\\', '/')
+        .endsWith(`/${modulePath}`)));
+    if (chunks.length === 0) {
+      throw new Error(`${label} lazy module was not emitted; its contract may be stale or the module was tree-shaken`);
+    }
+    if (chunks.length > 1) {
+      throw new Error(`${label} must be emitted in exactly one chunk; found ${chunks.length}`);
+    }
+    if (chunks[0].isEntry || chunks[0].name === 'main') {
+      throw new Error(`${label} must remain in one non-entry lazy chunk`);
+    }
+  }
+}
+
+function enforceLazyChunks() {
   return {
-    name: 'pinvou-enforce-acp-lazy-chunk',
+    name: 'pinvou-enforce-lazy-chunks',
     apply: 'build',
     generateBundle(_options, bundle) {
-      const acpChunks = Object.values(bundle).filter(output => output.type === 'chunk'
-        && Object.keys(output.modules).some(moduleId => moduleId.replaceAll('\\', '/')
-          .endsWith('/features/codex/CodexAcpView.jsx')));
-      if (acpChunks.length !== 1 || acpChunks[0].isEntry || acpChunks[0].name === 'main') {
-        throw new Error('CodexAcpView must remain in one non-entry lazy chunk');
-      }
+      assertLazyChunks(bundle);
+    },
+  };
+}
+
+// Keep both desktop and web close to Vite's 500 kB warning boundary. New entry
+// work should be split or lazy-loaded. Raising this limit requires measured
+// desktop + web before/after sizes and an explicit review decision.
+// 2026-09-24 500_000 → 502_000 (model store #1195, measured):
+//   web:     499,211 B (main @ 039c77941) → 500,863 B (+1,652 B, of which
+//            ~888 B is the sidebar/mobile entry wiring and ~764 B is the
+//            dynamic-import preload bookkeeping of adding a new lazy view).
+//   desktop: 498,510 B on the PR head — unchanged headroom, still passes.
+// The previous 500_000 left only 789 B of headroom, less than the floor cost
+// of wiring any new lazy view, so the next view feature could not merge
+// without a deliberate bump. 502_000 restores ~1.1 kB of headroom; further
+// growth should still be justified with fresh measurements.
+export const MAIN_ENTRY_BUDGET_BYTES = 502_000;
+
+export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
+  const mainEntry = Object.values(bundle).find(output => (
+    output.type === 'chunk' && output.isEntry && output.name === 'main'
+  ));
+  if (!mainEntry) throw new Error('Vite build did not emit the main entry chunk');
+  const bytes = Buffer.byteLength(mainEntry.code);
+  if (bytes > budgetBytes) {
+    throw new Error(`Main entry chunk ${bytes} B exceeds the ${budgetBytes} B startup budget`);
+  }
+  return bytes;
+}
+
+function enforceMainEntryBudget() {
+  return {
+    name: 'pinvou-enforce-main-entry-budget',
+    apply: 'build',
+    // Vite's build-import-analysis mutates chunks after user generateBundle
+    // hooks. writeBundle sees the final code that is written to disk, so the
+    // reported byte count matches the built asset exactly.
+    writeBundle(_options, bundle) {
+      assertMainEntryBudget(bundle);
     },
   };
 }
@@ -357,7 +431,7 @@ export default defineConfig(({ mode }) => {
     react(),
     ...(accountPortalBuild
       ? [preserveAccountPortalExtensions()]
-      : [copyRuntimeAssets(), enforceAcpLazyChunk(), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
+      : [copyRuntimeAssets(), enforceLazyChunks(), enforceMainEntryBudget(), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
   ],
   build: {
     outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',

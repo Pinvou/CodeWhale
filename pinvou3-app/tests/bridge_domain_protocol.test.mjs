@@ -81,6 +81,7 @@ const protocolSources = {
   teamRelay: ['bridge/team-relay.js'],
   accountPlatform: ['bridge/account-platform.js'],
   projects: ['bridge/projects.js'],
+  computerUse: ['bridge/computer_use.js'],
 };
 
 const expectedProtocolHashes = {
@@ -88,7 +89,37 @@ const expectedProtocolHashes = {
   orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
-  artifacts: 'de912dc47531a442428f1649d933c8b91d0616196a1b7ac6176bf0f59939fa12',
+  // Recomputed again for the Linux clipboard-image paste fallback (community
+  // #578 backflow): artifacts.js gains the addPasteImageFromClipboard invoke
+  // wrapping the paste_clipboard_image command (the native layer reads the
+  // WebKitGTK-invisible clipboard image and saves it server-side; web lane
+  // intentionally has no such backend).
+  artifacts: 'bb1974a6cff526075dc98813ee75dd7253ec970203ef59cb133d2c443ec5ed71',
+// New domain: computer-use consent commands/events (desktop-only; the web
+  // RPC allowlist excludes them, same policy as browser:*).
+  // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
+  // only closes its own dialog and fresh requests re-prompt immediately (no
+  // invoke/listen call-set change; comment wording is part of the digest).
+  // Recomputed when the deny()/grant_required handler comments were updated
+  // for the mainstream narrowing (no deny-cooldown memory, no idle-expired
+  // grant re-arm; comment wording inside the listen callback span is part of
+  // the digest). Recomputed again when the confirm_required handler's
+  // type-preview comment was corrected to the shipped contract (full text
+  // rides for every non-password Type action, short texts included).
+  // Recomputed for the fresh-review fixes: the grant/confirm_required inert branches
+  // now re-read authoritative status (other-window enable gap) and sameRequest compares
+  // the typed-text preview (comment and expression wording inside the callback spans
+  // is part of the digest; no invoke/listen call-set change).
+  // Recomputed for the structured confirm payload: confirm_required builds the
+  // request via buildConfirmRequest (action/button/click_count/point/text_preview/
+  // text_preview_truncated passthrough + summary fallback) and dismissConfirm was
+  // removed (no invoke/listen call-set change; listener body wording is part of
+  // the digest).
+  // Recomputed for the round-15 fix wave: secure-target chord masking (the
+  // chord_masked_chars passthrough in buildConfirmRequest), the
+  // background-session refresh guard, and the inert-branch optional chaining
+  // inside the listener callback spans (no invoke/listen call-set change).
+  computerUse: '9d0bad5bab784eb784a92b8df52ff7e83adef94cc0f6cb7bdbb99f913217e5b8',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
@@ -117,7 +148,7 @@ const expectedProtocolHashes = {
   // display-equality gate — listener body-internal edits only, no new invoke
   // or listen entries (capture-text refresh). Recomputed for per-frame stream
   // notification coalescing; event names and invoke shapes remain unchanged.
-  chat: 'cad6c1cb471c97240673b9706fc6d799c81e64224f4fbaf56f5f44b3698cdc1e',
+  chat: '9f8a9db3d3dc8b9601d0acf3349a8c2b579fec73aa82b16285d3e3588ac13fb1',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -135,14 +166,14 @@ const expectedProtocolHashes = {
   // surfaces while retaining Official's materialization behavior.
   sessions: '6c87c38edd620adf44a7c57a566e9116014d8a074c0dd382c922b9f132a5fdac',
   settings: '748f16e4c90a28128bff8c27a0c21f295e94d9d33aaad7c329741fc2d49cc3d0',
-  updater: 'c099482343ad342b32c8206abf7b72a01e20c0f5321ff469ddbed0a4d4086ffb',
+  updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via
   // comment differences inside its own voice.js; no invoke/listen surface).
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
-  accountPlatform: 'b27255619e222495aaada496eda619a788e7c876607730d36f08c9188780234d',
+  accountPlatform: 'c62a5be51d7fc51569e03f1dd05c91ffcdf4d60e6020e769329645c7d7c5d400',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):
   // rebind_workspace_root gains the optional previousPostBusySessionIds
   // payload — the dialog's previous report fed back on retry, honored by the

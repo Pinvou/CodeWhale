@@ -125,7 +125,7 @@ pub async fn exit_plan_to_yolo(
 /// 模型列表下方的会话级开关。开启：装配专家名册，并让下一次发送按多智能体
 /// 资源边界重建引擎；关闭：让下一次发送恢复普通对话的底座资源配置。切换时
 /// 回收空闲旧引擎，避免旧 hook / 深度 / 并发配置泄漏到新模式；正在生成时拒绝
-/// 切换。工具面不随开关变化——与主线完全一致：`workflow` 保持可用（委派提醒
+/// 切换。工具面不随开关变化——与主线完全一致：`workflow` 保持可用（蜂群契约
 /// 不教学不推荐），裸 `agent` 本就对所有会话可用。
 #[tauri::command]
 pub async fn set_multi_agent_mode(
@@ -155,30 +155,6 @@ pub async fn set_multi_agent_mode(
 /// 必须裹住方案全文 + 带明确"立即执行"信号,否则切了 Yolo 但 AI 收到空指令不知道干嘛。
 pub(super) fn accept_plan_instruction(plan_markdown: &str) -> String {
     format!("用户已批准方案,立即开始执行。方案:\n\n{plan_markdown}")
-}
-
-/// 「未成活」快照作废（发送前任何早退共用，按 id 精确删除；残留快照会抢占
-/// 重试时同号 turn 的 first-wins 对齐锚——评审 M5）。
-async fn drop_unsent_turn_checkpoint(
-    ledger: Option<std::path::PathBuf>,
-    snapshot_id: Option<String>,
-    session_id: &str,
-    caller: &str,
-) {
-    if let (Some(ledger), Some(snapshot_id)) = (ledger, snapshot_id) {
-        let sid = session_id.to_string();
-        let caller = caller.to_string();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            if let Err(error) =
-                crate::features::code_checkpoints::drop_checkpoint(&ledger, &snapshot_id)
-            {
-                log::warn!(
-                    "[pinvou3][{caller}] drop unsent-turn checkpoint failed sid={sid}: {error:#}"
-                );
-            }
-        })
-        .await;
-    }
 }
 
 /// 用户点 plan_card [✅ 就这么干]：接受 plan，切 YOLO 执行(对齐底座 accept-yolo)。
@@ -269,7 +245,7 @@ pub async fn accept_plan(
     let plan_claim = match store.claim_pending_plan(&session_id, &plan_id) {
         Ok(claim) => claim,
         Err(error) => {
-            drop_unsent_turn_checkpoint(
+            super::checkpoints::drop_unsent_turn_checkpoint(
                 checkpoint_ledger_root.clone(),
                 created_snapshot_id.clone(),
                 &session_id,
@@ -284,7 +260,7 @@ pub async fn accept_plan(
         plan_id.clone(),
         accepted_mode_state.clone(),
     )) {
-        drop_unsent_turn_checkpoint(
+        super::checkpoints::drop_unsent_turn_checkpoint(
             checkpoint_ledger_root.clone(),
             created_snapshot_id.clone(),
             &session_id,
@@ -293,17 +269,21 @@ pub async fn accept_plan(
         .await;
         return Err(format!("prepare accept_plan admission: {error:#}"));
     }
+    // 候选专家只从计划正文（plan_markdown）匹配，不加 accept 前缀——与快照同源；
+    // 实际发送内容仍是包装后的 accept 指令。蜂群契约在 spawn 级 instructions，
+    // 这里不再改写消息内容。
     let prepared_delegation = super::multiagent::prepare_delegation_turn(
         pool.inner(),
         &session_id,
         accepted_mode_state.multi_agent,
-        &plan_markdown,
         accept_plan_instruction(&plan_markdown),
+        super::multiagent::MatchSource(&plan_markdown),
     );
     let display_content = display_message
         .map(|message| message.trim().to_string())
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| "✅ 就这么干".to_string());
+    crate::features::assistant::timing::start_turn(&session_id);
     if let Err(error) = pool
         .send_reserved_user_message(
             &session_id,
@@ -312,12 +292,18 @@ pub async fn accept_plan(
             SerializableMode::Yolo.to_app_mode(),
             false,
             prepared_delegation.expert_snapshot,
+            prepared_delegation.expert_candidates,
             reservation,
         )
         .await
     {
+        crate::features::assistant::timing::finish_turn(
+            &session_id,
+            "send_error",
+            Some(&format!("{error:#}")),
+        );
         // 发送失败：作废「未成活」快照（与 chat.rs 同款，按 id 精确删除）。
-        drop_unsent_turn_checkpoint(
+        super::checkpoints::drop_unsent_turn_checkpoint(
             checkpoint_ledger_root,
             created_snapshot_id,
             &session_id,

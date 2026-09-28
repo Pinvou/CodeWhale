@@ -17,9 +17,11 @@ import {
 import {
   classifyAcpServiceFailure,
   isAcpAuthenticationFailure,
+  latestAgentRuntimeNotice,
   runtimeOperationFor,
 } from './runtimeNoticeState.js';
 import {
+  AgentRuntimeNotice,
   AgentServiceFailureNotice,
   RuntimeNotice,
   runtimeSourceLabel,
@@ -44,6 +46,7 @@ import {
   mergeAcpTimelineSnapshot,
   updateAcpAttachmentDraft,
   projectAcpTimeline,
+  redactDisplayError,
   resolveAcpSessionControls,
 } from './acp-state.js';
 import {
@@ -81,9 +84,8 @@ import {
   RewindConfirmDialog,
   RewindUndoChip,
   RewindUndoConfirmDialog,
-  useDialogEscapeKey,
 } from './RewindChip.jsx';
-import { useDialogFocusRestore } from '../../hooks/useDialogFocusRestore.js';
+import { ModalDialogShell } from './ModalDialogShell.jsx';
 import {
   ConversationActivityIndicator,
   ConversationMarkdown,
@@ -125,12 +127,18 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { buildUserInputAnswers, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
 import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
 import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
 import { notifyChatRoundCommitted } from '../tools/tool-events.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
 import { formatAttachmentLimitError } from '../attachments/attachment-limit-errors.js';
-import { collectClipboardImages, readPasteImageAsBytes } from '../attachments/paste-image.js';
+import {
+  collectClipboardImages,
+  pasteEventNeedsClipboardFallback,
+  pasteImageClipboardFallbackAvailable,
+  readPasteImageAsBytes,
+} from '../attachments/paste-image.js';
 import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import { bridge } from '../../hooks/useBridge.js';
@@ -247,30 +255,20 @@ function BranchSelector({ copy, branches, disabled, busy, menuOpen, onToggle, on
 // not hide the dialog into the background. Mounted only while the dialog is
 // open (conditional rendering at the call site).
 function BranchDialogShell({ copy, busy, testid, labelledBy, initialFocusRef, onCancel, children }) {
-  const dialogRef = useRef(null);
-  useDialogFocusRestore(dialogRef, initialFocusRef);
-  useDialogEscapeKey(busy, onCancel);
-  return createPortal(
-    <div data-testid={testid} className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-      <button
-        type="button"
-        aria-label={copy.branchSwitchCancel}
-        className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
-        disabled={busy}
-        onClick={onCancel}
-      />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        tabIndex={-1}
-        className="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
-      >
-        {children}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <ModalDialogShell
+      testid={testid}
+      zIndexClass="z-[120]"
+      backdropLabel={copy.branchSwitchCancel}
+      backdropClass="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
+      panelClass="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
+      busy={busy}
+      initialFocusRef={initialFocusRef}
+      labelledBy={labelledBy}
+      onCancel={onCancel}
+    >
+      {children}
+    </ModalDialogShell>
   );
 }
 
@@ -538,41 +536,12 @@ const NATIVE_CHAT_EVENTS = [
   'chat:done',
 ];
 
-function isFreeTextPlaceholderOption(option) {
-  const label = String(option?.label || '').trim();
-  return /^(?:其他|其它|other)(?:\s*[\(（][^()（）]*[\)）])?$/i.test(label);
-}
-
 function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput, copy, conversationCopy }) {
-  const questions = (item.questions || []).map((question, index) => {
-    const allowOther = question.allow_free_text !== false;
-    return {
-      id: question.id || `question-${index + 1}`,
-      header: question.header || `Q${index + 1}`,
-      question: question.question || '',
-      options: (question.options || [])
-        .filter(option => !allowOther || !isFreeTextPlaceholderOption(option))
-        .map(option => ({
-          value: option.label,
-          label: option.label,
-          description: option.description || '',
-        })),
-      allowOther,
-      multiSelect: Boolean(question.multi_select),
-      required: !question.multi_select,
-    };
-  });
+  const questions = normalizeUserInputQuestions(item.questions);
   const actionable = !item.resolved;
 
   function submit(groups) {
-    const answers = groups.flatMap(group => group.answers.map(answer => ({
-      id: group.questionId,
-      label: answer.other ? (conversationCopy && conversationCopy.otherAnswer) || answer.label : answer.label,
-      value: String(answer.value),
-      // 保留 other 标记：QuestionChoiceCard 还原历史答案时据此把“其他”与预设选项区分开，
-      // 避免“其他值 == 预设 value”被误判为预设（评审 P2）。
-      other: answer.other,
-    })));
+    const answers = buildUserInputAnswers(groups, conversationCopy && conversationCopy.otherAnswer);
     onSubmitAnswers(item.toolCallId, answers);
   }
 
@@ -585,6 +554,7 @@ function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput,
       submitting={responding}
       submitLabel={copy.submit}
       cancelLabel={copy.cancel}
+      otherPlaceholder={conversationCopy && conversationCopy.otherAnswer}
       otherAnswerLabel={conversationCopy && conversationCopy.otherAnswer}
       inputPlaceholder={conversationCopy && conversationCopy.inputPlaceholder}
       statusText={!actionable
@@ -823,6 +793,7 @@ export function CodexAcpView({
     await checkoutWorkspaceBranch(branch, 'carry');
   }
   const [dismissedFailureKey, setDismissedFailureKey] = useState('');
+  const [dismissedNoticeKey, setDismissedNoticeKey] = useState('');
   const [draftWorkspacePath, setDraftWorkspacePath] = useState(null);
   // 会话内用 sessionId 解析工作区；草稿态（会话未创建）直接扫描已选目录。
   const branchWorkspacePath = activeId ? null : draftWorkspacePath;
@@ -1286,6 +1257,18 @@ export function CodexAcpView({
   const visibleServiceFailure = serviceFailure?.key === dismissedFailureKey
     ? null
     : serviceFailure;
+  // Adapter stderr can appear here; always redact it before display, as for turn errors.
+  const runtimeNotice = useMemo(() => {
+    const notice = latestAgentRuntimeNotice(events);
+    if (!notice) return null;
+    return {
+      ...notice,
+      detail: redactDisplayError(notice.detail, acpModelServiceLanguage) || '',
+    };
+  }, [events, acpModelServiceLanguage]);
+  const visibleRuntimeNotice = runtimeNotice?.key === dismissedNoticeKey
+    ? null
+    : runtimeNotice;
   const workspaceUnavailable = Boolean(
     activeSession
       && activeSession.workspace_kind === 'project'
@@ -2360,7 +2343,33 @@ export function CodexAcpView({
     // WebKit-safe filter + image File extraction shared with the chat paste path;
     // whether to swallow the event is decided here (single preventDefault below).
     const images = collectClipboardImages(event);
-    if (!images.length) return;
+    if (!images.length) {
+      // Linux WebKitGTK surfaces an image clipboard as an empty clipboardData
+      // (swallowing the text part too); the native layer reads the clipboard
+      // instead, mirroring the chat paste path. Browsers hand images over
+      // through clipboardData items, so web keeps the device-upload path.
+      if (deviceFileUploadAvailable) return;
+      if (!pasteImageClipboardFallbackAvailable(bs && bs.platformCapabilities)) return;
+      if (!pasteEventNeedsClipboardFallback(event)) return;
+      event.preventDefault();
+      // 直连 invoke 与既有 save_paste_image 用法一致；语义对齐 chat 侧的
+      // bridge.attachments.addPasteImageFromClipboard（command 返回 null = 无图
+      // 像，静默维持「无内容可贴」）。fulfiller 内保持非 async：附件入列失败
+      // 单独 .catch，避免 .then 第二参覆盖不到而成为 unhandled rejection。
+      invoke('paste_clipboard_image').then((path) => {
+        if (!path) return;
+        addAttachmentByPath(path, attachmentKey).catch(showError);
+      }, (err) => {
+        const limitError = formatAttachmentLimitError(err, t.uiAttachments);
+        if (limitError) {
+          console.error('Codex clipboard paste failed:', err);
+          setError(limitError);
+        } else {
+          showError(err);
+        }
+      });
+      return;
+    }
     if (!deviceFileUploadAvailable && !canInvoke('save_paste_image')) return;
     event.preventDefault();
     images.forEach(file => {
@@ -3517,6 +3526,12 @@ export function CodexAcpView({
                     providerCopy={t.uiAcpProviders}
                   />
                 )}
+                <AgentRuntimeNotice
+                  notice={visibleRuntimeNotice}
+                  agentName={activeAgentName}
+                  onDismiss={() => setDismissedNoticeKey(runtimeNotice?.key || '')}
+                  copy={codexCopy}
+                />
               </>
             )}
             {!visibleTurns.length && (
@@ -4149,7 +4164,7 @@ export function CodexAcpView({
                   )}
                 </div>
                 {busy ? (
-                  <button onClick={cancel} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
+                  <button onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
                   <>
                     <VoiceComposerButton

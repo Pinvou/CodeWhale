@@ -98,26 +98,21 @@ pinvou3
 
 ## 5. Windows 软件更新（Windows 版）
 
-Windows 版应用内更新使用 H3C OTA 服务（更新源地址由引导服务下发）：
+Windows 与 macOS 共用静态 `latest.json` 更新源，并读取
+`platforms["windows-x86_64"]` 中独立的版本、URL、SHA-256、大小和更新说明：
 
-1. 查询更新：`POST /ota/pkg/package/upgrade/check`
-2. 下载更新包：HTTP 下载 zip 到 `~/.pinvou3/updates/`
-3. 解析安装包：解压下载 zip，读取 `OtaInfo.json` 并定位 `.msi` 或 NSIS `.exe`
-4. 启动安装：MSI 使用系统被动安装；NSIS EXE 使用 `/P /UPDATE` 显示安装进度并自动开始，无需手动点击按钮。安装器启动后当前 pinvou3 进程退出
-5. 反馈结果：下次启动读取 `~/.pinvou3/updates/update-feedback.json` 并调用 `/ota/pkg/package/updateLog`
+1. 查询更新：获取 `https://pinvou.com/pinvou3/latest.json`，只接受当前平台条目，不回退到顶层 Linux 包。
+2. 下载更新：直接将签名服务器生成的 NSIS `.exe` 或 MSI 下载到 `~/.pinvou3/updates/`。
+3. 完整性校验：严格校验清单大小和 SHA-256，校验通过后再将临时文件原子提交为正式安装文件。
+4. 安装前复验：再次核对路径、扩展名、文件大小和 SHA-256。
+5. 启动安装：MSI 使用系统被动安装；NSIS 使用 `/P /UPDATE`。Windows 弹出 UAC 后，当前 Pinvou 进程退出，安装成功后启动新版。
 
-可选环境变量：
+正式 Windows 安装器由独立签名服务器构建并签署，再按
+`docs/windows-static-update-release.md` 人工发布。应用不读取 BIOS SN、不依赖专用 OTA
+服务，也不上传升级结果。`PINVOU3_HOME` 仍可重定位用户数据和更新暂存目录。
 
-```powershell
-$env:PINVOU3_OTA_SOFTWARE_ID = "Pinvou3_Win"
-```
-
-- 设备 SN 读取 BIOS 序列号；读取失败时不执行更新查询。
-- `PINVOU3_OTA_SOFTWARE_ID` 默认 `Pinvou3_Win`。
-- `PINVOU3_HOME` 可重定位用户数据根目录，更新暂存目录随之移动。
-- 升级反馈失败会保留本地记录，并在下次启动后重试。
-
-Linux `.deb` 更新链路仍使用原有 `latest.json`、sha256 校验和 `pkexec apt-get install` 流程。
+Linux `.deb` 更新链路继续使用顶层清单字段、SHA-256 和
+`pkexec apt-get install`；macOS 使用 `platforms["macos-universal"]`。
 
 ---
 

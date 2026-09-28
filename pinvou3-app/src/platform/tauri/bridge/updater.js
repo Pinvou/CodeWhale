@@ -95,7 +95,7 @@
       state.updateProgress = 100; notify();
       state.updateInfo = info; // 复原：install 用发起时的版本元数据，不随静默检查漂移
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
-        await invoke("install_update", { packagePath: downloadResult.package_path, installerPath: downloadResult.installer_path, info: state.updateInfo });
+        await invoke("install_update", { installerPath: downloadResult.installer_path, info: state.updateInfo });
       } else {
         await invoke("install_update", { debPath: downloadResult, info: state.updateInfo });
       }

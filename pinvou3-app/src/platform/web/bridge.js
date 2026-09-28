@@ -172,6 +172,9 @@
     // 复位 effect 挂它 → 即便 activeSessionId 没变(draft→draft)也能重新求值,否则残留的工具欢迎卡
     // 会一直顶掉「你好」欢迎语(该 tool 无 welcomeQueries 时整块空白)。
     draftEpoch: 0,
+    // Same-shape desktop-slice stub: draft workspace directory binding is a desktop-only capability (the web has
+    // no system directory picker channel); always null on the web, but the sessions slice must match desktop key-by-key (see the bridge_state_domains contract).
+    draftWorkspacePath: null,
     // 跨页面预填输入框请求。比如侧边栏「产出物」一级入口点击「续写/新项目」：
     // 只把草稿放进 composer，不自动发送给模型。
     composerPrefill: { id: 0, text: "" },
@@ -259,6 +262,8 @@
     // 仅驻内存(后端也只驻内存),重启回到未挂载。名字由前端用知识集列表解析。
     mountedCollection: null,
     mountedCollections: [],
+    // Same-shape desktop-slice stub: remote knowledge-base mounting is operable only on desktop; always an empty array on the web.
+    mountedRemoteCollections: [],
     mountedCollectionsRevision: 0,
     // personaPool 只放轻量元信息(loadState),1078 张卡放模块级 personaPoolCache,
     // 不进 state/订阅快照，避免每个流式 token 都复制完整卡池。
@@ -1052,7 +1057,7 @@
       planSnapshot: { plan: null, todos: null },
       modeState: { mode: "yolo" },
       thinking: { active: false, phase: "thinking", toolName: "", startedAt: 0 },
-      tokens: { input: 0, max: maxModelLen },
+      tokens: { input: 0, max: 0 },
       activePersona: null, // 卡片池: 该 session 加持的专家面具(挂件用)
       mountedCollection: null, // 知识库: 该 session 挂载的知识集 id 或 null
       mountedCollections: [], // 多知识库挂载项 [{ collectionId, enabled }]
@@ -4452,7 +4457,8 @@
     return null;
   }
 
-  const SHELL_TOOL_NAMES = ["bash", "exec_shell", "task_shell_start", "shell", "Bash"];
+  // keep in sync with tauri/bridge/terminal.js
+  const SHELL_TOOL_NAMES = ["bash", "exec_shell", "exec_shell_wait", "exec_wait", "task_shell_start", "task_shell_wait", "shell", "Bash"];
   const SHELL_WAIT_TOOL_NAMES = ["exec_shell_wait", "exec_wait", "task_shell_wait"];
 
   function isShellExecutionTool(name) {
@@ -7228,11 +7234,57 @@
     return { running: running, waiting: waiting };
   }
 
+  // MonitorView only consumes state.monitor._fmt (plus one level of vllmRaw
+  // nesting), so shallow equality means display equivalence. The poll runs
+  // once per second; when a snapshot is display-equivalent, skip the
+  // assignment + notify to avoid a full App re-render every second while the
+  // monitor page is open. Numeric values jitter naturally (cpu/gpu
+  // percentages etc.), so comparisons allow a 0.5 tolerance (prefer one
+  // extra notify over ever getting stuck); counters are mostly strings after
+  // toFixed/round and compare exactly. updatedAt is a poll-tick marker (never
+  // rendered, only a sampling trigger) and must be excluded, otherwise every
+  // second counts as "changed"; the page clock is driven by MonitorView's
+  // local 1s timer and does not depend on it.
+  function monitorFmtEqual(prev, next) {
+    if (prev === next) return true;
+    if (!prev || !next) return false;
+    const numEq = function (a, b) {
+      if (a === b) return true;
+      return typeof a === "number" && typeof b === "number"
+        && Number.isFinite(a) && Number.isFinite(b)
+        && Math.abs(a - b) <= 0.5;
+    };
+    const keys = Object.keys(next);
+    if (keys.length !== Object.keys(prev).length) return false;
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (key === "updatedAt") continue;
+      const a = prev[key];
+      const b = next[key];
+      if (a && b && typeof a === "object" && typeof b === "object") {
+        const inner = Object.keys(b);
+        if (inner.length !== Object.keys(a).length) return false;
+        let same = true;
+        for (let j = 0; j < inner.length; j++) {
+          if (!numEq(a[inner[j]], b[inner[j]])) { same = false; break; }
+        }
+        if (!same) return false;
+        continue;
+      }
+      if (!numEq(a, b)) return false;
+    }
+    return true;
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   async function pollMonitor() {
     if (monitorPollInFlight) return;
     monitorPollInFlight = true;
     try {
       var snap = await invoke("get_monitor_snapshot");
+      // The previous round errored → this round must notify once so the
+      // "read failed" banner switches back to the normal panel.
+      const hadMonitorError = !!state.monitorError;
       state.monitorError = null;
       // GPU util sliding window
       if (snap.gpu) {
@@ -7332,11 +7384,15 @@
         updatedAt: snap.generated_at_ms ? new Date(snap.generated_at_ms).toLocaleTimeString() : "—",
       };
       if (snap.vllm && snap.vllm.max_model_len) {
-        maxModelLen = snap.vllm.max_model_len;
-        state.tokens.max = maxModelLen;
+        state.tokens.max = snap.vllm.max_model_len;
       }
-      state.monitor = snap;
-      notify();
+      // Display-equivalent snapshots neither overwrite state.monitor nor
+      // notify (must send on the first frame or after an errored round).
+      const prevFmt = state.monitor && state.monitor._fmt;
+      if (hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt)) {
+        state.monitor = snap;
+        notify();
+      }
     } catch (e) {
       state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
       console.warn("monitor poll failed", e);
@@ -7369,8 +7425,7 @@
       state.backendOnline = !!s.vllm_online;
       // 修 token 分母时机 bug：不再依赖用户打开监控页才拿到真实 max_model_len
       if (s.max_model_len) {
-        maxModelLen = s.max_model_len;
-        state.tokens.max = maxModelLen;
+        state.tokens.max = s.max_model_len;
       }
     } catch (e) {
       state.backendOnline = false;
@@ -7494,6 +7549,7 @@
         } else {
           state.settings = await invoke("update_search_settings", { search: search });
         }
+        await loadEffectiveModelConfig();
         notify();
         return true;
       } catch (e) {
@@ -10138,9 +10194,10 @@
   }
 
   // The web lane has no local ASR model download (startVoiceInput fails fast with
-  // dependency_unavailable when missing), so there is no interruptible install process;
-  // keep a same-named cancel entry as desktop that just collapses the install dialog and
-  // resolves, avoiding a TypeError when ChatView calls it on web.
+  // dependency_unavailable when missing; the install_voice_asr command is not on
+  // the web access-policy allowlist either), so there is no interruptible install
+  // process; keep a same-named cancel entry as desktop that just collapses the
+  // install dialog and resolves, avoiding a TypeError when ChatView calls it on web.
   async function cancelVoiceAsrSetup() {
     closeVoiceAsrSetup();
   }

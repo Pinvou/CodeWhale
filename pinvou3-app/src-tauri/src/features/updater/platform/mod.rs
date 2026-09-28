@@ -6,8 +6,6 @@ mod macos;
 mod unsupported;
 #[cfg(target_os = "windows")]
 mod windows;
-#[cfg(target_os = "windows")]
-mod windows_domain_bootstrap;
 
 #[cfg(target_os = "linux")]
 pub use linux::{
@@ -29,6 +27,3 @@ pub use windows::{
     check_for_update_info, cleanup_stale_backup, download_update_package,
     install_downloaded_update, report_pending_update_result_info,
 };
-mod signature;
-
-pub(super) use signature::verify_package_signature;

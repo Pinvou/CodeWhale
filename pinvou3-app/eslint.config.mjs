@@ -259,9 +259,17 @@ export default defineConfig([
       // localStorage/navigator look like experimental Node globals to the n
       // plugin, but in tests they run inside puppeteer page.evaluate()
       // browser contexts where they are ordinary web APIs, not Node builtins.
+      //
+      // module.registerHooks is the supported way for a plain `node --test` run
+      // to stub Vite asset imports (.svg/.png), which Node itself cannot
+      // resolve. It is still flagged experimental for the configured range
+      // (>=22.16 <23) but is stable on the Node 24 that CI actually runs, and
+      // the alternative -- spawning a subprocess with --experimental-loader per
+      // test file -- buys nothing here. Test-only: production code must not
+      // depend on it.
       'n/no-unsupported-features/node-builtins': [
         'error',
-        { ignores: ['localStorage', 'navigator'] },
+        { ignores: ['localStorage', 'navigator', 'module.registerHooks'] },
       ],
       // Many test entries are run directly by URL in package.json scripts
       // without extensions in shebang form; hashbangs are intentional there.

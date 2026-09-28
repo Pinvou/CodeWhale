@@ -9,9 +9,19 @@ RUST_CACHE_ACTION = "uses: Swatinem/rust-cache@v2"
 MAIN_ONLY_SAVE = "save-if: ${{ github.ref == 'refs/heads/main' }}"
 
 
+def _without_yaml_comments(block):
+    # 与 test_ci_gate_policy 同款辅助:被注释掉的步骤或 save-if 行
+    # 不得满足钉定活配置的断言。
+    return "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 class ReleaseCachePolicyTests(unittest.TestCase):
     def test_release_rust_caches_are_read_only_outside_main(self):
-        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        workflow = _without_yaml_comments(
+            RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        )
         cache_steps = [
             step
             for step in workflow.split("\n      - name:")

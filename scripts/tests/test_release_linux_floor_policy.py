@@ -1,5 +1,6 @@
 import platform
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -143,7 +144,7 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         self.assertEqual(source.count("，实际 $("), 2)
         self.assertIn("pinned commit 复核失败", source)
         # 所有 ❌ 报错走 stderr,管道/CI 捕获场景不丢诊断。
-        self.assertEqual(source.count(">&2"), 6)
+        self.assertEqual(source.count(">&2"), 7)
         # 引擎/模型/shim 都必须经同目录临时文件 + rename 落位。
         self.assertEqual(source.count(".tmp.$$"), 3)
         self.assertEqual(source.count("mv -f"), 3)
@@ -152,6 +153,7 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
             '[ -z "${engine_tmp:-}" ] || rm -f "$engine_tmp"', source
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "needs a Linux ELF host")
     def test_elf_policy_accepts_host_arch_and_rejects_mismatch(self):
         machine = platform.machine().lower()
         if machine in ("x86_64", "amd64"):

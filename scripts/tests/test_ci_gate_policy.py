@@ -30,13 +30,47 @@ def _without_yaml_comments(block):
 
 
 def _is_covered_by_trigger(entry, trigger_paths):
-    """entry 被 trigger path 覆盖:完全相同,或 trigger 是其上层 `/**` 目录 glob。"""
-    for trigger in trigger_paths:
-        if entry == trigger:
-            return True
-        if trigger.endswith("/**") and entry.startswith(trigger[:-2]):
-            return True
-    return False
+    """entry 被 trigger path 覆盖:完全相同,或 trigger 是其上层 `/**` 目录 glob。
+
+    与 dorny/paths-filter 的 some-with-excludes 语义对齐:至少一条正向
+    pattern 命中,且没有任何 `!` 排除条目命中(排除优先于命中)。忽略
+    排除条目会让路由锁在 filter 组新增排除时仍虚报覆盖(fail-open)。
+    """
+
+    def _matches(pattern):
+        return entry == pattern or (
+            pattern.endswith("/**") and entry.startswith(pattern[:-2])
+        )
+
+    if not any(_matches(p) for p in trigger_paths if not p.startswith("!")):
+        return False
+    excludes = [p[1:] for p in trigger_paths if p.startswith("!")]
+    return not any(_matches(p) for p in excludes)
+
+
+def _extract_contract_read_targets(contract_test):
+    """从 multiagent_plan_normalize.test.mjs 源码派生全部 src-tauri 读取目标。
+
+    `read('src-tauri', ...)` 产出单文件目标,`path.join(here, '..', 'src-tauri',
+    ...)` 产出 readdirSync 整目录拼接的 `/**` 目标。单引号与双引号形式都被
+    接受:此前正则只匹配单引号,双引号的 `read("src-tauri", ...)` 会整体绕过
+    路由锁(fail-open,经变异验证)。
+    """
+    targets = []
+    for args in re.findall(
+        r"read\(['\"]src-tauri['\"],\s*([^)]*)\)", contract_test
+    ):
+        parts = re.findall(r"['\"]([^'\"]*)['\"]", args)
+        if not parts:
+            raise AssertionError(f"无法解析的契约测试 read 目标: {args}")
+        targets.append("pinvou3-app/src-tauri/" + "/".join(parts))
+    for args in re.findall(
+        r"path\.join\(here, ['\"]\.\.['\"], ['\"]src-tauri['\"],\s*([^)]*)\)",
+        contract_test,
+    ):
+        parts = re.findall(r"['\"]([^'\"]*)['\"]", args)
+        targets.append("pinvou3-app/src-tauri/" + "/".join(parts) + "/**")
+    return targets
 
 
 def _matches_paths_filter(path, patterns):
@@ -119,7 +153,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
         self.assertIn('PINVOU_CODEWHALE_BRANCH="pinvou3-clean"', verifier)
-        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.12-r1"', verifier)
+        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.12-r3"', verifier)
         self.assertIn('[[ "$branch_target" != "$gitlink" ]]', verifier)
         self.assertIn('[[ "$branch_target" != "$tag_target" ]]', verifier)
         self.assertIn("unknown argument", verifier)
@@ -177,6 +211,153 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"静态门禁配置 {path} 不在 frontend filter 中",
             )
 
+    def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
+        # multiagent_plan_normalize.test.mjs reads the Rust sources below for
+        # cross-language contract pins (swarm contract text, same-snapshot
+        # invariant, edit-resend replay, roster caps). If they are absent from
+        # the frontend path filter, a Rust-only PR silently skips that node
+        # gate — the same structural blind spot the static-analysis configs
+        # above guard against.
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        frontend_paths = changes.split(
+            "            frontend:", maxsplit=1
+        )[1].split("            relay:", maxsplit=1)[0]
+        for path in (
+            "pinvou3-app/src-tauri/src/features/assistant/**",
+            "pinvou3-app/src-tauri/src/features/multiagent/transcripts.rs",
+            "pinvou3-app/src-tauri/src/features/remote_control/manager/**",
+            "pinvou3-app/src-tauri/src/features/sessions/**",
+            "pinvou3-app/src-tauri/src/features/personas/mod.rs",
+            "pinvou3-app/src-tauri/src/features/files/file_ingest.rs",
+            "pinvou3-app/src-tauri/src/app/commands/multiagent.rs",
+            "pinvou3-app/src-tauri/src/app/commands/chat.rs",
+            "pinvou3-app/src-tauri/src/app/commands/memory.rs",
+            "pinvou3-app/src-tauri/src/app/commands/interaction.rs",
+            "pinvou3-app/src-tauri/src/app/commands/remote_control.rs",
+            "pinvou3-app/src-tauri/src/app/commands/personas.rs",
+            "pinvou3-app/src-tauri/src/lib.rs",
+        ):
+            self.assertIn(
+                f"- '{path}'",
+                frontend_paths,
+                f"跨语言契约测试读取的 Rust 源 {path} 不在 frontend filter 中,Rust-only PR 会静默跳过该 node 门禁",
+            )
+
+    def test_cross_language_contract_reads_fully_routed(self):
+        # 上面的静态清单会随 .mjs 演进漂移:这里从
+        # multiagent_plan_normalize.test.mjs 本身派生它读取的全部 src-tauri
+        # 目标(单文件 read(...) 与 readdirSync 整目录拼接,单/双引号形式
+        # 均归一化匹配),逐一断言 frontend filter 覆盖。给契约测试新增
+        # Rust read 而不路由、或把已路由文件挪走,都会在这里失败(本套件
+        # 在 fast-gate 每个 PR 必跑)。
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        frontend_entries = _extract_quoted_paths(
+            changes.split("            frontend:", maxsplit=1)[1].split(
+                "            relay:", maxsplit=1
+            )[0]
+        )
+        contract_test = (
+            ROOT / "pinvou3-app/tests/multiagent_plan_normalize.test.mjs"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_contract_read_targets(contract_test)
+
+        self.assertTrue(
+            targets,
+            "未能从 multiagent_plan_normalize.test.mjs 解析出 src-tauri 读取目标",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_entries),
+                f"跨语言契约测试读取的 {target} 未被 frontend filter 覆盖,"
+                "Rust-only 改动会静默跳过该 node 门禁",
+            )
+
+    def test_contract_target_derivation_covers_double_quoted_reads(self):
+        # 回归锁:派生正则此前只匹配单引号形式,双引号的
+        # `read("src-tauri", ...)` 会整体绕过上面的路由锁(经变异验证)。
+        # 对派生函数喂最小 fixture:双引号的单文件与整目录目标都必须被
+        # 解析出来,且不被缺少该条目的 frontend filter 覆盖——即未来出现
+        # 未路由的双引号读取时,路由锁必定失败而不是静默通过。
+        fixture = (
+            "const direct = read(\"src-tauri\", \"src\", \"features\", "
+            "\"future_feature\", \"mod.rs\");\n"
+            "const dir = path.join(here, \"..\", \"src-tauri\", \"src\", "
+            "\"features\", \"future_module\");\n"
+        )
+        targets = _extract_contract_read_targets(fixture)
+        self.assertIn(
+            "pinvou3-app/src-tauri/src/features/future_feature/mod.rs",
+            targets,
+            "双引号 read 目标必须被派生出来(单引号正则 fail-open 回归)",
+        )
+        self.assertIn(
+            "pinvou3-app/src-tauri/src/features/future_module/**",
+            targets,
+            "双引号 path.join 整目录目标必须被派生出来",
+        )
+        unrouted_filter = ["pinvou3-app/src-tauri/src/lib.rs"]
+        for target in targets:
+            self.assertFalse(
+                _is_covered_by_trigger(target, unrouted_filter),
+                f"未路由的双引号读取 {target} 不应被无关 filter 覆盖",
+            )
+
+    def test_trigger_coverage_respects_exclusions(self):
+        # dorny/paths-filter(some-with-excludes)的语义是"至少一条正向
+        # pattern 命中且没有任何 `!` 排除条目命中"。此前
+        # _is_covered_by_trigger 忽略排除条目:frontend 组若新增排除,
+        # 路由锁会虚报覆盖而 CI 实际不触发该门禁。
+        positive = ["pinvou3-app/src-tauri/src/features/**"]
+        self.assertTrue(
+            _is_covered_by_trigger(
+                "pinvou3-app/src-tauri/src/features/assistant/engine.rs",
+                positive,
+            )
+        )
+        with_exclude = positive + [
+            "!pinvou3-app/src-tauri/src/features/assistant/**"
+        ]
+        self.assertFalse(
+            _is_covered_by_trigger(
+                "pinvou3-app/src-tauri/src/features/assistant/engine.rs",
+                with_exclude,
+            ),
+            "正向命中但被 `!` 排除条目命中的路径不得视为覆盖",
+        )
+        # 排除只作用于其命中范围,同组其余路径仍被覆盖。
+        self.assertTrue(
+            _is_covered_by_trigger(
+                "pinvou3-app/src-tauri/src/features/sessions/mode_state.rs",
+                with_exclude,
+            )
+        )
+        # 精确条目形式的排除同样生效。
+        exact_exclude = [
+            "pinvou3-app/src-tauri/src/lib.rs",
+            "!pinvou3-app/src-tauri/src/lib.rs",
+        ]
+        self.assertFalse(
+            _is_covered_by_trigger(
+                "pinvou3-app/src-tauri/src/lib.rs", exact_exclude
+            )
+        )
+        # 只有排除条目、没有任何正向 pattern 时不得视为覆盖。
+        self.assertFalse(
+            _is_covered_by_trigger(
+                "pinvou3-app/src-tauri/src/lib.rs",
+                ["!pinvou3-app/src-tauri/src/lib.rs"],
+            )
+        )
+
     def test_merge_queue_uses_path_filtering_and_product_gates(self):
         changes = self.workflow.split("\n  changes:", maxsplit=1)[1].split(
             "\n  fast-gate:", maxsplit=1
@@ -195,6 +376,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "relay",
             "team_relay_hub",
             "account_platform",
+            "update_release_console",
             "acp_runtime",
             "windows_codex",
             "windows_runtime",
@@ -217,6 +399,7 @@ class CiGatePolicyTests(unittest.TestCase):
         for job in (
             "team-relay-hub-test",
             "account-platform-test",
+            "update-release-console-test",
             "backflow-portability",
             "release-contract-test",
             "windows-runtime-test",
@@ -254,6 +437,48 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("alpine/helm:4.2.3", account_job)
         self.assertIn("govulncheck@v1.6.0", account_job)
         self.assertIn("docker compose", account_job)
+
+        console_job = self.workflow.split(
+            "\n  update-release-console-test:", maxsplit=1
+        )[1].split("\n  release-contract-test:", maxsplit=1)[0]
+        self.assertIn(
+            "needs.changes.outputs.update_release_console == 'true'",
+            console_job,
+        )
+        self.assertIn("npm --prefix update-release-console ci", console_job)
+        self.assertIn("npm --prefix update-release-console test", console_job)
+        self.assertIn('node-version: ["20", "24"]', console_job)
+        self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
+        self.assertIn(
+            "npm --prefix update-release-console audit "
+            "--registry=https://registry.npmjs.org --audit-level=high",
+            console_job,
+        )
+        self.assertIn(
+            "docker build --file update-release-console/Dockerfile "
+            "update-release-console",
+            console_job,
+        )
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "config --quiet",
+            console_job,
+        )
+        self.assertIn("nginx:1.27-alpine nginx -t", console_job)
+        self.assertIn("/var/www/pinvou3/latest.json", console_job)
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "up --detach --build",
+            console_job,
+        )
+        self.assertIn("release-console/healthz", console_job)
+        self.assertIn("release-console/api/status", console_job)
+        self.assertIn(
+            "docker compose --file update-release-console/deploy/compose.yaml "
+            "down --volumes --remove-orphans",
+            console_job,
+        )
+        self.assertIn("always() && matrix.node-version == '20'", console_job)
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
         portability = self.workflow.split(
@@ -775,12 +1000,14 @@ class CiGatePolicyTests(unittest.TestCase):
         source = (ROOT / "scripts" / "fetch-connectors.sh").read_text(
             encoding="utf-8"
         )
-        # 失配必须携带期望/实际值(文件缺失单列),并显式 return 1。
+        # 失配必须携带期望/实际值(文件缺失/不可读单列,不可读属 I/O 故障
+        # 而非哈希差异),并显式 return 1。
         self.assertIn(
             'echo "sha256 校验失败: $1（期望 $2，实际 $(compute_sha256 "$1")）"',
             source,
         )
         self.assertIn('echo "sha256 校验失败: $1（文件缺失，期望 $2）"', source)
+        self.assertIn('echo "sha256 校验失败: $1（文件不可读，期望 $2）"', source)
         self.assertIn('[[ "$(compute_sha256 "$1")" == "$2" ]]', source)
         self.assertIn("return 1", source)
         # 三处裸调 + 下载前探测调用,校验点不得悄悄减少。
@@ -961,10 +1188,14 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RUST_CACHE", windows_rust_test)
         self.assertIn("WINDOWS_RUST_TIMING", windows_rust_test)
 
-        # Node/npm were inherited from a retired JS-contract step. The remaining
-        # Rust build scripts and six filtered regressions do not consume node_modules.
+        # The static updater contract is dependency-free and uses the runner's
+        # preinstalled Node. Rust checks still must not install frontend dependencies.
         self.assertNotIn("actions/setup-node", windows_rust_test)
         self.assertNotIn("npm --prefix pinvou3-app ci", windows_rust_test)
+        self.assertIn(
+            "npm --prefix pinvou3-app run test:windows-static-updater",
+            windows_rust_test,
+        )
 
         self.assertIn(
             "defaults:\n      run:\n        shell: bash",
@@ -977,6 +1208,13 @@ class CiGatePolicyTests(unittest.TestCase):
         regression = windows_rust_test.split(
             "- name: Windows 原子替换状态机回归", maxsplit=1
         )[1]
+        # Cut at the next job boundary: the round-17 macos-rust-check leg
+        # legitimately runs `cargo test` (computer_use unit tests) and sits
+        # between the regression step and the previous extraction boundary —
+        # this assertion only guards the Windows regression against
+        # re-invoking cargo, which would re-link the exe and lose the
+        # embedded Common-Controls manifest.
+        regression = regression.split("\n  macos-rust-check:", maxsplit=1)[0]
         self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
@@ -991,6 +1229,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "artifact_writes_never_expose_partial_utf8_to_concurrent_readers",
             "artifact_public_read_",
             "features::memory::tests::topic_migration_",
+            "features::updater::platform::windows::tests::",
         ):
             self.assertEqual(regression.count(filter_name), 1)
         self.assertIn("running [1-9][0-9]* tests?", regression)
@@ -1020,6 +1259,33 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("--all-targets --features dev-tools", windows_rust_test)
         self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
         self.assertNotIn("--lib --no-run --features dev-tools", windows_rust_test)
+
+    def test_windows_release_powershell_scripts_route_to_native_static_contract(self):
+        changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  backflow-portability:", maxsplit=1
+        )[0]
+        route = changes.split("            windows_static_updater:", maxsplit=1)[1].split(
+            "            backflow_infra:", maxsplit=1
+        )[0]
+        paths = _extract_quoted_paths(route)
+        for script in (
+            "scripts/prepare-windows-release.ps1",
+            "scripts/verify-windows-release-online.ps1",
+        ):
+            self.assertTrue(_matches_paths_filter(script, paths), script)
+
+        job = self.pr_workflow.split(
+            "\n  windows-static-updater-contract:", maxsplit=1
+        )[1].split("\n  windows-rust-test:", maxsplit=1)[0]
+        self.assertIn("runs-on: windows-latest", job)
+        self.assertIn("needs.changes.outputs.windows_static_updater == 'true'", job)
+        self.assertIn("npm --prefix pinvou3-app run test:windows-static-updater", job)
+        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("- windows-static-updater-contract", required_gate)
+        self.assertIn(
+            '"windows-static-updater-contract:$WINDOWS_STATIC_UPDATER_RESULT"',
+            required_gate,
+        )
 
     def test_windows_policy_condition_truth_table_and_required_result(self):
         windows_job = self.pr_workflow.split(
@@ -1121,6 +1387,21 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RUST_REQUIRED_BY_POLICY", required_gate)
         self.assertIn('"$WINDOWS_RUST_RESULT" != success', required_gate)
         self.assertIn("回流策略 $BACKFLOW_MODE 要求完整 Windows Rust", required_gate)
+    def test_macos_rust_check_is_wired_into_required_gate(self):
+        # Review finding: the new native macOS leg must satisfy the same
+        # three-wiring rule as windows-rust-test (needs entry, env backfill,
+        # summary-loop entry) -- otherwise removing the job keeps CI green
+        # while the gate silently degrades.
+        job_body = self.pr_workflow.split("\n  macos-rust-check:", maxsplit=1)[1]
+        job = re.split(r"\n  [a-zA-Z]", job_body, maxsplit=1)[0]
+        self.assertIn("needs: changes", job)
+        self.assertIn("MACOS_RUST_CHECK_RESULT", self.pr_workflow)
+        required_gate = self.pr_workflow.split(
+            "\n  required-gate:", maxsplit=1
+        )[1]
+        self.assertIn("- macos-rust-check", required_gate)
+        self.assertIn("MACOS_RUST_CHECK_RESULT", required_gate)
+        self.assertIn('"macos-rust-check:$MACOS_RUST_CHECK_RESULT"', required_gate)
 
     def test_windows_browser_wrapper_lifecycle_runs_in_required_native_job(self):
         changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
@@ -1200,6 +1481,14 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("- 'pinvou3-app/src-tauri/resources/**'", release_contract_paths)
         self.assertIn(
             "- 'pinvou3-app/tests/knowledge_host_packaging.test.mjs'",
+            release_contract_paths,
+        )
+        # tauri_effective_config.test.js parses this script's --target dispatch to
+        # pin the cross-build Node architecture mapping, and it runs inside
+        # release-contract-test; without this entry a PR touching only the bridge
+        # script would silently skip that contract gate.
+        self.assertIn(
+            "- 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'",
             release_contract_paths,
         )
         # Keep the l1 section boundary load-bearing: if the split anchor stops

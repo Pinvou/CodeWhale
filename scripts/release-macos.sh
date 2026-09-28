@@ -46,21 +46,11 @@ done
 # SDK 版本),产出要求更高 macOS 的二进制,与声明的 11.0 不符 → 11.x 用户打不开。
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 
-# ── 1. 三处版本号一致校验（防版本漂移发出错包）────────────────────
-# 版本提取加 `|| true`:源文件缺该行时 grep/jq 退出非 0,在 set -e 下会直接退出并
-# 打印原始报错,而非下面更友好的"版本号不一致"信息(让校验逻辑接管)。
-V_TAURI=$(jq -r .version "$APP_DIR/src-tauri/tauri.conf.json" || true)
-V_CARGO=$(grep -m1 '^version = ' "$APP_DIR/src-tauri/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' || true)
-V_NPM=$(jq -r .version "$APP_DIR/package.json" || true)
-if [ -z "$V_TAURI" ] || [ -z "$V_CARGO" ] || [ -z "$V_NPM" ]; then
-  echo "❌ 版本号读取失败(源文件缺失或格式异常): tauri=$V_TAURI cargo=$V_CARGO npm=$V_NPM" >&2
-  exit 1
-fi
-if [ "$V_TAURI" != "$V_CARGO" ] || [ "$V_TAURI" != "$V_NPM" ]; then
-  echo "版本号不一致: tauri.conf.json=$V_TAURI Cargo.toml=$V_CARGO package.json=$V_NPM" >&2
-  exit 1
-fi
-VERSION="$V_TAURI"
+# ── 1. 版本号以根目录 VERSION 为单一事实来源(社区 #604 回流)─────
+# 旧三处交叉比对在打包文件同时过时时照样通过;改由 sync-version.mjs --check
+# 把登记的全部版本文件逐一与 VERSION 比对,版本号直接读 VERSION。
+node "$REPO_ROOT/scripts/sync-version.mjs" --check
+VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 echo "=== 发布 pinvou3 v$VERSION (macOS universal) ==="
 
 # 签名/公证就绪判断(4 个凭证齐全),构建与公证步骤复用,避免条件判断重复导致不一致。

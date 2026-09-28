@@ -12,6 +12,7 @@ const {
   mergeConfig,
 } = require("../scripts/tauri/effective-config.js");
 const {
+  TARGET_MACHINE_ARCHITECTURES,
   configureIsolatedWindowsRustToolchain,
   chromeDevtoolsMcpEnvironment,
   configSpecs,
@@ -367,6 +368,194 @@ assert.equal(
   "Linux 不应准备 Windows Codex Bridge",
 );
 
+// ---- 交叉构建：targetArch -> PINVOU3_BRIDGE_TARGET_ARCH 的映射与注入 ----
+//
+// 这条链是交叉构建备料的核心机制：build.js 从 `--target` 解析出 node 记法的
+// targetArch，codex-bridge.js 把它映射成 machine 名注入环境变量，备料脚本按这个
+// 词挑 Node 官方发行包。映射写反或丢键都不会让构建失败，只会**静默**备错架构的
+// 料，所以这里必须逐项钉死。
+function capturedBridgeSpawn(options) {
+  let captured = null;
+  prepareCodexBridge({
+    ...options,
+    spawn: (command, args, spawnOptions) => {
+      captured = { command, args, options: spawnOptions };
+      return { status: 0 };
+    },
+  });
+  return captured;
+}
+
+const bridgeEnvFixture = { PINVOU_TEST_ENV: "kept" };
+const hostBridgeSpawn = capturedBridgeSpawn({
+  platform: "linux",
+  env: bridgeEnvFixture,
+});
+// 非交叉构建回落到 uname -m：其余环境变量原样透传（deepEqual），但必须是复制的
+// 新对象——prepareCodexBridge 在这条路径上要清掉调用环境里可能残留的
+// PINVOU3_BRIDGE_TARGET_ARCH，不能动调用方的对象。
+assert.deepEqual(
+  hostBridgeSpawn.options.env,
+  bridgeEnvFixture,
+  "非交叉构建必须原样透传环境，让备料脚本回落到 uname -m",
+);
+assert.notEqual(
+  hostBridgeSpawn.options.env,
+  bridgeEnvFixture,
+  "透传必须走副本，不能把调用方的 env 对象直接交给子进程改动",
+);
+assert.equal(
+  hostBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH,
+  undefined,
+  "不传 targetArch 时不能注入目标架构",
+);
+
+const injectedBridgeMachines = new Set();
+for (const [targetArch, machine] of [
+  ["arm64", "aarch64"],
+  ["x64", "x86_64"],
+]) {
+  for (const platform of ["linux", "darwin"]) {
+    const crossBridgeSpawn = capturedBridgeSpawn({
+      platform,
+      targetArch,
+      env: bridgeEnvFixture,
+    });
+    assert.equal(
+      crossBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH,
+      machine,
+      `${platform} 上交叉到 ${targetArch} 必须注入 ${machine}`,
+    );
+    assert.equal(
+      crossBridgeSpawn.options.env.PINVOU_TEST_ENV,
+      "kept",
+      "注入目标架构不能把其余环境变量丢掉",
+    );
+    injectedBridgeMachines.add(crossBridgeSpawn.options.env.PINVOU3_BRIDGE_TARGET_ARCH);
+  }
+}
+assert.equal(
+  bridgeEnvFixture.PINVOU3_BRIDGE_TARGET_ARCH,
+  undefined,
+  "注入必须复制一份环境，不能就地污染调用方的 env",
+);
+// machine 映射里没有的记法回落宿主行为：其余环境变量原样透传（复制，不就地污染），
+// 且必须清掉调用环境里可能残留的 PINVOU3_BRIDGE_TARGET_ARCH——那是备料脚本的手动
+// 开关，shell 里残留它时若原样透传，非交叉构建会被按残留值备出另一架构的 Node，
+// 而 overlay 仍按 process.arch 挑，静默错包只是换了个入口。
+// 反例用 loongarch64 这类几乎不会进词表的机器段：riscv64 是相对主流的目标，哪天真
+// 被支持，用它会把这个反例用例本身撞红，还得回头改测试。
+const leftoverBridgeEnv = { ...bridgeEnvFixture, PINVOU3_BRIDGE_TARGET_ARCH: "x86_64" };
+const fallbackBridgeEnv = capturedBridgeSpawn({
+  platform: "linux",
+  targetArch: "loongarch64",
+  env: leftoverBridgeEnv,
+}).options.env;
+assert.deepEqual(
+  fallbackBridgeEnv,
+  bridgeEnvFixture,
+  "回落时其余环境变量原样透传，残留的 PINVOU3_BRIDGE_TARGET_ARCH 必须被清掉",
+);
+assert.notEqual(
+  fallbackBridgeEnv,
+  leftoverBridgeEnv,
+  "回落也必须复制一份环境，不能就地污染调用方的 env",
+);
+assert.equal(
+  leftoverBridgeEnv.PINVOU3_BRIDGE_TARGET_ARCH,
+  "x86_64",
+  "残留值是调用方环境的一部分，只能清副本，不能动调用方的对象",
+);
+
+// 注入的词必须落在备料脚本的目标词表里，两个 OS 都要。
+//
+// 这是 Darwin 别名那条回归的钉子：三元组里 macOS 的 arm64 写作 aarch64
+//（aarch64-apple-darwin），而 macOS 的 `uname -m` 返回 arm64。脚本只收
+// `Darwin-arm64` 时，darwin 宿主上手工单架构构建会落到 `*)` 硬失败——CI 只用
+// universal-apple-darwin（不注入），所以这个洞当时没被任何用例照到。
+const bridgeScriptSource = fs.readFileSync(
+  path.join(APP_ROOT, "scripts", "prepare-codex-bridge-runtime.sh"),
+  "utf8",
+);
+const bridgeTargetDispatch = bridgeScriptSource.match(
+  /case "\$OS_NAME-\$TARGET_MACHINE" in([\s\S]*?)\nesac/u,
+)?.[1];
+assert.ok(
+  bridgeTargetDispatch,
+  "备料脚本必须保留按 $OS_NAME-$TARGET_MACHINE 分派的目标词表",
+);
+const acceptedBridgeTargets = new Set(
+  (bridgeTargetDispatch.match(/^[ \t]*[A-Za-z0-9_|-]+\)/gmu) ?? []).flatMap((label) =>
+    label.trim().slice(0, -1).split("|"),
+  ),
+);
+for (const machine of injectedBridgeMachines) {
+  for (const osName of ["Linux", "Darwin"]) {
+    assert.ok(
+      acceptedBridgeTargets.has(`${osName}-${machine}`),
+      `备料脚本的目标词表必须认得 ${osName}-${machine}，否则交叉构建会落到 *) 硬失败`,
+    );
+  }
+}
+
+// 上面那组分派检查只证明「哪些目标词被接受」，证明不了 `$TARGET_MACHINE` 真是拿
+// 注入的变量喂的。哪天重构回落成只按 `uname -m` 推导，上面照样全绿，包里的
+// Bridge node 又变回宿主架构——正是交叉构建那个原始 bug。
+assert.match(
+  bridgeScriptSource,
+  /TARGET_MACHINE="\$\{PINVOU3_BRIDGE_TARGET_ARCH:-/u,
+  "备料脚本必须从 PINVOU3_BRIDGE_TARGET_ARCH（回落宿主）推导 TARGET_MACHINE，"
+    + "否则交叉构建会打出宿主架构的 Node",
+);
+
+// 扩展新架构时，build.js 的词表和 codex-bridge.js 的 machine 映射必须同步扩展。
+//
+// 上面那组用例把 arm64→aarch64 / x64→x86_64 逐项写死了，它钉的是**映射值对不对**；
+// 但因为对照表是硬编码的，往 TARGET_MACHINE_ARCHITECTURES 里加一个 loongarch64 而不动
+// machine 映射，上面照样全绿。而那正是要防的洞：machine 落成 undefined → 环境变量
+// 不注入 → 备料脚本回落 `uname -m` 按**宿主**架构备 Node → 包里的 Bridge node 是
+// 宿主架构，全程零报错，恰是本 PR 要消灭的静默错包。
+//
+// 所以这条断言两头都**从源码派生**，不硬编码任何架构名：
+//   左边 = build.js 的 TARGET_MACHINE_ARCHITECTURES 能产出的全部 node arch；
+//   右边 = 真跑一次 prepareCodexBridge、看它到底注没注入（即 machine 映射的键）；
+//   再顺着链条查一层 = 注入的那个词必须在备料脚本的目标词表里。
+// 任何一处漏改，这里就红。
+for (const targetArch of new Set(Object.values(TARGET_MACHINE_ARCHITECTURES))) {
+  const injected = capturedBridgeSpawn({
+    platform: "linux",
+    targetArch,
+    env: bridgeEnvFixture,
+  }).options.env.PINVOU3_BRIDGE_TARGET_ARCH;
+  assert.ok(
+    injected,
+    `build.js 的 TARGET_MACHINE_ARCHITECTURES 能解析出 ${targetArch}，但 `
+      + `codex-bridge.js 的 machine 映射里没有它：交叉构建会静默按宿主架构备 Node。`
+      + "两张表必须一起改。",
+  );
+  for (const osName of ["Linux", "Darwin"]) {
+    assert.ok(
+      acceptedBridgeTargets.has(`${osName}-${injected}`),
+      `${targetArch} 注入的 ${injected} 不在备料脚本的目标词表里（${osName}），`
+        + "交叉构建会落到 *) 硬失败",
+    );
+  }
+}
+
+// 派生链再补一环（targetArchitecture 硬失败文案清单②）：每个 build.js 能解析出的
+// 目标架构，platform-config.js 的 ARCHITECTURE_CONFIG_NAMES.linux 必须有对应的
+// overlay。漏②时 platformArchitectureConfigPath 返回 null，prepareTauriArgs 的
+// `if (architectureConfig)` 把整层架构 overlay **静默**跳过——上面那组映射断言
+// 照绿，只有这条能照到。反例机器段在 gate 测试里，那边用 loongarch64。
+for (const targetArch of new Set(Object.values(TARGET_MACHINE_ARCHITECTURES))) {
+  assert.ok(
+    platformArchitectureConfigPath("linux", targetArch) !== null,
+    `build.js 的 TARGET_MACHINE_ARCHITECTURES 能解析出 ${targetArch}，但 `
+      + `platform-config.js 的 ARCHITECTURE_CONFIG_NAMES.linux 里没有它：整层架构 `
+      + "overlay 会被静默跳过。两张表必须一起改。",
+  );
+}
+
 assert.throws(() => requireWrapper({}), /禁止绕过平台 overlay/);
 assert.doesNotThrow(() => requireWrapper({ [WRAPPER_ENV]: "1" }));
 
@@ -376,10 +565,13 @@ const buildArgs = prepareTauriArgs(
   { platform: "linux", stageRuntime: noRuntime },
 );
 assert.equal(tauriCommandIndex(buildArgs), 1, "build command may follow global options");
+// architecture 没显式传时默认 process.arch，期望值跟着宿主走：别硬编码 x64，
+// 否则这条断言在 arm64 宿主上预存红，而这个文件是顶层脚本式断言、首错即中断，
+// 会把它后面的所有断言（含本 PR 新增的接线断言）一起截断。
 assert.deepEqual(configSpecs(buildArgs), [
   platformConfigPath("linux"),
   linuxStartupOverlay,
-  platformArchitectureConfigPath("linux", "x64"),
+  platformArchitectureConfigPath("linux", process.arch),
 ]);
 const linuxArmArgs = prepareTauriArgs(
   ["build", "--bundles", "deb"],
@@ -531,10 +723,37 @@ assert.match(
   /prepareWindowsRustcStackWrapper\(\{ environment: tauriEnvironment \}\);\s*return runTauri\(preparedArgs, \{ environment: tauriEnvironment \}\);/u,
   "the direct npm/Tauri entry must inject the Windows compiler stack wrapper",
 );
+// 这条要钉的是**顺序**：备料必须发生在清单生成之前，否则 bundle 会以
+// 「安装包资源不存在」失败。
+//
+// 原先它是逐字匹配那一行的写法（`if (process.env.PINVOU3_SKIP_LINUX_ASR !== "1")
+// prepareLinuxAsrRuntime();`）。那样任何等价重构都会把它弄红，而真正要守的顺序
+// 反倒没被检查——把开关读取上移成局部常量就是这么撞上的。改成按位置比较。
+assert.ok(
+  buildSource.includes("prepareLinuxAsrRuntime()"),
+  "Linux packaging must still prepare the SenseVoice runtime",
+);
+assert.ok(
+  buildSource.indexOf("prepareLinuxAsrRuntime()") < buildSource.indexOf("writeEffectiveArtifacts("),
+  "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
+);
+// 交叉构建要能显式跳过 ASR（SenseVoice 只能在目标架构上原生构建）。
+assert.match(buildSource, /skipLinuxAsr/u, "the ASR step must stay skippable for cross builds");
+// 上面那组用例只证明「给了 targetArch 就会注入正确的词」；这条补上另一头的接线：
+// 解析出来的目标架构确实被交给了 Bridge 备料。断得松（只要求同一次调用里出现
+// targetArch），等价重构不会误伤，而整条链断掉会红。
 assert.match(
   buildSource,
-  /if \(hasTauriBuildCommand\) \{\s*prepareLinuxAsrRuntime\(\);/u,
-  "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
+  /prepareCodexBridge\([^)]*targetArch/u,
+  "Bridge 必须按解析出的目标架构备料，否则交叉构建会静默备一份宿主架构的料",
+);
+// 上面那条断言只要同一次调用里出现 targetArch 就过，所以 `{ targetArch: hostArch }`
+// 这种错值也能混过去。这里反向禁止宿主架构出现在调用里：main() 里能交给 Bridge
+// 的只能是解析出来的目标。
+assert.doesNotMatch(
+  buildSource,
+  /prepareCodexBridge\([^)]*hostArch/u,
+  "Bridge 不得按宿主架构备料，否则交叉构建会静默打出宿主架构的 Node",
 );
 const preparedBrowserPlatforms = [];
 for (const platform of ["win32", "darwin", "linux"]) {
@@ -665,6 +884,11 @@ assert.equal(
 assert.equal(
   linux.bundle.resources["resources/platforms/linux/asr/LICENSE-SenseVoice.cpp"],
   "runtime/asr/LICENSE-SenseVoice.cpp",
+);
+assert.equal(
+  linux.bundle.resources["resources/platforms/linux/asr/"],
+  undefined,
+  "the shared Linux overlay must not package the whole asr/ directory",
 );
 assert.equal(
   linux.bundle.resources["resources/platforms/linux/knowledge-host/"],

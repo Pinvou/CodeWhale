@@ -1,0 +1,19 @@
+{
+  "ComfyUI_source_archive": {
+    "version_observed": "0.35.0",
+    "sha256": "e42f1265f60cad3e649a3422bda97a462fabbe989db799f6587bb22f781886ba"
+  },
+  "ComfyUI_MiniMax_H3_Turbo_source_archive": {
+    "sha256": "a1398cac5a703a37073e5f74f852243d99bb716cf82d1e10eaa3b7cedf290a39"
+  },
+  "model_revisions": {
+    "Comfy-Org/MiniMax-H3": "a98869194787969724c7425d95d0ed73ce9202af",
+    "larryvrh/MiniMax-H3-Turbo-Lora": "43a74557ac3f6539db8e0f2a959d03feb7a81480"
+  },
+  "realesrgan_transport": {
+    "repo": "rockapaper/realesrgan",
+    "revision": "main",
+    "content_sha256": "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
+    "note": "revision alias is allowed only because the official release content hash is enforced"
+  }
+}

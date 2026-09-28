@@ -180,6 +180,8 @@ export function ConversationStatusBadge({ status, copy }) {
   );
 }
 
+// ChatView 与 CodexAcpView 的 LiveConversationActivityIndicator 仍跨文件消费此
+// 组件,保持模块表面导出(Community 端为文件内私有)。
 export function ConversationActivityIndicator({
   turn,
   now,

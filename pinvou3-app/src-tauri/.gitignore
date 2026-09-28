@@ -11,3 +11,5 @@ fbank_lfr_cmvn_feature.json
 # 发布形态 A 提交 / C 下载 待与 IT 定,见《EIP员工门户接入-开发方案》。合规事后补。
 /resources/bundle/eip/bin/eip-cli
 .cargo/config.local.toml
+
+.gtk-sysroot

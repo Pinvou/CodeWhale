@@ -260,6 +260,24 @@
     currentSessionModelRef: null,
     pendingDraftModelRef: null,
     superPermEnabled: false,
+    // Computer use (screenshot + keyboard/mouse control) authorization state. enabled is
+    // the global switch (off by default);
+    // granted/stopped/sessionId/grantRequest/confirmRequest describe the current active
+    // session's authorization and pending requests, maintained by bridge/computer_use.js.
+    computerUse: {
+      enabled: false,
+      granted: false,
+      stopped: false,
+      // Whether this OS has a computer_use backend at all (from
+      // computer_use_get_status.platform_supported); lets settings disable the
+      // toggle instead of letting users enable something that cannot work.
+      // Defaults false (fail closed): on an unsupported OS the toggle must
+      // not render enabled until the first get_status corrects the slice.
+      platformSupported: false,
+      sessionId: null,
+      grantRequest: null,
+      confirmRequest: null,
+    },
     modeState: { mode: "yolo" },
     // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
     // lane 未显式选过；缺省 code→plan、work→yolo）。草稿态 chip 显示与切换的
@@ -1610,6 +1628,7 @@
     models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
+    computerUse: ["computerUse"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
@@ -1755,8 +1774,13 @@
 
   var notificationQueue = [];
   var notificationDispatching = false;
+  // React subscribes before lifecycle.init() finishes. The independent startup
+  // loaders therefore used to expose a succession of partial snapshots and
+  // re-render the root once per completed IPC. Keep their state ownership and
+  // parallelism, but publish the initialized state as one coherent revision.
+  var startupNotificationBatching = false;
   function notify() {
-    if (suppressNotify) return;
+    if (suppressNotify || startupNotificationBatching) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -1798,7 +1822,30 @@
   }
   function subscribeStateSlices(domains, fn) {
     subscriptionStateSlices(domains);
-    return subscribe(function () { return subscriptionStateSlices(domains); }, fn);
+    // 每轮都重新取各域切片:切片身份由 subscriptionStateValue 的结构化
+    // 比较保证(内容不变 ⟺ 引用不变),因此组合对象只在任一订阅域切片
+    // 身份变化时才需要重建。无关域的 publication 复用上次组合对象,让
+    // React 借 Object.is 跳过无关渲染;回调仍每轮通知都触发,与单域订
+    // 阅的契约一致。与 web 端 domain-adapter 的 stablePick 语义互为镜像。
+    var lastSlices = new Array(domains.length);
+    var lastResult = null;
+    return subscribe(function () {
+      var changed = !lastResult;
+      var slices = new Array(domains.length);
+      for (var i = 0; i < domains.length; i++) {
+        slices[i] = subscriptionStateSlice(domains[i]);
+        if (slices[i] !== lastSlices[i]) changed = true;
+      }
+      if (changed) {
+        var result = {};
+        for (var j = 0; j < slices.length; j++) {
+          Object.assign(result, slices[j]);
+        }
+        lastSlices = slices;
+        lastResult = Object.freeze(result);
+      }
+      return lastResult;
+    }, fn);
   }
 
   var scheduledFeature = installBridgeFeature("scheduled", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addSystemItem: addSystemItem, rememberScheduledRunOwner: rememberScheduledRunOwner, isScheduledRunTerminal: isScheduledRunTerminal, purgeSessionBuffer: purgeSessionBuffer, createNewSession: createNewSession, prefillComposer: prefillComposer, sessionStates: sessionStates });
@@ -2524,6 +2571,7 @@
   var openUserExternalUrl = artifactsFeature.openUserExternalUrl;
   var addAttachmentByPath = artifactsFeature.addAttachmentByPath;
   var addPasteImage = artifactsFeature.addPasteImage;
+  var addPasteImageFromClipboard = artifactsFeature.addPasteImageFromClipboard;
   var removeAttachment = artifactsFeature.removeAttachment;
   var clearAttachments = artifactsFeature.clearAttachments;
   var pickAndAttach = artifactsFeature.pickAndAttach;
@@ -2604,6 +2652,7 @@
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
+  var computerUseFeature = installBridgeFeature("computer_use", { state: state, notify: notify, invoke: invoke, listen: listen });
   async function pickFiles() {
     if (!dialogOpen) return [];
     var selected = await dialogOpen({ multiple: true });
@@ -2701,6 +2750,8 @@
     if (initPromise) return initPromise;
     initPromise = (async function () {
     startupMark("bridge:init_start");
+    startupNotificationBatching = true;
+    try {
     // Populate the global Scheduled unread summary without requiring the user
     // to visit the Scheduled page first. This stays off the startup critical path.
     if (!isDetachedWindow) {
@@ -2756,7 +2807,10 @@
     }
     startupMark("bridge:background_checks_started");
     if (!isDetachedWindow) refreshRemoteControlStatus(); // 权威主窗口独占桌面 Web 代理状态
-    notify();
+    } finally {
+      startupNotificationBatching = false;
+      notify();
+    }
     startupMark("bridge:init_done");
     if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
     })();
@@ -2968,6 +3022,7 @@
     attachments: {
       addAttachmentByPath: addAttachmentByPath,
       addPasteImage: addPasteImage,
+      addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
       clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
@@ -2980,6 +3035,17 @@
     multiAgent: {
       listSubagentTranscripts: listMultiAgentSubagents,
       readSubagentTranscript: readMultiAgentSubagent,
+    },
+    computerUse: {
+      getStatus: computerUseFeature.getStatus,
+      refreshStatus: computerUseFeature.refreshStatus,
+      grant: computerUseFeature.grant,
+      revoke: computerUseFeature.revoke,
+      stop: computerUseFeature.stop,
+      confirm: computerUseFeature.confirm,
+      deny: computerUseFeature.deny,
+      setEnabled: computerUseFeature.setEnabled,
+      requestPermissions: computerUseFeature.requestPermissions,
     },
     files: {
       pickFiles,

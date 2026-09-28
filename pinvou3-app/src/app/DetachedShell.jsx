@@ -28,9 +28,14 @@ import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG } from '../sha
 import { ensurePersonaI18nOverlay } from './personas-overlay.js';
 
 function useDetachedBase() {
+  // `computerUse` is required: ChatView renders the grant/confirm consent
+  // surfaces from that slice, and a detached chat window without it shows no
+  // banner and no dialog while the agent controls the machine (round-10 M1).
+  // Web-safe: the web domain-adapter declares the domain and ChatView
+  // double-gates on `can('computerUse')`.
   const bs = useBridgeState([
     'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-    'settings', 'personas',
+    'settings', 'personas', 'computerUse',
   ]);
   const [language, setLanguage] = useState(initialSystemLanguage);
   // Same color-scheme semantics as the main window: `system` follows the OS
@@ -160,6 +165,18 @@ const DETACHED_VIEWS = {
   outputs: ({ theme, t }) => <LazyKnowledgeView theme={theme} t={t} mode="outputs" />,
 };
 
+// View name for the detached window title bar: maps each kind's raw id to the existing i18n
+// copy shared with the main window sidebar/title bar; unknown kinds (theoretically impossible) fall back to the raw id.
+const DETACHED_KIND_LABEL_KEYS = {
+  session: (t) => t.currentChat,
+  'codex-session': (t) => t.sidebarTaskFilterCodeSessions,
+  monitor: (t) => t.monitor,
+  cardpool: (t) => t.cardPool,
+  toolstore: (t) => t.toolStore,
+  knowledge: (t) => t.knowledge,
+  outputs: (t) => t.outputs,
+};
+
 export function DetachedShell({ kind, id }) {
   const { bs, activeTheme, t } = useDetachedBase();
 
@@ -173,6 +190,8 @@ export function DetachedShell({ kind, id }) {
   }, [kind, id]);
 
   const View = DETACHED_VIEWS[kind] || DETACHED_VIEWS.monitor;
+  const kindLabelFn = DETACHED_KIND_LABEL_KEYS[kind];
+  const kindLabel = kindLabelFn ? kindLabelFn(t) : kind;
   return (
     <div className={`h-screen w-screen flex flex-col bg-white text-[#1F1F1F] dark:bg-[#1B1C1D] dark:text-[#E3E3E3]`}>
       <VoiceShortcutRouter />
@@ -181,7 +200,7 @@ export function DetachedShell({ kind, id }) {
         className="h-9 shrink-0 flex items-center px-3 text-[13px] font-medium select-none"
         style={{ borderBottom: '1px solid rgba(128,128,128,.2)' }}
       >
-        <span data-tauri-drag-region className="pointer-events-none">{t.tearoffTitle} · {kind}</span>
+        <span data-tauri-drag-region className="pointer-events-none">{t.tearoffTitle} · {kindLabel}</span>
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
         {bs

@@ -129,10 +129,12 @@ test("the pr-title context name cannot collide with pr-check.yml job names", () 
   // Quoted keys are legal YAML, and GitHub names the check run after the job
   // id when no explicit name is set — a bare-word-only scan let `"pr-title":`
   // recreate the shadowing (review finding on #501). Strip quotes on both
-  // scans.
+  // scans, tolerate CRLF checkouts, and fail closed: an empty job-id scan
+  // would pass the includes() check vacuously.
   const prCheckKeys = [
-    ...workflow.matchAll(/^ {2}"?([\w-]+)"?:\n/gm),
+    ...workflow.matchAll(/^ {2}"?([\w-]+)"?:\r?\n/gm),
   ].map((match) => match[1]);
+  assert.ok(prCheckKeys.length > 0, "job-id scan matched nothing");
   const prCheckJobNames = [
     ...workflow.matchAll(/^ {4}name: (.+)$/gm),
   ].map((match) => match[1].trim().replace(/^['"]|['"]$/g, ""));
@@ -205,13 +207,15 @@ test("account-platform gate executes the Keycloak authenticator unit tests on Ja
     /working-directory: account-platform\/deploy\/keycloak\/mobile-authenticator\r?\n\s+run: \|[\s\S]*mvn --batch-mode --no-transfer-progress -DfailIfNoTests=true test/,
   );
   for (const expectedClass of [
+    "PasswordResetBrowserPolicyTest",
+    "PinvouIdentitySecurityResourceTest",
     "ProvisioningPasswordLoginFixtureTest",
     "RegistrationLoginPolicyTest",
     "RegistrationUserSelectorTest",
   ]) {
     assert.match(accountJob[0], new RegExp(`"${expectedClass}"`));
   }
-  assert.match(accountJob[0], /"tests": 16/);
+  assert.match(accountJob[0], /"tests": 22/);
   assert.match(accountJob[0], /"failures": 0/);
   assert.match(accountJob[0], /"errors": 0/);
   assert.match(accountJob[0], /"skipped": 0/);

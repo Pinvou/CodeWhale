@@ -10,6 +10,8 @@
  *   ⑤ session 内未发送的 composer 草稿在跳转其他页面后仍能恢复。
  * 依赖:puppeteer-core(自动从 node_modules / ~/.npm/_npx 发现)+ 系统 chromium(或 env CHROME 指定)。
  * 用法:node pinvou3-app/tests/ui_smoke.js   (全 PASS → exit 0,任一 FAIL → exit 1,缺依赖 → exit 2)
+ * 缺依赖分支必须在 exit 2 之前打印一行以 SKIP: 开头的说明(必须在行首);
+ * scripts/run-user-journey-tests.sh 只在退出码 2 且有该行时才算 skip,否则算失败。
  */
 const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
@@ -342,6 +344,26 @@ async function expand(page) {
       && visualShell.overflow === 'hidden'
       && visualShell.backgroundColor !== 'rgba(0, 0, 0, 0)',
     JSON.stringify(visualShell),
+  );
+
+  const searchOverlayFirstOpen = await page.evaluate(async () => {
+    const trigger = [...document.querySelectorAll('[aria-label], [title]')]
+      .find(element => `${element.getAttribute('aria-label') || ''}${element.getAttribute('title') || ''}`.includes('搜索对话'));
+    trigger?.click();
+    const opened = await window.__uiWait__(() => !!document.querySelector('[role="dialog"][aria-modal="true"]'));
+    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+    const fixedBackdrop = dialog?.parentElement
+      ? getComputedStyle(dialog.parentElement).position === 'fixed'
+      : false;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    const closed = await window.__uiWait__(() => !document.querySelector('[role="dialog"][aria-modal="true"]'));
+    return { triggerFound: !!trigger, opened, fixedBackdrop, closed };
+  });
+  rec(
+    'search overlay lazy chunk opens on first use and closes with Escape',
+    searchOverlayFirstOpen.triggerFound && searchOverlayFirstOpen.opened
+      && searchOverlayFirstOpen.fixedBackdrop && searchOverlayFirstOpen.closed,
+    JSON.stringify(searchOverlayFirstOpen),
   );
 
   const artifactPresentation = await page.evaluate(async () => {
@@ -679,7 +701,18 @@ async function expand(page) {
       cancelable: true,
       dataTransfer: dragData,
     }));
-    await new Promise(resolve => setTimeout(resolve, 80));
+    // Wait for a DEFINITE overlay state before reading the flag. While inactive
+    // the overlay still renders (invisible, aria-hidden), so a fixed timeout here
+    // raced the dragenter commit on slow runners and sampled the inactive-present
+    // form, which makes the withheld assertion vacuous. The two definite forms are
+    // the overlay removed from the DOM entirely (active committed, publication not
+    // yet acked) and aria-hidden=false (published), so a publication without an ack
+    // still fails the read below. The inactive-present tolerance is kept as the
+    // fallback for a runner slow enough to exhaust the wait deadline.
+    await window.__uiWait__(() => {
+      const overlay = document.querySelector('[data-testid="attachment-drop-overlay"]');
+      return !overlay || overlay.getAttribute('aria-hidden') === 'false';
+    });
     const attachmentDropBeforeHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]');
     const attachmentDropWithheldUntilHideAck = !attachmentDropBeforeHideAck
       || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false';
@@ -2443,11 +2476,17 @@ async function expand(page) {
     }));
     return true;
   });
-  await sleep(250);
+  await page.evaluate(() => window.__uiWait__(() =>
+    [...document.querySelectorAll('span,div,button,a')]
+      .some(node => (node.textContent || '').trim() === '收纳')));
   await clickText(page, '收纳');
-  await sleep(250);
+  await page.evaluate(() => window.__uiWait__(() =>
+    [...document.querySelectorAll('span,div,button,a')]
+      .some(node => (node.textContent || '').trim() === '确认收纳')));
   await clickText(page, '确认收纳');
-  await sleep(450);
+  await page.evaluate(() => window.__uiWait__(() =>
+    [...document.querySelectorAll('button')]
+      .some(node => (node.textContent || '').trim() === '前往查看')));
   const archiveToastBefore = await page.evaluate(() => {
     const button = [...document.querySelectorAll('button')].find(node => (node.textContent || '').trim() === '前往查看');
     const rect = button && button.getBoundingClientRect();
@@ -2458,7 +2497,9 @@ async function expand(page) {
     };
   });
   await clickText(page, '前往查看');
-  await sleep(600);
+  await page.evaluate(() => window.__uiWait__(() =>
+    document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'search'
+      && document.body.innerText.includes('第三季度财报分析')));
   const archiveToastGoto = await page.evaluate(() => ({
     currentView: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
     archivedTabVisible: document.body.innerText.includes('已收纳'),

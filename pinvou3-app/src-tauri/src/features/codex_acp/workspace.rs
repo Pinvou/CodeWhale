@@ -948,17 +948,15 @@ fn should_walk(entry: &DirEntry) -> bool {
 }
 
 fn file_kind(path: &Path) -> String {
+    // The image-extension set stays in sync with codex_acp::attachments' canonical MIME mapping table.
+    if crate::platform::filesystem::image_mime_type(path).is_some() {
+        return "image".to_string();
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg"
-    ) {
-        return "image".to_string();
-    }
     if matches!(
         extension.as_str(),
         "md" | "markdown"

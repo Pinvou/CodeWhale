@@ -301,14 +301,16 @@ pub(crate) async fn chat_with_reservation(
         }
     }
     // 取该 session 的 mode 状态（mode + 多智能体开关）。
-    // 多智能体模式（ADR-0006）：所有产生模型 turn 的入口共用提醒组装；每轮
-    // 重申而非首轮一次性教学，关掉开关即保持原消息不变。
+    // 多智能体模式（ADR-0006）：所有产生模型 turn 的入口共用同一装配——快照
+    // 与候选行同源捕获；蜂群契约本体在 spawn 级 instructions，用户内容逐字透传。
+    // 候选匹配只看用户原文（raw_message），不看 full 里已拼接的 persona 正文 /
+    // KB 引导 / 附件引用，避免注入文本的领域词虚假抬升无关专家卡。
     let prepared_delegation = super::multiagent::prepare_delegation_turn(
         pool,
         &sid,
         mode_state.multi_agent,
-        &raw_message,
         full,
+        super::multiagent::MatchSource(&raw_message),
     );
     full = prepared_delegation.content;
     let mode = mode_state.mode;
@@ -398,6 +400,7 @@ pub(crate) async fn chat_with_reservation(
             mode.to_app_mode(),
             restrict_tools.unwrap_or(false),
             prepared_delegation.expert_snapshot,
+            prepared_delegation.expert_candidates,
             reservation,
         )
         .await
@@ -443,21 +446,13 @@ pub(crate) async fn chat_with_reservation(
             );
             // 发送失败：作废本轮「未成活」快照（按 id 精确删除），让重试的同号
             // Turn 快照成为 first-wins 对齐锚（清理性质，失败仅记日志）。
-            if let Some(snapshot_id) = created_snapshot_id {
-                let checkpoint_ledger = roots.ledger.clone();
-                let sid_invalidate = sid.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(error) = crate::features::code_checkpoints::drop_checkpoint(
-                        &checkpoint_ledger,
-                        &snapshot_id,
-                    ) {
-                        log::warn!(
-                            "[pinvou3][chat] drop unsent-turn checkpoint failed sid={sid_invalidate}: {error:#}"
-                        );
-                    }
-                })
-                .await;
-            }
+            super::checkpoints::drop_unsent_turn_checkpoint(
+                Some(roots.ledger.clone()),
+                created_snapshot_id,
+                &sid,
+                "chat",
+            )
+            .await;
             log::error!(
                 "[pinvou3][chat] engine send failed sid={} send_elapsed_ms={} total_elapsed_ms={} error={:#}",
                 sid,
