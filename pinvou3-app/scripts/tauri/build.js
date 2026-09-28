@@ -475,12 +475,13 @@ function platformConfigWithoutKnowledgeHost(configPath) {
 /**
  * 目标架构 ≠ 宿主架构时，检查那些「只会按宿主架构备料」的步骤有没有被妥善处理。
  *
- * 为什么必须是**硬失败**而不是警告：这两步出问题的表现都不是构建报错，而是
- * 包**静默地错**——
- *   - 忘开 `PINVOU3_SKIP_LINUX_ASR`：`build-sensevoice-runtime.sh` 硬断言
- *     `requested_arch == host_arch`，这一步会当场失败，倒还算明显；
- *   - 忘开 `PINVOU3_SKIP_KNOWLEDGE_HOST`：`cargo build` 不带 `--target`，编出来
- *     的是**宿主架构**的 server，被原样打进另一个架构的包，构建全程零警告。
+ * 为什么必须是**硬失败**而不是警告：忘掉开关的后果要么报错报得晚、要么**静默地错**——
+ *   - 忘开 `PINVOU3_SKIP_LINUX_ASR`：备料脚本被要求的是**宿主**架构，
+ *     `requested_arch == host_arch` 断言照常通过；构建要到后面 effective-config
+ *     的资源存在性校验才停下来——目标架构的 overlay 声明了一个从没备出来的文件；
+ *   - 忘开 `PINVOU3_SKIP_KNOWLEDGE_HOST`：`cargo build` 不带 `--target`，编出来的
+ *     **宿主架构** server 恰好落在平台 overlay 期望的位置，被原样打进另一个架构的
+ *     包里，构建全程零警告。
  *     用户要等到在设备上用共享知识库时才发现，而那时候根本想不到是构建的问题。
  *
  * codex-bridge 不在这张清单上：它已经改成按目标架构备料了（见
@@ -782,10 +783,9 @@ async function main() {
     if (developmentHost?.configSpec) additionalConfigs.push(developmentHost.configSpec);
   }
   if (hasTauriBuildCommand) {
-    // SenseVoice 运行时按设计只能在目标架构上原生构建（build-sensevoice-runtime.sh
-    // 要求 requested_arch == host_arch，产物还链接宿主 glibc），交叉构建时这一步
-    // 必然失败。给一个显式开关跳过它——跳过后必须同时把 overlay 里的资源声明摘掉，
-    // 否则 bundle 会找不到文件。
+    // SenseVoice 按设计只能在目标架构上原生构建（build-sensevoice-runtime.sh 要求
+    // requested_arch == host_arch，产物还链接宿主 glibc），所以交叉构建必须显式
+    // 跳过它；跳过后 overlay 里的资源声明由 prepareTauriArgs 摘掉。
     const hostArch = process.arch;
     // 机器段不认识时这里会直接抛（见 `targetArchitecture`），不会漏进闸门——
     // 闸门对 `!targetArch` 是放行的，回 null 等于给未知架构开了条静默后门。

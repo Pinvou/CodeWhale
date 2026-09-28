@@ -55,6 +55,26 @@ test("不是交叉构建就不该拦", () => {
 test("targetArchitecture 认得两种写法", () => {
   assert.equal(targetArchitecture(["build", "--target", "aarch64-unknown-linux-gnu"]), "arm64");
   assert.equal(targetArchitecture(["build", "--target=x86_64-unknown-linux-gnu"]), "x64");
+  // 最后一次出现生效，与 cargo 的覆盖语义一致；两种写法必须参加同一场
+  // 「谁在后面谁赢」，不能各算各的。
+  assert.equal(
+    targetArchitecture([
+      "build",
+      "--target",
+      "x86_64-unknown-linux-gnu",
+      "--target=aarch64-unknown-linux-gnu",
+    ]),
+    "arm64",
+  );
+  assert.equal(
+    targetArchitecture([
+      "build",
+      "--target=aarch64-unknown-linux-gnu",
+      "--target",
+      "x86_64-unknown-linux-gnu",
+    ]),
+    "x64",
+  );
   // 没传 --target 就是原生构建，回 null 让调用方用 process.arch，原行为不变。
   assert.equal(targetArchitecture(["build"]), null);
 });

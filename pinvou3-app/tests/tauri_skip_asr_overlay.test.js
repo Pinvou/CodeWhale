@@ -137,3 +137,32 @@ test("PINVOU3_SKIP_LINUX_ASR=1 时，架构 overlay 被顶替且 ASR 资源被�
     );
   });
 });
+
+test("ASR 的 marker 只摘 ASR 那条，不能摘得更宽", () => {
+  // marker 是**子串**匹配。把它放宽（比如 `linux-asr-runtime` 放宽成 `linux-asr`）
+  // 会把所有架构 overlay 里名字沾边的声明一起误摘，而上面走 prepareTauriArgs 的
+  // 用例看不见这种事：纳入版本控制的 overlay 里恰好没有近似的键。这份合成的
+  // overlay 就是来当这个「擦边证人」的。用例走生产包装函数，保证这里钉住的
+  // marker 就是构建真正用的那一个。
+  const { architectureConfigWithoutAsr } = require("../scripts/tauri/build.js");
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou3-asr-marker-"));
+  try {
+    const overlay = path.join(dir, "tauri.conf.json");
+    const resources = {
+      "target/linux-asr-runtime/aarch64/sense-voice-main": "runtime/asr/sense-voice-main",
+      "target/linux-asr-models/config.json": "runtime/asr/config.json",
+      "resources/platforms/linux/codex-bridge/": "runtime/codex-bridge",
+    };
+    fs.writeFileSync(overlay, JSON.stringify({ bundle: { resources } }));
+    const result = JSON.parse(architectureConfigWithoutAsr(overlay));
+    assert.deepEqual(
+      Object.keys(result.bundle.resources),
+      ["target/linux-asr-models/config.json", "resources/platforms/linux/codex-bridge/"],
+      "只许摘掉 linux-asr-runtime 那条声明",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
