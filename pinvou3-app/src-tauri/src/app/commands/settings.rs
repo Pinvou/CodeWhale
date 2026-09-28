@@ -359,7 +359,7 @@ pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Resul
     Ok(())
 }
 
-/// 删一条模型。至少保留一条;删到当前 active 会自动回退列表首条。
+/// 删一条用户模型；内置 Account Platform 模型始终保留。
 #[tauri::command]
 pub async fn delete_model(id: String) -> Result<(), String> {
     UserPrefs::update_transaction(|prefs| {
@@ -368,9 +368,6 @@ pub async fn delete_model(id: String) -> Result<(), String> {
             .is_some_and(|model| model.is_builtin_account_platform())
         {
             return Err("内置模型不可删除".to_string());
-        }
-        if prefs.advanced.saved_models.len() <= 1 {
-            return Err("至少保留一个模型".to_string());
         }
         if let Some(reference) = prefs
             .model_by_id(&id)

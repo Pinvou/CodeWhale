@@ -2231,8 +2231,7 @@ const formatMemoryTime = (item, copy) => {
           multiline: false,
         });
       };
-      const renderModelRows = (models, totalCount) => models.length ? models.map(m => {
-        const total = totalCount != null ? totalCount : models.length;
+      const renderModelRows = models => models.length ? models.map(m => {
         const isActive = m.id === activeLocalModelId;
         const isLocal = isLocalModel(m);
         const isReadonly = isReadonlyModel(m);
@@ -2260,7 +2259,7 @@ const formatMemoryTime = (item, copy) => {
             </div>
             <div className="shrink-0 flex items-center gap-2">
               {!isReadonly && <button onClick={() => setEditingModel({ ...m, __scope: isLocal ? 'local' : 'cloud' })} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}
-              {!isReadonly && total > 1 && <button onClick={() => setModelDeleteConfirm(m)} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
+              {!isReadonly && <button onClick={() => setModelDeleteConfirm(m)} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('red')}`}>{settingsCopy.delete}</button>}
             </div>
           </div>
         );
@@ -2444,17 +2443,17 @@ const formatMemoryTime = (item, copy) => {
                 const any = preset.length > 0 || custom.length > 0;
                 return (
                   <>
-                    {!any && renderModelRows([], userModels.length)}
+                    {!any && renderModelRows([])}
                     {preset.length > 0 && (
                       <>
                         <div className="px-4 pt-2 pb-1 text-[12px] font-semibold text-[#8A8A8E] dark:text-[#8E8E93]">{t.modelGroupPreset}</div>
-                        {renderModelRows(preset, userModels.length)}
+                        {renderModelRows(preset)}
                       </>
                     )}
                     {custom.length > 0 && (
                       <>
                         <div className={`px-4 pt-2 pb-1 text-[12px] font-semibold text-[#8A8A8E] dark:text-[#8E8E93]${preset.length > 0 ? ' border-t border-black/[0.12] dark:border-white/[0.10]' : ''}`}>{t.modelGroupCustom}</div>
-                        {renderModelRows(custom, userModels.length)}
+                        {renderModelRows(custom)}
                       </>
                     )}
                   </>

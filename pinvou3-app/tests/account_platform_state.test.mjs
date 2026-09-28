@@ -2244,6 +2244,8 @@ test('settings owns the platform model default for new conversations', async () 
   assert.match(settings, /accountPlatformClient\.selectCatalogModel/);
   assert.match(settings, /defaultModelRef\?\.source === ACCOUNT_PLATFORM_SOURCE/);
   assert.match(settings, /filter\(model => !isBuiltInAccountPlatformModel\(model\)\)/);
+  assert.match(settings, /!isReadonly && <button onClick=\{\(\) => setModelDeleteConfirm\(m\)\}/);
+  assert.doesNotMatch(settings, /total > 1/);
   assert.match(settings, /data-testid="settings-platform-models"/);
   assert.equal((i18n.match(/platformModelsDesc:/g) || []).length, 3);
   assert.equal((i18n.match(/appliesToNewSessions:/g) || []).length, 3);

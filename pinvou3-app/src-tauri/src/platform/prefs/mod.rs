@@ -2330,6 +2330,35 @@ mod tests {
     }
 
     #[test]
+    fn remove_last_user_model_keeps_builtin_and_clears_local_default() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let user_model_id = prefs
+            .advanced
+            .saved_models
+            .iter()
+            .find(|model| !model.is_builtin_account_platform())
+            .expect("default user model")
+            .id
+            .clone();
+        prefs
+            .advanced
+            .saved_models
+            .retain(|model| model.is_builtin_account_platform() || model.id == user_model_id);
+        prefs
+            .set_default_model_ref(ModelSelectionRef::local(&user_model_id))
+            .expect("select last user model");
+
+        prefs.remove_model(&user_model_id);
+
+        assert_eq!(prefs.advanced.saved_models.len(), 1);
+        assert!(prefs.advanced.saved_models[0].is_builtin_account_platform());
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.active_model_id.is_none());
+    }
+
+    #[test]
     fn saved_model_api_key_is_not_serialized() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
