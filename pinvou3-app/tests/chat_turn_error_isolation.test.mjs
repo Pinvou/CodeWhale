@@ -1250,6 +1250,8 @@ try {
   assert.equal(nativeModelServiceContext(null, null, 'builtin_llmapi', catalog), null);
   assert.match(read('src', 'features', 'codex', 'CodexAcpView.jsx'),
     /nativeModelServiceContext\(activeId, nativeControlsOwner, nativeControls\.modelId, nativeSavedModels\)/);
+  assert.doesNotMatch(read('src', 'features', 'codex', 'CodexAcpView.jsx'), /modelServiceState: bs,/,
+    'native event handling must not pass the whole chat bridge state as model context');
   const options = { language: 'en', modelServiceState: managedState };
   const error = 'SSE stream request failed: HTTP 401 invalid API key; Authorization: Bearer demo-secret-for-test';
   const timelineEvents = [
