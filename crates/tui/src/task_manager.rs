@@ -478,7 +478,11 @@ pub struct TaskManagerConfig {
     /// delivery channel — can never be answered, so arming the window
     /// there would park the worker on the fail-safe cap; the clocks keep
     /// running instead. Defaults to `false`: opt in only where the
-    /// delivery channel exists.
+    /// delivery channel exists. The gate arms the built-in engine
+    /// executor's journal tracking; a custom executor that emits the
+    /// `HumanWaitStarted`/`HumanWaitEnded` pair is self-declaring its
+    /// waits answerable, and the supervisor honors the pair regardless of
+    /// this flag.
     pub human_waits_answerable: bool,
 }
 
@@ -668,12 +672,14 @@ impl ExecutionGuard {
             // fail-safe cap. A parked window can last hours, so polling
             // the journal at the catch-up cadence for that whole span is
             // waste: back the poll off, doubling with each parked second
-            // up to PARKED_POLL_CAP. An arriving decision broadcasts on
-            // the subscription and wakes the loop early, so the backoff
-            // never delays an answer — it only thins the empty polls, and
-            // only while the event bus is quiet. The cap wait excludes the
-            // already-closed windows too: the aggregate budget, not this
-            // window alone, bounds the sleep.
+            // up to PARKED_POLL_CAP. An arriving decision wakes this loop
+            // early — the turn loop through the runtime event
+            // subscription, the worker supervisor through the forwarded
+            // task event — so the backoff never delays an answer; it only
+            // thins the empty polls, and only while the event bus is
+            // quiet. The cap wait excludes the already-closed windows too:
+            // the aggregate budget, not this window alone, bounds the
+            // sleep.
             let parked = now.saturating_duration_since(since);
             let cap_wait = self
                 .limits
@@ -870,7 +876,11 @@ pub enum TaskExecutionEvent {
     /// A human-paced wait (pending approval or user-input prompt) opened or
     /// closed, so the worker supervisor's wall clock can exclude it exactly
     /// like the turn loop's own guard does. Supervisor-side signal only:
-    /// never persisted and never shown on the task timeline.
+    /// never persisted and never shown on the task timeline. The built-in
+    /// engine executor emits the pair only where `human_waits_answerable`
+    /// armed the window; a custom executor that emits it is self-declaring
+    /// its waits answerable, and the supervisor honors the pair regardless
+    /// of that flag.
     HumanWaitStarted,
     HumanWaitEnded,
     ToolCompleted {
@@ -4626,7 +4636,9 @@ mod tests {
     fn execution_guard_parked_backoff_grows_past_the_catchup_poll() {
         // Two seconds parked: the doubling has run twice, so the parked
         // wait must exceed the 200ms catch-up cadence the backoff exists
-        // to escape.
+        // to escape. Asserted as a literal so drifting EVENT_CATCHUP_POLL
+        // off its documented 200ms fails here instead of silently
+        // tracking the constant.
         let start = Instant::now();
         let mut guard = ExecutionGuard::new(
             execution_guard_limits(Duration::from_secs(24 * 60 * 60)),
@@ -4635,7 +4647,7 @@ mod tests {
         guard.begin_human_wait(start);
         match guard.evaluate(start + Duration::from_secs(2), false, false) {
             GuardAction::Run { wait } => {
-                assert_eq!(wait, EVENT_CATCHUP_POLL * 4);
+                assert_eq!(wait, Duration::from_millis(800));
             }
             other => panic!("expected a parked run, got {other:?}"),
         }
@@ -4643,6 +4655,9 @@ mod tests {
 
     #[test]
     fn execution_guard_parked_backoff_caps_at_two_seconds() {
+        // Asserted as a literal so moving PARKED_POLL_CAP off its
+        // documented 2s ceiling fails here instead of silently tracking
+        // the constant.
         let start = Instant::now();
         let mut guard = ExecutionGuard::new(
             execution_guard_limits(Duration::from_secs(24 * 60 * 60)),
@@ -4651,7 +4666,7 @@ mod tests {
         guard.begin_human_wait(start);
         match guard.evaluate(start + Duration::from_secs(3600), false, false) {
             GuardAction::Run { wait } => {
-                assert_eq!(wait, PARKED_POLL_CAP);
+                assert_eq!(wait, Duration::from_secs(2));
             }
             other => panic!("expected a parked run, got {other:?}"),
         }
@@ -5466,7 +5481,11 @@ mod tests {
         let manager = TaskManager::start_with_executor(
             config,
             Arc::new(SupervisedHumanWaitExecutor {
-                delay: Duration::from_millis(900),
+                // Two seconds: far past the short wall, with enough margin
+                // that scheduler starvation on a loaded CI runner cannot
+                // eat the exclusion before the supervisor sees the
+                // HumanWaitStarted signal.
+                delay: Duration::from_secs(2),
             }),
         )
         .await?;
@@ -5545,10 +5564,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chained_short_waits_sum_to_the_fail_safe_cap() -> Result<()> {
-        // Each window is well under the cap, so the per-window check alone
-        // would let a task chain prompts forever. The aggregate bound must
-        // release the worker once the closed windows alone reach the cap.
+    async fn chained_short_waits_still_terminate_at_the_fail_safe_cap() -> Result<()> {
+        // Each window is well under the cap, so chaining prompts must not
+        // park the worker forever: once the windows sum past the cap the
+        // guard terminalizes. Which arm observes the crossing first is a
+        // wake-timing detail this test does not pin — with these
+        // back-to-back windows the open-window check fires mid-window
+        // (window one's spend is already in the aggregate total); the
+        // between-windows arm alone is pinned deterministically by
+        // execution_guard_spent_aggregate_cap_terminalizes_between_windows.
         let runtime = Arc::new(test_runtime_manager().await?);
         let thread = runtime
             .create_thread(CreateThreadRequest::default())
@@ -5599,11 +5623,11 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(5), drive)
             .await
-            .expect("the aggregate bound must release the worker")?;
+            .expect("the fail-safe cap must release the worker")?;
         assert_eq!(
             result.terminal_reason,
             TaskTerminalReason::HumanWaitTimeout,
-            "closed windows past the cap must terminalize, not park forever"
+            "chained sub-cap windows must not park the worker forever"
         );
         Ok(())
     }
