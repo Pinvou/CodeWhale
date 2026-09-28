@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 49 commits, six maintained themes (r3 tagged at HEAD).
+# CodeWhale v0.9.12 clean re-fork guard: 49 commits, seven maintained themes (r3 tagged at HEAD).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,7 +56,7 @@ else
   fail=1
 fi
 
-bold "── 第 1 层：四主题与父仓适配指纹 ──"
+bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
   "T2|Unix shell guidance preservation test|CodeWhale/crates/tui/src/tools/shell/guidance.rs|fn shell_guidance_preserves_unix_shell_contracts"
@@ -202,6 +202,10 @@ fingerprints=(
   "T6|fleet 治理器接线全部 spawn 路径    |CodeWhale/crates/tui/src/tools/subagent/mod.rs|runtime.governor = Some(Arc::clone(&self.governor));"
   "T6|限流时间自愈行为回归               |CodeWhale/crates/tui/src/tools/subagent/governor.rs|fn forkguard_rate_limit_governor_pauses_and_time_recovers_after_window_drains"
 
+  "T8|roster 宿主 profiles 列表上限      |CodeWhale/crates/tui/src/tools/subagent/mod.rs|const ROSTER_HOST_PROFILE_LIMIT: usize = 48"
+  "T8|roster 载荷携带 host_profiles 键  |CodeWhale/crates/tui/src/tools/subagent/mod.rs|\"host_profiles_truncated\": host_profiles_truncated,"
+  "T8|roster profile_query 关键词发现通道 |CodeWhale/crates/tui/src/tools/subagent/mod.rs|fn roster_profile_query(input: &Value) -> Option<String>"
+
   "APP|spawn 前安装 Engine session id   |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|cfg.session_id = Some(session_id.to_string());"
   "APP|产品白名单复用原生 allowed_tools |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|allowed_tools: Some(crate::features::assistant::tool_policy::allowed_tool_names())"
   "APP|会话工具开关走动态禁用整形        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn shape_disallowed_tools("
@@ -287,7 +291,7 @@ bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
 
 echo
 if [[ $fail -eq 0 ]]; then
-  green "✅ fork-guard 全过：CodeWhale v0.9.12 r1 的 4 个 Pinvou 主题完好。"
+  green "✅ fork-guard 全过：CodeWhale v0.9.12 r1 的登记主题完好。"
 else
   red "❌ fork-guard 失败：请对照 docs/fork-modifications.md 排查。"
 fi
