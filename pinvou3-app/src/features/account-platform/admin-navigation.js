@@ -584,6 +584,12 @@ export function readAdminOrganizationRoute(locationLike = globalThis.location) {
   };
 }
 
+export function readAdminUserRoute(locationLike = globalThis.location) {
+  const search = new URLSearchParams(String(locationLike?.search || ''));
+  const requestedUserID = search.get('user_id') || '';
+  return { userID: uuidPattern.test(requestedUserID) ? requestedUserID : '' };
+}
+
 export function readAdminOrganizationDirectory(locationLike = globalThis.location) {
   const search = new URLSearchParams(String(locationLike?.search || ''));
   const requestedStatus = search.get('organization_status') || '';

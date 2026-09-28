@@ -155,6 +155,9 @@ test('admin portal follows the approved HTML visual system and business-page com
   assert.match(view, /previousFocus\?\.focus\?\.\(\)/);
   assert.match(view, /<DetailDrawer label=\{`\$\{copy\.tokens\.accountDetail\}/);
   assert.match(view, /<DetailDrawer label=\{copy\.audit\.detail\}/);
+  assert.match(view, /readAdminUserRoute/);
+  assert.match(view, /user_id: item\.user_id/);
+  assert.doesNotMatch(view, /<DetailDrawer label=\{`\$\{copy\.roles\.userMemberships\}/);
   assert.match(view, /currentGroup = visibleGroups\.find/);
   assert.doesNotMatch(view, /className="adm-hero"/);
   assert.match(sourceCSS, /\.adm-sidebar\{[^}]*position:fixed[^}]*background:var\(--adm-surface\)[^}]*border-right:1px solid var\(--adm-line\)/);

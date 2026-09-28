@@ -6,7 +6,7 @@ import { createAndSubmitGovernedApproval, updateAndSubmitGovernedApproval } from
 import { acquireAuditExportTicket, newAuditExportAttempt, submitAuditExportAttempt } from './admin-audit-export.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, readAdminUserRoute, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from './admin-finance-pagination.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { AdminApprovalWorkspace } from './AdminApprovalWorkspace.jsx';
@@ -708,6 +708,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       audit_resource: null,
       organization_id: null,
       organization_tab: null,
+      user_id: null,
       finance_tab: null,
       ...clearAdminFinanceQueryUpdates(),
       ...clearAdminFinanceDetailUpdates(),
@@ -752,6 +753,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const sectionIsReadOnly = section === 'settings' || section === 'overview' || section === 'forbidden' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
   const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
+  const userRoute = section === 'users' ? readAdminUserRoute() : { userID: '' };
   const organizationDirectory = section === 'organizations' ? readAdminOrganizationDirectory() : { q: '', status: '', cursor: '' };
   const financeTab = ['billing', 'payments', 'products'].includes(section) ? readAdminFinanceTab(section) : '';
   const financeQuery = ['billing', 'payments'].includes(section) ? readAdminFinanceQuery(section, financeTab) : {};
@@ -830,7 +832,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         </header>
         {busy && <div className="adm-progress" role="progressbar" aria-label={copy.loading} />}
         <div className="adm-page">
-          {!organizationRoute.organizationID && <PageHeader
+          {!organizationRoute.organizationID && !userRoute.userID && <PageHeader
             eyebrow={copy.navGroups[currentGroup?.key || (section === 'forbidden' ? 'models' : '')] || copy.product}
             title={currentPageTitle}
             subtitle={currentPageLead}
@@ -856,7 +858,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} modelTokenIAEnabled={modelTokenIAEnabled} onNavigate={navigate} />}
           {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} organizationRoute={organizationRoute} organizationDirectory={organizationDirectory} routeVersion={routeVersion} />}
           {section === 'users' && (
-            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
+            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} userRoute={userRoute} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} requestTracker={financeRequestTrackerRef.current} />}
@@ -1026,13 +1028,13 @@ function OverviewFacts({ rows }) {
   return <dl className="adm-overview-facts">{rows.map(([label, value, formatter = formatNumber]) => <div key={label}><dt>{label}</dt><dd>{formatter(value)}</dd></div>)}</dl>;
 }
 
-function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID, onNavigate }) {
+function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID, onNavigate, userRoute }) {
   const permissionSet = new Set(permissions || []);
   const repairCount = (data.registrationRepairs || []).length + (data.profileChangeRepairs || []).length + (data.accountClosures || []).length;
   const repairUnavailable = Object.values(data.userRepairAvailability || {}).includes('error');
   return (
     <div className="adm-user-workspace">
-      {permissionSet.has('platform.users.read') && (
+      {permissionSet.has('platform.users.read') && !userRoute.userID && (
         <section className="adm-user-summary" aria-label={copy.userManagement.summary}>
           <Metric label={copy.userManagement.totalUsers} value={data.accountOverview?.users} />
           <Metric label={copy.userManagement.activeUsers} value={data.accountOverview?.active_users} tone="positive" />
@@ -1040,8 +1042,8 @@ function UsersWorkspace({ copy, data, client, setData, permissions, currentUserI
           <Metric label={copy.userManagement.pendingRepairs} value={repairUnavailable ? '—' : repairCount} formatter={(value) => value} tone={!repairUnavailable && repairCount ? 'warning' : ''} />
         </section>
       )}
-      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} onNavigate={onNavigate} />}
-      <UserRepairWorkspace copy={copy} data={data} client={client} setData={setData} permissions={permissions} />
+      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} onNavigate={onNavigate} userRoute={userRoute} />}
+      {!userRoute.userID && <UserRepairWorkspace copy={copy} data={data} client={client} setData={setData} permissions={permissions} />}
     </div>
   );
 }
@@ -1136,8 +1138,9 @@ function OrganizationDeletionDialog({ copy, organization, client, onClose, onDel
 
 const DEFAULT_DIRECTORY_ROUTE = Object.freeze({ organizationID: '', tab: 'overview' });
 const DEFAULT_DIRECTORY_QUERY = Object.freeze({ q: '', status: '', cursor: '' });
+const DEFAULT_USER_ROUTE = Object.freeze({ userID: '' });
 
-function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = DEFAULT_DIRECTORY_ROUTE, organizationDirectory = DEFAULT_DIRECTORY_QUERY, routeVersion = 0 }) {
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = DEFAULT_DIRECTORY_ROUTE, organizationDirectory = DEFAULT_DIRECTORY_QUERY, userRoute = DEFAULT_USER_ROUTE, routeVersion = 0 }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
   const [userMode, setUserMode] = useState('directory');
@@ -1151,7 +1154,8 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   const [routeOrganization, setRouteOrganization] = useState(null);
   const [routeError, setRouteError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
-  const [selectedUser, setSelectedUser] = useState(null);
+  const [routeUser, setRouteUser] = useState(null);
+  const [routeUserError, setRouteUserError] = useState('');
   const [organizationName, setOrganizationName] = useState('');
   const [organizationStatus, setOrganizationStatus] = useState(organizationDirectory.status || '');
   const [createOpen, setCreateOpen] = useState(false);
@@ -1166,7 +1170,34 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   const canManageOrganizationStatus = permissionSet.has('platform.organizations.status.manage');
   const canDeleteOrganization = permissionSet.has('platform.organizations.delete');
   const items = isUserSection ? data.users || [] : data.organizations || [];
+  const selectedUser = isUserSection && userRoute.userID
+    ? items.find((item) => item.user_id === userRoute.userID) || (routeUser?.user_id === userRoute.userID ? routeUser : null)
+    : null;
   const selectedOrganization = !isUserSection && organizationRoute.organizationID ? items.find((item) => item.organization_id === organizationRoute.organizationID) || routeOrganization : null;
+  useEffect(() => {
+    if (!isUserSection || !userRoute.userID) {
+      setRouteUser(null);
+      setRouteUserError('');
+      return undefined;
+    }
+    const existing = (data.users || []).find((item) => item.user_id === userRoute.userID);
+    if (existing) {
+      setRouteUser(existing);
+      setRouteUserError('');
+      return undefined;
+    }
+    const controller = new globalThis.AbortController();
+    setRouteUser(null);
+    setRouteUserError('');
+    client.users(userRoute.userID, controller.signal).then((result) => {
+      const match = (result.items || []).find((item) => item.user_id === userRoute.userID);
+      if (match) setRouteUser(match);
+      else setRouteUserError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed);
+    }).catch((reason) => {
+      if (reason?.name !== 'AbortError') setRouteUserError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed);
+    });
+    return () => controller.abort();
+  }, [client, copy.accounts.actionFailed, copy.accounts.lookupUnavailable, data.users, isUserSection, userRoute.userID]);
   useEffect(() => {
     if (isUserSection || !organizationRoute.organizationID) {
       setRouteOrganization(null);
@@ -1309,7 +1340,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
           label: copy.userManagement.account,
           render: (item) => (
             <div className="adm-user-identity">
-              <button className="adm-name-link" onClick={() => setSelectedUser(item)}>{userLabel(item)}</button>
+              <button className="adm-name-link" onClick={() => onNavigate('users', { user_id: item.user_id })}>{userLabel(item)}</button>
               {item.display_name && item.display_name !== item.username && <small>{item.display_name}</small>}
             </div>
           ),
@@ -1453,7 +1484,14 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
       setActionKey('');
     }
   };
-  if (selectedUser) return <UserMembershipDetail copy={copy} user={selectedUser} client={client} onBack={() => setSelectedUser(null)} onNavigate={onNavigate} />;
+  if (isUserSection && userRoute.userID && !selectedUser)
+    return (
+      <section className="adm-panel adm-org-detail">
+        <button className="adm-back" onClick={() => onNavigate('users', { user_id: null })}>{copy.roles.backToUsers}</button>
+        {routeUserError ? <div className="adm-inline-message error" role="alert">{routeUserError}</div> : <div className="adm-empty" role="status">{copy.loading}</div>}
+      </section>
+    );
+  if (selectedUser) return <UserMembershipDetail copy={copy} user={selectedUser} client={client} onBack={() => onNavigate('users', { user_id: null })} onNavigate={onNavigate} />;
   if (!isUserSection && organizationRoute.organizationID && !selectedOrganization)
     return (
       <section className="adm-panel adm-org-detail">
@@ -1614,7 +1652,6 @@ function UserMembershipDetail({ copy, user, client, onBack, onNavigate }) {
     return () => controller.abort();
   }, [client, copy.accounts.actionFailed, user.user_id]);
   return (
-    <DetailDrawer label={`${copy.roles.userMemberships} · ${userLabel(user)}`} onClose={onBack}>
     <section className="adm-panel adm-org-detail">
       <button className="adm-back" onClick={onBack}>
         ← {copy.roles.backToUsers}
@@ -1671,7 +1708,6 @@ function UserMembershipDetail({ copy, user, client, onBack, onNavigate }) {
         <button type="button" onClick={() => onNavigate('roles')}>{copy.roles.viewRoleCatalog}</button>
       </div>
     </section>
-    </DetailDrawer>
   );
 }
 

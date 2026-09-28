@@ -12,7 +12,7 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from '../src/features/account-platform/admin-finance.js';
-import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGroups, adminSectionURL, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGroups, adminSectionURL, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, readAdminUserRoute, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { createFinanceDetailRecovery, financeCursorContext, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from '../src/features/account-platform/admin-finance-pagination.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { createAccountSynchronizationQueue, resolveAccountSynchronization } from '../src/features/account-platform/account-synchronization.js';
@@ -296,6 +296,8 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   assert.deepEqual(resolveAdminFinanceTab('orders', 'orders', []), { tab: '', replace: false });
   assert.deepEqual(readAdminOrganizationRoute({ search: '?organization_id=org-1&organization_tab=members' }), { organizationID: 'org-1', tab: 'members' });
   assert.deepEqual(readAdminOrganizationRoute({ search: '?organization_id=org-1&organization_tab=unknown' }), { organizationID: 'org-1', tab: 'overview' });
+  assert.deepEqual(readAdminUserRoute({ search: '?user_id=019a0000-0000-7000-8000-000000000001' }), { userID: '019a0000-0000-7000-8000-000000000001' });
+  assert.deepEqual(readAdminUserRoute({ search: '?user_id=not-a-user-id' }), { userID: '' });
   assert.deepEqual(readAdminOrganizationDirectory({ search: '?organization_q=AI&organization_status=DISABLED&organization_cursor=next%2Fpage' }), { q: 'AI', status: 'DISABLED', cursor: 'next/page' });
   assert.equal(adminSectionURL('billing', location), '/admin.html?trace=kept&section=billing#focus');
   assert.equal(
