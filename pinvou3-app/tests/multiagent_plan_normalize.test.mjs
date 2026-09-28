@@ -415,9 +415,13 @@ test('旧独立入口退役：多智能体经会话级开关 + spawn 级蜂群�
     /late sweep of deleted chat/,
     '普通会话删除一律延迟清扫（裸 agent 对所有会话可用，不只开关开启的）',
   );
+  // The trailing gap spans comment-heavy spawn plumbing, so comment bytes
+  // ride along; keep headroom for comment-only churn (the English
+  // translation pass alone pushed it past 3200; this pins ordering, not
+  // byte distance).
   assert.match(
     poolSource,
-    /let spawned_at_ms = Self::now_epoch_ms\(\);[\s\S]{0,3200}spawned_at_ms,/,
+    /let spawned_at_ms = Self::now_epoch_ms\(\);[\s\S]{0,3600}spawned_at_ms,/,
     'the engine must record its epoch timestamp for transcript zombie-worker screening (computed once at spawn; the steer-id generation comes from the process-monotonic incarnation sequence, zhuowp re-review P1-2)',
   );
   assert.match(
@@ -452,9 +456,12 @@ test('旧独立入口退役：多智能体经会话级开关 + spawn 级蜂群�
     /reconfigure_multi_agent_mode[\s\S]{0,700}if enabled && !self\.swarm_mode_available\(session_id\)[\s\S]{0,900}self\.store\.set_multi_agent\(session_id, enabled\)/,
     '开启前必须先执行能力门禁（swarm 可用性含定时会话排除）；开关只持久化会话策略，不再生成磁盘名册',
   );
+  // The trailing gap spans whole helper functions, so comment bytes ride
+  // along; keep headroom for comment-only churn (the English translation
+  // pass alone pushed it past 9000; this pins ordering, not byte distance).
   assert.match(
     assistantBridgeSource,
-    /build_multi_agent_dt_config[\s\S]{0,500}config\.fleet = Some\(snapshot\.fleet_config\(\)\.clone\(\)\)[\s\S]{0,9000}resolve_multi_agent_runtime_route_for_model/,
+    /build_multi_agent_dt_config[\s\S]{0,500}config\.fleet = Some\(snapshot\.fleet_config\(\)\.clone\(\)\)[\s\S]{0,12000}resolve_multi_agent_runtime_route_for_model/,
     '多智能体启动和每轮 route 都必须通过底座原生 fleet.profiles 注入专家',
   );
   assert.match(
