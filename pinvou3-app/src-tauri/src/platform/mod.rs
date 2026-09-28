@@ -25,6 +25,8 @@ pub(crate) mod telemetry;
 pub(crate) mod test_support;
 pub(crate) mod ui_cache;
 pub(crate) mod window_startup;
+#[cfg(target_os = "windows")]
+pub(crate) mod window_tray;
 
 #[cfg(feature = "behavior-telemetry-test")]
 #[doc(hidden)]

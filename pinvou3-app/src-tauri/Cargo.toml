@@ -292,6 +292,10 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
 ] }
 
 [target.'cfg(windows)'.dependencies]
+# The main window remains available from a native tray icon after the user
+# clicks the Windows close button. Keeping this target-specific avoids adding
+# tray lifecycle behavior or dependencies to macOS/Linux builds.
+tauri = { version = "2.11.1", features = ["tray-icon"] }
 # Win32_Graphics_Gdi: the in-repo monitor capture (computer_use) BitBlts the
 # desktop DC directly — xcap 0.9.8's capture_monitor leaks one GDI bitmap per
 # call (DeleteObject runs while the bitmap is still selected into the memory

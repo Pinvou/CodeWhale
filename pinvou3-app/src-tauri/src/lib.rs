@@ -758,6 +758,13 @@ pub fn run() {
             startup::mark("setup:plugins_ready");
             crate::platform::window_startup::arm_hidden_main_window_fallback(app.handle());
 
+            #[cfg(target_os = "windows")]
+            if let Err(error) = crate::platform::window_tray::install(app) {
+                // Keep normal close behavior when the tray cannot be created;
+                // otherwise the user could hide the only recovery window.
+                eprintln!("[pinvou3-app] failed to install system tray: {error}");
+            }
+
             // Linux webview(webkit2gtk)默认拒绝 getUserMedia,语音输入点麦克风会被拒。
             // 给 main 窗口 webview 挂 permission-request:只放行 UserMedia(麦克风/摄像头)
             // 请求,定位/通知等其余权限仍按默认拒绝。Windows/macOS 的 WebView2/WKWebView
@@ -1283,6 +1290,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(target_os = "windows")]
+            if crate::platform::window_tray::hide_main_on_close(window, event) {
+                return;
+            }
+
             if let tauri::WindowEvent::Destroyed = event {
                 // When a recording window is closed outright, the frontend has
                 // no chance to deregister; leaving it registered would keep the
