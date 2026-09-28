@@ -141,6 +141,7 @@
     "test:markdown-artifact-ui": "node tests/markdown_artifact_edit_smoke.js",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",
+    "test:remote-control-ui": "node scripts/remote-control-ui-smoke.mjs",
     "test:user-journey": "../scripts/run-user-journey-tests.sh",
     "sync:version": "node ../scripts/sync-version.mjs",
     "test:markdown": "node tests/markdown_syntax_highlight.test.mjs && node tests/markdown_bridge_fallback_safety.test.mjs"
@@ -170,7 +171,8 @@
     "oxlint": "^1.79.0",
     "puppeteer-core": "^25.8.0",
     "typescript": "^5.9.3",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "ws": "^8.22.0"
   },
   "dependencies": {
     "dompurify": "^3.4.14",

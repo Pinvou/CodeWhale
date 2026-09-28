@@ -484,11 +484,11 @@ fn temporary_model_gate(
 }
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
-    if controlled.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    controlled
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
 fn live_context(controlled: &ControlledDeviceManager) -> Result<LeaseContext, String> {
@@ -1787,6 +1787,7 @@ pub fn desktop_remote_task_reserve_a(
     intent: RemoteTaskReserveIntent,
 ) -> Result<RemoteDispatchReport, String> {
     (|| {
+        crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
         if !manager.is_supported() {
             return Err(UNSUPPORTED.to_owned());
         }
@@ -1914,6 +1915,7 @@ pub fn desktop_remote_task_commit_a(
     handle: RemoteRetryHandle,
     attachment_ids: Vec<String>,
 ) -> Result<RemoteDispatchReport, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     let started = Instant::now();
     let result = service
         .commit_prepared(&local_session_id, &remote_ref, handle, &attachment_ids)
@@ -1951,6 +1953,7 @@ pub fn desktop_remote_task_cancel_a(
     remote_ref: String,
     task_id: String,
 ) -> Result<RemoteCancelReport, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     service
         .cancel_task(&local_session_id, &remote_ref, &task_id)
         .map_err(|error| error.code().to_owned())
@@ -1963,6 +1966,7 @@ pub fn desktop_remote_task_abandon_prepared_a(
     client_request_id: String,
     task_id: String,
 ) -> Result<(), String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     service
         .abandon_prepared_remote_task(&local_session_id, &client_request_id, &task_id)
         .map_err(|error| error.code().to_owned())?;

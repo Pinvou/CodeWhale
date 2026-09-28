@@ -1040,6 +1040,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         () => remoteChatActive ? remoteDispatchCases(activeSessionId, remoteProxyHistory) : [],
         [activeSessionId, remoteChatActive, remoteDispatchRevision, remoteProxyHistory],
       );
+      const pendingPermissionCoordinationIds = remotePermissions
+        .filter(permission => permission?.state === 'pending')
+        .map(permission => permission.permissionRequestId);
+      const attachmentCoordinationIds = pendingRemoteDispatches
+        .filter(item => item?.state === 'prepared_not_sent')
+        .map(item => item.taskId);
+      const remoteUiCoordinationId = pendingPermissionCoordinationIds.length === 1
+        ? pendingPermissionCoordinationIds[0]
+        : (attachmentCoordinationIds.length === 1 ? attachmentCoordinationIds[0] : '');
       const currentRemoteTaskId = useMemo(
         () => remoteChatActive ? activeRemoteTaskId(activeSessionId, remoteProxyHistory) : null,
         [activeSessionId, remoteChatActive, remoteProxyHistory],
@@ -3091,7 +3100,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           {/* 有消息时底部留白由列表内的实体 spacer 承担，避免 WebKitGTK/Safari
               不把 overflow flex 容器的尾部 padding 完整计入 scrollHeight。
               空态不滚动，仍需 paddingBottom 让欢迎语在悬浮输入框上方居中。 */}
-          <div ref={scrollRef} data-testid="chat-scroll"
+          <div ref={scrollRef} data-testid="chat-scroll" data-coordination-id={remoteUiCoordinationId || undefined}
             style={{
               ...responsiveGutterStyle,
               ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
@@ -3280,7 +3289,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             )}
 
             {remoteChatActive && (currentRemoteTaskId || remotePermissions.length > 0) && (
-              <section data-testid="chat-remote-task-actions" aria-label={t.remoteConversation.taskActions}
+              <section data-testid="chat-remote-task-actions" data-coordination-id={remoteUiCoordinationId || undefined} aria-label={t.remoteConversation.taskActions}
                 className={`mb-4 w-full max-w-[800px] px-5 text-[12px] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
                 {currentRemoteTaskId && (
                   <div className="mb-2 flex items-center gap-2 rounded-xl border border-blue-500/20 bg-blue-500/10 px-3 py-2">
@@ -3293,15 +3302,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   </div>
                 )}
                 {remotePermissions.map(permission => (
-                  <div key={permission.permissionRequestId} role="alert" className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                  <div key={permission.permissionRequestId} role="alert" data-coordination-id={permission.permissionRequestId} className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
                     <div className="font-medium">{t.remoteConversation.permissionRequest}: {permission.operationType}</div>
                     {permission.preview && <p className="mt-1 whitespace-pre-wrap break-words">{permission.preview}</p>}
                     {permission.targetScope && <p className="mt-1 opacity-70">{permission.targetScope}</p>}
                     {permission.state === 'pending' ? (
                       <div className="mt-2 flex gap-2">
-                        <button type="button" onClick={() => decideRemotePermission(permission, 'allow')} disabled={!!remoteDispatchAction}
+                        <button type="button" data-testid="chat-remote-permission-allow" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'allow')} disabled={!!remoteDispatchAction}
                           className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.permissionAllow}</button>
-                        <button type="button" onClick={() => decideRemotePermission(permission, 'deny')} disabled={!!remoteDispatchAction}
+                        <button type="button" data-testid="chat-remote-permission-deny" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'deny')} disabled={!!remoteDispatchAction}
                           className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.permissionDeny}</button>
                       </div>
                     ) : <div className="mt-1 text-amber-700 dark:text-amber-300">{t.remoteConversation.permissionTimedOut}</div>}
@@ -3320,10 +3329,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       <FileText size={15} aria-hidden="true" />
                       <span className="min-w-0 flex-1 truncate">{artifact.displayName}</span>
                       {artifact.previewKind === 'text' && (
-                        <button type="button" onClick={() => previewRemoteArtifact(artifact)} disabled={!!remoteDispatchAction}
+                        <button type="button" data-testid="chat-remote-artifact-preview" onClick={() => previewRemoteArtifact(artifact)} disabled={!!remoteDispatchAction}
                           className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.previewArtifact}</button>
                       )}
-                      <button type="button" onClick={() => saveRemoteArtifact(artifact)} disabled={!!remoteDispatchAction}
+                      <button type="button" data-testid="chat-remote-artifact-download" onClick={() => saveRemoteArtifact(artifact)} disabled={!!remoteDispatchAction}
                         className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.downloadArtifact}</button>
                       {artifact.previewKind === 'download_only' && (
                         <span className="text-[11px] opacity-70">{t.remoteConversation.artifactDownloadOnly}</span>
@@ -3348,7 +3357,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       className="mt-2 rounded-lg bg-black/5 p-3 dark:bg-white/5">
                       <div className="flex items-center gap-2 font-medium">
                         <span id="chat-remote-artifact-preview-title" className="min-w-0 flex-1 truncate">{remoteArtifactPreview.displayName}</span>
-                        <button ref={remoteArtifactPreviewCloseRef} type="button" onClick={closeRemoteArtifactPreview} aria-label={t.close}><X size={15} /></button>
+                        <button ref={remoteArtifactPreviewCloseRef} data-testid="chat-remote-artifact-preview-close" type="button" onClick={closeRemoteArtifactPreview} aria-label={t.close}><X size={15} /></button>
                       </div>
                       <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words">{remoteArtifactPreview.text || t.remoteConversation.previewUnavailable}</pre>
                     </div>
@@ -3358,7 +3367,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             )}
 
             {remoteChatActive && remoteActionError && (
-              <div role="alert" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
+              <div role="alert" data-testid="chat-remote-action-error" className={`mb-4 w-full max-w-[800px] px-5 text-[12px] text-[#EA4335] max-sm:px-4 ${hasMessages ? 'mx-auto' : ''}`}>
                 {remoteActionError === 'result_unknown'
                   ? t.remoteConversation.actionResultUnknown
                   : t.remoteConversation.actionFailed}
@@ -3657,12 +3666,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             {/* 模型选择器/知识库挂载已挪进下方底栏(ComposerModelSelector/ComposerKbSelector) */}
             {/* 附件 chips */}
             {remoteChatActive && remoteFiles.length > 0 && (
-              <div data-testid="chat-remote-attachments" className="mb-2 flex flex-wrap gap-2 px-2">
+              <div data-testid="chat-remote-attachments" data-coordination-id={remoteUiCoordinationId || undefined} className="mb-2 flex flex-wrap gap-2 px-2">
                 {remoteFiles.map((file, index) => (
                   <div key={`${file.name}:${file.size}:${index}`} className="flex max-w-full items-center gap-2 rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-[12px]">
                     <Paperclip size={14} aria-hidden="true" />
                     <span className="max-w-[240px] truncate">{file.name}</span>
-                    <button type="button" onClick={() => setRemoteFiles(files => files.filter((_, itemIndex) => itemIndex !== index))}
+                    <button type="button" data-testid="chat-remote-attachment-remove" onClick={() => setRemoteFiles(files => files.filter((_, itemIndex) => itemIndex !== index))}
                       disabled={remoteTransfer?.state === 'uploading'} aria-label={t.remoteConversation.removeAttachment(file.name)}
                       className="rounded-full p-0.5 disabled:opacity-50"><X size={13} /></button>
                   </div>
@@ -3868,7 +3877,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   )}
                   {remoteChatActive && (
                     <>
-                      <input ref={remoteFileInputRef} type="file" multiple className="hidden" onChange={selectRemoteFiles}
+                      <input ref={remoteFileInputRef} data-testid="chat-remote-attachment-input" data-coordination-id={remoteUiCoordinationId || undefined} type="file" multiple className="hidden" onChange={selectRemoteFiles}
                         aria-label={t.remoteConversation.addAttachment} />
                       <button type="button" onClick={() => remoteFileInputRef.current?.click()}
                         disabled={!remoteLinkReady || !!remoteDispatchAction || remoteTransfer?.state === 'uploading'}
@@ -3934,7 +3943,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                         </button>
                       )}
                       {(!busy || hasDraftText || hasReadyAttachment) && (
-                        <button type="button" onClick={handleSend} disabled={!ready}
+                        <button type="button" data-testid="chat-composer-send" onClick={handleSend} disabled={!ready}
                           aria-label={busy ? t.queueMsg : t.sendMsg}
                           title={busy ? (can('interruptSend') ? t.queueMsgTip : t.queueMsg) : t.sendMsg}
                           className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all ${ready ? (isQueue ? 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md ring-2 ring-amber-300 dark:ring-amber-400' : 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md hover:-translate-y-0.5 active:translate-y-0') : 'bg-black/5 dark:bg-white/10 text-gray-400 cursor-not-allowed'}`}>

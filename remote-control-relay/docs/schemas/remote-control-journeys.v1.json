@@ -1,0 +1,33 @@
+{
+  "schema": "pinvou-remote-control-journey-catalog",
+  "version": 1,
+  "journeys": [
+    { "id": "RC-E2E-001", "title": "B 注册并显示 Relay 连接码", "required_checks": ["enrollment_authorized", "pairing_ttl"] },
+    { "id": "RC-E2E-002", "title": "A 配对并进入统一 ChatView", "required_checks": ["finished_receipt", "single_controller"] },
+    { "id": "RC-E2E-003", "title": "B 模型执行普通任务", "required_checks": ["b_model_selected", "terminal_once"] },
+    { "id": "RC-E2E-004", "title": "B 在同一权威 Session 继续输入", "required_checks": ["single_authority_session", "dual_projection"] },
+    { "id": "RC-E2E-005", "title": "A 临时模型完成任务", "required_checks": ["a_model_selected", "credential_cleanup"] },
+    { "id": "RC-E2E-006", "title": "A 允许工具权限", "required_checks": ["approval_allow", "dispatch_once"] },
+    { "id": "RC-E2E-007", "title": "A 拒绝工具权限", "required_checks": ["approval_deny", "tool_zero_call"] },
+    { "id": "RC-E2E-008", "title": "附件上传与 B 处理", "required_checks": ["attachment_commit", "attachment_budget", "controlled_attachment_received"] },
+    { "id": "RC-E2E-009", "title": "成果预览与下载", "required_checks": ["artifact_atomic_publish", "artifact_digest"] },
+    { "id": "RC-E2E-010", "title": "A/B 独立令牌断线恢复", "required_checks": ["role_token_isolation", "pending_liveness_barrier"] },
+    { "id": "RC-E2E-011", "title": "B 黑洞与三十秒单调预算", "required_checks": ["monotonic_30s_budget", "reconnect_flood_no_extension"] },
+    { "id": "RC-E2E-012", "title": "第二个 A 被拒绝", "required_checks": ["two_a_single_winner", "owner_continues"] },
+    { "id": "RC-E2E-013", "title": "Web 与 controller 交叉互斥", "required_checks": ["web_controller_single_winner", "old_web_jitter"] },
+    { "id": "RC-E2E-014", "title": "审批决定超时停止竞态", "required_checks": ["approval_race_single_terminal", "cross_epoch_rejected"] },
+    { "id": "RC-E2E-015", "title": "B 立即断开清理全部凭证", "required_checks": ["b_stop_cleanup", "pending_artifact_cleanup"] },
+    { "id": "RC-E2E-016", "title": "Relay 重启后旧租约失效", "required_checks": ["relay_restart_revokes", "new_pairing_required"] },
+    { "id": "RC-E2E-017", "title": "refresh generation 丢弃迟到回包", "required_checks": ["refresh_generation_order", "late_frame_rejected"] },
+    { "id": "RC-E2E-018", "title": "窗口隐藏与显式断开语义", "required_checks": ["window_hide_continues", "disconnect_converges"] },
+    { "id": "RC-E2E-019", "title": "B 重启与 pairing 字符串复用隔离", "required_checks": ["pairing_tombstone", "two_b_collision_isolated"] },
+    { "id": "RC-E2E-020", "title": "A/B 单边隔离与角色心跳隔离", "required_checks": ["a_side_isolation", "b_side_isolation", "heartbeat_role_isolation"] },
+    { "id": "RC-E2E-021", "title": "digest key 轮换碰撞与旧 Relay 回滚", "required_checks": ["digest_key_rotation_collision", "real_legacy_gateway", "bare_v2_rejected"] },
+    { "id": "RC-E2E-022", "title": "liveness RTT 与 attestation 预算", "required_checks": ["direct_rtt_candidate", "attestation_age_candidate"] },
+    { "id": "RC-E2E-023", "title": "本地 ACP 远程三路会话不串线", "required_checks": ["engine_lane", "acp_lane", "remote_lane"] },
+    { "id": "RC-E2E-024", "title": "旧入口与第二数据源不可调用", "required_checks": ["legacy_commands_absent", "single_data_source"] },
+    { "id": "RC-E2E-025", "title": "断线后只读 RemoteProxy 历史", "required_checks": ["offline_history_readable", "offline_mutations_closed"] },
+    { "id": "RC-E2E-026", "title": "幂等台账与 outcome_unknown 重启恢复", "required_checks": ["idempotent_retry", "fingerprint_conflict", "restart_outcome_unknown"] },
+    { "id": "RC-E2E-027", "title": "废弃 RemoteHistoryStore 不读取不迁移", "required_checks": ["fresh_install_single_store", "upgrade_legacy_ignored"] }
+  ]
+}

@@ -64,7 +64,7 @@ pub(crate) fn current() -> DesktopCapabilities {
         browser_agent_automation: browser_product_enabled(),
         browser_cdp: cfg!(target_os = "windows"),
         voice_shortcut_native: cfg!(target_os = "windows"),
-        desktop_remote_control_supported: supports_desktop_remote_control(std::env::consts::OS),
+        desktop_remote_control_supported: desktop_remote_control_enabled(),
     }
 }
 
@@ -77,6 +77,35 @@ pub(crate) fn supports_codex_acp(os: &str) -> bool {
 /// pretending to support the feature.
 pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
     matches!(os, "windows")
+}
+
+/// One client-side release switch shared with the Relay deployment contract.
+///
+/// The feature is not released yet, so absence, malformed values, and every
+/// value other than the exact string `1` fail closed.  Operators use the same
+/// variable on the Relay and both Windows clients; disabling it hides the UI
+/// capability and prevents the two network entry commands from opening a
+/// remote-control lane.  Durable registry/tombstone data is not coupled to
+/// this switch.
+pub(crate) fn desktop_remote_control_enabled() -> bool {
+    desktop_remote_control_enabled_for(
+        std::env::consts::OS,
+        std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED")
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub(crate) fn ensure_desktop_remote_control_enabled() -> Result<(), String> {
+    if desktop_remote_control_enabled() {
+        Ok(())
+    } else {
+        Err("desktop_remote_control_unsupported".to_owned())
+    }
+}
+
+fn desktop_remote_control_enabled_for(os: &str, flag: Option<&str>) -> bool {
+    supports_desktop_remote_control(os) && flag == Some("1")
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -128,7 +157,7 @@ mod tests {
         assert_eq!(capabilities.voice_shortcut_native, is_windows());
         assert_eq!(
             capabilities.desktop_remote_control_supported,
-            supports_desktop_remote_control(std::env::consts::OS)
+            desktop_remote_control_enabled()
         );
     }
 
@@ -150,5 +179,21 @@ mod tests {
         );
         assert!(browser_product_enabled_for("macos", true));
         assert!(!browser_product_enabled_for("android", true));
+    }
+
+    #[test]
+    fn desktop_remote_control_release_switch_is_exact_and_windows_only() {
+        assert!(desktop_remote_control_enabled_for("windows", Some("1")));
+        for flag in [None, Some(""), Some("0"), Some("true"), Some("01")] {
+            assert!(!desktop_remote_control_enabled_for("windows", flag));
+        }
+        assert!(!desktop_remote_control_enabled_for("linux", Some("1")));
+        assert!(!desktop_remote_control_enabled_for("macos", Some("1")));
+        if !desktop_remote_control_enabled() {
+            assert_eq!(
+                ensure_desktop_remote_control_enabled().unwrap_err(),
+                "desktop_remote_control_unsupported"
+            );
+        }
     }
 }

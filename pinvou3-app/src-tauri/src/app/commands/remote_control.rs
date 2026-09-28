@@ -20,6 +20,7 @@ use crate::features::remote_control::{
     RelaySettingsInfo, RemoteControlManager, WebAccessInfo, WebAccessStatus,
 };
 use crate::features::sessions::SessionStore;
+use crate::platform::capabilities::ensure_desktop_remote_control_enabled;
 use crate::platform::prefs::UserPrefs;
 
 const MAX_WEB_ARTIFACT_RPC_BYTES: usize = 2 * 1024 * 1024;
@@ -217,8 +218,9 @@ pub fn web_access_relay_settings(manager: State<'_, RemoteControlManager>) -> Re
 #[tauri::command]
 pub fn desktop_remote_endpoint_profiles(
     manager: State<'_, RemoteControlManager>,
-) -> Vec<serde_json::Value> {
-    manager.endpoint_profile_options()
+) -> Result<Vec<serde_json::Value>, String> {
+    ensure_desktop_remote_control_enabled()?;
+    Ok(manager.endpoint_profile_options())
 }
 
 /// 切换内置端点 profile（production / test）：用户不再需要配置环境变量。
@@ -227,6 +229,7 @@ pub fn desktop_remote_set_endpoint_profile(
     manager: State<'_, RemoteControlManager>,
     profile: String,
 ) -> Result<RelaySettingsInfo, String> {
+    ensure_desktop_remote_control_enabled()?;
     manager.set_endpoint_profile(&profile)
 }
 

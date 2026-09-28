@@ -210,7 +210,7 @@
 
 审核轮次 1（提交 788d87b8）
 
-- 逐条核对：runbook 覆盖前置门禁命令、灰度步骤（registry 覆盖率、能力开关、自托管升级、容量限流、故障注入）、18.3 的 21 条旅程（并点名最易假通过的第 9～10/13/16/19/20/21 条）、监控阈值、回滚约束（只关能力、不删 registry/tombstone、拒绝裸 v2）与残余风险（受信 Relay，不抵御恶意主动 MITM）；`controller-release-gates.test.js` 把 runbook 章节、门禁命令、回滚不删持久状态、gateway 无旁路与遥测枚举固化为断言（6 条）。
+- 历史审核当时只覆盖旧版旅程集；DEV-25 已以 `RC-E2E-001`～`RC-E2E-027`、严格证据 schema/validator 和可执行 release gate 取代该静态门禁，旧结论不能作为发布证据。
 - 登记缺口（未修）：真实双机/公网 E2E 未执行（本环境无法自证）；feature flag 配置与 CI workflow 尚未落成可执行产物。
 - 验证：`node --test controller-release-gates.test.js` 6 通过。
 - 结论：**REVIEW: PASS**（含 2 项已登记缺口，发布前必须补齐）。

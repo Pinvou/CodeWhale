@@ -293,6 +293,7 @@ export default function ControlledDevicePanel({
         <div className="flex shrink-0 items-center gap-2">
           <StateChip copy={copy} state={uiState} />
           <Toggle
+            data-testid="controlled-device-toggle"
             checked={active}
             disabled={!!busy || ['registering', 'retiring_generation', 'stopping'].includes(uiState)}
             aria-label={active ? copy.disable : copy.enable}
@@ -352,7 +353,7 @@ export default function ControlledDevicePanel({
             <span>{copy.deviceLabel}: </span>
             <span className="font-medium text-[#1C1C1E] dark:text-[#F2F2F7]">{device.controllerDeviceName || copy.deviceUnknown}</span>
           </div>}
-          <button type="button" onClick={() => run('refresh', remote => remote.controlledRefresh(), true)} disabled={!active || ['retiring_generation', 'stopping'].includes(uiState) || !!busy} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium text-[#007AFF] hover:bg-[#007AFF]/[0.06] disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF] forced-colors:border forced-colors:border-[ButtonText]">
+          <button type="button" data-testid="controlled-device-refresh" onClick={() => run('refresh', remote => remote.controlledRefresh(), true)} disabled={!active || ['retiring_generation', 'stopping'].includes(uiState) || !!busy} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium text-[#007AFF] hover:bg-[#007AFF]/[0.06] disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF] forced-colors:border forced-colors:border-[ButtonText]">
             <RefreshCw size={14} className={busy === 'refresh' ? 'animate-spin motion-reduce:animate-none' : ''} aria-hidden="true" />
             {busy === 'refresh' ? copy.refreshing : copy.regenerate}
           </button>

@@ -73,11 +73,11 @@ fn controlled_error(error: ControlledStateError) -> String {
 }
 
 fn ensure_supported(manager: &ControlledDeviceManager) -> Result<(), String> {
-    if manager.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    manager
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
 fn workspace_request(
@@ -162,6 +162,7 @@ pub fn desktop_remote_client_event(
     event: ClientRemoteEvent,
     detail: ClientRemoteDetail,
 ) -> Result<(), String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if matches!(event, ClientRemoteEvent::CapabilityHandshake)
         && !matches!(detail, ClientRemoteDetail::Failed)
     {

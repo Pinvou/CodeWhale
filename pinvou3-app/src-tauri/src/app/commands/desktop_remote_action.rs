@@ -545,6 +545,7 @@ pub async fn desktop_remote_action_a(
     request_id: String,
     intent: RemoteActionIntent,
 ) -> Result<Value, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     let started = std::time::Instant::now();
     let metric = match &intent {
         RemoteActionIntent::AttachmentChunk { .. } => Some(RemoteStage::Attachment),

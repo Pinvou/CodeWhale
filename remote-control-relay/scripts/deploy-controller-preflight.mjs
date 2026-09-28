@@ -25,10 +25,8 @@ const REQUIRED_KEYS = Object.freeze([
 ]);
 
 const EXACT_VALUES = Object.freeze({
-  NODE_ENV: "development",
-  PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
-  PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
-  PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
+  NODE_ENV: "production",
+  PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "false",
   PINVOU_REMOTE_CONTROLLER_STATE_PATH:
     "/var/lib/pinvou-remote-relay/state/controller-state.json",
   PINVOU_REMOTE_STATE_PATH: "/opt/pinvou-remote-relay/data/relay-state.json",
@@ -54,8 +52,13 @@ export function parseControllerEnvironment(source) {
   return entries;
 }
 
-export function validateControllerEnvironment(entries) {
+export function validateControllerEnvironment(entries, { expectedFeatureFlag = "1" } = {}) {
   if (!(entries instanceof Map)) fail("controller_env_entries_invalid");
+  if (!new Set(["0", "1"]).has(expectedFeatureFlag)) fail("controller_env_expected_feature_flag_invalid");
+  const allowedKeys = new Set(REQUIRED_KEYS);
+  if ([...entries.keys()].some((key) => !allowedKeys.has(key))) {
+    fail("controller_env_unknown_key");
+  }
   for (const key of REQUIRED_KEYS) {
     if (!entries.has(key) || entries.get(key).length === 0) {
       fail("controller_env_required_value_missing");
@@ -63,6 +66,12 @@ export function validateControllerEnvironment(entries) {
   }
   for (const [key, expected] of Object.entries(EXACT_VALUES)) {
     if (entries.get(key) !== expected) fail("controller_env_required_value_invalid");
+  }
+  if (entries.get("PINVOU_DESKTOP_CONTROLLER_ENABLED") !== expectedFeatureFlag) {
+    fail("controller_env_required_value_invalid");
+  }
+  if (!new Set(["official", "self_hosted"]).has(entries.get("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT"))) {
+    fail("controller_env_required_value_invalid");
   }
   const allowed = parseProxyIps(entries.get("PINVOU_REMOTE_ALLOWED_PROXY_IPS"));
   const trusted = parseProxyIps(entries.get("PINVOU_REMOTE_TRUSTED_PROXY_IPS"));
@@ -115,7 +124,7 @@ export function validateControllerEnvironmentMetadata({
 
 export async function validateControllerEnvironmentFile(
   filePath,
-  { expectedUid = 0, expectedGid = 0 } = {},
+  { expectedUid = 0, expectedGid = 0, expectedFeatureFlag = "1" } = {},
 ) {
   const expectedPath = resolve(filePath);
   const metadata = await lstat(expectedPath);
@@ -137,12 +146,13 @@ export async function validateControllerEnvironmentFile(
     resolvedPath,
   });
   const source = await readFile(expectedPath, "utf8");
-  validateControllerEnvironment(parseControllerEnvironment(source));
+  validateControllerEnvironment(parseControllerEnvironment(source), { expectedFeatureFlag });
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  validateControllerEnvironmentFile(process.argv[2] || "")
+  const expectedFeatureFlag = process.argv.includes("--expect-feature-off") ? "0" : "1";
+  validateControllerEnvironmentFile(process.argv[2] || "", { expectedFeatureFlag })
     .catch((error) => {
       // Never print file contents or variable values: this file contains production secrets.
       console.error(error?.code || "controller_env_preflight_failed");

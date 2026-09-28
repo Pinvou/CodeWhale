@@ -37,6 +37,9 @@ on:
       - 'scripts/check-linux-elf-policy.sh'
       - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
+      - '.github/workflows/pr-check.yml'
+      - '.github/workflows/windows-remote-control-evidence.yml'
+      - '.github/workflows/windows-remote-control-build-evidence.yml'
       - '.gitmodules'
       - 'private-runtimes/windows'
       - 'pinvou3-app/package.json'
@@ -54,6 +57,68 @@ on:
       - 'pinvou3-app/tests/codex_acp_windows_*'
       - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
       - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
+      - 'pinvou3-app/scripts/remote-control-ui-smoke.mjs'
+      - 'pinvou3-app/scripts/remote-control-*'
+      - 'pinvou3-app/scripts/remote-control-*/**'
+      - 'pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs'
+      - 'pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs'
+      - 'pinvou3-app/tests/remote_*'
+      - 'pinvou3-app/tests/remote_*/**'
+      - 'pinvou3-app/tests/desktop_remote_*'
+      - 'pinvou3-app/tests/desktop_remote_*/**'
+      - 'pinvou3-app/tests/connect_remote_device_*'
+      - 'pinvou3-app/tests/connect_remote_device_*/**'
+      - 'remote-control-relay/docs/schemas/**'
+      - 'remote-control-relay/**'
+      - 'remote-control-relay/package.json'
+      - 'remote-control-relay/package-lock.json'
+      - 'remote-control-relay/scripts/controller-release-gate.mjs'
+      - 'remote-control-relay/scripts/validate-controller-release-evidence.mjs'
+      - 'remote-control-relay/scripts/query-controller-release-telemetry.mjs'
+      - 'remote-control-relay/scripts/deploy-controller-preflight.mjs'
+      - 'remote-control-relay/scripts/prepare-legacy-gateway-route.mjs'
+      - 'remote-control-relay/scripts/verify-provider-attestation.mjs'
+      - 'remote-control-relay/scripts/verify-installer-supply-chain.mjs'
+      - 'remote-control-relay/controller-sensitive-scan.js'
+      - 'remote-control-relay/test/controller-sensitive-scan.test.js'
+      - 'remote-control-relay/test/controller-telemetry.test.js'
+      - 'remote-control-relay/test/controller-release-*.test.js'
+      - 'remote-control-relay/test/windows-e2e-*.test.js'
+      - 'remote-control-relay/test/installer-spdx.test.js'
+      - 'scripts/run-windows-remote-control-e2e.ps1'
+      - 'scripts/windows-e2e-process-guard.ps1'
+      - 'scripts/windows-e2e-orchestrator-helpers.ps1'
+      - 'scripts/create-installer-spdx.mjs'
+      - 'scripts/check-enrollment-gated-v2-rollback.mjs'
+      - 'scripts/remote-control-release-path-policy.mjs'
+      - 'scripts/remote-control-*'
+      - 'scripts/remote-control-*/**'
+      - 'scripts/run-remote-control-*'
+      - 'scripts/run-remote-control-*/**'
+      - 'pinvou3-app/src/features/remote-control/**'
+      - 'pinvou3-app/src/features/chat/ChatView.jsx'
+      - 'pinvou3-app/src/components/Toggle.jsx'
+      - 'pinvou3-app/src/app/main.jsx'
+      - 'pinvou3-app/src/features/settings/SettingsView.jsx'
+      - 'pinvou3-app/src/hooks/useBridge.js'
+      - 'pinvou3-app/src/platform/tauri/bridge.js'
+      - 'pinvou3-app/src/shared/platform.js'
+      - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
+      - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
+      - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+      - 'pinvou3-app/src-tauri/src/features/remote_control/**'
+      - 'pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs'
+      - 'pinvou3-app/src-tauri/src/features/sessions/remote_proxy/**'
+      - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
+      - 'pinvou3-app/src-tauri/src/app/commands/**'
+      - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
+      - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
+      - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
+      - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+      - 'pinvou3-app/src-tauri/capabilities/default.json'
+      - 'pinvou3-app/tests/remote_*'
+      - 'pinvou3-app/tests/desktop_remote_*'
+      - 'pinvou3-app/tests/connect_remote_device_*'
   pull_request:
     branches: [main]
     paths:
@@ -64,6 +129,9 @@ on:
       - 'scripts/check-linux-elf-policy.sh'
       - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
+      - '.github/workflows/pr-check.yml'
+      - '.github/workflows/windows-remote-control-evidence.yml'
+      - '.github/workflows/windows-remote-control-build-evidence.yml'
       - '.gitmodules'
       - 'private-runtimes/windows'
       - 'pinvou3-app/package.json'
@@ -81,10 +149,86 @@ on:
       - 'pinvou3-app/tests/codex_acp_windows_*'
       - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
       - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
+      - 'pinvou3-app/scripts/remote-control-ui-smoke.mjs'
+      - 'pinvou3-app/scripts/remote-control-*'
+      - 'pinvou3-app/scripts/remote-control-*/**'
+      - 'pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs'
+      - 'pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs'
+      - 'pinvou3-app/tests/remote_*'
+      - 'pinvou3-app/tests/remote_*/**'
+      - 'pinvou3-app/tests/desktop_remote_*'
+      - 'pinvou3-app/tests/desktop_remote_*/**'
+      - 'pinvou3-app/tests/connect_remote_device_*'
+      - 'pinvou3-app/tests/connect_remote_device_*/**'
+      - 'remote-control-relay/docs/schemas/**'
+      - 'remote-control-relay/**'
+      - 'remote-control-relay/package.json'
+      - 'remote-control-relay/package-lock.json'
+      - 'remote-control-relay/scripts/controller-release-gate.mjs'
+      - 'remote-control-relay/scripts/validate-controller-release-evidence.mjs'
+      - 'remote-control-relay/scripts/query-controller-release-telemetry.mjs'
+      - 'remote-control-relay/scripts/deploy-controller-preflight.mjs'
+      - 'remote-control-relay/scripts/prepare-legacy-gateway-route.mjs'
+      - 'remote-control-relay/scripts/verify-provider-attestation.mjs'
+      - 'remote-control-relay/scripts/verify-installer-supply-chain.mjs'
+      - 'remote-control-relay/controller-sensitive-scan.js'
+      - 'remote-control-relay/test/controller-sensitive-scan.test.js'
+      - 'remote-control-relay/test/controller-telemetry.test.js'
+      - 'remote-control-relay/test/controller-release-*.test.js'
+      - 'remote-control-relay/test/windows-e2e-*.test.js'
+      - 'remote-control-relay/test/installer-spdx.test.js'
+      - 'scripts/run-windows-remote-control-e2e.ps1'
+      - 'scripts/windows-e2e-process-guard.ps1'
+      - 'scripts/windows-e2e-orchestrator-helpers.ps1'
+      - 'scripts/create-installer-spdx.mjs'
+      - 'scripts/check-enrollment-gated-v2-rollback.mjs'
+      - 'scripts/remote-control-release-path-policy.mjs'
+      - 'scripts/remote-control-*'
+      - 'scripts/remote-control-*/**'
+      - 'scripts/run-remote-control-*'
+      - 'scripts/run-remote-control-*/**'
+      - 'pinvou3-app/src/features/remote-control/**'
+      - 'pinvou3-app/src/features/chat/ChatView.jsx'
+      - 'pinvou3-app/src/components/Toggle.jsx'
+      - 'pinvou3-app/src/app/main.jsx'
+      - 'pinvou3-app/src/features/settings/SettingsView.jsx'
+      - 'pinvou3-app/src/hooks/useBridge.js'
+      - 'pinvou3-app/src/platform/tauri/bridge.js'
+      - 'pinvou3-app/src/shared/platform.js'
+      - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
+      - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
+      - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+      - 'pinvou3-app/src-tauri/src/features/remote_control/**'
+      - 'pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs'
+      - 'pinvou3-app/src-tauri/src/features/sessions/remote_proxy/**'
+      - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
+      - 'pinvou3-app/src-tauri/src/app/commands/**'
+      - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
+      - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
+      - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
+      - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+      - 'pinvou3-app/src-tauri/capabilities/default.json'
+      - 'pinvou3-app/tests/remote_*'
+      - 'pinvou3-app/tests/desktop_remote_*'
+      - 'pinvou3-app/tests/connect_remote_device_*'
   workflow_dispatch:
+    inputs:
+      remote_control_evidence_run_id:
+        description: '含真实双 Windows 证据 artifact 的 workflow run id；仅启用远控发布时必填'
+        required: false
+        type: string
+      remote_control_evidence_artifact:
+        description: '证据 artifact 名称；其中必须包含 manifest.json 与全部哈希绑定文件'
+        required: false
+        type: string
+      remote_control_evidence_artifact_digest:
+        description: 'GitHub 记录的 evidence artifact sha256 digest；启用远控发布时必填'
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-packages-${{ github.ref }}
@@ -97,7 +241,6 @@ jobs:
   # pull_request / workflow_dispatch 无条件放行 gate:PR 只跑轻量契约,
   # workflow_dispatch 还会让下游完整打包;push 则按实际发布链路 diff 判定。
   # 首次 push 或 before commit 不可达时直接放行,宁可多构建也不漏构建。
-  # 同时用 sync-version.mjs --check 校验三处版本文件与 VERSION 一致,不一致 fail。
   check-version-bump:
     name: 检测发布链路变更
     runs-on: ubuntu-latest
@@ -123,8 +266,8 @@ jobs:
       - name: 版本同步脚本测试
         run: node --test scripts/tests/sync-version.test.mjs
 
-      # 版本号单一事实来源 = 根目录 VERSION。各处版本文件必须已与其同步,
-      # 否则包名/包内版本号可能不一致,直接 fail 提示先跑 sync-version.mjs。
+      # 版本号单一事实来源 = 根目录 VERSION。各处版本文件必须已与其同步。
+      # 否则包名/包内版本号可能不一致，直接 fail 并提示先运行 sync-version.mjs。
       - name: 校验各处版本文件与 VERSION 一致
         run: node scripts/sync-version.mjs --check
 
@@ -132,39 +275,130 @@ jobs:
         id: diff
         run: |
           set -euo pipefail
-
           V=$(tr -d '[:space:]' < VERSION)
-          echo "当前 VERSION: $V"
-
           EVENT_NAME="${{ github.event_name }}"
           BEFORE="${{ github.event.before }}"
-
-          # PR 改动需要在合入前验证版本和静态契约;手动触发用于补打/重打。
           if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "✓ $EVENT_NAME 触发,无条件验证"
             BUILD_REQUIRED=true
-          # 首次 push 的 before 为全零;强推后 before commit 也可能不可达。
           elif [ -z "$BEFORE" ] || [[ "$BEFORE" =~ ^0+$ ]] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            echo "⚠️ before commit 不存在或不可达,放行构建"
             BUILD_REQUIRED=true
           else
             CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
-            echo "push 变更路径:"
-            printf '%s\n' "$CHANGED_FILES"
-            if printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/(sync-version\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|\.github/workflows/release-packages\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|windows_runtime_packaging_contract\.test\.js)))'; then
-              echo "✓ 发布链路变化,触发构建"
+            if printf '%s\n' "$CHANGED_FILES" | node scripts/remote-control-release-path-policy.mjs || printf '%s\n' "$CHANGED_FILES" | grep -Eq \
+              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
               BUILD_REQUIRED=true
             else
-              echo "✗ 未检测到发布链路变化,跳过"
               BUILD_REQUIRED=false
             fi
           fi
-
           echo "build_required=$BUILD_REQUIRED" >> "$GITHUB_OUTPUT"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
-  # ── Job 2: Linux x86_64 deb ─────────────────────────────────────────
+  remote-control-release-gate:
+    name: Windows 远控真实证据门禁
+    needs: check-version-bump
+    if: >-
+      needs.check-version-bump.outputs.build_required == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ${{ vars.PINVOU_REMOTE_RELEASE_RUNNER || 'windows-latest' }}
+    environment:
+      name: windows-release
+    timeout-minutes: 15
+    outputs:
+      evidence_artifact_id: ${{ steps.remote-evidence-identity.outputs.artifact-id }}
+      evidence_run_id: ${{ steps.remote-evidence-identity.outputs.run-id }}
+    env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
+      PINVOU_RELEASE_COMMIT_SHA: ${{ github.sha }}
+      PINVOU_REMOTE_RELEASE_EVIDENCE: ${{ github.workspace }}/remote-control-evidence/manifest.json
+      PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: ${{ vars.PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY }}
+      PINVOU_REMOTE_GATEWAY_CONFIG_PATH: ${{ vars.PINVOU_REMOTE_GATEWAY_CONFIG_PATH }}
+      PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON: ${{ vars.PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON }}
+      PINVOU_REMOTE_LEGACY_RELAY_URL: ${{ vars.PINVOU_REMOTE_LEGACY_RELAY_URL }}
+      PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST: ${{ vars.PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST }}
+      PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT: ${{ vars.PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT }}
+      PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER: ${{ vars.PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER }}
+      PINVOU_REMOTE_CONTROLLER_ENV_FILE: ${{ vars.PINVOU_REMOTE_CONTROLLER_ENV_FILE }}
+      PINVOU_REMOTE_CONTROLLER_DISABLED_ENV_FILE: ${{ vars.PINVOU_REMOTE_CONTROLLER_DISABLED_ENV_FILE }}
+      PINVOU_REMOTE_CONTROLLER_STATE_PATH: ${{ vars.PINVOU_REMOTE_CONTROLLER_STATE_PATH }}
+      PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: ${{ vars.PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT }}
+      PINVOU_TRUSTED_E2E_DRIVER_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_DRIVER_SHA256 }}
+      PINVOU_TRUSTED_E2E_NODE_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_NODE_SHA256 }}
+      PINVOU_TRUSTED_E2E_NODE_SIGNER_THUMBPRINT: ${{ vars.PINVOU_TRUSTED_E2E_NODE_SIGNER_THUMBPRINT }}
+      PINVOU_TRUSTED_E2E_NODE_SIGNER_PUBLISHER: ${{ vars.PINVOU_TRUSTED_E2E_NODE_SIGNER_PUBLISHER }}
+      PINVOU_TRUSTED_E2E_ATTESTATION_PUBLIC_KEY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_PUBLIC_KEY_SHA256 }}
+      PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER }}
+      PINVOU_TRUSTED_E2E_ATTESTATION_KEY_ID: ${{ format('{0}/orchestrator', vars.PINVOU_TRUSTED_E2E_ATTESTATION_KEY_ID) }}
+      PINVOU_TRUSTED_E2E_ATTESTATION_ACL_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_ACL_SHA256 }}
+      PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256 }}
+      PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_VENDOR: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_VENDOR }}
+      PINVOU_TRUSTED_E2E_PROVIDER_ROOT_CERTIFICATE_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_ROOT_CERTIFICATE_SHA256 }}
+      PINVOU_TRUSTED_E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256 }}
+      PINVOU_TRUSTED_E2E_ORCHESTRATOR_ROLE_POLICY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ORCHESTRATOR_ROLE_POLICY_SHA256 }}
+      PINVOU_TRUSTED_E2E_A_ROLE_POLICY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_A_ROLE_POLICY_SHA256 }}
+      PINVOU_TRUSTED_E2E_B_ROLE_POLICY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_B_ROLE_POLICY_SHA256 }}
+      PINVOU_RELEASE_BUILD_PROVENANCE_SHA256: ${{ vars.PINVOU_RELEASE_BUILD_PROVENANCE_SHA256 }}
+      PINVOU_RELEASE_BUILD_REPOSITORY: ${{ github.repository }}
+      PINVOU_RELEASE_BUILD_WORKFLOW: .github/workflows/windows-remote-control-build-evidence.yml
+      PINVOU_RELEASE_BUILD_RUN_ID: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_RUN_ID }}
+      PINVOU_TRUSTED_GH_PATH: ${{ vars.PINVOU_TRUSTED_RELEASE_GH_PATH }}
+      PINVOU_RELEASE_INSTALLER_SHA256: ${{ vars.PINVOU_RELEASE_INSTALLER_SHA256 }}
+      PINVOU_RELEASE_VERSION: ${{ needs.check-version-bump.outputs.version }}
+      PINVOU_REMOTE_TELEMETRY_SNAPSHOT_URL: ${{ vars.PINVOU_REMOTE_TELEMETRY_SNAPSHOT_URL }}
+      PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE: ${{ vars.PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 锁定真实双机证据 run 与 artifact 身份
+        id: remote-evidence-identity
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
+        uses: actions/github-script@v8
+        env:
+          EVIDENCE_RUN_ID: ${{ inputs.remote_control_evidence_run_id || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_RUN_ID }}
+          EVIDENCE_ARTIFACT_NAME: ${{ inputs.remote_control_evidence_artifact || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_ARTIFACT }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ inputs.remote_control_evidence_artifact_digest || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_ARTIFACT_DIGEST }}
+          EVIDENCE_WORKFLOW_ID: ${{ vars.PINVOU_REMOTE_EVIDENCE_WORKFLOW_ID }}
+        with:
+          script: |
+            const { selectProtectedWorkflowArtifact } = require(`${process.env.GITHUB_WORKSPACE}/remote-control-relay/scripts/verify-github-workflow-run.cjs`);
+            const runId = Number(process.env.EVIDENCE_RUN_ID);
+            const expectedWorkflowId = Number(process.env.EVIDENCE_WORKFLOW_ID);
+            const artifactName = process.env.EVIDENCE_ARTIFACT_NAME;
+            const expectedDigest = process.env.EVIDENCE_ARTIFACT_DIGEST;
+            if (!Number.isSafeInteger(runId) || runId <= 0 || !Number.isSafeInteger(expectedWorkflowId) || expectedWorkflowId <= 0 || !artifactName || !/^sha256:[a-f0-9]{64}$/.test(expectedDigest || '')) {
+              core.setFailed('remote_evidence_identity_configuration_missing');
+              return;
+            }
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const { data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId });
+            const { data: workflow } = await github.rest.actions.getWorkflow({ owner, repo, workflow_id: expectedWorkflowId });
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({ owner, repo, run_id: runId, per_page: 100 });
+            let artifact;
+            try {
+              artifact = selectProtectedWorkflowArtifact({ run, workflow, artifacts: data.artifacts, expected: {
+                workflowId: expectedWorkflowId, workflowPath: '.github/workflows/windows-remote-control-evidence.yml',
+                sha: context.sha, ref: context.ref, repository: `${owner}/${repo}`,
+                artifactName, artifactDigest: expectedDigest,
+              }});
+            } catch (error) { core.setFailed(error.code || 'remote_evidence_workflow_identity_mismatch'); return; }
+            core.setOutput('artifact-id', String(artifact.id));
+            core.setOutput('artifact-digest', artifact.digest);
+            core.setOutput('run-id', String(runId));
+
+      - name: 下载真实双机证据
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.remote-evidence-identity.outputs.artifact-id }}
+          path: remote-control-evidence
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.remote_control_evidence_run_id || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_RUN_ID }}
+
+      - name: 执行远控发布门禁
+        run: node remote-control-relay/scripts/controller-release-gate.mjs
+
   build-linux-x64:
     name: 构建 Linux x86_64 deb
     needs: check-version-bump
@@ -172,9 +406,8 @@ jobs:
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    # Linux 发布基线是 Ubuntu 22.04 (glibc 2.35)。发布二进制链接构建机的 glibc，
-    # 在更新的 Ubuntu runner 上构建会引入 22.04 不存在的符号引用，导致启动崩溃。
-    # runner 必须钉在 ubuntu-22.04，升级前先调整并验证配套 glibc 下限守卫。
+    # 较新的 Ubuntu runner 可能引入 22.04 不具备的 glibc 符号，导致启动崩溃。
+    # runner 固定为 ubuntu-22.04；升级前必须调整并验证配套 glibc 下限守卫。
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -212,7 +445,6 @@ jobs:
             pinvou3-app/src-tauri
             pinvou-knowledge
           # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物，避免高版本
-          # glibc 符号通过 target 缓存混入 Ubuntu 22.04 发布包。
           shared-key: release-linux-x64-jammy
           # 非 main 手动构建只恢复 main 缓存；禁止写入分支缓存，避免多平台
           # release 缓存重复占满仓库配额并淘汰 pr-check 的 rust-test 暖缓存。
@@ -301,7 +533,6 @@ jobs:
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    # 与 x86_64 一致，ARM64 发布包也以 Ubuntu 22.04 (glibc 2.35) 为基线。
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     env:
@@ -444,8 +675,8 @@ jobs:
   # ── Job 5: Windows x86_64 nsis(仅受保护的非 PR 上下文) ────────────
   build-windows-x64:
     name: 构建 Windows x86_64 nsis
-    needs: check-version-bump
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version-bump.outputs.build_required == 'true'
+    needs: [check-version-bump, remote-control-release-gate]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.check-version-bump.outputs.build_required == 'true' && needs.remote-control-release-gate.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 90
     environment:
@@ -456,9 +687,8 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
-      # reqwest 0.13 → aws-lc-sys(非 FIPS)。Windows x86_64 需 NASM 汇编;runner 默认无 NASM,
-      # 用预生成 NASM 对象规避(同 pr-check.yml windows-rust-test 的结论)。
-      # 当前 Windows 默认发布目标仅 x86_64。
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
+      PINVOU_RELEASE_INSTALLER_SHA256: ${{ vars.PINVOU_RELEASE_INSTALLER_SHA256 }}
       AWS_LC_SYS_PREBUILT_NASM: "1"
       # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(三端统一注入;
       # Windows 用 .exe 版 wrapper(本 job 先编译):.cmd 经 cmd /C 受 8191 字符
@@ -529,7 +759,27 @@ jobs:
         # 与 gitignored secrets，不能在 GitHub-hosted runner 上调用。
         run: npm run build:nsis:local
 
-      # tauri nsis 产物默认名 pinvou3_<version>_x64-setup.exe,与目标命名一致。
+      - name: Download qualified Windows evidence artifact
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.remote-control-release-gate.outputs.evidence_artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.remote-control-release-gate.outputs.evidence_run_id }}
+          path: qualified-remote-control-evidence
+
+      - name: Reuse the exact qualified signed installer
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
+        shell: pwsh
+        run: |
+          $qualified = @(Get-ChildItem -LiteralPath qualified-remote-control-evidence -Filter pinvou-installer.exe -File -Recurse)
+          if ($qualified.Count -ne 1) { throw 'qualified_installer_count_invalid' }
+          $actual = (Get-FileHash -LiteralPath $qualified[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:PINVOU_RELEASE_INSTALLER_SHA256) { throw 'qualified_installer_digest_mismatch' }
+          $destination = "pinvou3-app/src-tauri/target/release/bundle/nsis/pinvou3_$env:VERSION`_x64-setup.exe"
+          Copy-Item -LiteralPath $qualified[0].FullName -Destination $destination -Force -ErrorAction Stop
+          if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $actual) { throw 'qualified_installer_copy_mismatch' }
+
       - name: 校验产物 + sha256
         working-directory: pinvou3-app/src-tauri/target/release/bundle/nsis
         run: |

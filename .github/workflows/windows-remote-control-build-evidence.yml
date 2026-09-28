@@ -1,0 +1,117 @@
+name: windows-remote-control-build-evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  protected-windows-installer:
+    environment: windows-release
+    runs-on: ${{ vars.PINVOU_WINDOWS_RELEASE_RUNNER || 'self-hosted' }}
+    timeout-minutes: 90
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: '1'
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Initialize public CodeWhale dependency
+        shell: pwsh
+        run: git submodule update --init --recursive -- CodeWhale
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Windows rustc stack wrapper
+        shell: pwsh
+        run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: pinvou3-app/package-lock.json
+
+      - name: Build signed installer from checked-out commit
+        shell: pwsh
+        working-directory: pinvou3-app
+        run: |
+          npm ci --prefer-offline --no-audit
+          npm run runtime:windows:init
+          npm run runtime:windows:onnx-smoke
+          node ../scripts/sync-version.mjs
+          $bge = 'src-tauri/resources/bge-m3'
+          New-Item -ItemType Directory -Path $bge -Force | Out-Null
+          foreach ($name in @('config.json', 'model.onnx', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json')) {
+            [IO.File]::WriteAllBytes((Join-Path $bge $name), [byte[]]::new(0))
+          }
+          npm run build:nsis
+
+      - name: Resolve exactly one installer
+        id: installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath pinvou3-app/src-tauri/target/release/bundle/nsis -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'protected_build_installer_count_invalid' }
+          "path=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Generate commit-bound SPDX 2.3 SBOM
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          node scripts/create-installer-spdx.mjs '${{ steps.installer.outputs.path }}' installer-sbom.spdx.json '${{ github.sha }}' $version pinvou3-app/package-lock.json pinvou3-app/src-tauri/Cargo.lock pinvou3-app/src-tauri/target/release/nsis-stage/manifest.json pinvou3-app/src-tauri/target/release/nsis-stage pinvou3-app/src-tauri/target/release/pinvou3-tauri.exe
+
+      - name: Attest installer build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.installer.outputs.path }}
+          show-summary: true
+
+      - name: Attest SBOM provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: installer-sbom.spdx.json
+          show-summary: true
+
+      - name: Verify attestation against this protected workflow
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          function Download-OneBundle([string]$subject, [string]$destination) {
+            $clean = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetRandomFileName())
+            New-Item -ItemType Directory -Path $clean -ErrorAction Stop | Out-Null
+            Push-Location $clean
+            try {
+              gh attestation download $subject --repo '${{ github.repository }}'
+              if ($LASTEXITCODE -ne 0) { throw 'protected_build_attestation_download_failed' }
+              $bundles = @(Get-ChildItem -LiteralPath $clean -Filter 'sha256-*.jsonl' -File)
+              if ($bundles.Count -ne 1) { throw 'protected_build_attestation_bundle_count_invalid' }
+              Move-Item -LiteralPath $bundles[0].FullName -Destination (Join-Path '${{ github.workspace }}' $destination) -ErrorAction Stop
+            } finally { Pop-Location; Remove-Item -LiteralPath $clean -Recurse -Force -ErrorAction Stop }
+          }
+          gh attestation verify '${{ steps.installer.outputs.path }}' --repo '${{ github.repository }}' --signer-workflow '.github/workflows/windows-remote-control-build-evidence.yml'
+          if ($LASTEXITCODE -ne 0) { throw 'protected_build_installer_attestation_invalid' }
+          gh attestation verify installer-sbom.spdx.json --repo '${{ github.repository }}' --signer-workflow '.github/workflows/windows-remote-control-build-evidence.yml'
+          if ($LASTEXITCODE -ne 0) { throw 'protected_build_sbom_attestation_invalid' }
+          Download-OneBundle '${{ steps.installer.outputs.path }}' 'installer-attestation.sigstore.jsonl'
+          Download-OneBundle (Resolve-Path -LiteralPath installer-sbom.spdx.json).Path 'installer-sbom-attestation.sigstore.jsonl'
+
+      - name: Upload installer, attestation bundle, and SPDX
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-remote-control-protected-build
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ steps.installer.outputs.path }}
+            installer-attestation.sigstore.jsonl
+            installer-sbom-attestation.sigstore.jsonl
+            installer-sbom.spdx.json
