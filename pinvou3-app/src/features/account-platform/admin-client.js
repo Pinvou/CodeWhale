@@ -882,6 +882,9 @@ export class AdminPlatformClient {
   usageRequest(usageRequestID, signal) {
     return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal);
   }
+  usageReconciliationCommandReadiness(signal) {
+    return this.request('token', '/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness', signal);
+  }
   usageEvidence(usageRequestID, filters = {}, signal) {
     return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/evidence?${tokenAdminCollectionQuery('usageEvidence', filters)}`, signal);
   }

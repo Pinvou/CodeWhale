@@ -1389,6 +1389,9 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness" {
+		return method == http.MethodGet
+	}
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/operations-overview", "/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
 		return true
 	}

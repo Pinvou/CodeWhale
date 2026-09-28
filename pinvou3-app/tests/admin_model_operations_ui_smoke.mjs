@@ -27,6 +27,7 @@ let attemptMode = 'success';
 let evidenceMode = 'success';
 let usageDelay = false;
 let retryMode = 'success';
+let isCommandReady = true;
 const observations = { provisioningDetail: 0, attempts: 0, usageDetail: 0, usageAborted: 0, evidence: 0, retryCalls: [], repairCalls: [], precheckCalls: [], commandCalls: [], resultCalls: 0, modelRequests: 0 };
 
 const now = '2026-09-04T12:00:00Z';
@@ -94,13 +95,17 @@ const server = createServer(async (request, response) => {
     if (url.searchParams.has('evidence')) evidenceMode = url.searchParams.get('evidence');
     if (url.searchParams.has('usage-delay')) usageDelay = url.searchParams.get('usage-delay') === '1';
     if (url.searchParams.has('retry')) retryMode = url.searchParams.get('retry');
-    return json(response, { permissions, detailsEnabled, attemptMode, evidenceMode, usageDelay, retryMode });
+    if (url.searchParams.has('command-ready')) isCommandReady = url.searchParams.get('command-ready') === '1';
+    return json(response, { permissions, detailsEnabled, attemptMode, evidenceMode, usageDelay, retryMode, isCommandReady });
   }
   if (url.pathname === '/__test__/state') return json(response, observations);
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-smoke', feature_flags: { admin_model_token_ia: true, admin_model_operations_details: detailsEnabled, admin_model_token_actions: true } });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actorID, platform_permissions: permissions });
   if (url.pathname === '/api/admin/token/admin/v1/provisionings' && request.method === 'GET') return json(response, envelope([provisioning]));
   if (url.pathname === '/api/admin/token/admin/v1/usage-requests' && request.method === 'GET') return json(response, envelope([usage]));
+  if (url.pathname === '/api/admin/token/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness' && request.method === 'GET') return json(response, isCommandReady
+    ? { schema_version: 1, command_type: 'TOKEN_USAGE_RECONCILIATION_RETRY', governance_state: 'ACTIVE', governance_epoch: 7, commands_enabled: true }
+    : { schema_version: 1, command_type: 'TOKEN_USAGE_RECONCILIATION_RETRY', governance_state: 'PRE_ACTIVATION', governance_epoch: 0, commands_enabled: false, unavailable_reason: 'GOVERNANCE_INACTIVE' });
   if (url.pathname === '/api/admin/token/admin/v1/reconciliation-cases') return json(response, envelope([{ case_id: caseID, case_type: 'USAGE_RECONCILIATION_REVIEW', resource_type: 'USAGE_REQUEST', resource_id: usageID, severity: 'P1', status: 'OPEN', claim_due_at: now, first_response_due_at: now, mitigation_due_at: now, resolution_due_at: '2026-09-05T12:00:00Z', escalation_level: 0, updated_at: now }]));
   if (url.pathname === `/api/admin/token/admin/v2/provisionings/${provisioningID}` && request.method === 'GET') { observations.provisioningDetail += 1; return json(response, provisioning); }
   if (url.pathname === `/api/admin/token/admin/v1/provisionings/${provisioningID}/attempts`) {
@@ -267,6 +272,10 @@ try {
   assert.equal(governedState.modelRequests, 0, 'reconciliation does not call a model or inference endpoint');
   await page.click('.adm-high-risk-dialog footer button:first-child');
   await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
+  await configure(page, 'command-ready=0');
+  await page.click('.adm-operation-detail header .adm-row-actions button:last-child');
+  await page.waitForFunction(() => document.querySelector('.adm-operation-detail [role="status"]')?.textContent.includes('Command governance is not active'));
+  assert.equal(await page.$$eval('.adm-operation-detail header button', (nodes) => nodes.filter((node) => node.textContent.trim() === 'Reconcile existing evidence again').length), 0, 'inactive governance hides a command that cannot pass precheck');
   await page.waitForFunction(() => document.querySelector('.adm-operation-audit button')?.getClientRects().length > 0);
   await page.evaluate(() => document.querySelector('.adm-operation-audit button').click());
   await page.waitForFunction((id) => new URLSearchParams(location.search).get('section') === 'audit' && new URLSearchParams(location.search).get('audit_resource') === id, {}, usageID);

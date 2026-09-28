@@ -450,6 +450,9 @@ test('new page source keeps independent loading, error, refresh and last-updated
   const operationsSource = await (await import('node:fs/promises')).readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminModelOperationsWorkspace.jsx', import.meta.url), 'utf8');
   assert.match(operationsSource, /state\.error\?\.status === 410/);
   assert.match(operationsSource, /source: 'usage'/);
+  assert.match(operationsSource, /client\.usageReconciliationCommandReadiness/);
+  assert.match(operationsSource, /readiness\.item\?\.commands_enabled === true/);
+  assert.match(operationsSource, /commandReadinessReasons/);
   const view = await (await import('node:fs/promises')).readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);

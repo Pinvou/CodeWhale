@@ -1794,6 +1794,18 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness:
+    get:
+      operationId: getAdminUsageReconciliationCommandReadiness
+      summary: Read authoritative readiness for usage evidence reconciliation
+      description: Non-secret, no-store command-specific projection. commands_enabled is true only when command governance is ACTIVE; the legacy impact-precheck feature flag is not part of this runtime command path.
+      responses:
+        "200":
+          description: Current command readiness
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenUsageReconciliationCommandReadiness" }
+        "403": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests:
     get:
       operationId: listAdminUsageRequests
@@ -3028,6 +3040,17 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    TokenUsageReconciliationCommandReadiness:
+      type: object
+      additionalProperties: false
+      required: [schema_version, command_type, governance_state, governance_epoch, commands_enabled]
+      properties:
+        schema_version: { type: integer, enum: [1] }
+        command_type: { type: string, enum: [TOKEN_USAGE_RECONCILIATION_RETRY] }
+        governance_state: { type: string, enum: [UNAVAILABLE, PRE_ACTIVATION, ACTIVE, SAFE_ROLLBACK] }
+        governance_epoch: { type: integer, format: int64, minimum: 0 }
+        commands_enabled: { type: boolean }
+        unavailable_reason: { type: string, enum: [GOVERNANCE_UNAVAILABLE, GOVERNANCE_INACTIVE] }
     TokenCommandPrecheckRequest:
       type: object
       additionalProperties: false

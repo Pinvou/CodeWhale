@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,40 @@ type tokenCommandActivationReaderFunc func(context.Context) (TokenCommandGoverna
 
 func (read tokenCommandActivationReaderFunc) CurrentTokenCommandGovernanceActivation(ctx context.Context) (TokenCommandGovernanceActivation, error) {
 	return read(ctx)
+}
+
+func TestAdminUsageReconciliationReadinessUsesAuthoritativeGovernanceState(t *testing.T) {
+	tests := []struct {
+		name        string
+		reader      TokenCommandGovernanceActivationReader
+		wantEnabled bool
+		wantState   string
+		wantReason  string
+	}{
+		{name: "governance unavailable", wantState: "UNAVAILABLE", wantReason: usageReconciliationReadinessGovernanceUnavailable},
+		{name: "pre activation", reader: tokenCommandActivationReaderFunc(func(context.Context) (TokenCommandGovernanceActivation, error) {
+			return TokenCommandGovernanceActivation{State: "PRE_ACTIVATION"}, nil
+		}), wantState: "PRE_ACTIVATION", wantReason: usageReconciliationReadinessGovernanceInactive},
+		{name: "ready", reader: tokenCommandActivationReaderFunc(func(context.Context) (TokenCommandGovernanceActivation, error) {
+			return TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 7}, nil
+		}), wantEnabled: true, wantState: "ACTIVE"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// The governed runtime precheck does not use the legacy impact-precheck
+			// feature flag. Keep it false here to prevent a false readiness gate.
+			service := &Service{commandGovernanceActivation: test.reader, impactPrechecksEnabled: false}
+			response := httptest.NewRecorder()
+			service.adminUsageReconciliationCommandReadiness(response, httptest.NewRequest(http.MethodGet, "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness", nil))
+			var projection usageReconciliationCommandReadiness
+			if err := json.Unmarshal(response.Body.Bytes(), &projection); err != nil {
+				t.Fatalf("decode readiness: %v", err)
+			}
+			if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || projection.CommandsEnabled != test.wantEnabled || projection.GovernanceState != test.wantState || projection.UnavailableReason != test.wantReason {
+				t.Fatalf("status=%d cache=%q projection=%+v", response.Code, response.Header().Get("Cache-Control"), projection)
+			}
+		})
+	}
 }
 
 func TestNewTokenCommandGovernanceFailsClosedUntilActive(t *testing.T) {

@@ -277,6 +277,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/token-accounts/:token_account_id/credential-launches/rotate", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ROTATE", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.registeredTokenHandler("TOKEN_CREDENTIAL_ROTATE", "ISOLATED")))
 		admin.GET("/credential-results/:result_ref", s.authorizer.Require("platform.tokens.read"), s.requireCredentialIsolationEnabled(), httpserver.AdaptFunc(s.adminCredentialIsolationResult))
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
+		admin.GET("/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness", s.authorizer.Require("platform.usage.reconcile.retry"), httpserver.AdaptFunc(s.adminUsageReconciliationCommandReadiness))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
 		admin.GET("/usage-requests/:usage_request_id/evidence", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageEvidence))
 		admin.GET("/reconciliation-cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))

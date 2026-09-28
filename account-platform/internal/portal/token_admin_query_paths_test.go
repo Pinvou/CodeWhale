@@ -15,6 +15,7 @@ import (
 func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 	usageID := uuid.NewString()
 	listPaths := []string{
+		"/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness",
 		"/admin/v1/models", "/admin/v1/protocols", "/admin/v1/formulas",
 		"/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/usage-requests",
 		"/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit",
@@ -39,6 +40,7 @@ func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 	// Existing aggregate roots retain their previously approved write methods while
 	// projection-only routes introduced by APT-121 cannot be used to mutate data.
 	for _, path := range []string{
+		"/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness",
 		"/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates",
 		"/admin/v1/resource-audit", "/admin/v1/usage-requests/" + usageID + "/evidence",
 		"/admin/v1/provisionings/" + usageID + "/attempts",
