@@ -31,6 +31,9 @@ const CLAIM_CAPABILITIES: &[&str] = &[
     "resume_v1",
     "task_v1",
     "temporary_model_package_v1",
+    "permission_v1",
+    "attachment_v1",
+    "artifact_v1",
     "snapshot_journal_v1",
 ];
 

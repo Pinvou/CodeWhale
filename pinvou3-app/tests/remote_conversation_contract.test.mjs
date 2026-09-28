@@ -32,7 +32,8 @@ test('A connection shell contains no second transcript, task list, history or co
   assert.ok(shell.includes('onRequestDisconnect'));
   assert.ok(shell.includes('onClose'));
   assert.ok(chat.includes('remoteProxyChatItems(activeSessionId, remoteProxyHistory)'));
-  assert.match(chat, /submitRemoteTask\(\s*remoteBinding\.localSessionId, remoteBinding\.remoteRef, intent/);
+  assert.match(chat, /reserveRemoteTask\(\s*remoteBinding\.localSessionId, remoteBinding\.remoteRef, intent/);
+  assert.match(chat, /commitRemoteTask\(\s*remoteBinding\.localSessionId, remoteBinding\.remoteRef, preparedOutcome\.handle, attachmentIds/);
   assert.match(chat, /readRemoteProxyHistory\(remoteBinding\.localSessionId\)[\s\S]*?recordRemoteDispatch\(/);
   assert.match(chat, /if \(outcome\.state !== 'queued'\) return 'held'/);
   assert.ok(!chat.includes('bs ? bs.transcript : []'));

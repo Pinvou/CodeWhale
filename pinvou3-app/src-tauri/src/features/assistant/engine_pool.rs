@@ -84,6 +84,16 @@ impl RemoteRuntimeModelBundle {
             vision_credential,
         })
     }
+
+    fn image_input_mode(&self) -> crate::features::assistant::image_capability::ImageInputMode {
+        use crate::features::assistant::image_capability::{
+            effective_image_capability, image_input_mode,
+        };
+        image_input_mode(
+            effective_image_capability(&self.primary),
+            self.vision.is_some(),
+        )
+    }
 }
 
 /// Engine 空闲回收阈值：engine 是进程内 task（非子进程），但每个都占一份通道、
@@ -2013,6 +2023,7 @@ impl EnginePool {
         &self,
         session_id: &str,
         content: String,
+        skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
         on_reserved: F,
     ) -> Result<()>
@@ -2021,11 +2032,118 @@ impl EnginePool {
     {
         let reservation = self.reserve_turn(session_id)?;
         on_reserved(reservation.generation());
+        let skill_session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
+                &skill_session_id,
+                &skill_ids,
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
+        .map_err(anyhow::Error::msg)?;
         let display_message = user_display_message(content.clone());
         self.send_reserved_user_message_with_model_override(
             session_id,
             content,
             display_message,
+            AppMode::Agent,
+            false,
+            None,
+            reservation,
+            None,
+            model_override,
+        )
+        .await
+    }
+
+    /// Remote attachments use the same ingestion and message construction as
+    /// local chat, while retaining the task-scoped model and the single turn
+    /// reservation. This method never accepts an A-supplied filesystem path.
+    pub(crate) async fn send_remote_user_message_with_attachments<F>(
+        &self,
+        session_id: &str,
+        content: String,
+        attachments: Vec<crate::features::files::file_ingest::IngestResult>,
+        skill_ids: Vec<String>,
+        model_override: Option<RemoteRuntimeModelBundle>,
+        on_reserved: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u64) + Send,
+    {
+        use crate::features::assistant::attachments::{
+            build_message_with_attachments_in_dir, prepare_native_user_message_in_dir,
+        };
+        use crate::features::assistant::image_capability::ImageInputMode;
+
+        if attachments.is_empty() {
+            return self
+                .send_remote_user_message(
+                    session_id,
+                    content,
+                    skill_ids,
+                    model_override,
+                    on_reserved,
+                )
+                .await;
+        }
+        let reservation = self.reserve_turn(session_id)?;
+        on_reserved(reservation.generation());
+        let skill_session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
+                &skill_session_id,
+                &skill_ids,
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
+        .map_err(anyhow::Error::msg)?;
+        let roots = self.store.session_roots(session_id)?;
+        let has_images = attachments.iter().any(|item| item.kind == "image");
+        let image_mode = if has_images {
+            match model_override.as_ref() {
+                Some(bundle) => bundle.image_input_mode(),
+                None => self.fresh_bridge_for(session_id).await?.image_input_mode(),
+            }
+        } else {
+            ImageInputMode::Native
+        };
+        if has_images && image_mode == ImageInputMode::Unsupported {
+            bail!("task_image_input_unsupported");
+        }
+        let names = attachments
+            .iter()
+            .map(|item| item.basename.as_str())
+            .collect::<Vec<_>>();
+        let names = serde_json::to_string(&names)?;
+        let display_content = if content.trim().is_empty() {
+            format!("📎 {names}")
+        } else {
+            format!("{content}\n\n📎 {names}")
+        };
+        let engine_content = if has_images && image_mode == ImageInputMode::Native {
+            prepare_native_user_message_in_dir(
+                content,
+                attachments,
+                &roots.execution,
+                "attachments",
+            )
+            .map_err(anyhow::Error::msg)?
+        } else {
+            build_message_with_attachments_in_dir(
+                content,
+                attachments,
+                &roots.ledger,
+                "attachments",
+                roots.ledger != roots.execution,
+            )
+        };
+        self.send_reserved_user_message_with_model_override(
+            session_id,
+            engine_content,
+            user_display_message(display_content),
             AppMode::Agent,
             false,
             None,

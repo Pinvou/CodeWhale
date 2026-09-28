@@ -48,7 +48,7 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
     SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    StopReason,
+    StopReason, ToolKind,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use agent_probe::{CliProbeCache, CliProbeGates, ResolvedCli};
@@ -635,11 +635,44 @@ pub struct CodexAcpPendingElicitation {
 struct PendingPermission {
     view: CodexAcpPendingPermission,
     option_ids: Vec<String>,
+    option_kinds: HashMap<String, String>,
+    remote_owner: Option<RemotePermissionOwner>,
+    remote_request_id: Option<String>,
+    remote_projection: Option<RemotePermissionProjection>,
     response_tx: oneshot::Sender<RequestPermissionResponse>,
+}
+
+/// Exact owner of ACP interactive requests raised by a controller-sourced code
+/// turn. Permission requests remain B-local and are projected through the
+/// remote permission protocol. Form elicitations are not part of that protocol,
+/// so they are cancelled immediately without retaining or projecting their
+/// payload. Local/Web callers can never resolve either kind of request for this
+/// authenticated A lease.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RemotePermissionOwner {
+    pub(crate) session_id: String,
+    pub(crate) task_id: String,
+    pub(crate) lease: crate::features::remote_control::controller::protocol::LeaseContext,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteOwnedPermission {
+    pub(crate) permission_request_id: String,
+    pub(crate) owner: RemotePermissionOwner,
+    pub(crate) projection: RemotePermissionProjection,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RemotePermissionProjection {
+    pub(crate) operation_type: String,
+    pub(crate) risk_level: String,
+    pub(crate) target_scope: String,
+    pub(crate) preview: String,
 }
 
 struct PendingElicitation {
     view: CodexAcpPendingElicitation,
+    remote_owner: Option<RemotePermissionOwner>,
     response_tx: oneshot::Sender<CreateElicitationResponse>,
 }
 
@@ -878,6 +911,7 @@ pub struct AcpPool {
     app: AppHandle,
     sessions: Arc<Mutex<HashMap<String, Arc<AcpSession>>>>,
     pending_permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
+    remote_permission_owners: Arc<parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>>,
     pending_elicitations: Arc<Mutex<HashMap<String, PendingElicitation>>>,
     agents: SessionAgentStore,
     config_defaults: AcpConfigDefaultsStore,
@@ -1158,6 +1192,7 @@ impl AcpPool {
             app,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+            remote_permission_owners: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pending_elicitations: Arc::new(Mutex::new(HashMap::new())),
             agents,
             config_defaults,
@@ -3046,6 +3081,26 @@ impl AcpPool {
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         workspace_references: Vec<String>,
     ) -> Result<()> {
+        self.send_message_with_display_content(
+            session_id,
+            content.clone(),
+            content,
+            attachments,
+            workspace_references,
+        )
+        .await
+    }
+
+    /// Submit private task-scoped instructions to ACP while preserving only
+    /// the original user text in the local transcript/event bridge.
+    pub(crate) async fn send_message_with_display_content(
+        &self,
+        session_id: &str,
+        content: String,
+        display_content: String,
+        attachments: Vec<crate::features::files::file_ingest::IngestResult>,
+        workspace_references: Vec<String>,
+    ) -> Result<()> {
         let workspace = self.execution_workspace(session_id)?;
         let workspace_references =
             workspace::resolve_workspace_references(&workspace, &workspace_references)?;
@@ -3065,7 +3120,7 @@ impl AcpPool {
         let session_id = session_id.to_string();
         tokio::spawn(async move {
             if runtime
-                .prompt(content, prepared.blocks, prepared.display_attachments)
+                .prompt(display_content, prepared.blocks, prepared.display_attachments)
                 .await
             {
                 pool.handle_outdated_codex_runtime(&session_id).await;
@@ -3411,6 +3466,102 @@ impl AcpPool {
             .collect()
     }
 
+    /// Marks the one code turn whose ACP permission prompts are controlled by
+    /// A. A session cannot be borrowed by a second task or lease while the
+    /// first turn is alive.
+    pub(crate) fn claim_remote_permission_owner(&self, owner: RemotePermissionOwner) -> Result<()> {
+        let mut owners = self.remote_permission_owners.lock();
+        match owners.get(&owner.session_id) {
+            Some(current) if current != &owner => bail!("remote_permission_owner_conflict"),
+            Some(_) => Ok(()),
+            None => {
+                owners.insert(owner.session_id.clone(), owner);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn has_remote_permission_owner(&self, owner: &RemotePermissionOwner) -> bool {
+        self.remote_permission_owners.lock().get(&owner.session_id) == Some(owner)
+    }
+
+    /// Returns only ACP requests captured while this exact remote owner was
+    /// active. The opaque controller request id is distinct from ACP's tool id.
+    pub(crate) async fn pending_remote_permissions(
+        &self,
+        owner: &RemotePermissionOwner,
+    ) -> Vec<RemoteOwnedPermission> {
+        self.pending_permissions
+            .lock()
+            .await
+            .values()
+            .filter_map(|pending| {
+                if !remote_request_owned_by(pending.remote_owner.as_ref(), owner) {
+                    return None;
+                }
+                Some(RemoteOwnedPermission {
+                    permission_request_id: pending.remote_request_id.clone()?,
+                    owner: owner.clone(),
+                    projection: pending.remote_projection.clone()?,
+                })
+            })
+            .collect()
+    }
+
+    /// Terminal/cancel/disconnect cleanup. Removing the owner first closes the
+    /// admission gate; every still-pending ACP responder is then cancelled.
+    pub(crate) async fn release_remote_permission_owner(&self, owner: &RemotePermissionOwner) {
+        {
+            let mut owners = self.remote_permission_owners.lock();
+            if owners.get(&owner.session_id) != Some(owner) {
+                return;
+            }
+            owners.remove(&owner.session_id);
+        }
+        let mut pending = self.pending_permissions.lock().await;
+        let keys = pending
+            .iter()
+            .filter(|(_, request)| remote_request_owned_by(request.remote_owner.as_ref(), owner))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut cancelled = Vec::new();
+        for key in keys {
+            if let Some(request) = pending.remove(&key) {
+                cancelled.push(request.view.tool_call_id.clone());
+                let _ = request.response_tx.send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+            }
+        }
+        drop(pending);
+        if let Some(runtime) = self.sessions.lock().await.get(&owner.session_id).cloned() {
+            for tool_call_id in cancelled {
+                runtime.bridge.emit(
+                    "permission_resolved",
+                    json!({
+                        "toolCallId": tool_call_id,
+                        "outcome": "cancelled",
+                    }),
+                );
+            }
+        }
+        let mut pending = self.pending_elicitations.lock().await;
+        let cancelled = cancel_remote_owned_elicitations(&mut pending, owner);
+        drop(pending);
+        if let Some(runtime) = self.sessions.lock().await.get(&owner.session_id).cloned() {
+            for elicitation_id in cancelled {
+                runtime.bridge.emit(
+                    "elicitation_resolved",
+                    json!({
+                        "elicitationId": elicitation_id,
+                        "action": "cancel",
+                        "reason": "remote_task_ended",
+                    }),
+                );
+            }
+        }
+    }
+
     pub async fn pending_elicitations_for(
         &self,
         session_id: &str,
@@ -3432,6 +3583,11 @@ impl AcpPool {
     ) -> Result<()> {
         let key = permission_key(session_id, tool_call_id);
         let mut pending = self.pending_permissions.lock().await;
+        if pending.get(&key).is_some_and(|request| {
+            !local_permission_response_allowed(request.remote_owner.as_ref())
+        }) {
+            bail!("remote_permission_controller_required");
+        }
         let request = pending
             .remove(&key)
             .context("权限请求已过期、已回复或不属于当前会话")?;
@@ -3463,6 +3619,63 @@ impl AcpPool {
         Ok(())
     }
 
+    /// Resolves a controller-owned ACP prompt with the exact
+    /// session/task/lease/request tuple. Local/Web callers cannot construct
+    /// this owner and continue to use `respond_permission`, which fails closed.
+    pub(crate) async fn respond_remote_permission(
+        &self,
+        owner: &RemotePermissionOwner,
+        permission_request_id: &str,
+        allow: bool,
+    ) -> Result<()> {
+        let mut pending = self.pending_permissions.lock().await;
+        let key = pending
+            .iter()
+            .find_map(|(key, request)| {
+                (remote_request_owned_by(request.remote_owner.as_ref(), owner)
+                    && request.remote_request_id.as_deref() == Some(permission_request_id))
+                .then(|| key.clone())
+            })
+            .context("remote_permission_binding_stale")?;
+        let request = pending.remove(&key).expect("matched remote permission");
+        let selected = remote_permission_option_id(&request.option_kinds, allow);
+        let (response, option_id, outcome) = if let Some(option_id) = selected {
+            (
+                RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                    SelectedPermissionOutcome::new(option_id.clone()),
+                )),
+                Some(option_id),
+                "selected",
+            )
+        } else if !allow {
+            (
+                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+                None,
+                "cancelled",
+            )
+        } else {
+            pending.insert(key, request);
+            bail!("remote_permission_allow_option_missing");
+        };
+        let tool_call_id = request.view.tool_call_id.clone();
+        request
+            .response_tx
+            .send(response)
+            .map_err(|_| anyhow::anyhow!("remote_permission_closed"))?;
+        drop(pending);
+        if let Some(runtime) = self.sessions.lock().await.get(&owner.session_id).cloned() {
+            runtime.bridge.emit(
+                "permission_resolved",
+                json!({
+                    "toolCallId": tool_call_id,
+                    "optionId": option_id,
+                    "outcome": outcome,
+                }),
+            );
+        }
+        Ok(())
+    }
+
     pub async fn respond_elicitation(
         &self,
         session_id: &str,
@@ -3470,6 +3683,13 @@ impl AcpPool {
         action: &str,
         content: serde_json::Value,
     ) -> Result<()> {
+        let key = elicitation_key(session_id, elicitation_id);
+        let mut pending = self.pending_elicitations.lock().await;
+        if pending.get(&key).is_some_and(|request| {
+            !local_elicitation_response_allowed(request.remote_owner.as_ref())
+        }) {
+            bail!("remote_elicitation_controller_required");
+        }
         let response = match action {
             "accept" => {
                 let content =
@@ -3481,13 +3701,10 @@ impl AcpPool {
             "cancel" => CreateElicitationResponse::new(ElicitationAction::Cancel),
             _ => bail!("不支持的输入请求操作: {action}"),
         };
-        let key = elicitation_key(session_id, elicitation_id);
-        let request = self
-            .pending_elicitations
-            .lock()
-            .await
+        let request = pending
             .remove(&key)
             .context("输入请求已过期、已回复或不属于当前会话")?;
+        drop(pending);
         request
             .response_tx
             .send(response)
@@ -3566,20 +3783,7 @@ impl AcpPool {
         bridge: Option<&EventBridge>,
     ) {
         let mut pending = self.pending_elicitations.lock().await;
-        let keys = pending
-            .iter()
-            .filter(|(_, request)| request.view.session_id == session_id)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        let mut cancelled = Vec::new();
-        for key in keys {
-            if let Some(request) = pending.remove(&key) {
-                cancelled.push(request.view.elicitation_id.clone());
-                let _ = request
-                    .response_tx
-                    .send(CreateElicitationResponse::new(ElicitationAction::Cancel));
-            }
-        }
+        let cancelled = cancel_session_elicitations(&mut pending, session_id);
         drop(pending);
         if let Some(bridge) = bridge {
             for elicitation_id in cancelled {
@@ -3748,7 +3952,9 @@ impl AcpPool {
         let bridge_for_elicitation = event_bridge.clone();
         let replay_for_notification = replay_suppressed.clone();
         let pending_for_permission = self.pending_permissions.clone();
+        let remote_owners_for_permission = self.remote_permission_owners.clone();
         let pending_for_elicitation = self.pending_elicitations.clone();
+        let remote_owners_for_elicitation = self.remote_permission_owners.clone();
         let pinvou_id_for_permission = pinvou_session_id.to_string();
         let pinvou_id_for_elicitation = pinvou_session_id.to_string();
 
@@ -3778,6 +3984,28 @@ impl AcpPool {
                             .collect::<Vec<_>>();
                         let request_value =
                             serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
+                        let option_kinds = request_value
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                Some((
+                                    option.get("optionId")?.as_str()?.to_owned(),
+                                    option.get("kind")?.as_str()?.to_owned(),
+                                ))
+                            })
+                            .collect::<HashMap<_, _>>();
+                        let remote_owner = remote_owners_for_permission
+                            .lock()
+                            .get(&pinvou_id_for_permission)
+                            .cloned();
+                        let remote_request_id = remote_owner
+                            .as_ref()
+                            .map(|_| format!("permission-{}", uuid::Uuid::new_v4().simple()));
+                        let remote_projection = remote_owner
+                            .as_ref()
+                            .map(|_| remote_permission_projection(&request));
                         let view = CodexAcpPendingPermission {
                             session_id: pinvou_id_for_permission.clone(),
                             tool_call_id: tool_call_id.clone(),
@@ -3789,6 +4017,10 @@ impl AcpPool {
                             PendingPermission {
                                 view,
                                 option_ids,
+                                option_kinds,
+                                remote_owner,
+                                remote_request_id,
+                                remote_projection,
                                 response_tx,
                             },
                         );
@@ -3809,6 +4041,20 @@ impl AcpPool {
                 )
                 .on_receive_request(
                     async move |request: CreateElicitationRequest, responder, _cx| {
+                        let remote_owner = remote_owners_for_elicitation
+                            .lock()
+                            .get(&pinvou_id_for_elicitation)
+                            .cloned();
+                        // Remote form elicitation has no authenticated A<->B
+                        // action protocol yet. Fail closed *before* storing or
+                        // emitting the request so the ACP call cannot hang and
+                        // form fields, raw content, and B-local paths cannot
+                        // reach the controller journal or local/Web prompt UI.
+                        if remote_elicitation_must_cancel(remote_owner.as_ref()) {
+                            return responder.respond(CreateElicitationResponse::new(
+                                ElicitationAction::Cancel,
+                            ));
+                        }
                         let request_value =
                             serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
                         let elicitation_id = elicitation_id_for(&request_value);
@@ -3823,7 +4069,14 @@ impl AcpPool {
                         pending_for_elicitation
                             .lock()
                             .await
-                            .insert(key.clone(), PendingElicitation { view, response_tx });
+                            .insert(
+                                key.clone(),
+                                PendingElicitation {
+                                    view,
+                                    remote_owner,
+                                    response_tx,
+                                },
+                            );
                         bridge_for_elicitation.emit(
                             "elicitation_requested",
                             json!({
@@ -4383,6 +4636,113 @@ fn permission_key(session_id: &str, tool_call_id: &str) -> String {
     format!("{session_id}\u{1f}{tool_call_id}")
 }
 
+fn remote_permission_option_id(
+    option_kinds: &HashMap<String, String>,
+    allow: bool,
+) -> Option<String> {
+    option_kinds.iter().find_map(|(id, kind)| {
+        let normalized = kind.to_ascii_lowercase().replace(['-', '_'], "");
+        let matches = if allow {
+            normalized == "allowonce"
+        } else {
+            normalized == "rejectonce" || normalized == "denyonce"
+        };
+        matches.then(|| id.clone())
+    })
+}
+
+fn remote_permission_projection(request: &RequestPermissionRequest) -> RemotePermissionProjection {
+    let (operation_type, risk_level) = match request.tool_call.fields.kind {
+        Some(ToolKind::Read | ToolKind::Search | ToolKind::Think) => ("tool_call", "low"),
+        Some(ToolKind::Edit | ToolKind::Move) => ("file_write", "medium"),
+        Some(ToolKind::Delete) => ("file_delete", "high"),
+        Some(ToolKind::Execute) => ("shell_command", "high"),
+        Some(ToolKind::Fetch) => ("network_request", "high"),
+        Some(ToolKind::SwitchMode) => ("tool_call", "medium"),
+        Some(_) | None => ("other", "high"),
+    };
+    let target_scope = request
+        .tool_call
+        .fields
+        .locations
+        .as_ref()
+        .and_then(|locations| locations.first())
+        .map(|location| location.path.to_string_lossy())
+        .map(|path| {
+            crate::features::remote_control::controller::permission::sanitize_scope(&path)
+        })
+        .unwrap_or_else(|| "[REDACTED]".to_owned());
+    let preview = request
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .map(crate::features::remote_control::controller::permission::sanitize_preview)
+        .unwrap_or_default();
+    RemotePermissionProjection {
+        operation_type: operation_type.to_owned(),
+        risk_level: risk_level.to_owned(),
+        target_scope,
+        preview,
+    }
+}
+
+fn local_permission_response_allowed(owner: Option<&RemotePermissionOwner>) -> bool {
+    owner.is_none()
+}
+
+fn remote_request_owned_by(
+    candidate: Option<&RemotePermissionOwner>,
+    expected: &RemotePermissionOwner,
+) -> bool {
+    candidate == Some(expected)
+}
+
+fn local_elicitation_response_allowed(owner: Option<&RemotePermissionOwner>) -> bool {
+    owner.is_none()
+}
+
+fn remote_elicitation_must_cancel(owner: Option<&RemotePermissionOwner>) -> bool {
+    owner.is_some()
+}
+
+fn cancel_remote_owned_elicitations(
+    pending: &mut HashMap<String, PendingElicitation>,
+    owner: &RemotePermissionOwner,
+) -> Vec<String> {
+    cancel_elicitations_matching(pending, |request| {
+        remote_request_owned_by(request.remote_owner.as_ref(), owner)
+    })
+}
+
+fn cancel_session_elicitations(
+    pending: &mut HashMap<String, PendingElicitation>,
+    session_id: &str,
+) -> Vec<String> {
+    cancel_elicitations_matching(pending, |request| request.view.session_id == session_id)
+}
+
+fn cancel_elicitations_matching(
+    pending: &mut HashMap<String, PendingElicitation>,
+    mut should_cancel: impl FnMut(&PendingElicitation) -> bool,
+) -> Vec<String> {
+    let keys = pending
+        .iter()
+        .filter(|(_, request)| should_cancel(request))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let mut cancelled = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Some(request) = pending.remove(&key) {
+            cancelled.push(request.view.elicitation_id.clone());
+            let _ = request
+                .response_tx
+                .send(CreateElicitationResponse::new(ElicitationAction::Cancel));
+        }
+    }
+    cancelled
+}
+
 fn elicitation_key(session_id: &str, elicitation_id: &str) -> String {
     format!("{session_id}\u{1f}{elicitation_id}")
 }
@@ -4754,6 +5114,222 @@ mod tests {
             permission_key("session-a", "tool-1"),
             permission_key("session-b", "tool-1")
         );
+    }
+
+    #[test]
+    fn remote_permission_decision_selects_only_matching_option_kind() {
+        let options = HashMap::from([
+            ("allow-once-id".to_owned(), "allow_once".to_owned()),
+            ("reject-once-id".to_owned(), "reject_once".to_owned()),
+        ]);
+        assert_eq!(
+            remote_permission_option_id(&options, true).as_deref(),
+            Some("allow-once-id")
+        );
+        assert_eq!(
+            remote_permission_option_id(&options, false).as_deref(),
+            Some("reject-once-id")
+        );
+        assert_eq!(
+            remote_permission_option_id(
+                &HashMap::from([
+                    ("persistent".to_owned(), "allow_always".to_owned()),
+                    ("unrelated".to_owned(), "ask".to_owned()),
+                ]),
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_permission_projection_maps_acp_metadata_without_leaking_payloads() {
+        let request: RequestPermissionRequest = serde_json::from_value(json!({
+            "sessionId": "session-remote",
+            "toolCall": {
+                "toolCallId": "tool-remote",
+                "kind": "execute",
+                "title": "curl -H 'Authorization: Bearer secret' https://private.example",
+                "locations": [{"path": "C:\\Users\\private\\secret.txt"}],
+                "rawInput": {"command": "never-project-this-command"}
+            },
+            "options": [{
+                "optionId": "allow-once",
+                "name": "Allow once",
+                "kind": "allow_once"
+            }]
+        }))
+        .unwrap();
+        let projection = remote_permission_projection(&request);
+        assert_eq!(projection.operation_type, "shell_command");
+        assert_eq!(projection.risk_level, "high");
+        assert_eq!(projection.target_scope, "[PATH]");
+        assert_eq!(projection.preview, "[REDACTED]");
+        let projected = format!("{projection:?}");
+        assert!(!projected.contains("secret.txt"));
+        assert!(!projected.contains("never-project-this-command"));
+        assert!(!projected.contains("private.example"));
+    }
+
+    #[test]
+    fn remote_permission_projection_uses_only_supported_fixed_enums() {
+        for (kind, expected_operation, expected_risk) in [
+            ("read", "tool_call", "low"),
+            ("search", "tool_call", "low"),
+            ("think", "tool_call", "low"),
+            ("edit", "file_write", "medium"),
+            ("move", "file_write", "medium"),
+            ("delete", "file_delete", "high"),
+            ("execute", "shell_command", "high"),
+            ("fetch", "network_request", "high"),
+            ("switch_mode", "tool_call", "medium"),
+            ("future_kind", "other", "high"),
+        ] {
+            let request: RequestPermissionRequest = serde_json::from_value(json!({
+                "sessionId": "session-remote",
+                "toolCall": {"toolCallId": "tool-remote", "kind": kind},
+                "options": [{
+                    "optionId": "reject-once",
+                    "name": "Reject once",
+                    "kind": "reject_once"
+                }]
+            }))
+            .unwrap();
+            let projection = remote_permission_projection(&request);
+            assert_eq!(projection.operation_type, expected_operation, "kind={kind}");
+            assert_eq!(projection.risk_level, expected_risk, "kind={kind}");
+            assert_eq!(projection.target_scope, "[REDACTED]");
+            assert_eq!(projection.preview, "");
+        }
+    }
+
+    #[test]
+    fn local_interactive_responses_fail_closed_for_remote_owner() {
+        assert!(local_permission_response_allowed(None));
+        let owner = RemotePermissionOwner {
+            session_id: "session-remote".to_owned(),
+            task_id: "task-remote".to_owned(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".to_owned(),
+                controller_lease_id: "lease-1".to_owned(),
+                lease_epoch: "1".to_owned(),
+                relay_epoch: "relay-1".to_owned(),
+                remote_control_generation: "generation-1".to_owned(),
+            },
+        };
+        assert!(!local_permission_response_allowed(Some(&owner)));
+        assert!(local_elicitation_response_allowed(None));
+        assert!(!local_elicitation_response_allowed(Some(&owner)));
+        assert!(!remote_elicitation_must_cancel(None));
+        assert!(remote_elicitation_must_cancel(Some(&owner)));
+    }
+
+    #[test]
+    fn remote_interactive_cleanup_requires_the_exact_task_session_and_lease() {
+        let owner = RemotePermissionOwner {
+            session_id: "session-remote".to_owned(),
+            task_id: "task-remote".to_owned(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".to_owned(),
+                controller_lease_id: "lease-1".to_owned(),
+                lease_epoch: "1".to_owned(),
+                relay_epoch: "relay-1".to_owned(),
+                remote_control_generation: "generation-1".to_owned(),
+            },
+        };
+        assert!(remote_request_owned_by(Some(&owner), &owner));
+        assert!(!remote_request_owned_by(None, &owner));
+
+        let mut foreign = owner.clone();
+        foreign.task_id = "task-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.session_id = "session-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.connection_id = "connection-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.controller_lease_id = "lease-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.lease_epoch = "2".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.relay_epoch = "relay-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+        foreign = owner.clone();
+        foreign.lease.remote_control_generation = "generation-other".to_owned();
+        assert!(!remote_request_owned_by(Some(&foreign), &owner));
+    }
+
+    #[tokio::test]
+    async fn remote_elicitation_cleanup_unblocks_only_the_exact_owner() {
+        let owner = RemotePermissionOwner {
+            session_id: "session-remote".to_owned(),
+            task_id: "task-remote".to_owned(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".to_owned(),
+                controller_lease_id: "lease-1".to_owned(),
+                lease_epoch: "1".to_owned(),
+                relay_epoch: "relay-1".to_owned(),
+                remote_control_generation: "generation-1".to_owned(),
+            },
+        };
+        let mut foreign_owner = owner.clone();
+        foreign_owner.lease.controller_lease_id = "lease-other".to_owned();
+
+        let make_pending = |id: &str, remote_owner: Option<RemotePermissionOwner>| {
+            let (response_tx, response_rx) = oneshot::channel();
+            (
+                PendingElicitation {
+                    view: CodexAcpPendingElicitation {
+                        session_id: "session-remote".to_owned(),
+                        elicitation_id: id.to_owned(),
+                        request: json!({ "form": { "secretPath": "C:/private/secret.txt" } }),
+                    },
+                    remote_owner,
+                    response_tx,
+                },
+                response_rx,
+            )
+        };
+        let (owned, owned_rx) = make_pending("owned", Some(owner.clone()));
+        let (foreign, mut foreign_rx) = make_pending("foreign", Some(foreign_owner));
+        let (local, mut local_rx) = make_pending("local", None);
+        let mut pending = HashMap::from([
+            ("owned".to_owned(), owned),
+            ("foreign".to_owned(), foreign),
+            ("local".to_owned(), local),
+        ]);
+
+        assert_eq!(
+            cancel_remote_owned_elicitations(&mut pending, &owner),
+            vec!["owned"]
+        );
+        let owned_response = owned_rx.await.expect("exact owner must be unblocked");
+        assert_eq!(
+            serde_json::to_value(owned_response).unwrap()["action"],
+            "cancel"
+        );
+        assert!(foreign_rx.try_recv().is_err());
+        assert!(local_rx.try_recv().is_err());
+        assert_eq!(pending.len(), 2);
+
+        // Session cancellation/disconnect is broader than owner release: all
+        // remaining prompts for that B-local session must be unblocked.
+        let mut cancelled = cancel_session_elicitations(&mut pending, "session-remote");
+        cancelled.sort();
+        assert_eq!(cancelled, vec!["foreign", "local"]);
+        assert_eq!(
+            serde_json::to_value(foreign_rx.await.unwrap()).unwrap()["action"],
+            "cancel"
+        );
+        assert_eq!(
+            serde_json::to_value(local_rx.await.unwrap()).unwrap()["action"],
+            "cancel"
+        );
+        assert!(pending.is_empty());
     }
 
     #[test]

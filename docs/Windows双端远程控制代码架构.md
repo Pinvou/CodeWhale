@@ -614,7 +614,7 @@ DEV-31 已删除未发布的 `RemoteConversationView`；`ChatView.jsx` 是唯一
 
 ### 7.5 Command 面存在重叠入口
 
-当前 A 端只保留 `openLiveRemoteProxy` 与 RemoteProxy 远程 action；其中 `submitRemoteTask(localSessionId, remoteRef, intent)` 是现行 `prepare → persist → dispatch` 入口，不是旧直发 handler。B 端保留本地权威会话入口 `controlledTaskSend`。未发布的 `controllerSessionOpen`、`openRemoteSession` 以及旧签名任务直发入口已直接删除，不设置别名或兼容代理。
+当前 A 端只保留 `openLiveRemoteProxy` 与 RemoteProxy 远程 action；任务提交使用 `reserveRemoteTask(localSessionId, remoteRef, intent) → 上传并确认附件 → commitRemoteTask(localSessionId, remoteRef, taskId, intentFingerprint)`。`reserve` 只持久化尚未尝试发送的 outbox，`commit` 才跨越 attempt barrier；一旦发送结果不确定，调用方必须展示 `result_unknown` 并对账，不能以新任务重发。B 端保留本地权威会话入口 `controlledTaskSend`。未发布的 `controllerSessionOpen`、`openRemoteSession`、`submitRemoteTask` 以及旧签名任务直发入口已直接删除，不设置别名或兼容代理。
 
 ### 7.6 A 端远程历史与 SessionStore 分裂
 

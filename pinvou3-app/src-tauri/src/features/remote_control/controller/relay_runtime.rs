@@ -6,11 +6,14 @@
 //! over from `controller_pairing_reserved`, runs the commitment/Finished
 //! exchange and applies `controller_joined` to the device owner.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
 
@@ -41,6 +44,95 @@ use super::resume::{
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
 const MAX_PAIRING_CODE_TTL_MS: u64 = 5 * 60_000;
+const REMOTE_ACTION_CACHE_CAPACITY: usize = 256;
+const REMOTE_ACTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone)]
+struct CachedRemoteActionResult {
+    fingerprint: [u8; 32],
+    response: Value,
+    touched_at: Instant,
+}
+
+#[derive(Default)]
+struct RemoteActionResultCache {
+    entries: Mutex<HashMap<String, CachedRemoteActionResult>>,
+}
+
+enum RemoteActionCacheLookup {
+    Miss,
+    Hit(Value),
+    Conflict,
+}
+
+impl RemoteActionResultCache {
+    fn lookup(&self, request_id: &str, fingerprint: [u8; 32]) -> RemoteActionCacheLookup {
+        let mut entries = self.entries.lock();
+        let now = Instant::now();
+        entries.retain(|_, entry| {
+            now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
+        });
+        match entries.get_mut(request_id) {
+            Some(entry) if entry.fingerprint == fingerprint => {
+                entry.touched_at = now;
+                RemoteActionCacheLookup::Hit(entry.response.clone())
+            }
+            Some(_) => RemoteActionCacheLookup::Conflict,
+            None => RemoteActionCacheLookup::Miss,
+        }
+    }
+
+    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Value) {
+        let mut entries = self.entries.lock();
+        let now = Instant::now();
+        entries.retain(|_, entry| {
+            now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
+        });
+        if entries.len() >= REMOTE_ACTION_CACHE_CAPACITY {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.touched_at)
+                .map(|(request_id, _)| request_id.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(
+            request_id,
+            CachedRemoteActionResult {
+                fingerprint,
+                response,
+                touched_at: now,
+            },
+        );
+    }
+}
+
+fn remote_action_fingerprint(
+    lease: &LeaseContext,
+    session_ref: &str,
+    request_id: &str,
+    operation: &str,
+    body: &Value,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let body_bytes = serde_json::to_vec(body).expect("validated remote action body serializes");
+    for field in [
+        lease.connection_id.as_bytes(),
+        lease.controller_lease_id.as_bytes(),
+        lease.lease_epoch.as_bytes(),
+        lease.relay_epoch.as_bytes(),
+        lease.remote_control_generation.as_bytes(),
+        session_ref.as_bytes(),
+        request_id.as_bytes(),
+        operation.as_bytes(),
+        body_bytes.as_slice(),
+    ] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    hasher.finalize().into()
+}
 
 // Relay signs a wall-clock expiry, whereas the B lifecycle owner and UI
 // countdown use one local monotonic clock. Convert once at receipt; never
@@ -161,6 +253,11 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // 一并声明 task_v1，使 A 的能力快照请求与任务请求能通过协商。
     "task_v1",
     "temporary_model_package_v1",
+    // DEV-23：审批、附件和成果均通过统一 remote_action 加密通道；只有在生产
+    // 注册能力中显式声明，A/B 才能协商出相应 operation capability。
+    "permission_v1",
+    "attachment_v1",
+    "artifact_v1",
     // E2E-05：B 的权威 journal（DEV-19）已实现，声明 snapshot_journal_v1 使
     // journal_event / journal_replay 等正文事件能通过协商。
     "snapshot_journal_v1",
@@ -201,6 +298,9 @@ pub(crate) struct ControlledRelayWorker {
     channel: crate::features::remote_control::manager::ControllerRelayChannel,
     /// 业务派发端口：由命令层注入（能力快照 / 任务接纳 / 取消）。
     business: std::sync::Arc<dyn ControlledBusinessPort>,
+    /// Generation-local action outcomes. Dropping the worker on disconnect
+    /// clears the cache; every hit is bound to the full request fingerprint.
+    action_results: RemoteActionResultCache,
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -416,6 +516,7 @@ impl ControlledRelayWorker {
             handshake: Some(handshake),
             channel,
             business,
+            action_results: RemoteActionResultCache::default(),
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -943,8 +1044,9 @@ impl ControlledRelayWorker {
         if payload_kind == "task_submit" {
             log_controlled_event("task_submit_decrypted", "dispatching");
         }
-        let responses = match dispatch_decrypted_payload(
+        let responses = match dispatch_decrypted_payload_cached(
             self.business.as_ref(),
+            &self.action_results,
             &lease,
             &payload_kind,
             &payload,
@@ -1044,6 +1146,16 @@ pub(crate) fn liveness_evidence_action(
 /// 接纳与取消）由命令层实现，避免两条实现漂移。
 #[async_trait::async_trait]
 pub(crate) trait ControlledBusinessPort: Send + Sync {
+    /// A closed, lease-bound desktop action. The implementation resolves the
+    /// authoritative B session before touching permission or transfer state.
+    async fn remote_action(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Result<Value, String>;
+
     /// 构造 wire `capability_snapshot`（`known_revision` 命中未过期快照时复用）。
     async fn capability_snapshot(
         &self,
@@ -1097,7 +1209,62 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
     payload_kind: &str,
     payload: &Value,
 ) -> Result<Vec<(&'static str, Value)>, String> {
+    let action_results = RemoteActionResultCache::default();
+    dispatch_decrypted_payload_cached(port, &action_results, lease, payload_kind, payload).await
+}
+
+async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
+    port: &P,
+    action_results: &RemoteActionResultCache,
+    lease: &LeaseContext,
+    payload_kind: &str,
+    payload: &Value,
+) -> Result<Vec<(&'static str, Value)>, String> {
     match payload_kind {
+        "remote_action_request" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let operation = payload
+                .get("operation")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let body = payload
+                .get("body")
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let fingerprint =
+                remote_action_fingerprint(lease, session_ref, request_id, operation, body);
+            match action_results.lookup(request_id, fingerprint) {
+                RemoteActionCacheLookup::Hit(response) => {
+                    return Ok(vec![("remote_action_result", response)]);
+                }
+                RemoteActionCacheLookup::Conflict => {
+                    return Ok(vec![(
+                        "remote_action_result",
+                        remote_action_response(
+                            lease,
+                            session_ref,
+                            request_id,
+                            operation,
+                            Err("result_unknown".to_owned()),
+                        ),
+                    )]);
+                }
+                RemoteActionCacheLookup::Miss => {}
+            }
+            let action = port
+                .remote_action(lease, session_ref, operation, body)
+                .await;
+            let response =
+                remote_action_response(lease, session_ref, request_id, operation, action);
+            action_results.insert(request_id.to_owned(), fingerprint, response.clone());
+            Ok(vec![("remote_action_result", response)])
+        }
         "capability_snapshot_request" => {
             let request_id = payload
                 .get("request_id")
@@ -1195,6 +1362,56 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
         }
         // liveness / 审批 / 附件 / 成果等能力属后续任务：未知类型一律丢弃。
         _ => Ok(Vec::new()),
+    }
+}
+
+fn remote_action_response(
+    lease: &LeaseContext,
+    session_ref: &str,
+    request_id: &str,
+    operation: &str,
+    action: Result<Value, String>,
+) -> Value {
+    let (ok, body, error_code) = match action {
+        Ok(body) => (true, body, None),
+        Err(code) => (
+            false,
+            serde_json::json!({}),
+            Some(public_remote_action_error(&code)),
+        ),
+    };
+    let mut response = serde_json::json!({
+        "v": 1, "type": "remote_action_result",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": request_id,
+        "session_id": session_ref,
+        "operation": operation,
+        "ok": ok,
+        "body": body,
+    });
+    if let Some(error_code) = error_code {
+        response["error_code"] = Value::String(error_code.to_owned());
+    }
+    response
+}
+
+fn public_remote_action_error(code: &str) -> &'static str {
+    match code {
+        "permission_expired" => "permission_expired",
+        "permission_already_decided" => "permission_already_decided",
+        "permission_not_found" => "permission_not_found",
+        "task_session_not_found" => "task_session_not_found",
+        "task_binding_stale" => "task_binding_stale",
+        "transfer_unknown" => "transfer_unknown",
+        "transfer_chunk_invalid" => "transfer_chunk_invalid",
+        "transfer_chunk_out_of_order" => "transfer_chunk_out_of_order",
+        "artifact_unavailable" => "artifact_unavailable",
+        "result_unknown" => "result_unknown",
+        _ => "remote_action_failed",
     }
 }
 
@@ -2005,6 +2222,9 @@ mod tests {
             "resume_v1",
             "task_v1",
             "temporary_model_package_v1",
+            "permission_v1",
+            "attachment_v1",
+            "artifact_v1",
             "snapshot_journal_v1",
         ] {
             assert!(claim.contains(&family), "A 端未声明 {family}");
@@ -2514,10 +2734,24 @@ mod tests {
     /// 回 A 端的会话引用；未知类型与畸形载荷不产生任何动作。
     #[tokio::test]
     async fn decrypted_payloads_dispatch_and_rewrite_the_session_reference() {
-        struct StubPort;
+        #[derive(Default)]
+        struct StubPort {
+            action_calls: std::sync::atomic::AtomicUsize,
+        }
 
         #[async_trait::async_trait]
         impl ControlledBusinessPort for StubPort {
+            async fn remote_action(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _operation: &str,
+                _body: &Value,
+            ) -> Result<Value, String> {
+                self.action_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"applied": true}))
+            }
             async fn capability_snapshot(
                 &self,
                 _lease: &LeaseContext,
@@ -2593,7 +2827,55 @@ mod tests {
             );
         let lease =
             crate::features::remote_control::controller::test_support::lease_context(&reservation);
-        let port = StubPort;
+        let port = StubPort::default();
+
+        let action_results = RemoteActionResultCache::default();
+        let action = json!({
+            "request_id":"action-1","session_id":"session-a-ref",
+            "operation":"permission_decide",
+            "body":{"task_id":"task-1","permission_request_id":"permission-1","decision":"allow"}
+        });
+        let first = dispatch_decrypted_payload_cached(
+            &port,
+            &action_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        let retry = dispatch_decrypted_payload_cached(
+            &port,
+            &action_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(
+            port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let conflict = dispatch_decrypted_payload_cached(
+            &port,
+            &action_results,
+            &lease,
+            "remote_action_request",
+            &json!({
+                "request_id":"action-1","session_id":"other-session",
+                "operation":"permission_decide","body":action["body"],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict[0].1["error_code"], "result_unknown");
+        assert_eq!(
+            port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a reused request id with a different binding must never execute"
+        );
 
         let frames = dispatch_decrypted_payload(
             &port,

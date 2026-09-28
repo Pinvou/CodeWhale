@@ -11,12 +11,14 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use sha2::Digest as _;
 
 use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferMetadata, TransferRegistry,
 };
 use super::limits::MAX_TRANSFER_CHUNK_BYTES;
 use crate::features::remote_control::controller::protocol::LeaseContext;
+use crate::features::remote_control::controller::task::TaskLeaseBinding;
 
 const MAX_ARTIFACTS: usize = 256;
 const MAX_ARTIFACT_ID_CHARS: usize = 128;
@@ -70,11 +72,14 @@ impl DownloadSource for MemoryArtifactSource {
         chunk_index: u64,
         max_bytes: usize,
     ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let max_bytes = max_bytes.min(MAX_TRANSFER_CHUNK_BYTES).max(1);
         let start = chunk_offset(chunk_index, max_bytes);
         if start >= self.bytes.len() as u64 {
             return Ok(None);
         }
-        let end = (start as usize + max_bytes).min(self.bytes.len());
+        let end = (start as usize)
+            .saturating_add(max_bytes)
+            .min(self.bytes.len());
         Ok(Some(self.bytes[start as usize..end].to_vec()))
     }
 }
@@ -93,7 +98,9 @@ impl FileArtifactSource {
 
 impl DownloadSource for FileArtifactSource {
     fn total_bytes(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|meta| meta.len()).unwrap_or(0)
+        std::fs::metadata(&self.path)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
     }
 
     fn read_chunk(
@@ -102,8 +109,9 @@ impl DownloadSource for FileArtifactSource {
         max_bytes: usize,
     ) -> std::result::Result<Option<Vec<u8>>, String> {
         use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(&self.path)
-            .map_err(|_| "artifact_unavailable".to_owned())?;
+        let max_bytes = max_bytes.min(MAX_TRANSFER_CHUNK_BYTES).max(1);
+        let mut file =
+            std::fs::File::open(&self.path).map_err(|_| "artifact_unavailable".to_owned())?;
         let offset = chunk_offset(chunk_index, max_bytes);
         let total = file
             .metadata()
@@ -114,11 +122,10 @@ impl DownloadSource for FileArtifactSource {
         }
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| "artifact_unavailable".to_owned())?;
-        let mut buffer = vec![0u8; max_bytes];
-        let read = file
-            .read(&mut buffer)
+        let mut buffer = Vec::with_capacity(max_bytes);
+        file.take(max_bytes as u64)
+            .read_to_end(&mut buffer)
             .map_err(|_| "artifact_unavailable".to_owned())?;
-        buffer.truncate(read);
         Ok(Some(buffer))
     }
 }
@@ -138,6 +145,7 @@ pub(crate) enum PreviewKind {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ArtifactDescriptor {
     pub(crate) artifact_id: String,
+    pub(crate) task_id: String,
     pub(crate) display_name: String,
     pub(crate) mime_type: String,
     pub(crate) total_bytes: u64,
@@ -156,8 +164,10 @@ pub(crate) struct ArtifactPreview {
 
 struct IndexedArtifact {
     session_id: String,
+    lease: TaskLeaseBinding,
     descriptor: ArtifactDescriptor,
     source: Arc<dyn DownloadSource>,
+    published: bool,
 }
 
 /// Session-scoped artifact index. IDs are opaque handles minted by B; the
@@ -170,12 +180,67 @@ pub(crate) struct ArtifactIndex {
 impl ArtifactIndex {
     pub(crate) fn register(
         &self,
+        lease: &LeaseContext,
         session_id: &str,
+        task_id: &str,
         artifact_id: &str,
         display_name: &str,
         mime_type: &str,
         sha256: &str,
         source: Arc<dyn DownloadSource>,
+    ) -> std::result::Result<ArtifactDescriptor, String> {
+        self.register_with_visibility(
+            lease,
+            session_id,
+            task_id,
+            artifact_id,
+            display_name,
+            mime_type,
+            sha256,
+            source,
+            true,
+        )
+    }
+
+    /// Reserve a validated index entry without exposing it to list, preview,
+    /// or download operations. The task terminal CAS later publishes every
+    /// staged entry for the exact binding atomically.
+    pub(crate) fn register_pending(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        artifact_id: &str,
+        display_name: &str,
+        mime_type: &str,
+        sha256: &str,
+        source: Arc<dyn DownloadSource>,
+    ) -> std::result::Result<ArtifactDescriptor, String> {
+        self.register_with_visibility(
+            lease,
+            session_id,
+            task_id,
+            artifact_id,
+            display_name,
+            mime_type,
+            sha256,
+            source,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_with_visibility(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        artifact_id: &str,
+        display_name: &str,
+        mime_type: &str,
+        sha256: &str,
+        source: Arc<dyn DownloadSource>,
+        published: bool,
     ) -> std::result::Result<ArtifactDescriptor, String> {
         if session_id.is_empty()
             || session_id.len() > MAX_SESSION_ID_CHARS
@@ -184,6 +249,14 @@ impl ArtifactIndex {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
             return Err("artifact_session_invalid".to_owned());
+        }
+        if task_id.is_empty()
+            || task_id.len() > MAX_ARTIFACT_ID_CHARS
+            || !task_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+        {
+            return Err("artifact_task_invalid".to_owned());
         }
         if artifact_id.is_empty()
             || artifact_id.len() > MAX_ARTIFACT_ID_CHARS
@@ -216,12 +289,16 @@ impl ArtifactIndex {
             return Err("artifact_unavailable".to_owned());
         }
         let mut entries = self.entries.lock();
-        if entries.len() >= MAX_ARTIFACTS && !entries.contains_key(artifact_id) {
+        if entries.contains_key(artifact_id) {
+            return Err("artifact_id_conflict".to_owned());
+        }
+        if entries.len() >= MAX_ARTIFACTS {
             return Err("artifact_capacity".to_owned());
         }
         let preview_kind = preview_kind_for(mime_type, total_bytes);
         let descriptor = ArtifactDescriptor {
             artifact_id: artifact_id.to_owned(),
+            task_id: task_id.to_owned(),
             display_name,
             mime_type: mime_type.to_owned(),
             total_bytes,
@@ -232,18 +309,125 @@ impl ArtifactIndex {
             artifact_id.to_owned(),
             IndexedArtifact {
                 session_id: session_id.to_owned(),
+                lease: TaskLeaseBinding::from_context(lease),
                 descriptor: descriptor.clone(),
                 source,
+                published,
             },
         );
         Ok(descriptor)
+    }
+
+    /// Publish all staged entries for one successful task as a single index
+    /// transition. Returning descriptors is idempotent only for the first
+    /// transition; callers use that property to emit artifact journal events
+    /// exactly once.
+    pub(crate) fn publish_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        lease: &LeaseContext,
+    ) -> Vec<ArtifactDescriptor> {
+        let binding = TaskLeaseBinding::from_context(lease);
+        let mut entries = self.entries.lock();
+        let mut published = Vec::new();
+        for entry in entries.values_mut().filter(|entry| {
+            entry.session_id == session_id
+                && entry.descriptor.task_id == task_id
+                && entry.lease == binding
+                && !entry.published
+        }) {
+            entry.published = true;
+            published.push(entry.descriptor.clone());
+        }
+        published.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+        published
+    }
+
+    pub(crate) fn list_for_binding(
+        &self,
+        session_id: &str,
+        lease: &LeaseContext,
+    ) -> Vec<ArtifactDescriptor> {
+        let binding = TaskLeaseBinding::from_context(lease);
+        let entries = self.entries.lock();
+        let mut descriptors: Vec<_> = entries
+            .values()
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.lease == binding
+                    && entry.published
+                    && entry.source.total_bytes() == entry.descriptor.total_bytes
+            })
+            .map(|entry| entry.descriptor.clone())
+            .collect();
+        descriptors.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+        descriptors
+    }
+
+    pub(crate) fn require_artifact_task(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        task_id: &str,
+        lease: &LeaseContext,
+    ) -> Result<(), String> {
+        self.resolve_for_task(session_id, artifact_id, task_id, lease)
+            .map(|_| ())
+    }
+
+    pub(crate) fn descriptor_for_binding(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        lease: &LeaseContext,
+    ) -> Result<ArtifactDescriptor, String> {
+        let entries = self.entries.lock();
+        entries
+            .get(artifact_id)
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.lease == TaskLeaseBinding::from_context(lease)
+                    && entry.published
+            })
+            .map(|entry| entry.descriptor.clone())
+            .ok_or_else(|| "artifact_not_found".to_owned())
+    }
+
+    pub(crate) fn preview_for_binding(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        lease: &LeaseContext,
+    ) -> Result<ArtifactPreview, String> {
+        self.preview_checked(session_id, artifact_id, Some(lease))
+    }
+
+    pub(crate) fn preview_for_task_binding(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        task_id: &str,
+        lease: &LeaseContext,
+    ) -> Result<ArtifactPreview, String> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .get(artifact_id)
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.descriptor.task_id == task_id
+                    && entry.lease == TaskLeaseBinding::from_context(lease)
+                    && entry.published
+            })
+            .ok_or_else(|| "artifact_not_found".to_owned())?;
+        preview_entry(artifact_id, entry)
     }
 
     pub(crate) fn list(&self, session_id: &str) -> Vec<ArtifactDescriptor> {
         let entries = self.entries.lock();
         let mut descriptors: Vec<ArtifactDescriptor> = entries
             .values()
-            .filter(|entry| entry.session_id == session_id)
+            .filter(|entry| entry.session_id == session_id && entry.published)
             .map(|entry| entry.descriptor.clone())
             .collect();
         descriptors.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
@@ -258,7 +442,7 @@ impl ArtifactIndex {
         let entries = self.entries.lock();
         let entry = entries
             .get(artifact_id)
-            .filter(|entry| entry.session_id == session_id)
+            .filter(|entry| entry.session_id == session_id && entry.published)
             .ok_or_else(|| "artifact_not_found".to_owned())?;
         Ok(entry.descriptor.clone())
     }
@@ -271,7 +455,7 @@ impl ArtifactIndex {
         let entries = self.entries.lock();
         entries
             .get(artifact_id)
-            .filter(|entry| entry.session_id == session_id)
+            .filter(|entry| entry.session_id == session_id && entry.published)
             .map(|entry| Arc::clone(&entry.source))
             .ok_or_else(|| "artifact_not_found".to_owned())
     }
@@ -281,33 +465,26 @@ impl ArtifactIndex {
         session_id: &str,
         artifact_id: &str,
     ) -> Result<ArtifactPreview, String> {
+        self.preview_checked(session_id, artifact_id, None)
+    }
+
+    fn preview_checked(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        lease: Option<&LeaseContext>,
+    ) -> Result<ArtifactPreview, String> {
         let entries = self.entries.lock();
         let entry = entries
             .get(artifact_id)
-            .filter(|entry| entry.session_id == session_id)
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.published
+                    && lease
+                        .is_none_or(|lease| entry.lease == TaskLeaseBinding::from_context(lease))
+            })
             .ok_or_else(|| "artifact_not_found".to_owned())?;
-        match entry.descriptor.preview_kind {
-            PreviewKind::Text => {
-                let chunk = entry
-                    .source
-                    .read_chunk(0, PREVIEW_MAX_BYTES as usize)
-                    .map_err(|_| "artifact_unavailable".to_owned())?
-                    .ok_or_else(|| "artifact_unavailable".to_owned())?;
-                let truncated = entry.descriptor.total_bytes > chunk.len() as u64;
-                Ok(ArtifactPreview {
-                    artifact_id: artifact_id.to_owned(),
-                    preview_kind: PreviewKind::Text,
-                    truncated,
-                    text: Some(String::from_utf8_lossy(&chunk).into_owned()),
-                })
-            }
-            kind => Ok(ArtifactPreview {
-                artifact_id: artifact_id.to_owned(),
-                preview_kind: kind,
-                truncated: false,
-                text: None,
-            }),
-        }
+        preview_entry(artifact_id, entry)
     }
 
     pub(crate) fn remove(&self, artifact_id: &str) -> bool {
@@ -327,8 +504,82 @@ impl ArtifactIndex {
         ids.len()
     }
 
+    pub(crate) fn clear_connection(&self, connection_id: &str) -> usize {
+        let mut entries = self.entries.lock();
+        let before = entries.len();
+        entries.retain(|_, entry| entry.lease.connection_id != connection_id);
+        before - entries.len()
+    }
+
+    pub(crate) fn clear_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        lease: &LeaseContext,
+    ) -> usize {
+        let mut entries = self.entries.lock();
+        let before = entries.len();
+        let binding = TaskLeaseBinding::from_context(lease);
+        entries.retain(|_, entry| {
+            entry.session_id != session_id
+                || entry.descriptor.task_id != task_id
+                || entry.lease != binding
+        });
+        before - entries.len()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.entries.lock().len()
+    }
+
+    fn resolve_for_task(
+        &self,
+        session_id: &str,
+        artifact_id: &str,
+        task_id: &str,
+        lease: &LeaseContext,
+    ) -> Result<(ArtifactDescriptor, Arc<dyn DownloadSource>), String> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .get(artifact_id)
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.descriptor.task_id == task_id
+                    && entry.lease == TaskLeaseBinding::from_context(lease)
+                    && entry.published
+            })
+            .ok_or_else(|| "artifact_not_found".to_owned())?;
+        Ok((entry.descriptor.clone(), Arc::clone(&entry.source)))
+    }
+}
+
+fn preview_entry(artifact_id: &str, entry: &IndexedArtifact) -> Result<ArtifactPreview, String> {
+    match entry.descriptor.preview_kind {
+        PreviewKind::Text => {
+            let chunk = entry
+                .source
+                .read_chunk(0, PREVIEW_MAX_BYTES as usize)
+                .map_err(|_| "artifact_unavailable".to_owned())?
+                .ok_or_else(|| "artifact_unavailable".to_owned())?;
+            if chunk.len() as u64 != entry.descriptor.total_bytes
+                || crate::platform::encoding::hex_lower(&sha2::Sha256::digest(&chunk))
+                    != entry.descriptor.sha256
+            {
+                return Err("artifact_unavailable".to_owned());
+            }
+            Ok(ArtifactPreview {
+                artifact_id: artifact_id.to_owned(),
+                preview_kind: PreviewKind::Text,
+                truncated: false,
+                text: Some(String::from_utf8_lossy(&chunk).into_owned()),
+            })
+        }
+        kind => Ok(ArtifactPreview {
+            artifact_id: artifact_id.to_owned(),
+            preview_kind: kind,
+            truncated: false,
+            text: None,
+        }),
     }
 }
 
@@ -364,11 +615,24 @@ pub(crate) struct ArtifactDownloadBegin {
 pub(crate) struct ArtifactDownloads {
     registry: Arc<TransferRegistry>,
     index: Arc<ArtifactIndex>,
+    active: Mutex<HashMap<String, DownloadBinding>>,
+}
+
+#[derive(Clone)]
+struct DownloadBinding {
+    lease: TaskLeaseBinding,
+    session_id: String,
+    task_id: String,
+    artifact_id: String,
 }
 
 impl ArtifactDownloads {
     pub(crate) fn new(registry: Arc<TransferRegistry>, index: Arc<ArtifactIndex>) -> Self {
-        Self { registry, index }
+        Self {
+            registry,
+            index,
+            active: Mutex::new(HashMap::new()),
+        }
     }
 
     pub(crate) fn index(&self) -> &Arc<ArtifactIndex> {
@@ -383,8 +647,9 @@ impl ArtifactDownloads {
         artifact_id: &str,
         now_b: u64,
     ) -> Result<ArtifactDownloadBegin, String> {
-        let descriptor = self.index.descriptor(session_id, artifact_id)?;
-        let source = self.index.source(session_id, artifact_id)?;
+        let (descriptor, source) =
+            self.index
+                .resolve_for_task(session_id, artifact_id, task_id, lease)?;
         // A deleted/raced artifact must fail closed rather than serve a stale
         // length or a truncated file.
         if source.total_bytes() != descriptor.total_bytes {
@@ -406,11 +671,90 @@ impl ArtifactDownloads {
                 now_b,
             )
             .map_err(|error| error.code.to_owned())?;
+        self.active.lock().insert(
+            handle.id().to_owned(),
+            DownloadBinding {
+                lease: TaskLeaseBinding::from_context(lease),
+                session_id: session_id.to_owned(),
+                task_id: task_id.to_owned(),
+                artifact_id: artifact_id.to_owned(),
+            },
+        );
         Ok(ArtifactDownloadBegin {
             handle_id: handle.id().to_owned(),
             chunk_bytes: self.registry.limits().chunk_bytes,
             total_bytes: progress.total_bytes,
         })
+    }
+
+    pub(crate) fn next_chunk_bound(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        artifact_id: &str,
+        handle_id: &str,
+        chunk_index: u64,
+        now_b: u64,
+    ) -> Result<Option<DownloadChunk>, String> {
+        let binding = self
+            .active
+            .lock()
+            .get(handle_id)
+            .cloned()
+            .ok_or_else(|| "transfer_unknown".to_owned())?;
+        if binding.lease != TaskLeaseBinding::from_context(lease)
+            || binding.session_id != session_id
+            || binding.task_id != task_id
+            || binding.artifact_id != artifact_id
+        {
+            return Err("transfer_binding_stale".to_owned());
+        }
+        let source = match self
+            .index
+            .resolve_for_task(session_id, artifact_id, task_id, lease)
+        {
+            Ok((_, source)) => source,
+            Err(error) => {
+                self.active.lock().remove(handle_id);
+                self.abort(handle_id);
+                return Err(error);
+            }
+        };
+        let result = self.next_chunk_from_source(source, handle_id, chunk_index, now_b);
+        if result.as_ref().is_err()
+            || result
+                .as_ref()
+                .ok()
+                .and_then(|chunk| chunk.as_ref())
+                .is_some_and(|chunk| chunk.completed.is_some())
+        {
+            self.active.lock().remove(handle_id);
+        }
+        result
+    }
+
+    pub(crate) fn abort_bound(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        artifact_id: &str,
+        handle_id: &str,
+    ) -> Result<bool, String> {
+        let mut active = self.active.lock();
+        let binding = active
+            .get(handle_id)
+            .ok_or_else(|| "transfer_unknown".to_owned())?;
+        if binding.lease != TaskLeaseBinding::from_context(lease)
+            || binding.session_id != session_id
+            || binding.task_id != task_id
+            || binding.artifact_id != artifact_id
+        {
+            return Err("transfer_binding_stale".to_owned());
+        }
+        active.remove(handle_id);
+        Ok(self.abort(handle_id))
     }
 
     pub(crate) fn next_chunk(
@@ -422,17 +766,33 @@ impl ArtifactDownloads {
         now_b: u64,
     ) -> Result<Option<DownloadChunk>, String> {
         let source = self.index.source(session_id, artifact_id)?;
+        self.next_chunk_from_source(source, handle_id, chunk_index, now_b)
+    }
+
+    fn next_chunk_from_source(
+        &self,
+        source: Arc<dyn DownloadSource>,
+        handle_id: &str,
+        chunk_index: u64,
+        now_b: u64,
+    ) -> Result<Option<DownloadChunk>, String> {
         let handle = super::core::TransferHandle::from_id(handle_id)
             .ok_or_else(|| "transfer_unknown".to_owned())?;
         let chunk_bytes = self.registry.limits().chunk_bytes;
-        let bytes = source
-            .read_chunk(chunk_index, chunk_bytes)
-            .map_err(|_| "artifact_unavailable".to_owned())?
-            .ok_or_else(|| "artifact_unavailable".to_owned())?;
-        match self
-            .registry
-            .accept_chunk(&handle, TransferDirection::Download, chunk_index, &bytes, now_b)
-        {
+        let bytes = match source.read_chunk(chunk_index, chunk_bytes) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) | Err(_) => {
+                self.registry.abort(&handle);
+                return Err("artifact_unavailable".to_owned());
+            }
+        };
+        match self.registry.accept_chunk(
+            &handle,
+            TransferDirection::Download,
+            chunk_index,
+            &bytes,
+            now_b,
+        ) {
             Ok(outcome) => Ok(Some(DownloadChunk {
                 chunk_index,
                 bytes,
@@ -457,16 +817,26 @@ impl ArtifactDownloads {
     }
 
     pub(crate) fn cleanup_for_task(&self, task_id: &str) -> usize {
+        self.active
+            .lock()
+            .retain(|_, binding| binding.task_id != task_id);
         self.registry.cleanup_for_task(task_id)
     }
 
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
-        self.registry.cleanup_for_connection(connection_id)
+        self.active
+            .lock()
+            .retain(|_, binding| binding.lease.connection_id != connection_id);
+        let cleaned = self.registry.cleanup_for_connection(connection_id);
+        self.index.clear_connection(connection_id);
+        cleaned
     }
 
     /// DEV-18 审核修复：未完成下载同样受 TTL 约束（RC-F-003 的下载侧）。
     pub(crate) fn expire(&self, now_b: u64) -> usize {
-        self.registry.expire(now_b).len()
+        let expired = self.registry.expire(now_b);
+        self.active.lock().retain(|id, _| !expired.contains(id));
+        expired.len()
     }
 }
 
@@ -510,7 +880,9 @@ mod tests {
     fn register(index: &ArtifactIndex, id: &str, name: &str, mime: &str, bytes: &[u8]) {
         index
             .register(
+                &lease(),
                 "session-0001",
+                "task-0001",
                 id,
                 name,
                 mime,
@@ -545,7 +917,9 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         index
             .register(
+                &lease(),
                 "session-0001",
+                "task-0001",
                 "artifact-0001",
                 "report.md",
                 "text/markdown",
@@ -584,7 +958,13 @@ mod tests {
         assert_eq!(preview.preview_kind, PreviewKind::DownloadOnly);
         assert!(preview.text.is_none());
 
-        register(&index, "artifact-image", "photo.png", "image/png", b"\x89PNG");
+        register(
+            &index,
+            "artifact-image",
+            "photo.png",
+            "image/png",
+            b"\x89PNG",
+        );
         let preview = index.preview("session-0001", "artifact-image").unwrap();
         assert_eq!(preview.preview_kind, PreviewKind::Unsupported);
         assert!(preview.text.is_none());
@@ -595,15 +975,29 @@ mod tests {
         let (_unused, index) = downloads();
         let bytes: Vec<u8> = (0..5000u32).map(|value| value as u8).collect();
         // Force multi-chunk transfers with a narrow chunk budget.
-        let registry = Arc::new(TransferRegistry::new(super::super::TransferLimits {
-            chunk_bytes: 1024,
-            ..super::super::TransferLimits::default()
-        })
-        .unwrap());
+        let registry = Arc::new(
+            TransferRegistry::new(super::super::TransferLimits {
+                chunk_bytes: 1024,
+                ..super::super::TransferLimits::default()
+            })
+            .unwrap(),
+        );
         let downloads = ArtifactDownloads::new(registry, Arc::clone(&index));
-        register(&index, "artifact-0001", "data.bin", "application/octet-stream", &bytes);
+        register(
+            &index,
+            "artifact-0001",
+            "data.bin",
+            "application/octet-stream",
+            &bytes,
+        );
         let begin = downloads
-            .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_000)
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
             .unwrap();
         assert_eq!(begin.chunk_bytes, 1024);
         let mut collected = Vec::new();
@@ -640,24 +1034,154 @@ mod tests {
         register(&index, "artifact-0001", "notes.txt", "text/plain", &bytes);
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0002", "task-0001", "artifact-0001", 1_000)
+                .begin(
+                    &lease(),
+                    "session-0002",
+                    "task-0001",
+                    "artifact-0001",
+                    1_000
+                )
                 .unwrap_err(),
             "artifact_not_found"
         );
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0001", "task-0001", "artifact-9999", 1_000)
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0002",
+                    "artifact-0001",
+                    1_000
+                )
+                .unwrap_err(),
+            "artifact_not_found"
+        );
+        let mut stale_lease = lease();
+        stale_lease.lease_epoch = "2".into();
+        assert_eq!(
+            downloads
+                .begin(
+                    &stale_lease,
+                    "session-0001",
+                    "task-0001",
+                    "artifact-0001",
+                    1_000
+                )
+                .unwrap_err(),
+            "artifact_not_found"
+        );
+        assert_eq!(
+            downloads
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-9999",
+                    1_000
+                )
                 .unwrap_err(),
             "artifact_not_found"
         );
         assert!(index.remove("artifact-0001"));
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_100)
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-0001",
+                    1_100
+                )
                 .unwrap_err(),
             "artifact_not_found"
         );
         assert!(!index.remove("artifact-0001"));
+    }
+
+    #[test]
+    fn active_download_rejects_cross_task_chunk_and_abort() {
+        let (downloads, index) = downloads();
+        register(
+            &index,
+            "artifact-0001",
+            "notes.txt",
+            "text/plain",
+            b"artifact",
+        );
+        let begun = downloads
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0002",
+                    "artifact-0001",
+                    &begun.handle_id,
+                    0,
+                    1_100,
+                )
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert_eq!(
+            downloads
+                .abort_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0002",
+                    "artifact-0001",
+                    &begun.handle_id,
+                )
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert!(
+            downloads
+                .abort_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-0001",
+                    &begun.handle_id,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn same_length_file_replacement_fails_preview_digest_check() {
+        let (_downloads, index) = downloads();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        index
+            .register(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                "report.txt",
+                "text/plain",
+                &digest(b"hello"),
+                Arc::new(FileArtifactSource::new(path.clone())),
+            )
+            .unwrap();
+
+        std::fs::write(path, b"world").unwrap();
+        assert_eq!(
+            index
+                .preview_for_task_binding("session-0001", "artifact-0001", "task-0001", &lease(),)
+                .unwrap_err(),
+            "artifact_unavailable"
+        );
     }
 
     #[test]
@@ -688,7 +1212,9 @@ mod tests {
         });
         index
             .register(
+                &lease(),
                 "session-0001",
+                "task-0001",
                 "artifact-0001",
                 "notes.txt",
                 "text/plain",
@@ -700,7 +1226,13 @@ mod tests {
         source.len.store(4, Ordering::SeqCst);
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_000)
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-0001",
+                    1_000
+                )
                 .unwrap_err(),
             "artifact_unavailable"
         );
@@ -714,7 +1246,13 @@ mod tests {
         let bytes = b"artifact".to_vec();
         register(&index, "artifact-0001", "notes.txt", "text/plain", &bytes);
         downloads
-            .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_000)
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
             .unwrap();
         assert_eq!(downloads.cleanup_for_task("task-0001"), 1);
         assert_eq!(downloads.cleanup_for_task("task-0001"), 0);
@@ -724,13 +1262,39 @@ mod tests {
     }
 
     #[test]
+    fn connection_cleanup_removes_downloads_and_index_entries() {
+        let (downloads, index) = downloads();
+        register(
+            &index,
+            "artifact-0001",
+            "notes.txt",
+            "text/plain",
+            b"artifact",
+        );
+        downloads
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(downloads.cleanup_for_connection("connection-0001"), 1);
+        assert_eq!(index.len(), 0);
+        assert_eq!(downloads.cleanup_for_connection("connection-0001"), 0);
+    }
+
+    #[test]
     fn index_rejects_unbounded_or_path_bearing_metadata() {
         let (_downloads, index) = downloads();
         let source = Arc::new(MemoryArtifactSource::new(b"data".to_vec()));
         assert_eq!(
             index
                 .register(
+                    &lease(),
                     "session-0001",
+                    "task-0001",
                     "artifact-0001",
                     "../escape.txt",
                     "text/plain",
@@ -744,7 +1308,9 @@ mod tests {
         assert_eq!(
             index
                 .register(
+                    &lease(),
                     "session-0001",
+                    "task-0001",
                     "../artifact",
                     "notes.txt",
                     "text/plain",
@@ -757,7 +1323,9 @@ mod tests {
         assert_eq!(
             index
                 .register(
+                    &lease(),
                     "session-0001",
+                    "task-0001",
                     "artifact-0002",
                     "notes.txt",
                     "text/plain",
@@ -766,6 +1334,45 @@ mod tests {
                 )
                 .unwrap_err(),
             "artifact_digest_invalid"
+        );
+    }
+
+    #[test]
+    fn pending_artifacts_are_invisible_until_atomic_task_publish() {
+        let (_downloads, index) = downloads();
+        let bytes = b"staged artifact".to_vec();
+        let descriptor = index
+            .register_pending(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-pending",
+                "result.txt",
+                "text/plain",
+                &digest(&bytes),
+                Arc::new(MemoryArtifactSource::new(bytes)),
+            )
+            .unwrap();
+        assert!(index.list_for_binding("session-0001", &lease()).is_empty());
+        assert_eq!(
+            index
+                .descriptor_for_binding("session-0001", &descriptor.artifact_id, &lease())
+                .unwrap_err(),
+            "artifact_not_found"
+        );
+
+        assert_eq!(
+            index.publish_task("session-0001", "task-0001", &lease()),
+            vec![descriptor.clone()]
+        );
+        assert_eq!(
+            index.list_for_binding("session-0001", &lease()),
+            vec![descriptor]
+        );
+        assert!(
+            index
+                .publish_task("session-0001", "task-0001", &lease())
+                .is_empty()
         );
     }
 }

@@ -41,6 +41,9 @@
     var proxyReadEpoch = 0;
     var proxyOpenIntent = 0;
     var proxyRefreshTimer = null;
+    var remoteActionSequence = 0;
+    var uncertainActionRequests = Object.create(null);
+    var uncertainActionOrder = [];
     var CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000;
     var CAPABILITY_MAX_ATTEMPTS = 3;
     var CAPABILITY_RENEWAL_LEAD_MS = 5_000;
@@ -203,6 +206,8 @@
         waiter.reject(asBoundedError("capability_snapshot_unavailable"));
         delete capabilityWaiters[requestId];
       });
+      uncertainActionRequests = Object.create(null);
+      uncertainActionOrder = [];
     }
 
     function controlledIntent(openNewGeneration) {
@@ -576,29 +581,136 @@
       return beginCapabilityHandshake(remoteRef, false);
     }
 
+    function invalidControlledTask() {
+      var error = new Error("controlled_task_input_invalid");
+      error.code = "controlled_task_input_invalid";
+      return error;
+    }
+
     /** B submits through the same authoritative remote task service as A. */
-    function controlledTaskSend(sessionId, text) {
+    async function controlledTaskSend(sessionId, text, readyAttachments, skillIds) {
       ensureAvailable();
       var visibleText = String(text || "").trim();
-      return invoke("desktop_remote_controlled_task_send", {
+      if (!requiredOpaqueId(sessionId) || !Array.isArray(readyAttachments)
+        || readyAttachments.length > 8 || !Array.isArray(skillIds)
+        || skillIds.length > 32 || new Set(skillIds).size !== skillIds.length
+        || skillIds.some(function (id) { return !requiredOpaqueId(id); })) {
+        throw invalidControlledTask();
+      }
+      var sources = [];
+      var consumedIds = [];
+      for (var index = 0; index < readyAttachments.length; index++) {
+        var attachment = readyAttachments[index];
+        var result = attachment && attachment.status === "ready" && attachment.result;
+        if (!result) throw invalidControlledTask();
+        var uploadId = result.__pinvouManagedDraftAttachmentId;
+        if (uploadId) {
+          result = await invoke("adopt_draft_attachment", {
+            sessionId: sessionId,
+            uploadId: uploadId,
+          });
+          Object.defineProperty(result, "__pinvouManagedAttachmentSessionId", {
+            configurable: true,
+            value: sessionId,
+            enumerable: false,
+          });
+          attachment.result = result;
+          attachment.basename = result.basename || attachment.basename;
+        }
+        if (!result || typeof result.path !== "string" || !result.path) {
+          throw invalidControlledTask();
+        }
+        // Paths are B-local IPC input only. The authoritative task payload and
+        // every network/journal projection contain Rust-minted opaque handles.
+        sources.push({ path: result.path });
+        consumedIds.push(attachment.id);
+      }
+      if (!visibleText && sources.length === 0) throw invalidControlledTask();
+      var result = await invoke("desktop_remote_controlled_task_send", {
         sessionId: sessionId,
         text: visibleText,
-      }).catch(function (failure) { throw asBoundedError(failure); }).then(function (result) {
-        var projection = result && typeof result === "object" ? result : {};
-        // The B Command returns the frozen task_status protocol projection.
-        var taskId = projection.task_id || null;
-        if (taskId && projection.session_id === sessionId && projection.task_status) {
-          publish(logic.applyControlledTaskEvent(current(), {
-            taskId: taskId,
-            sessionId: projection.session_id,
-            generation: projection.generation,
-            modelSource: projection.modelSource,
-            status: projection.task_status,
-            text: visibleText,
-          }));
-        }
-        return result;
-      });
+        skillIds: skillIds.slice(),
+        attachments: sources,
+      }).catch(function (failure) { throw asBoundedError(failure); });
+      var projection = result && typeof result === "object" ? result : {};
+      // The B Command returns the frozen task_status protocol projection.
+      var taskId = projection.task_id || null;
+      if (taskId && projection.session_id === sessionId && projection.task_status) {
+        publish(logic.applyControlledTaskEvent(current(), {
+          taskId: taskId,
+          sessionId: projection.session_id,
+          generation: projection.generation,
+          modelSource: projection.modelSource,
+          status: projection.task_status,
+          text: visibleText,
+        }));
+      }
+      if (consumedIds.length) {
+        state.attachments = (state.attachments || []).filter(function (attachment) {
+          return consumedIds.indexOf(attachment.id) < 0;
+        });
+        if (typeof notify === "function") notify("chat");
+      }
+      return result;
+    }
+
+    function controlledCapabilitiesSnapshot(sessionId) {
+      ensureAvailable();
+      subscribe();
+      if (!requiredOpaqueId(sessionId)) {
+        return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
+      }
+      return invoke("desktop_remote_controlled_capabilities_snapshot", { sessionId: sessionId })
+        .then(function (snapshot) {
+          snapshot = snapshot && typeof snapshot === "object" ? snapshot : {};
+          var descriptors = function (items, idKey, kind) {
+            return (Array.isArray(items) ? items : []).map(function (item) {
+              var id = item && item[idKey];
+              if (!requiredOpaqueId(id)) return null;
+              var projected = {};
+              projected[idKey] = id;
+              projected.displayName = String(item.displayName || id).slice(0, 256);
+              if (kind === "workspace") projected.codeAllowed = item.codeAllowed === true;
+              if (kind === "skill") {
+                var scopes = Array.isArray(item.scopes) ? item.scopes.filter(function (scope, index, all) {
+                  return (scope === "chat" || scope === "code") && all.indexOf(scope) === index;
+                }) : [];
+                if (!scopes.length || scopes.length !== item.scopes.length) return null;
+                projected.scopes = scopes;
+              }
+              return projected;
+            }).filter(Boolean);
+          };
+          var expiresAtMs = Number(snapshot.expiresAtMs);
+          if (snapshot.sessionId !== sessionId
+            || (snapshot.sessionLane !== "chat" && snapshot.sessionLane !== "code")
+            || !requiredOpaqueId(snapshot.connectionId)
+            || !requiredOpaqueId(snapshot.controllerLeaseId)
+            || !requiredOpaqueId(snapshot.leaseEpoch)
+            || !requiredOpaqueId(snapshot.relayEpoch)
+            || !requiredOpaqueId(snapshot.remoteControlGeneration)
+            || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) {
+            throw asBoundedError("capability_snapshot_unavailable");
+          }
+          return {
+            connectionId: snapshot.connectionId,
+            controllerLeaseId: snapshot.controllerLeaseId,
+            leaseEpoch: snapshot.leaseEpoch,
+            relayEpoch: snapshot.relayEpoch,
+            remoteControlGeneration: snapshot.remoteControlGeneration,
+            sessionId: snapshot.sessionId,
+            sessionLane: snapshot.sessionLane,
+            capabilityRevision: requiredOpaqueId(snapshot.capabilityRevision)
+              ? snapshot.capabilityRevision : null,
+            expiresAtMs: expiresAtMs,
+            modes: (Array.isArray(snapshot.modes) ? snapshot.modes : [])
+              .filter(function (mode) { return mode === "chat" || mode === "code"; }),
+            tools: descriptors(snapshot.tools, "toolId", "tool"),
+            skills: descriptors(snapshot.skills, "skillId", "skill"),
+            workspaces: descriptors(snapshot.workspaces, "workspaceId", "workspace"),
+          };
+        })
+        .catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function capabilitiesSnapshot(remoteRef) {
@@ -803,7 +915,7 @@
     }
 
     /** A-side intent only. Rust owns IDs, digest, binding and encrypted wire bytes. */
-    function submitRemoteTask(localSessionId, remoteRef, intent) {
+    function reserveRemoteTask(localSessionId, remoteRef, intent) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef) || !intent || typeof intent !== "object") {
         return Promise.reject(invalidTaskIntent());
@@ -812,48 +924,86 @@
       if (intent.kind === "new") {
         if (typeof intent.text !== "string" || !intent.text.trim()
           || new TextEncoder().encode(intent.text).length > 65536
+          || (intent.mode !== "chat" && intent.mode !== "code")
           || (intent.modelSource !== "controlled_device" && intent.modelSource !== "controller_temporary")) {
           return Promise.reject(invalidTaskIntent());
         }
+        if ((intent.mode === "chat" && intent.workspaceId != null)
+          || (intent.mode === "code" && !requiredOpaqueId(intent.workspaceId))) {
+          return Promise.reject(invalidTaskIntent());
+        }
+        if (!Array.isArray(intent.skillIds) || intent.skillIds.length > 32
+          || new Set(intent.skillIds).size !== intent.skillIds.length
+          || intent.skillIds.some(function (id) { return !requiredOpaqueId(id); })) {
+          return Promise.reject(invalidTaskIntent());
+        }
         if (intent.modelSource === "controller_temporary" && !requiredOpaqueId(intent.selectedModelId)) {
+          return Promise.reject(invalidTaskIntent());
+        }
+        if (intent.mode === "code" && intent.modelSource === "controller_temporary") {
           return Promise.reject(invalidTaskIntent());
         }
         if (intent.modelSource === "controlled_device" && intent.selectedModelId != null) {
           return Promise.reject(invalidTaskIntent());
         }
         if (Object.keys(intent).some(function (key) {
-          return ["kind", "text", "modelSource", "selectedModelId"].indexOf(key) < 0;
+          return ["kind", "text", "mode", "workspaceId", "skillIds", "modelSource", "selectedModelId"].indexOf(key) < 0;
         })) return Promise.reject(invalidTaskIntent());
         body = {
           kind: "new",
           text: intent.text,
+          mode: intent.mode,
+          workspaceId: intent.mode === "code" ? intent.workspaceId : null,
+          skillIds: intent.skillIds.slice(),
           modelSource: intent.modelSource,
           selectedModelId: intent.modelSource === "controller_temporary" ? intent.selectedModelId : null,
         };
-      } else if (intent.kind === "retry") {
-        var handle = intent.handle;
-        if (!handle || typeof handle !== "object"
-          || !requiredOpaqueId(handle.taskId) || !requiredOpaqueId(handle.clientRequestId)
-          || !/^[a-fA-F0-9]{64}$/.test(handle.requestFingerprint || "")
-          || Object.keys(handle).some(function (key) {
-            return ["taskId", "clientRequestId", "requestFingerprint"].indexOf(key) < 0;
-          }) || Object.keys(intent).some(function (key) {
-            return ["kind", "handle"].indexOf(key) < 0;
-          })) return Promise.reject(invalidTaskIntent());
-        body = { kind: "retry", handle: {
-          taskId: handle.taskId,
-          clientRequestId: handle.clientRequestId,
-          requestFingerprint: handle.requestFingerprint,
-        } };
       } else return Promise.reject(invalidTaskIntent());
-      return invoke("desktop_remote_task_dispatch_a", {
+      return invoke("desktop_remote_task_reserve_a", {
         localSessionId: localSessionId,
         remoteRef: remoteRef,
         intent: body,
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
-    function abandonPreparedRemoteTask(localSessionId, clientRequestId, taskId) {
+    function validTaskHandle(handle) {
+      return !!handle && typeof handle === "object"
+        && requiredOpaqueId(handle.taskId) && requiredOpaqueId(handle.clientRequestId)
+        && /^[a-fA-F0-9]{64}$/.test(handle.requestFingerprint || "")
+        && !Object.keys(handle).some(function (key) {
+          return ["taskId", "clientRequestId", "requestFingerprint"].indexOf(key) < 0;
+        });
+    }
+
+    function commitRemoteTask(localSessionId, remoteRef, handle, attachmentIds) {
+      ensureAvailable();
+      var ids = Array.isArray(attachmentIds) ? attachmentIds : [];
+      if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef) || !validTaskHandle(handle)
+        || ids.length > 8 || ids.some(function (id) { return !requiredOpaqueId(id); })
+        || new Set(ids).size !== ids.length) return Promise.reject(invalidTaskIntent());
+      return invoke("desktop_remote_task_commit_a", {
+        localSessionId: localSessionId,
+        remoteRef: remoteRef,
+        handle: {
+          taskId: handle.taskId,
+          clientRequestId: handle.clientRequestId,
+          requestFingerprint: handle.requestFingerprint,
+        },
+        attachmentIds: ids.slice(),
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function cancelRemoteTask(localSessionId, remoteRef, taskId) {
+      ensureAvailable();
+      if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef) || !requiredOpaqueId(taskId)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invoke("desktop_remote_task_cancel_a", {
+        localSessionId: localSessionId, remoteRef: remoteRef, taskId: taskId,
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function abandonRemoteTask(localSessionId, clientRequestId, taskId) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(clientRequestId) || !requiredOpaqueId(taskId)) {
         return Promise.reject(invalidTaskIntent());
@@ -865,34 +1015,96 @@
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
-    function permissionList(taskId) {
+    function newRemoteActionRequestId() {
+      remoteActionSequence += 1;
+      return "action-" + Date.now().toString(36) + "-" + remoteActionSequence.toString(36)
+        + "-" + Math.floor(Math.random() * 0x100000000).toString(36);
+    }
+
+    function remoteActionKey(localSessionId, remoteRef, intent) {
+      return [
+        localSessionId, remoteRef, intent.operation, intent.taskId, intent.transferId,
+        intent.chunkIndex, intent.chunkBytes, intent.permissionRequestId, intent.decision,
+        intent.artifactId, intent.fileName, intent.mimeType, intent.totalBytes, intent.sha256,
+      ].map(function (value) { return value == null ? "" : String(value); }).join("\u001f");
+    }
+
+    function rememberUncertainAction(key, requestId) {
+      if (!uncertainActionRequests[key]) uncertainActionOrder.push(key);
+      uncertainActionRequests[key] = requestId;
+      while (uncertainActionOrder.length > 128) {
+        var expired = uncertainActionOrder.shift();
+        delete uncertainActionRequests[expired];
+      }
+    }
+
+    function forgetUncertainAction(key) {
+      delete uncertainActionRequests[key];
+    }
+
+    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId) {
       ensureAvailable();
-      return invoke("desktop_remote_permission_list", { taskId: taskId }).then(function (permissions) {
+      if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      if (suppliedRequestId != null && !requiredOpaqueId(suppliedRequestId)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      var key = remoteActionKey(localSessionId, remoteRef, intent);
+      var requestId = suppliedRequestId || uncertainActionRequests[key] || newRemoteActionRequestId();
+      function attempt(retryUncertain) {
+        return invoke("desktop_remote_action_a", {
+          localSessionId: localSessionId, remoteRef: remoteRef,
+          requestId: requestId, intent: intent,
+        }).then(function (body) {
+          forgetUncertainAction(key);
+          return body;
+        }).catch(function (failure) {
+          var error = asBoundedError(failure);
+          error.requestId = requestId;
+          if (error.code === "result_unknown") {
+            rememberUncertainAction(key, requestId);
+            if (retryUncertain) return attempt(false);
+          } else {
+            forgetUncertainAction(key);
+          }
+          throw error;
+        });
+      }
+      return attempt(true);
+    }
+
+    function permissionList(localSessionId, remoteRef, taskId) {
+      if (!requiredOpaqueId(taskId)) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "permission_list", taskId: taskId,
+      }).then(function (body) {
+        var permissions = body && body.permissions;
         var next = shallow(current());
         next.remotePermissions = Array.isArray(permissions)
           ? permissions.slice(0, 8).map(function (entry) {
               return {
-                permissionRequestId: String(entry.permissionRequestId || ""),
-                taskId: String(entry.taskId || ""),
-                operationType: String(entry.operationType || ""),
-                riskLevel: String(entry.riskLevel || ""),
-                targetScope: String(entry.targetScope || ""),
+                permissionRequestId: String(entry.permission_request_id || ""),
+                taskId: String(entry.task_id || ""),
+                operationType: String(entry.operation_type || ""),
+                riskLevel: String(entry.risk_level || ""),
+                targetScope: String(entry.target_scope || ""),
                 preview: String(entry.preview || ""),
                 state: String(entry.state || "pending"),
               };
             })
           : [];
         publish(next);
-        return permissions;
+        return next.remotePermissions;
       });
     }
 
-    function permissionDecide(taskId, permissionRequestId, decision) {
-      ensureAvailable();
-      return invoke("desktop_remote_permission_decide", {
-        taskId: taskId,
-        permissionRequestId: permissionRequestId,
-        decision: decision,
+    function permissionDecide(localSessionId, remoteRef, taskId, permissionRequestId, decision) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(permissionRequestId)
+        || ["allow", "deny"].indexOf(decision) < 0) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "permission_decide", taskId: taskId,
+        permissionRequestId: permissionRequestId, decision: decision,
       }).then(function (result) {
         var next = shallow(current());
         next.remotePermissions = (next.remotePermissions || []).filter(function (entry) {
@@ -908,58 +1120,91 @@
       return invoke("desktop_remote_permission_deny_task", { taskId: taskId, reason: reason || "b_stop" });
     }
 
-    function attachmentBegin(request) {
-      ensureAvailable();
-      return invoke("desktop_remote_attachment_begin", request || {});
+    function attachmentBegin(localSessionId, remoteRef, taskId, fileName, mimeType, totalBytes, sha256) {
+      if (!requiredOpaqueId(taskId) || typeof fileName !== "string" || typeof mimeType !== "string"
+        || !fileName.trim() || Array.from(fileName).length > 200
+        || !mimeType || mimeType.length > 120
+        || !Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > 32 * 1024 * 1024
+        || !/^[a-f0-9]{64}$/.test(sha256 || "")) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "attachment_begin", taskId: taskId, fileName: fileName,
+        mimeType: mimeType, totalBytes: totalBytes, sha256: sha256,
+      }).then(function (body) { return {
+        transferId: body.transfer_id, chunkBytes: Number(body.chunk_bytes), totalBytes: Number(body.total_bytes),
+      }; });
     }
 
-    function attachmentChunk(transferId, chunkIndex, chunkB64, chunkBytes) {
-      ensureAvailable();
-      return invoke("desktop_remote_attachment_chunk", {
-        transferId: transferId,
-        chunkIndex: chunkIndex,
-        chunkB64: chunkB64,
-        chunkBytes: chunkBytes,
+    function attachmentChunk(localSessionId, remoteRef, taskId, transferId, chunkIndex, chunkB64, chunkBytes) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(transferId)
+        || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0
+        || typeof chunkB64 !== "string" || !Number.isSafeInteger(chunkBytes)
+        || chunkBytes <= 0 || chunkBytes > 256 * 1024) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "attachment_chunk", taskId: taskId, transferId: transferId,
+        chunkIndex: chunkIndex, chunkB64: chunkB64, chunkBytes: chunkBytes,
+      }).then(function (body) { return {
+        state: body.state, receivedBytes: Number(body.received_bytes), sha256: body.sha256 || null,
+      }; });
+    }
+
+    function attachmentAbort(localSessionId, remoteRef, taskId, transferId) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(transferId)) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "attachment_abort", taskId: taskId, transferId: transferId,
       });
     }
 
-    function attachmentAbort(transferId) {
-      ensureAvailable();
-      return invoke("desktop_remote_attachment_abort", { transferId: transferId });
+    function artifactIndex(localSessionId, remoteRef) {
+      return invokeRemoteAction(localSessionId, remoteRef, { operation: "artifact_index" })
+        .then(function (body) { return (body.artifacts || []).map(function (item) { return {
+          artifactId: item.artifact_id, taskId: item.task_id, displayName: item.display_name,
+          mimeType: item.mime_type, totalBytes: Number(item.total_bytes), sha256: item.sha256,
+          previewKind: item.preview_kind,
+        }; }); });
     }
 
-    function artifactIndex(sessionId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_index", { sessionId: sessionId });
+    function artifactPreview(localSessionId, remoteRef, artifactId) {
+      if (!requiredOpaqueId(artifactId)) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "artifact_preview", artifactId: artifactId,
+      }).then(function (body) { return {
+        artifactId: body.artifact_id, previewKind: body.preview_kind,
+        truncated: body.truncated, text: body.text || null,
+      }; });
     }
 
-    function artifactPreview(sessionId, artifactId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_preview", { sessionId: sessionId, artifactId: artifactId });
+    function artifactDownloadBegin(localSessionId, remoteRef, taskId, artifactId) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(artifactId)) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "artifact_download_begin", taskId: taskId, artifactId: artifactId,
+      }).then(function (body) { return {
+        transferId: body.transfer_id, chunkBytes: Number(body.chunk_bytes), totalBytes: Number(body.total_bytes),
+      }; });
     }
 
-    function artifactDownloadBegin(sessionId, taskId, artifactId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_download_begin", {
-        sessionId: sessionId,
-        taskId: taskId,
-        artifactId: artifactId,
+    function artifactDownloadChunk(localSessionId, remoteRef, taskId, artifactId, transferId, chunkIndex) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(artifactId) || !requiredOpaqueId(transferId)
+        || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "artifact_download_chunk", taskId: taskId,
+        artifactId: artifactId, transferId: transferId, chunkIndex: chunkIndex,
+      }).then(function (body) { return {
+        chunkIndex: Number(body.chunk_index), chunkB64: body.chunk_b64,
+        chunkBytes: Number(body.chunk_bytes), receivedBytes: Number(body.received_bytes),
+        nextChunk: Number(body.next_chunk), completed: body.completed,
+      }; });
+    }
+
+    function artifactDownloadAbort(localSessionId, remoteRef, taskId, artifactId, transferId) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(artifactId) || !requiredOpaqueId(transferId)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "artifact_download_abort", taskId: taskId,
+        artifactId: artifactId, transferId: transferId,
       });
-    }
-
-    function artifactDownloadChunk(sessionId, artifactId, transferId, chunkIndex) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_download_chunk", {
-        sessionId: sessionId,
-        artifactId: artifactId,
-        transferId: transferId,
-        chunkIndex: chunkIndex,
-      });
-    }
-
-    function artifactDownloadAbort(transferId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_download_abort", { transferId: transferId });
     }
 
     function shallow(value) {
@@ -996,6 +1241,7 @@
       controllerStatus: controllerStatus,
       controllerCapabilitySend: controllerCapabilitySend,
       controlledTaskSend: controlledTaskSend,
+      controlledCapabilitiesSnapshot: controlledCapabilitiesSnapshot,
       controlledStopTask: controlledStopTask,
       capabilitiesSnapshot: capabilitiesSnapshot,
       listExportableModels: listExportableModels,
@@ -1004,8 +1250,10 @@
       readRemoteProxyHistory: readRemoteProxyHistory,
       selectRemoteProxyHistory: selectRemoteProxyHistory,
       deleteRemoteProxyHistory: deleteRemoteProxyHistory,
-      submitRemoteTask: submitRemoteTask,
-      abandonPreparedRemoteTask: abandonPreparedRemoteTask,
+      reserveRemoteTask: reserveRemoteTask,
+      commitRemoteTask: commitRemoteTask,
+      cancelRemoteTask: cancelRemoteTask,
+      abandonRemoteTask: abandonRemoteTask,
       permissionList: permissionList,
       permissionDecide: permissionDecide,
       permissionDenyTask: permissionDenyTask,
