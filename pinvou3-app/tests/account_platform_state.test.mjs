@@ -15,7 +15,7 @@ import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGro
 import { createFinanceDetailRecovery, financeCursorContext, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from '../src/features/account-platform/admin-finance-pagination.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { createAccountSynchronizationQueue, resolveAccountSynchronization } from '../src/features/account-platform/account-synchronization.js';
-import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
+import { summarizeUsageRecords, usageRecordReference } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformErrorCodes, localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
 import { accountDisplayLabel } from '../src/features/account-platform/account-display-label.js';
 import { profileCaptchaSubmissionOffset } from '../src/features/account-platform/profile-captcha-state.js';
@@ -926,6 +926,17 @@ test('personal surfaces show whole-point balances while Web model usage keeps tw
   assert.match(popover, /import \{ formatWholePoints \} from '\.\/credit-units\.js'/);
   assert.equal((popover.match(/formatWholePoints\(/g) || []).length, 4);
   assert.doesNotMatch(popover, /\bformatPoints\(/);
+});
+
+test('Web model usage records show the first six characters of the turn identifier', async () => {
+  assert.equal(usageRecordReference({ logical_turn_id: 'pinvou-turn-a1b2c3d4e5f6' }), 'a1b2c3');
+  assert.equal(usageRecordReference({ logical_turn_id: 'legacy-turn-id' }), 'legacy');
+  assert.equal(usageRecordReference({ usage_request_id: '12345678-1234-1234-1234-123456789abc' }), '123456');
+  assert.equal(usageRecordReference({}), '—');
+
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /usageRecordReference\(record\)/);
+  assert.doesNotMatch(view, /String\(record\.logical_turn_id \|\| record\.usage_request_id[\s\S]*?\.slice\(0, 8\)/);
 });
 
 test('Web personal center keeps the URL, selected tab, and browser history synchronized', async () => {

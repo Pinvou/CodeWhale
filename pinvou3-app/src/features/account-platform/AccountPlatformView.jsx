@@ -10,7 +10,7 @@ import { createAccountSynchronizationQueue, resolveAccountSynchronization } from
 import { clearInvitationAcceptanceRetries, invitationAcceptanceMayBeCommitted, invitationRecoveryScope, readInvitationAcceptanceRetries, writeInvitationAcceptanceRetries } from './invitation-recovery.js';
 import { invitationSubmissionAttempt } from './invitation-client.js';
 import { PendingInvitations } from './pending-invitations.js';
-import { summarizeUsageRecords } from './usage-summary.js';
+import { summarizeUsageRecords, usageRecordReference } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { accountDisplayLabel } from './account-display-label.js';
@@ -2713,7 +2713,7 @@ function Usage({ copy, language, records, unavailable, page, hasPrevious, hasMor
                     </small>
                   )}
                   <small title={record.logical_turn_id || record.usage_request_id}>
-                    {copy.usageRecord}: {String(record.logical_turn_id || record.usage_request_id || '—').slice(0, 8)}
+                    {copy.usageRecord}: {usageRecordReference(record)}
                   </small>
                 </div>
                 <div>

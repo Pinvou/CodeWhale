@@ -7,6 +7,19 @@ const cancellableExecutionStatuses = new Set([
   'STREAMING',
 ]);
 
+const logicalTurnPrefix = 'pinvou-turn-';
+
+export function usageRecordReference(record) {
+  const logicalTurnID = String(record?.logical_turn_id || '').trim();
+  if (logicalTurnID) {
+    const identifier = logicalTurnID.startsWith(logicalTurnPrefix)
+      ? logicalTurnID.slice(logicalTurnPrefix.length)
+      : logicalTurnID;
+    return identifier.slice(0, 6) || '—';
+  }
+  return String(record?.usage_request_id || '').trim().slice(0, 6) || '—';
+}
+
 function numeric(value) {
   if (value == null || value === '') return null;
   const number = Number(value);
