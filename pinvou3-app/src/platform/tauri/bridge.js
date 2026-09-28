@@ -2751,6 +2751,7 @@
     initPromise = (async function () {
     startupMark("bridge:init_start");
     startupNotificationBatching = true;
+    var initFailure;
     try {
     // Populate the global Scheduled unread summary without requiring the user
     // to visit the Scheduled page first. This stays off the startup critical path.
@@ -2807,10 +2808,21 @@
     }
     startupMark("bridge:background_checks_started");
     if (!isDetachedWindow) refreshRemoteControlStatus(); // 权威主窗口独占桌面 Web 代理状态
+    } catch (initError) {
+      initFailure = initError;
     } finally {
       startupNotificationBatching = false;
-      notify();
     }
+    // 连贯快照在 finally 之外发布:notify() 会原样上抛订阅者回调的异常,
+    // 而 finally 内抛出的异常会顶替进行中的 init 错误。失败路径照常发布,
+    // 但只让真正的 init 错误向外传播;成功路径上发布失败仍按原样使 init
+    // 失败。此段同步执行,标志复位与发布之间不会插入其他通知。
+    try {
+      notify();
+    } catch (notifyError) {
+      if (!initFailure) throw notifyError;
+    }
+    if (initFailure) throw initFailure;
     startupMark("bridge:init_done");
     if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
     })();

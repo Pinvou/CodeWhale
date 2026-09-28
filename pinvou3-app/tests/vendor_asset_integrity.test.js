@@ -25,6 +25,13 @@ for (const line of readme.split('\n')) {
 // Keep this generic integrity contract so a future classic vendor script
 // cannot be added without an explicit registry row and reviewed checksum.
 
+// The registry is intentionally EMPTY right now: the Tailwind runtime was the
+// last vendor script and moved to a build-time dependency, so src/vendor/
+// holds only this README. Emptiness is a pinned state, not a vacuous pass —
+// the two-sided checks below still fail if a .js file appears unregistered,
+// if a registry row loses its file, or if either side drifts from its
+// reviewed SHA-256.
+
 for (const entry of registered) {
   assert.ok(entry.version.trim().length > 0, `registry row for ${entry.file} is missing a version`);
   const assetPath = path.join(vendorDir, entry.file);
@@ -39,11 +46,11 @@ for (const entry of registered) {
   );
 }
 
-const registeredFiles = registered.map((entry) => entry.file).sort();
+const registeredFiles = registered.map((entry) => entry.file).sort(); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic string order is the assertion's expectation
 const onDiskFiles = fs
   .readdirSync(vendorDir)
   .filter((name) => name.endsWith('.js'))
-  .sort();
+  .sort(); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic string order is the assertion's expectation
 assert.deepStrictEqual(
   onDiskFiles,
   registeredFiles,

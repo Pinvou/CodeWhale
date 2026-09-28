@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useRef, useState } from 'react';
+import React, { memo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Archive, Check, Download, Edit2, FolderOpen, Layers, MoreHorizontal, PinIcon, PinOffIcon, Sparkles, Trash2, X } from '../icons.jsx';
 import { useLongPressDrag } from '../../hooks/useLongPressDrag.js';
@@ -42,66 +42,6 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
         </Root>
       );
     });
-
-    const ArchivedDeleteConfirmDialog = ({ theme, t, onCancel, onConfirm }) => {
-      const isDark = theme === 'dark';
-      useEffect(() => {
-        const onKey = (e) => {
-          if (e.key === 'Escape') onCancel();
-        };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-      }, [onCancel]);
-      return (
-        <div
-          role="presentation"
-          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-          style={{
-            background: 'rgba(0,0,0,.34)',
-            backdropFilter: 'blur(14px) saturate(140%)',
-            WebkitBackdropFilter: 'blur(14px) saturate(140%)',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif'
-          }}
-          onClick={onCancel}
-        >
-          <div
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="archived-delete-confirm-title"
-            className="w-[320px] max-w-[calc(100vw-48px)] overflow-hidden rounded-[16px] shadow-2xl bg-[rgba(250,250,250,.96)] dark:bg-[rgba(44,44,46,.96)] text-[#000] dark:text-[#F2F2F7]"
-            style={{
-              // isDark dynamic-value: 保留 (boxShadow)
-              boxShadow: isDark ? '0 24px 60px rgba(0,0,0,.55)' : '0 24px 60px rgba(0,0,0,.22)'
-            }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="px-6 pt-6 pb-5 text-center">
-              <div id="archived-delete-confirm-title" className="text-[20px] font-semibold leading-[26px]">{t.archivedDeleteTitle}</div>
-              <div className="mt-2.5 text-[15px] leading-[22px] text-[rgba(60,60,67,.72)] dark:text-[rgba(235,235,245,.72)]">
-                {t.archivedDeleteMessage}
-              </div>
-            </div>
-            <div className="h-px bg-[rgba(60,60,67,.24)] dark:bg-[rgba(84,84,88,.65)]" />
-            <div className="grid grid-cols-2">
-              <button
-                type="button"
-                onClick={onCancel}
-                className="h-[50px] text-[17px] active:opacity-70 text-[#007AFF] dark:text-[#0A84FF]"
-              >
-                {t.cpCancel}
-              </button>
-              <button
-                type="button"
-                onClick={onConfirm}
-                className="h-[50px] text-[17px] font-semibold active:opacity-70 text-[#FF3B30] border-l border-l-[rgba(60,60,67,.24)] dark:border-l-[rgba(84,84,88,.65)]"
-              >
-                {t.archivedDeleteAction}
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    };
 
     // 近期会话项：支持重命名(内联编辑) + 删除(内联二次确认)
     // Inline styles are extracted into pure functions: dragging lowers opacity; the persona target row builds its highlight color at runtime (isDark-dependent, cannot use static dark: variants).
@@ -297,4 +237,4 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
       );
     });
 
-export { NavItem, ArchivedDeleteConfirmDialog, RecentItem };
+export { NavItem, RecentItem };

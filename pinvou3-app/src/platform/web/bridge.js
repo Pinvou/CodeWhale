@@ -943,6 +943,10 @@
   var sessionBufferTouchClock = 0;
   var scheduledRunOwnerTouchClock = 0;
   var suppressNotify = false;
+  // init() 启动窗口内的批量抑制:置位期间 loader 的 notify 全部静默(状态照
+  // 写),窗口结束在 finally 里翻转并发布一个连贯快照,与 tauri 桥
+  // startupNotificationBatching 同口径。启动完成后此值恒为 false。
+  var startupNotificationBatching = false;
   // sessionId → true:标题当前是「卡牌占位名」(加卡时自动取的),可被首条用户消息覆盖。
   // 卡牌名只在「加了卡但还没开口」时当临时标题;一旦开始对话,对话内容更能区分同卡会话。
   // 内存态(不持久化):重启后丢标记仅影响「加卡→重启→才发首条消息」这一冷门路径。
@@ -2151,6 +2155,7 @@
   }
   function immediateNotify() {
     if (suppressNotify) return;
+    if (startupNotificationBatching) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -10556,6 +10561,11 @@
     // 错误并落兜底值),串行 await 会把多个 RPC 往返叠进首屏延迟——并行后往返
     // 宽度收敛为 1。enterDraft/markStateReady 必须等本组完成后才走(durable
     // state 未就绪前不得放行桌面事件重放,这是 web 重试契约的前提)。
+    // 与 tauri 桥同口径:启动窗口内抑制 notify(状态照写),try/finally 结束
+    // 后发布一个连贯快照并把通知恢复为立即发布。
+    startupNotificationBatching = true;
+    var initFailure;
+    try {
     var parallelLoads = [
       loadSettings(),
       hasCapability("pet") ? loadSelectedPet() : Promise.resolve(),
@@ -10588,7 +10598,24 @@
       checkForUpdateSilently();
     }
     if (hasCapability("webAccessAdmin")) refreshWebAccessStatus();
-    notify();
+    } catch (initError) {
+      initFailure = initError;
+    } finally {
+      // finally 而非仅成功路径:即使启动中途抛错,也必须恢复立即发布,
+      // 否则抑制位会永久吞掉此后所有通知(上文 loadScheduledTasks 等
+      // fire-and-forget 仍需照常发布)。
+      startupNotificationBatching = false;
+    }
+    // 连贯快照在 finally 之外发布:notify() 会原样上抛订阅者回调的异常,
+    // 而 finally 内抛出的异常会顶替进行中的 init 错误。失败路径照常发布,
+    // 但只让真正的 init 错误向外传播;成功路径上发布失败仍按原样使 init
+    // 失败。此段同步执行,标志复位与发布之间不会插入其他通知。
+    try {
+      notify();
+    } catch (notifyError) {
+      if (!initFailure) throw notifyError;
+    }
+    if (initFailure) throw initFailure;
     })();
     initPromise = attempt.then(function (result) {
       disarmWebInitRetry();
