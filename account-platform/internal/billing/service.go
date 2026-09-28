@@ -188,6 +188,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 			admin.POST("/recharge-products/:catalog_item_id/publish", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishRechargeProduct))
 			admin.POST("/recharge-products/:catalog_item_id/unpublish", s.authorizer.Require("platform.products.unpublish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_UNPUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUnpublishRechargeProduct))
 			admin.POST("/recharge-products/:catalog_item_id/delete", s.authorizer.Require("platform.products.delete"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteRechargeProduct))
+			admin.POST("/recharge-products/:catalog_item_id/display-names", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRechargeProductDisplayNames))
 		}
 		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
 		admin.GET("/refunds", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminRefunds))

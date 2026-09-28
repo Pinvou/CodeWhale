@@ -144,6 +144,7 @@ func buildPolicies() map[string]Policy {
 		"BILLING_RECHARGE_PRODUCT_CREATE":    "platform.products.create", "BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY": "platform.products.publish",
 		"BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE": "platform.products.publish", "BILLING_RECHARGE_PRODUCT_PUBLISH": "platform.products.publish",
 		"BILLING_RECHARGE_PRODUCT_UNPUBLISH": "platform.products.unpublish", "BILLING_RECHARGE_PRODUCT_DELETE": "platform.products.delete",
+		"BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE": "platform.products.publish",
 		"BILLING_CHARGEBACK_RECORD": "internal.billing.payment.reconcile", "BILLING_FORCED_REFUND_RECORD": "internal.billing.payment.reconcile",
 		"BILLING_DAILY_RECONCILIATION": "internal.billing.payment.reconcile",
 		"BILLING_ADJUSTMENT_REQUEST":   "platform.billing.repairs.request",

@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -55,11 +56,79 @@ func TestListPackagesProjectsCurrentLocalizedCatalogNamesPostgresIntegration(t *
 		t.Fatalf("localized package projection=%+v", item)
 	}
 
-	if _, err := repository.pool.Exec(ctx, `UPDATE recharge_product_catalog_items SET display_name_zh_cn='更新中文名',display_name_en='Updated English name',display_name_ja='更新した日本語名',updated_at=$2 WHERE catalog_item_id=$1`, catalogItemID, now.Add(time.Minute)); err != nil {
+	command := func(version int64, zh, en, ja, key string) RechargeProductDisplayNamesCommand {
+		return RechargeProductDisplayNamesCommand{CatalogItemID: catalogItemID, ExpectedVersion: version, DisplayNameZhCN: zh, DisplayNameEN: en, DisplayNameJA: ja, IdempotencyKey: key, RequestHash: key, Actor: ownerID.String(), Reason: "integration rename"}
+	}
+	for _, failure := range []struct{ table, key string }{{"recharge_product_command_records", "package-record-fail-0001"}, {"recharge_product_audits", "package-audit-fail-0001"}} {
+		functionName := "fail_" + strings.TrimPrefix(failure.table, "recharge_product_")
+		if _, err = repository.pool.Exec(ctx, `CREATE OR REPLACE FUNCTION `+functionName+`() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.command_type='BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE' THEN RAISE EXCEPTION 'injected write failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER `+functionName+` BEFORE INSERT ON `+failure.table+` FOR EACH ROW EXECUTE FUNCTION `+functionName+`()`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, command(1, "不应提交", "Must rollback", "ロールバック", failure.key)); err == nil {
+			t.Fatalf("%s failure did not abort rename", failure.table)
+		}
+		var name string
+		var version int64
+		if err = repository.pool.QueryRow(ctx, `SELECT display_name_en,version FROM recharge_product_catalog_items WHERE catalog_item_id=$1`, catalogItemID).Scan(&name, &version); err != nil || name != "Current English name" || version != 1 {
+			t.Fatalf("%s did not roll back catalog: name=%q version=%d err=%v", failure.table, name, version, err)
+		}
+		var commands int
+		if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM recharge_product_command_records WHERE idempotency_key=$1`, failure.key).Scan(&commands); err != nil || commands != 0 {
+			t.Fatalf("%s left command record: count=%d err=%v", failure.table, commands, err)
+		}
+		if _, err = repository.pool.Exec(ctx, `DROP TRIGGER `+functionName+` ON `+failure.table+`; DROP FUNCTION `+functionName+`()`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	updated, err := repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, command(1, "更新中文名", "Updated English name", "更新した日本語名", "package-rename-0001"))
+	if err != nil || updated.Version != 2 || updated.LifecycleStatus != "OFF_SALE" {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	replayed, err := repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, command(1, "更新中文名", "Updated English name", "更新した日本語名", "package-rename-0001"))
+	if err != nil || replayed.Version != updated.Version {
+		t.Fatalf("idempotent replay=%+v err=%v", replayed, err)
+	}
+	crossProduct := command(1, "更新中文名", "Updated English name", "更新した日本語名", "package-rename-0001")
+	crossProduct.CatalogItemID = uuid.New()
+	crossProduct.RequestHash = "different-resource-hash"
+	if _, err = repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, crossProduct); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same key across resources must conflict: %v", err)
+	}
+	var commandCount, auditCount int
+	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM recharge_product_command_records WHERE idempotency_key='package-rename-0001'`).Scan(&commandCount); err != nil {
 		t.Fatal(err)
+	}
+	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM recharge_product_audits WHERE idempotency_key='package-rename-0001'`).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if commandCount != 1 || auditCount != 1 {
+		t.Fatalf("command=%d audit=%d", commandCount, auditCount)
 	}
 	packages, _, err = repository.ListPackages(ctx, ownerID, walletID, 10)
 	if err != nil || len(packages) != 1 || packages[0].PlanName != "Purchase-time snapshot" || packages[0].CurrentPlanNameEN != "Updated English name" {
 		t.Fatalf("updated localized package projection=%+v err=%v", packages, err)
+	}
+	if _, err = repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, command(1, "stale", "stale", "stale", "package-rename-0002")); err == nil {
+		t.Fatal("stale expected_version must fail")
+	}
+	if _, err = repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, command(2, " ", "English", "日本語", "package-rename-0003")); err == nil {
+		t.Fatal("blank localized name must fail")
+	}
+	if _, err = repository.TransitionRechargeProduct(ctx, catalogItemID, 2, "DELETED", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, command(3, "删除后中文", "Deleted English", "削除後日本語", "package-rename-0004")); err != nil {
+		t.Fatal(err)
+	}
+	packages, _, err = repository.ListPackages(ctx, ownerID, walletID, 10)
+	if err != nil || packages[0].CurrentPlanNameEN != "Deleted English" || packages[0].PlanName != "Purchase-time snapshot" {
+		t.Fatalf("deleted catalog projection=%+v err=%v", packages, err)
+	}
+	if _, err = repository.pool.Exec(ctx, `DELETE FROM recharge_product_catalog_items WHERE catalog_item_id=$1`, catalogItemID); err != nil {
+		t.Fatal(err)
+	}
+	packages, _, err = repository.ListPackages(ctx, ownerID, walletID, 10)
+	if err != nil || packages[0].CurrentPlanNameEN != "" || packages[0].PlanName != "Purchase-time snapshot" {
+		t.Fatalf("missing catalog fallback projection=%+v err=%v", packages, err)
 	}
 }

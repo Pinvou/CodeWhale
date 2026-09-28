@@ -940,6 +940,17 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/recharge-products/{catalog_item_id}/display-names:
+    post:
+      operationId: updateRechargeProductDisplayNames
+      summary: Update all localized display names with compare-and-swap; an on-sale product becomes off-sale and requires fresh admission
+      parameters: [{ $ref: "#/components/parameters/CatalogItemID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RechargeProductDisplayNamesUpdate" } } } }
+      responses:
+        "200": { description: Names updated and any active admission closed, content: { application/json: { schema: { $ref: "#/components/schemas/RechargeProduct" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/recharge-products/{catalog_item_id}/unpublish:
     post:
       operationId: unpublishRechargeProduct
@@ -4585,6 +4596,16 @@ components:
         expected_version: { type: integer, minimum: 1 }
         reason: { type: string, minLength: 1 }
         evidence_id: { type: string, format: uuid }
+    RechargeProductDisplayNamesUpdate:
+      type: object
+      additionalProperties: false
+      required: [expected_version, display_name_zh_cn, display_name_en, display_name_ja, reason]
+      properties:
+        expected_version: { type: integer, minimum: 1 }
+        display_name_zh_cn: { type: string, minLength: 1 }
+        display_name_en: { type: string, minLength: 1 }
+        display_name_ja: { type: string, minLength: 1 }
+        reason: { type: string, minLength: 1 }
     ProductAdmissionVerification:
       type: object
       required: [verification_id, catalog_item_id, publish_fingerprint, status, requested_at]

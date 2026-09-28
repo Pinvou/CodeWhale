@@ -1333,7 +1333,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 			if parts[4] == "admission-verifications" {
 				return method == http.MethodGet || method == http.MethodPost
 			}
-			return method == http.MethodPost && (parts[4] == "publish" || parts[4] == "unpublish" || parts[4] == "delete")
+			return method == http.MethodPost && (parts[4] == "publish" || parts[4] == "unpublish" || parts[4] == "delete" || parts[4] == "display-names")
 		}
 		if len(parts) == 7 && parts[4] == "admission-verifications" {
 			if _, err := uuid.Parse(parts[5]); err != nil {

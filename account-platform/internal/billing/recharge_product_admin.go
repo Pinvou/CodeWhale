@@ -48,6 +48,12 @@ func catalogRequestHash(command string, body any) string {
 	return hex.EncodeToString(digest[:])
 }
 
+func catalogResourceRequestHash(command string, catalogID uuid.UUID, body any) string {
+	raw, _ := json.Marshal(body)
+	digest := sha256.Sum256(append([]byte(command+"\n"+catalogID.String()+"\n"), raw...))
+	return hex.EncodeToString(digest[:])
+}
+
 func (s *Service) replayCatalogCommand(w http.ResponseWriter, r *http.Request, hash string) (bool, error) {
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(key) < 16 || len(key) > 128 {
@@ -223,6 +229,51 @@ func (s *Service) adminUnpublishRechargeProduct(w http.ResponseWriter, r *http.R
 }
 func (s *Service) adminDeleteRechargeProduct(w http.ResponseWriter, r *http.Request) {
 	s.runCatalogTransition(w, r, "DELETED", "BILLING_RECHARGE_PRODUCT_DELETE")
+}
+
+type catalogDisplayNamesRequest struct {
+	ExpectedVersion int64  `json:"expected_version"`
+	DisplayNameZhCN string `json:"display_name_zh_cn"`
+	DisplayNameEN   string `json:"display_name_en"`
+	DisplayNameJA   string `json:"display_name_ja"`
+	Reason          string `json:"reason"`
+}
+
+func (s *Service) adminUpdateRechargeProductDisplayNames(w http.ResponseWriter, r *http.Request) {
+	catalogID, _, pathErr := catalogPathIDs(r)
+	if pathErr != nil {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	var body catalogDisplayNamesRequest
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	body.DisplayNameZhCN = strings.TrimSpace(body.DisplayNameZhCN)
+	body.DisplayNameEN = strings.TrimSpace(body.DisplayNameEN)
+	body.DisplayNameJA = strings.TrimSpace(body.DisplayNameJA)
+	body.Reason = strings.TrimSpace(body.Reason)
+	principal, _, actorOK := catalogActor(r)
+	if !actorOK || body.ExpectedVersion < 1 || body.DisplayNameZhCN == "" || body.DisplayNameEN == "" || body.DisplayNameJA == "" || body.Reason == "" {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	hash := catalogResourceRequestHash("BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE", catalogID, body)
+	item, err := s.catalog.ExecuteRechargeProductDisplayNamesUpdate(r.Context(), RechargeProductDisplayNamesCommand{
+		CatalogItemID: catalogID, ExpectedVersion: body.ExpectedVersion,
+		DisplayNameZhCN: body.DisplayNameZhCN, DisplayNameEN: body.DisplayNameEN, DisplayNameJA: body.DisplayNameJA,
+		IdempotencyKey: idempotencyKey, RequestHash: hash, Actor: principal.Subject, Reason: body.Reason,
+	})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
 }
 
 func (s *Service) adminProductAdmissionVerifications(w http.ResponseWriter, r *http.Request) {

@@ -15,7 +15,7 @@ test('recharge product commands use atomic permissions, recent OIDC authenticati
     assert.match(permissions, new RegExp(`platform\\.products\\.${permission}`));
     assert.match(service, new RegExp(`platform\\.products\\.${permission}`));
   }
-  for (const command of ['CREATE', 'ADMISSION_VERIFY', 'ADMISSION_REVOKE', 'PUBLISH', 'UNPUBLISH', 'DELETE']) {
+  for (const command of ['CREATE', 'ADMISSION_VERIFY', 'ADMISSION_REVOKE', 'PUBLISH', 'UNPUBLISH', 'DELETE', 'DISPLAY_NAMES_UPDATE']) {
     assert.match(policies, new RegExp(`BILLING_RECHARGE_PRODUCT_${command}`));
   }
   assert.match(handlers, /principal\.AuthenticatedAt/);
@@ -24,6 +24,9 @@ test('recharge product commands use atomic permissions, recent OIDC authenticati
   assert.match(handlers, /Idempotency-Key/);
   assert.match(migration, /recharge_product_command_records/);
   assert.match(migration, /recharge_product_audits/);
+  assert.match(service, /display-names.*platform\.products\.publish/);
+  assert.match(handlers, /adminUpdateRechargeProductDisplayNames/);
+  assert.match(handlers, /strings\.TrimSpace\(body\.DisplayNameZhCN\)/);
 });
 
 test('portal proxy and OpenAPI expose only the exact product lifecycle', async () => {
@@ -37,6 +40,7 @@ test('portal proxy and OpenAPI expose only the exact product lifecycle', async (
     '/billing/admin/v1/recharge-products/{catalog_item_id}/publish',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/unpublish',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/delete',
+    '/billing/admin/v1/recharge-products/{catalog_item_id}/display-names',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/admission-verifications',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/admission-verifications/{verification_id}/retry',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/admission-verifications/{verification_id}/revoke',

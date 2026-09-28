@@ -817,16 +817,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: false
-                required: [summary, items]
-                properties:
-                  summary:
-                    $ref: "#/components/schemas/EntitlementPackageSummary"
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/EntitlementPackage"
+                $ref: "#/components/schemas/EntitlementPackageList"
         "401":
           $ref: "#/components/responses/Error"
         "403":
@@ -850,7 +841,12 @@ paths:
       parameters:
         - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
-        "200": { description: Organization entitlement packages }
+        "200":
+          description: Organization entitlement packages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntitlementPackageList"
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /organizations/{organization_id}/recharge/orders:
@@ -1934,6 +1930,15 @@ components:
         active_package_count: { type: integer, minimum: 0 }
         next_expiry_at: { type: string, format: date-time }
         next_expiry_microcredits: { type: integer, format: int64, minimum: 0 }
+    EntitlementPackageList:
+      type: object
+      additionalProperties: false
+      required: [summary, items]
+      properties:
+        summary: { $ref: "#/components/schemas/EntitlementPackageSummary" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/EntitlementPackage" }
     EntitlementPackage:
       type: object
       additionalProperties: false
@@ -1949,6 +1954,9 @@ components:
         source_reference: { type: string, minLength: 1 }
         plan_id: { type: string }
         plan_name: { type: string }
+        current_plan_name_zh_cn: { type: string, minLength: 1, description: Current Simplified Chinese catalog name; omitted when the catalog row is unavailable. }
+        current_plan_name_en: { type: string, minLength: 1, description: Current English catalog name; omitted when the catalog row is unavailable. }
+        current_plan_name_ja: { type: string, minLength: 1, description: Current Japanese catalog name; omitted when the catalog row is unavailable. }
         sku_code: { type: string }
         amount_fen: { type: integer, format: int64, minimum: 0 }
         points_total_microcredits: { type: integer, format: int64, minimum: 1 }

@@ -125,6 +125,54 @@ ORDER BY evidence.created_at DESC,evidence.evidence_id DESC LIMIT 1`).Scan(&cata
 		}
 	})
 
+	t.Run("renaming an on-sale product fails closed until the new fingerprint is verified", func(t *testing.T) {
+		item, oldEvidence := createVerifiedRechargeProduct(t, ctx, repository, "rename", repository.now().Add(time.Hour))
+		published, transitionErr := repository.TransitionRechargeProduct(ctx, item.CatalogItemID, item.Version, "ON_SALE", &oldEvidence)
+		if transitionErr != nil {
+			t.Fatal(transitionErr)
+		}
+		staleVerification, _, err := repository.StartProductAdmissionVerification(ctx, item.CatalogItemID, uuid.New(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		renamed, renameErr := repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, RechargeProductDisplayNamesCommand{CatalogItemID: item.CatalogItemID, ExpectedVersion: published.Version, DisplayNameZhCN: "新中文名", DisplayNameEN: "New English name", DisplayNameJA: "新しい日本語名", IdempotencyKey: "catalog-rename-test-0001", RequestHash: "rename-hash-1", Actor: uuid.NewString(), Reason: "integration rename"})
+		if renameErr != nil || renamed.LifecycleStatus != "OFF_SALE" || renamed.Version != published.Version+1 || renamed.AdmissionVersion != published.AdmissionVersion+1 {
+			t.Fatalf("renamed=%+v err=%v", renamed, renameErr)
+		}
+		var activeBindings, activeMappings int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM product_admission_bindings WHERE catalog_item_id=$1 AND effective_to IS NULL`, item.CatalogItemID).Scan(&activeBindings); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_product_mappings WHERE product_id=$1 AND effective_to IS NULL AND status IN ('FROZEN','TEST_ONLY')`, item.ProductID).Scan(&activeMappings); err != nil {
+			t.Fatal(err)
+		}
+		if activeBindings != 0 || activeMappings != 0 {
+			t.Fatalf("rename retained admission: bindings=%d mappings=%d", activeBindings, activeMappings)
+		}
+		if _, err = repository.CompleteProductAdmissionVerification(ctx, staleVerification.VerificationID, "integration-test", "CATALOG_FACT_CHECK", "stale-sha256", repository.now().Add(time.Hour)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("verification completed after rename: %v", err)
+		}
+		renamedBack, err := repository.ExecuteRechargeProductDisplayNamesUpdate(ctx, RechargeProductDisplayNamesCommand{CatalogItemID: item.CatalogItemID, ExpectedVersion: renamed.Version, DisplayNameZhCN: item.DisplayNameZhCN, DisplayNameEN: item.DisplayNameEN, DisplayNameJA: item.DisplayNameJA, IdempotencyKey: "catalog-rename-test-0002", RequestHash: "rename-hash-2", Actor: uuid.NewString(), Reason: "integration rename back"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repository.TransitionRechargeProduct(ctx, item.CatalogItemID, renamedBack.Version, "ON_SALE", &oldEvidence); !errors.Is(err, ErrConflict) {
+			t.Fatalf("old fingerprint unexpectedly republished product: %v", err)
+		}
+		verification, _, err := repository.StartProductAdmissionVerification(ctx, item.CatalogItemID, uuid.New(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		newEvidence, err := repository.CompleteProductAdmissionVerification(ctx, verification.VerificationID, "integration-test", "CATALOG_FACT_CHECK", "renamed-sha256", repository.now().Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		republished, err := repository.TransitionRechargeProduct(ctx, item.CatalogItemID, renamedBack.Version, "ON_SALE", &newEvidence)
+		if err != nil || republished.LifecycleStatus != "ON_SALE" {
+			t.Fatalf("republished=%+v err=%v", republished, err)
+		}
+	})
+
 	for _, fixture := range []struct {
 		name      string
 		expiresAt func(time.Time) time.Time
