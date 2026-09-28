@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use super::core::{
     CompletedTransfer, TransferBinding, TransferContext, TransferHandle, TransferMetadata,
 };
-use crate::features::remote_control::controller::protocol::LeaseContext;
 pub(crate) use crate::features::files::file_ingest::PublishedAttachment;
+use crate::features::remote_control::controller::protocol::LeaseContext;
 
 struct CompletedReceipt {
     binding: TransferBinding,

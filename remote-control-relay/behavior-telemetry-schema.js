@@ -16,6 +16,10 @@ const CLIENT_FIELDS = new Set([
   ...BEHAVIOR_TELEMETRY_SCHEMA.required,
   ...BEHAVIOR_TELEMETRY_SCHEMA["x-client-optional-fields"],
 ]);
+const REMOTE_CONTROL_EVENT = "remote_control_event";
+const REMOTE_CONTROL_FIELDS = new Set(
+  BEHAVIOR_EVENT_CONTRACTS[REMOTE_CONTROL_EVENT]?.allowed || [],
+);
 export const BEHAVIOR_STORED_FIELDS = new Set([...CLIENT_FIELDS, ...SERVER_FIELDS]);
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_EVENT_BYTES = 8 * 1024;
@@ -54,13 +58,28 @@ export function validateBehaviorEventShape(raw, options = {}) {
   const eventName = raw.event_name;
   const contract = BEHAVIOR_EVENT_CONTRACTS[eventName];
   if (!contract) return invalid("unknown_event", "event_name");
+  const eventFields = Array.isArray(contract.allowed)
+    ? new Set([...BEHAVIOR_TELEMETRY_SCHEMA.required, ...contract.allowed])
+    : CLIENT_FIELDS;
   for (const field of Object.keys(raw)) {
     if (SERVER_FIELDS.has(field)) return invalid("invalid_field", field);
-    if (!CLIENT_FIELDS.has(field)) return invalid("invalid_field", field);
+    if (!eventFields.has(field)) return invalid("invalid_field", field);
+    if (eventName !== REMOTE_CONTROL_EVENT && REMOTE_CONTROL_FIELDS.has(field)) {
+      return invalid("invalid_field", field);
+    }
   }
   for (const field of [...BEHAVIOR_TELEMETRY_SCHEMA.required, ...contract.required]) {
     if (raw[field] === undefined || raw[field] === null || raw[field] === "") {
       return invalid("invalid_field", field);
+    }
+  }
+  if (eventName === REMOTE_CONTROL_EVENT) {
+    const permissionStage = raw.remote_stage === "permission";
+    if (permissionStage && raw.remote_permission_step === undefined) {
+      return invalid("invalid_field", "remote_permission_step");
+    }
+    if (!permissionStage && raw.remote_permission_step !== undefined) {
+      return invalid("invalid_field", "remote_permission_step");
     }
   }
   for (const [field, value] of Object.entries(raw)) {

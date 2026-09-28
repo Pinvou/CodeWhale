@@ -743,7 +743,10 @@ mod tests {
             relay_url_path("wss://pinvou.com/pinvou3/remote-test/ws?token=hunter2"),
             "/pinvou3/remote-test/ws"
         );
-        assert_eq!(relay_url_path("ws://127.0.0.1:8787/pinvou3/remote/ws"), "/pinvou3/remote/ws");
+        assert_eq!(
+            relay_url_path("ws://127.0.0.1:8787/pinvou3/remote/ws"),
+            "/pinvou3/remote/ws"
+        );
         assert_eq!(relay_url_path("wss://pinvou.com"), "");
         assert_eq!(relay_url_path("not-a-url"), "");
     }

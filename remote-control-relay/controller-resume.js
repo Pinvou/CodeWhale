@@ -134,6 +134,7 @@ export class ControllerResumeHooks {
 
     try {
       if (message.type === "controller_resume_prepare") {
+        state.resumeStartedAt ??= timestamp;
         return this.#prepare({ message, socketIdentity, role, lease, state });
       }
       if (message.type === "encrypted_resume_confirm") {
@@ -426,10 +427,14 @@ export class ControllerResumeHooks {
           livenessEpochB: state.candidate.livenessEpochB,
           tokenA: state.candidate.tokenA,
           tokenB: state.candidate.tokenB,
+          latencyMs: state.resumeStartedAt === null
+            ? undefined
+            : Math.max(0, now(this.#clock) - state.resumeStartedAt),
         });
         state.phase = "connected";
         state.lease = { ...updated };
         state.deadline = Number(updated.resume_deadline_ms);
+        state.resumeStartedAt = null;
         zeroCandidate(state);
         return Object.freeze({ lease: updated });
       },
@@ -460,6 +465,7 @@ export class ControllerResumeHooks {
       activationAck: null,
       postActivationLiveness: null,
       candidate: null,
+      resumeStartedAt: null,
     });
     return Object.freeze({ deliveries: Object.freeze([]) });
   }

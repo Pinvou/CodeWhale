@@ -527,8 +527,11 @@ pub(super) fn validate_web_rpc_scope(
             Ok(())
         };
     };
-    crate::features::sessions::validate_session_id(session_id).map_err(|error| {
-        log::warn!("[remote_control] rejected invalid Web Session id: {error:#}");
+    crate::features::sessions::validate_session_id(session_id).map_err(|_| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "session_id_rejected",
+            "rejected",
+        );
         "invalid_web_session_id".to_string()
     })?;
     super::validate_multi_agent_session_web_scope(app, command, session_id)?;
@@ -549,8 +552,11 @@ pub(super) fn validate_web_rpc_scope(
     let store = app
         .try_state::<SessionStore>()
         .ok_or_else(|| "Session store is not ready".to_string())?;
-    store.load(session_id).map_err(|error| {
-        log::warn!("[remote_control] Web Session scope lookup failed: {error:#}");
+    store.load(session_id).map_err(|_| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "session_scope_lookup_failed",
+            "failed",
+        );
         "web_session_unavailable".to_string()
     })?;
     Ok(())
@@ -685,7 +691,10 @@ pub(super) fn enqueue_stream_reset(sender: RelaySender, message: Value) {
     // RelaySender owns a single bounded waiter and coalesces repeated recovery
     // barriers to the latest lease/epoch while the data channel is saturated.
     if sender.enqueue_stream_reset(message).is_err() {
-        eprintln!("[web-access] stream reset could not reach the relay task");
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "stream_reset_enqueue_failed",
+            "queue_failed",
+        );
     }
 }
 

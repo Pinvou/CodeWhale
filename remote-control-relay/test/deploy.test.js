@@ -69,7 +69,7 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
   const packed = spawnSync("tar", [
     "-czf", "-",
     "-C", "remote-control-relay",
-    "server.js", "telemetry-service.js", "behavior-telemetry-schema.js",
+    "server.js", "telemetry-service.js", "behavior-telemetry-schema.js", "controller-telemetry.js",
     "-C", "..",
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",

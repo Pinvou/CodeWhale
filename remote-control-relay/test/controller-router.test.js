@@ -7,6 +7,7 @@ function fixture() {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
   const aborted = [];
   const terminated = [];
+  const audits = [];
   const reserved = Object.freeze({
     v: 1,
     type: "controller_pairing_reserved",
@@ -59,6 +60,7 @@ function fixture() {
       sent.get(socket).push(message);
       return true;
     },
+    audit: (event) => audits.push(event),
   });
   router.addSocket({ socketIdentity: "socket-A", source: "198.51.100.1", socket: "socket-A" });
   router.addSocket({ socketIdentity: "socket-B", source: "198.51.100.2", socket: "socket-B" });
@@ -67,7 +69,7 @@ function fixture() {
     endpointId: "endpoint-0001",
     authenticatedContext: Object.freeze({ endpointId: "endpoint-0001", credential: "secret" }),
   });
-  return { router, sent, aborted, terminated };
+  return { router, sent, aborted, terminated, audits };
 }
 
 async function connectController(router) {
@@ -149,7 +151,7 @@ test("router keeps registration on authenticated B and cleans up disconnected pe
 });
 
 test("explicit controller disconnect forwards once and terminates the shared lease", async () => {
-  const { router, sent, terminated } = fixture();
+  const { router, sent, terminated, audits } = fixture();
   await router.handle({
     socketIdentity: "socket-A",
     message: { v: 1, type: "controller_pairing_claim", request_id: "request-claim-0001" },
@@ -179,10 +181,18 @@ test("explicit controller disconnect forwards once and terminates the shared lea
   assert.deepEqual(terminated, [{
     controllerLeaseId: "controller-lease-0001", reason: "user_requested",
   }]);
+  assert.deepEqual(audits, ["controller_joined"], "lease manager owns the sole terminal audit");
+});
+
+test("closing an unauthenticated controller socket never fabricates a lease lifecycle", async () => {
+  const { router, audits, aborted } = fixture();
+  await router.removeSocket("socket-A");
+  assert.deepEqual(audits, []);
+  assert.deepEqual(aborted, [{ socketIdentity: "socket-A", reason: "owner_disconnected" }]);
 });
 
 test("authenticated encrypted business frames are validated and forwarded both ways", async () => {
-  const { router, sent } = fixture();
+  const { router, sent, audits } = fixture();
   await connectController(router);
   sent.get("socket-A").length = 0;
   sent.get("socket-B").length = 0;
@@ -194,10 +204,11 @@ test("authenticated encrypted business frames are validated and forwarded both w
   const response = encryptedFrame("B", "capability_snapshot", "2");
   assert.deepEqual(await router.handle({ socketIdentity: "socket-B", message: response }), response);
   assert.deepEqual(sent.get("socket-A"), [response]);
+  assert.deepEqual(audits.slice(-2), ["task_forwarded", "task_forwarded"]);
 });
 
 test("encrypted business frames fail closed on role or lease mismatch", async () => {
-  const { router, sent } = fixture();
+  const { router, sent, audits } = fixture();
   await connectController(router);
   sent.get("socket-A").length = 0;
   sent.get("socket-B").length = 0;
@@ -217,6 +228,7 @@ test("encrypted business frames fail closed on role or lease mismatch", async ()
     (error) => error?.code === "controller_business_invalid",
   );
   assert.equal(sent.get("socket-B").length, 0);
+  assert.equal(audits.at(-1), "task_rejected");
 });
 
 test("router collapses internal claim failures to a bounded public error", async () => {

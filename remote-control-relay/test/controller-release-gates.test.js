@@ -1,7 +1,9 @@
 "use strict";
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 // DEV-25：把发布/回滚门禁固化成可执行断言，避免 runbook 与代码漂移。
@@ -74,4 +76,13 @@ test("telemetry thresholds stay inside the DEV-24 enum", () => {
   // The runbook may only reference aggregate counters, never identity fields.
   assert.ok(!/pairing_code\s*[:=]/.test(runbook));
   assert.ok(!/lease_id\s*[:=]/.test(runbook));
+});
+
+test("release gate executes the real lifecycle sensitive-surface scan", () => {
+  const result = spawnSync(process.execPath, [
+    "--test",
+    "--test-concurrency=1",
+    fileURLToPath(new URL("./controller-sensitive-scan.test.js", import.meta.url)),
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, "controller sensitive-surface gate failed");
 });

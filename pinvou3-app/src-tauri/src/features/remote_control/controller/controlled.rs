@@ -171,6 +171,12 @@ pub(crate) struct ControlledStatus {
     error_code: Option<String>,
 }
 
+impl ControlledStatus {
+    pub(crate) fn kind(&self) -> ControlledStatusKind {
+        self.status
+    }
+}
+
 impl std::fmt::Debug for ControlledStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -331,11 +337,7 @@ pub(crate) struct WorkspaceAuthorizationRequest {
 }
 
 impl WorkspaceAuthorizationRequest {
-    pub(crate) fn new(
-        path: PathBuf,
-        display_name: String,
-        code_allowed: bool,
-    ) -> Result<Self> {
+    pub(crate) fn new(path: PathBuf, display_name: String, code_allowed: bool) -> Result<Self> {
         if !path.is_dir() {
             return Err(ControlledStateError::new("workspace_path_invalid"));
         }
@@ -1569,7 +1571,10 @@ mod tests {
         );
         std::fs::remove_dir_all(&authorized_path).unwrap();
         assert_eq!(
-            manager.resolve_code_workspace(&workspace_id).unwrap_err().code,
+            manager
+                .resolve_code_workspace(&workspace_id)
+                .unwrap_err()
+                .code,
             "workspace_authorization_stale"
         );
     }

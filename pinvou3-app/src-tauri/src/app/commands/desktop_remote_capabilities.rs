@@ -121,9 +121,8 @@ pub async fn desktop_remote_controlled_capabilities_snapshot(
     if still_live != context {
         return Err("session_context_stale".to_owned());
     }
-    let runtime = app.state::<
-        std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>,
-    >();
+    let runtime =
+        app.state::<std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
     let lane = runtime
         .service()
         .lane_for_session(&session_id, &context.remote_control_generation)

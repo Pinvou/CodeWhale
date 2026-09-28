@@ -22,6 +22,10 @@ PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controlle
 PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json
 PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10
 PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10
+PINVOU_TELEMETRY_ENROLLMENT_TOKEN=telemetry-enrollment-secret-24
+PINVOU_TELEMETRY_DEVICE_PEPPER=telemetry-device-pepper-24
+PINVOU_STATS_ADMIN_PASSWORD=operations-admin-password
+PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry
 `;
 
 test("production controller environment requires the accepted deployment profile", () => {
@@ -40,6 +44,25 @@ test("production controller environment requires the accepted deployment profile
   assert.throws(
     () => parseControllerEnvironment(`${VALID_ENV}\nNODE_ENV=development\n`),
     /controller_env_duplicate_key/u,
+  );
+});
+
+test("production controller environment requires an enabled protected telemetry service", () => {
+  for (const replacement of [
+    ["PINVOU_TELEMETRY_ENROLLMENT_TOKEN=telemetry-enrollment-secret-24", "PINVOU_TELEMETRY_ENROLLMENT_TOKEN=short"],
+    ["PINVOU_TELEMETRY_DEVICE_PEPPER=telemetry-device-pepper-24", "PINVOU_TELEMETRY_DEVICE_PEPPER=short"],
+    ["PINVOU_STATS_ADMIN_PASSWORD=operations-admin-password", "PINVOU_STATS_ADMIN_PASSWORD=short"],
+  ]) {
+    assert.throws(
+      () => validateControllerEnvironment(parseControllerEnvironment(VALID_ENV.replace(...replacement))),
+      /controller_env_telemetry_credentials_invalid/u,
+    );
+  }
+  assert.throws(
+    () => validateControllerEnvironment(parseControllerEnvironment(
+      VALID_ENV.replace("PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry", "PINVOU_TELEMETRY_DATA_DIR=relative/path"),
+    )),
+    /controller_env_telemetry_data_dir_invalid/u,
   );
 });
 

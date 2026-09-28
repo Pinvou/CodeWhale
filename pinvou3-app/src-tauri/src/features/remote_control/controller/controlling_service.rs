@@ -18,7 +18,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::controlling::{
-    ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus, ResumeStep,
+    ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus,
+    ControllingStatusKind, ResumeStep,
 };
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
 use super::controlling_runtime::{
@@ -43,6 +44,9 @@ use super::relay_transport::{
 use super::resume::{
     build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
     resume_frame_matches_lease,
+};
+use crate::features::behavior_telemetry::{
+    RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
 };
 use crate::features::remote_control::RemoteControlManager;
 
@@ -1588,7 +1592,34 @@ pub(crate) async fn connect_controlling_device(
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
         let device = manager.inner();
+        let mut previous_status = ControllingStatusKind::Connected;
         let mut on_status = |status: &ControllingStatus| {
+            let current = status.kind();
+            if current != previous_status {
+                let event = match (previous_status, current) {
+                    (ControllingStatusKind::Connected, ControllingStatusKind::Reconnecting) => {
+                        Some(RemoteControlEvent::new(
+                            RemoteStage::Disconnection,
+                            RemoteOutcome::Ok,
+                        ))
+                    }
+                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Connected) => {
+                        Some(RemoteControlEvent::new(
+                            RemoteStage::Resume,
+                            RemoteOutcome::Ok,
+                        ))
+                    }
+                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Error) => Some(
+                        RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
+                            .reason(RemoteReason::ResumeFailed),
+                    ),
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    track_remote_control(&keeper, event);
+                }
+                previous_status = current;
+            }
             log_controller_event("status", &controller_status_log_detail(status));
             let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
         };

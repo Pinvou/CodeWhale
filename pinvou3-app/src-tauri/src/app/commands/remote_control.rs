@@ -134,10 +134,10 @@ fn web_session_result<T, E: std::fmt::Display>(
     operation: WebSessionOperation,
     result: Result<T, E>,
 ) -> Result<T, String> {
-    result.map_err(|error| {
-        log::warn!(
-            "[remote_control] Web session {} failed: {error}",
-            operation.as_str()
+    result.map_err(|_| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "web_session_operation_failed",
+            "failed",
         );
         format!("web_session_{}_failed", operation.as_str())
     })
@@ -147,10 +147,10 @@ fn web_workspace_result<T, E: std::fmt::Display>(
     operation: WebWorkspaceOperation,
     result: Result<T, E>,
 ) -> Result<T, String> {
-    result.map_err(|error| {
-        log::warn!(
-            "[remote_control] Web code workspace {} failed: {error}",
-            operation.as_str()
+    result.map_err(|_| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "web_workspace_operation_failed",
+            "failed",
         );
         format!("web_workspace_{}_failed", operation.as_str())
     })
@@ -160,10 +160,10 @@ fn web_acp_result<T, E: std::fmt::Display>(
     operation: WebAcpOperation,
     result: Result<T, E>,
 ) -> Result<T, String> {
-    result.map_err(|error| {
-        log::warn!(
-            "[remote_control] Web ACP {} failed: {error:#}",
-            operation.as_str()
+    result.map_err(|_| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "web_acp_operation_failed",
+            "failed",
         );
         format!("web_acp_{}_failed", operation.as_str())
     })
@@ -942,8 +942,9 @@ pub async fn web_access_create_codex_acp_session(
                     .map(|reservation| manager.restore_web_workspace_grant(reservation))
                     .is_some_and(|restored| !restored)
                 {
-                    log::warn!(
-                        "[remote_control] failed to restore Web workspace authorization after Session creation failure"
+                    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                        "workspace_auth_restore_failed",
+                        "failed",
                     );
                 }
                 return Err(error);
@@ -1049,20 +1050,21 @@ pub async fn web_access_codex_acp_prompt(
         let attachment_handles = attachment_handles.unwrap_or_default();
         let (attachment_reservation, attachments) =
             manager.reserve_web_attachments(&attachment_handles)?;
-        let (attachments, staged_sources) = match stage_uploaded_attachments(
-            attachments,
-            &session_id,
-            &store,
-        ) {
+        let staged = stage_uploaded_attachments(attachments, &session_id, &store);
+        let (attachments, staged_sources) = match staged {
             Ok(staged) => staged,
             Err(error) => {
-                if let Err(release_error) = manager.finish_web_attachment_reservation(
+                if manager
+                    .finish_web_attachment_reservation(
                     &attachment_reservation,
                     &attachment_handles,
                     false,
-                ) {
-                    eprintln!(
-                        "[web-access] release ACP attachment reservation failed: {release_error}"
+                )
+                    .is_err()
+                {
+                    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                        "attachment_release_failed",
+                        "failed",
                     );
                 }
                 return Err(error);
@@ -1088,7 +1090,10 @@ pub async fn web_access_codex_acp_prompt(
             consume,
         ) {
             if consume {
-                eprintln!("[web-access] finalize accepted ACP attachments failed: {error}");
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "attachment_finalize_failed",
+                    "failed",
+                );
             } else {
                 return Err(format!(
                     "{}; additionally failed to release attachments: {error}",
@@ -1376,22 +1381,26 @@ async fn web_access_chat_for_session(
     let attachment_handles = attachment_handles.unwrap_or_default();
     let (attachment_reservation, attachments) =
         manager.reserve_web_attachments(&attachment_handles)?;
-    let (attachments, staged_sources) =
-        match stage_uploaded_attachments(attachments, &session_id, store) {
-            Ok(staged) => staged,
-            Err(error) => {
-                if let Err(release_error) = manager.finish_web_attachment_reservation(
+    let staged = stage_uploaded_attachments(attachments, &session_id, store);
+    let (attachments, staged_sources) = match staged {
+        Ok(staged) => staged,
+        Err(error) => {
+            if manager
+                .finish_web_attachment_reservation(
                     &attachment_reservation,
                     &attachment_handles,
                     false,
-                ) {
-                    eprintln!(
-                        "[web-access] release staged attachment reservation failed: {release_error}"
-                    );
-                }
-                return Err(error);
+                )
+                .is_err()
+            {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "attachment_release_failed",
+                    "failed",
+                );
             }
-        };
+            return Err(error);
+        }
+    };
     let result = super::chat::chat_with_reservation(
         message,
         Some(attachments),
@@ -1415,7 +1424,10 @@ async fn web_access_chat_for_session(
         if consume {
             // The engine already accepted the turn. Never report a false
             // failure that could cause the browser to submit it again.
-            eprintln!("[web-access] finalize accepted attachment reservation failed: {error}");
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "attachment_finalize_failed",
+                "failed",
+            );
         } else {
             return Err(format!(
                 "{}; additionally failed to release attachments: {error}",
@@ -1489,9 +1501,9 @@ fn cleanup_staged_attachment_sources(paths: &[std::path::PathBuf]) {
     for path in paths {
         if let Err(error) = std::fs::remove_file(path) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!(
-                    "[web-access] cleanup rejected staged attachment {} failed: {error}",
-                    path.display()
+                crate::features::remote_control::controller::relay_runtime::log_attachment_cleanup_failure(
+                    path,
+                    &error,
                 );
             }
         }

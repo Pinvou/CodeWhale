@@ -15,7 +15,7 @@
 | 前端与桥 | `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run test:webui` | WebUI v2 行为与旧 fixture 不回归 |
 | 架构守卫 | `python scripts/architecture-guard.py` | 依赖方向与平台边界 |
 | 发布门槛清单 | `node --test remote-control-relay/test/controller-release-gates.test.js` | 本文件的必备章节、回滚约束与残余风险 |
-| 泄露扫描 | `cargo test ... controller::telemetry`、`node --test remote-control-relay/test/controller-telemetry.test.js` | 受控枚举与哨兵扫描 |
+| 泄露扫描 | `node --test remote-control-relay/test/controller-telemetry.test.js remote-control-relay/test/controller-sensitive-scan.test.js` | 受控枚举与真实生命周期四类 surface 哨兵扫描 |
 
 ## 2. 灰度步骤
 
@@ -41,14 +41,25 @@
 
 | 指标 | 用途 | 建议阈值 |
 |---|---|---|
-| `claim|busy|slot_conflict` 速率 | 设备被争抢/爆破 | 突增 5 分钟即告警 |
-| `handshake|rejected|*` 比例 | 握手/收据异常 | 连续 10 分钟 > 5% |
-| `liveness|timeout|watchdog_expired` | 30 秒预算触发 | 任一出现即排查 |
-| `resume|rejected|resume_failed` | 恢复失败 | 10 分钟 > 2% |
-| `task|rejected|task_conflict` | 任务幂等冲突 | 出现即确认是否 A 重试 |
-| `attachment|rejected|transfer_budget` | 传输预算 | 持续出现需复核客户端行为 |
+| `claim_busy|claim|busy|slot_conflict` 速率 | 设备被争抢/爆破 | 突增 5 分钟即告警 |
+| `handshake_rejected|handshake|rejected|handshake_failed` 比例 | 握手/收据异常 | 连续 10 分钟 > 5% |
+| `liveness_expired|liveness|timeout|watchdog_expired` | 30 秒预算触发 | 任一出现即排查 |
+| `resume_rejected|resume|rejected|resume_failed` | 恢复失败 | 10 分钟 > 2% |
+| `task_rejected|task|rejected|task_conflict` | 任务幂等冲突 | 出现即确认是否 A 重试 |
+| `attachment_rejected|attachment|rejected|transfer_budget` | 传输预算 | 持续出现需复核客户端行为 |
 
-所有指标只允许 DEV-24 枚举内的聚合计数，禁止携带连接码、endpoint/lease/token、IP、设备名、prompt/回复、文件名与路径。
+Relay 内置三个固定滚动告警：60 秒内 `claim` 无效/限流累计 10 次触发
+`pairing_bruteforce_suspected`，5 分钟内 busy/容量拒绝累计 5 次触发
+`controller_capacity_pressure`，5 分钟内恢复失败累计 3 次触发
+`controller_recovery_failure_spike`。聚合结果只进入现有受保护的
+`/pinvou3/stats/api/overview.desktop_controller`；仅 `operations_admin` 可读，
+`behavior_analyst` 和未认证请求均不可读。生产启用 controller lane 时必须同时配置现有
+Telemetry/Stats 服务，不能另开匿名指标出口。
+`deploy-controller-preflight.mjs` 必须验证 `PINVOU_TELEMETRY_ENROLLMENT_TOKEN`、
+`PINVOU_TELEMETRY_DEVICE_PEPPER`、`PINVOU_STATS_ADMIN_PASSWORD` 达到现有服务的最低长度，且
+`PINVOU_TELEMETRY_DATA_DIR` 为绝对路径；任一条件不满足即阻断生产部署。
+
+所有指标和结构化 `[controller-audit]` 日志只允许 DEV-24 固定枚举内的聚合计数，禁止携带连接码、endpoint/lease/token/key、IP、设备名、prompt/回复、工具参数、文件名、路径或内容。发布证据必须以合成哨兵覆盖日志、controller 持久文件、抓包/密文和崩溃诊断四个固定 surface，并执行 `node --test remote-control-relay/test/controller-sensitive-scan.test.js`；该门禁会实际启动 Relay、制造撤销持久化失败并采集真实 stderr/audit sink，扫描结果只能报告 surface 名，不得回显哨兵。
 
 ## 5. 回滚
 

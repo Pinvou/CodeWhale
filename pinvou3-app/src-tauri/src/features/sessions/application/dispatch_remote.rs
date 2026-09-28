@@ -109,6 +109,18 @@ pub(crate) enum RemoteDispatchState {
 pub(crate) struct RemoteDispatchReport {
     pub(crate) retry_handle: RemoteRetryHandle,
     pub(crate) state: RemoteDispatchState,
+    /// Internal-only attempt classification. This is deliberately not exposed
+    /// over Tauri: it exists so telemetry records the irreversible send once,
+    /// never reserve/abandon or a reconciliation retry.
+    #[serde(skip)]
+    pub(crate) attempt: RemoteDispatchAttempt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteDispatchAttempt {
+    NotAttempted,
+    FirstAttempt,
+    Reconciled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -136,10 +148,15 @@ pub(crate) struct RemoteRetryHandle {
 }
 
 impl RemoteRetryHandle {
-    fn report(&self, state: RemoteDispatchState) -> RemoteDispatchReport {
+    fn report(
+        &self,
+        state: RemoteDispatchState,
+        attempt: RemoteDispatchAttempt,
+    ) -> RemoteDispatchReport {
         RemoteDispatchReport {
             retry_handle: self.clone(),
             state,
+            attempt,
         }
     }
 }
@@ -334,7 +351,10 @@ impl RemoteDispatchService {
             }
             PendingReservation::Existing(_) => return Err(error("remote_request_id_exists")),
         }
-        Ok(handle.report(RemoteDispatchState::PreparedNotSent))
+        Ok(handle.report(
+            RemoteDispatchState::PreparedNotSent,
+            RemoteDispatchAttempt::NotAttempted,
+        ))
     }
 
     /// Retry has no task semantics. It can only replay the original cached
@@ -393,7 +413,10 @@ impl RemoteDispatchService {
         }
         if pending.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred {
             ephemeral.remove(&key);
-            return Ok(handle.report(RemoteDispatchState::OutcomeUnknown));
+            return Ok(handle.report(
+                RemoteDispatchState::OutcomeUnknown,
+                RemoteDispatchAttempt::Reconciled,
+            ));
         }
         if !ephemeral.get(&key).is_some_and(|cached| {
             cached.context == live && cached.fingerprint == handle.request_fingerprint
@@ -505,7 +528,10 @@ impl RemoteDispatchService {
         ephemeral: &mut HashMap<OutboxKey, PreparedOutboxEntry>,
     ) -> Result<RemoteDispatchReport, UseCaseError> {
         if self.port.after_persist().is_err() {
-            return Ok(handle.report(RemoteDispatchState::PreparedNotSent));
+            return Ok(handle.report(
+                RemoteDispatchState::PreparedNotSent,
+                RemoteDispatchAttempt::NotAttempted,
+            ));
         }
         if self
             .port
@@ -527,7 +553,10 @@ impl RemoteDispatchService {
             )
             .is_err()
         {
-            return Ok(handle.report(RemoteDispatchState::PreparedNotSent));
+            return Ok(handle.report(
+                RemoteDispatchState::PreparedNotSent,
+                RemoteDispatchAttempt::NotAttempted,
+            ));
         }
         // No subsequent error can justify an automatic resend. Moving out of
         // the cache also ensures secrets are not retained for retry.
@@ -541,11 +570,14 @@ impl RemoteDispatchService {
             .wire_payload;
         let result = self.port.send_encrypted(&payload, live);
         drop(payload);
-        Ok(handle.report(if result.is_ok() {
-            RemoteDispatchState::Queued
-        } else {
-            RemoteDispatchState::OutcomeUnknown
-        }))
+        Ok(handle.report(
+            if result.is_ok() {
+                RemoteDispatchState::Queued
+            } else {
+                RemoteDispatchState::OutcomeUnknown
+            },
+            RemoteDispatchAttempt::FirstAttempt,
+        ))
     }
 
     /// Explicitly abandon a durable never-attempted request, whether its
@@ -1128,19 +1160,24 @@ mod tests {
 
         let prepared = service.reserve_new(same_request(&request)).unwrap();
         assert_eq!(prepared.state, RemoteDispatchState::PreparedNotSent);
-        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            service
-                .commit_prepared(
-                    &local_id,
-                    &request.semantics.remote_session_ref,
-                    prepared.retry_handle,
-                    &[]
-                )
+        assert_eq!(prepared.attempt, RemoteDispatchAttempt::NotAttempted);
+        assert!(
+            serde_json::to_value(&prepared)
                 .unwrap()
-                .state,
-            RemoteDispatchState::PreparedNotSent,
+                .get("attempt")
+                .is_none()
         );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        let disconnected = service
+            .commit_prepared(
+                &local_id,
+                &request.semantics.remote_session_ref,
+                prepared.retry_handle,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(disconnected.state, RemoteDispatchState::PreparedNotSent);
+        assert_eq!(disconnected.attempt, RemoteDispatchAttempt::NotAttempted);
         let record = store.remote_proxy_snapshot(&local_id).unwrap();
         assert_eq!(record.pending.len(), 1);
         assert_eq!(
@@ -1210,10 +1247,9 @@ mod tests {
         // The original payload is still cached, while its credential source
         // is gone. A retry must not build another DEV-15 package.
         port.credential_available.store(false, Ordering::SeqCst);
-        assert_eq!(
-            commit(&service, &store, &request).unwrap().state,
-            RemoteDispatchState::Queued
-        );
+        let committed = commit(&service, &store, &request).unwrap();
+        assert_eq!(committed.state, RemoteDispatchState::Queued);
+        assert_eq!(committed.attempt, RemoteDispatchAttempt::FirstAttempt);
         assert_eq!(port.prepare_count.load(Ordering::SeqCst), 1);
         assert_eq!(port.package_build_count.load(Ordering::SeqCst), 1);
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
@@ -1222,10 +1258,9 @@ mod tests {
             "base_url": "https://changed.test/v1", "model": "model-b",
             "display_name": "Model B", "image_capability_override": "enabled"
         });
-        assert_eq!(
-            commit(&service, &store, &request).unwrap().state,
-            RemoteDispatchState::OutcomeUnknown
-        );
+        let replay = commit(&service, &store, &request).unwrap();
+        assert_eq!(replay.state, RemoteDispatchState::OutcomeUnknown);
+        assert_eq!(replay.attempt, RemoteDispatchAttempt::Reconciled);
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
         assert_eq!(port.package_build_count.load(Ordering::SeqCst), 1);
         let mut wrong_after_attempt = first.retry_handle;
@@ -1291,6 +1326,7 @@ mod tests {
         assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
         let first = commit(&service, &store, &request).unwrap();
         assert_eq!(first.state, RemoteDispatchState::OutcomeUnknown);
+        assert_eq!(first.attempt, RemoteDispatchAttempt::FirstAttempt);
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
         assert!(
             service
@@ -1310,18 +1346,16 @@ mod tests {
         ));
         let service = RemoteDispatchService::new(restarted.clone(), restarted_port.clone());
         assert_eq!(restarted_port.send_count.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            service
-                .commit_prepared(
-                    &request.semantics.local_session_id,
-                    &request.semantics.remote_session_ref,
-                    first.retry_handle,
-                    &[],
-                )
-                .unwrap()
-                .state,
-            RemoteDispatchState::OutcomeUnknown
-        );
+        let reconciled = service
+            .commit_prepared(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                first.retry_handle,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(reconciled.state, RemoteDispatchState::OutcomeUnknown);
+        assert_eq!(reconciled.attempt, RemoteDispatchAttempt::Reconciled);
         assert_eq!(restarted_port.send_count.load(Ordering::SeqCst), 0);
         let pending = &restarted
             .remote_proxy_snapshot(&request.semantics.local_session_id)

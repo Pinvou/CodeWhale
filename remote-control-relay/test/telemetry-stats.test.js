@@ -93,6 +93,22 @@ function behaviorEvent(collectionPeriodId, overrides = {}) {
   };
 }
 
+function remoteBehaviorEvent(collectionPeriodId, overrides = {}) {
+  const event = behaviorEvent(collectionPeriodId, {
+    event_id: "remote_behavior_event_000001",
+    event_name: "remote_control_event",
+    remote_stage: "connection",
+    remote_outcome: "ok",
+    remote_reason: "none",
+    remote_latency_bucket: "lt_1s",
+    ...overrides,
+  });
+  for (const field of [
+    "session_id", "attempt_id", "mode", "initiator_type", "input_type", "has_attachment",
+  ]) delete event[field];
+  return event;
+}
+
 async function serviceRequest(service, method, path, body, headers = {}) {
   const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
   request.method = method;
@@ -794,6 +810,106 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal("metrics" in commercial, false);
 });
 
+test("remote-control behavior events aggregate only controlled dimensions", () => {
+  const now = Date.now();
+  const events = [
+    {
+      event_name: "remote_control_event",
+      event_id: "remote_event_000000000001",
+      identity_id: "installation_remote_0001",
+      device_id: "installation_remote_0001",
+      occurred_at: now,
+      received_at: now,
+      remote_stage: "task_terminal",
+      remote_outcome: "ok",
+      remote_reason: "none",
+      remote_latency_bucket: "lt_5s",
+      remote_model_source: "controlled",
+    },
+    {
+      event_name: "remote_control_event",
+      event_id: "remote_event_000000000002",
+      identity_id: "installation_remote_0001",
+      device_id: "installation_remote_0001",
+      occurred_at: now,
+      received_at: now,
+      remote_stage: "attachment",
+      remote_outcome: "rejected",
+      remote_reason: "transfer_budget",
+      remote_latency_bucket: "lt_250ms",
+      remote_size_bucket: "10_100mib",
+    },
+  ];
+  const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "today", now);
+  assert.equal(overview.remote_control.event_count, 2);
+  assert.deepEqual(overview.remote_control.rows, [
+    { stage: "attachment", outcome: "rejected", reason: "transfer_budget", count: 1 },
+    { stage: "task_terminal", outcome: "ok", reason: "none", count: 1 },
+  ]);
+  assert.deepEqual(overview.remote_control.latency_buckets, { lt_250ms: 1, lt_5s: 1 });
+  assert.deepEqual(overview.remote_control.model_sources, { controlled: 1 });
+  assert.deepEqual(overview.remote_control.size_buckets, { "10_100mib": 1 });
+  assert.deepEqual(overview.remote_control.permission_funnel, {
+    request: 0, allowed: 0, denied: 0, expired: 0,
+  });
+  assert.equal(overview.remote_control.success_rate, null, "small samples do not expose a rate");
+  assert.doesNotMatch(JSON.stringify(overview.remote_control), /device|endpoint|lease|token|prompt|path/i);
+});
+
+test("remote-control permission funnel counts one request and one terminal step", () => {
+  const now = Date.now();
+  const steps = ["request", "allowed", "denied", "expired"];
+  const events = steps.map((step, index) => ({
+    event_name: "remote_control_event",
+    event_id: `remote_permission_${String(index).padStart(12, "0")}`,
+    identity_id: "installation_remote_permission_0001",
+    device_id: "installation_remote_permission_0001",
+    occurred_at: now,
+    received_at: now,
+    remote_stage: "permission",
+    remote_outcome: step === "allowed" ? "ok"
+      : step === "expired" ? "expired" : step === "request" ? "ok" : "rejected",
+    remote_reason: step === "denied" ? "permission_denied"
+      : step === "expired" ? "permission_timeout" : "none",
+    remote_latency_bucket: "lt_50ms",
+    remote_permission_step: step,
+  }));
+  const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "today", now);
+  assert.deepEqual(overview.remote_control.permission_funnel, {
+    request: 1, allowed: 1, denied: 1, expired: 1,
+  });
+});
+
+test("remote-control behavior retransmission reuses the existing event-id deduplication", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-remote-behavior-dedupe-"));
+  try {
+    const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars", {
+      eventRatePerMinute: 1_000,
+      globalEventRatePerMinute: 2_000,
+    });
+    const credential = store.register({
+      hardware_claim: "remote-behavior-hardware-0001",
+      registration_secret: "remote-behavior-registration-secret-00001",
+      hardware_source: "test",
+      identity_quality: "hardware_serial",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x64",
+    }, null);
+    const device = store.authenticate(credential.device_id, credential.device_token);
+    const collection = store.startBehaviorCollection(device, {
+      request_id: "request_remote_behavior_start_000001",
+    });
+    const event = remoteBehaviorEvent(collection.collection_period_id);
+    const result = store.appendBehaviorEvents(device, [event, event], "batch_remote_behavior_000001");
+    assert.deepEqual(result.results.map(({ status }) => status), ["accepted", "duplicate"]);
+    assert.equal(store.behaviorEvents.length, 1);
+    assert.equal(store.behaviorEvents[0].event_name, "remote_control_event");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("behavior event store validates v1 independently, injects identity and deduplicates", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-events-"));
   try {
@@ -1401,7 +1517,26 @@ test("stats roles keep behavior analysts away from device-level endpoints", asyn
     process.env.PINVOU_STATS_ADMIN_PASSWORD = "operations-admin-password";
     process.env.PINVOU_BEHAVIOR_ANALYTICS_PASSWORD = "behavior-analyst-password";
     process.env.PINVOU_TELEMETRY_DATA_DIR = dataDir;
-    const service = createTelemetryService({ regionResolver: { enabled: false, lookup: async () => null } });
+    const service = createTelemetryService({
+      regionResolver: { enabled: false, lookup: async () => null },
+      controllerMetrics: () => ({
+        schema_version: 1,
+        counters: { "claim_rate_limited|claim|rejected|rate_limited|lt_50ms": 12 },
+        alerts: [{
+          code: "pairing_bruteforce_suspected",
+          severity: "warning",
+          window_seconds: 60,
+          count: 12,
+          threshold: 10,
+        }],
+        total: 12,
+      }),
+    });
+
+    assert.equal(
+      (await serviceRequest(service, "GET", "/pinvou3/stats/api/overview")).status,
+      401,
+    );
 
     const analystLogin = await serviceRequest(service, "POST", "/pinvou3/stats/api/login", {
       password: "behavior-analyst-password",
@@ -1412,6 +1547,7 @@ test("stats roles keep behavior analysts away from device-level endpoints", asyn
     assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/session", undefined, { cookie: analystCookie })).body.role, "behavior_analyst");
     assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/behavior/overview", undefined, { cookie: analystCookie })).status, 200);
     assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/devices", undefined, { cookie: analystCookie })).status, 403);
+    assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/overview", undefined, { cookie: analystCookie })).status, 403);
 
     const adminLogin = await serviceRequest(service, "POST", "/pinvou3/stats/api/login", {
       password: "operations-admin-password",
@@ -1419,6 +1555,17 @@ test("stats roles keep behavior analysts away from device-level endpoints", asyn
     const adminCookie = adminLogin.headers["set-cookie"].split(";")[0];
     assert.equal(adminLogin.body.role, "operations_admin");
     assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/devices", undefined, { cookie: adminCookie })).status, 200);
+    const operations = await serviceRequest(
+      service,
+      "GET",
+      "/pinvou3/stats/api/overview",
+      undefined,
+      { cookie: adminCookie },
+    );
+    assert.equal(operations.status, 200);
+    assert.equal(operations.body.desktop_controller.total, 12);
+    assert.equal(operations.body.desktop_controller.alerts[0].code, "pairing_bruteforce_suspected");
+    assert.doesNotMatch(JSON.stringify(operations.body.desktop_controller), /endpoint|lease|token|device|prompt/i);
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];

@@ -1084,6 +1084,29 @@ pub fn run() {
                     let temporary_models = commands::desktop_remote_model::shared_model_store();
                     handle.manage(temporary_models.clone());
                     let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                    let permission_telemetry_app = handle.clone();
+                    permission_authority.set_telemetry_sink(std::sync::Arc::new(move |metric| {
+                        use features::behavior_telemetry::{
+                            RemoteControlEvent, RemoteOutcome, RemotePermissionStep, RemoteReason,
+                            RemoteStage, track_remote_control,
+                        };
+                        use features::remote_control::controller::permission::PermissionTelemetryTransition;
+                        let (outcome, reason, step) = match metric.transition {
+                            PermissionTelemetryTransition::Requested =>
+                                (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Request),
+                            PermissionTelemetryTransition::Allowed =>
+                                (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Allowed),
+                            PermissionTelemetryTransition::Denied =>
+                                (RemoteOutcome::Rejected, RemoteReason::PermissionDenied, RemotePermissionStep::Denied),
+                            PermissionTelemetryTransition::Expired =>
+                                (RemoteOutcome::Expired, RemoteReason::PermissionTimeout, RemotePermissionStep::Expired),
+                        };
+                        track_remote_control(&permission_telemetry_app,
+                            RemoteControlEvent::new(RemoteStage::Permission, outcome)
+                                .reason(reason)
+                                .permission_step(step)
+                                .latency_ms(metric.latency_ms));
+                    }));
                     handle.manage(permission_authority.clone());
                     let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
                         handle.clone(),
@@ -1548,7 +1571,7 @@ pub fn run() {
             commands::desktop_remote_controlled::desktop_remote_controlled_stop,
             commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,
             commands::desktop_remote_controlled::desktop_remote_controlled_status,
-            commands::desktop_remote_controlled::desktop_remote_client_log,
+            commands::desktop_remote_controlled::desktop_remote_client_event,
             commands::desktop_remote_controlled::desktop_remote_controlled_poll_watchdog,
             commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
             commands::desktop_remote_controller::desktop_remote_controller_connect,

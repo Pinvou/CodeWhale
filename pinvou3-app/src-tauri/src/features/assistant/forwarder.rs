@@ -1623,10 +1623,7 @@ mod remote_assistant_tests {
         collector.push("tool-loop preface");
         collector.start_content_block(0);
         collector.push("## Final\n\n| A | B |");
-        assert_eq!(
-            collector.take().as_deref(),
-            Some("## Final\n\n| A | B |")
-        );
+        assert_eq!(collector.take().as_deref(), Some("## Final\n\n| A | B |"));
         assert_eq!(collector.take(), None);
     }
 

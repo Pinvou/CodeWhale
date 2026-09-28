@@ -18,6 +18,10 @@ const REQUIRED_KEYS = Object.freeze([
   "PINVOU_REMOTE_STATE_PATH",
   "PINVOU_REMOTE_ALLOWED_PROXY_IPS",
   "PINVOU_REMOTE_TRUSTED_PROXY_IPS",
+  "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+  "PINVOU_TELEMETRY_DEVICE_PEPPER",
+  "PINVOU_STATS_ADMIN_PASSWORD",
+  "PINVOU_TELEMETRY_DATA_DIR",
 ]);
 
 const EXACT_VALUES = Object.freeze({
@@ -67,6 +71,17 @@ export function validateControllerEnvironment(entries) {
     || [...allowed].some((address) => !trusted.has(address))
   ) {
     fail("controller_env_proxy_ips_mismatch");
+  }
+  if (
+    entries.get("PINVOU_TELEMETRY_ENROLLMENT_TOKEN").length < 24
+    || entries.get("PINVOU_TELEMETRY_DEVICE_PEPPER").length < 24
+    || entries.get("PINVOU_STATS_ADMIN_PASSWORD").length < 12
+  ) {
+    fail("controller_env_telemetry_credentials_invalid");
+  }
+  const telemetryDataDir = entries.get("PINVOU_TELEMETRY_DATA_DIR");
+  if (!telemetryDataDir.startsWith("/") || telemetryDataDir.includes("\0")) {
+    fail("controller_env_telemetry_data_dir_invalid");
   }
 }
 

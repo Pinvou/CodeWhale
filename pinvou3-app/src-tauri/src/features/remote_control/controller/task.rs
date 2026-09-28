@@ -1849,12 +1849,9 @@ impl RemoteTaskService {
                 .claim_execution_lane(session_id, false, None)
                 .map_err(|_| error("task_session_backend_bind_failed"))?;
         }
-        let claimed = self.sessions.ensure_lane(
-            &remote_ref,
-            generation,
-            requested,
-            true,
-        )?;
+        let claimed = self
+            .sessions
+            .ensure_lane(&remote_ref, generation, requested, true)?;
         if claimed.as_deref() != Some(session_id) {
             return Err(error("task_session_not_found"));
         }
@@ -2112,12 +2109,7 @@ impl RemoteTaskService {
             "input": ticket.input,
         });
         let result = executor
-            .execute_with_attachments(
-                execution_request,
-                attachments,
-                Arc::clone(&events),
-                cancel,
-            )
+            .execute_with_attachments(execution_request, attachments, Arc::clone(&events), cancel)
             .await;
         self.cancel_tokens.lock().remove(&task_id);
         let cancel_won = self
@@ -2787,18 +2779,22 @@ mod tests {
         let ticket = admitted(&service, &body, 1_000);
         let sink = Arc::new(RecordingJournalSink::default());
         let record = runtime()
-            .block_on(service.dispatch(
-                ticket,
-                sink.clone(),
-                CancellationToken::new(),
-                1_100,
-            ))
+            .block_on(service.dispatch(ticket, sink.clone(), CancellationToken::new(), 1_100))
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Failed);
-        assert_eq!(sink.0.lock().as_slice(), &[(JournalKind::Error, json!({
-            "code": "executor_error"
-        }))]);
-        assert_eq!(hooks.events.lock().last().unwrap().status, TASK_STATUS_FAILED);
+        assert_eq!(
+            sink.0.lock().as_slice(),
+            &[(
+                JournalKind::Error,
+                json!({
+                    "code": "executor_error"
+                })
+            )]
+        );
+        assert_eq!(
+            hooks.events.lock().last().unwrap().status,
+            TASK_STATUS_FAILED
+        );
     }
 
     #[test]
@@ -2824,18 +2820,22 @@ mod tests {
         let ticket = admitted(&service, &body, 1_000);
         let sink = Arc::new(RecordingJournalSink::default());
         let record = runtime()
-            .block_on(service.dispatch(
-                ticket,
-                sink.clone(),
-                CancellationToken::new(),
-                1_100,
-            ))
+            .block_on(service.dispatch(ticket, sink.clone(), CancellationToken::new(), 1_100))
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Cancelled);
-        assert_eq!(sink.0.lock().as_slice(), &[(JournalKind::Cancel, json!({
-            "status": TASK_STATUS_CANCELLED
-        }))]);
-        assert_eq!(hooks.events.lock().last().unwrap().status, TASK_STATUS_CANCELLED);
+        assert_eq!(
+            sink.0.lock().as_slice(),
+            &[(
+                JournalKind::Cancel,
+                json!({
+                    "status": TASK_STATUS_CANCELLED
+                })
+            )]
+        );
+        assert_eq!(
+            hooks.events.lock().last().unwrap().status,
+            TASK_STATUS_CANCELLED
+        );
     }
 
     #[test]
@@ -3684,11 +3684,7 @@ mod tests {
         request["input"]["skill_ids"] = json!(["skill-1"]);
         request["input_digest"] = json!(task_input_digest_for_value(&request["input"]).unwrap());
         runtime()
-            .block_on(executor.execute(
-                request,
-                sink.clone(),
-                CancellationToken::new(),
-            ))
+            .block_on(executor.execute(request, sink.clone(), CancellationToken::new()))
             .unwrap();
         let events = sink.0.lock();
         assert_eq!(events.len(), 2, "用户消息与回复各一条正文事件");
@@ -3753,15 +3749,14 @@ mod tests {
         request["input"]["skill_ids"] = json!(["code-skill"]);
         request["input_digest"] = json!(task_input_digest_for_value(&request["input"]).unwrap());
         runtime()
-            .block_on(executor.execute(
-                request,
-                sink.clone(),
-                CancellationToken::new(),
-            ))
+            .block_on(executor.execute(request, sink.clone(), CancellationToken::new()))
             .unwrap();
         assert_eq!(
             sink.events.lock().as_slice(),
-            &[(JournalKind::UserMessage, json!({ "text": "run the report" }))]
+            &[(
+                JournalKind::UserMessage,
+                json!({ "text": "run the report" })
+            )]
         );
     }
 
