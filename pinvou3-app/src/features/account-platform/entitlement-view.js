@@ -1,3 +1,5 @@
+import { localizedProductDisplayName } from './localized-product-display-name.js';
+
 const visibleStatuses = new Set(['ACTIVE', 'CONSUMED']);
 
 function expiryTime(item) {
@@ -33,16 +35,5 @@ export function remainingEntitlementMicrocredits(items = []) {
 }
 
 export function entitlementPackageDisplayName(item, language) {
-  const normalizedLanguage = String(language || '').trim().toLowerCase();
-  const languageKey = normalizedLanguage.startsWith('zh') ? 'zh' : normalizedLanguage.startsWith('ja') ? 'ja' : 'en';
-  const currentNames = {
-    zh: item?.current_plan_name_zh_cn,
-    en: item?.current_plan_name_en,
-    ja: item?.current_plan_name_ja,
-  };
-  for (const candidate of [currentNames[languageKey], item?.plan_name, item?.plan_id]) {
-    const value = String(candidate || '').trim();
-    if (value) return value;
-  }
-  return '';
+  return localizedProductDisplayName(item, language, 'plan_id');
 }

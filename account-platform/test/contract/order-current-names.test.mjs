@@ -71,11 +71,13 @@ test('Billing projects current catalog names without overwriting the order purch
 
 test('Web order list, pending payment, responsive card, and details re-evaluate the active language', async () => {
   const view = await readRepository('pinvou3-app/src/features/account-platform/AccountPlatformView.jsx');
-  const orderView = await readRepository('pinvou3-app/src/features/account-platform/order-view.js');
+  const [orderView, localizedName] = await Promise.all([
+    readRepository('pinvou3-app/src/features/account-platform/order-view.js'),
+    readRepository('pinvou3-app/src/features/account-platform/localized-product-display-name.js'),
+  ]);
   assert.match(view, /PendingPaymentOrders copy=\{copy\} language=\{language\}/);
   assert.ok((view.match(/paymentOrderDisplayName\(item, language\)/g) || []).length >= 5);
-  assert.match(orderView, /current_plan_name_zh_cn/);
-  assert.match(orderView, /current_plan_name_en/);
-  assert.match(orderView, /current_plan_name_ja/);
-  assert.match(orderView, /currentNames\[languageKey\], item\?\.plan_name, item\?\.product_id/);
+  assert.match(orderView, /localizedProductDisplayName\(item, language, 'product_id'\)/);
+  assert.match(localizedName, /current_plan_name_\$\{languageKey\}/);
+  assert.match(localizedName, /currentProductName\(item, language\), item\?\.plan_name, item\?\.\[stableIDField\]/);
 });

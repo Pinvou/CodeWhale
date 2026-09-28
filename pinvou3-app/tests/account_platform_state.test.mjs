@@ -4,6 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementPackageDisplayName, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
+import { localizedProductDisplayName } from '../src/features/account-platform/localized-product-display-name.js';
 import { compactOrderID, effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderDisplayName, paymentOrderHistory, paymentOrderRemainingSeconds, paymentScanPrompt } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
@@ -86,6 +87,26 @@ test('benefit packages use the current catalog name for the active language and 
   assert.equal(entitlementPackageDisplayName({ plan_name: 'Legacy snapshot', plan_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
   assert.equal(entitlementPackageDisplayName({ current_plan_name_en: ' ', plan_name: 'Legacy snapshot', plan_id: 'LEGACY' }, 'en'), 'Legacy snapshot');
   assert.equal(entitlementPackageDisplayName({ plan_id: 'LEGACY' }, 'en'), 'LEGACY');
+});
+
+test('localized product names share language, snapshot, identifier, and whitespace fallback rules', () => {
+  const item = {
+    plan_name: '  Purchase snapshot  ',
+    current_plan_name_zh_cn: '  当前名称  ',
+    current_plan_name_en: ' ',
+    current_plan_name_ja: '\t',
+    plan_id: '  PLAN-FALLBACK  ',
+    product_id: '  PRODUCT-FALLBACK  ',
+  };
+  assert.equal(localizedProductDisplayName(item, ' zh-Hans ', 'plan_id'), '当前名称');
+  assert.equal(localizedProductDisplayName(item, 'fr-FR', 'product_id'), 'Purchase snapshot');
+  assert.equal(localizedProductDisplayName({ plan_id: ' PLAN-FALLBACK ' }, 'en', 'plan_id'), 'PLAN-FALLBACK');
+  assert.equal(localizedProductDisplayName({ product_id: ' PRODUCT-FALLBACK ' }, 'en', 'product_id'), 'PRODUCT-FALLBACK');
+  assert.equal(localizedProductDisplayName({}, 'en', 'product_id'), '');
+
+  const wrapperFallbacks = { plan_id: 'ENTITLEMENT-ID', product_id: 'ORDER-ID' };
+  assert.equal(entitlementPackageDisplayName(wrapperFallbacks, 'en'), 'ENTITLEMENT-ID');
+  assert.equal(paymentOrderDisplayName(wrapperFallbacks, 'en'), 'ORDER-ID');
 });
 
 test('payment orders use the current catalog name for the active language and preserve the purchase snapshot as fallback', async () => {
@@ -2121,7 +2142,7 @@ test('Web payment QR uses a dialog and only user-activated payable orders can re
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   assert.match(view, /setQrData\(isPayablePaymentOrder\(order\)/);
   assert.match(view, /paymentDialogOpen && activePayment && <PaymentQRCodeDialog/);
-  assert.match(view, /<PendingPaymentOrders copy=\{copy\} orders=\{pendingOrders\}/);
+  assert.match(view, /<PendingPaymentOrders copy=\{copy\} language=\{language\} orders=\{pendingOrders\}/);
   assert.match(view, /onActivateRecharge\(orderId\)/);
   assert.match(view, /const history = await client\.rechargeOrders\(\)/);
   assert.match(view, /setInterval\(\(\) => void refresh\(\), 5000\)/);
