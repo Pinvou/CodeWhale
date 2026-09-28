@@ -21,6 +21,8 @@ import test, { afterEach } from 'node:test';
 const scripts = new Map();
 /** 每个命令被调了多少次，用来断言"轮询真的停了"。 */
 const callCounts = new Map();
+/** 命令名 -> 要抛的错误文本。用来模拟 IPC 自己失败。 */
+const failCommands = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -43,6 +45,10 @@ globalThis.__TAURI__ = {
         return chunk;
       }
       if (command === 'model_store_cancel_run' || command === 'model_store_answer_run') {
+        // 让用例能指定「取消/应答这个命令自己失败」——不是「运行已结束」那种正常
+        // 落空，而是 IPC 真的没送达。这条路径原先被 `.catch(() => {})` 整个吃掉。
+        const boom = failCommands.get(command);
+        if (boom) throw new Error(boom);
         return { ok: true };
       }
       if (command === 'model_store_active_runs') return { runs: [] };
@@ -53,6 +59,8 @@ globalThis.__TAURI__ = {
 
 const {
   REATTACH_REPLAY_LINES,
+  answerTask,
+  cancelTask,
   dismissTask,
   getTasks,
   reattachRuns,
@@ -88,6 +96,7 @@ const taskByRunId = (runId) => getTasks().find((task) => task.runId === runId) |
 // 它持续增长的轮询计数污染。这两件事都真的发生过。
 afterEach(() => {
   for (const task of [...getTasks()]) dismissTask(task.id);
+  failCommands.clear();
 });
 
 /**
@@ -263,4 +272,74 @@ test('关掉任务卡才算真的不要了：轮询随之停下', async () => {
   const before = callCounts.get('model_store_run_log');
   await sleep(60);
   assert.equal(callCounts.get('model_store_run_log'), before, '任务已经关掉，轮询还在继续');
+});
+
+// ---------------------------------------------------------------- 取消/应答失败
+
+/**
+ * 起一个「一直在跑、永不结束」的任务，返回它的任务 id。
+ *
+ * 这才是这两个 bug 真正咬人的场景：几十分钟到十几小时的下载。用会结束的运行测不
+ * 出来——任务一落地就被移出面板，回灌上去的错误没人看得见。
+ * @param {string} runId - 假后端里的运行 id。
+ * @param {string} kind - 操作类型。
+ * @returns {Promise<number>} 任务 id。
+ */
+async function startNeverEndingTask(runId, kind) {
+  const before = new Set(getTasks().map((t) => t.id));
+  // 故意不 await：这个 Promise 到运行结束才 resolve，而它永不结束。
+  runTask({ title: `${kind}「测试卡」`, kind, key: `${kind}:${runId}`, start: async () => ({ run_id: runId }) });
+  await waitFor(() => getTasks().some((t) => !before.has(t.id)), '任务卡没建起来');
+  return getTasks().find((t) => !before.has(t.id)).id;
+}
+
+test('取消命令自己失败时要浮出来，不能让卡片顶着「正在取消」跑完', async () => {
+  scripts.set('run-cancel-fails', (from) => idleChunk(from));
+  failCommands.set('model_store_cancel_run', 'IPC 通道没了');
+
+  const id = await startNeverEndingTask('run-cancel-fails', 'download');
+  cancelTask(id);
+
+  // 关键断言：失败必须浮到卡片上，而且状态要退回 running 让按钮重新可点。
+  // 原先这里是 `.catch(() => {})`，卡片会永远停在 cancelling、错误一个字不显示。
+  await waitFor(
+    () => {
+      const t = getTasks().find((x) => x.id === id);
+      return t && t.status === 'running' && typeof t.error === 'string' && t.error.includes('IPC 通道没了');
+    },
+    '取消失败既没有回灌错误、也没有把状态退回 running——用户会一直看着「正在取消」',
+  );
+
+  // 而且不能顺手把整张卡判死：运行还在继续，轮询循环仍然会送回它真正的结局。
+  assert.notEqual(
+    getTasks().find((x) => x.id === id).status,
+    'error',
+    '取消失败不等于任务失败，判死这张卡的权力属于轮询循环',
+  );
+});
+
+test('作答没送达时把提示放回去，别让输入框凭空消失', async () => {
+  scripts.set('run-answer-fails', (from) => {
+    if (from === 0) {
+      return { lines: ['LMM_PROMPT=text|请输入从机 IP'], next: 1, done: false, awaiting_input: true };
+    }
+    // 脚本还阻塞在它那次 read 上，所以「在等作答」这个标志一直立着
+    return idleChunk(from, { awaiting_input: true });
+  });
+  failCommands.set('model_store_answer_run', '后端连接断了');
+
+  const id = await startNeverEndingTask('run-answer-fails', 'deploy');
+  await waitFor(() => getTasks().find((t) => t.id === id)?.prompt, '提示没出现');
+
+  answerTask(id, '10.0.0.2');
+
+  // 提示要回来（用户得能再答一次），原因要看得见。否则用户看到的是「输入框没了，
+  // 然后十分钟后任务莫名失败」——脚本那边 600 秒后被 PROMPT_TIMEOUT 判死。
+  await waitFor(
+    () => {
+      const t = getTasks().find((x) => x.id === id);
+      return t && t.prompt && typeof t.error === 'string' && t.error.includes('后端连接断了');
+    },
+    '作答失败后提示没有放回去、或者错误没有浮出来',
+  );
 });

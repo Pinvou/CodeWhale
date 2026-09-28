@@ -204,6 +204,13 @@ pub trait StoreSource: Send + Sync {
 /// 商店 API 最多试几次。见 get_json 里的说明。
 const STORE_API_ATTEMPTS: u32 = 3;
 
+/// 商店 JSON 响应的体积上限。
+///
+/// 商店地址是用户可配的，无界 `json()` 等于把「往内存里灌多少」交给对端决定。
+/// 64 MiB 取自仓库既有先例 `marketplace/python_dependencies.rs`（`MAX_WHEEL_BYTES`），
+/// 保持同一个量级，免得两处各定一个数。卡片列表实际是几十 KB 量级，离这条线很远。
+const MAX_STORE_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
 pub struct StoreClient {
     base_url: String,
 }
@@ -283,11 +290,52 @@ impl StoreClient {
                             status.as_u16()
                         )));
                     }
-                    return resp
-                        .json::<T>()
+                    // 商店地址是**用户可配**的，所以这份响应体不能无界读进内存：
+                    // 一个写错的地址或被改过的商店，返回一条几个 G 的 body 就能把
+                    // 应用打到 OOM。照仓库既有的做法两道一起来——先看 header 声明
+                    // 的长度，再用 `take(MAX+1)` 兜住不声明或声明得小的那种。
+                    let too_big = || {
+                        StoreError::new(format!(
+                            "模型商店返回的数据超过 {} MiB 上限，已中止",
+                            MAX_STORE_RESPONSE_BYTES / 1024 / 1024
+                        ))
+                    };
+                    // 第一道：信 header 声明的长度，能在读任何字节之前就退出。
+                    if resp
+                        .content_length()
+                        .is_some_and(|len| len > MAX_STORE_RESPONSE_BYTES)
+                    {
+                        return Err(too_big());
+                    }
+                    // 第二道：header 可以不声明、也可以撒谎，所以照样按上限截断读。
+                    // 多读 1 字节是为了把"正好等于上限"和"超了"区分开。
+                    let mut capped = std::io::Read::take(resp, MAX_STORE_RESPONSE_BYTES + 1);
+                    let mut body = Vec::new();
+                    if let Err(e) = std::io::Read::read_to_end(&mut capped, &mut body) {
+                        return Err(StoreError::new(format!("读取商店返回数据失败：{e}")));
+                    }
+                    if body.len() as u64 > MAX_STORE_RESPONSE_BYTES {
+                        return Err(too_big());
+                    }
+                    return serde_json::from_slice::<T>(&body)
                         .map_err(|e| StoreError::new(format!("解析商店返回数据失败：{e}")));
                 }
                 Err(e) => {
+                    // 重定向被上面那条策略拒了：这是**来源判定**的结果，不是网络
+                    // 抖动。重试三次只会把同一条 302 再走三遍，而且拒绝的理由会
+                    // 被 `humanize_reqwest_error` 整段吃掉——它没有 is_redirect
+                    // 分支、也不挖 source 链，用户最后只看到「操作失败，请稍后
+                    // 重试」，而策略明明把「拒了哪个地址」写进了错误里。
+                    //
+                    // reqwest 的 Display 只印一句 "error following redirect for
+                    // url …"，真正那句话在它的 source 上。同 PR 的
+                    // `script_runner` 对同一场景就是这么处理的，这里对齐。
+                    if e.is_redirect() {
+                        let cause = std::error::Error::source(&e)
+                            .map(|src| src.to_string())
+                            .unwrap_or_else(|| e.to_string());
+                        return Err(StoreError::new(cause));
+                    }
                     last_err = format!(
                         "{}（请检查设置里的模型商店地址是否正确、设备是否能访问外网）",
                         humanize_reqwest_error(&e)

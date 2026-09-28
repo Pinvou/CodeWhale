@@ -679,6 +679,21 @@ pub async fn run_log(
         .unwrap_or(LOG_WAIT);
     let deadline = Instant::now() + wait;
     loop {
+        // **先登记成等待者，再取快照**，顺序不能反。
+        //
+        // `RunLog::push` 用的是 `notify_waiters()`，它只唤醒**此刻已经登记**的等待
+        // 者、不预存许可。原先的写法是先 snapshot、再 `notified()`，于是 worker 在
+        // 这两步之间 push 的那一行唤醒会丢：本次长轮询拿不到新行，又等不到唤醒，
+        // 只能挂满剩余的 `LOG_WAIT`（25 秒）才靠超时重查。
+        //
+        // 这条恰好压在交互提示（`awaiting_input`）的路径上——脚本问一句话，用户
+        // 最坏要等 25 秒才看见。`enable()` 是 tokio 给这个场景的惯用法：它把
+        // waiter 立刻挂上去而不 await，所以「登记 → 快照 → 等待」三步之间不存在
+        // 能丢唤醒的窗口。
+        let notified = log.notify.notified();
+        let mut notified = std::pin::pin!(notified);
+        notified.as_mut().enable();
+
         let (lines, next, outcome) = log.snapshot(from);
         // 有新行、或者已经结束，就立刻返回；否则挂着等唤醒
         if !lines.is_empty() || outcome.is_some() || Instant::now() >= deadline {
@@ -702,7 +717,6 @@ pub async fn run_log(
                 "error": error,
             }));
         }
-        let notified = log.notify.notified();
         let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), notified)
             .await;
     }
@@ -1026,5 +1040,58 @@ mod tests {
         assert!(is_prompt_line("  LMM_PROMPT_FORM={}  "));
         assert!(!is_prompt_line("LMM_PROMPTX=1"));
         assert!(!is_prompt_line("正在下载 …"));
+    }
+
+    /// `notify_waiters()` **不预存许可**——这是长轮询里顺序不能反的全部原因。
+    ///
+    /// 把这条单独钉出来，是因为它是那个 bug 的根：读代码的人很容易以为「push 里
+    /// 已经通知了，谁来等都能收到」。实际上没有等待者时这次通知直接丢弃，后来
+    /// 才登记的等待者拿不到任何东西，只能挂到超时。
+    ///
+    /// 这条同时是一道护栏：谁要是把 `push` 改成 `notify_one()`（它**会**存一个
+    /// 许可，看起来「更安全」），这条会红——而那个改法会让多个并发长轮询里只有
+    /// 一个被唤醒，是另一个更难查的错。唤醒的安全性必须来自登记顺序，不是许可。
+    #[tokio::test(start_paused = true)]
+    async fn notify_waiters_drops_the_wakeup_when_nobody_is_waiting_yet() {
+        let log = RunLog::new();
+
+        // 此刻没有任何等待者，这一次唤醒被丢弃
+        log.push("先推一行");
+
+        // 之后才登记的等待者收不到它 —— 所以「先 snapshot 再 notified()」会丢唤醒
+        let late = log.notify.notified();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), late)
+                .await
+                .is_err(),
+            "notify_waiters 竟然预存了许可：那长轮询里的顺序就无所谓了，             这条测试和 run_log 里那段注释都要重写"
+        );
+    }
+
+    /// 长轮询必须**先把自己登记成等待者、再取快照**。
+    ///
+    /// 真正的竞态发生在 `run_log` 里相邻两条语句之间（worker 恰好在 snapshot 之后、
+    /// 登记之前 push），从测试外部注入不了这个时机，所以这里退一步断源码结构——
+    /// 跟 `tauri_cross_build_gate.test.js` 对备料守卫的做法一致。等价重构（改名、
+    /// 换等待方式）不会误伤，把两行调回原来的顺序则必红。
+    ///
+    /// 会红意味着什么：脚本问一句话，用户最坏要等满 `LOG_WAIT`（25 秒）才看见。
+    #[test]
+    fn the_long_poll_registers_its_waiter_before_taking_the_snapshot() {
+        const SERVICE_SOURCE: &str = include_str!("service.rs");
+        let body = SERVICE_SOURCE
+            .split("pub async fn run_log(")
+            .nth(1)
+            .expect("run_log 没了？这条测试要跟着改");
+        let registered = body
+            .find("notified.as_mut().enable()")
+            .expect("run_log 里找不到 enable()：等待者没有被提前登记，会丢唤醒");
+        let snapshot = body
+            .find("log.snapshot(from)")
+            .expect("run_log 里找不到 snapshot 调用");
+        assert!(
+            registered < snapshot,
+            "登记等待者必须在取快照之前。现在反了——worker 在这两步之间 push 的行             会丢唤醒，本次长轮询要挂满 25 秒，而这条路径上跑的是交互提示。"
+        );
     }
 }

@@ -218,10 +218,18 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const BUILD_SCRIPT_SOURCE = fs.readFileSync(
-  path.join(__dirname, "..", "scripts", "tauri", "build.js"),
-  "utf8",
-);
+// 读进来就把行尾归一成 LF。
+//
+// 这个文件的断言全靠换行符锚定结构（形如 "\n" + "async function main() {" + "\n"），
+// 而 Windows 上 core.autocrlf=true 检出的是 CRLF，左花括号后面跟的是 CR+LF——正则
+// 一条都匹配不上，报出来的却是「build.js 必须有 main() 编排入口」，而 main() 明明
+// 就在那儿。Windows 开发者本地跑这个文件会被引去查一个不存在的问题，而 CI 在
+// Linux 上全绿，所以这个坑只在本地显形、没人会在流水线上发现它。
+//
+// 归一放在读取这一步、而不是逐个去改正则：以后新加的断言自动受益，不用每次都记得。
+const BUILD_SCRIPT_SOURCE = fs
+  .readFileSync(path.join(__dirname, "..", "scripts", "tauri", "build.js"), "utf8")
+  .replace(/\r\n/gu, "\n");
 
 test("两个跳过开关由 main() 算一次再显式传下去", () => {
   // 闸门和 overlay 摘除必须用同一份结论。原先 main() 和 prepareTauriArgs 各读一次

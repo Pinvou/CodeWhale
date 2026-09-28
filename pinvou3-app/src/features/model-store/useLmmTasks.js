@@ -223,7 +223,15 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
   // 用户可能在 run_id 回来之前就点了取消。那一刻 cancelRun 无处可发,意图被记在
   // cancelWanted 里,这里补发——否则作业会照跑到底,而卡片永远停在"取消中…"。
   if (cancelWanted.delete(id)) {
-    cancelRun(runId).catch(() => {});
+    // 跟 `cancelTask` 里那次一样要回灌：这条路径的注释自己写着「否则卡片永远停在
+    // 取消中…」，而 `.catch(() => {})` 恰好让那句话成真——补发失败时用户看到的就是
+    // 一张永远「正在取消」的卡。评审没点到这处，但它跟下面那两处是同一个病。
+    cancelRun(runId).catch((e) => {
+      patch(id, (task) => ({
+        status: task.status === 'cancelling' ? 'running' : task.status,
+        error: `取消没有生效：${String(e?.message || e)}`,
+      }));
+    });
   }
   return drainRun(runId, {
     replayLimit,
@@ -390,7 +398,21 @@ function cancelTask(id) {
   const runId = runIds.get(id);
   patch(id, () => ({ status: 'cancelling', prompt: null }));
   if (runId) {
-    cancelRun(runId).catch(() => {});
+    cancelRun(runId).catch((e) => {
+      // **取消命令自己失败了**，不是「运行已结束」那种正常落空。
+      //
+      // 此刻卡片已经被 patch 成 `cancelling`、取消按钮已经禁用。不把这件事回灌
+      // 上去的话，一次几十分钟到十几小时的下载会顶着「正在取消」一路跑完：用户
+      // 既取消不了，也看不到任何报错，只能以为界面卡住了。
+      //
+      // 不能走 `failTask`——那会把整张卡判死并广播 settled，而运行大概率还在继续，
+      // 轮询循环仍然会送回它真正的结果，两边会打架。这里只做两件事：把状态退回
+      // `running` 让按钮重新可点，并把原因显示出来。
+      patch(id, (task) => ({
+        status: task.status === 'cancelling' ? 'running' : task.status,
+        error: `取消没有生效：${String(e?.message || e)}`,
+      }));
+    });
   } else {
     // run_id 还没回来。记下意图,等它落地时补发(见 pumpRun)。
     cancelWanted.add(id);
@@ -405,8 +427,25 @@ function cancelTask(id) {
  */
 function answerTask(id, value) {
   const runId = runIds.get(id);
+  // 先把这条提示存下来再清空：送达失败时要原样放回去，而下面那行 patch 一执行
+  // 就再也读不到它了。
+  const pendingPrompt = findTask(id)?.prompt ?? null;
   patch(id, () => ({ prompt: null, status: value === null ? 'cancelling' : 'running' }));
-  if (runId) answerRun(runId, value).catch(() => {});
+  if (runId) {
+    answerRun(runId, value).catch((e) => {
+      // 答案没送到，而脚本还阻塞在它那次 `read` 上——600 秒后会被
+      // `PROMPT_TIMEOUT` 判死。上面已经把 `prompt` 清掉了，不回灌的话用户看到的
+      // 是「输入框消失了，然后十分钟后任务莫名失败」。
+      //
+      // 把提示原样放回去（让用户能再答一次）并显示原因。同样不走 `failTask`：
+      // 判死这张卡的权力属于轮询循环。
+      patch(id, (task) => ({
+        prompt: task.prompt ?? pendingPrompt,
+        status: task.status === 'cancelling' ? 'running' : task.status,
+        error: `这次作答没有送达：${String(e?.message || e)}`,
+      }));
+    });
+  }
 }
 
 /**
