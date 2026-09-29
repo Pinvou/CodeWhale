@@ -584,15 +584,15 @@ pub async fn desktop_remote_action_a(
             return Err("remote_binding_mismatch".to_owned());
         }
         state.purge_stale(&live);
-        let session = sessions
+        sessions
             .state(&remote_ref, &lease)
             .map_err(|_| "remote_session_unavailable".to_owned())?;
-        let record = store
-            .remote_proxy_snapshot(&local_session_id)
-            .ok_or_else(|| "remote_proxy_not_found".to_owned())?;
-        if record.controlled_session_id.as_deref() != Some(session.session_id.as_str()) {
-            return Err("remote_mapping_unconfirmed".to_owned());
-        }
+        // `remote_dispatch_live_context` already verified the current context,
+        // remote ref, confirmed mapping, and presence of B's Session id under
+        // the store lock. Registration atomically rechecks that authority via
+        // `with_current_dispatch_binding` and `require_live_remote_mutation`.
+        // A's remote/session id and B's controlled Session id are distinct
+        // namespaces and must not be compared for equality.
         if request_id.is_empty()
             || request_id.len() > 128
             || !request_id
