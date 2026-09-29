@@ -433,6 +433,9 @@ export const dictEn = {
           tasksTitle:'In progress', taskRunning:'Working…', taskCancelling:'Cancelling…', taskCancelled: 'Cancelled', taskWaitingInput:'Waiting for your input…',
           taskCancel:'Cancel', taskClose:'Close', taskExpand:'Show log', taskCollapse:'Hide log', taskNoOutput:'(No output)', taskCancelFailed:(m)=>`Cancel did not take effect: ${m}`, taskAnswerFailed:(m)=>`That answer did not get through: ${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`${d} left`,
+          taskProgressEstimated:'estimated', taskStep:(i,n)=>`Step ${i} of ${n}`,
+          taskLayers:(done,total)=>`Image layers ${done}/${total}`, taskCopyLog:'Copy details',
+          taskOpenLogDir:'Open log folder', taskOpenLogDirFailed:(m)=>`Cannot open the log folder: ${m}`,
           etaSec:n=>`${n}s`, etaMin:n=>`${n} min`, etaHour:(h,m)=>`${h} h ${m} min`,
           promptTitle:'A few details are needed', promptSubmit:'OK', promptCancel:'Cancel', promptYes:'Yes', promptNo:'No',
 

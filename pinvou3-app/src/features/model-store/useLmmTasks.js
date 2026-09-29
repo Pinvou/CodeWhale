@@ -136,6 +136,12 @@ function createTask({ key, kind, title, reattached = false }) {
       errorKey: null,
       errorDetail: null,
       progress: null,
+      // 阶段名(`LMM_STAGE=`)、粗粒度步骤(`LMM_STEP=`)、docker 层聚合表。
+      // 三样都由 reduceLogChunk 维护,见 model-store-logic.js。在这里一并列出初始值,
+      // 免得「字段不存在」和「字段是 null」在下游看起来是两回事。
+      stage: null,
+      step: null,
+      layers: null,
       speed: null,
       prompt: null,
       samples: [],

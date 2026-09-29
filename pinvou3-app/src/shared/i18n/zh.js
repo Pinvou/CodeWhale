@@ -463,6 +463,11 @@ export const dictZh = {
           tasksTitle:'正在进行', taskRunning:'正在执行…', taskCancelling:'正在取消…', taskCancelled: '已取消', taskWaitingInput:'等待你输入…',
           taskCancel:'取消', taskClose:'关闭', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）', taskCancelFailed:(m)=>`取消没有生效：${m}`, taskAnswerFailed:(m)=>`这次作答没有送达：${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`剩余约 ${d}`,
+          // 「估算」不是客套：这一档的分母是 docker 已经露面的那些镜像层之和，会随 pull
+          // 推进往上长，百分比因此会往回跳。不标出来，用户会以为进度条坏了。
+          taskProgressEstimated:'估算', taskStep:(i,n)=>`第 ${i} 步 / 共 ${n} 步`,
+          taskLayers:(done,total)=>`镜像层 ${done}/${total}`, taskCopyLog:'复制详情',
+          taskOpenLogDir:'打开日志目录', taskOpenLogDirFailed:(m)=>`打不开日志目录：${m}`,
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分钟`, etaHour:(h,m)=>`${h} 小时 ${m} 分`,
           promptTitle:'需要你补充几项信息', promptSubmit:'确定', promptCancel:'取消', promptYes:'是', promptNo:'否',
 

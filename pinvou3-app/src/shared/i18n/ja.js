@@ -431,6 +431,9 @@ const jaBase = {
           tasksTitle:'実行中', taskRunning:'実行中…', taskCancelling:'キャンセル中…', taskCancelled: 'キャンセル済み', taskWaitingInput:'入力を待っています…',
           taskCancel:'キャンセル', taskClose:'閉じる', taskExpand:'ログを表示', taskCollapse:'ログを閉じる', taskNoOutput:'（出力はありません）', taskCancelFailed:(m)=>`キャンセルが反映されませんでした：${m}`, taskAnswerFailed:(m)=>`この回答は送信されませんでした：${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`残り約 ${d}`,
+          taskProgressEstimated:'推定', taskStep:(i,n)=>`ステップ ${i} / ${n}`,
+          taskLayers:(done,total)=>`イメージレイヤー ${done}/${total}`, taskCopyLog:'詳細をコピー',
+          taskOpenLogDir:'ログフォルダーを開く', taskOpenLogDirFailed:(m)=>`ログフォルダーを開けません：${m}`,
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分`, etaHour:(h,m)=>`${h} 時間 ${m} 分`,
           promptTitle:'いくつか入力が必要です', promptSubmit:'OK', promptCancel:'キャンセル', promptYes:'はい', promptNo:'いいえ',
 

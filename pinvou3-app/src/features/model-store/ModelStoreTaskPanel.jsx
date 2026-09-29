@@ -3,20 +3,27 @@
 //
 // 输入框刻意不做成全局模态:面板本来就是「不阻塞界面」的设计,而且可以同时有几个
 // 任务各自在等输入,模态框既要排队又容易把答案答到别的任务上去。
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from '../../components/icons.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
+import { copyClipboardText } from '../../shared/clipboard.js';
+import { revealRunLogsDir } from './model-store-api.js';
 import {
   canForceRemove,
   formatBytes,
+  layerSummary,
   missingFormFields,
-  progressPercent,
+  taskProgressView,
   etaSeconds,
   splitDuration,
 } from './model-store-logic.js';
 import { HOVER_SURFACE, INPUT_CLASS, MsButton, TEXT_DANGER, TEXT_PRIMARY, TEXT_SECONDARY } from './model-store-ui.jsx';
 
 const PROMPT_SURFACE = 'rounded-[14px] border border-[#E1E5EA] bg-[#F0F4F9] p-3 dark:border-[#2E3134] dark:bg-[#282A2C]';
+
+// 「复制详情」按钮那一瞬间的反馈。复制失败**不能谎报成功**——内容本来就是可见可手选的,
+// 说一句"已复制"会让用户以为剪贴板里有东西,粘出来才发现是空的。
+const COPY_LABEL_KEYS = { ok: 'copied', fail: 'copyFailed' };
 
 /**
  * 把剩余秒数交给词典渲染,避免在组件里拼时间单位。
@@ -149,8 +156,17 @@ function MsPromptForm({ prompt, copy, onSubmit, onCancel }) {
 }
 
 /**
- * 任务卡的副标题:出错给首行错误,等输入/取消中给状态,有进度给「已下载/总量 ·
- * 网速 · 剩余」,都没有就退化成最后一行日志。
+ * 任务卡的副标题。
+ *
+ * # 这里**刻意不再显示「最后一行日志」**
+ *
+ * 原来算不出百分比时就把最后一行日志顶上来。装引擎时那一行是 docker 自己的层进度
+ * (`7014a14111a1: Downloading [====>] 1.967GB/4.07GB`),十几层并行、每层每秒重绘,
+ * 于是副标题在原地乱跳——用户的原话是「别说用户看得头痛,我看到都一脸懵逼」。
+ *
+ * 现在按可信度取:阶段名(脚本用 `LMM_STAGE=` 说的人话) → 字节进度 / 粗粒度步骤 →
+ * 层汇总 → 「正在执行…」。**没有信息就说没有**,不拿一行乱码去填这个位置。原始日志
+ * 一个字没少,在展开区里,还多了一个复制按钮。
  * @param {object} task - 任务。
  * @param {object} copy - t.uiModelStore。
  * @returns {string} 副标题。
@@ -161,14 +177,24 @@ function taskSubtitle(task, copy) {
   if (task.status === 'cancelled') return copy.taskCancelled;
   if (task.status === 'cancelling') return copy.taskCancelling;
   if (task.prompt) return copy.taskWaitingInput;
-  const percent = progressPercent(task.progress);
-  if (percent === null) return task.lines[task.lines.length - 1] || copy.taskRunning;
-  const eta = renderEta(copy, etaSeconds(task.progress, task.speed));
-  return [
-    copy.taskProgress(formatBytes(task.progress.done), formatBytes(task.progress.total)),
-    task.speed ? copy.taskSpeed(formatBytes(task.speed)) : '',
-    eta ? copy.taskEta(eta) : '',
-  ].filter(Boolean).join(' · ');
+  const view = taskProgressView(task);
+  const parts = [];
+  if (task.stage) parts.push(task.stage);
+  if (view?.kind === 'bytes') {
+    parts.push(copy.taskProgress(formatBytes(view.done), formatBytes(view.total)));
+    // 「估算」这两个字不是客套:这一档的分母是 docker 已经露面的那些层之和,会随
+    // pull 推进往上长,百分比因此会往回跳。不标出来,用户会以为进度条坏了。
+    if (view.estimated) parts.push(copy.taskProgressEstimated);
+    if (task.speed) parts.push(copy.taskSpeed(formatBytes(task.speed)));
+    const eta = renderEta(copy, etaSeconds({ done: view.done, total: view.total }, task.speed));
+    if (eta) parts.push(copy.taskEta(eta));
+  } else if (view?.kind === 'step') {
+    parts.push(copy.taskStep(view.index, view.total));
+  }
+  if (parts.length > 0) return parts.join(' · ');
+  const layers = layerSummary(task.layers);
+  if (layers) return copy.taskLayers(layers.complete, layers.count);
+  return copy.taskRunning;
 }
 
 /**
@@ -177,9 +203,32 @@ function taskSubtitle(task, copy) {
  */
 function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove }) {
   const logRef = useRef(null);
+  // 要不要跟着新行滚到底。**初值是 false**:用户的原话是「不要滚动的闪日志,这样很乱」。
+  // 原来每来一行就无条件 `scrollTop = scrollHeight`,而装引擎时日志是一秒几十行——
+  // 视觉上就是一片抖动的字。现在展开后停在顶部,只有用户自己滚到底部才开始跟随
+  // (常见做法:跟随是"我在看最新的"这个意图的表达,而不是默认行为)。
+  const followRef = useRef(false);
   useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    const element = logRef.current;
+    if (!element || !followRef.current) return;
+    element.scrollTop = element.scrollHeight;
   }, [task.lines, task.expanded]);
+  // 滚到距底部这么近就算"在看最新的"。给一点余量:whitespace-pre-wrap 下
+  // scrollHeight 会有亚像素误差,严格判等于会让跟随随机失效。
+  const onLogScroll = useCallback(() => {
+    const element = logRef.current;
+    if (!element) return;
+    followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 24;
+  }, []);
+
+  // 复制结果就地反馈,不走全局 toast:面板本来就是"不阻塞界面"的设计,为一个按钮
+  // 往下透传一个 onToast 会让任务面板多认识一个跟它无关的概念。
+  const [copied, setCopied] = useState(null);
+  useEffect(() => {
+    if (!copied) return undefined;
+    const timer = setTimeout(() => setCopied(null), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   // 要显示的错误文本。`errorKey` 是 useLmmTasks 回灌的结构化错误（那个模块按本
   // feature 的分层约定不拼文案，只给键和原文），在这里过词典；`task.error` 是
@@ -193,8 +242,23 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   // 会让取消掉的卡片渲染出「取消」按钮，点一下变 cancelling 就被 disabled，
   // 卡片从此关不掉。
   const isTerminal = isError || task.status === 'cancelled';
-  const percent = progressPercent(task.progress);
+  const view = taskProgressView(task);
+  const layers = layerSummary(task.layers);
   const ChevronIcon = task.expanded ? ChevronDown : ChevronRight;
+  // 展开区里能复制的全文 = 日志 + 错误原文。「撤简日志」的前提就是这个按钮:
+  // 简化之后用户没法再靠肉眼从面板里抄走排查信息,必须有一个一键拿全文的出口。
+  const logText = (errorText ? [...task.lines, '', errorText] : task.lines).join('\n');
+  const copyLog = () => {
+    copyClipboardText(logText || '').then((ok) => setCopied(ok ? 'ok' : 'fail'));
+  };
+  // 「打开日志目录」。面板上的日志被简化了、还只留最后 500 行，而磁盘上那份是完整的
+  // （`~/.pinvou3/model-store/logs/`）。失败要说出来——静静地什么都不发生，用户只会
+  // 反复点。
+  const [logDirError, setLogDirError] = useState(null);
+  const openLogDir = () => {
+    setLogDirError(null);
+    revealRunLogsDir().catch((e) => setLogDirError(String(e?.message || e)));
+  };
 
   return (
     <div
@@ -236,16 +300,18 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         </button>
       </div>
 
-      {percent === null || isTerminal ? null : (
+      {view === null || isTerminal ? null : (
         <div className="mt-2 px-4">
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E1E5EA] dark:bg-[#2E3134]">
             <div
               data-testid="model-store-progress-bar"
+              data-progress-kind={view.kind}
+              data-progress-estimated={view.estimated ? 'true' : undefined}
               className="h-full rounded-full bg-[#0B57D0] transition-[width] duration-500 dark:bg-[#A8C7FA]"
-              style={{ width: `${percent}%` }}
+              style={{ width: `${view.percent}%` }}
             />
           </div>
-          <div className={`mt-1 text-right text-[10px] ${TEXT_SECONDARY}`}>{`${percent.toFixed(1)}%`}</div>
+          <div className={`mt-1 text-right text-[10px] ${TEXT_SECONDARY}`}>{`${view.percent.toFixed(1)}%`}</div>
         </div>
       )}
 
@@ -261,16 +327,65 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
       ) : null}
 
       {task.expanded ? (
-        <pre
-          ref={logRef}
-          data-testid="model-store-task-log"
-          className="mx-4 mt-2 h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-[#202124] p-2.5 text-[11px] leading-4 text-[#E3E3E3] dark:bg-[#131314]"
-        >
-          {(errorText ? [...task.lines, '', errorText] : task.lines).join('\n') || copy.taskNoOutput}
-        </pre>
+        <div className="mx-4 mt-2">
+          {/* docker pull 的几十层聚合成这**一行**,原地更新。
+              原来每层每次刷新都往日志里追加一行,一个镜像十几层同时下,展开日志
+              就是一片滚动的乱码 —— 用户的原话是「不要滚动的闪日志,这样很乱」。
+              逐层的原文在这里被 reduceLogChunk 拦掉了,不进 task.lines。 */}
+          {/* 打不开日志目录要说出来。静静地什么都不发生，用户只会反复点那个按钮。
+              报错原文可能很长（路径 + errno），所以放在这里而不是按钮标签里。 */}
+          {logDirError ? (
+            <div
+              data-testid="model-store-task-log-dir-error"
+              className={`mb-1 line-clamp-2 text-[10px] ${TEXT_DANGER}`}
+            >
+              {copy.taskOpenLogDirFailed(logDirError)}
+            </div>
+          ) : null}
+          {layers ? (
+            <div
+              data-testid="model-store-task-layers"
+              className={`mb-1 truncate text-[10px] ${TEXT_SECONDARY}`}
+            >
+              {copy.taskLayers(layers.complete, layers.count)}
+              {layers.total > 0
+                ? ` · ${copy.taskProgress(formatBytes(layers.done), formatBytes(layers.total))}`
+                : ''}
+            </div>
+          ) : null}
+          <pre
+            ref={logRef}
+            onScroll={onLogScroll}
+            data-testid="model-store-task-log"
+            className="h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-[#202124] p-2.5 text-[11px] leading-4 text-[#E3E3E3] dark:bg-[#131314]"
+          >
+            {logText || copy.taskNoOutput}
+          </pre>
+        </div>
       ) : null}
 
       <div className="flex justify-end gap-2 px-4 py-2.5">
+        {/* 「复制详情」。日志简化之后必须有它:面板上现在只剩阶段化的少量人话,
+            用户要把排查信息交给别人时,不该靠在一个 160px 高的框里手选。
+            展开才出现——收起状态下没有日志可看,多一个按钮只是噪声。 */}
+        {task.expanded ? (
+          <MsButton
+            tone="neutral"
+            onClick={openLogDir}
+            data-testid="model-store-task-open-log-dir"
+          >
+            {copy.taskOpenLogDir}
+          </MsButton>
+        ) : null}
+        {task.expanded ? (
+          <MsButton
+            tone="neutral"
+            onClick={copyLog}
+            data-testid="model-store-task-copy-log"
+          >
+            {copy[COPY_LABEL_KEYS[copied] ?? 'taskCopyLog']}
+          </MsButton>
+        ) : null}
         {/* 卸载失败时多给一个「强制从列表移除」。
             它只在这里出现,不做成常驻按钮:强制移除不可逆,而且会把磁盘上的权重
             原样留下,常驻等于给用户第二个长得像卸载的按钮。放在失败的任务卡上,

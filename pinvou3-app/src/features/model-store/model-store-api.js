@@ -232,6 +232,17 @@ function answerRun(runId, answer) {
 }
 
 /**
+ * 在文件管理器里打开模型商店的运行日志目录（`~/.pinvou3/model-store/logs/`）。
+ *
+ * 只"打开目录"、不"把日志读回前端"：那几 MB 文本走 IPC 再塞进一个浮动任务卡没有
+ * 任何意义，而用户真正要做的是把文件发给别人。
+ * @returns {Promise<{path:string}>} 目录路径。
+ */
+function revealRunLogsDir() {
+  return invokeTauri('model_store_reveal_run_logs_dir');
+}
+
+/**
  * 还在跑的长操作。给了 `cardId` 就只问那一张卡。
  *
  * 进入模型商店时用它把任务卡接回去。任务态在前端随视图销毁（模型商店是条件挂载
@@ -307,5 +318,6 @@ export {
   pollRunLog,
   cancelRun,
   answerRun,
+  revealRunLogsDir,
   fetchActiveRuns,
 };

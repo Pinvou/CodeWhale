@@ -55,6 +55,19 @@ function splitDuration(seconds) {
  * 已下载会夹到总量以内。脚本那边本来就该算准,这里是最后一道兜底:真机上出现过
  * 「51.0GB / 30.6GB,进度 100% 还在转」——并发下载留下的孤儿临时块被重复统计了。
  * 哪怕将来某张卡的脚本又算错,界面也不该把这种数字摆给用户看。
+ *
+ * # 🔴 这个正则**刻意没有 `^` 锚定**，不要"顺手"加上
+ *
+ * 宿主会给日志行加阶段前缀（`[下载模型] `、`[安装引擎] `，见 Rust 侧
+ * `script_runner::prefix_log_line`）。现在那个函数会放协议行原样通过，但**历史上
+ * 不会**——设备上跑着的旧版本、以及任何将来新加的中继层，都可能再给进度行套一层
+ * 前缀。不锚定是这条链路唯一的容错点：加上 `^` 之后进度条会**静默**全灭（没有报错、
+ * 没有异常，只是永远不出现进度），而这类故障要在真机上盯着一次几十 GB 的下载才看
+ * 得出来。回归测试见 model_store_logic.test.mjs 里喂 `[下载模型] LMM_PROGRESS_BYTES=1/2`
+ * 那一条。
+ *
+ * 同理下面的 `parseStageLine` / `parseStepLine` / `parseDockerLayerLine` 也都不锚定。
+ * 反过来 `parsePromptLine` **必须**锚定（见它自己的说明）。
  * @param {string} line - 一行脚本输出。
  * @returns {{done:number, total:number}|null} 解析结果;不是进度行则返回 null。
  */
@@ -64,6 +77,161 @@ function parseProgressLine(line) {
   const total = Number(matched[2]);
   const done = Number(matched[1]);
   return { done: total > 0 ? Math.min(done, total) : done, total };
+}
+
+/**
+ * 脚本约定:`LMM_STAGE=<人话阶段名>`。
+ *
+ * 装引擎有好几个依赖包、好几个动作（拉镜像 / 装 Python 依赖 / 解交付包 / 起容器），
+ * 每一段的字节计数各自从零开始。没有阶段名的时候任务卡副标题退化成"最后一行日志",
+ * 用户看到的就是 docker 自己的多层并行进度在原地乱跳。
+ * @param {string} line - 一行脚本输出。
+ * @returns {string|null} 阶段名;不是阶段行则返回 null。
+ */
+function parseStageLine(line) {
+  const matched = /LMM_STAGE=(.*)$/.exec(String(line ?? ''));
+  if (!matched) return null;
+  const name = matched[1].trim();
+  return name || null;
+}
+
+/**
+ * 脚本约定:`LMM_STEP=<第几步>/<共几步>`。
+ *
+ * **给拿不到字节分母的阶段用**。`pip install` 的依赖总量要等依赖解析完才知道,在那
+ * 之前不存在任何可信的分母;宁可给一个诚实的「第 2 步 / 共 4 步」,也不要编一个假分母
+ * 让进度条先冲到 90% 再倒退——那比没有进度条更伤信任。
+ * @param {string} line - 一行脚本输出。
+ * @returns {{index:number, total:number}|null} 解析结果;不是步骤行则返回 null。
+ */
+function parseStepLine(line) {
+  const matched = /LMM_STEP=(\d+)\/(\d+)/.exec(String(line ?? ''));
+  if (!matched) return null;
+  const total = Number(matched[2]);
+  if (total <= 0) return null;
+  return { index: Math.min(Number(matched[1]), total), total };
+}
+
+// docker 的 `HumanSize` 用 1000 进位（`GB`）,`BytesSize` 用 1024 进位（`GiB`）。
+// 两套都认,按它自己的语义换算——把 `4.07GB` 当成 1024 进位会让分母凭空大 7%,
+// 而这个分母正是进度条的分母。
+const DOCKER_SIZE_UNITS = {
+  b: 1,
+  kb: 1000,
+  mb: 1000 ** 2,
+  gb: 1000 ** 3,
+  tb: 1000 ** 4,
+  kib: 1024,
+  mib: 1024 ** 2,
+  gib: 1024 ** 3,
+  tib: 1024 ** 4,
+};
+
+/**
+ * 把 docker 打出来的 `1.967GB` 之类换成字节数。
+ * @param {string} text - 带单位的大小。
+ * @returns {number} 字节数;认不出来时 0。
+ */
+function parseDockerSize(text) {
+  const matched = /^([\d.]+)\s*([a-zA-Z]{1,3})$/.exec(String(text ?? '').trim());
+  if (!matched) return 0;
+  const scale = DOCKER_SIZE_UNITS[matched[2].toLowerCase()];
+  const value = Number(matched[1]);
+  if (!scale || !Number.isFinite(value)) return 0;
+  return value * scale;
+}
+
+// 宿主给日志行加的阶段前缀（`[安装引擎] ` / `[下载模型] `）。层聚合要先把它剥掉,
+// 否则 `<层 id>:` 那个判据落不到行首。
+const STAGE_PREFIX_RE = /^\[[^\]]{1,24}\]\s+/;
+
+// `<12 位十六进制层 id>: <状态>`。docker pull 的每一层都按这个形状刷新自己那一行。
+const DOCKER_LAYER_RE = /^([0-9a-f]{8,64}):\s+(.+)$/;
+
+// `Downloading [=====>    ]  1.967GB/4.07GB` 里的两个数。
+const DOCKER_LAYER_BYTES_RE = /\[[=>\s]*\]\s+([\d.]+\s*[a-zA-Z]{1,3})\s*\/\s*([\d.]+\s*[a-zA-Z]{1,3})/;
+
+// 这些状态意味着这一层已经不再占用下行带宽了。`Already exists` 是本机已有,压根没下。
+const DOCKER_LAYER_DONE = ['download complete', 'pull complete', 'already exists', 'verifying checksum'];
+
+// 最多跟踪多少层。真实镜像几十层就到顶了;设上限是因为层 id 来自**卡片脚本的输出**,
+// 而卡片来自网络:一个被投毒的脚本可以打出无限多个假层 id,把这张表撑成内存泄漏。
+const MAX_TRACKED_LAYERS = 200;
+
+/**
+ * 认出 docker pull 的逐层刷屏行。
+ *
+ * 用户的原话:「现在显示出来的日志别说用户看得头痛,我看到都一脸懵逼」。截图上刷的
+ * 就是这些——十几行 `ae5a106b6076: Pulling fs layer`,加上多层并行的
+ * `7014a14111a1: Downloading [====>] 1.967GB/4.07GB` 一起跳。它们**不进日志**,由
+ * `layerSummary` 聚合成一行原地更新的汇总。
+ * @param {string} line - 一行脚本输出。
+ * @returns {{id:string, status:string, done:number, total:number, complete:boolean}|null} 解析结果。
+ */
+function parseDockerLayerLine(line) {
+  const body = String(line ?? '').replace(STAGE_PREFIX_RE, '').trim();
+  const matched = DOCKER_LAYER_RE.exec(body);
+  if (!matched) return null;
+  const status = matched[2].trim();
+  const bytes = DOCKER_LAYER_BYTES_RE.exec(status);
+  const lower = status.toLowerCase();
+  return {
+    id: matched[1],
+    status,
+    done: bytes ? parseDockerSize(bytes[1]) : 0,
+    total: bytes ? parseDockerSize(bytes[2]) : 0,
+    complete: DOCKER_LAYER_DONE.some((done) => lower.startsWith(done)),
+  };
+}
+
+/**
+ * 把一次层状态更新并进层表。
+ *
+ * 已知的总量要**记住**:`Downloading` 那一行带着 `x/y`,而紧随其后的
+ * `Verifying Checksum` / `Download complete` 不带——不记住的话分母会在最后一刻塌掉。
+ * @param {Record<string, object>|null} layers - 现有层表。
+ * @param {{id:string, status:string, done:number, total:number, complete:boolean}} update - 本次更新。
+ * @returns {Record<string, object>} 新层表（不改入参）。
+ */
+function applyLayerUpdate(layers, update) {
+  const next = { ...(layers || {}) };
+  const previous = next[update.id];
+  if (!previous && Object.keys(next).length >= MAX_TRACKED_LAYERS) return next;
+  const total = update.total > 0 ? update.total : (previous?.total ?? 0);
+  const done = update.complete ? total : Math.max(update.done, previous?.done ?? 0);
+  next[update.id] = { status: update.status, total, done, complete: update.complete };
+  return next;
+}
+
+/**
+ * 层表的汇总:一共几层、完成几层、已下多少字节、总共多少字节。
+ *
+ * # 「统计引擎总包大小」这件事能做到什么程度
+ *
+ * **拿不到 pull 之前的总量。** docker 只在每一层开始下载时才打出那一层的 `x/y`,
+ * 所以这里的 `total` 是「**到目前为止已经露面的**层的总和」,会随 pull 推进往上长。
+ * 真要在 pull 之前知道总量,只能由**卡片脚本**去问一次 registry 的 manifest（各层
+ * `size` 之和）并用 `LMM_PROGRESS_BYTES` 上报——那要多一次网络请求和 registry 认证,
+ * 归卡片脚本管,见 pinvou3-ops/docs 里的规范增补草案。
+ *
+ * 所以这份汇总只在脚本**没有**上报 `LMM_PROGRESS_BYTES` 时兜底,而且界面必须标成
+ * 「估算」:分母会长,百分比会往回跳。宁可让用户看见"这是估的",也不要把一个会倒退的
+ * 数字当成确定进度。
+ * @param {Record<string, object>|null} layers - 层表。
+ * @returns {{count:number, complete:number, done:number, total:number}|null} 汇总;没有层时 null。
+ */
+function layerSummary(layers) {
+  const entries = Object.values(layers || {});
+  if (entries.length === 0) return null;
+  let done = 0;
+  let total = 0;
+  let complete = 0;
+  for (const layer of entries) {
+    done += Number(layer.done) || 0;
+    total += Number(layer.total) || 0;
+    if (layer.complete) complete += 1;
+  }
+  return { count: entries.length, complete, done, total: Math.max(total, done) };
 }
 
 const PROMPT_KINDS = ['text', 'password', 'confirm'];
@@ -145,29 +313,80 @@ function trimSamples(samples, now) {
  * 这是整条链路上唯一需要仔细对待的地方,所以单独抽成纯函数:进度行和提示行都是
  * 给界面看的控制信息、不该进日志(进度行两秒一条,不拦下来会把真正有用的报错刷没),
  * 而它们的副作用(测速采样、弹输入框)又必须按出现顺序生效。
- * @param {{lines:Array<string>, progress:object|null, speed:number|null, prompt:object|null, samples:Array<object>}} state - 折叠前的任务状态。
+ *
+ * 除了协议行,还有两类**噪声**在这里被拦下来,不进日志:
+ *
+ * 1. **docker 的逐层刷屏**(`<层 id>: Pulling fs layer` / `Waiting` /
+ *    `Downloading [====>] 1.9GB/4.07GB` …)。一个镜像几十层,每层每秒重绘一次,
+ *    逐行追加的结果就是用户说的「滚动的闪日志,这样很乱」。它们聚合进 `layers`,
+ *    由界面渲染成一行原地更新的汇总。
+ * 2. **紧挨着的重复行**。脚本用 `\r` 原地重绘进度时,宿主按 `\r` 切行
+ *    (`script_runner::drain_lines`),同一句话会来几百遍。
+ *
+ * 入参允许缺少 `stage` / `step` / `layers`(老的调用方和测试只给五个字段),缺了就
+ * 当没有——多一个字段不该让既有调用方炸掉。
+ * @param {{lines:Array<string>, progress:object|null, speed:number|null, prompt:object|null, samples:Array<object>, stage?:string|null, step?:object|null, layers?:object|null}} state - 折叠前的任务状态。
  * @param {Array<string>} chunk - 本次取回的行。
  * @param {number} now - 当前时间戳(测速用,注入方便测试)。
- * @returns {{lines:Array<string>, progress:object|null, speed:number|null, prompt:object|null, samples:Array<object>}} 折叠后的任务状态。
+ * @returns {{lines:Array<string>, progress:object|null, speed:number|null, prompt:object|null, samples:Array<object>, stage:string|null, step:object|null, layers:object|null}} 折叠后的任务状态。
  */
 function reduceLogChunk(state, chunk, now) {
   let { progress, speed, prompt } = state;
   let samples = state.samples;
+  let stage = state.stage ?? null;
+  let step = state.step ?? null;
+  let layers = state.layers ?? null;
   const lines = [...state.lines];
 
-  for (const line of chunk || []) {
+  const sample = (done) => {
+    samples = trimSamples([...samples, { t: now, done }], now);
+    speed = computeSpeed(samples);
+  };
+
+  for (const raw of chunk || []) {
+    const line = String(raw ?? '');
     const parsedPrompt = parsePromptLine(line);
     if (parsedPrompt) {
       prompt = parsedPrompt;
       continue;
     }
-    const parsedProgress = parseProgressLine(line);
-    if (parsedProgress) {
-      samples = trimSamples([...samples, { t: now, done: parsedProgress.done }], now);
-      progress = parsedProgress;
-      speed = computeSpeed(samples);
+    const parsedStage = parseStageLine(line);
+    if (parsedStage !== null) {
+      // 换阶段就把进度、层表、测速采样一起清掉。下一阶段的字节计数从零重新开始,
+      // 跨阶段做差算出来的不是网速而是噪声(上一阶段的总量除以两次采样的间隔),
+      // 而留着上一阶段的分母会让新阶段一开始就显示 99%。
+      if (parsedStage !== stage) {
+        samples = [];
+        speed = null;
+        progress = null;
+        layers = null;
+      }
+      stage = parsedStage;
       continue;
     }
+    const parsedStep = parseStepLine(line);
+    if (parsedStep) {
+      step = parsedStep;
+      continue;
+    }
+    const parsedProgress = parseProgressLine(line);
+    if (parsedProgress) {
+      progress = parsedProgress;
+      sample(parsedProgress.done);
+      continue;
+    }
+    const parsedLayer = parseDockerLayerLine(line);
+    if (parsedLayer) {
+      layers = applyLayerUpdate(layers, parsedLayer);
+      // 只在脚本没上报字节进度时拿层聚合去测速:两套分子混进同一串采样里,
+      // 差值算出来毫无意义。
+      if (!progress) {
+        const summary = layerSummary(layers);
+        if (summary && summary.total > 0) sample(summary.done);
+      }
+      continue;
+    }
+    if (lines.length > 0 && lines[lines.length - 1] === line) continue;
     lines.push(line);
   }
 
@@ -177,6 +396,9 @@ function reduceLogChunk(state, chunk, now) {
     speed,
     prompt,
     samples,
+    stage,
+    step,
+    layers,
   };
 }
 
@@ -190,6 +412,58 @@ function progressPercent(progress) {
   const total = Number(progress.total);
   if (!Number.isFinite(total) || total <= 0) return null;
   return Math.min(100, (Number(progress.done) / total) * 100);
+}
+
+/**
+ * 任务卡该画成什么样的进度。
+ *
+ * 三档,按可信度从高到低,**绝不编假分母**:
+ *
+ * 1. `bytes` + `estimated:false`——脚本自己上报的 `LMM_PROGRESS_BYTES`。分母是卡片
+ *    元数据里的真实体积(下权重)或这一阶段的包总量(装引擎),可信。
+ * 2. `bytes` + `estimated:true`——只有 docker 的层聚合可用。**分母会随 pull 推进往上
+ *    长**(docker 要等一层开始下载才报那一层的大小),所以百分比会往回跳,界面必须
+ *    把它标成估算。
+ * 3. `step`——连字节都没有(`pip install` 的依赖总量要等解析完才知道)。给「第 2 步 /
+ *    共 4 步」这种粗粒度,而不是假装有字节级进度。
+ *
+ * 三档都不成立就返回 null,界面退化成不确定态(转圈 + 阶段名),这也是诚实的。
+ * @param {object|null} task - 任务。
+ * @returns {{kind:'bytes'|'step', percent:number, estimated:boolean, done?:number, total?:number, index?:number, layers?:object}|null} 进度视图。
+ */
+function taskProgressView(task) {
+  const percent = progressPercent(task?.progress);
+  if (percent !== null) {
+    return {
+      kind: 'bytes',
+      percent,
+      estimated: false,
+      done: Number(task.progress.done),
+      total: Number(task.progress.total),
+    };
+  }
+  const summary = layerSummary(task?.layers);
+  if (summary && summary.total > 0) {
+    return {
+      kind: 'bytes',
+      percent: Math.min(100, (summary.done / summary.total) * 100),
+      estimated: true,
+      done: summary.done,
+      total: summary.total,
+      layers: summary,
+    };
+  }
+  const step = task?.step;
+  if (step && Number(step.total) > 0) {
+    return {
+      kind: 'step',
+      percent: Math.min(100, (Number(step.index) / Number(step.total)) * 100),
+      estimated: false,
+      index: Number(step.index),
+      total: Number(step.total),
+    };
+  }
+  return null;
 }
 
 /**
@@ -560,6 +834,14 @@ export {
   splitDuration,
   parseProgressLine,
   parsePromptLine,
+  parseStageLine,
+  parseStepLine,
+  parseDockerLayerLine,
+  parseDockerSize,
+  applyLayerUpdate,
+  layerSummary,
+  taskProgressView,
+  MAX_TRACKED_LAYERS,
   computeSpeed,
   trimSamples,
   reduceLogChunk,

@@ -20,9 +20,16 @@ import {
   missingFormFields,
   weightVerificationNotice,
   weightVerificationOf,
+  applyLayerUpdate,
+  layerSummary,
+  parseDockerLayerLine,
+  parseDockerSize,
   parseProgressLine,
   parsePromptLine,
+  parseStageLine,
+  parseStepLine,
   progressPercent,
+  taskProgressView,
   reduceLogChunk,
   splitDuration,
   uninstallDoneText,
@@ -320,3 +327,155 @@ test('weightVerificationNotice：没声明的卡出黄条，而且出的是最�
   assert.deepEqual(weightVerificationNotice({}), { bodyKey: 'weightVerifyNone' });
   assert.deepEqual(weightVerificationNotice(null), { bodyKey: 'weightVerifyNone' });
 });
+
+// ---------------------------------------------------------------- 阶段化进度
+
+test('parseProgressLine：吃得下宿主加的阶段前缀——这个正则刻意没有 ^ 锚定', () => {
+  // 🔴 这条是**回归守卫**，不是补充覆盖。给 parseProgressLine 的正则"顺手"加上 `^`
+  // 之后，进度条会**静默**全灭：没有报错、没有异常，只是永远不出现进度。
+  // 宿主给日志行加过 `[下载模型] ` / `[安装引擎] ` 前缀（Rust 侧
+  // script_runner::prefix_log_line 现在放协议行原样通过，但设备上跑着的旧版本会加），
+  // 不锚定是这条链路唯一的容错点。
+  assert.deepEqual(parseProgressLine('[下载模型] LMM_PROGRESS_BYTES=1/2'), { done: 1, total: 2 });
+  assert.deepEqual(parseProgressLine('[安装引擎] LMM_PROGRESS_BYTES=3/4'), { done: 3, total: 4 });
+});
+
+test('parseStageLine / parseStepLine：阶段名与粗粒度步骤', () => {
+  assert.equal(parseStageLine('LMM_STAGE=正在拉取引擎镜像'), '正在拉取引擎镜像');
+  assert.equal(parseStageLine('[安装引擎] LMM_STAGE=正在安装依赖'), '正在安装依赖');
+  // 空阶段名等于没说，别把副标题变成一个空位
+  assert.equal(parseStageLine('LMM_STAGE='), null);
+  assert.equal(parseStageLine('普通日志'), null);
+
+  assert.deepEqual(parseStepLine('LMM_STEP=2/4'), { index: 2, total: 4 });
+  // 步数超过总数就夹住，界面不该出现「第 9 步 / 共 4 步」
+  assert.deepEqual(parseStepLine('LMM_STEP=9/4'), { index: 4, total: 4 });
+  assert.equal(parseStepLine('LMM_STEP=1/0'), null);
+  assert.equal(parseStepLine('普通日志'), null);
+});
+
+test('parseDockerSize：1000 进位的 GB 与 1024 进位的 GiB 是两回事', () => {
+  // 把 4.07GB 当成 1024 进位会让分母凭空大 7%，而这个分母正是进度条的分母。
+  assert.equal(parseDockerSize('4.07GB'), 4.07 * 1000 ** 3);
+  assert.equal(parseDockerSize('1GiB'), 1024 ** 3);
+  assert.equal(parseDockerSize('512kB'), 512 * 1000);
+  assert.equal(parseDockerSize('说不清'), 0);
+});
+
+test('parseDockerLayerLine：认出 docker 的逐层刷屏，含前缀也认', () => {
+  assert.deepEqual(parseDockerLayerLine('[安装引擎] ae5a106b6076: Pulling fs layer'), {
+    id: 'ae5a106b6076',
+    status: 'Pulling fs layer',
+    done: 0,
+    total: 0,
+    complete: false,
+  });
+  const downloading = parseDockerLayerLine('[安装引擎] 7014a14111a1: Downloading [====>    ]  1.967GB/4.07GB');
+  assert.equal(downloading.id, '7014a14111a1');
+  assert.equal(downloading.done, 1.967 * 1000 ** 3);
+  assert.equal(downloading.total, 4.07 * 1000 ** 3);
+  assert.equal(downloading.complete, false);
+  assert.equal(parseDockerLayerLine('ae5a106b6076: Download complete').complete, true);
+  assert.equal(parseDockerLayerLine('abcdef123456: Already exists').complete, true);
+  // 普通日志、以及没有层 id 的 docker 行不该被吞掉
+  assert.equal(parseDockerLayerLine('Status: Downloaded newer image for vllm/vllm-openai:v0.8.5'), null);
+  assert.equal(parseDockerLayerLine('正在下载 …'), null);
+});
+
+test('applyLayerUpdate：记住已知总量，别让分母在最后一刻塌掉', () => {
+  let layers = applyLayerUpdate(null, parseDockerLayerLine('aaaaaaaaaaaa: Downloading [==>  ] 1GB/4GB'));
+  // Verifying Checksum / Download complete 都不带 x/y。不记住总量的话，
+  // 这一层的分母会归零，进度条在最后一秒跳回 0%。
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('aaaaaaaaaaaa: Download complete'));
+  assert.equal(layers.aaaaaaaaaaaa.total, 4 * 1000 ** 3);
+  assert.equal(layers.aaaaaaaaaaaa.done, 4 * 1000 ** 3);
+  assert.equal(layers.aaaaaaaaaaaa.complete, true);
+});
+
+test('layerSummary：层数、完成数、字节汇总', () => {
+  let layers = applyLayerUpdate(null, parseDockerLayerLine('aaaaaaaaaaaa: Downloading [=> ] 1GB/4GB'));
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('bbbbbbbbbbbb: Download complete'));
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('cccccccccccc: Pulling fs layer'));
+  const summary = layerSummary(layers);
+  assert.equal(summary.count, 3);
+  assert.equal(summary.complete, 1);
+  assert.equal(summary.done, 1 * 1000 ** 3);
+  assert.equal(summary.total, 4 * 1000 ** 3);
+  assert.equal(layerSummary(null), null);
+});
+
+test('reduceLogChunk：docker 的逐层刷屏不进日志，聚合进层表', () => {
+  // 用户的原话：「不要滚动的闪日志，这样很乱」。截图上刷的就是这些行。
+  const next = reduceLogChunk(
+    { lines: [], progress: null, speed: null, prompt: null, samples: [] },
+    [
+      '[安装引擎] 正在拉取镜像 vllm/vllm-openai:v0.8.5',
+      '[安装引擎] ae5a106b6076: Pulling fs layer',
+      '[安装引擎] 7014a14111a1: Pulling fs layer',
+      '[安装引擎] 7014a14111a1: Waiting',
+      '[安装引擎] 7014a14111a1: Downloading [====>  ]  1GB/4GB',
+      '[安装引擎] ae5a106b6076: Download complete',
+    ],
+    1000,
+  );
+  assert.deepEqual(next.lines, ['[安装引擎] 正在拉取镜像 vllm/vllm-openai:v0.8.5']);
+  const summary = layerSummary(next.layers);
+  assert.equal(summary.count, 2);
+  assert.equal(summary.complete, 1);
+  assert.equal(summary.done, 1 * 1000 ** 3);
+});
+
+test('reduceLogChunk：紧挨着的重复行只留一条', () => {
+  // 脚本用 \r 原地重绘时宿主按 \r 切行，同一句话会来几百遍，把真正有用的报错刷没。
+  const next = reduceLogChunk(
+    { lines: [], progress: null, speed: null, prompt: null, samples: [] },
+    ['正在校验 …', '正在校验 …', '正在校验 …', '校验通过', '正在校验 …'],
+    0,
+  );
+  assert.deepEqual(next.lines, ['正在校验 …', '校验通过', '正在校验 …']);
+});
+
+test('reduceLogChunk：换阶段要把上一阶段的进度和测速采样一起清掉', () => {
+  const first = reduceLogChunk(
+    { lines: [], progress: null, speed: null, prompt: null, samples: [] },
+    ['LMM_STAGE=正在拉取引擎镜像', 'LMM_PROGRESS_BYTES=900/1000'],
+    0,
+  );
+  assert.equal(first.stage, '正在拉取引擎镜像');
+  assert.deepEqual(first.progress, { done: 900, total: 1000 });
+  const second = reduceLogChunk(first, ['LMM_STAGE=正在安装依赖'], 5000);
+  // 留着上一阶段的分母会让新阶段一开始就显示 90%；留着采样会把"上一阶段的总量除以
+  // 两次采样的间隔"当成网速报出来。
+  assert.equal(second.stage, '正在安装依赖');
+  assert.equal(second.progress, null);
+  assert.equal(second.speed, null);
+  assert.deepEqual(second.samples, []);
+});
+
+test('taskProgressView：三档按可信度排，绝不编假分母', () => {
+  // 第一档：脚本上报的真实字节
+  const bytes = taskProgressView({ progress: { done: 50, total: 200 } });
+  assert.equal(bytes.kind, 'bytes');
+  assert.equal(bytes.percent, 25);
+  assert.equal(bytes.estimated, false);
+
+  // 第二档：只有 docker 层聚合。分母会随 pull 推进往上长，必须标成估算。
+  let layers = applyLayerUpdate(null, parseDockerLayerLine('aaaaaaaaaaaa: Downloading [=> ] 1GB/4GB'));
+  const estimated = taskProgressView({ progress: null, layers });
+  assert.equal(estimated.kind, 'bytes');
+  assert.equal(estimated.estimated, true);
+  assert.equal(estimated.percent, 25);
+  // 脚本自己报了就以它为准，不拿估算去盖真值
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('bbbbbbbbbbbb: Downloading [=> ] 0GB/100GB'));
+  assert.equal(taskProgressView({ progress: { done: 1, total: 2 }, layers }).estimated, false);
+
+  // 第三档：连字节都没有（pip 的依赖总量要等解析完才知道）
+  const step = taskProgressView({ progress: null, layers: null, step: { index: 2, total: 4 } });
+  assert.equal(step.kind, 'step');
+  assert.equal(step.percent, 50);
+
+  // 三档都不成立就说没有，界面退化成不确定态——这也是诚实的
+  assert.equal(taskProgressView({ progress: null, layers: null, step: null }), null);
+  assert.equal(taskProgressView(null), null);
+});
+
