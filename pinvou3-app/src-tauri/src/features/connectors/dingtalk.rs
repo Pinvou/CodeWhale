@@ -35,7 +35,15 @@ fn dws(args: &[&str]) -> std::process::Command {
 }
 
 fn dws_cli_present() -> bool {
-    matches!(cc::run(dws(&["--version"])), Ok((true, _, _)))
+    dws_cli_probe().unwrap_or(false)
+}
+
+/// `--version` 探测三态:`Ok(true)` 已安装可用;`Ok(false)` 已安装但版本探测
+/// 退出非零;`Err(ProbeError)` 探测本身失败,按 Spawn/Timeout/Other 分型。
+/// 状态轮询把失败都折叠成「未连接」;断开登录路径必须按分型与探测结果
+/// 区别对待,见 [`dingtalk_logout`]。
+fn dws_cli_probe() -> Result<bool, cc::ProbeError> {
+    cc::run_probe(dws(&["--version"])).map(|(ok, _, _)| ok)
 }
 
 /// `dws auth status --format json` 的已登录判定。
@@ -87,19 +95,9 @@ fn extract_user_code(line: &str) -> Option<String> {
 }
 
 fn safe_auth_log_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("access_token")
-        || lower.contains("refresh_token")
-        || lower.contains("authorization:")
-        || lower.contains("bearer ")
-    {
-        return Some("[redacted credential line]".to_string());
-    }
-    Some(trimmed.chars().take(320).collect())
+    // 不开兜底 "token"：钉钉 CLI 的正常 JSON 行含 camelCase token 字段名，
+    // 开了会把非敏感行也整体吞掉（与旧本地实现行为一致）。
+    cc::safe_auth_log_line(line, false)
 }
 
 fn dingtalk_auth_error_hint(text: &str) -> Option<String> {
@@ -147,7 +145,15 @@ fn drain_for_auth_event<R: std::io::Read + Send + 'static>(
     tx: mpsc::Sender<AuthEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for line in std::io::BufRead::lines(std::io::BufReader::new(r)).flatten() {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(r)) {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    // 管道读取错误通常不可恢复；继续迭代可能反复返回 Err 并空转。
+                    log::warn!("[dingtalk] 授权输出读取失败，停止排空：{error}");
+                    break;
+                }
+            };
             if let Some(safe_line) = safe_auth_log_line(&line) {
                 let _ = tx.send(AuthEvent::Line(safe_line));
             }
@@ -210,6 +216,7 @@ pub async fn dingtalk_ensure_cli() -> Result<Value, String> {
 }
 
 /// 查询当前钉钉连接状态。只返回布尔,不把身份信息带进 webview。
+/// (Only called internally by the command layer's `bundle_readiness` CLI dispatch; there is no standalone Tauri command anymore.)
 pub async fn dingtalk_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         if !dws_cli_present() {
@@ -276,6 +283,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
         let now = std::time::Instant::now();
         if now >= deadline {
             let _ = child.kill();
+            cc::reap_after_kill(&mut child);
             conn.set_pid(ID, None);
             return Err("60s 内未拿到二维码链接(检查网络 / 代理)".into());
         }
@@ -305,6 +313,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
             }
             Err(_) => {
                 let _ = child.kill();
+                cc::reap_after_kill(&mut child);
                 conn.set_pid(ID, None);
                 return Err("60s 内未拿到二维码链接(检查网络 / 代理)".into());
             }
@@ -334,6 +343,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
     loop {
         if conn.is_cancelled(ID) {
             let _ = child.kill();
+            cc::reap_after_kill(&mut child);
             conn.set_pid(ID, None);
             return Ok(());
         }
@@ -381,11 +391,24 @@ pub async fn dingtalk_cancel(app: AppHandle) -> Result<Value, String> {
 }
 
 /// 断开钉钉:`dws auth logout`。未安装时也视为已断开。
+///
+/// 探测的任何非成功结果都不能沿用状态轮询的「按未安装降级」:无论是
+/// 超时/执行异常(CLI 挂死),还是 `--version` 成功执行但退出非零
+/// (CLI 损坏/版本过旧——只证明它没能正常自报版本,不能证明不存在),
+/// `auth logout` 都未曾执行、token 未撤销,返回 `ok:true/installed:false`
+/// 会向用户谎报已断开。只有 [`cc::ProbeError::Spawn`](≈二进制不存在,
+/// 真未安装)保留原降级。裁决统一走 [`cc::logout_probe_verdict`],
+/// 其余按分型转为人类可读文案原样上抛(超时文案自带重试指引)。
 pub async fn dingtalk_logout() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
-        if !dws_cli_present() {
+        let not_installed = || {
             cc::bundle_store_on_disconnected(ID);
-            return Ok::<Value, String>(json!({ "ok": true, "installed": false }));
+            Ok::<Value, String>(json!({ "ok": true, "installed": false }))
+        };
+        match cc::logout_probe_verdict("钉钉", dws_cli_probe()) {
+            cc::LogoutProbeVerdict::Installed => {}
+            cc::LogoutProbeVerdict::NotInstalled => return not_installed(),
+            cc::LogoutProbeVerdict::Unconfirmed(message) => return Err(message),
         }
         let (ok, _, _) = cc::run(dws(&["auth", "logout", "--yes"]))?;
         if !ok {
@@ -407,9 +430,6 @@ impl ConnectorSkillGate for DingtalkGate {
     fn id(&self) -> &'static str {
         ID
     }
-    fn display_name(&self) -> &'static str {
-        "钉钉"
-    }
     fn disabled_filename(&self) -> &'static str {
         "dingtalk_disabled"
     }
@@ -421,12 +441,8 @@ impl ConnectorSkillGate for DingtalkGate {
 }
 const GATE: DingtalkGate = DingtalkGate;
 
-pub fn is_dingtalk_disabled() -> bool {
+fn is_dingtalk_disabled() -> bool {
     GATE.is_disabled()
-}
-
-fn set_dingtalk_disabled_flag(disabled: bool) -> Result<(), String> {
-    GATE.set_disabled_flag(disabled)
 }
 
 pub fn dingtalk_skills_should_show() -> bool {
@@ -446,21 +462,6 @@ pub async fn dingtalk_apply_skills() -> Result<Value, String> {
     }
     Ok(json!({ "visible": show }))
 }
-pub async fn set_dingtalk_enabled(enabled: bool) -> Result<Value, String> {
-    let show = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        set_dingtalk_disabled_flag(!enabled)?;
-        // 停用标志 ↔ 统一禁用集桥接（见 set_feishu_enabled 同名注释）。
-        crate::features::marketplace::sync_disabled_bundles_for_connector_switch(
-            "dingtalk", enabled,
-        );
-        let show = dingtalk_skills_should_show();
-        GATE.apply_skills(show)?;
-        Ok(show)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))??;
-    Ok(json!({ "ok": true, "visible": show }))
-}
 pub async fn dingtalk_skills_state() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let disabled = is_dingtalk_disabled();
@@ -478,7 +479,6 @@ pub async fn dingtalk_skills_state() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]
     fn auth_status_detects_authenticated() {
@@ -517,37 +517,5 @@ mod tests {
         .unwrap();
         assert!(hint.contains("钉钉组织未开启 CLI 数据访问"));
         assert!(hint.contains("xuyajing"));
-    }
-
-    #[test]
-    fn dingtalk_disabled_flag_roundtrip() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = format!(
-            "{}/pinvou3-dingtalk-test-{}",
-            std::env::temp_dir().display(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let previous = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
-        let _ = std::fs::create_dir_all(crate::platform::paths::pinvou3_home());
-
-        set_dingtalk_disabled_flag(false).unwrap();
-        assert!(!is_dingtalk_disabled());
-        set_dingtalk_disabled_flag(true).unwrap();
-        assert!(is_dingtalk_disabled());
-        set_dingtalk_disabled_flag(false).unwrap();
-        assert!(!is_dingtalk_disabled());
-
-        match previous {
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

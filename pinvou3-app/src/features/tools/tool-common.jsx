@@ -349,10 +349,11 @@ const AcFmtIcon = FileTypeIcon;
       const T = tc(t);
 
       return (
-        // 根节点不用 overflow-hidden class:vendor/tailwind.js 运行时把生成的
-        // .overflow-hidden 注入到 base.css 之后,会盖掉 .tool-card-output 的
-        // overflow-y:auto,导致 diff 被 200px max-height 裁剪且无法滚动(e2e 实测)。
-        // 内联样式优先级最高:显式 y 滚动 + x 裁剪(保圆角),expanded 时放开 max-height。
+        // The root avoids the overflow-hidden class: Tailwind utilities come after
+        // base.css and would override .tool-card-output's overflow-y:auto, clipping
+        // the diff at the 200px max-height with no way to scroll (verified in e2e).
+        // Inline styles win: explicit y scrolling + x clipping (keeps the rounded
+        // corners); max-height is lifted when expanded.
         <div
           data-testid="diff-view"
           className={`${outBox()} p-0`}
@@ -506,15 +507,15 @@ const AcFmtIcon = FileTypeIcon;
       { id: 5, backendId: null, title: '乐享文档连接器', subtitle: '企业知识文档全量检索', category: 'docs', type: 'Webhook/API', version: 'v1.1.0', latency: '<80ms', desc: '支持通过 API 搜索、创建和管理乐享知识库中的文档。支持批量导入 Markdown、按标签整理内容、实时订阅团队文档的更新动态。', icon: Hexagon, color: 'bg-gradient-to-b from-blue-400 to-blue-600', installed: false, authRequired: true },
       { id: 6, backendId: 'tencent-docs', mcpServer: true, title: '腾讯文档 MCP', subtitle: '官方远程 MCP：在线文档/表格/幻灯片读写与协作', category: 'docs', type: 'MCP Server', version: 'v1.0.41', latency: '云端', desc: '接入腾讯文档官方远程 MCP（通用文档 + PPT/Word/Excel 精细编辑四个服务）：以你的账号创建、读取、编辑在线文档、表格、幻灯片、思维导图、智能表格，管理知识库空间与文件，支持网页剪藏与本地文件上云；安装时自动配官方技能（场景路由 + 工具 API 参考）。需要腾讯文档个人 Token（官方页面 QQ/微信扫码获取），密钥只写入本机系统凭据。', icon: FileText, color: 'bg-gradient-to-b from-blue-500 to-indigo-600', installed: false, authRequired: true, configTitle: '连接腾讯文档', configDescription: 'Token 只保存在本机系统凭据，不写入 mcp.json，也不会进入对话。', configDocUrl: 'https://docs.qq.com/scenario/open-claw.html?nlc=1', configDocLabel: '去获取腾讯文档 Token', configFields: [{ key: 'TENCENT_DOCS_TOKEN', label: '个人 Token', required: true, target: 'bearer', secret: true, placeholder: '粘贴腾讯文档个人 Token', helpText: '打开授权页用 QQ 或微信扫码登录后复制 Token；请勿添加 Bearer 前缀。' }], welcomeQueries: ['列出我最近的腾讯文档', '把这份周报写成腾讯智能文档', '新建一个在线表格记录收支', '读取这个腾讯文档表格并分析'] },
       { id: 8, backendId: 'wecom-bot', mcpServer: true, title: '企微群机器人', subtitle: '向企业微信群推送消息与通知', category: 'collab', type: 'MCP Server', version: 'v1.0.0', latency: '云端', desc: '接入企业微信官方群机器人 webhook（消息推送 API）：让 AI 向绑定的群推送文本（可@成员）、Markdown、图文、图片和文件。需要填写你自己的群机器人 Webhook Key，密钥只写入本机系统凭据。数据经企业微信服务器（可选联网功能，opt-in）。', icon: MessageCircle, color: 'bg-gradient-to-b from-cyan-400 to-blue-500', installed: false, authRequired: true, configTitle: '企微群机器人 Key', configDescription: 'Key 只保存在本机凭据，不写入 mcp.json。', configDocUrl: 'https://developer.work.weixin.qq.com/document/path/91770', configDocLabel: '查看官方群机器人文档', configFields: [{ key: 'WECOM_BOT_KEY', label: 'Webhook Key', required: true, target: 'env', secret: true, placeholder: '粘贴群机器人 key 或完整 webhook 地址', helpText: '企业微信群里右上角「…」→ 群机器人 → 添加机器人，复制 webhook 地址即可。' }], welcomeQueries: ['往群里发一条今日天气播报', '把这份周报整理成 Markdown 发到企微群', '@所有人：下午三点例会别忘了', '把这个文件发到企微群'] },
-      { id: 9, backendId: 'feishu', feishuCli: true, title: '飞书（Lark）', subtitle: '以你本人身份操作飞书文档/日历/表格/消息', category: 'collab', type: 'CLI + 官方技能', version: 'v1.0.87', latency: '云端', desc: '接入飞书官方 CLI + 官方域技能（MIT）：让 AI 以你本人身份读写云文档、查改日历、操作多维表格（Base）与电子表格、收发消息、管理知识库与任务。点「连接飞书」浏览器一键授权，全程不填 key。数据经飞书云 OpenAPI（可选联网功能，opt-in）。', icon: Send, color: 'bg-gradient-to-b from-teal-400 to-emerald-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['读飞书文档帮我做一份 PPT', '把飞书文档整理成摘要', '查我今天的飞书日历', '看看我飞书里的待办任务'] },
+      { id: 9, backendId: 'feishu', feishuCli: true, title: '飞书（Lark）', subtitle: '以你本人身份操作飞书文档/日历/表格/消息', category: 'collab', type: 'CLI + 官方技能', version: 'v1.0.95', latency: '云端', desc: '接入飞书官方 CLI + 官方域技能（MIT）：让 AI 以你本人身份读写云文档、查改日历、操作多维表格（Base）与电子表格、收发消息、管理知识库与任务。点「连接飞书」浏览器一键授权，全程不填 key。数据经飞书云 OpenAPI（可选联网功能，opt-in）。', icon: Send, color: 'bg-gradient-to-b from-teal-400 to-emerald-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['读飞书文档帮我做一份 PPT', '把飞书文档整理成摘要', '查我今天的飞书日历', '看看我飞书里的待办任务'] },
       { id: 17, backendId: 'eip', eipCli: true, internal: 'H3C', title: 'H3C 员工门户（EIP）', subtitle: '以你本人 SSO 身份查考勤/假期/加班/待办/找人/资讯/消费', category: 'h3c', type: 'CLI + 官方技能', version: 'v1.0.0', latency: '内网', desc: '接入 H3C EIP 员工门户：以你本人 SSO 身份查考勤打卡、假期余额、加班时数、待办审批、搜同事、看集团新闻公告、查食堂消费与报销等。点「连接」浏览器 SSO 一键登录，全程不填 key。需公司内网。', icon: Briefcase, color: 'bg-gradient-to-b from-indigo-400 to-blue-600', installed: false, authRequired: true, configFields: [], welcomeQueries: ['我这个月考勤有没有异常', '我还有几天年假', '有没有待办审批', '帮我查同事的联系方式'] },
       { id: 18, backendId: 'zhidao', zhidaoCli: true, internal: 'H3C', title: 'H3C 知道 · 内部知识库', subtitle: '以你本人 SSO 身份检索 H3C 内部知识与资料', category: 'h3c', type: 'CLI + 官方技能', version: 'v1.0.0', latency: '内网', desc: '接入 H3C「知道」内部知识库：以你本人 SSO 身份搜索知识条目、资料库和文档内容，支持基于企业内部知识进行问答与资料定位。点「连接」扫码或浏览器 SSO 登录，全程不填 key。需公司内网。', icon: BookOpen, color: 'bg-gradient-to-b from-emerald-400 to-teal-600', installed: false, authRequired: true, configFields: [], welcomeQueries: ['在知道里搜一下交换机配置规范', '帮我查内部资料库里的安全方案', '知道里有没有这类故障处理文档', '帮我找这个产品的内部知识'] },
-      { id: 22, backendId: 'tmeet', tmeetCli: true, title: '腾讯会议', subtitle: '以你本人身份管理会议/录制/纪要/参会报告', category: 'collab', type: 'CLI + 官方技能', version: 'v1.0.15', latency: '云端', desc: '接入腾讯会议官方 CLI（@tencentcloud/tmeet）+ 官方技能：让 AI 以你本人身份创建、查询、修改和取消腾讯会议，查询受邀人、参会报告、录制、转写与智能纪要，并支持会中呼叫成员入会。点「连接」打开腾讯会议授权页扫码登录，全程不填 key。', icon: Video, color: 'bg-gradient-to-b from-sky-400 to-blue-600', installed: false, authRequired: true, configFields: [], welcomeQueries: ['帮我创建一个腾讯会议', '查一下我的腾讯会议录制', '看看最近会议的智能纪要', '查询这场腾讯会议的参会人'] },
-      { id: 99, backendId: 'wecom', wecomCli: true, title: '企业微信', subtitle: '以你本人身份操作企微消息/邮件/文档/会议/日程', category: 'collab', type: 'CLI + 官方技能', version: 'v1.1.0', latency: '云端', desc: '接入企业微信官方 CLI（@wecom/cli，MIT）+ 官方域技能：让 AI 以你本人身份收发消息、收发邮件、读写文档/智能表格/在线表格/智能文档、管理微盘文件、创建/查询会议与日程、管理待办、查询通讯录。点「连接」用企业微信 App 扫码授权，全程不填 key。数据经企业微信云（可选联网功能，opt-in）。', icon: MessageCircle, color: 'bg-gradient-to-b from-cyan-400 to-blue-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['把这段内容写成企微智能文档', '读一下我企微某篇文档的内容', '在企微智能表格里新建一张子表', '查一下企微智能表格里的数据'] },
-      { id: 10, backendId: 'dingtalk', dingtalkCli: true, title: '钉钉', subtitle: '以你本人身份操作钉钉文档/日历/表格/消息', category: 'collab', type: 'CLI + 官方技能', version: 'v1.0.58', latency: '云端', desc: '接入钉钉官方 DingTalk Workspace CLI（dws，Apache-2.0）+ 官方技能：让 AI 以你本人身份读写钉钉文档、查改日历、操作 AI 表格/在线表格、收发群聊消息、处理待办/审批/日志/邮箱等。点「连接」用钉钉 App 扫码授权，全程不填 key。', icon: Navigation, color: 'bg-gradient-to-b from-blue-400 to-indigo-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['读一下我的钉钉文档', '查我今天的钉钉日程', '在钉钉 AI 表格里查数据', '看看我的钉钉待办'] },
+      { id: 22, backendId: 'tmeet', tmeetCli: true, title: '腾讯会议', subtitle: '以你本人身份管理会议/录制/纪要/参会报告', category: 'collab', type: 'CLI + 官方技能', version: 'v1.0.18', latency: '云端', desc: '接入腾讯会议官方 CLI（@tencentcloud/tmeet）+ 官方技能：让 AI 以你本人身份创建、查询、修改和取消腾讯会议，查询受邀人、参会报告、录制、转写与智能纪要，并支持会中呼叫成员入会。点「连接」打开腾讯会议授权页扫码登录，全程不填 key。', icon: Video, color: 'bg-gradient-to-b from-sky-400 to-blue-600', installed: false, authRequired: true, configFields: [], welcomeQueries: ['帮我创建一个腾讯会议', '查一下我的腾讯会议录制', '看看最近会议的智能纪要', '查询这场腾讯会议的参会人'] },
+      { id: 99, backendId: 'wecom', wecomCli: true, title: '企业微信', subtitle: '以你本人身份操作企微消息/邮件/文档/会议/日程', category: 'collab', type: 'CLI + 官方技能', version: 'v1.2.1', latency: '云端', desc: '接入企业微信官方 CLI（@wecom/cli，MIT）+ 官方域技能：让 AI 以你本人身份收发消息、收发邮件、读写文档/智能表格/在线表格/智能文档、管理微盘文件、创建/查询会议与日程、管理待办、查询通讯录。点「连接」用企业微信 App 扫码授权，全程不填 key。数据经企业微信云（可选联网功能，opt-in）。', icon: MessageCircle, color: 'bg-gradient-to-b from-cyan-400 to-blue-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['把这段内容写成企微智能文档', '读一下我企微某篇文档的内容', '在企微智能表格里新建一张子表', '查一下企微智能表格里的数据'] },
+      { id: 10, backendId: 'dingtalk', dingtalkCli: true, title: '钉钉', subtitle: '以你本人身份操作钉钉文档/日历/表格/消息', category: 'collab', type: 'CLI + 官方技能', version: 'v1.0.61', latency: '云端', desc: '接入钉钉官方 DingTalk Workspace CLI（dws，Apache-2.0）+ 官方技能：让 AI 以你本人身份读写钉钉文档、查改日历、操作 AI 表格/在线表格、收发群聊消息、处理待办/审批/日志/邮箱等。点「连接」用钉钉 App 扫码授权，全程不填 key。', icon: Navigation, color: 'bg-gradient-to-b from-blue-400 to-indigo-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['读一下我的钉钉文档', '查我今天的钉钉日程', '在钉钉 AI 表格里查数据', '看看我的钉钉待办'] },
       { id: 11, backendId: null, title: 'TAPD 敏捷研发', subtitle: '缺陷与迭代的自动化追踪', category: 'dev', type: 'Action Skill', version: 'v2.8.0', latency: '<60ms', desc: '研发管理核心工具。允许 AI 查询项目迭代进度、自动拆分需求条目、更新缺陷状态，实现从需求到发布的研发全生命周期数字化。', icon: Layout, color: 'bg-gradient-to-b from-violet-500 to-fuchsia-600', installed: false, authRequired: true },
       { id: 12, backendId: null, title: 'CNB 云原生管线', subtitle: '代码仓库与 CI/CD 调度', category: 'dev', type: 'MCP Server', version: 'v1.0.0', latency: '<40ms', desc: '将云原生开发能力赋予大模型。支持通过自然语言进行代码仓库检索、提交 Issue、审查 PR、触发并监控流水线部署等极客操作。', icon: Code, color: 'bg-gradient-to-b from-orange-400 to-rose-500', installed: false, authRequired: true },
-      { id: 13, backendId: 'qcc', oauthMcp: true, oauthServerName: 'qcc-company', title: '企查查', subtitle: '企业工商数据授权查询', category: 'finance', type: 'Remote MCP', version: 'v1.0.0', latency: '云端', desc: '接入企查查智能体数据平台 qcc-company 远程 MCP。点「连接」后会打开浏览器进行企查查账号 OAuth 授权，全程不填写 API Key。', icon: Building2, color: 'bg-gradient-to-br from-blue-600 to-cyan-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['查一下华为的工商信息', '腾讯的工商登记信息', '比亚迪有哪些对外投资', '阿里巴巴的股东结构'] },
+      { id: 13, backendId: 'qcc', oauthMcp: true, oauthServerName: 'qcc-company', title: '企查查', subtitle: '企业工商数据授权查询', category: 'finance', type: 'Remote MCP', version: 'v1.0.0', latency: '云端', desc: '接入企查查智能体数据平台 qcc-company 远程 MCP。点「连接」默认通过企查查账号 OAuth 授权；如有企查查 API Key 也可选填，密钥只写入本机系统凭据。', icon: Building2, color: 'bg-gradient-to-br from-blue-600 to-cyan-500', installed: false, authRequired: true, configTitle: '企查查 API Key（可选）', configDescription: 'API Key 只保存在本机系统凭据，不写入 mcp.json。留空则直接使用 OAuth 授权。', configFields: [{ key: 'QCC_API_KEY', label: '企查查 API Key', required: false, target: 'bearer', secret: true, placeholder: '粘贴企查查 API Key（可留空）', helpText: '可选。默认使用 OAuth 授权；如需以 API Key 方式接入再填写。' }], welcomeQueries: ['查一下华为的工商信息', '腾讯的工商登记信息', '比亚迪有哪些对外投资', '阿里巴巴的股东结构'] },
       { id: 20, backendId: 'patsnap-search', mcpServer: true, title: '智慧芽专利&文献', subtitle: '全球专利与论文融合检索，支持公开号详情获取', category: 'docs', type: 'MCP Server', version: 'v1.0.0', latency: '云端', desc: '接入智慧芽远程 MCP，在全球专利数据库和文献库中进行融合检索，支持自然语言、语义搜索、关键词检索和多维过滤，并可按专利公开号或结果 URL 拉取 Markdown 详情。需要填写智慧芽 API Key，密钥只写入本机系统凭据，mcp.json 仅保存环境变量占位符。', icon: Search, color: 'bg-gradient-to-b from-emerald-500 to-cyan-600', installed: false, authRequired: true, configTitle: '填写智慧芽 API Key', configDescription: 'API Key 仅存储在本机系统凭据中，不会明文写入 mcp.json；连接智慧芽服务时通过 Authorization 请求头发送。', configDocUrl: 'https://open.zhihuiya.com/dashboard/api-keys', configDocLabel: '查看 API Key 获取说明', configFields: [{ key: 'PATSNAP_API_KEY', label: '智慧芽 API Key', required: true, target: 'bearer', secret: true, placeholder: '粘贴你的智慧芽 API Key', helpText: '请从智慧芽开放平台或企业管理员提供的 MCP/API 凭证中获取。' }], welcomeQueries: ['检索固态电池电解质相关专利和论文', '查找近五年 CRISPR 递送系统核心专利和文献', '获取公开号 CN109123456A 的专利详情', '分析宁德时代钠离子电池方向专利布局'] },
       { id: 21, backendId: 'canva-mcp', oauthMcp: true, oauthServerName: 'canva_mcp', title: 'Canva 可画', subtitle: '海报、演示文稿、封面与品牌模板设计', category: 'life', type: 'Remote MCP', version: 'v1.0.0', latency: '云端', desc: '接入 Canva 可画远程 MCP。支持通过自然语言生成和编辑海报、演示文稿、小红书封面、品牌模板等设计内容；点「连接」后会打开浏览器进行 Canva 可画账号授权，全程不填写 API Key。设计指令、素材、文件夹和品牌模板相关内容会发送到 Canva 可画远程 MCP 服务。', icon: Palette, color: 'bg-gradient-to-b from-cyan-500 to-pink-500', installed: false, authRequired: true, configFields: [], welcomeQueries: ['帮我生成一张新品发布海报', '做一份三页产品介绍演示文稿', '设计一张小红书封面', '用品牌模板生成活动宣传图'] },
       { id: 14, backendId: 'obsidian', mcpServer: true, title: 'Obsidian 知识库', subtitle: '检索并管理本机 Obsidian 笔记，读写你的个人知识', category: 'docs', type: 'MCP Server', version: 'v1.1.0', latency: '<30ms', desc: '把你本机的 Obsidian 笔记库（vault）接入大模型。支持全文检索、读取、新建、编辑、改名（自动修双链）与删除——让 AI 基于并维护你自己沉淀的知识。自动识别当前打开的库，无需手动配置；笔记不出本机、模型也在本机，知识与算力全链路不出域。', icon: BookOpen, color: 'bg-gradient-to-b from-violet-500 to-purple-700', installed: false, authRequired: false, welcomeQueries: ['帮我搜一下我的笔记', '帮我新建一篇笔记记录今天的想法', '我的知识库有哪些文档？', '总结一下我的笔记'] },
@@ -529,7 +530,16 @@ const AcFmtIcon = FileTypeIcon;
       { backendId: 'pptx', title: 'PPT 生成', category: 'docs', desc: '说“做个 PPT / 汇报”，AI 先列大纲让你确认，再按内容自动选主题（9 套）生成可编辑 .pptx——真·图表、自带封面缩略图，全程本地、数据不出机。首次安装会自动下载 python-pptx 依赖（需联网）。', icon: Presentation, welcomeQueries: ['做个 Q2 季度汇报 PPT', '帮我做一份产品介绍 PPT', '做个项目方案演示', '做个公司介绍 PPT'] },
     ];
 
-    // overlay 提供 configFields 时按字段 key 深合并，只覆盖 label/helpText/placeholder，其余源字段保留。
+    // configFields 字段级展示文案白名单：两处合并（localizeTool 的源数据×词典
+    // overlay、mergeConfigFields 的后端功能事实×overlay）共用同一策略——只有这些
+    // key 允许被 overlay 覆盖，其余（key/required/target/secret 等功能事实）一律
+    // 保留源侧。后端 bundle_readiness 只下发功能事实、从不下发展示文案（见
+    // src-tauri marketplace/bundle.rs ConfigFieldSpec），展示文案的唯一来源就是
+    // overlay/词典；白名单是纵深防御：后端未来若加入展示字段，这里保证三语
+    // overlay 仍然赢。
+    const CONFIG_FIELD_DISPLAY_KEYS = ['label', 'helpText', 'placeholder'];
+
+    // overlay 提供 configFields 时按字段 key 深合并，只覆盖白名单内的展示文案，其余源字段保留。
     const localizeTool = (tool, t) => {
       if (!tool) return tool;
       const tools = t?.uiToolDetails?.tools;
@@ -541,7 +551,7 @@ const AcFmtIcon = FileTypeIcon;
           const ov = localized.configFields.find((f) => f && f.key === src.key);
           if (!ov) return src;
           const out = { ...src };
-          for (const k of ['label', 'helpText', 'placeholder']) if (ov[k] != null) out[k] = ov[k];
+          for (const k of CONFIG_FIELD_DISPLAY_KEYS) if (ov[k] != null) out[k] = ov[k];
           return out;
         });
       }
@@ -550,12 +560,20 @@ const AcFmtIcon = FileTypeIcon;
 
     // 后端 config_fields（key/required/secret/target 功能事实，bundle_readiness 的
     // bundle 字段）× 本地 overlay（label/placeholder/helpText 展示文案）按 key 合并；
-    // 后端无字段时原样使用 overlay。
+    // 后端无字段时原样使用 overlay。功能事实（required/target/secret 等）保持后端
+    // 胜出，展示文案按白名单一律 overlay 胜出（纵深防御，见上方白名单注释）。
     const mergeConfigFields = (backendFields, overlayFields) => {
       if (!Array.isArray(backendFields) || backendFields.length === 0) return overlayFields;
       const overlayByKey = {};
       (overlayFields || []).forEach((f) => { if (f && f.key) overlayByKey[f.key] = f; });
-      return backendFields.map((f) => ({ ...(overlayByKey[f.key] || {}), ...f }));
+      return backendFields.map((f) => {
+        const ov = overlayByKey[f.key] || {};
+        const merged = { ...f };
+        for (const k of CONFIG_FIELD_DISPLAY_KEYS) {
+          if (ov[k] != null) merged[k] = ov[k];
+        }
+        return merged;
+      });
     };
 
     const weatherIconSvg = (code) => {

@@ -93,6 +93,17 @@ for (const [domain, methods] of Object.entries(expectedApi)) {
   assert.deepEqual(Object.keys(api[domain]).sort(), [...methods].sort(), `${domain} Web API surface changed`);
 }
 assert.equal(api.getState, undefined, 'Web flat compatibility facade must stay private');
+// The computerUse domain must reject on web (review finding: the surface
+// equality lock alone would not catch a stub turning into a no-op resolver).
+// Every stub is pinned individually: a single-method pin used to leave the
+// other eight swappable to fake resolvers (phantom consent state on web).
+for (const method of Object.keys(api.computerUse)) {
+  await assert.rejects(
+    api.computerUse[method](),
+    /not supported on the web client/,
+    `web computerUse.${method} stub must reject, never fake success`,
+  );
+}
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
 
 snapshotReads = 0;
@@ -125,7 +136,10 @@ deepCloneCalls = 0;
 invokeResponse = async command => command === 'web_access_ingest_file'
   ? { basename: 'stable-snapshot.txt', handle: 'attachment-handle' }
   : null;
-await api.attachments.addAttachmentByPath('/tmp/stable-snapshot.txt');
+// Drive the ingest flow through the private flat facade: the adapted web
+// domain object exposes the identical function implementation, but asserting
+// through the flat facade keeps this test independent of the domain copy.
+await flat.addAttachmentByPath('/tmp/stable-snapshot.txt');
 assert.equal(snapshotReads, 0, 'subscription notifications must use the supplied transport snapshot');
 assert.equal(deepCloneCalls, 0, 'subscription notifications must not deep-clone the transcript');
 assert.equal(flatSnapshots.length, 2, 'Web flat subscribers should observe parsing and ready updates');
@@ -243,9 +257,26 @@ const settingsResult = () => {
   return result;
 };
 const unsubscribeSettings = api.state.subscribe('settings', snapshot => { settingsSnapshots.push(snapshot); });
+const settingsAndModelsSnapshots = [];
+const unsubscribeSettingsAndModels = api.state.subscribeMany(
+  ['settings', 'models'],
+  snapshot => { settingsAndModelsSnapshots.push(snapshot); },
+);
 invokeResponse = async command => command === 'web_access_update_settings' ? settingsResult() : null;
 assert.equal(await api.settings.saveSettings({ language: 'en' }), true);
+// saveSettings may publish more than once; compare the last snapshot before
+// the chat-only publication with the one it delivers.
+const settingsBeforeChat = settingsSnapshots.length;
+const settingsAndModelsBeforeChat = settingsAndModelsSnapshots.length;
 api.chat.prefillComposer('same-settings-revision');
+assert.equal(settingsSnapshots.length, settingsBeforeChat + 1,
+  'a chat-only publication must still notify single-domain subscribers');
+assert.equal(settingsAndModelsSnapshots.length, settingsAndModelsBeforeChat + 1,
+  'a chat-only publication must still notify multi-domain subscribers');
+assert.equal(settingsSnapshots.at(-2), settingsSnapshots.at(-1),
+  'a chat-only publication must preserve an unrelated single-domain snapshot identity');
+assert.equal(settingsAndModelsSnapshots.at(-2), settingsAndModelsSnapshots.at(-1),
+  'a chat-only publication must preserve an unrelated multi-domain snapshot identity');
 const firstSettings = settingsSnapshots[0];
 const repeatedSettings = settingsSnapshots[1];
 assert.ok(Object.hasOwn(firstSettings.settings, '__proto__'));
@@ -266,6 +297,7 @@ assert.equal(changedSettings.settings['__proto__'].marker, 'own-value');
 assert.equal(Object.getPrototypeOf(changedSettings.settings).marker, undefined,
   'web copy-on-write updates must not route __proto__ through the prototype setter');
 unsubscribeSettings();
+unsubscribeSettingsAndModels();
 
 const memorySources = {
   profile: { available: true }, preferences: { available: true }, work_context: { available: true },
@@ -360,13 +392,13 @@ assert.equal(stableCombined[2].composerPrefill.text, 'stable-combined-identity-2
 unsubscribeStableCombined();
 
 invokeResponse = async command => command === 'web_access_ingest_file' ? new Date(0) : null;
-await assert.rejects(api.attachments.addAttachmentByPath('/tmp/non-plain.txt'), /only supports arrays and plain objects/);
+await assert.rejects(flat.addAttachmentByPath('/tmp/non-plain.txt'), /only supports arrays and plain objects/);
 const nonPlainAttachment = flat.getState().attachments.at(-1);
 api.attachments.removeAttachment(nonPlainAttachment.id);
 const cyclic = { value: 'cycle' };
 cyclic.self = cyclic;
 invokeResponse = async command => command === 'web_access_ingest_file' ? cyclic : null;
-await assert.rejects(api.attachments.addAttachmentByPath('/tmp/cyclic.txt'), /must not contain cycles/);
+await assert.rejects(flat.addAttachmentByPath('/tmp/cyclic.txt'), /must not contain cycles/);
 
 // probeLocalServerKind 降级契约（PR #218 五审 P2）：web 桥层不得吞错伪造成
 // generic——命令失败（web 白名单不含该命令/老版本桌面）必须 reject，由消费方

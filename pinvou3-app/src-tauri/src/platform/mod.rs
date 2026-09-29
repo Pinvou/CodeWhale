@@ -4,6 +4,8 @@ pub mod connector_lock;
 pub mod connector_skills;
 pub mod connector_state;
 pub mod credential_store;
+#[cfg(target_os = "macos")]
+pub(crate) mod cursor;
 pub(crate) mod download;
 pub(crate) mod encoding;
 pub(crate) mod filesystem;
@@ -18,6 +20,8 @@ pub(crate) mod startup;
 pub(crate) mod strings;
 pub mod super_permission;
 pub(crate) mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod ui_cache;
 pub(crate) mod window_startup;
 

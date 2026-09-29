@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import {
@@ -8,6 +8,7 @@ import {
 import { AcpAgentLogo } from './AcpAgentLogo.jsx';
 import { CodexWorkspacePanel } from './CodexWorkspacePanel.jsx';
 import { SubagentTranscriptPanel } from '../multiagent/SubagentTranscriptPanel.jsx';
+import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
 import {
   refreshAcpAgentCatalog,
   startSerialStatusPolling,
@@ -16,9 +17,11 @@ import {
 import {
   classifyAcpServiceFailure,
   isAcpAuthenticationFailure,
+  latestAgentRuntimeNotice,
   runtimeOperationFor,
 } from './runtimeNoticeState.js';
 import {
+  AgentRuntimeNotice,
   AgentServiceFailureNotice,
   RuntimeNotice,
   runtimeSourceLabel,
@@ -43,6 +46,7 @@ import {
   mergeAcpTimelineSnapshot,
   updateAcpAttachmentDraft,
   projectAcpTimeline,
+  redactDisplayError,
   resolveAcpSessionControls,
 } from './acp-state.js';
 import {
@@ -80,14 +84,13 @@ import {
   RewindConfirmDialog,
   RewindUndoChip,
   RewindUndoConfirmDialog,
-  useDialogEscapeKey,
-  useDialogFocusRestore,
 } from './RewindChip.jsx';
+import { ModalDialogShell } from './ModalDialogShell.jsx';
 import {
   ConversationActivityIndicator,
   ConversationMarkdown,
   ConversationStatusBadge,
-  ConversationTurn,
+  ConversationTimeline,
   useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
 import {
@@ -124,11 +127,18 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { buildUserInputAnswers, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
 import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { YoloConfirmCard } from '../../shared/yolo-confirm-card.jsx';
 import { notifyChatRoundCommitted } from '../tools/tool-events.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
 import { formatAttachmentLimitError } from '../attachments/attachment-limit-errors.js';
-import { collectClipboardImages, readPasteImageAsBytes } from '../attachments/paste-image.js';
+import {
+  collectClipboardImages,
+  pasteEventNeedsClipboardFallback,
+  pasteImageClipboardFallbackAvailable,
+  readPasteImageAsBytes,
+} from '../attachments/paste-image.js';
 import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import { bridge } from '../../hooks/useBridge.js';
@@ -160,8 +170,13 @@ import {
   uploadAcpDeviceAttachment,
 } from './acpClient.js';
 import { can, canInvoke, isWeb, onPlatformConnectionChange } from '../../shared/platform.js';
+import {
+  forgetWorkspace,
+  loadRecentWorkspaces,
+  rememberWorkspace,
+  workspaceName,
+} from '../../shared/workspace-recents.js';
 const invoke = invokeTauri;
-const RECENT_WORKSPACES_KEY = 'pinvou_codex_recent_workspaces';
 const DRAFT_ATTACHMENT_KEY = '__codex_draft__';
 
 function codeTelemetryToken(prefix) {
@@ -188,11 +203,6 @@ const CODE_AGENT_IDS = new Set(['pinvou', 'codex', 'claude', 'kimi']);
 const EMPTY_CONVERSATION_TURNS = [];
 // Same idea: the sessions default must be a stable reference; an inline [] is a fresh array on every render.
 const EMPTY_SESSIONS = [];
-
-function workspaceName(path, unknownDirectory) {
-  // Trailing-separator stripping + Windows drive-letter path semantics live in shared/path-utils (same as the former inline code).
-  return pathBasename(path, { collapseTrailing: true, fallback: unknownDirectory });
-}
 
 // 分支显示/切换 pill：会话 header 与草稿 header（已选项目目录、未开会话）共用。
 // 非 git 工作区或 detached HEAD（current 为空）时隐藏；web 端由调用方不渲染。
@@ -237,61 +247,29 @@ function BranchSelector({ copy, branches, disabled, busy, menuOpen, onToggle, on
   );
 }
 
-// 分支切换弹窗外壳：与 RewindConfirmDialog / NativeYoloConfirmCard 同款——portal
-// 到 <body>（composer 容器的 backdrop-blur 会成为 fixed 后代的包含块）、焦点夺取/
-// 归还、Escape 关闭（busy 时禁用）。backdrop 是 disabled 随 busy 的按钮，切换
-// 进行中不允许点空白处把弹窗藏到后台。仅当对应弹窗打开时才挂载（调用处条件渲染）。
+// Branch-switch dialog shell: same pattern as RewindConfirmDialog / the shared
+// YoloConfirmCard — portal to <body> (the composer container's backdrop-blur
+// becomes the containing block for fixed descendants), focus capture/restore,
+// Escape to close (disabled while busy). The backdrop is a button disabled
+// along with busy: while a switch is in flight, clicking the blank area must
+// not hide the dialog into the background. Mounted only while the dialog is
+// open (conditional rendering at the call site).
 function BranchDialogShell({ copy, busy, testid, labelledBy, initialFocusRef, onCancel, children }) {
-  const dialogRef = useRef(null);
-  useDialogFocusRestore(dialogRef, initialFocusRef);
-  useDialogEscapeKey(busy, onCancel);
-  return createPortal(
-    <div data-testid={testid} className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-      <button
-        type="button"
-        aria-label={copy.branchSwitchCancel}
-        className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
-        disabled={busy}
-        onClick={onCancel}
-      />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        tabIndex={-1}
-        className="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
-      >
-        {children}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <ModalDialogShell
+      testid={testid}
+      zIndexClass="z-[120]"
+      backdropLabel={copy.branchSwitchCancel}
+      backdropClass="absolute inset-0 cursor-default bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
+      panelClass="relative w-[min(400px,calc(100vw-24px))] rounded-[24px] p-6 bg-white text-[#1F1F1F] outline-none dark:bg-[#1E1F20] dark:text-[#E8EAED]"
+      busy={busy}
+      initialFocusRef={initialFocusRef}
+      labelledBy={labelledBy}
+      onCancel={onCancel}
+    >
+      {children}
+    </ModalDialogShell>
   );
-}
-
-function loadRecentWorkspaces() {
-  try {
-    const value = JSON.parse(localStorage.getItem(RECENT_WORKSPACES_KEY) || '[]');
-    return Array.isArray(value) ? value.filter(path => typeof path === 'string').slice(0, 6) : [];
-  } catch {
-    return [];
-  }
-}
-
-function rememberWorkspace(path) {
-  const next = [path, ...loadRecentWorkspaces().filter(item => item !== path)].slice(0, 6);
-  localStorage.setItem(RECENT_WORKSPACES_KEY, JSON.stringify(next));
-  return next;
-}
-
-function forgetWorkspace(path) {
-  const next = loadRecentWorkspaces().filter(item => item !== path);
-  try {
-    localStorage.setItem(RECENT_WORKSPACES_KEY, JSON.stringify(next));
-  } catch {
-    // localStorage 不可用时仍允许当前窗口继续创建新会话。
-  }
-  return next;
 }
 
 // 记住用户上次在 code 界面选择的 agent：重开界面/重启应用后沿用，直到用户再次切换。
@@ -557,41 +535,12 @@ const NATIVE_CHAT_EVENTS = [
   'chat:done',
 ];
 
-function isFreeTextPlaceholderOption(option) {
-  const label = String(option?.label || '').trim();
-  return /^(?:其他|其它|other)(?:\s*[\(（][^()（）]*[\)）])?$/i.test(label);
-}
-
 function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput, copy, conversationCopy }) {
-  const questions = (item.questions || []).map((question, index) => {
-    const allowOther = question.allow_free_text !== false;
-    return {
-      id: question.id || `question-${index + 1}`,
-      header: question.header || `Q${index + 1}`,
-      question: question.question || '',
-      options: (question.options || [])
-        .filter(option => !allowOther || !isFreeTextPlaceholderOption(option))
-        .map(option => ({
-          value: option.label,
-          label: option.label,
-          description: option.description || '',
-        })),
-      allowOther,
-      multiSelect: Boolean(question.multi_select),
-      required: !question.multi_select,
-    };
-  });
+  const questions = normalizeUserInputQuestions(item.questions);
   const actionable = !item.resolved;
 
   function submit(groups) {
-    const answers = groups.flatMap(group => group.answers.map(answer => ({
-      id: group.questionId,
-      label: answer.other ? (conversationCopy && conversationCopy.otherAnswer) || answer.label : answer.label,
-      value: String(answer.value),
-      // 保留 other 标记：QuestionChoiceCard 还原历史答案时据此把“其他”与预设选项区分开，
-      // 避免“其他值 == 预设 value”被误判为预设（评审 P2）。
-      other: answer.other,
-    })));
+    const answers = buildUserInputAnswers(groups, conversationCopy && conversationCopy.otherAnswer);
     onSubmitAnswers(item.toolCallId, answers);
   }
 
@@ -604,6 +553,7 @@ function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput,
       submitting={responding}
       submitLabel={copy.submit}
       cancelLabel={copy.cancel}
+      otherPlaceholder={conversationCopy && conversationCopy.otherAnswer}
       otherAnswerLabel={conversationCopy && conversationCopy.otherAnswer}
       inputPlaceholder={conversationCopy && conversationCopy.inputPlaceholder}
       statusText={!actionable
@@ -662,68 +612,6 @@ function NativePlanCard({ item, theme, t, copy, modePlan, busy, onAccept, onDisc
     </div>
   );
 }
-
-// 首次切 yolo 的一次性确认卡（全局记忆）：语义 = "该模式下模型将对你的项目目录
-// 全自动读写、可执行 shell，无逐步审批"；确认后全局记住、不再弹（与 VS Code 同款
-// UI 层确认，后端不强制门控）。按钮样式复用方案审批卡的 cardBtnCls。
-function NativeYoloConfirmCard({ theme, t, busy, onConfirm, onCancel }) {
-  const isDark = theme === 'dark';
-  const dialogRef = useRef(null);
-  // 打开即聚焦卡片（键盘可达），Esc 视为取消——与 NativePlanCard 内联卡不同，
-  // 这是一张全屏模态，必须挡住底层控件，故补 role=dialog/aria-modal/键盘交互。
-  // Focus/Escape interaction shares the same hook pair as RewindChip's two confirm dialogs (focus restored on unmount).
-  useDialogFocusRestore(dialogRef);
-  useDialogEscapeKey(busy, onCancel);
-  // portal 到 <body>：该卡片渲染在 composer 容器内，而容器的 backdrop-blur 会成为
-  // `position: fixed` 的包含块，不 portal 的话全屏模态只会盖住输入框区域，
-  // 点击遮罩取消也随之失效。
-  return createPortal(
-    <div data-testid="native-yolo-confirm" className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <button
-        type="button"
-        aria-label={t.modeYoloConfirmCancel}
-        className="absolute inset-0 cursor-default bg-black/30 backdrop-blur-[2px]"
-        disabled={busy}
-        onClick={onCancel}
-      />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="native-yolo-confirm-title"
-        tabIndex={-1}
-        className={`relative w-full max-w-[420px] rounded-2xl border p-4 shadow-xl backdrop-blur-xl outline-none ${
-          isDark ? 'border-white/10 bg-[#202124]/95' : 'border-black/[0.08] bg-white/95'
-        }`}>
-        <div id="native-yolo-confirm-title" className={`text-[14px] font-semibold ${isDark ? 'text-[#E3E3E3]' : 'text-[#1F1F1F]'}`}>
-          {t.modeYoloConfirmTitle}
-        </div>
-        <div className={`mt-2 text-[13px] leading-relaxed ${isDark ? 'text-[#C4C7C5]' : 'text-[#444746]'}`}>
-          {t.modeYoloConfirmBody}
-        </div>
-        <div className="mt-2 text-[12px] text-[#C5221F] dark:text-red-400">{t.modeYoloConfirmHint}</div>
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            data-testid="native-yolo-confirm-cancel"
-            className={cardBtnCls()}
-            disabled={busy}
-            onClick={onCancel}
-          >{t.modeYoloConfirmCancel}</button>
-          <button
-            type="button"
-            data-testid="native-yolo-confirm-ok"
-            className={cardBtnCls('danger')}
-            disabled={busy}
-            onClick={onConfirm}
-          >{t.modeYoloConfirmOk}</button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 // eslint-disable-next-line sonarjs/cognitive-complexity -- ACP code main view: session/event/draft/attachment/scroll lifecycles share one set of ref+state; refactoring is high-risk
 export function CodexAcpView({
   theme,
@@ -903,6 +791,7 @@ export function CodexAcpView({
     await checkoutWorkspaceBranch(branch, 'carry');
   }
   const [dismissedFailureKey, setDismissedFailureKey] = useState('');
+  const [dismissedNoticeKey, setDismissedNoticeKey] = useState('');
   const [draftWorkspacePath, setDraftWorkspacePath] = useState(null);
   // 会话内用 sessionId 解析工作区；草稿态（会话未创建）直接扫描已选目录。
   const branchWorkspacePath = activeId ? null : draftWorkspacePath;
@@ -1009,6 +898,7 @@ export function CodexAcpView({
   // error notice copy needs the current UI language and model config;
   // the latest values are threaded through a ref so closures never hold a
   // stale bridge state snapshot (same pattern as activeIdRef).
+  // Assigned below, once the native session's own model context is known.
   const nativeEventContextRef = useRef({ language: null, modelServiceState: null });
   useLayoutEffect(() => {
     // loadSession may optimistically point this ref at a just-created session before
@@ -1172,9 +1062,9 @@ export function CodexAcpView({
   const nativeProjection = useMemo(
     () => (isNativeAgent ? projectNativeLane(activeNativeLane, activeId, {
       // Same as the main chat ChatView: the timeline error card's friendly
-      // copy is built in the UI language, with the provider label derived
-      // from bridge state (internally, a provider signal in the error text
-      // still wins).
+      // copy is built in the UI language; the provider label comes from the
+      // native session's own controls (nativeModelServiceState above), and a
+      // provider signal in the error text itself still wins.
       language: nativeModelServiceLanguage,
       modelServiceState: nativeModelServiceState,
     }) : null),
@@ -1366,6 +1256,18 @@ export function CodexAcpView({
   const visibleServiceFailure = serviceFailure?.key === dismissedFailureKey
     ? null
     : serviceFailure;
+  // Adapter stderr can appear here; always redact it before display, as for turn errors.
+  const runtimeNotice = useMemo(() => {
+    const notice = latestAgentRuntimeNotice(events);
+    if (!notice) return null;
+    return {
+      ...notice,
+      detail: redactDisplayError(notice.detail, acpModelServiceLanguage) || '',
+    };
+  }, [events, acpModelServiceLanguage]);
+  const visibleRuntimeNotice = runtimeNotice?.key === dismissedNoticeKey
+    ? null
+    : runtimeNotice;
   const workspaceUnavailable = Boolean(
     activeSession
       && activeSession.workspace_kind === 'project'
@@ -2440,7 +2342,33 @@ export function CodexAcpView({
     // WebKit-safe filter + image File extraction shared with the chat paste path;
     // whether to swallow the event is decided here (single preventDefault below).
     const images = collectClipboardImages(event);
-    if (!images.length) return;
+    if (!images.length) {
+      // Linux WebKitGTK surfaces an image clipboard as an empty clipboardData
+      // (swallowing the text part too); the native layer reads the clipboard
+      // instead, mirroring the chat paste path. Browsers hand images over
+      // through clipboardData items, so web keeps the device-upload path.
+      if (deviceFileUploadAvailable) return;
+      if (!pasteImageClipboardFallbackAvailable(bs && bs.platformCapabilities)) return;
+      if (!pasteEventNeedsClipboardFallback(event)) return;
+      event.preventDefault();
+      // 直连 invoke 与既有 save_paste_image 用法一致；语义对齐 chat 侧的
+      // bridge.attachments.addPasteImageFromClipboard（command 返回 null = 无图
+      // 像，静默维持「无内容可贴」）。fulfiller 内保持非 async：附件入列失败
+      // 单独 .catch，避免 .then 第二参覆盖不到而成为 unhandled rejection。
+      invoke('paste_clipboard_image').then((path) => {
+        if (!path) return;
+        addAttachmentByPath(path, attachmentKey).catch(showError);
+      }, (err) => {
+        const limitError = formatAttachmentLimitError(err, t.uiAttachments);
+        if (limitError) {
+          console.error('Codex clipboard paste failed:', err);
+          setError(limitError);
+        } else {
+          showError(err);
+        }
+      });
+      return;
+    }
     if (!deviceFileUploadAvailable && !canInvoke('save_paste_image')) return;
     event.preventDefault();
     images.forEach(file => {
@@ -3479,6 +3407,14 @@ export function CodexAcpView({
             />
           )}
           {busy && <ConversationStatusBadge status="running" copy={t.uiConversation} />}
+          {isNativeAgent && nativeMultiAgentAvailable && activeId && (
+            <RunningAgentsOverlay
+              sessionId={activeId}
+              theme={theme}
+              t={t}
+              swarmOn={nativeMultiAgentEnabled}
+            />
+          )}
           <button
             type="button"
             onClick={toggleWorkspacePanel}
@@ -3531,7 +3467,7 @@ export function CodexAcpView({
 
         <div className="flex-1 min-h-0 flex">
         <div className="relative min-w-0 flex-1 min-h-0 flex flex-col">
-        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowAnchor: 'none' }}>
           <div ref={conversationContentRef} className="w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
             {workspaceUnavailable ? (
               <div
@@ -3589,6 +3525,12 @@ export function CodexAcpView({
                     providerCopy={t.uiAcpProviders}
                   />
                 )}
+                <AgentRuntimeNotice
+                  notice={visibleRuntimeNotice}
+                  agentName={activeAgentName}
+                  onDismiss={() => setDismissedNoticeKey(runtimeNotice?.key || '')}
+                  copy={codexCopy}
+                />
               </>
             )}
             {!visibleTurns.length && (
@@ -3606,9 +3548,15 @@ export function CodexAcpView({
                 </div>
               </div>
             )}
-            {visibleTurns.map(turn => (
-                  <Fragment key={turn.id}>
-                    {isNativeAgent && rewindEntries.has(turn.id) && (
+            {visibleTurns.length > 0 && (
+                  <ConversationTimeline
+                    turns={visibleTurns}
+                    sessionId={activeId}
+                    scrollElementRef={scroller}
+                    busy={busy}
+                    turnGapPx={28}
+                    followOutputRef={autoScrollRef}
+                    renderBeforeTurn={turn => isNativeAgent && rewindEntries.has(turn.id) ? (
                       // 原生车道 turn 边界回退入口：turn N+1 前的 chip =「回退到第 N 轮」；
                       // 无快照的边界为「仅回退对话」变体（rewindEntriesByTurnId 判定）。
                       <RewindChip
@@ -3617,10 +3565,7 @@ export function CodexAcpView({
                         copy={codexCopy}
                         onOpen={openRewindDialog}
                       />
-                    )}
-                    <ConversationTurn
-                      turn={turn}
-                      sessionId={activeId}
+                    ) : null}
                       copy={t.uiConversation}
                       pendingByTool={pendingByTool}
                       onRespond={respond}
@@ -3652,6 +3597,14 @@ export function CodexAcpView({
                               <ToolCard
                                 item={{ ...item.legacyItem, sessionId: activeId }}
                                 sessionId={activeId}
+                                // The codex native host has no subagent list
+                                // view: its `pinvou:open-subagent` handler only
+                                // accepts a concrete agentId, so the null-
+                                // agentId count-row click would be a no-op. The
+                                // transcript entry point is the header-mounted
+                                // RunningAgentsOverlay instead, whose entries
+                                // carry a concrete agentId the handler accepts.
+                                spawnRowInteractive={false}
                                 theme={theme}
                                 t={t}
                                 variant="timeline"
@@ -3662,9 +3615,8 @@ export function CodexAcpView({
                       agentLabel={activeAgentName}
                       onOpenExternal={(url) => openAcpExternalUrl(url).catch(showError)}
                       onOpenResource={isWeb ? undefined : openWorkspaceResource}
-                    />
-                  </Fragment>
-                ))}
+                  />
+                )}
             {isNativeAgent && rewindUndoAvailable(rewindUndoState) && (
               // 「撤销回退」入口：渲染在时间线末尾（回退成功的内联提示其后），
               // 与 RewindChip 同门控（仅原生代码车道）；undoState 为 null 即消失。
@@ -4210,7 +4162,7 @@ export function CodexAcpView({
                   )}
                 </div>
                 {busy ? (
-                  <button onClick={cancel} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
+                  <button onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
                   <>
                     <VoiceComposerButton
@@ -4252,9 +4204,15 @@ export function CodexAcpView({
           // 首次切 yolo 的一次性确认卡（全局记忆）；确认后继续切换，取消留在 Plan。
           // 必须挂在输入框容器外：该容器带 backdrop-blur-xl，会按 Filter Effects L2
           // 成为 fixed 后代的包含块，把全屏模态锁进输入框条内（fixed inset-0 相对它解析）。
-          <NativeYoloConfirmCard
+          <YoloConfirmCard
             theme={theme}
-            t={t}
+            copy={{
+              title: t.modeYoloConfirmTitle,
+              body: t.modeYoloConfirmBody,
+              hint: t.modeYoloConfirmHint,
+              ok: t.modeYoloConfirmOk,
+              cancel: t.modeYoloConfirmCancel,
+            }}
             busy={yoloConfirmBusy}
             onConfirm={confirmPendingYoloSwitch}
             onCancel={() => setPendingYoloSwitch(null)}

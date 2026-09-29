@@ -136,9 +136,12 @@ def git(*args: str) -> str:
     return subprocess.check_output(("git", *args), text=True, encoding="utf-8").strip()
 
 
-def validate_file(path: Path) -> list[str]:
+def validate_file(path: Path, *, require_signoff: bool = True) -> list[str]:
     raw = path.read_text(encoding="utf-8")
-    return validate_text(raw, str(path)) + validate_signoff(raw, str(path))
+    errors = validate_text(raw, str(path))
+    if require_signoff:
+        errors.extend(validate_signoff(raw, str(path)))
+    return errors
 
 
 def validate_range(
@@ -196,12 +199,19 @@ def main() -> int:
             "author (for GitHub squash commits on main)"
         ),
     )
+    parser.add_argument(
+        "--subject-only",
+        action="store_true",
+        help="validate only the subject convention for non-commit text such as a PR title",
+    )
     args = parser.parse_args()
 
     if bool(args.message_file) == bool(args.range):
         parser.error("provide either a commit message file or --range BASE HEAD")
     if args.allow_signoff_author_mismatch and not args.range:
         parser.error("--allow-signoff-author-mismatch requires --range BASE HEAD")
+    if args.subject_only and not args.message_file:
+        parser.error("--subject-only requires a message file")
 
     errors = (
         validate_range(
@@ -209,7 +219,7 @@ def main() -> int:
             require_matching_signoff=not args.allow_signoff_author_mismatch,
         )
         if args.range
-        else validate_file(args.message_file)
+        else validate_file(args.message_file, require_signoff=not args.subject_only)
     )
 
     if errors:

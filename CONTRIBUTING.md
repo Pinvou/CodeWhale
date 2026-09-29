@@ -116,13 +116,28 @@ Release-chain changes run lightweight contract tests only; full deb, dmg, and ns
 packages are built only after a
 `VERSION` change reaches `main`, or through an explicit `workflow_dispatch`.
 
-The Linux Rust job reserves at least 12 GiB of free disk after dependencies,
-caches, and swap are prepared. `scripts/ci-rust-disk.py` removes only the unused
-Android and .NET SDK directories on disposable GitHub-hosted Linux runners;
-it refuses self-hosted runners, redirected paths, and an undersized disk. Both
-the main library tests and the separate behavior-telemetry tests remain required.
-If runner images change, inspect the preparation step's free-space report instead
-of bypassing the capacity check or skipping either test harness.
+The Linux Rust job reserves at least 12 GiB of free disk after dependencies and
+caches are prepared. `scripts/ci-rust-disk.py` removes only the unused
+preinstalled SDK directories (Android, .NET, Haskell/ghcup, Julia by default;
+optionally the hostedtoolcache and browser bundles with `--aggressive`) on
+disposable GitHub-hosted Linux runners; it refuses self-hosted runners,
+redirected paths, and an undersized disk (`--min-free-gib`, default 12). The
+release build jobs run the same preparation with a 24 GiB floor. Hosted Linux
+runners use a single disk (`/` and `/mnt` share one ext4 filesystem), so the
+memory expansion step (`scripts/ci-memory-setup.sh`) provisions memory in
+layers: zram (on by default, sized to 2x RAM with a zstd compressor, pool
+capped at 70% of RAM), a mandatory 8 GiB `/mnt/swapfile` as the unbounded
+overflow (on the shared single disk this costs 8 GiB of build disk; it is
+skipped only when /mnt is RAM-backed or has too little free space), then
+zswap and the image swap as fallbacks.
+All Linux jobs pin the release runner image (`ubuntu-22.04` /
+`ubuntu-22.04-arm`): release binaries link the build machine's glibc, so
+tests must run on the same system. The image is upgraded repo-wide in one
+coordinated change only (enforced by the image guard test) — never per-job
+and never via rolling tags like `ubuntu-latest`. Both the main library tests
+and the separate behavior-telemetry tests remain required. If runner images
+change, inspect the preparation step's free-space report instead of bypassing
+the capacity check or skipping either test harness.
 
 The merge queue runs the applicable product gates against the actual combined tree
 of the queued pull request and the latest `main`. Rust changes run formatting,

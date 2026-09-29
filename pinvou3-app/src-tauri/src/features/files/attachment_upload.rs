@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::file_ingest::{self, IngestResult, MAX_FILE_BYTES};
 
-pub const MAX_ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
 const STALE_ATTACHMENT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CONVERSATION_ATTACHMENT_REFS_FILE: &str = "conversation-attachments.json";
 static CONVERSATION_ATTACHMENT_REFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -215,7 +215,7 @@ async fn remove_dir_if_present(path: &Path) -> Result<(), String> {
 }
 
 fn sweep_stale_upload_root(root: &Path, now: SystemTime) -> usize {
-    super::platform::stale_attachment_cleanup::sweep_stale_upload_root(
+    super::platform::stale_attachment_cleanup::platform::sweep(
         root,
         now,
         STALE_ATTACHMENT_AGE,
@@ -251,24 +251,8 @@ pub async fn append_draft_chunk(
     sha256: Option<&str>,
 ) -> Result<Option<IngestResult>, String> {
     let workspace = draft_attachment_workspace();
-    append_draft_chunk_in_workspace(
-        &workspace, upload_id, filename, offset, total, data, commit, sha256,
-    )
-    .await
-}
-
-async fn append_draft_chunk_in_workspace(
-    workspace: &Path,
-    upload_id: &str,
-    filename: &str,
-    offset: usize,
-    total: usize,
-    data: &[u8],
-    commit: bool,
-    sha256: Option<&str>,
-) -> Result<Option<IngestResult>, String> {
     append_chunk(
-        workspace, upload_id, filename, offset, total, data, commit, sha256,
+        &workspace, upload_id, filename, offset, total, data, commit, sha256,
     )
     .await
 }
@@ -367,17 +351,24 @@ async fn adopt_upload(
 
     if tokio::fs::try_exists(&target_dir).await.unwrap_or(false) {
         let (_, target_file) = managed_completed_file(target_workspace, upload_id).await?;
-        return match ingest_managed_file(&target_file) {
-            Ok(result) => {
-                let _ =
-                    remove_dir_if_present(&upload_completed_dir(source_workspace, upload_id)).await;
-                Ok(result)
+        // 与下方首次采纳分支一致：摄入跑 LibreOffice/pandoc 子进程（分钟级），
+        // 必须离开 async worker 线程。
+        let ingest_path = target_file.clone();
+        let ingest_result =
+            tokio::task::spawn_blocking(move || ingest_managed_file(&ingest_path)).await;
+        let result = match ingest_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                let _ = remove_dir_if_present(&target_dir).await;
+                return Err(error);
             }
             Err(error) => {
                 let _ = remove_dir_if_present(&target_dir).await;
-                Err(error)
+                return Err(format!("摄入任务失败：{error}"));
             }
         };
+        let _ = remove_dir_if_present(&upload_completed_dir(source_workspace, upload_id)).await;
+        return Ok(result);
     }
 
     let (source_dir, source_file) = managed_completed_file(source_workspace, upload_id).await?;
@@ -396,11 +387,19 @@ async fn adopt_upload(
         let _ = remove_dir_if_present(&target_dir).await;
         return Err(format!("迁移附件草稿失败：{error}"));
     }
-    let result = match ingest_managed_file(&target_file) {
-        Ok(result) => result,
-        Err(error) => {
+    // 摄入跑 LibreOffice/pandoc 子进程（分钟级），离开 async worker 线程。
+    let ingest_path = target_file.clone();
+    let ingest_result =
+        tokio::task::spawn_blocking(move || ingest_managed_file(&ingest_path)).await;
+    let result = match ingest_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
             let _ = remove_dir_if_present(&target_dir).await;
             return Err(error);
+        }
+        Err(error) => {
+            let _ = remove_dir_if_present(&target_dir).await;
+            return Err(format!("摄入任务失败：{error}"));
         }
     };
     if let Err(error) = remove_dir_if_present(&source_dir).await {
@@ -425,7 +424,7 @@ fn ingest_managed_file(path: &Path) -> Result<IngestResult, String> {
 /// When the client provides a whole-file SHA-256 on the committing chunk the
 /// assembled staging file is re-hashed before the rename, so corrupted bytes
 /// from the transport never reach the ingest pipeline.
-pub async fn append_chunk(
+pub(crate) async fn append_chunk(
     workspace: &Path,
     upload_id: &str,
     filename: &str,
@@ -509,11 +508,19 @@ pub async fn append_chunk(
         .await
         .map_err(|error| format!("提交会话附件失败：{error}"))?;
     let completed_path = completed_dir.join(filename);
-    let result = match ingest_managed_file(&completed_path) {
-        Ok(result) => result,
-        Err(error) => {
+    // 与 adopt_upload 一致：摄入跑 LibreOffice/pandoc 子进程（分钟级），
+    // 必须离开 async worker 线程。
+    let ingest_result =
+        tokio::task::spawn_blocking(move || ingest_managed_file(&completed_path)).await;
+    let result = match ingest_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
             let _ = remove_dir_if_present(&completed_dir).await;
             return Err(error);
+        }
+        Err(error) => {
+            let _ = remove_dir_if_present(&completed_dir).await;
+            return Err(format!("摄入任务失败：{error}"));
         }
     };
     Ok(Some(result))
@@ -521,14 +528,14 @@ pub async fn append_chunk(
 
 /// Clean up bytes from a failed append without touching a previously completed
 /// attachment that happens to use the same client-provided upload ID.
-pub async fn abort_staging_upload(workspace: &Path, upload_id: &str) -> Result<(), String> {
+pub(crate) async fn abort_staging_upload(workspace: &Path, upload_id: &str) -> Result<(), String> {
     let upload_id = validate_upload_id(upload_id)?;
     remove_dir_if_present(&upload_staging_dir(workspace, upload_id)).await
 }
 
 /// Cancel an incomplete upload. The completed directory is also removed to
 /// cover the small race where commit finished before the UI observed success.
-pub async fn cancel_upload(workspace: &Path, upload_id: &str) -> Result<(), String> {
+pub(crate) async fn cancel_upload(workspace: &Path, upload_id: &str) -> Result<(), String> {
     let upload_id = validate_upload_id(upload_id)?;
     remove_dir_if_present(&upload_staging_dir(workspace, upload_id)).await?;
     remove_dir_if_present(&upload_completed_dir(workspace, upload_id)).await
@@ -589,10 +596,10 @@ mod tests {
     use super::{
         ConversationAttachmentRecord, ConversationAttachmentReference, MAX_ATTACHMENT_CHUNK_BYTES,
         MAX_FILE_BYTES, STALE_ATTACHMENT_AGE, abort_staging_upload, adopt_upload, append_chunk,
-        append_draft_chunk_in_workspace, conversation_attachment_names_for_display_prefix,
-        conversation_attachment_refs_path, discard_attachment, record_conversation_attachments,
-        resolve_conversation_attachment, sweep_stale_draft_attachment_workspace,
-        upload_staging_dir, validate_filename, validate_upload_id,
+        conversation_attachment_names_for_display_prefix, conversation_attachment_refs_path,
+        discard_attachment, record_conversation_attachments, resolve_conversation_attachment,
+        sweep_stale_draft_attachment_workspace, upload_staging_dir, validate_filename,
+        validate_upload_id,
     };
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
@@ -734,7 +741,7 @@ mod tests {
                 .unwrap(),
         );
         let new_bytes = b"new upload";
-        append_draft_chunk_in_workspace(
+        append_chunk(
             &workspace,
             "desktop_attach_new_upload",
             "new.txt",

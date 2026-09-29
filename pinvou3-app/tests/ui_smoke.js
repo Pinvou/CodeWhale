@@ -10,6 +10,8 @@
  *   ⑤ session 内未发送的 composer 草稿在跳转其他页面后仍能恢复。
  * 依赖:puppeteer-core(自动从 node_modules / ~/.npm/_npx 发现)+ 系统 chromium(或 env CHROME 指定)。
  * 用法:node pinvou3-app/tests/ui_smoke.js   (全 PASS → exit 0,任一 FAIL → exit 1,缺依赖 → exit 2)
+ * 缺依赖分支必须在 exit 2 之前打印一行以 SKIP: 开头的说明(必须在行首);
+ * scripts/run-user-journey-tests.sh 只在退出码 2 且有该行时才算 skip,否则算失败。
  */
 const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
@@ -126,7 +128,6 @@ function injectSource() {
           : Promise.resolve(window.__LLMAPI_MODELS__ || {available_models:[],default_model:''});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
-        case 'get_codex_acp_status': return Promise.resolve({installed:false,node_supported:false,authenticated:false});
         case 'get_acp_agent_status': return Promise.resolve({agent_id:args.agentId||'codex',installed:true,node_supported:true,authenticated:true});
         case 'get_codex_acp_session_info': return Promise.resolve({session_id:args.sessionId,models:[],current_model_id:'',modes:null,config_options:[]});
         case 'get_codex_acp_timeline': return Promise.resolve([
@@ -239,7 +240,6 @@ function injectSource() {
         case 'session_mounted_collections_snapshot': return Promise.resolve({revision:MOUNTED_COLLECTIONS_REVISION,collections:MOUNTED_COLLECTIONS});
         case 'session_mounted_collections': return Promise.resolve(MOUNTED_COLLECTIONS);
         case 'session_mounted_collection': return Promise.resolve(MOUNTED_COLLECTIONS.find(function(entry){ return entry.enabled; })?.collectionId || null);
-        case 'session_set_mounted_collections': MOUNTED_COLLECTIONS=(args.collections||[]).map(function(entry){ return {collectionId:entry.collectionId,enabled:entry.enabled!==false}; }); MOUNTED_COLLECTIONS_REVISION+=1; return Promise.resolve(MOUNTED_COLLECTIONS);
         case 'session_add_mounted_collection': {
           const entry=MOUNTED_COLLECTIONS.find(function(item){return item.collectionId===args.collectionId;});
           if(entry) entry.enabled=true; else MOUNTED_COLLECTIONS.push({collectionId:args.collectionId,enabled:true});
@@ -355,6 +355,26 @@ async function expand(page) {
       && visualShell.overflow === 'hidden'
       && visualShell.backgroundColor !== 'rgba(0, 0, 0, 0)',
     JSON.stringify(visualShell),
+  );
+
+  const searchOverlayFirstOpen = await page.evaluate(async () => {
+    const trigger = [...document.querySelectorAll('[aria-label], [title]')]
+      .find(element => `${element.getAttribute('aria-label') || ''}${element.getAttribute('title') || ''}`.includes('搜索对话'));
+    trigger?.click();
+    const opened = await window.__uiWait__(() => !!document.querySelector('[role="dialog"][aria-modal="true"]'));
+    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+    const fixedBackdrop = dialog?.parentElement
+      ? getComputedStyle(dialog.parentElement).position === 'fixed'
+      : false;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    const closed = await window.__uiWait__(() => !document.querySelector('[role="dialog"][aria-modal="true"]'));
+    return { triggerFound: !!trigger, opened, fixedBackdrop, closed };
+  });
+  rec(
+    'search overlay lazy chunk opens on first use and closes with Escape',
+    searchOverlayFirstOpen.triggerFound && searchOverlayFirstOpen.opened
+      && searchOverlayFirstOpen.fixedBackdrop && searchOverlayFirstOpen.closed,
+    JSON.stringify(searchOverlayFirstOpen),
   );
 
   const artifactPresentation = await page.evaluate(async () => {
@@ -692,7 +712,18 @@ async function expand(page) {
       cancelable: true,
       dataTransfer: dragData,
     }));
-    await new Promise(resolve => setTimeout(resolve, 80));
+    // Wait for a DEFINITE overlay state before reading the flag. While inactive
+    // the overlay still renders (invisible, aria-hidden), so a fixed timeout here
+    // raced the dragenter commit on slow runners and sampled the inactive-present
+    // form, which makes the withheld assertion vacuous. The two definite forms are
+    // the overlay removed from the DOM entirely (active committed, publication not
+    // yet acked) and aria-hidden=false (published), so a publication without an ack
+    // still fails the read below. The inactive-present tolerance is kept as the
+    // fallback for a runner slow enough to exhaust the wait deadline.
+    await window.__uiWait__(() => {
+      const overlay = document.querySelector('[data-testid="attachment-drop-overlay"]');
+      return !overlay || overlay.getAttribute('aria-hidden') === 'false';
+    });
     const attachmentDropBeforeHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]');
     const attachmentDropWithheldUntilHideAck = !attachmentDropBeforeHideAck
       || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false';
@@ -1507,7 +1538,12 @@ async function expand(page) {
       .find(node => (node.textContent || '').trim() === 'Codex回归会话' && node.getBoundingClientRect().left > 300);
     label && label.closest('div[class*="cursor-pointer"]')?.click();
   });
-  await clickText(page, '收纳'); await sleep(700);
+  await clickText(page, '收纳');
+  // The archive toast is a lazy chunk (Suspense fallback=null until it
+  // arrives), so poll for the toast text instead of a fixed sleep — the same
+  // contract the ⑤b archive flow below pins.
+  await page.evaluate(() => window.__uiWait__(() =>
+    document.body.innerText.includes('已收纳到【对话管理-已收纳】')));
   const codexBatchArchive = await page.evaluate(() => ({
     invoked: window.__TAURI_INVOKES__.some(call => call.cmd === 'set_session_archived' && call.args.id === 'codex-1' && call.args.archived === true),
     archived: document.body.innerText.includes('已收纳到【对话管理-已收纳】'),
@@ -1645,7 +1681,8 @@ async function expand(page) {
       && llmApiCacheFallback.accountUiHiddenWhenDisabled,
     JSON.stringify(llmApiCacheFallback));
   // End of the codex block: opening a code session from the chat manager page enters
-  // code mode (sidebar style, collapsed nav, and New chat behavior all follow the mode).
+  // code mode (sidebar style and New chat behavior follow the mode; the primary-nav
+  // collapse does not — it is a global manual toggle now).
   // Later cases rely on the standard sidebar and chat view, so exit code mode explicitly
   // to avoid polluting downstream assertions.
   // The exit path must not open any existing normal session (case ③ relies on the first
@@ -1653,6 +1690,13 @@ async function expand(page) {
   // pre-opening would route the second entry through the cache path): click 「新对话」
   // into the code draft page first, then switch back to work mode via the
   // HomeModeSwitcher — without touching any existing session.
+  // Inside code mode the primary nav must stay expanded: the auto-collapse is
+  // gone, folding is only reachable through the manual toggle.
+  const codeModeNavNotCollapsed = await page.evaluate(() =>
+    !document.querySelector('[data-testid="sidebar-primary-nav-expand"]')
+      && [...document.querySelectorAll('span')]
+        .some(node => (node.textContent || '').trim() === '定时任务' && node.getBoundingClientRect().left < 330));
+  rec('①a-6a code 模式下主导航不再自动收缩', codeModeNavNotCollapsed, String(codeModeNavNotCollapsed));
   await clickText(page, '新对话'); await sleep(500);
   await page.evaluate(() => document.querySelector('[data-testid="home-mode-work"]')?.click());
   await sleep(700);
@@ -1660,6 +1704,36 @@ async function expand(page) {
     document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat'
       && !document.querySelector('[data-testid="sidebar-primary-nav-expand"]'));
   rec('①a-6 HomeModeSwitcher 切回工作模式退出 code 模式', exitedCodeMode, String(exitedCodeMode));
+
+  // The primary-nav collapse is a global manual toggle: in any mode, 收起导航
+  // folds the nav to a single expand row and 展开导航 restores it; the choice
+  // persists to localStorage and no mode switch resets it. freshStorageAbsent
+  // first proves nothing wrote the key automatically; the case ends expanded so
+  // later cases keep the default state.
+  const navManualToggle = await page.evaluate(async () => {
+    const settle = () => new Promise(resolve => { setTimeout(resolve, 150); });
+    const expandRow = () => document.querySelector('[data-testid="sidebar-primary-nav-expand"]');
+    const collapseRow = () => document.querySelector('[data-testid="sidebar-primary-nav-collapse"]');
+    const scheduledNavVisible = () => [...document.querySelectorAll('span')]
+      .some(node => (node.textContent || '').trim() === '定时任务' && node.getBoundingClientRect().left < 330);
+    const result = { freshStorageAbsent: localStorage.getItem('pinvou_sidebar_nav_collapsed') === null };
+    collapseRow()?.click();
+    await settle();
+    result.collapsedRowShown = !!expandRow();
+    result.collapsedRowGone = !collapseRow();
+    result.navItemsHidden = !scheduledNavVisible();
+    result.storedCollapsed = localStorage.getItem('pinvou_sidebar_nav_collapsed') === '1';
+    expandRow()?.click();
+    await settle();
+    result.expandedBack = !expandRow() && !!collapseRow() && scheduledNavVisible();
+    result.storedExpanded = localStorage.getItem('pinvou_sidebar_nav_collapsed') === '0';
+    return result;
+  });
+  rec('①a-6b 主导航收缩为全局手动开关且持久化',
+    navManualToggle.freshStorageAbsent && navManualToggle.collapsedRowShown && navManualToggle.collapsedRowGone
+      && navManualToggle.navItemsHidden && navManualToggle.storedCollapsed
+      && navManualToggle.expandedBack && navManualToggle.storedExpanded,
+    JSON.stringify(navManualToggle));
 
   // 全部/代码胶囊:三态默认(未选择时 storage 为空且普通模式按「全部」渲染)、
   // 点击即持久化并切换列表形态;一键折叠按钮聚合当前可见分组的真实状态,
@@ -2545,11 +2619,17 @@ async function expand(page) {
     }));
     return true;
   });
-  await sleep(250);
+  await page.evaluate(() => window.__uiWait__(() =>
+    [...document.querySelectorAll('span,div,button,a')]
+      .some(node => (node.textContent || '').trim() === '收纳')));
   await clickText(page, '收纳');
-  await sleep(250);
+  await page.evaluate(() => window.__uiWait__(() =>
+    [...document.querySelectorAll('span,div,button,a')]
+      .some(node => (node.textContent || '').trim() === '确认收纳')));
   await clickText(page, '确认收纳');
-  await sleep(450);
+  await page.evaluate(() => window.__uiWait__(() =>
+    [...document.querySelectorAll('button')]
+      .some(node => (node.textContent || '').trim() === '前往查看')));
   const archiveToastBefore = await page.evaluate(() => {
     const button = [...document.querySelectorAll('button')].find(node => (node.textContent || '').trim() === '前往查看');
     const rect = button && button.getBoundingClientRect();
@@ -2560,7 +2640,9 @@ async function expand(page) {
     };
   });
   await clickText(page, '前往查看');
-  await sleep(600);
+  await page.evaluate(() => window.__uiWait__(() =>
+    document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'search'
+      && document.body.innerText.includes('第三季度财报分析')));
   const archiveToastGoto = await page.evaluate(() => ({
     currentView: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
     archivedTabVisible: document.body.innerText.includes('已收纳'),

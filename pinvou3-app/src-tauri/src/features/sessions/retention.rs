@@ -41,6 +41,31 @@ use std::path::PathBuf;
 static SCHEDULED_RUNTIME_DELETE_FAULTS: LazyLock<parking_lot::Mutex<HashMap<String, ErrorKind>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
+/// Shared fabrication for tool-output artifact records appended by the
+/// transcript writers in [`super::store`] and this module: same
+/// `p3art_<session>_<index>` / `p3_<index>` id scheme, same `"write_file"`
+/// tool name, byte size probed best-effort from disk.
+pub(super) fn fabricated_tool_output_record(
+    id: &str,
+    index: usize,
+    path: PathBuf,
+) -> ArtifactRecord {
+    let byte_size = std::fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    ArtifactRecord {
+        id: format!("p3art_{id}_{index}"),
+        kind: ArtifactKind::ToolOutput,
+        session_id: id.to_string(),
+        tool_call_id: format!("p3_{index}"),
+        tool_name: "write_file".to_string(),
+        created_at: Utc::now(),
+        byte_size,
+        preview: String::new(),
+        storage_path: path,
+    }
+}
+
 impl SessionStore {
     pub(crate) fn save_session_atomic(&self, session: &SavedSession) -> Result<PathBuf> {
         validate_session_id(&session.metadata.id)?;
@@ -60,7 +85,8 @@ impl SessionStore {
         let payload = serde_json::to_vec_pretty(session).context("serialize saved session")?;
         deepseek_tui::utils::write_atomic(&path, &payload)
             .with_context(|| format!("write session {}", path.display()))?;
-        // 会话 JSON 落盘后列表快照即过期(标题/更新时间/新会话都可能变)
+        // Once the session JSON hits disk the list snapshot is stale (title /
+        // updated_at / new session may all have changed)
         self.invalidate_list_cache();
         Ok(path)
     }
@@ -98,8 +124,10 @@ impl SessionStore {
             }
         }
         if !deleted_ids.is_empty() {
-            // 保留策略删掉的会话使列表快照过期;部分失败(JSON 已删、Err 提前
-            // 冒泡)同样过期——不能只认 Ok 分支,否则幽灵条目驻留到下一次任意写。
+            // Sessions deleted by the retention policy stale the list snapshot;
+            // partial failures (JSON already removed, Err bubbling early)
+            // stale it just the same — we must not honor only the Ok branch,
+            // otherwise a ghost entry lingers until the next arbitrary write.
             self.invalidate_list_cache();
         }
         self.purge_session_side_maps(&deleted_ids);
@@ -119,11 +147,7 @@ impl SessionStore {
         session: &SavedSession,
         event: &'static str,
     ) -> Result<PathBuf> {
-        let path = self.save_session_atomic(session)?;
-        if let Err(error) = self.enforce_session_retention_locked() {
-            eprintln!("[sessions] retention reconciliation failed after {event}: {error:#}");
-        }
-        Ok(path)
+        self.persist_then_reconcile_with(session, || event.to_string(), event)
     }
 
     pub(crate) fn persist_then_reconcile_with(
@@ -207,8 +231,10 @@ impl SessionStore {
             removed_multi_agent
         };
         if removed_multi_agent {
-            // 保留策略清掉的会话必须同步移出 _multi_agent.json：残留的幽灵
-            // id 会在重启后复活开关状态，专家池变更联动还会给它重建工作区。
+            // Sessions purged by the retention policy must also be removed from
+            // _multi_agent.json: a leftover ghost id would resurrect the flag
+            // state after a restart, and an expert-pool change would even
+            // rebuild a workspace for it.
             if let Err(error) = self.save_multi_agent_flags() {
                 eprintln!(
                     "[sessions] update _multi_agent.json after retention purge failed: {error:#}"
@@ -224,6 +250,18 @@ impl SessionStore {
         };
         if removed_code_modes {
             self.save_session_mode_states();
+        }
+
+        // Working-directory binding: clear the in-memory cache and best-effort
+        // delete the per-session sidecar file. The normal session-deletion path
+        // already removes it; this covers leftovers of a partially failed
+        // deletion. For unbound ids it is a pure NotFound probe with negligible
+        // cost.
+        for id in ids {
+            self.session_workspaces.write().remove(id.as_str());
+            if validate_session_id(id).is_ok() {
+                self.remove_workspace_sidecar_file(id);
+            }
         }
 
         let removed_models = {
@@ -273,7 +311,8 @@ impl SessionStore {
         for id in ids {
             self.notify_session_purged(id);
         }
-        // 回退备份 sidecar 同样随会话清理（best-effort，见其实现注释）。
+        // Rewind-backup sidecars are cleaned up with the session as well
+        // (best-effort; see the implementation comment there).
         Self::purge_rewound_turns_backups(ids);
     }
 
@@ -442,18 +481,6 @@ impl SessionStore {
         self.scheduled_profiles.read().get(id).cloned()
     }
 
-    pub fn scheduled_session_ids_for_task(&self, task_id: &str) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .scheduled_profiles
-            .read()
-            .iter()
-            .filter(|(_, profile)| profile.task_id == task_id)
-            .map(|(session_id, _)| session_id.clone())
-            .collect();
-        ids.sort();
-        ids
-    }
-
     pub fn scheduled_session_exists(&self, id: &str) -> bool {
         self.scheduled_profile(id).is_some() && self.manager.load_session_snapshot(id).is_ok()
     }
@@ -538,8 +565,10 @@ impl SessionStore {
         }
 
         let _mutation = self.scheduled_mutation.lock();
-        // 每次运行创建独立对话；同一 automation 的所有对话共享任务工作间。
-        // workspace 只由稳定 task_id(automation_id)派生，不接受调用方路径。
+        // Each run creates its own conversation; all conversations of the same
+        // automation share the task workspace.
+        // workspace is derived only from the stable task_id (automation_id);
+        // a caller-supplied path is never accepted.
         profile.workspace = self.scheduled_workspace_for_task(&profile.task_id)?;
         std::fs::create_dir_all(&profile.workspace).with_context(|| {
             format!(
@@ -567,9 +596,11 @@ impl SessionStore {
             .insert(id.clone(), profile.clone());
         if let Err(err) = self.save_scheduled_profiles() {
             self.scheduled_profiles.write().remove(&id);
-            // 回滚删除本身也是一次落盘变更:失效列表缓存,防止并发读者恰在
-            // save 失效与回滚删除之间重扫到 sched-*.json 并以当时的代数回填,
-            // 让已被回滚的幽灵会话滞留在缓存里。
+            // The rollback delete is itself an on-disk change: invalidate the
+            // list cache so a concurrent reader cannot rescan sched-*.json
+            // right between the save invalidation and the rollback delete and
+            // backfill with the generation of that moment, stranding the
+            // rolled-back ghost session in the cache.
             self.invalidate_list_cache();
             let (_, rollback_result) = self.delete_session_record(&id);
             if let Err(rollback_error) = rollback_result {
@@ -716,23 +747,11 @@ impl SessionStore {
         {
             return Ok(());
         }
-        let now = Utc::now();
         let index = session.artifacts.len();
-        let byte_size = std::fs::metadata(&path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        session.artifacts.push(ArtifactRecord {
-            id: format!("p3art_{id}_{index}"),
-            kind: ArtifactKind::ToolOutput,
-            session_id: id.to_string(),
-            tool_call_id: format!("p3_{index}"),
-            tool_name: "write_file".to_string(),
-            created_at: now,
-            byte_size,
-            preview: String::new(),
-            storage_path: path,
-        });
-        session.metadata.updated_at = now;
+        session
+            .artifacts
+            .push(fabricated_tool_output_record(id, index, path));
+        session.metadata.updated_at = Utc::now();
         self.persist_then_reconcile_with(
             &session,
             || format!("persist scheduled artifact for {id}"),

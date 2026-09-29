@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use agent_backend_api::SecretText;
 use fs2::FileExt;
 use hf_hub::api::sync::ApiBuilder;
-use hf_hub::{Cache, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::Field;
 use rand::random;
@@ -308,7 +308,6 @@ pub struct SnapshotFileMetadata {
 enum ExpectedDigest {
     Sha256([u8; 32]),
     GitSha1([u8; 20]),
-    None,
 }
 
 impl SnapshotFileMetadata {
@@ -328,15 +327,6 @@ impl SnapshotFileMetadata {
         }
     }
 
-    #[deprecated(note = "size-only metadata is rejected by GAIA acquisition")]
-    pub fn new_without_digest(remote_path: impl Into<PathBuf>, size: u64) -> Self {
-        Self {
-            remote_path: remote_path.into(),
-            size,
-            expected_digest: ExpectedDigest::None,
-        }
-    }
-
     pub fn remote_path(&self) -> &Path {
         &self.remote_path
     }
@@ -348,7 +338,7 @@ impl SnapshotFileMetadata {
     pub fn expected_sha256(&self) -> Option<&[u8; 32]> {
         match &self.expected_digest {
             ExpectedDigest::Sha256(digest) => Some(digest),
-            ExpectedDigest::GitSha1(_) | ExpectedDigest::None => None,
+            ExpectedDigest::GitSha1(_) => None,
         }
     }
 }
@@ -509,7 +499,14 @@ fn hf_repo(
     }
     let cache_dir = scratch_root.join(".hf-cache").join("hub");
     fs::create_dir_all(&cache_dir).map_err(|_| ())?;
-    let api = ApiBuilder::from_cache(Cache::new(cache_dir))
+    // from_env lets HF_ENDPOINT take effect (networks in mainland China can set the
+    // https://hf-mirror.com mirror; from_cache hard-codes the official endpoint),
+    // the cache directory stays explicitly pinned under the benchmark scratch
+    // directory, and the token comes from the explicit argument (same as the original
+    // behavior). Note: HF_ENDPOINT forwards the token to the selected endpoint too,
+    // so it must only point to a trusted endpoint (see docs/gaia-benchmark.md).
+    let api = ApiBuilder::from_env()
+        .with_cache_dir(cache_dir)
         .with_progress(false)
         .with_token(Some(token.expose_to_backend().to_owned()))
         .build()
@@ -624,6 +621,9 @@ pub struct GaiaSnapshotManager<D> {
 }
 
 impl<D: SnapshotDownloader> GaiaSnapshotManager<D> {
+    /// Test-only convenience wrapper; production always constructs through
+    /// [`GaiaSnapshotManager::new_with_optional_worktree`].
+    #[cfg(test)]
     pub fn new(
         acquisition_root: impl AsRef<Path>,
         worktree_root: impl AsRef<Path>,
@@ -912,12 +912,6 @@ impl<D: SnapshotDownloader> GaiaSnapshotManager<D> {
             .map_err(|_| GaiaFetchError::DownloadFailed)?;
         validate_preflight_identity(remote_paths, &metadata)
             .map_err(|_| GaiaFetchError::DownloadFailed)?;
-        if metadata
-            .iter()
-            .any(|entry| matches!(entry.expected_digest, ExpectedDigest::None))
-        {
-            return Err(GaiaFetchError::DownloadFailed);
-        }
         Ok(metadata)
     }
 
@@ -930,9 +924,6 @@ impl<D: SnapshotDownloader> GaiaSnapshotManager<D> {
         actual_total: &mut u64,
     ) -> Result<(), GaiaFetchError> {
         validate_relative(relative).map_err(|_| GaiaFetchError::DownloadFailed)?;
-        if matches!(expected.expected_digest, ExpectedDigest::None) {
-            return Err(GaiaFetchError::DownloadFailed);
-        }
         let remote = relative.to_str().ok_or(GaiaFetchError::DownloadFailed)?;
         let destination = staging.join(relative);
         let request = SnapshotDownloadRequest {
@@ -1323,7 +1314,6 @@ fn digest_matches(expected: &SnapshotFileMetadata, sha256: Sha256, git_sha1: Sha
     match expected.expected_digest {
         ExpectedDigest::Sha256(digest) => <[u8; 32]>::from(sha256.finalize()) == digest,
         ExpectedDigest::GitSha1(digest) => <[u8; 20]>::from(git_sha1.finalize()) == digest,
-        ExpectedDigest::None => false,
     }
 }
 
@@ -2448,21 +2438,6 @@ mod review_contract_tests {
             stream_verified_file(b"TRUSTED".as_slice(), Some(7), &tampered, expected, 7).is_err()
         );
         assert!(!tampered.exists());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn fetch_size_only_metadata_remains_source_compatible_but_cannot_publish_content() {
-        let metadata = SnapshotFileMetadata::new_without_digest("payload", 7);
-        assert_eq!(metadata.expected_sha256(), None);
-        let root = test_directory("size-only-rejected");
-        let destination = root.join("payload");
-        assert!(
-            stream_verified_file(b"trusted".as_slice(), Some(7), &destination, &metadata, 7,)
-                .is_err()
-        );
-        assert!(!destination.exists());
         let _ = fs::remove_dir_all(root);
     }
 

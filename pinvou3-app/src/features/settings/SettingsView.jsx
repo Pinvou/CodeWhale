@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
-import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
+import { ArchivedDeleteConfirmDialog } from '../sessions/ArchiveConfirmDialog.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
@@ -321,9 +321,11 @@ const formatMemoryTime = (item, copy) => {
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
-      // 思考深度档位：初始取已保存值（先归一——存量可能是底座归一前的旧值，
-      // 如 deepseek 的 medium），无则按模型默认（vllm→off，其余→high；
-      // 底座不支持的模型无默认，保持 null = 未显式设置，避免保存时污染 SavedModel）。
+      // Thinking effort: initialize from the stored value (normalize first —
+      // legacy records may carry pre-normalization values such as deepseek's
+      // medium), otherwise fall back to the model default (vllm→low (lowest
+      // thinking tier), others→high; models without tiers have no default and
+      // stay null = not explicitly set, so saving does not pollute SavedModel).
       const [reasoningEffort, setReasoningEffort] = useState(
         normalizeStoredReasoningEffort(initial, initial.reasoning_effort)
       );
@@ -470,9 +472,13 @@ const formatMemoryTime = (item, copy) => {
         if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
         if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : (item.title || presetProviderLabel(p, t))));
         setContextWindow(p === 'local_vllm' ? '262144' : '');
-        setMaxOutput(p === 'local_vllm' ? '24576' : '');
-        // 换目录项时重置思考深度到该模型的默认档位（vllm→off，其余→high；
-        // 无档位模型置 null = 未显式设置）。带上 nextBaseUrl 以按新 route 判定档位。
+        // The output cap is no longer prefilled with 24K: left empty like
+        // cloud/custom, declared uniformly by the runtime window tiers.
+        setMaxOutput('');
+        // Reset the thinking effort to the new entry's default tier when the
+        // catalog item changes (vllm→low (lowest thinking tier), others→high;
+        // models without tiers get null = not explicitly set). Pass nextBaseUrl
+        // so the tier is decided by the new route.
         setReasoningEffort(reasoningEffortForModelSwitch({ preset: p, model: nextModel, vendor: group.vendor || vendor, base_url: nextBaseUrl }));
         if (p !== 'local_vllm') {
           setApiKey('');
@@ -798,10 +804,13 @@ const formatMemoryTime = (item, copy) => {
         setPickerOpen(false);
         // 手动添加本地模型是显式切换:未手动改过档位时回到「自动处理」。
         if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(''));
-        // 本地模型 → 手动添加是显式切换 route：丢弃草稿残留的思考深度，回落到 vLLM
-        // 默认 off（防 SSE timeout）。否则新建 DeepSeek 草稿初始化的 high 会被当成
-        // 合法 vLLM 档位保留，保存时显式写入 reasoning_effort=high，绕过桥接层
-        // 「vllm→off」的默认约束。与 applyCatalogItem / chooseModel 的切换语义一致。
+        // Local model → manual add is an explicit route switch: drop the
+        // draft's leftover thinking effort and fall back to the vLLM default
+        // lowest thinking tier low. Otherwise the high a fresh DeepSeek draft
+        // starts with would be kept as a legitimate vLLM tier and saved as an
+        // explicit reasoning_effort=high, bypassing the bridge's "vllm→low"
+        // default constraint. Same switch semantics as applyCatalogItem /
+        // chooseModel.
         setReasoningEffort(reasoningEffortForModelSwitch({ preset: 'local_vllm', model: '', vendor, base_url: defs.baseUrl }));
       }
       const catalogSectionTitleClass = `px-1 mb-2 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`;
@@ -912,7 +921,7 @@ const formatMemoryTime = (item, copy) => {
         </div>
       );
       const renderCloudProviderPicker = () => {
-        const bySection = ['coding_plan', 'official_api', 'custom'].map(section => ({
+        const bySection = ['coding_plan', 'official_api', 'aggregator', 'custom'].map(section => ({
           section,
           title: settingsCopy.catalogSections[section] || MODEL_CATALOG_SECTIONS[section],
           groups: catalogGroups.filter(group => (group.section || 'official_api') === section),
@@ -1625,6 +1634,83 @@ const formatMemoryTime = (item, copy) => {
         </div>
       </div>
     );
+    // Post-completion grace window (ms) for the settings toggle's synchronous
+    // single-flight guard: it swallows the trailing click of a double-click,
+    // whose second press can land before React commits the disabled state.
+    // Mirrors DOUBLE_CLICK_GUARD_MS in features/computer-use/ComputerUseConsent.jsx.
+    const COMPUTER_USE_TOGGLE_GUARD_MS = 200;
+    /**
+     * Computer-use settings row as a self-contained component so the failed
+     * write can surface an inline error (the old code did `catch(() => {})`,
+     * so a failed enable looked like the switch bouncing back with no
+     * explanation). Also consumes the status projection's platform_supported:
+     * on a platform without a backend the toggle is disabled instead of
+     * letting users enable something that cannot work.
+     *
+     * Lives at module scope (stable component identity across parent
+     * renders). The switch disables itself while a write is in flight so
+     * rapid clicks cannot interleave contradictory set_enabled calls
+     * (matching the consent dialog's single-flight standard).
+     */
+    const ComputerUseSettingSection = ({ t }) => {
+      const slice = useBridgeState(['computerUse']);
+      const computerUse = (slice && slice.computerUse) || {};
+      const [actionError, setActionError] = useState('');
+      const [pending, setPending] = useState(false);
+      // Synchronous single-flight (review finding): the disabled attribute
+      // only updates one render after the click, so a double-click could fire
+      // two concurrent set_enabled calls. This ref is checked inside the
+      // event handler, before React commits anything — same pattern as the
+      // consent dialog's useConsentAction flightRef.
+      const flightRef = useRef({ busy: false, settledAt: 0 });
+      const unsupported = computerUse.platformSupported === false;
+      // An emergency stop latches `stopped` without touching the toggle: the
+      // switch still reads ON but every consent surface is dead until the
+      // user toggles off and back on (set_enabled's re-enable is the only
+      // resume path). Without this hint the stop state is invisible in
+      // settings — the safety loop's exit must be discoverable.
+      const stopped = !!computerUse.stopped;
+      return (
+        <IOSSection title={t.uiComputerUse.settingsSection}>
+          <IOSRow
+            label={t.uiComputerUse.settingsToggle}
+            desc={
+              unsupported
+                ? t.uiComputerUse.platformUnsupportedHint
+                : (actionError ||
+                  (stopped ? t.uiComputerUse.settingsStoppedHint : t.uiComputerUse.settingsHint))
+            }
+          >
+            <IOSSwitch
+              checked={!!computerUse.enabled}
+              disabled={unsupported || pending}
+              onChange={(value) => {
+                const flight = flightRef.current;
+                if (flight.busy || Date.now() - flight.settledAt < COMPUTER_USE_TOGGLE_GUARD_MS) return;
+                if (!bridge.available || !bridge.computerUse) return;
+                flight.busy = true;
+                setActionError('');
+                setPending(true);
+                bridge.computerUse.setEnabled(value)
+                  .then(() => {
+                    // Only a success arms the cooldown guard: a failure
+                    // leaves the switch immediately clickable to retry (the
+                    // consent dialog states this rule explicitly; match it).
+                    flight.settledAt = Date.now();
+                  })
+                  .catch((error) => {
+                    setActionError(t.uiComputerUse.actionFailed(String(error && error.message ? error.message : error)));
+                  })
+                  .finally(() => {
+                    flight.busy = false;
+                    setPending(false);
+                  });
+              }}
+            />
+          </IOSRow>
+        </IOSSection>
+      );
+    };
 
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
@@ -1641,6 +1727,7 @@ const formatMemoryTime = (item, copy) => {
       const [modelTab, setModelTab] = useState(initialSection === 'providers' ? 'acp' : 'models');
       const canUsePet = can('pet');
       const canUseSuperPermission = can('superPermission');
+      const canUseComputerUse = can('computerUse');
       const canUpdateApp = can('appUpdate');
       const canInstallDependencies = can('dependencyInstall');
       const canConfigureDesktopNotifications = can('desktopNotifications');
@@ -1721,6 +1808,16 @@ const formatMemoryTime = (item, copy) => {
           setActiveSection(initialSection);
         }
       }, [initialSection]);
+      // Cold-start status read: until a session exists nothing else polls
+      // computer-use status, so the platform_supported grey-out would never
+      // learn the platform is unsupported. One session-less refreshStatus on
+      // mount fills enabled/platform_supported; with a session active it
+      // degenerates to the ordinary status read.
+      useEffect(() => {
+        if (!canUseComputerUse || !bridge.available || !bridge.computerUse) return;
+        bridge.computerUse.refreshStatus(bs && bs.activeSessionId).catch(() => {});
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only: the read is idempotent and must not refire on every bs change
+      }, []);
       useEffect(() => {
         if (!feedbackNotice) return;
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
@@ -1952,7 +2049,9 @@ const formatMemoryTime = (item, copy) => {
           name: preset === 'local_vllm' ? settingsCopy.localDefaultName : presetProviderLabel(preset, t),
           preset,
           context_window_tokens: preset === 'local_vllm' ? 262144 : null,
-          max_output_tokens: preset === 'local_vllm' ? 24576 : null,
+          // The output cap is not prefilled: declared uniformly by the
+          // runtime window tiers (route_limits_for_model).
+          max_output_tokens: null,
           model: defs.model,
           base_url: defs.baseUrl,
           api_key: '',
@@ -2605,6 +2704,7 @@ const formatMemoryTime = (item, copy) => {
                 </IOSRow>
               </IOSSection>
             )}
+            {canUseComputerUse && <ComputerUseSettingSection t={t} />}
             <div id="settings-dependencies">
               <IOSSection
                 title={t.depCheckTitle}

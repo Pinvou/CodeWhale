@@ -14,8 +14,13 @@ import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConne
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { pathBasename } from '../../shared/path-utils.js';
+import { companionPackageMap } from '../../shared/companion-packages.js';
 
-const OAUTH_UI_TIMEOUT_MS = 90_000;
+// 10 分钟:等待的是人完成浏览器 OAuth(2FA、慢邮箱登录、跨设备取码都可能
+// 超过旧值 90s)。后端本地回调等待自身有 300s 上限,到时后端先显式失败;
+// 这里的 10 分钟是 UI 兜底安全网,到时仍会显式取消后端登录,给用户一个
+// 可重试的干净状态,而不是在用户快完成时取消。
+const OAUTH_UI_TIMEOUT_MS = 600_000;
 
 const canStartExternalAuth = () => can('oauth') && can('externalAuth');
 
@@ -300,7 +305,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // identical; every behavioral difference is collapsed into a createConnectorFlow config option (each maps to the original
     // implementation — do not casually "unify" them):
     //   twoStep        Feishu two-stage QR scan: after ensure_cli advance the connect step, then begin; the rest single-stage.
-    //   progressEvent  Only feishu has the fine-grained feishu:progress event (backend-driven progress).
     //   qrStepsExtra   Feishu's QR event additionally marks the connect step done (two-stage stage one already finished).
     //   qrPayloadExtra Extra fields on the QR event: dingtalk user_code; tmeet browserAuth flag.
     //   openAuthUrl    When tmeet's QR event carries a url, open the browser directly (embedded-QR render fallback).
@@ -341,19 +345,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         const ev = isTauriAvailable() ? tauriEvents : null;
         if (!ev) return;
         conn.listenersReady = true;
-        if (cfg.progressEvent) {
-          ev.listen(cfg.progressEvent, (e) => {
-            const p = e.payload || {};
-            conn.setFlow(f => {
-              const nf = f ? { ...f, steps: { ...f.steps } } : { phase: 'running', steps: {}, active: null, pct: 0, sec: 0, log: '' };
-              if (p.step) { nf.active = p.step; nf.steps[p.step] = p.status === 'done' ? 'done' : 'active'; }
-              if (typeof p.pct === 'number') nf.pct = p.pct;
-              if (p.log) nf.log = p.log;
-              if (nf.phase !== 'error') nf.phase = 'running';
-              return nf;
-            });
-          });
-        }
         ev.listen(cfg.events.qr, (e) => {
           const p = e.payload || {};
           conn.stopTick();
@@ -410,7 +401,10 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // Component-side quartet handlers: deps are injected from the component closure at call time (same semantics
       // as the original in-component quartet); busyId is cleared in event callbacks/error branches. The configuration
       // telemetry hooks (begin/finishToolConfiguration + findLocalizedTool) ride along as optional deps.
-      const connect = async ({ setBusyId, detailCopy, beginToolConfiguration: beginCfg, finishToolConfiguration: finishCfg, findLocalizedTool: findTool }) => {
+      const connect = async ({ setBusyId, busyRef, detailCopy, beginToolConfiguration: beginCfg, finishToolConfiguration: finishCfg, findLocalizedTool: findTool }) => {
+        // 共享忙碌槽位:另一操作在跑时启动会经 setBusyId(cfg.key) 抢走其槽位、
+        // 令对方按钮中途放闸,故拒绝重叠启动(retry 复用本路径,同获保护)。
+        if (busyRef.current) return;
         if (beginCfg) beginCfg(findTool(cfg.key), 'marketplace');
         setBusyId(cfg.key);
         ensureListeners();
@@ -433,7 +427,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (finishCfg) finishCfg(cfg.key, false);
           reportConnectorFailure(cfg.key, e, stage);
           conn.stopTick();
-          setBusyId(null);
+          // 失败收尾只释放自己的槽位:异步期间 busyId 可能已易主(同 releaseBusy 纪律)。
+          setBusyId(busy => releaseBusy(busy, cfg.key));
           conn.setFlow(f => applyConnectorFailure(f, e, stage));
         }
       };
@@ -442,11 +437,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         if (finishCfg) finishCfg(cfg.key, false);
         conn.stopTick();
         invokeTauri(cfg.commands.cancel).catch(() => {});
-        conn.setFlow(null); setBusyId(null);
+        conn.setFlow(null);
+        // 收起弹窗只释放自己的槽位:此时用户可能已发起另一个工具操作。
+        setBusyId(busy => releaseBusy(busy, cfg.key));
       };
       // Retry: ensure_cli is idempotent, so simply rerun the whole connection flow.
       const retry = (deps) => { connect(deps); };
-      const disconnect = async ({ setBusyId, storeCopy, detailCopy, loadBackendState, setAlert }) => {
+      const disconnect = async ({ setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert }) => {
+        if (busyRef.current) return;
         setBusyId(cfg.key);
         try {
           await invokeTauri(cfg.commands.logout);
@@ -459,7 +457,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error(`${cfg.key} logout failed:`, e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isError: true });
         } finally {
-          setBusyId(null);
+          // 断开收尾只释放自己的槽位:logout 期间别的操作可能已接手 busyId。
+          setBusyId(busy => releaseBusy(busy, cfg.key));
         }
       };
       return { conn, ensureListeners, connect, disconnect, resetFlow, retry };
@@ -467,7 +466,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
     const feishuFlowApi = createConnectorFlow({
       key: 'feishu', conn: feishuConn, twoStep: true,
-      progressEvent: 'feishu:progress',
       events: { qr: 'feishu:qr', connected: 'feishu:connected', error: 'feishu:error' },
       commands: { ensureCli: 'feishu_ensure_cli', begin: 'feishu_connect_begin', cancel: 'feishu_cancel', logout: 'feishu_logout', applySkills: 'feishu_apply_skills' },
       qrStepsExtra: { connect: 'done' },
@@ -1106,7 +1104,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('restore recycled plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, item.id));
         }
       };
       // 彻底删除：二次确认（沿用更新确认的弹窗模式）后物理删除包文件与回收站条目。
@@ -1125,7 +1124,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('purge recycled plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, id));
         }
       };
       // 导出为 zip 插件包：桌面端弹原生保存对话框，返回保存路径=成功；
@@ -1145,7 +1145,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('export recycled plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, item.id));
         }
       };
       // 已安装卡片「导出」：companion 技能卡先经 skillToMcp 映射为所属包 id（与可见性
@@ -1165,7 +1166,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('export installed plugin failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, tool.backendId));
         }
       };
       const [visibilityLoaded, setVisibilityLoaded] = useState(false);
@@ -1233,8 +1235,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const [feishuFlow, setFeishuFlow] = useState(feishuConn.flow); // 从跨视图 store 水合：切走再回来不丢进度
 
       // 企业微信(CLI 路线)连接流程卡(跨视图水合);连接态由 bundleStates 派生(见上)
-      const [wecomQr, setWecomQr] = useState(null); // { qr: dataUrl, url } 扫码弹窗(单段)
       const [wecomFlow, setWecomFlow] = useState(wecomConn.flow); // 企微连接流程卡(跨视图水合)
+      const [wecomQr, setWecomQr] = useState(null); // { qr: dataUrl, url } 扫码弹窗(单段)
 
       // 钉钉(CLI 路线)连接流程卡;连接态由 bundleStates 派生
       const [dingtalkFlow, setDingtalkFlow] = useState(dingtalkConn.flow);
@@ -1247,6 +1249,19 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const [eipSso, setEipSso] = useState(null); // { url, qr } SSO 登录引导弹窗
       const [zhidaoConnected, setZhidaoConnected] = useState(false);
       const [zhidaoSso, setZhidaoSso] = useState(null); // { url, qr } SSO 登录引导弹窗
+      // 连接态镜像 ref:事件回调持有的是渲染时快照,无法判断迟到的 sso/sso_wait
+      // (Reuse 重放)是否落在 eip:connected 之后——ref 记录最新连接态,已连接就
+      // 不再弹 SSO 弹窗(收起弹窗后立即重连恰逢旧流程完成的窄窗口,issue #1097)。
+      const eipConnectedRef = useRef(false);
+      const zhidaoConnectedRef = useRef(false);
+      // 挂载探测(eip_status/zhidao_status)与在途 SSO 事件之间没有到达顺序保证:
+      // 事件先到、探测响应后到时,陈旧的 connected 值会把事件刚写入的连接态
+      // (含 ref 镜像)打回旧值。给 mark* 记代际,探测只在其发出后没有任何
+      // mark* 写入过(代际未变)时才允许落盘——事件永远是更新的一方。
+      const eipConnEpochRef = useRef(0);
+      const zhidaoConnEpochRef = useRef(0);
+      const markEipConnected = (v) => { eipConnEpochRef.current += 1; eipConnectedRef.current = v; setEipConnected(v); };
+      const markZhidaoConnected = (v) => { zhidaoConnEpochRef.current += 1; zhidaoConnectedRef.current = v; setZhidaoConnected(v); };
 
       // 从后端加载已安装状态 + 统一 readiness（Phase 2 第八刀：逐连接器 status
       // 命令退役，installed/ready/actions 统一经 bundle_readiness 取数）。
@@ -1260,14 +1275,15 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const fetched = await invokeTauri('list_marketplace_tools');
           list = Array.isArray(fetched) ? fetched : [];
           const states = {};
-          const s2m = {}; // 配套技能 → 所属 MCP(manifest companion_skills 反建,单一真源)。
-          // 映射与安装态无关：组合包语义要求 companion 卡的「安装」始终路由到
-          // 所属 MCP（装 MCP 联动装技能）；「卸载」与卡片安装态在下游按 MCP
-          // 是否已装分流（MCP 已装 → 包级卸载；仅技能独立已装 → 技能级卸载，
-          // 后端 uninstall 按实际物理位置删除，G3）。
+          // 配套技能 → 所属 MCP：shared/companion-packages.js 单一真源（与
+          // 场景可用性自愈共用，manifest companion_skills 反建）。映射与安装
+          // 态无关：组合包语义要求 companion 卡的「安装」始终路由到所属 MCP
+          // （装 MCP 联动装技能）；「卸载」与卡片安装态在下游按 MCP 是否已装
+          // 分流（MCP 已装 → 包级卸载；仅技能独立已装 → 技能级卸载，后端
+          // uninstall 按实际物理位置删除，G3）。
+          const s2m = companionPackageMap(list);
           list.forEach(t => {
             states[t.id] = t.installed;
-            (t.companion_skills || []).forEach(sid => { s2m[sid] = t.id; });
           });
           setToolStates(states);
           setSkillToMcp(s2m);
@@ -1330,7 +1346,26 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
       };
 
-      useEffect(() => { loadBackendState(); }, []);
+      useEffect(() => {
+        loadBackendState();
+        // EIP/知道(SSO 路线)连接态挂载回填:两者未接入 bundle_readiness,连接态是
+        // 组件内 state,切视图卸载重挂后会丢成"未连接"。卡面的已连接跟随事件
+        // (eip:connected / zhidao:connected),而监听只在本页挂载期间在场——离开
+        // 插件中心后完成的 SSO 连接没人听见,回来若不主动问后端,卡面会一直显示
+        // 未连接(issue #1097 窄窗口②)。挂载时按后端真相校准一次;status 的副作用
+        // (set_connected)与查询同源,幂等且顺带自愈后端持久标记。失败静默,与
+        // composer-shared.jsx 的既有消费口径一致。
+        // 探测在途期间若收到任何连接态事件(代际已变),说明探测结果已过时,丢弃。
+        if (!isTauriAvailable()) return;
+        const eipProbeEpoch = eipConnEpochRef.current;
+        invokeTauri('eip_status').then(res => {
+          if (eipConnEpochRef.current === eipProbeEpoch) markEipConnected(!!(res && res.connected));
+        }).catch(() => {});
+        const zhidaoProbeEpoch = zhidaoConnEpochRef.current;
+        invokeTauri('zhidao_status').then(res => {
+          if (zhidaoConnEpochRef.current === zhidaoProbeEpoch) markZhidaoConnected(!!(res && res.connected));
+        }).catch(() => {});
+      }, []);
 
       // 订阅跨视图 store：把 store 状态镜像进本组件渲染，并在完成/失败时做组件级收尾
       // (alert dialog, connection-state refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
@@ -1382,10 +1417,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }));
         // 节流/等旧流程期间的进度,让用户看到"约 N 秒后出码"并能取消(见 sso_wait 弹窗状态)。
         track(ev.listen('eip:sso_wait', (e) => {
+          // 已连接后迟到的等待/二维码事件(Reuse 重放恰逢旧流程完成):不再弹窗,
+          // 否则用户会面对一张已无效的登录引导(issue #1097 窄窗口①)。
+          if (eipConnectedRef.current) return;
           const p = e.payload || {};
           setEipSso({ url: null, qr: null, waitSeconds: p.seconds || 0, previousFlow: !!p.previous_flow });
         }));
         track(ev.listen('eip:sso', (e) => {
+          if (eipConnectedRef.current) return; // 同上:迟到的重放不再弹窗
           const p = e.payload || {};
           setEipSso({ url: p.url, qr: p.qr_data_url });
         }));
@@ -1393,7 +1432,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           finishToolConfiguration('eip', true);
           // 只释放自己的忙碌槽位:用户可能已收起弹窗、并发起了另一个工具操作,那时
           // 无条件清空会把别人未完成的忙碌态一起抹掉(按钮提前可点 → 重复操作)。
-          setEipSso(null); setEipConnected(true); setBusyId(busy => releaseBusy(busy, 'eip'));
+          setEipSso(null); markEipConnected(true); setBusyId(busy => releaseBusy(busy, 'eip'));
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         }));
@@ -1405,16 +1444,19 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
         }));
         track(ev.listen('zhidao:sso_wait', (e) => {
+          // 同 eip:sso_wait:已连接后迟到的重放不再弹窗(issue #1097 窄窗口①)。
+          if (zhidaoConnectedRef.current) return;
           const p = e.payload || {};
           setZhidaoSso({ url: null, qr: null, waitSeconds: p.seconds || 0, previousFlow: !!p.previous_flow });
         }));
         track(ev.listen('zhidao:sso', (e) => {
+          if (zhidaoConnectedRef.current) return; // 同上:迟到的重放不再弹窗
           const p = e.payload || {};
           setZhidaoSso({ url: p.url, qr: p.qr_data_url });
         }));
         track(ev.listen('zhidao:connected', () => {
           finishToolConfiguration('zhidao', true);
-          setZhidaoSso(null); setZhidaoConnected(true); setBusyId(busy => releaseBusy(busy, 'zhidao'));
+          setZhidaoSso(null); markZhidaoConnected(true); setBusyId(busy => releaseBusy(busy, 'zhidao'));
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         }));
@@ -1772,7 +1814,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             const tool = findLocalizedTool(backendId);
             const name = tool ? tool.title : backendId;
             clearOAuthRequest(backendId, requestId);
-            setBusyId(null);
+            // 只释放自己的槽位:取消期间别的操作可能已接手 busyId(同 releaseBusy)。
+            setBusyId(busy => releaseBusy(busy, backendId));
             const outcome = resolveOAuthInstallOutcome(
               name,
               { status: 'cancelled', message: storeCopy.authWaitCancelled },
@@ -1805,7 +1848,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 执行安装（已拿到 config 或无需 config）
       const doInstall = async (backendId, userConfig) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         const t = findLocalizedTool(backendId);
         if (!externalAuthAvailable && isRestrictedExternalAuthTool(t)) return;
         const name = t ? t.title : backendId;
@@ -1926,17 +1969,17 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (t?.oauthMcp) {
             if (isCurrentOAuthRequest(backendId, oauthRequestId)) {
               clearOAuthRequest(backendId, oauthRequestId);
-              setBusyId(null);
+              setBusyId(busy => releaseBusy(busy, backendId));
             }
           } else {
-            setBusyId(null);
+            setBusyId(busy => releaseBusy(busy, backendId));
           }
         }
       };
 
       // 技能安装/卸载(无 configFields,直接装/卸)
       const handleSkillAction = async (backendId, isInstalled) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         const t = skillCards.find(x => x.backendId === backendId);
         const name = t ? t.title : backendId;
         setBusyId(backendId);
@@ -1953,7 +1996,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('skill action failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, backendId));
         }
       };
 
@@ -1968,7 +2012,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setUpdateConfirm({ backendId, skillId, name: card ? card.title : skillId });
       };
       const doSkillUpdate = async () => {
-        if (!updateConfirm) return;
+        if (!updateConfirm || busyRef.current) return;
         const { backendId, skillId, name } = updateConfirm;
         setUpdateConfirm(null);
         setBusyId(backendId);
@@ -1981,7 +2025,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('skill update failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.operationFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, backendId));
         }
       };
 
@@ -2045,7 +2090,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('update bundle display meta failed:', e);
           return String(e);
         } finally {
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, dlg.backendId));
         }
       };
 
@@ -2055,7 +2100,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // （extra 覆盖 > 上传文件名/manifest 回退），用户可直接保存或改名，
       // 取消则不设覆盖、保留默认展示。
       const doImportSkillZip = async (invokeFn) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         setBusyId('__upload__');
         setAlert({ loading: true, visible: false, title: storeCopy.importingSkill, subtitle: storeCopy.validatingSkillPackage, isInstall: true, isError: false });
         try {
@@ -2085,7 +2130,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('import skill failed:', e);
           setAlert({ visible: true, loading: false, title: storeCopy.importFailedWith(String(e)), isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, '__upload__'));
         }
       };
       const handleUploadSkill = () => doImportSkillZip(() => invokeTauri('import_plugin_package_cmd'));
@@ -2104,7 +2149,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       };
 
       const connectIma = async (values = {}) => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         const clientId = (values.IMA_CLIENT_ID || '').trim();
         const apiKey = (values.IMA_API_KEY || '').trim();
         setBusyId('ima');
@@ -2126,12 +2171,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setAlert({ visible: true, loading: false, title: detailCopy.actions.imaFailed, subtitle: detailCopy.actions.operationFailed, isInstall: false, isError: true });
         } finally {
           finishToolConfiguration('ima', succeeded);
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, 'ima'));
         }
       };
 
       const disconnectIma = async () => {
-        if (!canMutateToolStore) return;
+        if (!canMutateToolStore || busyRef.current) return;
         setBusyId('ima');
         try {
           await invokeTauri('ima_logout');
@@ -2145,7 +2190,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('ima logout failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, subtitle: detailCopy.actions.operationFailed, isError: true });
         } finally {
-          setBusyId(null);
+          setBusyId(busy => releaseBusy(busy, 'ima'));
         }
       };
 
@@ -2181,7 +2226,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setBusyId('eip');
         try {
           await invokeTauri('eip_logout');
-          setEipConnected(false);
+          markEipConnected(false);
           setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         } catch (e) {
@@ -2223,7 +2268,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setBusyId('zhidao');
         try {
           await invokeTauri('zhidao_logout');
-          setZhidaoConnected(false);
+          markZhidaoConnected(false);
           setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         } catch (e) {
@@ -2237,11 +2282,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // Connector flow handlers: factory products + component closure injection (mirroring the original
       // connect*/disconnect*/*ResetFlow*/*Retry quartets; event-driven, busyId cleared in event/error branches).
-      const flowDeps = { setBusyId, storeCopy, detailCopy, loadBackendState, setAlert, beginToolConfiguration, finishToolConfiguration, findLocalizedTool };
+      const flowDeps = { setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert, beginToolConfiguration, finishToolConfiguration, findLocalizedTool };
       const connectConnector = (key) => CONNECTOR_FLOW_APIS[key].connect(flowDeps);
+      const retryConnector = (key) => { connectConnector(key); };
       const disconnectConnector = (key) => CONNECTOR_FLOW_APIS[key].disconnect(flowDeps);
       const resetConnectorFlow = (key) => CONNECTOR_FLOW_APIS[key].resetFlow(flowDeps);
-      const retryConnector = (key) => { connectConnector(key); };
       // Fallback toast when "Open in browser" fails (e.g. the external-url allowlist rejects it); previously this failed silently.
       const browserOpenFailed = () => setAlert({ visible: true, loading: false, title: storeCopy.openBrowserFailed, isInstall: false, isError: true });
 
@@ -2271,6 +2316,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         // OAuth orchestration differ per connector listener). Routing-table order mirrors the original if-chain order.
         const cliFlowTool = CLI_FLOW_TOOLS[backendId];
         if (cliFlowTool) {
+          if (busyRef.current) return;
           if (isInstalled) return disconnectConnector(backendId);
           const ct = tools.find(x => x[cliFlowTool.cliKey]) || localizeTool(tsToolsData.find(x => x.backendId === backendId), t);
           if (ct) setSelectedTool(ct);
@@ -2333,6 +2379,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
 
         // 卸载
+        if (busyRef.current) return;
         setBusyId(backendId);
         try {
           await invokeTauri('uninstall_marketplace_tool', { toolId: backendId });
@@ -2360,7 +2407,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('uninstall failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isInstall: false, isError: true });
         } finally {
-          setBusyId(null);
+          // 收尾只释放自己的槽位,防误清异步期间接手的别的操作(同 releaseBusy)。
+          setBusyId(busy => releaseBusy(busy, backendId));
         }
       };
 
@@ -2397,14 +2445,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             // 关闭或切换工具时重建本地字段状态，避免把上一工具的 Key 带入安装请求。
             key={(externalAuthAvailable && configDialog?.backendId) || 'closed'}
             config={externalAuthAvailable ? configDialog : null}
-            theme={theme}
             copy={storeCopy}
             onCancel={() => { if (configDialog?.backendId) finishToolConfiguration(configDialog.backendId, false); setConfigDialog(null); }}
             onConfirm={(values) => { const bid = configDialog.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
           />, document.body)}
           {createPortal(<TsObsidianGuide
             guide={obsidianGuide}
-            theme={theme}
             copy={storeCopy}
             allowDownload={can('localModelSetup')}
             onCancel={() => setObsidianGuide(null)}
@@ -2429,37 +2475,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               onCancel={() => setUpdateConfirm(null)}
             />
           ), document.body)}
-          {/* 上传包展示名/说明编辑弹窗（edit_display 动作触发；条件挂载，state 初值即当前覆盖值）。
-              key 按 backendId 强制重挂载：编辑目标切换（重开/自动预填）时不得复用旧包的
-              useState 输入初值、保存却写进新包 id（串台）。弹窗开着时的拖放导入已在
-              canAccept 处拒绝（editDisplayRef），原位替换路径不再可达。 */}
-          {editDisplay && createPortal(<TsEditDisplayDialog
-            key={editDisplay.backendId}
-            dialog={editDisplay}
-            copy={storeCopy}
-            onCancel={() => setEditDisplay(null)}
-            onConfirm={doEditDisplaySave}
-          />, document.body)}
-          {/* 回收站彻底删除二次确认:物理删除包文件与回收站条目,不可恢复
-              (自绘确认,风格对齐预置技能更新确认) */}
-          {purgeConfirm && createPortal((
-            <SheetRowConfirm
-              title={storeCopy.recyclePurgeTitle(purgeConfirm.name)}
-              desc={storeCopy.recyclePurgeHint}
-              cancelLabel={storeCopy.cancel}
-              confirmLabel={storeCopy.recyclePurge}
-              confirmTone="rose"
-              confirmTestId="recycled-purge-confirm"
-              onConfirm={doPurgeRecycled}
-              onCancel={() => setPurgeConfirm(null)}
-            />
-          ), document.body)}
           {/* 飞书扫码二维码已内联进 FeishuFlowCard（详情弹窗内），不再单独浮层 */}
           {wecomQr && (() => {
             // Mirrors the wecom flow reset (factory resetFlow): backend cancel is now
             // silent (no wecom:error cleanup), so we must clear the flow here, otherwise
             // the detail/mini flow cards stay stale on "waiting for scan".
-            const cancel = () => { finishToolConfiguration('wecom', false); wecomConn.stopTick(); invokeTauri('wecom_cancel').catch(() => {}); wecomConn.setFlow(null); setWecomQr(null); setBusyId(null); };
+            const cancel = () => { finishToolConfiguration('wecom', false); wecomConn.stopTick(); invokeTauri('wecom_cancel').catch(() => {}); wecomConn.setFlow(null); setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom')); };
             return createPortal((
             <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)' }} onClick={cancel}>
               <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[440px] flex flex-col items-center text-center shadow-2xl" onClick={e => e.stopPropagation()}>
@@ -2488,6 +2509,31 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
             onDismiss={() => { setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }}
             onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }} />
+          {/* 上传包展示名/说明编辑弹窗（edit_display 动作触发；条件挂载，state 初值即当前覆盖值）。
+              key 按 backendId 强制重挂载：编辑目标切换（重开/自动预填）时不得复用旧包的
+              useState 输入初值、保存却写进新包 id（串台）。弹窗开着时的拖放导入已在
+              canAccept 处拒绝（editDisplayRef），原位替换路径不再可达。 */}
+          {editDisplay && createPortal(<TsEditDisplayDialog
+            key={editDisplay.backendId}
+            dialog={editDisplay}
+            copy={storeCopy}
+            onCancel={() => setEditDisplay(null)}
+            onConfirm={doEditDisplaySave}
+          />, document.body)}
+          {/* 回收站彻底删除二次确认:物理删除包文件与回收站条目,不可恢复
+              (自绘确认,风格对齐预置技能更新确认) */}
+          {purgeConfirm && createPortal((
+            <SheetRowConfirm
+              title={storeCopy.recyclePurgeTitle(purgeConfirm.name)}
+              desc={storeCopy.recyclePurgeHint}
+              cancelLabel={storeCopy.cancel}
+              confirmLabel={storeCopy.recyclePurge}
+              confirmTone="rose"
+              confirmTestId="recycled-purge-confirm"
+              onConfirm={doPurgeRecycled}
+              onCancel={() => setPurgeConfirm(null)}
+            />
+          ), document.body)}
           {/* 回收站子页面:点入口后整个插件中心内容区切换为回收站页面(非弹窗),
               返回按钮回到主列表;彻底删除二次确认仍用弹窗(见上方 purgeConfirm) */}
           {showRecycleBin && (
@@ -2887,9 +2933,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                       <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white mb-2 tracking-tight">{selectedTool.title}</h2>
                       <p className="text-[17px] text-slate-500 dark:text-slate-400 mb-5 font-medium">{selectedTool.subtitle}</p>
                       <div className="flex flex-col items-end gap-1.5">
-                        {(() => { const sf = selectedTool.feishuCli ? feishuFlow : selectedTool.wecomCli ? wecomFlow : selectedTool.dingtalkCli ? dingtalkFlow : selectedTool.tmeetCli ? tmeetFlow : null; return (externalAuthAvailable && sf && (sf.phase === 'running' || sf.phase === 'qr'))
-                          ? <FeishuMini flow={sf} onClick={() => {}} copy={storeCopy.mini} />
-                          : <PlatformToolAction tool={selectedTool} busy={busyId === selectedTool.backendId} onAction={handleAction} onUpdate={handleSkillUpdate} onEditDisplay={handleEditDisplay} onExport={handleExportInstalled} size="lg" copy={storeCopy} t={t} />; })()}
+                        <PlatformToolAction tool={selectedTool} busy={busyId === selectedTool.backendId} onAction={handleAction} onUpdate={handleSkillUpdate} onEditDisplay={handleEditDisplay} onExport={handleExportInstalled} size="lg" copy={storeCopy} t={t} />
                         {((selectedTool.feishuCli && !feishuConnected) || (selectedTool.wecomCli && !wecomConnected) || (selectedTool.dingtalkCli && !dingtalkConnected) || (selectedTool.tmeetCli && !tmeetConnected)) && <span className="text-[11px] text-slate-400">{storeCopy.firstUseOnlineInstall}</span>}
                       </div>
                     </div>
@@ -2959,5 +3003,5 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // Shared Components
     // ==========================================
 
-export { FeishuStepIcon, FeishuBar, FeishuFlowCard, FeishuMini, feishuConn, ensureFeishuListeners, wecomConn, ensureWecomListeners, dingtalkConn, ensureDingtalkListeners, tmeetConn, ensureTmeetListeners, TsAlert, TsConfigDialog, TsEditDisplayDialog, TsObsidianGuide, ToolStoreView };
+export { ToolStoreView };
 /* eslint-enable sonarjs/cognitive-complexity -- tool store main view;legacy view */

@@ -116,7 +116,8 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         title: &str,
         code_mode: bool,
     ) -> std::result::Result<String, String> {
-        let metadata = super::sessions::create_session_record(false, &self.store, &self.pool)?;
+        let metadata =
+            super::sessions::create_session_record(false, &self.store, &self.pool, None)?;
         let session_id = metadata.id.clone();
         let bounded: String = title.trim().chars().take(120).collect();
         if !bounded.is_empty() {

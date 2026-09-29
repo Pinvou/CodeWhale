@@ -248,8 +248,6 @@
       codexAcpSupported: false,
       teamRelaySupported: true,
       browserNativeDisplay: false,
-      browserAgentAutomation: false,
-      browserCdp: false,
     },
     settings: null,
     behaviorTelemetry: null,
@@ -275,6 +273,24 @@
     activeModelId: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
     superPermEnabled: false,
+    // Computer use (screenshot + keyboard/mouse control) authorization state. enabled is
+    // the global switch (off by default);
+    // granted/stopped/sessionId/grantRequest/confirmRequest describe the current active
+    // session's authorization and pending requests, maintained by bridge/computer_use.js.
+    computerUse: {
+      enabled: false,
+      granted: false,
+      stopped: false,
+      // Whether this OS has a computer_use backend at all (from
+      // computer_use_get_status.platform_supported); lets settings disable the
+      // toggle instead of letting users enable something that cannot work.
+      // Defaults false (fail closed): on an unsupported OS the toggle must
+      // not render enabled until the first get_status corrects the slice.
+      platformSupported: false,
+      sessionId: null,
+      grantRequest: null,
+      confirmRequest: null,
+    },
     modeState: { mode: "yolo" },
     // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
     // lane 未显式选过；缺省 code→plan、work→yolo）。草稿态 chip 显示与切换的
@@ -286,6 +302,17 @@
     modeLane: "work",
     // 草稿态寄存的多智能体开关意图：不物化会话，首条消息创建会话时落后端。
     pendingDraftMultiAgent: false,
+    // Staged explicit mode of a bound-workspace draft (null = never explicitly
+    // chosen): bound drafts run in the code lane (code mode's safety posture),
+    // applied per session from the staged value at materialization; when
+    // unstaged, the backend resolves the code lane global default and the
+    // frontend no longer applies the work lane default.
+    pendingDraftMode: null,
+    // Working directory selected in draft state (plain chat, mirroring the code
+    // mode draft selector): null = default (session-private directory). Sent to
+    // create_session via the workspacePath parameter, cleared after successful
+    // materialization, reset by enterDraft.
+    draftWorkspacePath: null,
     // 最新 plan/todos 快照（用于 mode header 进度 chip，与 plan_ready 卡解耦）
     planSnapshot: { plan: null, todos: null },
     // 当前 session 产物列表 [{ path, basename }]
@@ -552,6 +579,7 @@
       pickFolderTitle: "Choose a working directory",
       fileMediaFilterName: "Images and videos",
       kbPickFolderTitle: "Choose folders to import into the knowledge base",
+      rebindPickFolderTitle: "Choose the folder to rebind this project to",
       memoryWriteFailed: "Memory write failed: ", memoryIgnoreFailed: "Failed to ignore memory: ", memoryNeverFailed: "Failed to set \"never ask\": ",
       attachNeedSession: "⚠️ Start a new chat before adding attachments", attachEmptyFile: "Empty files cannot be added", attachAddCancelled: "Attachment add canceled", attachInvalidResult: "Attachment add returned no valid result", deviceUploadFailed: "⚠️ Upload failed: ",
       planTicketInvalid: "⚠️ The plan credential is no longer valid. Regenerate the plan before executing.",
@@ -653,6 +681,7 @@
       pickFolderTitle: "作業ディレクトリを選択",
       fileMediaFilterName: "画像と動画",
       kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
+      rebindPickFolderTitle: "このプロジェクトの再バインド先フォルダーを選択",
       memoryWriteFailed: "メモリの書き込みに失敗: ", memoryIgnoreFailed: "メモリの無視に失敗: ", memoryNeverFailed: "「今後表示しない」の設定に失敗: ",
       attachNeedSession: "⚠️ 添付ファイルを追加する前に新しいチャットを開始してください", attachEmptyFile: "空のファイルは追加できません", attachAddCancelled: "添付ファイルの追加はキャンセルされました", attachInvalidResult: "添付ファイルの追加で有効な結果が返されませんでした", deviceUploadFailed: "⚠️ アップロードに失敗: ",
       planTicketInvalid: "⚠️ プランの資格情報が無効になりました。プランを再生成してから実行してください。",
@@ -754,6 +783,7 @@
       pickFolderTitle: "选择工作目录",
       fileMediaFilterName: "图片和视频",
       kbPickFolderTitle: "选择要导入知识库的文件夹",
+      rebindPickFolderTitle: "选择重绑定项目的新文件夹",
       memoryWriteFailed: "记忆写入失败：", memoryIgnoreFailed: "忽略记忆失败：", memoryNeverFailed: "设置不再提示失败：",
       attachNeedSession: "⚠️ 请先新建会话再添加附件", attachEmptyFile: "空文件无法添加", attachAddCancelled: "附件添加已取消", attachInvalidResult: "附件添加未返回有效结果", deviceUploadFailed: "⚠️ 上传失败: ",
       planTicketInvalid: "⚠️ 方案凭证已失效，请重新生成方案后再执行",
@@ -1130,6 +1160,9 @@
       return desktopRemoteControlFeature.deleteRemoteProxyHistory(id);
     },
     sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
+    // The draft workspace picker uses the system directory dialog through the
+    // bridge; React never touches Tauri globals directly.
+    dialogOpen: dialogOpen,
     scheduledRunSessionOwners: scheduledRunSessionOwners,
     personaPlaceholderTitles: personaPlaceholderTitles, turnUsageDirty: turnUsageDirty,
     // Clean host-side per-session side tables when a session buffer is
@@ -1239,6 +1272,9 @@
   var enterDraft = sessionsFeature.enterDraft;
   var createNewSession = sessionsFeature.createNewSession;
   var materializeSession = sessionsFeature.materializeSession;
+  var setDraftWorkspace = sessionsFeature.setDraftWorkspace;
+  var pickDraftWorkspace = sessionsFeature.pickDraftWorkspace;
+  var getSessionWorkspaceBinding = sessionsFeature.getSessionWorkspaceBinding;
   var ensureSession = sessionsFeature.ensureSession;
   var reportSessionSwitchFailure = sessionsFeature.reportSessionSwitchFailure;
   var hydratedMessageKey = sessionsFeature.hydratedMessageKey;
@@ -1258,6 +1294,7 @@
   var toggleSessionPinned = sessionsFeature.toggleSessionPinned;
   var archiveSession = sessionsFeature.archiveSession;
   var restoreArchivedSession = sessionsFeature.restoreArchivedSession;
+  var exportSessionArchive = sessionsFeature.exportSessionArchive;
   function runSyncOnSession(sid, fn) {
     if (!sid || sid === state.activeSessionId) { fn(); return; }
     var bg = sessionStates[sid]; if (!bg) return;
@@ -1300,12 +1337,20 @@
     });
   }
 
-  // 草稿态（无 active 会话）的 modeState：取当前 lane 的全局默认，缺省 yolo
-  // （与后端 plain 缺省方向一致）。两分 lane 语义：草稿显示 = 本 lane 全局默认。
+  // The draft-state (no active session) modeState: take the current lane's
+  // global default, falling back to yolo (aligned with the backend's plain
+  // default direction). Two-lane semantics (design merged into work, #428):
+  // the draft display = this lane's global default. A draft bound to a
+  // workspace aligns with the code lane's safety posture: show the code
+  // lane's global default, falling back to plan on first use (read-only is
+  // the safe side, same as the code page's draft fallback).
   function currentDraftModeState() {
-    var lane = state.modeLane === "code" ? "code" : "work";
-    var d = state.modeDefaults && state.modeDefaults[lane];
-    return { mode: d || "yolo", multiAgent: false };
+    const boundDraft = !!state.draftWorkspacePath;
+    // Bound drafts always show the code lane default; unbound drafts follow the
+    // current lane (design was merged into work, #428).
+    const lane = boundDraft || state.modeLane === "code" ? "code" : "work";
+    const d = state.modeDefaults && state.modeDefaults[lane];
+    return { mode: d || (boundDraft ? "plan" : "yolo"), multiAgent: false };
   }
 
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
@@ -1336,7 +1381,7 @@
       }, authoritySyncBufferSnapshot(sid, buf)));
     }
   }
-  function onSessionEvent(e, fn) {
+  function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
       var eventBuffer = getBuffer(sid);
@@ -1348,7 +1393,7 @@
     }
     var isBg = sid && sid !== state.activeSessionId;
     runSyncOnSession(sid, fn);
-    if (isBg) notify();
+    if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
   function isScheduledRunSession(sid) {
     return !!sid && (
@@ -1627,7 +1672,7 @@
   var subscribers = [];
   const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
+    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
@@ -1638,6 +1683,7 @@
     llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
+    computerUse: ["computerUse"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
@@ -1797,8 +1843,13 @@
 
   var notificationQueue = [];
   var notificationDispatching = false;
+  // React subscribes before lifecycle.init() finishes. The independent startup
+  // loaders therefore used to expose a succession of partial snapshots and
+  // re-render the root once per completed IPC. Keep their state ownership and
+  // parallelism, but publish the initialized state as one coherent revision.
+  var startupNotificationBatching = false;
   function notify() {
-    if (suppressNotify) return;
+    if (suppressNotify || startupNotificationBatching) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -1840,7 +1891,30 @@
   }
   function subscribeStateSlices(domains, fn) {
     subscriptionStateSlices(domains);
-    return subscribe(function () { return subscriptionStateSlices(domains); }, fn);
+    // 每轮都重新取各域切片:切片身份由 subscriptionStateValue 的结构化
+    // 比较保证(内容不变 ⟺ 引用不变),因此组合对象只在任一订阅域切片
+    // 身份变化时才需要重建。无关域的 publication 复用上次组合对象,让
+    // React 借 Object.is 跳过无关渲染;回调仍每轮通知都触发,与单域订
+    // 阅的契约一致。与 web 端 domain-adapter 的 stablePick 语义互为镜像。
+    var lastSlices = new Array(domains.length);
+    var lastResult = null;
+    return subscribe(function () {
+      var changed = !lastResult;
+      var slices = new Array(domains.length);
+      for (var i = 0; i < domains.length; i++) {
+        slices[i] = subscriptionStateSlice(domains[i]);
+        if (slices[i] !== lastSlices[i]) changed = true;
+      }
+      if (changed) {
+        var result = {};
+        for (var j = 0; j < slices.length; j++) {
+          Object.assign(result, slices[j]);
+        }
+        lastSlices = slices;
+        lastResult = Object.freeze(result);
+      }
+      return lastResult;
+    }, fn);
   }
 
   var scheduledFeature = installBridgeFeature("scheduled", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addSystemItem: addSystemItem, rememberScheduledRunOwner: rememberScheduledRunOwner, isScheduledRunTerminal: isScheduledRunTerminal, purgeSessionBuffer: purgeSessionBuffer, createNewSession: createNewSession, prefillComposer: prefillComposer, sessionStates: sessionStates });
@@ -1870,7 +1944,6 @@
   var parseLooseJsonObject = scheduledFeature.parseLooseJsonObject;
   var normalizeScheduledTaskDraft = scheduledFeature.normalizeScheduledTaskDraft;
   var activeScheduledTaskModelConfig = scheduledFeature.activeScheduledTaskModelConfig;
-  var activeScheduledTaskModel = scheduledFeature.activeScheduledTaskModel;
   var lockScheduledTaskDraftModel = scheduledFeature.lockScheduledTaskDraftModel;
   var parseScheduledTaskDraftFromText = scheduledFeature.parseScheduledTaskDraftFromText;
   var clearScheduledTaskDraft = scheduledFeature.clearScheduledTaskDraft;
@@ -2277,6 +2350,27 @@
         });
       }
     }
+    // Replay-time terminal ratchet (parity with the codex native lane): a
+    // tool_use that never got a matching tool_result in the persisted
+    // transcript is an interrupted in-flight call — it can never complete
+    // after reload, so settle it as failed instead of leaving an eternal
+    // "running" card (a live spawn row would then pulse forever through the
+    // swarm aggregation). Skipped while the session is mid-turn: pending
+    // cards then belong to the live turn and are settled by its own events;
+    // background shells keep running across turns and are excluded; so are
+    // synthetic shell-snapshot cards ("shell-task:" ids never pair with a
+    // tool_use id, and their job may still be running — the terminal poll
+    // settles them itself from the snapshot).
+    if (!state.busy) {
+      for (const item of state.chatItems) {
+        const unsettled = item && item.type === "tool" && item.toolId && item.background !== true
+          && item.shellSnapshot !== true
+          && (item.state === "pending" || item.state === "running") && !resultById[item.toolId];
+        if (!unsettled) continue;
+        item.success = false;
+        item.state = "failed";
+      }
+    }
     emitPersonaAt(state.messages.length, true); // 最后一条消息之后发生的卡牌事件(末尾加持/卸下)
   }
 
@@ -2347,6 +2441,10 @@
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
+    // Live suppression probe for scheduleStreamNotify: inside a background
+    // working set the immediate first-delta notify is suppressed, so the
+    // stream scheduler must fall through to its bounded frame instead.
+    isNotifySuppressed: function () { return suppressNotify; },
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
     // 与历史重载路径共用同一信封判定（userMessageDisplayText 的 isInternalRuntimeEnvelopeText），
@@ -2514,6 +2612,8 @@
   var setDraftMode = interactionFeature.setDraftMode;
   var setModeLane = interactionFeature.setModeLane;
   var refreshModeDefaults = interactionFeature.refreshModeDefaults;
+  var getCodePermissionPrefs = interactionFeature.getCodePermissionPrefs;
+  var confirmCodeYolo = interactionFeature.confirmCodeYolo;
   var setMultiAgentMode = interactionFeature.setMultiAgentMode;
   var planStuckReplan = interactionFeature.planStuckReplan;
   var planStuckGo = interactionFeature.planStuckGo;
@@ -2553,6 +2653,7 @@
   var openUserExternalUrl = artifactsFeature.openUserExternalUrl;
   var addAttachmentByPath = artifactsFeature.addAttachmentByPath;
   var addPasteImage = artifactsFeature.addPasteImage;
+  var addPasteImageFromClipboard = artifactsFeature.addPasteImageFromClipboard;
   var removeAttachment = artifactsFeature.removeAttachment;
   var clearAttachments = artifactsFeature.clearAttachments;
   var pickAndAttach = artifactsFeature.pickAndAttach;
@@ -2640,38 +2741,56 @@
   var syncVoiceShortcutRecording = voiceFeature.syncVoiceShortcutRecording;
   var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
-  var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
-  var projectsFeature = installBridgeFeature("projects", { state: state, notify: notify, invoke: invoke, listen: listen });
-  var loadProjects = projectsFeature.loadProjects;
-  var createProject = projectsFeature.createProject;
-  var renameProject = projectsFeature.renameProject;
-  var deleteProject = projectsFeature.deleteProject;
-  var moveSessionToProject = projectsFeature.moveSessionToProject;
+  const projectsFeature = installBridgeFeature("projects", { state, notify, invoke, listen });
+  const loadProjects = projectsFeature.loadProjects;
+  const createProject = projectsFeature.createProject;
+  const renameProject = projectsFeature.renameProject;
+  const deleteProject = projectsFeature.deleteProject;
+  const moveSessionToProject = projectsFeature.moveSessionToProject;
+  const rebindWorkspaceRoot = projectsFeature.rebindWorkspaceRoot;
 
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
+  var computerUseFeature = installBridgeFeature("computer_use", { state: state, notify: notify, invoke: invoke, listen: listen });
   async function pickFiles() {
     if (!dialogOpen) return [];
     var selected = await dialogOpen({ multiple: true });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
-  async function pickFolder() {
+  // Shared system directory-picker scaffold for pickFolder / pickFolders /
+  // sessions.pickDraftWorkspace: returns null when the dialog is unavailable
+  // or the user cancels, otherwise the normalized array of selected paths.
+  async function pickDirectory(options) {
     if (!dialogOpen) return null;
     var selected = await dialogOpen({ directory: true, multiple: false, title: bt("pickFolderTitle") });
     if (!selected) return null;
-    return Array.isArray(selected) ? (selected[0] || null) : selected;
+    return Array.isArray(selected) ? selected : [selected];
+  }
+  async function pickFolder() {
+    const selected = await pickDirectory({ directory: true, multiple: false, title: bt("pickFolderTitle") });
+    return (selected && selected[0]) || null;
   }
   async function pickFolders() {
     if (!dialogOpen) return [];
     var selected = await dialogOpen({ directory: true, multiple: true, title: bt("kbPickFolderTitle") });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
+  }
+  // Dedicated picker for directory rebind (broken-link repair): single
+  // selection with a title that matches the rebind semantics — it used to
+  // borrow the knowledge-base multi-select import picker, whose title did not
+  // match the "only picked[0] is used" behavior (review #463 Minor 6).
+  async function pickRebindFolder() {
+    if (!dialogOpen) return null;
+    const selected = await dialogOpen({ directory: true, multiple: false, title: bt("rebindPickFolderTitle") });
+    if (!selected) return null;
+    return Array.isArray(selected) ? (selected[0] || null) : selected;
   }
   async function pickFeedbackFiles() {
     if (!dialogOpen) return [];
@@ -2734,6 +2853,9 @@
     if (initPromise) return initPromise;
     initPromise = (async function () {
     startupMark("bridge:init_start");
+    startupNotificationBatching = true;
+    var initFailure;
+    try {
     // Populate the global Scheduled unread summary without requiring the user
     // to visit the Scheduled page first. This stays off the startup critical path.
     if (!isDetachedWindow) {
@@ -2792,7 +2914,21 @@
     }
     startupMark("bridge:background_checks_started");
     if (!isDetachedWindow) refreshRemoteControlStatus(); // 权威主窗口独占桌面 Web 代理状态
-    notify();
+    } catch (initError) {
+      initFailure = initError;
+    } finally {
+      startupNotificationBatching = false;
+    }
+    // 连贯快照在 finally 之外发布:notify() 会原样上抛订阅者回调的异常,
+    // 而 finally 内抛出的异常会顶替进行中的 init 错误。失败路径照常发布,
+    // 但只让真正的 init 错误向外传播;成功路径上发布失败仍按原样使 init
+    // 失败。此段同步执行,标志复位与发布之间不会插入其他通知。
+    try {
+      notify();
+    } catch (notifyError) {
+      if (!initFailure) throw notifyError;
+    }
+    if (initFailure) throw initFailure;
     startupMark("bridge:init_done");
     if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
     })();
@@ -2845,7 +2981,6 @@
       completeVoiceSubmission: voiceFeature.completeVoiceSubmission,
       dismissVoiceInput: voiceFeature.dismissVoiceInput,
       appendVoiceText: appendVoiceText,
-      runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
     knowledge: {
       loadKnowledgeEmbedderAfterFirstFrame: loadKnowledgeEmbedderAfterFirstFrame,
@@ -2893,6 +3028,16 @@
       toggleSessionPinned: toggleSessionPinned,
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
+      exportSessionArchive: exportSessionArchive,
+      // Draft-state working directory selection (desktop only: system directory
+      // dialog + the create_session workspacePath parameter; the web side has no
+      // such channel, the UI guards on method existence).
+      setDraftWorkspace: setDraftWorkspace,
+      pickDraftWorkspace: pickDraftWorkspace,
+      // Working directory binding query for materialized sessions (bound
+      // sessions share the code mode's safety posture; web/remote sessions have
+      // no binding concept, stub returns null).
+      getSessionWorkspaceBinding: getSessionWorkspaceBinding,
     },
     projects: {
       loadProjects,
@@ -2900,6 +3045,7 @@
       renameProject,
       deleteProject,
       moveSessionToProject,
+      rebindWorkspaceRoot,
     },
     monitor: {
       startMonitorPolling: startMonitorPolling,
@@ -2958,6 +3104,9 @@
     setDraftMode: setDraftMode,
     setModeLane: setModeLane,
     refreshModeDefaults: refreshModeDefaults,
+      // One-shot YOLO confirmation gate for bound-workspace sessions.
+    getCodePermissionPrefs: getCodePermissionPrefs,
+    confirmCodeYolo: confirmCodeYolo,
     setMultiAgentMode: setMultiAgentMode,
     planStuckReplan: planStuckReplan,
     planStuckGo: planStuckGo,
@@ -3043,6 +3192,7 @@
     attachments: {
       addAttachmentByPath: addAttachmentByPath,
       addPasteImage: addPasteImage,
+      addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
       clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
@@ -3056,10 +3206,22 @@
       listSubagentTranscripts: listMultiAgentSubagents,
       readSubagentTranscript: readMultiAgentSubagent,
     },
+    computerUse: {
+      getStatus: computerUseFeature.getStatus,
+      refreshStatus: computerUseFeature.refreshStatus,
+      grant: computerUseFeature.grant,
+      revoke: computerUseFeature.revoke,
+      stop: computerUseFeature.stop,
+      confirm: computerUseFeature.confirm,
+      deny: computerUseFeature.deny,
+      setEnabled: computerUseFeature.setEnabled,
+      requestPermissions: computerUseFeature.requestPermissions,
+    },
     files: {
-      pickFiles: pickFiles,
-      pickFolders: pickFolders,
-      pickFeedbackFiles: pickFeedbackFiles,
+      pickFiles,
+      pickFolders,
+      pickRebindFolder,
+      pickFeedbackFiles,
     },
     personas: {
       loadPersonas: loadPersonas,

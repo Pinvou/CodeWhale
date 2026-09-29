@@ -1,5 +1,5 @@
 use super::prelude::*;
-use anyhow::{Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult, anyhow};
 use base64::Engine as _;
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -959,8 +959,14 @@ async fn voice_postprocess_bridge(
     store: &SessionStore,
 ) -> AnyResult<crate::features::assistant::platform::bridge::Pinvou3Bridge> {
     if let Some(sid) = session_id.filter(|sid| !sid.trim().is_empty()) {
-        crate::features::sessions::validate_session_id(sid)?;
-        store.load(sid)?;
+        // The error chain reaches the local log and the frontend diagnostics
+        // verbatim (summarize_voice_postprocess_error), so keep the session
+        // id out of it.
+        crate::features::sessions::validate_session_id(sid)
+            .map_err(|_| anyhow!("session id is invalid"))?;
+        store
+            .load(sid)
+            .map_err(|_| anyhow!("session snapshot is unavailable"))?;
         return pool
             .fresh_bridge_for(sid)
             .await
@@ -973,9 +979,8 @@ async fn voice_postprocess_bridge(
 
 /// Returns (sanitized text, whether truncated by max_tokens). Truncation
 /// detection: OpenAI-compatible endpoints report
-/// choices[0].finish_reason == "length"; the Anthropic endpoint's stop_reason
-/// is not surfaced (post_anthropic_messages returns text only), so it stays
-/// false for now.
+/// choices[0].finish_reason == "length"; Anthropic endpoints report
+/// stop_reason == "max_tokens", surfaced by post_anthropic_messages.
 async fn call_voice_postprocess_model(
     bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
     mode: &str,
@@ -1014,7 +1019,7 @@ async fn call_voice_postprocess_model(
         .unwrap_or_else(|| bridge.prefs.advanced.model_preset.unwrap_or_default());
 
     if preset == crate::platform::prefs::ModelPreset::Anthropic {
-        let content = crate::core::model_endpoint::post_anthropic_messages(
+        let completion = crate::core::model_endpoint::post_anthropic_messages(
             &client,
             &base_url,
             &bridge.api_key(),
@@ -1024,7 +1029,11 @@ async fn call_voice_postprocess_model(
             voice_postprocess_max_tokens(mode, retry),
         )
         .await?;
-        return Ok((sanitize_voice_postprocess_output(&content), false));
+        let truncated = completion.stop_reason.as_deref() == Some("max_tokens");
+        return Ok((
+            sanitize_voice_postprocess_output(&completion.text),
+            truncated,
+        ));
     }
 
     let mut body = json!({

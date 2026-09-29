@@ -1,11 +1,15 @@
 //! Secret/credential management: MCP tool secrets are neither written in
-//! plaintext nor placed in `headers` (the foundation sends that field as a
-//! literal); they live in the system credential store plus an in-process
-//! registry, and `mcp.json` keeps only `${ENV}` placeholders.
+//! plaintext nor placed in `headers` (the foundation sends `headers` values
+//! as-is and does not expand `${ENV}` placeholders in them); they live in the
+//! system credential store plus an in-process registry, and `mcp.json` keeps
+//! only `${ENV}` placeholders for subprocess env plus env-var NAME references
+//! (`env_headers` values, `bearer_token_env_var`) that the foundation
+//! resolves at request time through the host resolver.
 //!
 //! Placeholders are resolved on demand by the foundation's MCP secret resolver
 //! hook (`install_mcp_secret_resolver`, registered at boot) when MCP
-//! subprocess env is expanded / request headers are parsed — the process
+//! subprocess env is expanded and when env-var NAME references in
+//! `env_headers`/`bearer_token_env_var` are resolved — the process
 //! environment is no longer written at runtime: under edition 2024 a runtime
 //! `set_var` racing uncoordinated concurrent readers (the foundation's
 //! `vars_os()` child-process env snapshots, WebKit/glib libc `getenv`) is a
@@ -156,12 +160,54 @@ pub(super) fn mcp_secret_store_error(tool_id: &str, key: &str, error: Credential
     ))
 }
 
+/// Why resolving a secret failed. The fallback-active miss is a distinct
+/// classification, not a message string: it is the ONLY outcome an optional
+/// config field may tolerate (the read succeeded but returned nothing while
+/// the OS keyring is unreachable, so absence cannot be proven — the
+/// credential may sit in the unreachable keyring). Every other variant is a
+/// real store fault — a failed read or a failed write, including under an
+/// active fallback — and must fail the install/rebuild so the next startup
+/// retries, instead of baking a permanently unwired entry that later
+/// startups never repair. Callers must match on this enum rather than
+/// re-consulting `os_keyring_unreachable` themselves: the classification is
+/// made where the failing operation is known.
+#[derive(Debug)]
+pub(super) enum SecretResolveError {
+    /// The read succeeded with no stored value while the OS keyring is
+    /// unreachable and reads are served by the file fallback.
+    UndeterminableMiss(String),
+    /// A real credential-store fault; the message is user-facing and
+    /// already redacted.
+    StoreFault(String),
+}
+
+impl std::fmt::Display for SecretResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UndeterminableMiss(message) | Self::StoreFault(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Extract every secret's (keyring target, key) from the manifest:
 /// `secret_env`→("env",key), `secret_headers`→("header",source_key),
 /// `config_fields`(secret=true)→(env or header, key). Each (target,key) pair
 /// is deduplicated once. Targets stay aligned with `resolve_secret_placeholder`
 /// at install time (a config_fields "bearer" lands as reference target
 /// "header" there).
+///
+/// Sensitive-by-name legacy `manifest.env` keys (the same
+/// [`is_sensitive_key_name`] heuristic the install and rebuild paths apply in
+/// `connectors.rs`) are enumerated under **both** targets the two writers
+/// store them under — local entries resolve them as "env", the remote legacy
+/// channel persists them under the Bearer target. Enumerating both keeps the
+/// restart rehydration (`sync_secret_values`) on the same reference at least
+/// one of the writers wrote; the wrong-target lookup simply misses. Without
+/// this leg, a legacy-only manifest's credential is registered by the
+/// installing reconcile and then wiped by the next boot's
+/// `sync_secret_values` clear-and-rebuild — silent 401s from the first
+/// restart. The registry is keyed by env-var name only, so when both targets
+/// of the same key ever hold values, the later (Bearer) registration wins.
 pub(super) fn manifest_secret_targets(manifest: &ToolManifest) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push = |target: &str, key: &str| {
@@ -172,6 +218,15 @@ pub(super) fn manifest_secret_targets(manifest: &ToolManifest) -> Vec<(String, S
     };
     for s in &manifest.secret_env {
         push("env", &s.key);
+    }
+    for key in manifest.env.keys() {
+        if is_sensitive_key_name(key) {
+            push("env", key);
+            push(
+                bundle::keyring_target(bundle::CredentialTarget::Bearer),
+                key,
+            );
+        }
     }
     for s in &manifest.secret_headers {
         push(
@@ -241,32 +296,82 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         user_config: &HashMap<String, String>,
         legacy_env: &HashMap<String, String>,
     ) -> Result<String, String> {
+        match self.try_resolve_secret_placeholder(tool_id, target, key, user_config, legacy_env) {
+            Ok(Some(placeholder)) => Ok(placeholder),
+            Ok(None) => Err(mcp_secret_missing_error(tool_id, key)),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Degrade-aware variant of `resolve_secret_placeholder` for the startup
+    /// reconcile: `Ok(None)` means the credential is genuinely absent (never
+    /// entered, no legacy copy) and the caller may degrade to an entry without
+    /// that wiring. `Err` means the credential store itself failed — including
+    /// a miss while the OS keyring is unreachable and reads are served by the
+    /// file fallback, which cannot be distinguished from a credential stored
+    /// in the unreachable keyring. The two cases must stay distinguishable:
+    /// degrading on a store failure would bake a transiently locked keyring
+    /// into a permanently unwired entry that later startups never repair
+    /// (healthy entries are skipped and the remote matcher ignores credential
+    /// fields), so the caller propagates `Err` and the next startup retries
+    /// the restore. The error carries its classification
+    /// ([`SecretResolveError`]): only [`SecretResolveError::UndeterminableMiss`]
+    /// is an ambiguity — a failed read or write is a fault in every mode.
+    pub(super) fn try_resolve_secret_placeholder(
+        &self,
+        tool_id: &str,
+        target: &str,
+        key: &str,
+        user_config: &HashMap<String, String>,
+        legacy_env: &HashMap<String, String>,
+    ) -> Result<Option<String>, SecretResolveError> {
         let reference = mcp_secret_reference(tool_id, target, key);
         if let Some(value) = user_config.get(key).filter(|v| !v.trim().is_empty()) {
-            self.credential_store
-                .set(&reference, value)
-                .map_err(|e| mcp_secret_store_error(tool_id, key, e))?;
+            self.credential_store.set(&reference, value).map_err(|e| {
+                SecretResolveError::StoreFault(mcp_secret_store_error(tool_id, key, e))
+            })?;
             store_secret_value(mcp_secret_env_var(key), value.clone());
-            return Ok(mcp_secret_placeholder(key));
+            return Ok(Some(mcp_secret_placeholder(key)));
         }
 
         match self.credential_store.get(&reference) {
             Ok(Some(value)) if !value.trim().is_empty() => {
                 store_secret_value(mcp_secret_env_var(key), value);
-                Ok(mcp_secret_placeholder(key))
+                Ok(Some(mcp_secret_placeholder(key)))
             }
             Ok(_) => {
                 if let Some(value) = legacy_env.get(key).filter(|v| !v.trim().is_empty()) {
-                    self.credential_store
-                        .set(&reference, value)
-                        .map_err(|e| mcp_secret_store_error(tool_id, key, e))?;
+                    self.credential_store.set(&reference, value).map_err(|e| {
+                        SecretResolveError::StoreFault(mcp_secret_store_error(tool_id, key, e))
+                    })?;
                     store_secret_value(mcp_secret_env_var(key), value.clone());
-                    Ok(mcp_secret_placeholder(key))
+                    Ok(Some(mcp_secret_placeholder(key)))
+                } else if self.credential_store.os_keyring_unreachable(&reference) {
+                    // The OS keyring is unreachable and reads are served by the
+                    // file fallback, so a miss here may be a credential sitting
+                    // in the keyring we cannot reach — it cannot be classified
+                    // as absent. Report the dedicated classification: callers
+                    // that must not block on a keyring-less host (an optional
+                    // config field) tolerate exactly this outcome, everything
+                    // else fails loud so the next startup retries.
+                    Err(SecretResolveError::UndeterminableMiss(
+                        mcp_secret_store_error(
+                            tool_id,
+                            key,
+                            CredentialError::new(format!(
+                                "the OS keyring is unreachable (file-backed fallback active), so it \
+                             cannot be determined whether credential {key} exists; the \
+                             operation retries on the next startup"
+                            )),
+                        ),
+                    ))
                 } else {
-                    Err(mcp_secret_missing_error(tool_id, key))
+                    Ok(None)
                 }
             }
-            Err(e) => Err(mcp_secret_store_error(tool_id, key, e)),
+            Err(e) => Err(SecretResolveError::StoreFault(mcp_secret_store_error(
+                tool_id, key, e,
+            ))),
         }
     }
 }
@@ -296,6 +401,29 @@ mod tests {
         assert_eq!(targets.len(), 2, "AMAP/QCC each deduplicated once");
         assert!(targets.contains(&("env".to_string(), "AMAP_KEY".to_string())));
         assert!(targets.contains(&("header".to_string(), "QCC_API_KEY".to_string())));
+    }
+
+    #[test]
+    fn manifest_secret_targets_includes_sensitive_legacy_env_keys() {
+        // A legacy-only manifest (plain env keys recognized by name, no
+        // secret channels) must rehydrate under both targets the writers
+        // store them under: local entries resolve them as "env", the remote
+        // legacy channel persists them under the Bearer target.
+        let manifest: ToolManifest = serde_json::from_str(
+            r#"{
+            "id":"t","name":"T","description":"","version":"1","icon":"","category":"",
+            "mcp_tools":[],"command":"","args":[],
+            "env":{"VENDOR_API_KEY":"from-manifest","REGION":"not-a-secret"}
+        }"#,
+        )
+        .unwrap();
+        let targets = manifest_secret_targets(&manifest);
+        assert!(targets.contains(&("env".to_string(), "VENDOR_API_KEY".to_string())));
+        assert!(targets.contains(&("header".to_string(), "VENDOR_API_KEY".to_string())));
+        assert!(
+            !targets.iter().any(|(_, key)| key == "REGION"),
+            "non-sensitive legacy env keys are not secrets"
+        );
     }
 
     #[test]

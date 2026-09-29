@@ -84,6 +84,14 @@ pub(super) fn install(app: AppHandle) {
         });
     }
 
+    // SAFETY: a single dedicated pump thread installs the global
+    // WH_KEYBOARD_LL hook and pumps its messages. `keyboard_hook_proc` is a
+    // valid `extern "system"` fn, the null module handle with thread id 0 is
+    // the documented way to install a global low-level hook, and the
+    // returned HHOOK is null-checked before use and unhooked exactly once on
+    // this same thread. `zeroed::<MSG>()` is valid because MSG is a plain C
+    // struct for which the all-zero bit pattern is acceptable, and `&mut
+    // msg` is a live writable out-parameter for GetMessageW.
     std::thread::spawn(|| unsafe {
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), 0 as HINSTANCE, 0);
         if hook.is_null() {
@@ -224,6 +232,11 @@ unsafe extern "system" fn keyboard_hook_proc(
         return call_next_hook(code, w_param, l_param);
     }
 
+    // SAFETY: for WH_KEYBOARD_LL, Windows guarantees that l_param points to a
+    // KBDLLHOOKSTRUCT valid for the duration of this hook callback; only
+    // WM_KEYDOWN/WM_KEYUP/WM_SYSKEYDOWN/WM_SYSKEYUP reach this point, and all
+    // of those carry that l_param layout. The reference borrows the
+    // callback-owned struct without outliving the call.
     let info = unsafe { &*(l_param as *const KBDLLHOOKSTRUCT) };
     // Injected keys (SendInput synthetics, including the Alt down this module
     // replays for combos) never take part in gesture detection.
@@ -232,6 +245,10 @@ unsafe extern "system" fn keyboard_hook_proc(
     }
 
     let key = voice_shortcut_key(info.vkCode as VIRTUAL_KEY);
+    // SAFETY: GetForegroundWindow takes no pointer arguments and is
+    // thread-safe per MSDN, so it may be called from this low-level hook
+    // callback; the returned HWND is only compared and stored as an isize,
+    // never dereferenced.
     let foreground = unsafe { GetForegroundWindow() };
     let target = hook_target_label(foreground);
     let decision = {
@@ -240,6 +257,17 @@ unsafe extern "system" fn keyboard_hook_proc(
             Ok(guard) => guard,
             Err(_) => return call_next_hook(code, w_param, l_param),
         };
+        // Shift/Ctrl/Win already held means this Alt belongs to a system
+        // chord; the state machine lets that whole Alt press pass through.
+        // Only the Alt-down branch of the state machine consults held
+        // modifiers, so keep the probes off every other keystroke.
+        let other_modifier_down = matches!(key, VoiceShortcutKey::Alt(_))
+            && key_down
+            && [VK_SHIFT, VK_CONTROL, VK_LWIN, VK_RWIN].iter().any(|vk| {
+                // SAFETY: GetAsyncKeyState takes a plain virtual-key code and no
+                // pointer arguments; it is safe to call from the hook callback.
+                unsafe { GetAsyncKeyState(i32::from(*vk)) < 0 }
+            });
         let decision = handle_voice_shortcut_with_modifiers(
             &mut state,
             key,
@@ -247,9 +275,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             target.is_some(),
             foreground as isize,
             info.time,
-            [VK_SHIFT, VK_CONTROL, VK_LWIN, VK_RWIN]
-                .iter()
-                .any(|key| unsafe { GetAsyncKeyState(i32::from(*key)) < 0 }),
+            other_modifier_down,
         );
         if decision.inject_alt_down {
             // The combo down was swallowed: replay [Alt↓, combo↓] in order
@@ -351,6 +377,12 @@ fn alt_side_vk(side: AltSide) -> VIRTUAL_KEY {
 #[cfg(target_os = "windows")]
 fn replay_combo_with_alt(alt_vk: VIRTUAL_KEY, combo_vk: VIRTUAL_KEY) -> ComboReplayOutcome {
     let inputs = combo_replay_inputs(alt_vk, combo_vk);
+    // SAFETY: `inputs` is a stack array of two fully initialized INPUT
+    // entries — INPUT_KEYBOARD with the ki union member populated by
+    // combo_replay_inputs — so `inputs.as_ptr()` points to inputs.len()
+    // contiguous valid entries, and the cbSize argument is exactly
+    // size_of::<INPUT>(), as SendInput requires. The array outlives the
+    // synchronous call.
     let sent = unsafe {
         SendInput(
             inputs.len() as u32,
@@ -447,6 +479,10 @@ fn combo_replay_outcome(sent: u32, total: u32) -> ComboReplayOutcome {
 
 #[cfg(target_os = "windows")]
 fn call_next_hook(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+    // SAFETY: CallNextHookEx's first parameter is documented as ignored (a
+    // null HHOOK is accepted); code/w_param/l_param are forwarded unmodified
+    // from the current hook notification, which is exactly the required
+    // contract for passing the event down the hook chain.
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) }
 }
 
@@ -471,7 +507,14 @@ fn voice_shortcut_key(vk: VIRTUAL_KEY) -> VoiceShortcutKey {
 fn foreground_is_current_app(hwnd: HWND) -> bool {
     let current_pid = std::process::id();
     window_belongs_to_process(hwnd, current_pid)
+        // SAFETY: `hwnd` was null-checked by the caller (hook_target_label)
+        // and is a live window handle here; GetAncestor is thread-safe per
+        // MSDN, and the returned HWND is passed straight into
+        // window_belongs_to_process, which re-checks it for null before use.
         || window_belongs_to_process(unsafe { GetAncestor(hwnd, GA_ROOT) }, current_pid)
+        // SAFETY: same contract as the GA_ROOT call above: `hwnd` is a
+        // null-checked live window handle, GetAncestor is thread-safe, and
+        // the result is re-validated inside window_belongs_to_process.
         || window_belongs_to_process(unsafe { GetAncestor(hwnd, GA_ROOTOWNER) }, current_pid)
 }
 
@@ -481,6 +524,10 @@ fn window_belongs_to_process(hwnd: HWND, current_pid: u32) -> bool {
         return false;
     }
     let mut pid = 0u32;
+    // SAFETY: `hwnd` was null-checked above and is a live window handle;
+    // `&mut pid` points to a live writable DWORD local owned by this stack
+    // frame, which GetWindowThreadProcessId fills with the window's owning
+    // process id.
     unsafe {
         GetWindowThreadProcessId(hwnd, &mut pid);
     }

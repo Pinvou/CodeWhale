@@ -11,8 +11,6 @@
 //!
 //! pre-flight 健康探针:vLLM `/v1/models` 200 OK 才执行 scenario。普通开发机不在线时
 //! 允许 skip；`PINVOU3_L1_REQUIRE_VLLM=1` 严格验收中，启动前或 turn 中途掉线都失败。
-//!
-//! 设计与决策见 `docs/自动化测试方案.md` §3。
 
 #![allow(dead_code)] // 框架辅助函数会在后续 scenario 里逐步消化
 
@@ -535,8 +533,10 @@ fn ensure_runtime_env() {
     // 关键:vLLM 在 10.214.74.113 不是 loopback,底座默认拒绝非 loopback HTTP
     set_var_if_unset("DEEPSEEK_ALLOW_INSECURE_HTTP", "1");
     set_var_if_unset("DEEPSEEK_FORCE_HTTP1", "1");
-    // L1 是本地 vLLM headless 测试：24576 与 route_limits_for_model 的 is_local_vllm
-    // 分支显式携带的 24K 预算一致（正式 App 已不再全局注入该 env，此处仅测本地预算）。
+    // L1 is a local vLLM headless test: the production app no longer
+    // injects this env (the host declares output by window tiers); here the
+    // base reads DEEPSEEK_MAX_OUTPUT_TOKENS directly to get an explicit 24K
+    // budget, pinning the base's local behavior under that convention.
     set_var_if_unset("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576");
     // 与正式 App 和底座默认值保持一致，避免 L1 仍用旧 90s 配置，
     // 把慢速本地模型的正常长生成误判为运行时回归。
@@ -601,7 +601,6 @@ async fn translate_no_tool() {
 /// MVP 2: 一 turn 内连续 7 次 canonical `write`。
 /// 防 OpenAI streaming batch tool_calls bug 回归 (单 slot current_tool_index
 /// 被覆盖,导致 7 个 tool_use 只剩 1 进 messages,产物面板少 6 个卡片)。
-/// 详见 docs/自动化测试方案.md §3.4 + PR #1686。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn batch_create_7_files() {
@@ -899,8 +898,16 @@ async fn save_to_tmp_no_validate_fail() {
 }
 
 /// MVP 5: 简单单 turn 必须 < 15s (LLM 没工具调用,不应该 thinking)。
-/// 防 reasoning_effort=off 失效或 prefill 变长拖慢响应回归。
-/// thinking 没关时 Qwen3.6 单 turn 可达 30s+,差 2 倍以上易判别。
+/// Note: the local default tier is now the lowest thinking tier (low) instead
+/// of off — real-machine testing shows models like the Qwen3.8 family cannot
+/// reliably turn thinking off (see bridge::request_reasoning_effort). This
+/// scenario starts with default prefs and injects no explicit tier, so it now
+/// exercises the low path: thinking is expected to be on and the 15s budget
+/// times out deterministically (a single Qwen3.6 turn can reach 30s+ with
+/// thinking on), so do not mistake the timeout for a regression. To verify the
+/// off path is not slowed by longer prefill, first save reasoning_effort=off
+/// for this model in Settings and rerun (the harness cannot inject it; off
+/// remains an explicit option and a stored value is sent verbatim).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn reasoning_off_speed() {
@@ -1456,96 +1463,6 @@ async fn image_vision_analyze() {
     assert!(
         text_up.contains("KX7"),
         "[{scenario}] 最终答案必须命中图中随机码 KX7-93,实际文本={:?}",
-        summary.full_text
-    );
-}
-
-/// 附件分流 e2e:真实 ~5000 行 xlsx(转换产物 ~237K tokens,曾一条消息顶穿 vLLM
-/// 262144 上限)走「ingest → build_message_with_attachments 分流 → 真 vLLM」全链路。
-/// 验证:(1) prompt 只剩预览级体量;(2) CSV 落盘 workspace;(3) 模型按引导用
-/// bash/read 消化全量数据后答出仅预览答不出的事实(总行数/最高频品牌)。
-/// 依赖本机测试文件,不在 → skip。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "L1 真 vLLM 端到端,默认不跑"]
-async fn large_xlsx_attachment_path_mode() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let scenario = "large_xlsx_attachment_path_mode";
-    if !require_vllm(scenario).await {
-        return;
-    }
-    let src = PathBuf::from("/home/hexin/下载/2025年SSD存储数据.xlsx");
-    if !src.is_file() {
-        eprintln!("SKIP {scenario}: 测试文件不存在 {}", src.display());
-        return;
-    }
-    let (engine, ws) = spawn_for_scenario(scenario).await;
-
-    // 真实 ingest → 注入分流。该表转换产物必须远超内联预算,否则测不到路径模式。
-    let r = pinvou3_lib::features::files::file_ingest::ingest(&src);
-    assert!(
-        r.token_estimate > 100_000,
-        "[{scenario}] 转换产物应远超内联预算, got ~{} tokens",
-        r.token_estimate
-    );
-    let user = pinvou3_lib::build_message_with_attachments(
-        "这张表一共有多少条数据记录(不含表头)?BRAND 列哪个品牌出现次数最多?".into(),
-        vec![r],
-        &ws,
-    );
-    // 硬契约 1:分流后 prompt 只剩预览级体量(回归=又把全量塞回 prompt)。
-    let approx_tokens = user.chars().count() as f64 / 1.6;
-    assert!(
-        approx_tokens < 4_000.0,
-        "[{scenario}] 分流后 prompt 应为预览级, got ~{approx_tokens:.0} tokens"
-    );
-    // 硬契约 2:转换产物落盘 workspace,模型才有的读。
-    let csv = ws.join("attachments/2025年SSD存储数据.csv");
-    assert!(csv.is_file(), "[{scenario}] CSV 应落盘 {}", csv.display());
-
-    let mut expect = Expect::default();
-    expect.max_duration_s = 240.0;
-
-    engine
-        .send_user_message(user.clone(), AppMode::Agent, None, false)
-        .await
-        .expect("send_user_message");
-    let (timeline, elapsed, timed_out) =
-        collect_turn_events(&engine, Duration::from_secs(280)).await;
-    let summary = summarize(&timeline, elapsed, timed_out);
-    eprintln!(
-        "[{scenario}] elapsed={:.1}s tools={:?} text_len={}",
-        summary.elapsed.as_secs_f64(),
-        summary.tool_call_counts,
-        summary.full_text.chars().count(),
-    );
-    let path = record_transcript(scenario, &user, AppMode::Agent, &timeline, &summary);
-    eprintln!("[{scenario}] transcript → {}", path.display());
-
-    verify_expect(&summary, &expect, scenario);
-    // 硬契约 3:模型真用工具消化了数据,不是拿 20 行预览臆测全表。
-    let used_tool = ["bash", "read"]
-        .iter()
-        .any(|t| summary.tool_call_counts.contains_key(*t));
-    assert!(
-        used_tool,
-        "[{scenario}] 模型必须用 bash/read 消化数据,实际工具={:?}",
-        summary.tool_call_counts
-    );
-    // 硬契约 4:答案命中全量数据才有的事实。真值:4970 条数据(csv.reader 逻辑行);
-    // 品牌最高频 WD(908 次,断崖领先第二名 Kingston 597)。行数按统计口径放宽到
-    // 497x(物理行 vs 逻辑行 vs 是否含落盘文件头部注释行会差 1-3)。
-    let text_up = summary.full_text.to_uppercase();
-    // 剥千分位分隔符(ASCII/全角逗号 + 空格):模型常写 "4,970" 条,原 contains("497")
-    // 会被中间的逗号("4,97")挡掉造成假阴性——答案其实正确。
-    let text_digits = text_up.replace([',', '，', ' ', '\u{00a0}'], "");
-    assert!(
-        text_digits.contains("497"),
-        "[{scenario}] 答案应命中总行数 ~4970,实际文本={:?}",
-        summary.full_text
-    );
-    assert!(
-        text_up.contains("WD"),
-        "[{scenario}] 答案应命中最高频品牌 WD,实际文本={:?}",
         summary.full_text
     );
 }

@@ -1,8 +1,6 @@
 // Baseline polyfills for Safari 14.0 (WKWebView of the first macOS 11 release).
-// Loaded synchronously as a classic script before tailwind.js in every window
-// entry (index/pet/reader): this covers both the vendored Tailwind runtime
-// (postcss uses .at() internally) and every module chunk that runs after it
-// (bundlers downlevel syntax, not runtime APIs).
+// Loaded synchronously as a classic script before application code in every
+// window entry (index/pet/reader). Bundlers downlevel syntax, not runtime APIs.
 // Everything is feature-detected: zero overhead on modern engines, which keep
 // the native implementations.
 (function () {

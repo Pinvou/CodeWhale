@@ -28,8 +28,8 @@ use super::types::{
     normalize_work_context_topic,
 };
 use super::util::{
-    clean_id, clean_text, looks_completed_work_status, looks_recent_work_status, looks_sensitive,
-    looks_sensitive_or_task_like, looks_task_like,
+    clean_id, clean_text, contains_memory_block_marker, looks_completed_work_status,
+    looks_sensitive, validate_memory_content,
 };
 
 const LLM_REVIEW_TIMEOUT: StdDuration = StdDuration::from_secs(75);
@@ -423,7 +423,7 @@ const REMEMBER_REQUEST_PHRASES_ASCII: [&str; 4] = [
 /// Wider status/context words that only suggest the turn may contain memorable
 /// content: they trigger a per-turn review but carry no relaxed write
 /// consequences.
-const REVIEW_STATUS_HINT_PHRASES_CJK: [&str; 31] = [
+const REVIEW_STATUS_HINT_PHRASES_CJK: [&str; 27] = [
     "以后",
     "之后",
     "叫我",
@@ -443,16 +443,12 @@ const REVIEW_STATUS_HINT_PHRASES_CJK: [&str; 31] = [
     "经常",
     "负责",
     "参与",
-    "最近在",
     "最近",
     "这周",
-    "这周在",
     "本周",
-    "本周在",
     "目前在",
     "主要在",
     "正在",
-    "最近主要",
     "后面还",
     "继续",
 ];
@@ -568,8 +564,9 @@ pub(super) fn assistant_suggests_delivery_complete(user: &str, assistant: &str) 
 /// `label` ("review" / "organize") only feeds the error-context strings. A
 /// `finish_reason: "length"` response is reported as truncation instead of
 /// surfacing downstream as a confusing JSON parse error. The Anthropic branch
-/// cannot do this: `post_anthropic_messages` does not expose stop_reason, so a
-/// truncated response there still fails as a parse error.
+/// keeps its pre-fix behavior (a truncated response still fails as a parse
+/// error) and only logs stop_reason, now that post_anthropic_messages exposes
+/// it — making it an error here would change memory outcomes, out of scope.
 pub(super) async fn send_memory_llm_request(
     bridge: &(impl MemoryReviewModel + ?Sized),
     label: &str,
@@ -605,7 +602,7 @@ pub(super) async fn send_memory_llm_request(
     // The official Anthropic endpoint uses a native Messages protocol direct
     // call (x-api-key auth, standalone system field, no response_format).
     if preset == ModelPreset::Anthropic {
-        return crate::core::model_endpoint::post_anthropic_messages(
+        let completion = crate::core::model_endpoint::post_anthropic_messages(
             &client,
             &base_url,
             &bridge.memory_api_key(),
@@ -614,7 +611,14 @@ pub(super) async fn send_memory_llm_request(
             user_content,
             max_tokens,
         )
-        .await;
+        .await?;
+        if completion.stop_reason.as_deref() == Some("max_tokens") {
+            log::debug!(
+                "[memory {label}] anthropic response truncated (stop_reason=max_tokens); \
+                 kept as-is, it will surface through the JSON parse path"
+            );
+        }
+        return Ok(completion.text);
     }
     let mut body = json!({
         "model": model_name,
@@ -781,7 +785,6 @@ pub(super) fn apply_llm_memory_review(
                 &suggestion.content,
                 &suggestion.source,
                 decision.ttl_days,
-                decision.confidence,
             ) {
                 Ok(item) => outcome.events.push(MemoryWriteEvent {
                     kind: item.kind,
@@ -849,9 +852,24 @@ pub(super) fn sanitize_llm_memory_item(
         _ => "preference".to_string(),
     };
     let mut topic = clean_text(&raw.topic, 40);
-    let mut content = super::util::clean_candidate_sentence(&raw.content, 180);
+    // Per-store cap shared with the io write path (and the organize validator),
+    // matched by the pre-normalization kind: a candidate that passes here is
+    // stored verbatim instead of being silently truncated on write.
+    let content_cap = match kind.as_str() {
+        "preference" => io::PREFERENCE_TEXT_MAX_CHARS,
+        "work_context" => io::WORK_CONTEXT_TEXT_MAX_CHARS,
+        _ => io::TIMED_TEXT_MAX_CHARS,
+    };
+    let mut content = super::util::clean_candidate_sentence(&raw.content, content_cap);
     let _reason = clean_text(&raw.reason, 120);
     if content.is_empty() || looks_sensitive(&content) {
+        return None;
+    }
+    // Memory-block markers are the render layer's structural boundary (the
+    // <pinvou_user_memory> block in render.rs): content carrying one could forge
+    // or prematurely close that boundary inside the runtime memory block — same
+    // drop policy as the organize validator.
+    if contains_memory_block_marker(&content) {
         return None;
     }
     if raw_kind == "recent_work" {
@@ -889,18 +907,18 @@ pub(super) fn sanitize_llm_memory_item(
             return None;
         }
     } else if matches!(kind.as_str(), "current_focus" | "recent_activity") {
-        if looks_task_like(&content) && !looks_recent_work_status(&content) {
+        if !validate_memory_content(&kind, &content) {
             return None;
         }
         topic = normalize_timed_memory_topic(&kind, &topic);
     } else if kind == "work_context" {
-        if content.chars().count() < 8 {
+        if !validate_memory_content(&kind, &content) {
             return None;
         }
         topic = normalize_work_context_topic(&topic);
     } else {
         kind = "preference".to_string();
-        if looks_sensitive_or_task_like(&content) || content.chars().count() < 6 {
+        if !validate_memory_content(&kind, &content) {
             return None;
         }
         topic = normalize_preference_topic(&topic);
@@ -1053,13 +1071,10 @@ fn memory_review_reasoning_dialect(
                 MemoryReviewReasoningDialect::None
             }
         }
-        ModelPreset::OpenaiCompatible
-        | ModelPreset::LocalVllm
-        | ModelPreset::Deepseek
-        | ModelPreset::Openai
-        | ModelPreset::Anthropic
-        | ModelPreset::Gemini
-        | ModelPreset::Xai => {
+        // LocalVllm / Deepseek never reach this fallback (both presets are
+        // intercepted by the preceding `provider`/`preset` ifs), so the
+        // remaining presets share the URL-sniff fallback below.
+        _ => {
             // 先取共享的 URL sniff 结果;若 URL 无法识别厂商,回退到 model 名匹配
             // (保留原 memory 的 model.contains 回退,覆盖自定义 OpenAI 兼容端点)。
             let d = reasoning_dialect_from_base_url(base_url, model);
@@ -1075,95 +1090,4 @@ fn memory_review_reasoning_dialect(
             d.into()
         }
     }
-}
-
-pub(super) fn discover_turn_suggestions(user: &str) -> Vec<MemorySuggestion> {
-    let text = clean_text(user, 500);
-    if text.is_empty() || looks_sensitive(&text) {
-        return Vec::new();
-    }
-
-    let clauses: Vec<String> = text
-        .split(['。', '！', '？', '；', ';', '\n'])
-        .map(|s| clean_text(s, 160))
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let mut out = Vec::new();
-    for clause in clauses {
-        if let Some(content) = preference_candidate_text(&clause) {
-            out.push(MemorySuggestion {
-                kind: "preference".to_string(),
-                topic: "output_preference".to_string(),
-                content,
-                source: "auto_review".to_string(),
-            });
-            continue;
-        }
-        if let Some(content) = recent_work_candidate_text(&clause) {
-            out.push(MemorySuggestion {
-                kind: "recent_work".to_string(),
-                topic: "current_work".to_string(),
-                content,
-                source: "auto_review".to_string(),
-            });
-        }
-    }
-    out
-}
-
-fn preference_candidate_text(clause: &str) -> Option<String> {
-    let has_trigger = [
-        "我喜欢",
-        "我不喜欢",
-        "我偏好",
-        "我的习惯",
-        "以后回答",
-        "以后默认",
-        "以后都",
-        "每次都",
-        "尽量",
-        "不要太",
-        "别太",
-        "默认用",
-        "优先用",
-    ]
-    .iter()
-    .any(|needle| clause.contains(needle));
-    if !has_trigger || looks_sensitive_or_task_like(clause) {
-        return None;
-    }
-    let content = super::util::clean_candidate_sentence(clause, 80);
-    if content.chars().count() < 6 {
-        return None;
-    }
-    Some(content)
-}
-
-fn recent_work_candidate_text(clause: &str) -> Option<String> {
-    let has_time_trigger = [
-        "最近在",
-        "这周在",
-        "本周在",
-        "目前在",
-        "正在",
-        "继续",
-        "上次那个",
-        "最近主要",
-    ]
-    .iter()
-    .any(|needle| clause.contains(needle));
-    let has_work_noun = [
-        "项目", "材料", "报告", "PPT", "方案", "文档", "工作", "任务", "周报", "汇报",
-    ]
-    .iter()
-    .any(|needle| clause.contains(needle));
-    if !has_time_trigger || !has_work_noun || looks_sensitive(clause) {
-        return None;
-    }
-    let content = super::util::clean_candidate_sentence(clause, 60);
-    if content.chars().count() < 6 {
-        return None;
-    }
-    Some(content)
 }

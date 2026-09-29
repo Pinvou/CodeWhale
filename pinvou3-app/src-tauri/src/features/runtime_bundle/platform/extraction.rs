@@ -286,19 +286,16 @@ impl Pinvou3Bundle {
         // deleting legacy plaintext before it has been copied into the credential store.
         crate::platform::startup::mark("bundle_extract:write_mcp_servers:start");
         self.write_mcp_servers(mcp_secret_migration_ok)?;
-        // Existing Python MCP entries may still launch server.py directly without the managed
-        // dependency environment. Repair or atomically downgrade them before any engine reads
-        // mcp.json, leaving a stable install target for the UI to retry.
-        let repair_errors = repair_python_tools(marketplace).map_err(std::io::Error::other)?;
-        for error in repair_errors {
-            // The packaged Windows GUI has no stderr; the log is the only way users see downgrade/retry outcomes.
-            log::warn!("[pinvou3-app] {error}");
-        }
-        // mcp.json merge:每次启动 upsert 内置 pinvou server,保留 marketplace 条目。
-        // 不受 VERSION gate 限制——marketplace 安装可能在任何时候发生。启动自愈(刷新
-        // 陈旧的本地 python server command)也在同一次调用里完成,两者共享一次读盘
-        // +parse;必须在引擎 spawn 前跑(引擎从 mcp.json 拉起 server)。
-        self.ensure_builtin_mcp_servers()?;
+        // Reconcile → Python repair → builtin upsert, in that order; see
+        // `run_mcp_startup_maintenance` for why the order is load-bearing.
+        // Coverage boundary: tests pin the order and the corrupt-file gate
+        // *inside* `run_mcp_startup_maintenance`
+        // (`startup_maintenance_restores_missing_entry_before_python_repair`,
+        // `startup_maintenance_preserves_corrupt_mcp_json_bytes`); this call
+        // site itself is driven end to end by
+        // `ensure_extracted_preserves_corrupt_mcp_json_bytes`, which runs the
+        // real boot chain including the retired-tool cleanup that precedes it.
+        self.run_mcp_startup_maintenance(marketplace, repair_python_tools)?;
         crate::platform::startup::mark("bundle_extract:write_mcp_servers:done");
 
         if !bundle_changed {
@@ -354,6 +351,89 @@ impl Pinvou3Bundle {
             BUNDLE_VERSION
         );
         Ok(())
+    }
+
+    /// MCP startup maintenance, in a fixed order: reconcile the marketplace
+    /// registry into mcp.json first (the managed-runtime patch fails while an
+    /// entry is missing entirely, so restoring missing/dead entries first lets
+    /// one startup converge to the managed form), then the Python repair
+    /// (upgrades a restored entry to the managed-runtime form before any engine
+    /// reads mcp.json), then the builtin-server upsert. Engine-owned keys
+    /// (pinvou3/pinvou/browser — see `ENGINE_OWNED_MCP_SERVER_KEYS`) are skipped
+    /// by the reconcile, and `ensure_builtin_mcp_servers` re-asserts them
+    /// afterwards; note it also runs `refresh_mcp_python_commands`, which may
+    /// rewrite the python command of any stale entry — a complementary self-heal
+    /// outside the key-set footprint.
+    ///
+    /// A corrupt mcp.json is preserved for the whole boot: the reconcile backs
+    /// it up and returns early, and the builtin upsert below is skipped (its
+    /// repair loader would reset the file to a builtin-only skeleton). Sessions
+    /// degrade to an empty MCP pool rather than fail, and the recovery path is
+    /// the backup plus the timeline note. Pinned end to end by
+    /// `startup_maintenance_preserves_corrupt_mcp_json_bytes`.
+    ///
+    /// The ordering and the reconcile call itself are load-bearing and pinned by
+    /// `startup_maintenance_restores_missing_entry_before_python_repair`:
+    /// deleting the reconcile call, or moving it after the repair, fails that
+    /// test. Reconcile actions go through the startup timeline: release builds
+    /// register no log sink, so `log::info!` alone would leave the outcomes
+    /// invisible. Reconcile failures never block startup; the repair closure's
+    /// integrity result and the builtin upsert's structural errors propagate to
+    /// the caller, which treats them like any other extraction failure.
+    pub(super) fn run_mcp_startup_maintenance<S, F>(
+        &self,
+        marketplace: &crate::features::marketplace::MarketplaceManager<S>,
+        repair_python_tools: F,
+    ) -> std::io::Result<Vec<String>>
+    where
+        S: crate::platform::credential_store::CredentialStore,
+        F: FnOnce(
+            &crate::features::marketplace::MarketplaceManager<S>,
+        ) -> Result<Vec<String>, String>,
+    {
+        let reconcile_actions = match marketplace.reconcile_installed_mcp_entries() {
+            Ok(actions) => actions,
+            Err(error) => {
+                log::warn!("[pinvou3-app] mcp.json reconcile failed (non-blocking): {error}");
+                crate::platform::startup::mark_with_detail("rust", "mcp_reconcile:failed", &error);
+                Vec::new()
+            }
+        };
+        for action in &reconcile_actions {
+            log::info!("[pinvou3-app] mcp.json reconcile: {action}");
+            crate::platform::startup::mark_with_detail("rust", "mcp_reconcile", action);
+        }
+        // Existing Python MCP entries may still launch server.py directly without the managed
+        // dependency environment. Repair or atomically downgrade them before any engine reads
+        // mcp.json, leaving a stable install target for the UI to retry.
+        let repair_errors = repair_python_tools(marketplace).map_err(std::io::Error::other)?;
+        for error in repair_errors {
+            // The packaged Windows GUI has no stderr; the log is the only way users see downgrade/retry outcomes.
+            log::warn!("[pinvou3-app] {error}");
+        }
+        // mcp.json merge:每次启动 upsert 内置 pinvou server,保留 marketplace 条目。
+        // 不受 VERSION gate 限制——marketplace 安装可能在任何时候发生。启动自愈(刷新
+        // 陈旧的本地 python server command)也在同一次调用里完成,两者共享一次读盘
+        // +parse;必须在引擎 spawn 前跑(引擎从 mcp.json 拉起 server)。
+        // 损坏文件例外:reconcile 刚刚备份过的坏文件绝不能在这里被 repair loader
+        // 重置成 builtin-only 骨架——那会毁掉备份刚保护下来的自定义条目。跳过本次
+        // upsert(引擎对解析失败降级为空 MCP 池,会话不受阻),恢复路径 = 备份 +
+        // timeline 提示。检测独立于 reconcile 的返回值:即使 reconcile 因其它原因
+        // 提前失败,这条防线依然挡住对坏文件的重写。
+        if crate::features::marketplace::mcp_json_unparseable() {
+            let note = "mcp.json is unparseable; builtin MCP upsert skipped this boot to \
+                        preserve the backed-up original — fix or delete the file to restore \
+                        MCP servers";
+            log::warn!("[pinvou3-app] {note}");
+            crate::platform::startup::mark_with_detail("rust", "mcp_builtin_skip", note);
+        } else {
+            // 本函数对 mcp.json 的读-改-写绕过 connectors 写入器(不带内建锁),
+            // 与并发安装/卸载的写入器互斥由这把锁补齐;boot 链此处无外层持锁,
+            // 函数体内也无嵌套取锁,直接取即可。
+            let _guard = crate::features::marketplace::mcp_json_lock();
+            self.ensure_builtin_mcp_servers()?;
+        }
+        Ok(reconcile_actions)
     }
 
     /// 清理已下线内置 skills 的残留目录(被 ensure_extracted 在 VERSION check 前
@@ -435,21 +515,43 @@ impl Pinvou3Bundle {
                 .unwrap_or(true);
             if !user_uploaded {
                 // 廉价残留探测:所有清理面都干净时直接返回——uninstall 会无条件重写
-                // installed.json / mcp.json 并访问系统 keyring,不值得每次启动都实例化
-                // MarketplaceManager 跑一遍。探测只读私有布局文件,不实例化管理器;
-                // BundleStore 记录的读取开销与探测同量级,保护判定前置不亏。
+                // installed.json / mcp.json(manifest 声明 secret_targets 时还会清
+                // 系统 keyring),不值得每次启动都实例化 MarketplaceManager 跑一遍。
+                // 探测只读私有布局文件,不实例化管理器;BundleStore 记录的读取开销
+                // 与探测同量级,保护判定前置不亏。
                 if !Self::marketplace_tool_residue_present(tool_id) {
                     return Ok(());
                 }
-                let _ = crate::features::marketplace::MarketplaceManager::new().uninstall(tool_id);
-                let mut disabled = crate::features::marketplace::load_disabled_connectors();
-                let before = disabled.len();
-                disabled.retain(|id| id != tool_id);
-                if disabled.len() != before {
-                    crate::features::marketplace::save_disabled_connectors(&disabled);
+                // 卸载失败(如今最常见的是损坏 mcp.json 拒绝写入器)必须留日志:
+                // 此前 `let _ =` 无声吞掉,损坏窗口内每个启动都静默复发。
+                let uninstall_error = crate::features::marketplace::MarketplaceManager::new()
+                    .uninstall(tool_id)
+                    .err();
+                // 禁用/隐藏残留统一走 scope 模块的单临界区 RMW 助手:一次
+                // DISABLED_BUNDLES_FILE_LOCK 内 load→retain→条件 save(#455 收敛范式),
+                // plain + code 所有 scope 的 disabled/hidden 两套集合一并清理。此前
+                // plain 走「load → 内存 retain → 条件 save」两段独立取锁的临界区,
+                // 两段之间并发写方的更新会被旧快照整表覆盖(#522,与 #455 修复的 M-6b
+                // 两段式同型)。uninstall 成功时其内部清理已覆盖本步,这次幂等复扫是
+                // 纵深防御;回滚时本步是唯一清理面,不可省——该残留不在事务快照内,
+                // 留着会让未来同名重装被误隐藏(#522)。
+                crate::features::marketplace::scope::remove_bundle_from_disabled_scopes(tool_id);
+                if let Some(error) = uninstall_error {
+                    // 回滚说明工具仍登记在册:目录删除随之跳过,不销毁在册工具的
+                    // 包目录;登记与目录都是残留探测面,下次启动会重试整套清理。
+                    // 打包版 Windows GUI 无 stderr:timeline 是用户能看到这条
+                    // 推迟的唯一渠道(与 reconcile 失败的上报同一范式)。
+                    log::warn!(
+                        "[cleanup] retired tool '{tool_id}' uninstall deferred: {error}; \
+                         retrying on the next startup"
+                    );
+                    crate::platform::startup::mark_with_detail(
+                        "rust",
+                        "retired_tool_cleanup:deferred",
+                        &error,
+                    );
+                    return Ok(());
                 }
-                // 代码会话的 code scope 同样清理残留。
-                crate::features::marketplace::remove_connector_from_disabled_scopes(tool_id);
 
                 let _ = std::fs::remove_dir_all(paths::bundle_mcp_servers_dir().join(tool_id));
                 // 按包聚合新布局的退役残留：`migrate_custom_mcp_layout` 会先把旧目录
@@ -463,10 +565,10 @@ impl Pinvou3Bundle {
     }
 
     /// 探测已下架 marketplace 工具是否还有任何残留清理面:安装目录、installed.json、
-    /// 禁用列表落盘、mcp.json server 条目。全干净 → false(调用方据此跳过
-    /// MarketplaceManager 实例化 + uninstall)。installed.json 与
-    /// disabled_connectors.json 是 marketplace 模块的私有布局,这里按其落盘路径直读做
-    /// contains 级探测——宁可误报(多跑一次幂等清理)也不漏报(残留永驻)。
+    /// 禁用/隐藏列表落盘、mcp.json server 条目。全干净 → false(调用方据此跳过
+    /// MarketplaceManager 实例化 + uninstall)。installed.json 与禁用集落盘是
+    /// marketplace 模块的私有布局,这里按其落盘路径直读做 contains 级探测——宁可
+    /// 误报(多跑一次幂等清理)也不漏报(残留永驻)。
     fn marketplace_tool_residue_present(tool_id: &str) -> bool {
         if paths::bundle_mcp_servers_dir().join(tool_id).exists() {
             return true;
@@ -478,9 +580,15 @@ impl Pinvou3Bundle {
         }
         let home = paths::pinvou3_home();
         // installed.json = ~/.pinvou3/marketplace/installed.json(镜像 MarketplaceManager
-        // 私有 installed_file 布局);disabled_connectors.json 覆盖 plain + 所有 code scope
-        // 的禁用集(镜像 marketplace::disabled_connectors_path 布局)。
-        for probe in ["marketplace/installed.json", "disabled_connectors.json"] {
+        // 私有 installed_file 布局)。禁用/隐藏残留的落盘真相源是 scope 收敛后的单一
+        // disabled_bundles.json(plain + 所有 scope 的 disabled/hidden 集,镜像
+        // marketplace::scope 私有布局);漏掉它会把「仅禁用/隐藏集有残留」的退役工具
+        // 误判干净、跳过清理,陈旧条目继续误隐藏未来同名重装(#522)。旧布局
+        // disabled_connectors.json 不探测:首个 scope 读路径「读到即迁移」把其内容
+        // 并进统一文件,此后它只剩死数据(uninstall 与 scope 写方都不再碰它),探测
+        // 死数据只会对已迁移用户产生永不收敛的误报;同样的残留最晚由统一文件面在
+        // 下一次启动收敛。
+        for probe in ["marketplace/installed.json", "disabled_bundles.json"] {
             let path = home.join(probe);
             if !path.exists() {
                 continue; // 文件不存在 = 该清理面本就干净,不算误报
@@ -496,8 +604,8 @@ impl Pinvou3Bundle {
                 Err(_) => return true,
             }
         }
-        // mcp.json 按结构探测:server key 存在即残留;坏 json 保守视为有残留,交给
-        // uninstall 走重建路径。
+        // mcp.json 按结构探测:server key 存在即残留;坏 json 保守视为有残留——
+        // uninstall 会在写入器处拒绝并整体回滚,清理推迟到文件修复后的下次启动。
         if !paths::mcp_config_path().is_file() {
             return false;
         }
@@ -652,81 +760,116 @@ impl Pinvou3Bundle {
         paths::bundles_root().join(id).join("skills")
     }
 
-    pub fn apply_feishu_skills(&self, show: bool) -> std::io::Result<()> {
-        let target = Self::connector_package_skills_dir("feishu");
+    /// CLI 连接器域技能门控的公共实现:`show` → 解包内嵌技能目录到
+    /// `bundles/<id>/skills/`;否则**删掉**技能目录 + NOTICE。幂等(删不存在
+    /// 的目录不报错)。可见性 = 目录在不在,引擎重刷系统提示时重扫即生效。
+    /// {feishu,wecom,dingtalk,tmeet} 四个 `apply_*_skills` 原本逐字重复
+    /// (仅内嵌目录 / 目录表 / NOTICE 文件名不同),收编为表驱动助手。
+    fn apply_connector_skills(
+        connector_id: &str,
+        embedded_dir: &Dir<'_>,
+        skill_dirs: &[&str],
+        notice_file: &str,
+        show: bool,
+    ) -> std::io::Result<()> {
+        let target = Self::connector_package_skills_dir(connector_id);
         if show {
-            Self::extract_dir(&LARK_SKILLS_DIR, &target)?;
+            Self::extract_dir(embedded_dir, &target)?;
         } else {
-            for d in LARK_SKILL_DIRS {
+            for d in skill_dirs {
                 let _ = std::fs::remove_dir_all(target.join(d));
             }
-            let _ = std::fs::remove_file(target.join("NOTICE.md"));
+            let _ = std::fs::remove_file(target.join(notice_file));
         }
         Ok(())
     }
-    /// 启动缓存只在 9 个飞书域技能全部完整落盘时判 visible，避免上次异常中断留下
-    /// 半套目录却被 SkillRegistry 当成已连接。实时真相在首屏后的 CLI 探测中刷新。
-    pub(super) fn cached_feishu_skills_visible(&self) -> bool {
-        let target = Self::connector_package_skills_dir("feishu");
-        crate::platform::connector_state::feishu_skills_visible()
-            && LARK_SKILL_DIRS
+
+    /// 启动缓存的公共判定:启动缓存状态 + 连接器技能目录**全部完整落盘**才判
+    /// visible,避免上次异常中断留下半套目录却被 SkillRegistry 当成已连接。
+    /// 实时真相在首屏后的 CLI 探测中刷新。
+    fn cached_connector_skills_visible(
+        &self,
+        connector_id: &str,
+        skill_dirs: &[&str],
+        state_fn: impl Fn() -> bool,
+    ) -> bool {
+        let target = Self::connector_package_skills_dir(connector_id);
+        state_fn()
+            && skill_dirs
                 .iter()
                 .all(|dir| target.join(dir).join("SKILL.md").is_file())
     }
 
+    /// 飞书域技能门控:`show` → 解包 9 个 lark 技能到包目录;否则**删掉**它们(+ NOTICE.md)。
+    /// `LARK_SKILLS_DIR` 的根对应包内 `skills/`,内含 `lark-<域>/SKILL.md` + `references/`,
+    /// 直接铺到目标——引擎 `SkillRegistry` 扫该目录的每个含 `SKILL.md` 的子目录。
+    /// (顶层散落的 NOTICE.md 不含 SKILL.md,会被注册表忽略。)
+    pub fn apply_feishu_skills(&self, show: bool) -> std::io::Result<()> {
+        Self::apply_connector_skills(
+            "feishu",
+            &LARK_SKILLS_DIR,
+            &LARK_SKILL_DIRS,
+            "NOTICE.md",
+            show,
+        )
+    }
+    /// 启动缓存只在 9 个飞书域技能全部完整落盘时判 visible，避免上次异常中断留下
+    /// 半套目录却被 SkillRegistry 当成已连接。实时真相在首屏后的 CLI 探测中刷新。
+    pub(super) fn cached_feishu_skills_visible(&self) -> bool {
+        self.cached_connector_skills_visible(
+            "feishu",
+            &LARK_SKILL_DIRS,
+            crate::platform::connector_state::feishu_skills_visible,
+        )
+    }
+
     /// 企微域技能门控:`show` → 解包 14 个 wecomcli 技能到包目录;否则**删掉**它们。
     /// 幂等。与飞书门控正交(各自的连接 / 停用状态独立)。
-    /// 注:`WECOM_SKILLS_DIR` 根 = `wecom-skills/`,内含 `wecomcli-<域>/SKILL.md`(+ NOTICE.md);
+    /// 注:`WECOM_SKILLS_DIR` 根 = `wecom-skills/`,内含 `wecomcli-<域>/SKILL.md`;
     /// 直接铺到 `bundles/wecom/skills/`,引擎 `SkillRegistry` 扫每个含 `SKILL.md` 的子目录。
     /// 出处声明用 `NOTICE-wecom.md`(避开飞书的 `NOTICE.md`,两者解包到同一 skills_dir
-    /// 不会互相覆盖)。隐藏时一并删掉。0.1.9 时代的旧目录(服务改名前)无论显示与否
-    /// 都清掉,防残留技能教已死的命令(`msg`/`schedule`)。
+    /// 不会互相覆盖)。
     pub fn apply_wecom_skills(&self, show: bool) -> std::io::Result<()> {
-        let target = Self::connector_package_skills_dir("wecom");
-        // 0.1.9 时代的旧目录（服务改名前）在旧扁平布局下清理，无论显示与否。
+        // 0.1.9 时代的旧目录（服务改名前）在旧扁平布局下清理，无论显示与否，
+        // 防残留技能教已死的命令(`msg`/`schedule`)。
         for d in WECOM_LEGACY_SKILL_DIRS {
             let _ = std::fs::remove_dir_all(self.skills_dir.join(d));
         }
-        if show {
-            Self::extract_dir(&WECOM_SKILLS_DIR, &target)?;
-        } else {
-            for d in WECOM_SKILL_DIRS {
-                let _ = std::fs::remove_dir_all(target.join(d));
-            }
-            let _ = std::fs::remove_file(target.join("NOTICE-wecom.md"));
-        }
-        Ok(())
+        Self::apply_connector_skills(
+            "wecom",
+            &WECOM_SKILLS_DIR,
+            &WECOM_SKILL_DIRS,
+            "NOTICE-wecom.md",
+            show,
+        )
     }
     /// 同 [`cached_feishu_skills_visible`]，以完整的企微技能目录作为启动缓存。
     pub(super) fn cached_wecom_skills_visible(&self) -> bool {
-        let target = Self::connector_package_skills_dir("wecom");
-        crate::platform::connector_state::wecom_skills_visible()
-            && WECOM_SKILL_DIRS
-                .iter()
-                .all(|dir| target.join(dir).join("SKILL.md").is_file())
+        self.cached_connector_skills_visible(
+            "wecom",
+            &WECOM_SKILL_DIRS,
+            crate::platform::connector_state::wecom_skills_visible,
+        )
     }
 
     /// 钉钉 mono skill 门控:`show` → 解包 `dws` 到包目录;否则删除。
     /// 出处声明用 `NOTICE-dingtalk.md`,避免覆盖飞书 / 企微的 NOTICE。
     pub fn apply_dingtalk_skills(&self, show: bool) -> std::io::Result<()> {
-        let target = Self::connector_package_skills_dir("dingtalk");
-        if show {
-            Self::extract_dir(&DINGTALK_SKILLS_DIR, &target)?;
-        } else {
-            for d in DINGTALK_SKILL_DIRS {
-                let _ = std::fs::remove_dir_all(target.join(d));
-            }
-            let _ = std::fs::remove_file(target.join("NOTICE-dingtalk.md"));
-        }
-        Ok(())
+        Self::apply_connector_skills(
+            "dingtalk",
+            &DINGTALK_SKILLS_DIR,
+            &DINGTALK_SKILL_DIRS,
+            "NOTICE-dingtalk.md",
+            show,
+        )
     }
     /// 同 [`cached_feishu_skills_visible`]，以完整的钉钉技能目录作为启动缓存。
     pub(super) fn cached_dingtalk_skills_visible(&self) -> bool {
-        let target = Self::connector_package_skills_dir("dingtalk");
-        crate::platform::connector_state::dingtalk_skills_visible()
-            && DINGTALK_SKILL_DIRS
-                .iter()
-                .all(|dir| target.join(dir).join("SKILL.md").is_file())
+        self.cached_connector_skills_visible(
+            "dingtalk",
+            &DINGTALK_SKILL_DIRS,
+            crate::platform::connector_state::dingtalk_skills_visible,
+        )
     }
 
     /// EIP 技能门控：连接时恢复包内 `SKILL.md`，未连接时隐藏技能但保留 CLI 二进制。
@@ -752,16 +895,13 @@ impl Pinvou3Bundle {
     /// 腾讯会议 mono skill 门控:`show` → 解包 `tmeet-skill` 到包目录;否则删除。
     /// 出处声明用 `NOTICE-tmeet.md`,避免覆盖其他 CLI 连接器 NOTICE。
     pub fn apply_tmeet_skills(&self, show: bool) -> std::io::Result<()> {
-        let target = Self::connector_package_skills_dir("tmeet");
-        if show {
-            Self::extract_dir(&TMEET_SKILLS_DIR, &target)?;
-        } else {
-            for d in TMEET_SKILL_DIRS {
-                let _ = std::fs::remove_dir_all(target.join(d));
-            }
-            let _ = std::fs::remove_file(target.join("NOTICE-tmeet.md"));
-        }
-        Ok(())
+        Self::apply_connector_skills(
+            "tmeet",
+            &TMEET_SKILLS_DIR,
+            &TMEET_SKILL_DIRS,
+            "NOTICE-tmeet.md",
+            show,
+        )
     }
     /// 知道技能门控：显示时刷新包内 `SKILL.md` 与 references，隐藏时保留 CLI 二进制。
     pub fn apply_zhidao_skill_visibility(&self, show: bool) -> std::io::Result<()> {
@@ -784,11 +924,11 @@ impl Pinvou3Bundle {
     }
     /// 同 [`cached_feishu_skills_visible`]，以完整的腾讯会议技能目录作为启动缓存。
     pub(super) fn cached_tmeet_skills_visible(&self) -> bool {
-        let target = Self::connector_package_skills_dir("tmeet");
-        crate::platform::connector_state::tmeet_skills_visible()
-            && TMEET_SKILL_DIRS
-                .iter()
-                .all(|dir| target.join(dir).join("SKILL.md").is_file())
+        self.cached_connector_skills_visible(
+            "tmeet",
+            &TMEET_SKILL_DIRS,
+            crate::platform::connector_state::tmeet_skills_visible,
+        )
     }
     /// 递归解包 `include_dir::Dir` 到磁盘目标路径。
     /// `root` 是磁盘目标根(对应 include_dir 的顶层),`dir` 可以是任意层级子目录。
@@ -827,12 +967,17 @@ impl Pinvou3Bundle {
     }
 
     /// mcp.json merge：upsert 内置 pinvou server，保留 marketplace 已安装的条目。
-    /// 每次启动都调用（不受 VERSION gate 限制）。
+    /// 每次启动都调用（不受 VERSION gate 限制）。启动维护链只会在 mcp.json 可解析
+    /// （或缺失）时调用本函数——损坏文件由 reconcile 备份并整轮保持原样，repair
+    /// loader 的空骨架重建因此只服务于直接调用方（测试、防御兜底），不再承担
+    /// 生产链路上的坏文件自愈；那个职责已让位给数据保全（备份 + 跳过重置）。
     pub(super) fn ensure_builtin_mcp_servers(&self) -> std::io::Result<()> {
         // mcp.json 只读 + parse 一次,upsert 与 python command 自愈共享(两段语义
         // 不同:前者修内置 server 条目,后者修 marketplace 条目的陈旧 python 路径;
-        // 合并的只是 IO,不是逻辑)。坏 json 由 load 层重建空骨架,保证内置 server
-        // 条目自愈恢复(parse 失败早期返回会让坏 mcp.json 永远修不好)。
+        // 合并的只是 IO,不是逻辑)。本函数的 repair loader 在坏 json 上仍会重建
+        // 空骨架,但唯一的生产调用方已由 `mcp_json_unparseable()` 先行门控(见
+        // run_mcp_startup_maintenance),坏文件根本走不到这里——骨架重建只剩
+        // 测试调用方,门控注释见本函数上方的调用点。
         let mut mcp = self.load_mcp_json_for_repair();
         let present_server = paths::bundle_present_artifact_server();
         // Both paths of load_mcp_json_for_repair return an object skeleton;
@@ -885,18 +1030,22 @@ impl Pinvou3Bundle {
             servers.remove("browser");
         }
         self.refresh_mcp_python_commands(&mut mcp, &python_cmd)?;
-        let json = serde_json::to_string_pretty(&mcp).map_err(std::io::Error::other)?;
         // 写回前与现有文件比对:内容一致则跳过写盘(避免每次启动重写 mcp.json)。
+        // 原子落盘复用 marketplace 的共享写方(write_json_pretty → write_atomic,
+        // tmp+rename):裸写被崩溃打断会制造出启动维护防御的损坏文件本身。
+        let json = serde_json::to_string_pretty(&mcp).map_err(std::io::Error::other)?;
         if std::fs::read_to_string(&self.mcp_json).is_ok_and(|existing| existing == json) {
             return Ok(());
         }
-        std::fs::write(&self.mcp_json, json)
+        crate::features::marketplace::write_json_pretty(&self.mcp_json, &mcp)
+            .map_err(std::io::Error::other)
     }
 
     /// 读 + parse mcp.json 供启动自愈路径复用:文件缺失给空骨架;坏 json 同样重建
-    /// 空骨架(`{"servers":{}}`)——自愈路径的职责就是把内置 server 条目修回来,
-    /// 坏文件若原样放过,present_artifact 会永久失效。代价是丢弃坏文件里可能
-    /// 残留的 marketplace 条目,可接受:坏 json 本就无法被引擎消费。
+    /// 空骨架(`{"servers":{}}`)。生产启动维护链不会在文件损坏时调用本函数
+    /// (`run_mcp_startup_maintenance` 以 `mcp_json_unparseable` 把整个 upsert 挡在
+    /// 备份过的坏文件之外),这条重建路径只覆盖直接调用方与防御兜底;数据保全
+    /// (备份 + 整轮保持原样)优先于坏文件自动重置。
     fn load_mcp_json_for_repair(&self) -> serde_json::Value {
         if !self.mcp_json.is_file() {
             return serde_json::json!({"servers": {}});
@@ -1593,5 +1742,502 @@ mod tests {
         // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
         unsafe { std::env::remove_var("PINVOU3_HOME") };
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Startup-maintenance wiring: the reconcile must actually run, and must run
+    /// BEFORE the Python repair (the managed-runtime patch errors while an entry
+    /// is missing entirely, so repair-before-reconcile never converges in one
+    /// startup). The injected repair closure probes mcp.json at its invocation
+    /// time: the entry seeded as missing must already exist by then, and the
+    /// final file must contain the restored entry. Deleting the reconcile call
+    /// from `run_mcp_startup_maintenance`, or moving it after the repair, turns
+    /// this test red.
+    #[test]
+    fn startup_maintenance_restores_missing_entry_before_python_repair() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // Restores the host's PINVOU3_HOME (present or absent) on drop, panic paths included.
+        let _env = crate::platform::paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-mcp-maintenance-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        // Seed one installed local tool (disk manifest, absolute existing command)
+        // whose mcp.json entry is missing entirely.
+        let marketplace_dir = crate::platform::paths::pinvou3_home().join("marketplace");
+        std::fs::create_dir_all(&marketplace_dir).unwrap();
+        std::fs::write(marketplace_dir.join("installed.json"), r#"["maint-x"]"#).unwrap();
+        let manifest = serde_json::json!({
+            "id":"maint-x","name":"MaintX","description":"d","version":"1","icon":"x","category":"c",
+            "mcp_tools":[],"command":std::env::current_exe().unwrap().to_string_lossy(),"args":[]
+        });
+        std::fs::create_dir_all(crate::features::marketplace::mcp_catalog::package_mcp_dir(
+            "maint-x",
+        ))
+        .unwrap();
+        std::fs::write(
+            crate::features::marketplace::mcp_catalog::package_mcp_dir("maint-x")
+                .join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let manager = crate::features::marketplace::MarketplaceManager::with_store(
+            crate::platform::credential_store::MemoryCredentialStore::default(),
+        );
+        let bundle = super::Pinvou3Bundle::paths();
+        assert!(!bundle.mcp_json.exists(), "precondition: no mcp.json yet");
+
+        let entry_seen_at_repair = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let repair_probe = entry_seen_at_repair.clone();
+        let mcp_json = bundle.mcp_json.clone();
+        let actions = bundle
+            .run_mcp_startup_maintenance(&manager, move |_manager| {
+                repair_probe.store(
+                    std::fs::read_to_string(&mcp_json)
+                        .map(|content| content.contains("maint-x"))
+                        .unwrap_or(false),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(Vec::new())
+            })
+            .unwrap();
+
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("restored missing mcp.json entry")),
+            "the reconcile call inside startup maintenance must restore the entry: {actions:?}"
+        );
+        assert!(
+            entry_seen_at_repair.load(std::sync::atomic::Ordering::SeqCst),
+            "the reconcile must run before the python repair sees mcp.json"
+        );
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        assert_eq!(
+            mcp["servers"]["maint-x"]["command"],
+            serde_json::Value::String(
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            "the missing entry must be restored by the end of startup maintenance"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The corrupt-file contract must hold across the WHOLE startup maintenance
+    /// chain, not just the reconcile step: a corrupt mcp.json is backed up, the
+    /// reconcile returns early, and the builtin upsert must NOT reset the live
+    /// file to a builtin-only skeleton (its repair loader would, unchecked).
+    /// The original bytes survive every writer, the backup stays a single
+    /// byte-identical copy across repeated boots, and a healthy file still gets
+    /// the upsert.
+    #[test]
+    fn startup_maintenance_preserves_corrupt_mcp_json_bytes() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::platform::paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-mcp-corrupt-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let manager = crate::features::marketplace::MarketplaceManager::with_store(
+            crate::platform::credential_store::MemoryCredentialStore::default(),
+        );
+        let bundle = super::Pinvou3Bundle::paths();
+        std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+        // Corrupt by truncation: two hand-added custom entries, no closing brace.
+        let corrupt = r#"{
+  "servers": {
+    "my-custom-tool": {"command": "/usr/local/bin/my-tool", "args": ["--serve"]},
+    "another-custom": {"command": "echo", "args": ["hi"]}"#;
+        std::fs::write(&bundle.mcp_json, corrupt).unwrap();
+
+        let run = || bundle.run_mcp_startup_maintenance(&manager, |_manager| Ok(Vec::new()));
+        let actions = run().unwrap();
+
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("unparseable") && action.contains("backed up")),
+            "the reconcile must report the skipped boot: {actions:?}"
+        );
+        assert_eq!(
+            std::fs::read(&bundle.mcp_json).unwrap(),
+            corrupt.as_bytes(),
+            "the corrupt file must stay byte-identical through the whole maintenance chain"
+        );
+        let backups: Vec<_> = std::fs::read_dir(bundle.mcp_json.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("mcp.json.corrupt.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "exactly one backup must exist");
+        assert_eq!(
+            std::fs::read(backups[0].path()).unwrap(),
+            corrupt.as_bytes(),
+            "the backup must hold the original bytes"
+        );
+
+        // A persistent parse failure repeats the boot: no second backup, no rewrite.
+        let actions = run().unwrap();
+        assert!(actions.iter().any(|action| action.contains("unparseable")));
+        assert_eq!(std::fs::read(&bundle.mcp_json).unwrap(), corrupt.as_bytes());
+        let backups: Vec<_> = std::fs::read_dir(bundle.mcp_json.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("mcp.json.corrupt.")
+            })
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "an identical corrupt file must not mint a second backup"
+        );
+
+        // Once the user repairs the file, the builtin upsert works again.
+        std::fs::write(
+            &bundle.mcp_json,
+            r#"{"servers":{"my-custom-tool":{"command":"node","args":["/opt/t/run.js"]}}}"#,
+        )
+        .unwrap();
+        run().unwrap();
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        assert!(
+            mcp["servers"].get("pinvou3").is_some(),
+            "a repaired file gets the builtin upsert again: {mcp}"
+        );
+        assert!(
+            mcp["servers"].get("my-custom-tool").is_some(),
+            "the upsert must keep the user's entries"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The preservation contract must hold through the REAL boot chain, not
+    /// just `run_mcp_startup_maintenance`: `ensure_extracted` first runs the
+    /// retired-tool cleanup, whose residue probe treats a corrupt mcp.json as
+    /// "residue present" and calls `uninstall` — and an uninstall that reset
+    /// the file would destroy the original bytes *before* the reconcile ever
+    /// got to back them up. With the refusal in `remove_from_mcp_json`, the
+    /// uninstall rolls back, the corrupt file (and its single backup) survive
+    /// the whole chain, and the engine builtin keys stay untouched.
+    #[test]
+    fn ensure_extracted_preserves_corrupt_mcp_json_bytes() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::platform::paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-boot-corrupt-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        // A retired preset tool still present in the registry: the cleanup's
+        // uninstall path runs against the corrupt file (probe returns true).
+        let marketplace_dir = crate::platform::paths::pinvou3_home().join("marketplace");
+        std::fs::create_dir_all(&marketplace_dir).unwrap();
+        std::fs::write(
+            marketplace_dir.join("installed.json"),
+            r#"["data_analysis"]"#,
+        )
+        .unwrap();
+
+        let bundle = super::Pinvou3Bundle::paths();
+        std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+        let corrupt = r#"{
+  "servers": {
+    "my-custom-tool": {"command": "/usr/local/bin/my-tool", "args": ["--serve"], "enabled": false}
+  }"#;
+        std::fs::write(&bundle.mcp_json, corrupt).unwrap();
+        // Seed the bundle VERSION so the boot skips re-extraction and returns
+        // right after the maintenance block (the code path every normal boot
+        // with an unchanged bundle takes).
+        std::fs::write(super::paths::bundle_version_file(), super::BUNDLE_VERSION).unwrap();
+
+        let manager = crate::features::marketplace::MarketplaceManager::with_store(
+            crate::platform::credential_store::MemoryCredentialStore::default(),
+        );
+        bundle
+            .ensure_extracted_with_marketplace(&manager, |_manager| Ok(Vec::new()))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&bundle.mcp_json).unwrap(),
+            corrupt.as_bytes(),
+            "the corrupt file must stay byte-identical through the real boot chain"
+        );
+        let backups: Vec<_> = std::fs::read_dir(bundle.mcp_json.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("mcp.json.corrupt.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "exactly one backup must exist");
+        assert_eq!(
+            std::fs::read(backups[0].path()).unwrap(),
+            corrupt.as_bytes(),
+            "the backup must hold the original bytes"
+        );
+        let installed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(marketplace_dir.join("installed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            installed,
+            serde_json::json!(["data_analysis"]),
+            "the rolled-back uninstall must leave the registry unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 把 PINVOU3_HOME 指到干净临时目录跑闭包(借 ENV_LOCK 与其它 env 测试串行)。
+    fn with_temp_home<F: FnOnce()>(label: &str, f: F) {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // Restores the host's PINVOU3_HOME (present or absent) on drop, panic paths included.
+        let _env = crate::platform::paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-{label}-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        f();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #522 回归:禁用/隐藏残留可能只存在于 scope 收敛后的单一 disabled_bundles.json
+    /// (旧 disabled_connectors.json 只读保留、新写入不再产生)。探测漏掉该文件会把
+    /// 「仅禁用/隐藏集有残留」的退役工具误判干净,启动清理被整体跳过,陈旧条目继续
+    /// 误隐藏未来同名重装。
+    #[test]
+    fn residue_probe_covers_disabled_bundles_layout() {
+        with_temp_home("pinvou3-residue-probe", || {
+            // 前置:所有清理面干净时探测不得误报。
+            assert!(!super::Pinvou3Bundle::marketplace_tool_residue_present(
+                "data_analysis"
+            ));
+            std::fs::write(
+                crate::platform::paths::pinvou3_home().join("disabled_bundles.json"),
+                r#"{"scopes":{"plain":["data_analysis"]},"hidden_scopes":{"code":["data_analysis"]}}"#,
+            )
+            .unwrap();
+            assert!(
+                super::Pinvou3Bundle::marketplace_tool_residue_present("data_analysis"),
+                "残留仅在 disabled_bundles.json 时探测必须报有残留"
+            );
+        });
+    }
+
+    /// 旧布局 disabled_connectors.json 不探测:其内容在首个 scope 读路径「读到即
+    /// 迁移」并进统一 disabled_bundles.json,此后只剩死数据(uninstall 与 scope
+    /// 写方都不再碰它)——探测它只会对已迁移用户产生永不收敛的误报(评审轮 #580:
+    /// 每次启动白跑一遍完整 uninstall)。活残留由统一文件面覆盖。
+    #[test]
+    fn residue_probe_ignores_dead_legacy_disabled_file() {
+        with_temp_home("pinvou3-residue-legacy", || {
+            // 最老形态:裸数组 = plain scope(旧版真实用户落盘)。
+            std::fs::write(
+                crate::platform::paths::pinvou3_home().join("disabled_connectors.json"),
+                r#"["data_analysis"]"#,
+            )
+            .unwrap();
+            assert!(
+                !super::Pinvou3Bundle::marketplace_tool_residue_present("data_analysis"),
+                "legacy 死数据不得触发探测:其内容已由迁移并进统一文件"
+            );
+        });
+    }
+
+    /// 禁用落盘存在但读失败(权限/损坏)必须保守视为有残留——宁可误报(多跑一次
+    /// 幂等清理)也不漏报。以同名目录制造 read_to_string 的读失败路径。
+    #[test]
+    fn residue_probe_treats_unreadable_disabled_file_as_residue() {
+        with_temp_home("pinvou3-residue-unreadable", || {
+            std::fs::create_dir_all(
+                crate::platform::paths::pinvou3_home().join("disabled_bundles.json"),
+            )
+            .unwrap();
+            assert!(
+                super::Pinvou3Bundle::marketplace_tool_residue_present("data_analysis"),
+                "禁用落盘存在但读失败时探测必须保守报有残留"
+            );
+        });
+    }
+
+    /// #522 端到端:退役工具的残留只落在 disabled_bundles.json 时,探测必须报有残留
+    /// (否则清理被整体跳过、陈旧禁用条目永驻),且清理把 plain/code 的 disabled 与
+    /// hidden 陈旧条目一并清掉,其它工具的条目与 scope 初始化登记原样保留。
+    #[test]
+    fn cleanup_scrubs_disabled_bundles_only_residue() {
+        with_temp_home("pinvou3-residue-cleanup", || {
+            std::fs::write(
+                crate::platform::paths::pinvou3_home().join("disabled_bundles.json"),
+                r#"{"scopes":{"plain":["data_analysis"],"code":["weather"]},"hidden_scopes":{"code":["data_analysis"]},"initialized":["plain","code"]}"#,
+            )
+            .unwrap();
+
+            super::Pinvou3Bundle::paths()
+                .cleanup_removed_marketplace_tools()
+                .unwrap();
+
+            let file: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(
+                    crate::platform::paths::pinvou3_home().join("disabled_bundles.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                file["scopes"]["plain"],
+                serde_json::json!([]),
+                "plain 禁用集里的退役条目必须被清掉"
+            );
+            assert_eq!(
+                file["scopes"]["code"],
+                serde_json::json!(["weather"]),
+                "其它工具的禁用条目必须原样保留"
+            );
+            assert_eq!(
+                file["hidden_scopes"]["code"],
+                serde_json::json!([]),
+                "code 隐藏集里的退役条目必须被清掉"
+            );
+            let initialized = file["initialized"].as_array().unwrap();
+            assert!(
+                initialized.contains(&serde_json::json!("plain"))
+                    && initialized.contains(&serde_json::json!("code")),
+                "清理不得改动 scope 初始化登记: {initialized:?}"
+            );
+        });
+    }
+
+    /// #522 失败路径:uninstall 因 mcp.json 拒重置而整体回滚(字节保全契约见
+    /// ensure_extracted_preserves_corrupt_mcp_json_bytes)时,其内部 scope 清理随回滚
+    /// 被跳过——禁用/隐藏残留必须仍被外层的单临界区 RMW 调用清掉。若把这步收敛进
+    /// uninstall 成功路径,本用例转红。
+    #[test]
+    fn cleanup_scrubs_disabled_residue_when_uninstall_rolls_back() {
+        with_temp_home("pinvou3-residue-rollback", || {
+            let home = crate::platform::paths::pinvou3_home();
+            let marketplace_dir = home.join("marketplace");
+            std::fs::create_dir_all(&marketplace_dir).unwrap();
+            std::fs::write(
+                marketplace_dir.join("installed.json"),
+                r#"["data_analysis"]"#,
+            )
+            .unwrap();
+            let disabled = home.join("disabled_bundles.json");
+            std::fs::write(
+                &disabled,
+                r#"{"scopes":{"plain":["data_analysis"]},"hidden_scopes":{"plain":["data_analysis"]}}"#,
+            )
+            .unwrap();
+            let bundle = super::Pinvou3Bundle::paths();
+            std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+            let corrupt = r#"{"servers":{"mine":{"command":"x""#;
+            std::fs::write(&bundle.mcp_json, corrupt).unwrap();
+
+            bundle.cleanup_removed_marketplace_tools().unwrap();
+
+            // 卸载回滚:登记与 mcp.json 原样保留(数据保全契约不因清理改变)。
+            let installed: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(marketplace_dir.join("installed.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                installed,
+                serde_json::json!(["data_analysis"]),
+                "回滚后登记必须原样保留"
+            );
+            assert_eq!(
+                std::fs::read(&bundle.mcp_json).unwrap(),
+                corrupt.as_bytes(),
+                "损坏 mcp.json 必须保持字节不变"
+            );
+            // 禁用/隐藏残留仍被外层清理步清掉。
+            let file: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&disabled).unwrap()).unwrap();
+            assert_eq!(
+                file["scopes"]["plain"],
+                serde_json::json!([]),
+                "卸载回滚后 plain 禁用残留仍必须被清掉"
+            );
+            assert_eq!(
+                file["hidden_scopes"]["plain"],
+                serde_json::json!([]),
+                "卸载回滚后 plain 隐藏残留仍必须被清掉"
+            );
+        });
+    }
+
+    /// #522 结构性回归:退役清理的禁用/隐藏残留必须走 scope 模块的单临界区 RMW
+    /// 助手,extraction.rs 不得再内联「load → 内存 retain → 条件 save」两段独立取锁
+    /// 的落盘写法(两段之间并发写方的更新会被旧快照整表覆盖)。源码钉扎与
+    /// platform::filesystem 的同类测试同一风格;探测词拼接构造,避免测试源码自匹配。
+    #[test]
+    fn disabled_cleanup_has_no_inline_two_phase_scope_writes() {
+        let source = include_str!("extraction.rs");
+        let load = ["load_disabled", "_bundles_for"].concat();
+        let save = ["save_disabled", "_bundles_for"].concat();
+        let helper = ["remove_bundle_from", "_disabled_scopes"].concat();
+        assert_eq!(
+            source.matches(&load).count(),
+            0,
+            "退役清理不得内联 scope 禁用集读取:统一走 scope 模块单临界区 RMW 助手"
+        );
+        assert_eq!(
+            source.matches(&save).count(),
+            0,
+            "退役清理不得内联 scope 禁用集写方:统一走 scope 模块单临界区 RMW 助手"
+        );
+        assert!(
+            source.matches(&helper).count() >= 1,
+            "退役清理必须调用 scope 模块的单临界区 RMW 助手清理所有 scope 残留"
+        );
     }
 }

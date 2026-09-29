@@ -204,10 +204,14 @@ pub(crate) async fn chat_with_reservation(
     // 无损表达含 ` · ` 等分隔符的合法文件名)。
     let display_content = display_chat_message(&message, &attachments);
     let raw_message = message.clone();
-    // 原生代码会话绑项目目录时，落盘根（会话私有目录）与引擎 cwd（项目目录）
-    // 不同根，附件引用必须绝对路径；其余会话两根一致，维持相对路径引用。
-    // 两个根由 SessionStore::session_roots 统一解析（与引擎执行根同一来源）。
-    let reference_absolute = roots.ledger != roots.execution;
+    // For sessions bound to a project/working directory, the persist root (the
+    // session-private directory) differs from the engine cwd (the bound
+    // directory), so attachment references must be absolute; unbound sessions
+    // have identical roots and keep relative references. Binding is detected via
+    // the explicit bound flag (same source as the engine execution root,
+    // SessionStore::session_roots), not a ledger != execution path comparison
+    // (see the rationale in sessions/mod.rs).
+    let reference_absolute = roots.bound;
     // Native(v0.9.5 官方标记方案):图片暂存后生成 `[Attached image: <path>]`
     // 标记行,底座构建时展开为 ImageUrl 块,不注入"看不到图"硬规则;其余路径
     // 维持现有文本拼接(Fallback 含 image_analyze 硬规则提示)。两分支互斥,
@@ -297,14 +301,16 @@ pub(crate) async fn chat_with_reservation(
         }
     }
     // 取该 session 的 mode 状态（mode + 多智能体开关）。
-    // 多智能体模式（ADR-0006）：所有产生模型 turn 的入口共用提醒组装；每轮
-    // 重申而非首轮一次性教学，关掉开关即保持原消息不变。
+    // 多智能体模式（ADR-0006）：所有产生模型 turn 的入口共用同一装配——快照
+    // 与候选行同源捕获；蜂群契约本体在 spawn 级 instructions，用户内容逐字透传。
+    // 候选匹配只看用户原文（raw_message），不看 full 里已拼接的 persona 正文 /
+    // KB 引导 / 附件引用，避免注入文本的领域词虚假抬升无关专家卡。
     let prepared_delegation = super::multiagent::prepare_delegation_turn(
         pool,
         &sid,
         mode_state.multi_agent,
-        &raw_message,
         full,
+        super::multiagent::MatchSource(&raw_message),
     );
     full = prepared_delegation.content;
     let mode = mode_state.mode;
@@ -394,6 +400,7 @@ pub(crate) async fn chat_with_reservation(
             mode.to_app_mode(),
             restrict_tools.unwrap_or(false),
             prepared_delegation.expert_snapshot,
+            prepared_delegation.expert_candidates,
             reservation,
         )
         .await
@@ -439,21 +446,13 @@ pub(crate) async fn chat_with_reservation(
             );
             // 发送失败：作废本轮「未成活」快照（按 id 精确删除），让重试的同号
             // Turn 快照成为 first-wins 对齐锚（清理性质，失败仅记日志）。
-            if let Some(snapshot_id) = created_snapshot_id {
-                let checkpoint_ledger = roots.ledger.clone();
-                let sid_invalidate = sid.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(error) = crate::features::code_checkpoints::drop_checkpoint(
-                        &checkpoint_ledger,
-                        &snapshot_id,
-                    ) {
-                        log::warn!(
-                            "[pinvou3][chat] drop unsent-turn checkpoint failed sid={sid_invalidate}: {error:#}"
-                        );
-                    }
-                })
-                .await;
-            }
+            super::checkpoints::drop_unsent_turn_checkpoint(
+                Some(roots.ledger.clone()),
+                created_snapshot_id,
+                &sid,
+                "chat",
+            )
+            .await;
             log::error!(
                 "[pinvou3][chat] engine send failed sid={} send_elapsed_ms={} total_elapsed_ms={} error={:#}",
                 sid,

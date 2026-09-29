@@ -16,11 +16,9 @@ pub mod platform;
 )]
 unsafe extern "C" {}
 
-pub use features::assistant::attachments::{
-    build_message_with_attachments, stage_file_in_workspace,
-};
-
 use tauri::Manager;
+
+pub use features::assistant::attachments::stage_file_in_workspace;
 
 #[cfg(feature = "benchmark-hooks")]
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
@@ -60,8 +58,10 @@ const RELEASE_ENV_DEFAULTS: &[(&str, &str)] = &[
     ("DEEPSEEK_ALLOW_INSECURE_HTTP", "1"),
     ("DEEPSEEK_FORCE_HTTP1", "1"),
     // 不再注入 DEEPSEEK_MAX_OUTPUT_TOKENS：它会把所有模型（含云端）的输出上限
-    // 钉死在 24576。云端模型应落到底座请求上限与厂商能力兜底；本地 vLLM 的
-    // 24K 预算由 route_limits_for_model 的 is_local_vllm 分支显式携带。
+    // 钉死在 24576。底座对 ≥500K 窗口模型默认 64K（API_MAX_OUTPUT_TOKENS），
+    // Cloud models should land on the base fallback; local models and custom
+    // endpoints share the operator window tiers (route_limits_for_model),
+    // equally independent of this env.
     // 与 CodeWhale 的 stream_chunk_timeout 默认值保持一致。
     ("DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS", "300"),
     // SSE 首响应头超时(open timeout):底座只认 env,默认 45s 是为云端调的。
@@ -602,6 +602,22 @@ pub fn run() {
     install_rustls_provider();
     ensure_release_env();
     startup_process_env();
+    // GUI 宿主同样必须给 tokio worker 大栈:底座 engine 一次 dispatch 在 debug
+    // 构建下实测栈高水位 2.25–2.5MiB(见 CodeWhale/crates/tui/src/lib.rs 的
+    // headless 同款修复说明),tokio 默认 2MiB worker 栈会被顶穿——栈溢出不是
+    // panic,catch_unwind 看不到,进程直接 0xc00000fd/SIGABRT。headless 路径
+    // 已同款修复(headless_bridge.rs run_windowless_host),此处补齐 GUI 路径;
+    // 勿"优化"回默认 runtime。runtime 本体绑定在本函数作用域,随 run() 活到
+    // 进程退出。
+    // A runtime build failure (outside OOM-killed process death) leaves the
+    // app without async execution — no degradation path, fail fast.
+    #[allow(clippy::expect_used)]
+    let async_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()
+        .expect("build GUI async runtime");
+    tauri::async_runtime::set(async_runtime.handle().clone());
     startup::init();
     startup::mark("environment:ready");
     // 必须早于 Tauri Builder/WebView 创建：避免升级后 WebKit 复用旧 index.html，
@@ -834,6 +850,20 @@ pub fn run() {
                 }));
             }
             app.handle().manage(projects_store);
+            // 模型商店：全进程唯一的一份。它持有卡片级互斥表和下载队列，那是
+            // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
+            let model_store =
+                std::sync::Arc::new(features::model_store::ModelStoreService::default());
+            // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
+            // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
+            // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
+            // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
+            features::model_store::run_startup_cleanup(&model_store);
+            // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
+            // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
+            // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
+            features::model_store::run_startup_refresh();
+            app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
             let remote_event_endpoint = remote_control_manager.clone();
@@ -922,9 +952,32 @@ pub fn run() {
                     }
                 };
             startup::mark("engine_pool:start");
-            let tool_factory: crate::features::assistant::engine_pool::EngineToolFactory =
-                std::sync::Arc::new(|app, session_id| {
-                    vec![
+            // Computer Use consent state: a global singleton. The
+            // EngineToolFactory injects it into every per-session
+            // ComputerUseTool, and the Tauri commands
+            // (app::commands::computer_use) reach the same instance through
+            // the .manage()'d State. settings.json's computer_use.enabled is
+            // the single source of truth for the toggle; it is replayed into
+            // the AtomicBool at startup (the computer_use_set_enabled command
+            // owns the later persist-to-disk → flip-flag flow).
+            let computer_use_shared =
+                std::sync::Arc::new(features::computer_use::ComputerUseShared::new());
+            // Replay the persisted toggle through the same platform gate the
+            // set_enabled command enforces: on an OS without a backend a
+            // stale `enabled: true` in settings.json must not flip the
+            // in-memory flag (it would keep the tool model-visible while
+            // every call dies at the capability check).
+            computer_use_shared.set_enabled(
+                crate::platform::prefs::UserPrefs::load().computer_use.enabled
+                    && features::computer_use::backend_supported(),
+            );
+            app.manage(computer_use_shared.clone());
+            let tool_factory: crate::features::assistant::engine_pool::EngineToolFactory = {
+                let computer_use_shared = computer_use_shared.clone();
+                std::sync::Arc::new(move |app, session_id| {
+                    let mut tools: Vec<
+                        std::sync::Arc<dyn deepseek_tui::tools::spec::ToolSpec>,
+                    > = vec![
                         std::sync::Arc::new(knowledge::KbSearchTool::new(
                             app.clone(),
                             session_id.to_string(),
@@ -933,11 +986,31 @@ pub fn run() {
                             app.clone(),
                             session_id.to_string(),
                         )),
-                    ]
-                });
-            let tool_policy: crate::features::assistant::engine_pool::ToolPolicy =
-                std::sync::Arc::new(|app| {
-                    let mut tools = crate::features::marketplace::disabled_tool_names();
+                    ];
+                    // ComputerUseTool is constructed unconditionally: the
+                    // settings toggle governs visibility through the
+                    // disallowed list in tool_policy below, not through
+                    // construction. This keeps both toggle directions
+                    // immediate on already-running engines — a tool instance
+                    // held by an engine spawned while disabled becomes
+                    // reachable on the next turn after enabling, with no
+                    // engine rebuild needed. Defense in depth while
+                    // disabled: the schema hides the tool (disallow list)
+                    // and the consent guard rejects every call.
+                    tools.push(std::sync::Arc::new(
+                        features::computer_use::ComputerUseTool::new(
+                            app.clone(),
+                            session_id.to_string(),
+                            computer_use_shared.clone(),
+                        ),
+                    ));
+                    tools
+                })
+            };
+            let tool_policy: crate::features::assistant::engine_pool::ToolPolicy = {
+                let computer_use_shared = computer_use_shared.clone();
+                std::sync::Arc::new(move |app| {
+                    let mut tools = crate::features::marketplace::unavailable_tool_names();
                     // 语义与单一真相源见 KnowledgeService::kb_tools_usable:
                     // 只看有没有内容,不看模型在位状态(可见性随模型波动会让
                     // 自愈重载路径不可达)。
@@ -953,8 +1026,23 @@ pub fn run() {
                         tools.push("kb_search".to_string());
                         tools.push("kb_open_source".to_string());
                     }
+                    // Dynamic visibility for computer_use: the guard hook
+                    // appends the tool to the disallow list while the master
+                    // switch is off (single source of truth in guard.rs, unit
+                    // tested there). The disallowed list is the only
+                    // toggle→engine channel; this closure re-evaluates
+                    // whenever refresh_disallowed_tools runs.
+                    // computer_use_set_enabled flips the flag and refreshes
+                    // immediately (see app/commands/computer_use.rs), so both
+                    // toggle directions take effect on every live engine on
+                    // the next turn — construction is unconditional on the
+                    // factory side. Other refresh triggers (connector /
+                    // marketplace / knowledge changes) recompute against the
+                    // same current flag state.
+                    computer_use_shared.add_to_disallow_list_when_disabled(&mut tools);
                     tools
-                });
+                })
+            };
             match EnginePool::new_with_runtime_model_provider(
                 handle.clone(),
                 store_for_engine.clone(),
@@ -969,10 +1057,22 @@ pub fn run() {
                     // 解析到项目目录；账本根（附件/审计/产物）恒为会话私有目录。
                     // 解析实现统一下沉在 SessionStore::session_roots，bridge 与
                     // SessionStore 注入同一份 resolver 闭包，两侧结果一致。
+                    // When the resolver misses a native code session's project
+                    // binding, fall back to plain chat sessions' user
+                    // working-directory bindings (the per-session sidecar
+                    // `workspace-binding.json` inside the session-private
+                    // directory) — the dual-root semantics, AGENTS.md injection,
+                    // and prompt environment section treat both kinds of bound
+                    // sessions alike.
                     let execution_root_resolver: crate::features::sessions::ExecutionRootResolver =
                         std::sync::Arc::new({
                             let agents = code_session_agents.clone();
-                            move |session_id: &str| agents.code_project_workspace(session_id)
+                            let store = store_for_engine.clone();
+                            move |session_id: &str| {
+                                agents
+                                    .code_project_workspace(session_id)
+                                    .or_else(|| store.session_workspace_binding(session_id))
+                            }
                         });
                     pool.bridge
                         .set_execution_root_resolver(execution_root_resolver.clone());
@@ -1358,30 +1458,32 @@ pub fn run() {
             commands::startup::report_frontend_startup,
             commands::diagnostics::record_authority_sync_diagnostics,
             commands::startup::reveal_startup_window,
+            commands::computer_use::computer_use_get_status,
+            commands::computer_use::computer_use_grant,
+            commands::computer_use::computer_use_revoke,
+            commands::computer_use::computer_use_stop,
+            commands::computer_use::computer_use_deny,
+            commands::computer_use::computer_use_confirm,
+            commands::computer_use::computer_use_set_enabled,
+            commands::computer_use::computer_use_request_permissions,
             commands::connectors::refresh_connector_auth_gates,
             commands::connectors::feishu_ensure_cli,
-            commands::connectors::feishu_status,
             commands::connectors::feishu_connect_begin,
             commands::connectors::feishu_cancel,
             commands::connectors::feishu_logout,
             commands::connectors::feishu_apply_skills,
-            commands::connectors::set_feishu_enabled,
             commands::connectors::feishu_skills_state,
             commands::connectors::wecom_ensure_cli,
-            commands::connectors::wecom_status,
             commands::connectors::wecom_connect_begin,
             commands::connectors::wecom_cancel,
             commands::connectors::wecom_logout,
             commands::connectors::wecom_apply_skills,
-            commands::connectors::set_wecom_enabled,
             commands::connectors::wecom_skills_state,
             commands::connectors::dingtalk_ensure_cli,
-            commands::connectors::dingtalk_status,
             commands::connectors::dingtalk_connect_begin,
             commands::connectors::dingtalk_cancel,
             commands::connectors::dingtalk_logout,
             commands::connectors::dingtalk_apply_skills,
-            commands::connectors::set_dingtalk_enabled,
             commands::connectors::dingtalk_skills_state,
             commands::connectors::eip_status,
             commands::connectors::eip_connect_begin,
@@ -1392,14 +1494,11 @@ pub fn run() {
             commands::connectors::zhidao_cancel,
             commands::connectors::zhidao_logout,
             commands::connectors::tmeet_ensure_cli,
-            commands::connectors::tmeet_status,
             commands::connectors::tmeet_connect_begin,
             commands::connectors::tmeet_cancel,
             commands::connectors::tmeet_logout,
             commands::connectors::tmeet_apply_skills,
-            commands::connectors::set_tmeet_enabled,
             commands::connectors::tmeet_skills_state,
-            commands::connectors::ima_status,
             commands::connectors::ima_connect,
             commands::connectors::ima_logout,
             commands::settings::get_settings,
@@ -1457,6 +1556,26 @@ pub fn run() {
             commands::llmapi::set_llmapi_user_enabled,
             commands::llmapi::get_llmapi_admin_overview,
             commands::monitor::discover_local_vllm,
+            commands::model_store::model_store_availability,
+            commands::model_store::model_store_cards,
+            commands::model_store::model_store_library,
+            commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_start_download,
+            commands::model_store::model_store_start_deploy,
+            commands::model_store::model_store_start_lifecycle,
+            commands::model_store::model_store_force_remove,
+            commands::model_store::model_store_run_log,
+            commands::model_store::model_store_cancel_run,
+            commands::model_store::model_store_answer_run,
+            commands::model_store::model_store_active_runs,
+            commands::model_store::model_store_api_keys,
+            commands::model_store::model_store_create_api_key,
+            commands::model_store::model_store_test_store_state,
+            commands::model_store::model_store_unlock_test_store,
+            commands::model_store::model_store_disable_test_store,
+            commands::model_store::model_store_take_startup_cleanup,
+            commands::model_store::model_store_storage_settings,
+            commands::model_store::model_store_set_storage_settings,
             commands::settings::list_models,
             commands::settings::reveal_model_api_key,
             commands::settings::probe_local_server_kind,
@@ -1466,16 +1585,11 @@ pub fn run() {
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,
             commands::settings::get_image_input_capability,
-            commands::codex::get_codex_acp_status,
             commands::codex::list_acp_agents,
             commands::codex::get_acp_agent_status,
-            commands::codex::prepare_codex_acp,
-            commands::codex::install_codex_homebrew,
             commands::codex::install_acp_agent,
-            commands::codex::login_codex_acp,
             commands::codex::login_acp_agent,
             commands::codex::switch_acp_agent_account,
-            commands::codex::open_codex_login_url,
             commands::codex::open_acp_agent_login_url,
             commands::codex::submit_acp_agent_login_code,
             commands::codex::get_codex_acp_session_info,
@@ -1532,11 +1646,14 @@ pub fn run() {
             commands::projects::update_project,
             commands::projects::delete_project,
             commands::projects::move_session_to_project,
+            commands::projects::rebind_workspace_root,
             commands::sessions::list_sessions,
             commands::sessions::create_session,
+            commands::sessions::get_session_workspace_binding,
             commands::sessions::load_session,
             commands::sessions::delete_session,
             commands::sessions::rename_session,
+            commands::sessions::export_session,
             commands::sessions::set_session_pinned,
             commands::sessions::list_archived_sessions,
             commands::sessions::set_session_archived,
@@ -1643,7 +1760,6 @@ pub fn run() {
             commands::remote_control::web_access_list_codex_acp_sessions,
             commands::remote_control::web_access_list_acp_agents,
             commands::remote_control::web_access_get_acp_agent_status,
-            commands::remote_control::web_access_save_session_messages_chunk,
             commands::remote_control::web_access_transcribe_voice_audio,
             commands::remote_control::web_access_track_behavior_event,
             commands::remote_control::web_access_read_artifact_chunk,
@@ -1658,8 +1774,6 @@ pub fn run() {
             commands::connectors::get_disabled_connectors,
             commands::connectors::set_bundle_visibility,
             commands::connectors::get_bundle_visibility,
-            commands::connectors::set_disabled_skills,
-            commands::connectors::get_disabled_skills,
             commands::connectors::set_project_skills_enabled,
             commands::connectors::get_project_skills_enabled,
             commands::memory::get_memory_profile,
@@ -1695,7 +1809,6 @@ pub fn run() {
             commands::artifacts::reveal_session_folder,
             commands::artifacts::open_scheduled_task_folder,
             commands::artifacts::open_artifact_window,
-            commands::pet::open_detached_window,
             commands::pet::begin_detach_drag,
             commands::pet::set_pet_enabled,
             commands::pet::get_pet_scale,
@@ -1715,14 +1828,13 @@ pub fn run() {
             commands::files::ingest_draft_file_chunk,
             commands::files::cancel_draft_file_upload,
             commands::files::adopt_draft_attachment,
-            commands::files::ingest_dropped_file_chunk,
-            commands::files::cancel_dropped_file_upload,
             commands::files::discard_dropped_attachment,
             commands::files::resolve_conversation_attachment,
             commands::files::open_conversation_attachment,
             commands::files::reveal_conversation_attachment,
             commands::files::detect_system_tools,
             commands::files::save_paste_image,
+            commands::files::paste_clipboard_image,
             commands::interaction::compact_now,
             commands::interaction::get_mode_state,
             commands::interaction::get_code_permission_prefs,
@@ -1734,14 +1846,12 @@ pub fn run() {
             commands::interaction::set_multi_agent_mode,
             commands::interaction::accept_plan,
             commands::interaction::discard_plan,
-            commands::interaction::read_skill_body,
             // 多智能体执行记录投影。
             commands::multiagent::list_subagent_transcripts,
             commands::multiagent::read_subagent_transcript,
             commands::interaction::submit_user_input,
             commands::interaction::cancel_user_input,
             commands::interaction::get_pending_user_inputs,
-            commands::interaction::restart_engine,
             commands::interaction::summon_pinvou,
             commands::personas::save_session_pinvou_reviews,
             commands::personas::get_session_pinvou_reviews,
@@ -1775,7 +1885,6 @@ pub fn run() {
             commands::artifacts::detect_obsidian,
             commands::knowledge::kb_start_scan,
             commands::knowledge::kb_scan_status,
-            commands::knowledge::kb_cancel_scan,
             commands::knowledge::kb_search,
             commands::knowledge::kb_stats,
             commands::knowledge::kb_type_counts,
@@ -1797,7 +1906,6 @@ pub fn run() {
             commands::knowledge::kb_model_download,
             commands::knowledge::kb_model_cancel,
             commands::knowledge::session_mount_collection,
-            commands::knowledge::session_set_mounted_collections,
             commands::knowledge::session_add_mounted_collection,
             commands::knowledge::session_set_mounted_collection_enabled,
             commands::knowledge::session_remove_mounted_collection,
@@ -1824,8 +1932,6 @@ pub fn run() {
             commands::remote_knowledge::remote_kb_devices,
             commands::remote_knowledge::remote_kb_update_device,
             commands::remote_knowledge::remote_kb_remove_device,
-            commands::remote_knowledge::remote_kb_trashed_collections,
-            commands::remote_knowledge::remote_kb_trashed_documents,
             commands::remote_knowledge::remote_kb_permanently_delete_collection,
             commands::remote_knowledge::remote_kb_permanently_delete_document,
             commands::shared_knowledge_host::shared_kb_host_status,
@@ -1841,7 +1947,6 @@ pub fn run() {
             commands::remote_knowledge::remote_kb_remove_connection,
             commands::remote_knowledge::remote_kb_collections,
             commands::remote_knowledge::remote_kb_create_collection,
-            commands::remote_knowledge::remote_kb_update_collection,
             commands::remote_knowledge::remote_kb_delete_collection,
             commands::remote_knowledge::remote_kb_restore_collection,
             commands::remote_knowledge::remote_kb_documents,
@@ -1861,8 +1966,6 @@ pub fn run() {
             commands::marketplace::install_marketplace_skill,
             commands::marketplace::update_marketplace_skill,
             commands::marketplace::update_bundle_display_meta,
-            commands::marketplace::import_skill_package,
-            commands::marketplace::import_skill_package_bytes,
             commands::marketplace::import_plugin_package_cmd,
             commands::marketplace::import_plugin_package_bytes_cmd,
             commands::marketplace::import_skill_md_bytes,
@@ -2000,6 +2103,15 @@ mod tool_allowlist_contract {
             "kb_search",
             "kb_open_source",
             "mcp_weather_get_weather",
+            // Tools named by the base registry-first policy: the instruction
+            // says "call these first", so the allowlist must admit them
+            // (capability is governed by the allowlist, not by deleting
+            // descriptions).
+            "registry_sync",
+            "start_registry_mcp_server",
+            // The ima connector skill teaches a direct call to this native
+            // tool; without an exact rule the `mcp_*` prefix never admits it.
+            "ima_openapi",
         ] {
             assert!(is_pinvou3_allowed(core), "核心工具 {core} 应在白名单");
         }
@@ -2028,16 +2140,60 @@ mod tool_allowlist_contract {
             );
         }
 
-        assert_eq!(
-            PINVOU3_ALWAYS_LOADED_TOOLS,
-            &["request_user_input", "image_analyze"]
-        );
+        // Always-loading a name the allowlist strips is dead configuration
+        // (the per-turn retain wins), so every entry must resolve through the
+        // real matcher; a typo here must fail instead of silently deferring.
+        for always_loaded in PINVOU3_ALWAYS_LOADED_TOOLS {
+            assert!(
+                is_pinvou3_allowed(always_loaded),
+                "always-loaded tool {always_loaded} has no matching allowlist rule"
+            );
+        }
+        // Membership guard: the static instructions and the registry-first
+        // policy name these tools directly, so each must stay in the
+        // always-loaded list. The live-catalog regression iterates this same
+        // constant, so dropping an entry here would silence that check and
+        // re-create the first-turn-absent phantom with a green suite.
+        for load_bearing in [
+            "load_skill",
+            "file_search",
+            "registry_sync",
+            "start_registry_mcp_server",
+        ] {
+            assert!(
+                PINVOU3_ALWAYS_LOADED_TOOLS.contains(&load_bearing),
+                "always-loaded list dropped {load_bearing}: static text names it, so it must ship non-deferred on the first turn"
+            );
+        }
         // `is_pinvou3_allowed` is deliberately case-insensitive, so the
         // legacy `Bash` spelling remains executable when replaying an old
         // transcript. The source catalog still teaches only canonical `bash`.
         assert!(!PINVOU3_ALLOWED_TOOLS.contains(&"Bash"));
         assert!(!PINVOU3_ALLOWED_TOOLS.contains(&"File"));
         assert!(PINVOU3_ALLOWED_TOOLS.contains(&"mcp_*"));
+    }
+
+    /// The native ima tool's name is spelled independently in the engine
+    /// registration, the allowlist, and the marketplace deny table; a rename
+    /// that updates the allowlist but not the deny table fails open silently
+    /// (a stale deny of a nonexistent name) while every list-only test stays
+    /// green. Pin all three to the tool's actual registered name.
+    #[test]
+    fn native_ima_tool_name_is_pinned_across_allowlist_and_deny_table() {
+        let registered = crate::features::connectors::ima::ImaOpenApiTool::new()
+            .name()
+            .to_string();
+        assert_eq!(registered, "ima_openapi");
+        assert!(
+            is_pinvou3_allowed(&registered),
+            "native tool {registered} must keep an exact allowlist rule (the mcp_ prefix never admits it)"
+        );
+        assert!(
+            crate::features::marketplace::NATIVE_PACKAGE_TOOLS
+                .iter()
+                .any(|(tool, _)| *tool == registered),
+            "native tool {registered} must keep its marketplace ownership mapping"
+        );
     }
 
     /// Conditional host tools and dynamically discovered MCP tools do not

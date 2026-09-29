@@ -40,7 +40,21 @@ esac
 lock="$repo_root/pinvou3-app/src-tauri/resources/platforms/$platform_resources/bundle/connectors/connectors.lock.json"
 destination="$(dirname "$lock")/$platform/bin"
 
-for command_name in node curl tar install mktemp; do
+if [[ ! -f "$lock" ]]; then
+  echo "missing connector lock: $lock" >&2
+  exit 1
+fi
+
+required_commands=(node curl tar install mktemp)
+# ZIP artifacts exist only for windows-x64, and GNU tar cannot read them; check
+# unzip up front with the other dependencies rather than after the download.
+# --check only re-hashes files already on disk, so it never needs an extractor.
+# Scope the probe to the url field, which is what extract_archive keys off; any
+# other value ending in .zip (a name, a version) must not demand an extractor.
+if ! "$check_only" && grep -qE '"url"[[:space:]]*:[[:space:]]*"[^"]*\.zip"' "$lock"; then
+  required_commands+=(unzip)
+fi
+for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null || {
     echo "missing required command: $command_name" >&2
     exit 1
@@ -56,7 +70,22 @@ compute_sha256() {
 }
 
 verify_file() {
-  [[ -f "$1" ]] && [[ "$(compute_sha256 "$1")" == "$2" ]]
+  if [[ -f "$1" ]] && [[ "$(compute_sha256 "$1")" == "$2" ]]; then
+    return 0
+  fi
+  # 三个调用点(check_only 门禁、下载复核、落位前)都在 set -e 下裸调,
+  # 失配诊断必须内建在此,否则整个脚本零输出退出;下载前的探测调用
+  # 自行 >/dev/null 2>&1 抑制,不受影响。
+  # 文件不可读属于 I/O 故障而非哈希差异,单列消息,
+  # 避免误报成"失配 ... 实际 )"的空实际值。
+  if [[ ! -f "$1" ]]; then
+    echo "sha256 校验失败: $1（文件缺失，期望 $2）" >&2
+  elif [[ ! -r "$1" ]]; then
+    echo "sha256 校验失败: $1（文件不可读，期望 $2）" >&2
+  else
+    echo "sha256 校验失败: $1（期望 $2，实际 $(compute_sha256 "$1")）" >&2
+  fi
+  return 1
 }
 
 names=()
@@ -106,11 +135,7 @@ extract_archive() {
   local archive="$1" dest="$2"
   mkdir -p "$dest"
   if [[ "$archive" == *.zip ]]; then
-    if command -v unzip >/dev/null 2>&1; then
-      unzip -q -o "$archive" -d "$dest"
-    else
-      tar -xf "$archive" -C "$dest"
-    fi
+    unzip -q -o "$archive" -d "$dest"
   else
     tar xzf "$archive" -C "$dest"
   fi

@@ -326,7 +326,6 @@ test('narrow authenticated capability result settles only its matching RemotePro
     localSessionId: 'remote-ref-1', remoteSessionRef: 'ref-1', sessionId: 'session-1',
     connectionId: 'connection-1', controllerLeaseId: 'lease-1', leaseEpoch: '2',
     relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
-    remoteSessionRef: 'ref-1',
     capabilityRequestId: 'request-1', capabilityRevision: 3,
     capabilityValidForMs: 30000, capabilityError: null,
     mappingConfirmed: true, temporaryModelAvailable: true,
@@ -458,7 +457,11 @@ test('remote actions reuse one request id across uncertain retry and later recon
   const { feature, calls } = installFeature((command) => {
     if (command !== 'desktop_remote_action_a') return undefined;
     attempts += 1;
-    if (attempts <= 2) return Promise.reject('result_unknown');
+    if (attempts <= 2) {
+      const error = new Error('result_unknown');
+      error.code = 'result_unknown';
+      return Promise.reject(error);
+    }
     return Promise.resolve({ permissions: [] });
   });
   await assert.rejects(

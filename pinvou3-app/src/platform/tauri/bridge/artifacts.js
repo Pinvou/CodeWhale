@@ -159,7 +159,10 @@
   function openArtifactExternal(path, sessionId) {
     var ext = (String(path).split(".").pop() || "").toLowerCase();
     var cmd = (ext === "html" || ext === "htm") ? "open_artifact_window" : "open_in_system";
-    return invoke(cmd, { path: path, sessionId: sessionId || null }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
+    return invoke(cmd, { path: path, sessionId: sessionId || null }).then(function (result) {
+      trackArtifactExport(path, sessionId);
+      return result;
+    }).catch(function (e) { addSystemItem(bt("openFailed") + e); return false; });
   }
   function artifactExportFormat(path) {
     var ext = (String(path || "").split(".").pop() || "").toLowerCase();
@@ -168,9 +171,24 @@
     if (ext === "md") return "markdown";
     return "other";
   }
-  function trackArtifactExport(path) {
+  function artifactsForSession(sessionId) {
+    var targetSessionId = sessionId || state.activeSessionId;
+    if (!targetSessionId) return [];
+    if (targetSessionId === state.activeSessionId) return state.artifacts || [];
+    return sessionStates[targetSessionId] && sessionStates[targetSessionId].artifacts || [];
+  }
+  function trackArtifactExport(path, sessionId) {
     var bn = basename(path);
-    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    var candidates = artifactsForSession(sessionId);
+    var exactMatches = candidates.filter(function (item) {
+      return String(item.path || "") === String(path || "");
+    });
+    var basenameMatches = exactMatches.length ? [] : candidates.filter(function (item) {
+      return basename(item.path) === bn;
+    });
+    var artifact = exactMatches.length === 1
+      ? exactMatches[0]
+      : (basenameMatches.length === 1 ? basenameMatches[0] : null);
     if (!artifact || !artifact.telemetryId) return;
     invoke("track_behavior_event", { request: {
       eventName: "artifact_exported", artifactId: artifact.telemetryId,
@@ -178,12 +196,7 @@
     } }).catch(function () {});
   }
   function downloadArtifact(path, sessionId) {
-    var ext = (String(path).split(".").pop() || "").toLowerCase();
-    var cmd = (ext === "html" || ext === "htm") ? "open_artifact_window" : "open_in_system";
-    return invoke(cmd, { path: path, sessionId: sessionId || null }).then(function (result) {
-      trackArtifactExport(path);
-      return result;
-    }).catch(function (e) { addSystemItem(bt("openFailed") + e); return false; });
+    return openArtifactExternal(path, sessionId);
   }
 
   // ── 附件 ────────────────────────────────────────────────────────
@@ -296,6 +309,21 @@
       addSystemItem(limitError || bt("pasteImageFailed") + e);
     }
   }
+  // Linux WebKitGTK 的 paste 事件不携带图像数据，由原生层读剪贴板 → 落盘 → 返回 path
+  // （图像字节不过 IPC）。无图像返回 null 并静默——与「剪贴板无内容可贴」既有行为一致；
+  // 落盘/读剪贴板失败走 addPasteImage 同款报错。
+  async function addPasteImageFromClipboard(formatError) {
+    try {
+      const path = await invoke("paste_clipboard_image");
+      if (!path) return null;
+      await addAttachmentByPath(path);
+      return path;
+    } catch (e) {
+      const limitError = typeof formatError === "function" ? formatError(e) : "";
+      addSystemItem(limitError || bt("pasteImageFailed") + e);
+      return null;
+    }
+  }
   function removeAttachment(id) {
     var removed = state.attachments.find(function (a) { return a.id === id; });
     if (removed) {
@@ -378,6 +406,7 @@
       openUserExternalUrl: openUserExternalUrl,
       addAttachmentByPath: addAttachmentByPath,
       addPasteImage: addPasteImage,
+      addPasteImageFromClipboard: addPasteImageFromClipboard,
       removeAttachment: removeAttachment,
       clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,

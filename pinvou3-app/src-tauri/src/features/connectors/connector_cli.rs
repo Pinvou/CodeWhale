@@ -15,8 +15,9 @@
 //! `lib.rs` 里 `.manage(ConnectorConn::default())` 注册一次,飞书 / 企微共用。
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
+
+use crate::platform::process::{REAP_GRACE, Reap, reap_killed_child};
 
 /// 一个 CLI 连接器的运行上下文(薄声明的"可执行"部分)。
 /// 全是 `'static` 引用,故可 `Copy`——能直接搬进抓 URL 的后台线程。
@@ -83,16 +86,143 @@ pub fn apply_user_npm_prefix(cmd: &mut Command) {
 
 // ─────────────────────────────── 公共执行件 ───────────────────────────────
 
-/// 跑一个命令、收集 `(success, stdout, stderr)`。在 `spawn_blocking` 里调。
-pub fn run(mut cmd: Command) -> Result<(bool, String, String), String> {
-    let out = cmd
-        .output()
-        .map_err(|e| format!("启动失败: {e}(需要先完成对应连接器 CLI 的在线安装)"))?;
-    Ok((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
+/// 授权 CLI 输出行的安全化（打日志 / 经事件通道上屏前统一过一道）：空行丢弃；
+/// 命中敏感词整行替换为占位符；其余行截断到 320 字符。敏感词为
+/// `access_token` / `refresh_token` / `authorization:` / `bearer `，`redact_bare_token`
+/// 再追加兜底子串 `token`——tmeet 的输出会出现不带下划线/驼峰的 token 字样需要兜底；
+/// dingtalk 不开兜底（其正常 JSON 行含 camelCase token 字段名，开了会把非敏感行
+/// 也整体吞掉，属行为变化）。原先 tmeet/dingtalk 各有一份本地副本，已收编至此。
+pub(crate) fn safe_auth_log_line(line: &str, redact_bare_token: bool) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let mut sensitive = lower.contains("access_token")
+        || lower.contains("refresh_token")
+        || lower.contains("authorization:")
+        || lower.contains("bearer ");
+    if redact_bare_token {
+        sensitive = sensitive || lower.contains("token");
+    }
+    if sensitive {
+        return Some("[redacted credential line]".to_string());
+    }
+    Some(trimmed.chars().take(320).collect())
+}
+
+/// 探测失败必须按原因分型(见各变体)——「没装」与「装了但挂死」混为一谈,
+/// 会误导用户重装或谎报已断开。注意各 `*_cli_present` 仍把 Err 折叠成
+/// false,ensure 流程因此仍可能对挂死 CLI 重跑安装(布尔折叠的已知残余);
+/// 这里的分型保证的是人类可读诊断与调用方降级分支都不再误导。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeError {
+    /// 进程没起来(≈CLI 二进制不存在,「未安装」),可安全按未安装降级。
+    Spawn(String),
+    /// 进程已启动但超时被杀(可能挂在网络/代理),重试有意义。
+    Timeout(String),
+    /// 进程已启动但 wait/管道失败——**不是**「未安装」,按安装缺失提示是错的。
+    Other(String),
+}
+
+impl ProbeError {
+    /// 在**包装人类可读文案之前**对 platform::process 的原始错误分型。
+    /// 分型依据是本仓库自家模块的报错格式(`spawn {program} failed: ` 出自
+    /// platform/process.rs 的 spawn 失败路径,` timed out after ` 出自超时
+    /// 路径),由下方测试钉住。分型必须吃原始错误——先包装后分型会让前缀
+    /// 匹配永远落空,降级分支随之失效(本轮修掉的回归)。
+    fn classify(raw: String) -> Self {
+        if raw.starts_with("spawn ") {
+            Self::Spawn(raw)
+        } else if raw.contains(" timed out after ") {
+            Self::Timeout(raw)
+        } else {
+            Self::Other(raw)
+        }
+    }
+
+    /// 人类可读的探测失败文案;分类与 [`ProbeError`] 严格对应。
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Spawn(error) => {
+                format!("启动失败: {error}(需要先完成对应连接器 CLI 的在线安装)")
+            }
+            Self::Timeout(error) => {
+                format!("{error}(CLI 探测超时;可能被网络/代理卡住,请重试)")
+            }
+            Self::Other(error) => {
+                format!("{error}(CLI 探测执行异常;进程已启动但通信失败,请重试)")
+            }
+        }
+    }
+}
+
+/// 跑探测命令并保留**分型后的错误**,供断开登录路径按类降级。
+///
+/// 在 `spawn_blocking` 里调。带 30s 兜底超时(kill-tree):这些调用绝大多数
+/// 是 `--version` / `auth status` / `auth logout` 一类的短命令,但 npm-shim
+/// CLI 曾实测会卡在网络/代理/无 TTY 提示上无限挂起(同 `run_with_timeout`
+/// 的注释)。不设上限会让 connector 状态查询与首帧 auth-gate 刷新永久转圈;
+/// 超时按失败处理,调用方已有各自的降级分支。用 kill-tree 变体:超时只杀
+/// wrapper 会把 node 孙进程连同管道一起留下,飞书 `auth login --device-code`
+/// 轮询里的阻塞调用会反复超时、反复孤儿化进程。
+///
+/// `Spawn` ≈ 真未安装(保留「未安装」降级),`Timeout`/`Other` 都发生在
+/// 进程**已经启动**之后,按「未安装」降级是错的——断开登录路径若把探测
+/// 超时当未安装,会在 `auth logout` 根本没执行、token 未撤销的情况下向
+/// 用户谎报「已断开」。
+pub(crate) fn run_probe(cmd: Command) -> Result<(bool, String, String), ProbeError> {
+    const CLI_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    crate::platform::process::output_with_timeout_and_kill_tree(cmd, CLI_PROBE_TIMEOUT)
+        .map_err(ProbeError::classify)
+        .map(|out| {
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        })
+}
+
+/// 断开登录路径对探测结果的**唯一裁决**:只有「进程没起来」
+/// ([`ProbeError::Spawn`] ≈ 二进制不存在)允许按未安装降级。
+///
+/// 其余一切非成功探测——超时、执行异常、乃至探测**成功执行**但 CLI
+/// 自报失败(`--version` 退出非零/版本无法解析,各连接器折叠为
+/// `Ok(false)` 传入)——都只说明 CLI 没能正常响应,不能证明它不存在:
+/// 此时 `auth logout` 根本没执行、token 未撤销,按未安装降级会清掉
+/// bundle store 并向用户谎报「已断开」。该分支历史上曾被调用点
+/// 折叠成「未安装」,故裁决收敛到本函数并用测试钉死。
+#[derive(Debug)]
+pub(crate) enum LogoutProbeVerdict {
+    /// 探测通过,继续执行 `auth logout`。
+    Installed,
+    /// 真未安装,调用方按 `installed:false` 降级(清 bundle store 合法)。
+    NotInstalled,
+    /// 凭据状态未确认,携带人类可读文案原样上抛,不得动 bundle store。
+    Unconfirmed(String),
+}
+
+/// 按 [`LogoutProbeVerdict`] 裁决;`label` 是连接器中文名(如「钉钉」),
+/// 用于「已安装但版本探测未通过」文案。
+pub(crate) fn logout_probe_verdict(
+    label: &str,
+    probe: Result<bool, ProbeError>,
+) -> LogoutProbeVerdict {
+    match probe {
+        Ok(true) => LogoutProbeVerdict::Installed,
+        Ok(false) => LogoutProbeVerdict::Unconfirmed(format!(
+            "{label} CLI 已安装但版本探测未通过，登录状态未确认；请重试或重新安装 CLI 后再断开"
+        )),
+        Err(ProbeError::Spawn(_)) => LogoutProbeVerdict::NotInstalled,
+        Err(error) => LogoutProbeVerdict::Unconfirmed(error.message()),
+    }
+}
+
+/// 同 [`run_probe`],但把分型错误折叠成人类可读文案,供不区分失败原因的
+/// 调用方(状态轮询、ensure 流程、`auth logout` 执行本身)继续用 `?` 上抛。
+pub fn run(cmd: Command) -> Result<(bool, String, String), String> {
+    run_probe(cmd).map_err(|error| error.message())
 }
 
 /// 跑命令并带**超时**(防 npm/npx 卡在网络 / 代理 / 无 TTY 提示上无限转)。
@@ -101,14 +231,24 @@ pub fn run(mut cmd: Command) -> Result<(bool, String, String), String> {
 /// 1. **stdin 显式接 null**。app 是无窗口 GUI 进程,继承来的 stdin 是坏句柄,
 ///    CLI 安装器(`@wecom/cli` / `@larksuite/cli` 等)读它会**死等 → 每次卡到超时**
 ///    (终端手动跑却几十秒就成)。给个立即 EOF 的 null stdin,安装器走非交互分支跑通。
-/// 2. **stdout/stderr 落日志文件**(不再 `null` 丢弃),失败可诊断:
-///    `~/.pinvou3/cli-install.log`。写文件不是管道、无写满死锁之虞。
+/// 2. **stdout/stderr are appended to a log file** (no longer discarded to
+///    `null`), so failures are diagnosable: `~/.pinvou3/cli-install.log`.
+///    Writing to a file is not a pipe, so there is no risk of a deadlocked
+///    write on a full buffer. Appending instead of truncating on every run
+///    preserves each stage's output of a multi-stage install (mirror retry
+///    after the default registry fails); stage boundaries are distinguished
+///    by the marker lines of [`append_cli_install_log`].
 pub fn run_with_timeout(mut cmd: Command, secs: u64) -> Result<bool, String> {
     let log_path = crate::platform::paths::pinvou3_home().join("cli-install.log");
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let (out, err) = match std::fs::File::create(&log_path) {
+    rotate_cli_install_log_if_oversized(&log_path);
+    let (out, err) = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
         Ok(f) => match f.try_clone() {
             Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
             Err(_) => (Stdio::null(), Stdio::null()),
@@ -125,9 +265,29 @@ pub fn run_with_timeout(mut cmd: Command, secs: u64) -> Result<bool, String> {
             Some(status) => return Ok(status.success()),
             None => {
                 if start.elapsed() > Duration::from_secs(secs) {
-                    let _ = child.kill();
+                    // Termination must be confirmed before the bounded
+                    // reap: if kill() fails the installer may still be
+                    // alive, and waiting on it could outlive the timeout
+                    // budget, so report the failure immediately instead.
+                    if let Err(e) = child.kill() {
+                        return Err(format!(
+                            "CLI 安装超时({secs}s):可能是网络 / 代理(Clash)拦截;终止安装进程失败({e})(日志见 {})",
+                            log_path.display()
+                        ));
+                    }
+                    // Reap the killed child on a bounded budget: without
+                    // wait() it lingers as a zombie and repeated timeouts
+                    // exhaust kernel process-table entries
+                    // (Pinvou/pinvou3#1097).
+                    let reap_note = match reap_killed_child(&mut child, REAP_GRACE) {
+                        Reap::Reaped => String::new(),
+                        Reap::Abandoned => {
+                            format!(";终止请求已发出但 {:?} 内仍未退出,进程可能驻留", REAP_GRACE)
+                        }
+                        Reap::Failed(e) => format!(";回收安装进程失败({e})"),
+                    };
                     return Err(format!(
-                        "CLI 安装超时({secs}s):可能是网络 / 代理(Clash)拦截(日志见 {})",
+                        "CLI 安装超时({secs}s):可能是网络 / 代理(Clash)拦截{reap_note}(日志见 {})",
                         log_path.display()
                     ));
                 }
@@ -135,6 +295,98 @@ pub fn run_with_timeout(mut cmd: Command, secs: u64) -> Result<bool, String> {
             }
         }
     }
+}
+
+/// Appends one stage marker line to `cli-install.log`. The log is
+/// append-only (see [`run_with_timeout`]); each stage's output of a
+/// multi-stage install (mirror retry after the default registry fails) is
+/// attributed via its marker line. Write failures are likewise silently
+/// dropped and never block the install flow.
+pub fn append_cli_install_log(line: &str) {
+    let log_path = crate::platform::paths::pinvou3_home().join("cli-install.log");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// `cli-install.log` is append-only with no natural upper bound (output of
+/// multi-stage installs / repeated retries accumulates, growing for the
+/// application's entire lifetime). Once the size limit is exceeded it is
+/// rotated to `cli-install.log.old` (overwriting the previous copy): disk
+/// usage stays bounded while the latest output of the current install is
+/// still fully preserved.
+const CLI_INSTALL_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+fn rotate_cli_install_log_if_oversized(log_path: &Path) {
+    rotate_cli_install_log_if_oversized_with(log_path, CLI_INSTALL_LOG_MAX_BYTES);
+}
+
+fn rotate_cli_install_log_if_oversized_with(log_path: &Path, max_bytes: u64) {
+    let Ok(metadata) = std::fs::metadata(log_path) else {
+        return;
+    };
+    if metadata.len() <= max_bytes {
+        return;
+    }
+    let mut rotated = log_path.as_os_str().to_owned();
+    rotated.push(".old");
+    // When two installs trigger rotation concurrently, the later rename
+    // fails: log rotation is not worth a lock, so ignore it.
+    // Relies on std::fs::rename's replace-existing-destination semantics: on
+    // Windows it also replaces (FileRenameInfoEx POSIX semantics, falling
+    // back to MoveFileExW + REPLACE_EXISTING), so the old `.old` is directly
+    // overwritten with no prior delete; failures are ignored only for cases
+    // such as the destination being held by another process, and the next
+    // rotation retries (the test below pins this overwrite semantics).
+    let _ = std::fs::rename(log_path, PathBuf::from(rotated));
+}
+
+/// Bounded reap of a killed connector child with the shared grace budget,
+/// so auth-timeout and cancel paths do not leave zombies behind. The
+/// outcome is deliberately discarded by callers: their user-facing
+/// messages describe the auth result, not process hygiene.
+pub(crate) fn reap_after_kill(child: &mut Child) {
+    let _ = reap_killed_child(child, REAP_GRACE);
+}
+
+/// 连接器 CLI 单次调用的兜底上限。Rust 侧全部单次调用(eip `auth login
+/// --no-poll` / `auth poll`(CLI 本地轮询窗口默认 30s,见 eip linux-src
+/// main.go `cmdPoll`;zhidao 侧缺省并显式传 5s)/ status / load / logout)
+/// 受 CLI 自带 HTTP 客户端超时 60s 约束(见同文件 `httpClient`),单次合法
+/// 最坏 ≈ 30s 轮询窗口末次在途请求 + 60s + 启动开销 ≈ 90s;超过视为进程级
+/// 挂死。须小于门闩抢占阈值 `flow_gate::STALL_LIMIT`(180s),让卡死先在
+/// 调用点以本超时自愈,抢占只作兜底。
+pub(crate) const CLI_RUN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 跑命令并**捕获输出**、带超时兜底(EIP / 知道 SSO 编排用)。
+///
+/// 旧实现直接 `cmd.output()`:CLI 真挂死(网络半开、内网网关黑洞)时会无限
+/// 阻塞,spawn_blocking 线程与子进程都不回收,反复触发会耗尽线程池(issue
+/// #1097)。委托 `platform::process::output_with_timeout` 而非自管进程:临时
+/// 文件捕获输出(无管道写满死锁,孙进程继承句柄也不影响超时生效),超时
+/// kill 并 wait() 收尸,超过捕获上限同样终止,防失控输出拖垮调用方。
+pub(crate) fn run_captured_with_timeout(
+    cmd: Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<(bool, i32, String, String), String> {
+    crate::platform::process::output_with_timeout(cmd, timeout)
+        .map(|out| {
+            (
+                out.status.success(),
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        })
+        .map_err(|e| format!("{label}: {e}"))
 }
 
 /// 标准 base64 编码(避免引新依赖)。
@@ -230,7 +482,15 @@ pub fn drain_for_url<R: std::io::Read + Send + 'static>(
     tx: mpsc::Sender<String>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for line in BufReader::new(r).lines().flatten() {
+        for line in BufReader::new(r).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    // 管道读取错误通常不可恢复；继续迭代可能反复返回 Err 并空转。
+                    log::warn!("[{}] 授权输出读取失败，停止排空：{error}", ctx.cli_bin);
+                    break;
+                }
+            };
             if let Some(u) = ctx.extract_url(&line) {
                 let _ = tx.send(u);
             }
@@ -428,6 +688,44 @@ mod tests {
         auth_domains: &["work.weixin.qq.com", "weixin.qq.com"],
     };
 
+    /// The append-only cli-install.log has no natural upper bound: over the
+    /// limit it must rotate to `.old` (overwriting the previous rotation);
+    /// under the limit it is left untouched.
+    #[test]
+    fn oversized_cli_install_log_rotates_to_old() {
+        let root = std::env::temp_dir().join(format!("pinvou-cli-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("cli-install.log");
+        std::fs::write(&log_path, b"x").unwrap();
+        rotate_cli_install_log_if_oversized_with(&log_path, 1024);
+        assert!(log_path.exists());
+        assert!(!root.join("cli-install.log.old").exists());
+
+        std::fs::write(&log_path, [b'a'; 2048]).unwrap();
+        rotate_cli_install_log_if_oversized_with(&log_path, 1024);
+        assert!(!log_path.exists());
+        assert_eq!(
+            std::fs::read(root.join("cli-install.log.old"))
+                .unwrap()
+                .len(),
+            2048
+        );
+
+        // The second rotation must overwrite the existing `.old` (including
+        // on Windows: std::fs::rename has the same replace semantics there,
+        // covered by the CI Windows leg of this test); if a failed replace
+        // were swallowed, the main log would grow unboundedly from this
+        // point on.
+        std::fs::write(&log_path, [b'b'; 2048]).unwrap();
+        std::fs::write(root.join("cli-install.log.old"), b"stale-old-log").unwrap();
+        rotate_cli_install_log_if_oversized_with(&log_path, 1024);
+        assert!(!log_path.exists());
+        let rotated = std::fs::read(root.join("cli-install.log.old")).unwrap();
+        assert_eq!(rotated.len(), 2048);
+        assert!(rotated.iter().all(|&b| b == b'b'), "{rotated:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// extract_url three-branch matrix: whitelisted domain hits truncate at
     /// whitespace (QR-scan URLs often carry `&` query strings that must not be
     /// cut), non-whitelisted domains do not count as this connector's URL,
@@ -449,6 +747,117 @@ mod tests {
                 "{input:?}"
             );
         }
+    }
+
+    use std::io::{Error, Read};
+
+    struct ReadErrorThenPanic {
+        failed: bool,
+    }
+
+    impl Read for ReadErrorThenPanic {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.failed {
+                panic!("读取错误后不应继续轮询同一管道");
+            }
+            self.failed = true;
+            Err(Error::other("test read failure"))
+        }
+    }
+
+    #[test]
+    fn drain_for_url_stops_after_read_error() {
+        let (tx, _rx) = mpsc::channel();
+        let handle = drain_for_url(TEST_CTX, ReadErrorThenPanic { failed: false }, tx);
+        assert!(handle.join().is_ok(), "读取错误后应退出排空线程");
+    }
+
+    /// A 30s probe timeout must NOT read as "CLI not installed": the ensure
+    /// flow branches on the collapsed boolean and would re-download a CLI
+    /// that is merely hung, and `auth logout` of a connected user would
+    /// claim the CLI is missing. [`ProbeError`] separates the three classes
+    /// for the logout paths, and classification must happen on the RAW
+    /// platform error — a previous round classified the human-wrapped
+    /// message instead, so the Spawn branch was unreachable and the
+    /// missing-CLI logout degrade regressed into a hard error.
+    #[test]
+    fn probe_error_messages_distinguish_timeout_from_missing_install() {
+        // fixtures use the real platform::process message formats.
+        let timeout = ProbeError::classify(String::from(
+            "lark-cli timed out after 30s: subprocess tree termination requested",
+        ));
+        assert!(matches!(timeout, ProbeError::Timeout(_)));
+        assert!(timeout.message().contains("探测超时"));
+        assert!(!timeout.message().contains("在线安装"));
+
+        let spawn = ProbeError::classify(String::from("spawn lark-cli failed: program not found"));
+        assert!(matches!(spawn, ProbeError::Spawn(_)));
+        assert!(spawn.message().contains("启动失败"));
+        assert!(spawn.message().contains("在线安装"));
+
+        // 进程已启动后的 wait/管道失败既非「未安装」也非超时,文案不得再
+        // 宣称需要安装(上一轮实现会把这一类误标成「启动失败需安装」)。
+        let other = ProbeError::classify(String::from("lark-cli wait error: no child process"));
+        assert!(matches!(other, ProbeError::Other(_)));
+        assert!(!other.message().contains("在线安装"));
+
+        // 组合回归:run_probe 是 logout 路径的入口,必须端到端产出 Spawn 分型。
+        assert!(matches!(
+            run_probe(Command::new("pinvou3-no-such-connector-cli-for-tests")),
+            Err(ProbeError::Spawn(_))
+        ));
+    }
+
+    /// 断开登录的裁决表:只有 Spawn(≈二进制不存在)允许按「未安装」
+    /// 降级;其余一切非成功探测——超时、执行异常、乃至探测成功执行但
+    /// CLI 自报失败(`--version` 退出非零/版本无法解析,调用点折叠为
+    /// `Ok(false)` 传入)——都只说明 CLI 没能正常响应,不能证明不存在:
+    /// 此时 `auth logout` 根本没执行,按未安装降级会在 token 未撤销时
+    /// 清掉 bundle store 并谎报「已断开」。该折叠分支曾真实存在
+    /// (dingtalk `Ok(false)` / tmeet `Ok(None)`),故整表钉死。
+    #[test]
+    fn logout_probe_verdict_degrades_only_on_spawn() {
+        let label = "测试";
+
+        // 真未安装:唯一保留降级的路径。
+        let spawn = ProbeError::classify(String::from("spawn dws failed: program not found"));
+        assert!(matches!(
+            logout_probe_verdict(label, Err(spawn)),
+            LogoutProbeVerdict::NotInstalled
+        ));
+
+        // 探测通过:继续执行 auth logout。
+        assert!(matches!(
+            logout_probe_verdict(label, Ok(true)),
+            LogoutProbeVerdict::Installed
+        ));
+
+        // 已安装但版本探测未通过:不得降级,文案须标明「未确认」且不得
+        // 诱导重装路径之外的误判。
+        match logout_probe_verdict(label, Ok(false)) {
+            LogoutProbeVerdict::Unconfirmed(message) => {
+                assert!(message.contains(label), "{message}");
+                assert!(message.contains("登录状态未确认"), "{message}");
+                assert!(!message.contains("未安装"), "{message}");
+            }
+            other => panic!("Ok(false) 不得按未安装降级,实际 {other:?}"),
+        }
+
+        // 超时/执行异常维持原分型文案,同样不得降级。
+        let timeout = ProbeError::classify(String::from(
+            "dws timed out after 30s: subprocess tree termination requested",
+        ));
+        match logout_probe_verdict(label, Err(timeout)) {
+            LogoutProbeVerdict::Unconfirmed(message) => {
+                assert!(message.contains("探测超时"), "{message}");
+            }
+            other => panic!("Timeout 应转为未确认错误,实际 {other:?}"),
+        }
+        let other = ProbeError::classify(String::from("dws wait error: no child process"));
+        assert!(matches!(
+            logout_probe_verdict(label, Err(other)),
+            LogoutProbeVerdict::Unconfirmed(_)
+        ));
     }
 
     /// 本地生成二维码:任意 URL 都能出码(不依赖各 CLI 的 qrcode 子命令),
@@ -499,6 +908,67 @@ mod tests {
         );
     }
 
+    /// The timeout path must stay bounded and reap the killed child: a
+    /// failed kill() returns immediately instead of waiting on a
+    /// still-alive installer, and after a confirmed kill the reap is
+    /// bounded by REAP_GRACE. Kill and reap are both pinned via the error
+    /// text: a failed kill() and an abandoned or failed reap each append
+    /// a clause, so their absence proves the installer was killed and
+    /// collected. Soft-skips when no `sleep` binary is on PATH (bare
+    /// Windows hosts; windows-latest CI bash steps have Git Bash's
+    /// `sleep.exe` on PATH, so the test runs for real there). The
+    /// Abandoned reap branch is induced deterministically in the
+    /// platform::process tests with a zero grace budget; the Failed
+    /// branch is not inducible in-process (std caches the exit status, so
+    /// a collected child can never report a wait error).
+    #[test]
+    fn run_with_timeout_reaps_and_stays_bounded() {
+        if Command::new("sleep").arg("0").status().is_err() {
+            eprintln!("skipping: no `sleep` binary on this platform");
+            return;
+        }
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::platform::paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-rwt-reap-test-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp PINVOU3_HOME");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes
+        // serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+
+        let started = Instant::now();
+        let mut cmd = Command::new("sleep");
+        cmd.arg("120");
+        let error = run_with_timeout(cmd, 1).expect_err("sleep 120s must hit the 1s timeout");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            error.contains("CLI 安装超时(1s)"),
+            "unexpected timeout error: {error}"
+        );
+        assert!(
+            !error.contains("进程可能驻留")
+                && !error.contains("回收安装进程失败")
+                && !error.contains("终止安装进程失败"),
+            "timeout error must not contain kill or reap failure clauses: {error}"
+        );
+        let elapsed = started.elapsed();
+        // >= 1s proves the timeout poll loop actually ran (a spawn failure
+        // would also Err but return instantly); < 10s proves the timeout
+        // path returned promptly after kill + grace-bounded reap (normal
+        // exit is milliseconds; the 2s REAP_GRACE is the worst-case tail)
+        // instead of blocking on the child indefinitely.
+        assert!(
+            elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(10),
+            "timeout path should return promptly after the kill, took {elapsed:?}"
+        );
+    }
+
     // 测试辅助:标准 base64 解码(生产 b64 的逆运算,仅测试用)。
     fn b64_decode(s: &str) -> Vec<u8> {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -519,5 +989,55 @@ mod tests {
             }
         }
         out
+    }
+
+    /// run_captured_with_timeout 正常路径:退出码与 stdout/stderr 都被完整捕获。
+    #[test]
+    fn run_captured_collects_output_and_status() {
+        // 用 std::env::consts::OS 常量分支而非 cfg 语法:平台条件编译不得出现在
+        // 适配层外(architecture-guard rust_target_cfg_outside_adapter)。
+        let windows = std::env::consts::OS == "windows";
+        let mut cmd = Command::new(if windows { "cmd" } else { "echo" });
+        if windows {
+            cmd.args(["/C", "echo captured-ok 1>&2"]);
+        } else {
+            cmd.arg("captured-stdout-ok");
+        }
+        let (ok, _code, so, se) = run_captured_with_timeout(cmd, "test-cli", CLI_RUN_TIMEOUT)
+            .expect("fast command must succeed");
+        assert!(ok);
+        if windows {
+            assert!(se.contains("captured-ok"), "stderr captured, got {se:?}");
+        } else {
+            assert!(
+                so.contains("captured-stdout-ok"),
+                "stdout captured, got {so:?}"
+            );
+        }
+    }
+
+    /// run_captured_with_timeout 超时路径:挂死的子进程被 kill 并收尸,调用在
+    /// 超时后很快返回错误,而不是无限阻塞(issue #1097:僵尸流程资源不回收)。
+    #[test]
+    fn run_captured_kills_a_hung_child_at_the_deadline() {
+        let windows = std::env::consts::OS == "windows";
+        let mut cmd = Command::new(if windows { "cmd" } else { "sleep" });
+        if windows {
+            cmd.args(["/C", "ping -n 30 127.0.0.1"]);
+        } else {
+            cmd.arg("30");
+        }
+        let t0 = Instant::now();
+        let err = run_captured_with_timeout(cmd, "test-cli", Duration::from_secs(1))
+            .expect_err("hung command must be killed");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "kill must return promptly, took {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            err.contains("timed out after 1s"),
+            "error must report the timeout, got {err:?}"
+        );
     }
 }

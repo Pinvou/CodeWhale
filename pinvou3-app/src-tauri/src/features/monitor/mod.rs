@@ -20,14 +20,11 @@ mod platform;
 mod self_metrics;
 
 // re-export 子模块 pub 面，保持 `crate::features::monitor::Foo` 调用路径不变。
-// `MonitorDiagnostic` 仅在 model_probe 内部使用，但作为原 pub 面的一部分保留 re-export
-// 以维持外部可见性承诺（无外部调用方，allow 抑制 unused_imports 门禁）。
-#[allow(unused_imports)]
 pub use model_probe::{
-    MonitorDiagnostic, VllmSnapshot, VllmStatus, active_model_snapshot, probe_vllm_model_info,
-    resolve_served_model, vllm_base_url, vllm_configured_model, vllm_snapshot,
+    VllmSnapshot, VllmStatus, active_model_snapshot, adopts_probed_facts, resolve_served_model,
+    vllm_base_url, vllm_configured_model, vllm_snapshot,
 };
-pub use self_metrics::{SelfMetrics, SelfMetricsDebugSnapshot, SelfPerfSnapshot};
+pub use self_metrics::{SelfMetrics, SelfPerfSnapshot};
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,7 +45,6 @@ pub struct MonitorSnapshot {
     /// 无关,任何后端(本地 vLLM / LM Studio / Ollama / 云端 API)都有值——因为是在
     /// 流式转发通路上就地测的。前端一律用这块显示这四项(vllm 块只剩队列/窗口/健康)。
     pub self_perf: SelfPerfSnapshot,
-    pub self_perf_debug: SelfMetricsDebugSnapshot,
     pub app: AppSnapshot,
 }
 
@@ -139,17 +135,25 @@ async fn sample_all_with_cpu(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    // GPU 采样可能拉起 nvidia-smi 子进程（已带 GPU_PROBE_TIMEOUT 兜底），放到
+    // blocking 池，避免 1s 一次的监控轮询占住 async worker；与 ram/vllm 并发
+    // 采样，探测挂起时其余指标不再排队等它。预算是**单个候选进程**的：
+    // Linux 最多 3 个候选逐个尝试，挂死时快照最长延迟约「候选数 × 预算」；
+    // 挂起期间结果缓存互斥量被持有，后续轮询在 blocking 池里排队等它结束，
+    // 拿到的是新采样而非缓存旧值。
+    let gpu_task = tokio::task::spawn_blocking(gpu_snapshot);
+    let ram = platform::ram_snapshot();
+    let vllm = match active_model_snapshot().await {
+        Some(snapshot) => Some(snapshot),
+        None => vllm_snapshot(vllm_upstream, configured_model).await,
+    };
     MonitorSnapshot {
         generated_at_ms: now_ms,
-        gpu: gpu_snapshot(),
+        gpu: gpu_task.await.unwrap_or(None),
         cpu,
-        ram: platform::ram_snapshot(),
-        vllm: match active_model_snapshot().await {
-            Some(snapshot) => Some(snapshot),
-            None => vllm_snapshot(vllm_upstream, configured_model).await,
-        },
+        ram,
+        vllm,
         self_perf: state.self_metrics.snapshot(),
-        self_perf_debug: state.self_metrics.debug_snapshot(),
         app: AppSnapshot {
             pinvou3_version: env!("CARGO_PKG_VERSION"),
             deepseek_tui_version: env!("CARGO_PKG_VERSION"), // TODO: 从 deepseek-tui crate 取
@@ -189,6 +193,12 @@ struct GpuSnapshotCache {
     value: Option<GpuSnapshot>,
 }
 
+/// 子进程 GPU 探测的统一兜底预算（nvidia-smi / macOS ioreg / Windows 性能
+/// 计数器探测）。驱动/CUDA 争用下这些探测可能挂死数秒到永远；上层
+/// `gpu_snapshot` 已配 3s 结果缓存，探测失败/超时按「本机无数据」降级，
+/// 缓存窗口内的后续轮询复用上次成功值。
+pub(crate) const GPU_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 调 `nvidia-smi` 查 GPU。本机没 NVIDIA/没装 nvidia-smi → None。
 /// 桌面环境启动时 PATH 可能不含 nvidia-smi，加常见绝对路径 fallback。
 fn nvidia_gpu_snapshot() -> Option<GpuSnapshot> {
@@ -200,9 +210,9 @@ fn nvidia_gpu_snapshot() -> Option<GpuSnapshot> {
     let out = crate::platform::os::nvidia_smi_candidates()
         .into_iter()
         .find_map(|candidate| {
-            crate::platform::process::HiddenCommand::new(candidate)
-                .args(args)
-                .output()
+            let mut command = crate::platform::process::HiddenCommand::new(candidate);
+            command.args(args);
+            crate::platform::process::output_with_timeout(command, GPU_PROBE_TIMEOUT)
                 .ok()
                 .filter(|o| o.status.success())
         })?;
@@ -232,6 +242,22 @@ mod tests {
 
     #[tokio::test]
     async fn sample_all_keeps_other_fields_when_cpu_snapshot_is_none() {
+        // 该测试会经由 active_model_snapshot 读取宿主真实 prefs;一旦宿主
+        // settings.json 存在带 credential_ref 的 active_model,无头测试进程会
+        // 在 macOS 钥匙串授权弹窗上永久阻塞。用临时 PINVOU3_HOME 隔离,
+        // 保证 prefs 为空、探测走纯本地快路径。
+        let temp_home =
+            std::env::temp_dir().join(format!("pinvou3-monitor-test-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_home).expect("create isolated PINVOU3_HOME");
+        // Hold ENV_LOCK across the whole test: paths.rs requires the lock to
+        // outlive the EnvVarGuard so the final restore stays serialized.
+        let _env_lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env_restore = crate::platform::paths::tests::EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &temp_home) };
+
         let state = MonitorState::new();
         let snapshot = sample_all_with_cpu(&state, "not-a-url", None, None).await;
         assert!(snapshot.generated_at_ms > 0);

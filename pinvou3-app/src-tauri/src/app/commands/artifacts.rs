@@ -103,11 +103,6 @@ fn ensure_editable_artifact_path(path: &std::path::Path) -> Result<(), String> {
     }
     Ok(())
 }
-pub(super) fn atomic_write_utf8(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let _lifecycle = artifact_lifecycle_lock().lock();
-    atomic_write_utf8_unlocked(path, content)
-}
-
 fn atomic_write_utf8_unlocked(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     atomic_write_utf8_unlocked_with(
         path,
@@ -361,7 +356,10 @@ pub async fn read_artifact_image_b64(path: String) -> Result<String, String> {
         "bmp" => "image/bmp",
         _ => "image/png",
     };
-    let b64 = crate::features::files::file_ingest::base64_encode(&bytes);
+    let b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    };
     Ok(format!("data:{mime};base64,{b64}"))
 }
 
@@ -403,7 +401,10 @@ pub async fn read_artifact_thumbnail(path: String) -> Result<Option<String>, Str
         } else {
             "image/jpeg"
         };
-        let b64 = crate::features::files::file_ingest::base64_encode(&buf);
+        let b64 = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        };
         return Ok(Some(format!("data:{mime};base64,{b64}")));
     }
     Ok(None)
@@ -668,13 +669,6 @@ pub async fn render_artifact_visual(path: String) -> Result<VisualResult, String
 }
 
 /// 系统没有演示文稿默认打开方式时，使用 LibreOffice 作为显式兜底。
-fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
 fn open_with_libreoffice(path: &std::path::Path) -> Result<(), String> {
     let program = crate::platform::os::libreoffice_tool_path();
     let program_text = program.to_string_lossy().to_string();
@@ -727,7 +721,7 @@ const EXTERNAL_URL_ALLOWLIST: &[&str] = &[
     // Canva 可画 MCP 返回的设计编辑链接/预览图资源
     "https://www.canva.cn/",
     "https://export-download.canva.cn/",
-    // 腾讯文档个人 Token 授权页(工具商店「腾讯文档 MCP」配置入口)
+    // Tencent Docs personal token auth page (configured via the "Tencent Docs MCP" connector in Plugin Center)
     "https://docs.qq.com/scenario/open-claw.html",
 ];
 
@@ -941,7 +935,7 @@ pub async fn reveal_session_folder(
     session_id: String,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
-    if !valid_session_id(&session_id) {
+    if crate::features::sessions::validate_session_id(&session_id).is_err() {
         return Err("invalid session id".into());
     }
     store
@@ -970,7 +964,7 @@ pub async fn reveal_session_folder(
 /// 共享该目录；首次打开早于首次运行时按需创建，不接受前端传入任意文件系统路径。
 #[tauri::command]
 pub async fn open_scheduled_task_folder(automation_id: String) -> Result<(), String> {
-    if !valid_session_id(&automation_id) {
+    if crate::features::sessions::validate_scheduled_task_id(&automation_id).is_err() {
         return Err("invalid automation id".into());
     }
     let dir = crate::platform::paths::scheduled_task_workspace_dir(&automation_id);

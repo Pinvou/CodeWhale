@@ -3,13 +3,14 @@ use std::time::Duration;
 
 use tauri::AppHandle;
 
-use super::super::{DownloadUpdateResult, PendingUpdateReportResult, UpdateInfo};
+use super::super::{PendingUpdateReportResult, UpdateInfo};
 
 pub fn cleanup_stale_backup() {}
 
 pub async fn check_for_update_info(
     _client: &reqwest::Client,
     current_version: &str,
+    _manifest_url: &str,
 ) -> Result<UpdateInfo, String> {
     Ok(UpdateInfo {
         available: false,
@@ -26,6 +27,8 @@ pub async fn check_for_update_info(
         update_type: String::new(),
         platform: std::env::consts::OS.to_string(),
         ota_host: String::new(),
+        approval_receipt: String::new(),
+        platforms: std::collections::HashMap::new(),
     })
 }
 
@@ -34,7 +37,7 @@ pub async fn download_update_package(
     _app: AppHandle,
     _cancel: &AtomicBool,
     _stall_timeout: Duration,
-) -> Result<DownloadUpdateResult, String> {
+) -> Result<(), String> {
     Err("当前平台暂不支持应用内更新".to_string())
 }
 

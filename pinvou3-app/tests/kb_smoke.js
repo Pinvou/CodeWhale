@@ -5,6 +5,8 @@
  * 文件管理、本地知识库与远程知识库三个 subtab，以及本地知识库的导入和索引流程。
  * 重点抓运行时 ReferenceError。
  * 用法: node pinvou3-app/tests/kb_smoke.js  (全 PASS→0 / FAIL→1 / 缺依赖→2)
+ * 缺依赖分支必须在 exit 2 之前打印一行以 SKIP: 开头的说明(必须在行首),
+ * 否则 scripts/run-user-journey-tests.sh 会把这次跳过判为失败。
  */
 const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
@@ -75,11 +77,10 @@ function injectSource() {
         case 'get_active_persona': return Promise.resolve(null);
         case 'list_deliverable_index': return Promise.resolve(OUTPUTS);
         // ---- kb_* ----
-        case 'kb_scan_status': return Promise.resolve({running:false,phase:'done',scanned:1248,dedupDone:0,dedupTotal:0});
+        case 'kb_scan_status': return Promise.resolve({running:false,phase:'done',scanned:1248});
         case 'kb_stats': return Promise.resolve({totalFiles:1248,totalBytes:9e9,hashed:1248,duplicateGroups:3,duplicateFiles:7,duplicateWastedBytes:1048576});
         case 'kb_type_counts': return Promise.resolve([{ext:'pdf',count:230},{ext:'docx',count:120},{ext:'xlsx',count:80},{ext:'md',count:60},{ext:'png',count:274},{ext:'zip',count:18}]);
         case 'kb_search': return Promise.resolve(FILES);
-        case 'kb_find_duplicates': return Promise.resolve([]);
         case 'kb_collection_list': return Promise.resolve(COLLS);
         case 'kb_documents': return Promise.resolve((args&&args.collectionId>0)?DOCS:DOCS);
         case 'kb_index_status': return Promise.resolve(window.__KB_INDEX_STATE__ || {running:false,phase:'idle',done:0,total:0,failed:0});
@@ -113,9 +114,7 @@ function injectSource() {
           finish();
           return Promise.resolve(null);
         }
-        case 'kb_retrieve': return Promise.resolve([{text:'受访者认为保险报价流程过于繁琐，希望一键比价。竞品在交强险环节体验更顺畅。',score:-1.5,docName:'访谈纪要.md',docPath:'/home/x/访谈纪要.md',ord:0}]);
         case 'kb_embed_info': return Promise.resolve({enabled:true,baseUrl:'local(fastembed)',model:'bge-m3'});
-        case 'kb_ask': return Promise.resolve({answer:'受访者认为保险报价流程过于繁琐，希望一键比价 [1]。竞品在交强险环节体验更顺畅 [1]。',citations:[{idx:1,docName:'访谈纪要.md',docPath:'/home/x/访谈纪要.md',ord:0,snippet:'受访者认为保险报价流程过于繁琐…'}],noContext:false});
         case 'remote_kb_connections': {
           const snapshot = window.__REMOTE_KB_CONNECTIONS__.map(connection=>({
             ...connection,scope:window.__REMOTE_KB_SCOPE__,online:true,ready:true,error:null
@@ -1204,6 +1203,7 @@ async function chooseRemoteUploadSource(page, testId) {
   await page.focus('[data-testid="remote-owner-people-tab"]');
   await page.keyboard.press('ArrowRight');
   await page.waitForSelector('#remote-owner-host-panel');
+  await page.waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'remote-owner-host-tab');
   const keyboardHostTab = await page.evaluate(() => ({
     selected: document.querySelector('[data-testid="remote-owner-host-tab"]')?.getAttribute('aria-selected'),
     focused: document.activeElement?.getAttribute('data-testid'),

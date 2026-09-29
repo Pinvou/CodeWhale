@@ -47,6 +47,15 @@ macro_rules! sync_command_passthrough {
 pub(super) use async_command_passthrough;
 pub(super) use sync_command_passthrough;
 
+/// Unified redaction at the command-layer error exit: `context` + redacted error string (credentials/keys
+/// must not pass through verbatim to the frontend). Hoisted from the old settings.rs local; shared by settings / memory.
+pub(crate) fn sanitize_command_error(context: &str, err: impl std::fmt::Display) -> String {
+    format!(
+        "{context}: {}",
+        crate::platform::credential_store::redact_secret(&err.to_string())
+    )
+}
+
 /// 解析当前会话 id：优先入参，否则取 store.active_id()。
 ///
 /// 收敛原本散落在 workflows/interaction/memory/chat 共 14 处的
@@ -59,6 +68,31 @@ pub(super) fn require_active_sid(
     session_id
         .or_else(|| store.active_id())
         .ok_or_else(|| "no active session".to_string())
+}
+
+/// 到调用方拼好的完整 fallback 文件名。扩展名的剥离与拼接（含 `.tar.xz` 多段
+/// 扩展）由调用方经 `extension` 传入，返回值恒带该扩展名。
+pub(super) fn safe_export_stem(name: &str, extension: &str, fallback: &str) -> String {
+    let Some(name) = std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return fallback.to_string();
+    };
+    let stem = name
+        .trim()
+        .trim_end_matches(&format!(".{extension}"))
+        .trim_end_matches(['.', ' ']);
+    if stem.is_empty()
+        || stem.len() > 120
+        || stem
+            .chars()
+            .any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
+    {
+        fallback.to_string()
+    } else {
+        format!("{stem}.{extension}")
+    }
 }
 
 #[cfg(test)]

@@ -288,7 +288,6 @@ pub fn update_profile(patch: ProfilePatch) -> io::Result<MemoryProfile> {
     if let Some(value) = patch.style_notes {
         profile.conventions.style_notes = value;
     }
-    profile.revision = profile.revision.saturating_add(1);
     profile.updated_at = Utc::now().to_rfc3339();
     profile.normalize();
     let path = profile_path();
@@ -300,9 +299,6 @@ pub fn clear_profile() -> io::Result<MemoryProfile> {
     let profile = MemoryProfile {
         version: PROFILE_VERSION,
         updated_at: Utc::now().to_rfc3339(),
-        revision: load_profile()
-            .map(|p| p.revision.saturating_add(1))
-            .unwrap_or(1),
         ..MemoryProfile::default()
     };
     save_profile(&profile)?;
@@ -804,12 +800,23 @@ fn quarantine_unparsable_journal(journal_path: &Path) {
     }
 }
 
-fn work_context_stale_paths_unlocked(
+/// Topic-migration stale-file scan shared by the preferences and work-context
+/// directory stores: every `*.json` in `dir` other than the new authority
+/// whose normalized topic equals the old or the new topic is stale and must
+/// be removed once the new authority commits.
+fn topic_stale_paths_unlocked<T, N, Topic>(
     dir: &Path,
     new_path: &Path,
     old_topic: &str,
     new_topic: &str,
-) -> io::Result<Vec<PathBuf>> {
+    normalize: N,
+    topic_of: Topic,
+) -> io::Result<Vec<PathBuf>>
+where
+    T: serde::de::DeserializeOwned,
+    N: Fn(&str) -> String,
+    Topic: Fn(&T) -> &str,
+{
     let mut stale = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -823,9 +830,9 @@ fn work_context_stale_paths_unlocked(
         }
         let same_topic = fs::read_to_string(&path)
             .ok()
-            .and_then(|raw| serde_json::from_str::<WorkContextFile>(&raw).ok())
+            .and_then(|raw| serde_json::from_str::<T>(&raw).ok())
             .map(|item| {
-                let topic = normalize_work_context_topic(&item.topic);
+                let topic = normalize(topic_of(&item));
                 topic == old_topic || topic == new_topic
             })
             .unwrap_or(false);
@@ -834,6 +841,22 @@ fn work_context_stale_paths_unlocked(
         }
     }
     Ok(stale)
+}
+
+fn work_context_stale_paths_unlocked(
+    dir: &Path,
+    new_path: &Path,
+    old_topic: &str,
+    new_topic: &str,
+) -> io::Result<Vec<PathBuf>> {
+    topic_stale_paths_unlocked::<WorkContextFile, _, _>(
+        dir,
+        new_path,
+        old_topic,
+        new_topic,
+        normalize_work_context_topic,
+        |item: &WorkContextFile| item.topic.as_str(),
+    )
 }
 
 pub fn update_work_context(
@@ -960,7 +983,6 @@ pub(super) fn upsert_timed_memory_unlocked(
     content: &str,
     source: &str,
     ttl_days: Option<i64>,
-    confidence: f32,
 ) -> io::Result<TimedMemoryItem> {
     let kind = normalize_timed_memory_kind(kind);
     let now = Utc::now();
@@ -1001,7 +1023,6 @@ pub(super) fn upsert_timed_memory_unlocked(
         existing.topic = topic.clone();
         existing.text = text.clone();
         existing.source = clean_text(source, 40);
-        existing.confidence = confidence;
         existing.status = "active".to_string();
         existing.updated_at = now_s.clone();
         existing.last_hit = now_s.clone();
@@ -1014,7 +1035,6 @@ pub(super) fn upsert_timed_memory_unlocked(
             topic,
             text,
             source: clean_text(source, 40),
-            confidence,
             created_at: now_s.clone(),
             updated_at: now_s.clone(),
             last_hit: now_s.clone(),
@@ -1034,10 +1054,9 @@ pub(super) fn upsert_timed_memory_locked(
     content: &str,
     source: &str,
     ttl_days: Option<i64>,
-    confidence: f32,
 ) -> io::Result<TimedMemoryItem> {
     let _guard = write_lock().lock();
-    upsert_timed_memory_unlocked(kind, topic, content, source, ttl_days, confidence)
+    upsert_timed_memory_unlocked(kind, topic, content, source, ttl_days)
 }
 
 pub(super) fn archive_timed_memory_unlocked(kind: &str, id: &str) -> io::Result<bool> {
@@ -1110,9 +1129,6 @@ pub(super) fn update_timed_memory_unlocked(
         }
         item.text = text;
     }
-    if let Some(ttl_days) = patch.ttl_days {
-        item.ttl_days = ttl_days.clamp(1, 90);
-    }
     item.updated_at = Utc::now().to_rfc3339();
     item.last_hit = item.updated_at.clone();
     item.status = "active".to_string();
@@ -1168,6 +1184,27 @@ fn load_timed_memory_file(path: &std::path::Path, kind: &str) -> io::Result<Vec<
     Ok(dedupe_timed_memory_items(out))
 }
 
+/// Shared JSONL store writer: serialize each item as one compact JSON line
+/// and atomically replace the store file. Items whose id or key field is
+/// empty are dropped instead of written (same rule every store applied
+/// inline before this helper was extracted).
+fn write_jsonl_store<T: Serialize>(
+    path: &Path,
+    items: Vec<T>,
+    nonempty_fields: impl Fn(&T) -> (&str, &str),
+) -> io::Result<()> {
+    let mut lines = String::new();
+    for item in &items {
+        let (id, key) = nonempty_fields(item);
+        if id.is_empty() || key.is_empty() {
+            continue;
+        }
+        lines.push_str(&serde_json::to_string(item).map_err(invalid_data)?);
+        lines.push('\n');
+    }
+    write_text_atomic(path, &lines)
+}
+
 pub(super) fn write_timed_memory_file(
     path: &std::path::Path,
     items: &[TimedMemoryItem],
@@ -1184,27 +1221,7 @@ pub(super) fn write_timed_memory_file(
     }
     normalized = dedupe_timed_memory_items(normalized);
     normalized = compact_timed_memory_items(normalized, kind);
-    let mut lines = String::new();
-    for item in normalized {
-        if item.id.is_empty() || item.text.is_empty() {
-            continue;
-        }
-        lines.push_str(&serde_json::to_string(&item).map_err(invalid_data)?);
-        lines.push('\n');
-    }
-    write_text_atomic(path, &lines)
-}
-
-/// Reload and rewrite a single timed store under the write lock: normalize /
-/// dedupe / capacity compaction, then an atomic write. The whole read-modify-write
-/// holds [`write_lock`], mutually exclusive with write entry points like
-/// `update_timed_memory`; organize's apply phase runs
-/// [`compact_timed_memory_store_unlocked`] in the same critical section as its
-/// mutations instead of a bare load+write, so entries the per-turn review just
-/// wrote between the two steps are not overwritten wholesale by the old list.
-pub fn compact_timed_memory_store(kind: &str) -> io::Result<()> {
-    let _guard = write_lock().lock();
-    compact_timed_memory_store_unlocked(kind)
+    write_jsonl_store(path, normalized, |item| (&item.id, &item.text))
 }
 
 /// Caller must hold [`write_lock`]: organize's apply phase runs this in the
@@ -1423,7 +1440,6 @@ pub fn confirm_pending_memory(id: &str) -> io::Result<Option<MemoryWriteEvent>> 
         "profile" if item.topic == "call_name" => {
             let mut profile = load_profile()?;
             profile.identity.call_name = item.content.clone();
-            profile.revision = profile.revision.saturating_add(1);
             profile.updated_at = now.clone();
             profile.normalize();
             write_json_atomic(&profile_path(), &profile)?;
@@ -1431,7 +1447,6 @@ pub fn confirm_pending_memory(id: &str) -> io::Result<Option<MemoryWriteEvent>> 
         "profile" if item.topic == "assistant_alias" => {
             let mut profile = load_profile()?;
             profile.identity.assistant_alias = item.content.clone();
-            profile.revision = profile.revision.saturating_add(1);
             profile.updated_at = now.clone();
             profile.normalize();
             write_json_atomic(&profile_path(), &profile)?;
@@ -1464,7 +1479,6 @@ pub fn confirm_pending_memory(id: &str) -> io::Result<Option<MemoryWriteEvent>> 
                     &item.source
                 },
                 None,
-                0.86,
             )?;
         }
         "work_context" => {
@@ -1589,19 +1603,6 @@ pub fn load_never_memory() -> io::Result<Vec<NeverMemoryItem>> {
     load_never_memory_unlocked()
 }
 
-pub fn review_turn_candidates(user: &str, _assistant: &str) -> io::Result<Vec<PendingMemoryItem>> {
-    let suggestions = super::llm_review::discover_turn_suggestions(user);
-    let mut items = Vec::new();
-    for suggestion in suggestions {
-        match enqueue_memory_candidate(suggestion) {
-            Ok(item) => items.push(item),
-            Err(err) if err.kind() == io::ErrorKind::InvalidInput => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(items)
-}
-
 pub fn refresh_recent_work_expiry() -> io::Result<usize> {
     let _guard = write_lock().lock();
     let now = Utc::now();
@@ -1666,40 +1667,20 @@ pub fn list_preferences() -> io::Result<Vec<PreferenceFile>> {
     load_preferences()
 }
 
-pub fn list_preferences_with_cleanup() -> io::Result<TopicRead<Vec<PreferenceFile>>> {
-    load_preferences_with_cleanup()
-}
-
 fn preference_stale_paths_unlocked(
     dir: &Path,
     new_path: &Path,
     old_topic: &str,
     new_topic: &str,
 ) -> io::Result<Vec<PathBuf>> {
-    let mut stale = Vec::new();
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(stale),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if path == new_path || path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let same_topic = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<PreferenceFile>(&raw).ok())
-            .map(|item| {
-                let topic = normalize_preference_topic(&item.topic);
-                topic == old_topic || topic == new_topic
-            })
-            .unwrap_or(false);
-        if same_topic {
-            stale.push(path);
-        }
-    }
-    Ok(stale)
+    topic_stale_paths_unlocked::<PreferenceFile, _, _>(
+        dir,
+        new_path,
+        old_topic,
+        new_topic,
+        normalize_preference_topic,
+        |item: &PreferenceFile| item.topic.as_str(),
+    )
 }
 
 pub fn update_preference(
@@ -1817,10 +1798,10 @@ pub(super) fn delete_preference_unlocked(id: &str) -> io::Result<bool> {
 }
 
 pub(super) fn load_preferences() -> io::Result<Vec<PreferenceFile>> {
-    load_preferences_with_cleanup().map(|result| result.value)
+    list_preferences_with_cleanup().map(|result| result.value)
 }
 
-fn load_preferences_with_cleanup() -> io::Result<TopicRead<Vec<PreferenceFile>>> {
+pub fn list_preferences_with_cleanup() -> io::Result<TopicRead<Vec<PreferenceFile>>> {
     let _lifecycle = file_lifecycle_lock().lock();
     load_preferences_with_cleanup_unlocked()
 }
@@ -1955,16 +1936,11 @@ fn load_never_memory_unlocked() -> io::Result<Vec<NeverMemoryItem>> {
 }
 
 pub(super) fn write_never_memory_unlocked(items: &[NeverMemoryItem]) -> io::Result<()> {
-    let normalized = compact_never_memory_items(items);
-    let mut lines = String::new();
-    for item in normalized {
-        if item.id.is_empty() || item.pattern.is_empty() {
-            continue;
-        }
-        lines.push_str(&serde_json::to_string(&item).map_err(invalid_data)?);
-        lines.push('\n');
-    }
-    write_text_atomic(&never_memory_path(), &lines)
+    write_jsonl_store(
+        &never_memory_path(),
+        compact_never_memory_items(items),
+        |item| (&item.id, &item.pattern),
+    )
 }
 
 fn compact_never_memory_items(items: &[NeverMemoryItem]) -> Vec<NeverMemoryItem> {
@@ -1993,16 +1969,11 @@ fn compact_never_memory_items(items: &[NeverMemoryItem]) -> Vec<NeverMemoryItem>
 }
 
 pub(super) fn write_recent_work_unlocked(items: &[RecentWorkItem]) -> io::Result<()> {
-    let normalized = compact_recent_work_items(items);
-    let mut lines = String::new();
-    for item in normalized {
-        if item.id.is_empty() || item.title.is_empty() {
-            continue;
-        }
-        lines.push_str(&serde_json::to_string(&item).map_err(invalid_data)?);
-        lines.push('\n');
-    }
-    write_text_atomic(&recent_work_path(), &lines)
+    write_jsonl_store(
+        &recent_work_path(),
+        compact_recent_work_items(items),
+        |item| (&item.id, &item.title),
+    )
 }
 
 fn compact_recent_work_items(items: &[RecentWorkItem]) -> Vec<RecentWorkItem> {
@@ -2176,17 +2147,25 @@ pub(super) fn active_recent_work(
     active
 }
 
-pub(super) fn pending_item_from_suggestion(
-    suggestion: MemorySuggestion,
-) -> io::Result<PendingMemoryItem> {
-    let kind = match clean_text(&suggestion.kind, 20).as_str() {
+/// Canonical pending-candidate kind: recognized kinds pass through,
+/// `recent_work` folds into `current_focus`, everything else lands in the
+/// `preference` default bucket. Shared by the suggestion→candidate mapping
+/// and the on-disk record normalization so the two cannot drift.
+fn normalize_pending_kind(kind: &str) -> String {
+    match kind {
         "profile" => "profile".to_string(),
         "work_context" => "work_context".to_string(),
         "current_focus" => "current_focus".to_string(),
         "recent_activity" => "recent_activity".to_string(),
         "recent_work" => "current_focus".to_string(),
         _ => "preference".to_string(),
-    };
+    }
+}
+
+pub(super) fn pending_item_from_suggestion(
+    suggestion: MemorySuggestion,
+) -> io::Result<PendingMemoryItem> {
+    let kind = normalize_pending_kind(clean_text(&suggestion.kind, 20).as_str());
     let mut topic = clean_text(&suggestion.topic, 40);
     if kind == "preference" {
         topic = normalize_preference_topic(&topic);
@@ -2229,14 +2208,7 @@ pub(super) fn pending_item_from_suggestion(
 
 fn normalize_pending_memory(item: &mut PendingMemoryItem) {
     item.id = clean_id(&item.id);
-    item.kind = match clean_text(&item.kind, 20).as_str() {
-        "profile" => "profile".to_string(),
-        "work_context" => "work_context".to_string(),
-        "current_focus" => "current_focus".to_string(),
-        "recent_activity" => "recent_activity".to_string(),
-        "recent_work" => "current_focus".to_string(),
-        _ => "preference".to_string(),
-    };
+    item.kind = normalize_pending_kind(clean_text(&item.kind, 20).as_str());
     item.topic = clean_text(&item.topic, 40);
     item.content = clean_text(&item.content, 120);
     item.source = clean_text(&item.source, 40);
@@ -2261,16 +2233,11 @@ fn pending_content_key(item: &PendingMemoryItem) -> String {
 }
 
 pub(super) fn write_pending_memory_unlocked(items: &[PendingMemoryItem]) -> io::Result<()> {
-    let normalized = compact_pending_memory_items(items);
-    let mut lines = String::new();
-    for item in normalized {
-        if item.id.is_empty() || item.content.is_empty() {
-            continue;
-        }
-        lines.push_str(&serde_json::to_string(&item).map_err(invalid_data)?);
-        lines.push('\n');
-    }
-    write_text_atomic(&pending_memory_path(), &lines)
+    write_jsonl_store(
+        &pending_memory_path(),
+        compact_pending_memory_items(items),
+        |item| (&item.id, &item.content),
+    )
 }
 
 fn compact_pending_memory_items(items: &[PendingMemoryItem]) -> Vec<PendingMemoryItem> {

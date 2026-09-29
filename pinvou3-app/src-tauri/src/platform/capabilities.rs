@@ -19,6 +19,11 @@ pub(crate) struct DesktopCapabilities {
     pub(crate) voice_shortcut_native: bool,
     /// Windows-only desktop dual-end remote control backend.
     pub(crate) desktop_remote_control_supported: bool,
+    /// The Linux WebView (WebKitGTK) carries no image data to the page in
+    /// paste events (an image clipboard surfaces an empty clipboardData), so
+    /// composer pastes fall back to a native clipboard read; the macOS/Windows
+    /// WebViews carry image items natively and need no fallback.
+    pub(crate) paste_image_clipboard_read: bool,
 }
 
 /// Sole production-release switch for macOS BrowserCore. Keep it `false` until physical
@@ -65,6 +70,7 @@ pub(crate) fn current() -> DesktopCapabilities {
         browser_cdp: cfg!(target_os = "windows"),
         voice_shortcut_native: cfg!(target_os = "windows"),
         desktop_remote_control_supported: desktop_remote_control_enabled(),
+        paste_image_clipboard_read: cfg!(target_os = "linux"),
     }
 }
 
@@ -157,6 +163,10 @@ mod tests {
         assert_eq!(
             capabilities.desktop_remote_control_supported,
             desktop_remote_control_enabled()
+        );
+        assert_eq!(
+            capabilities.paste_image_clipboard_read,
+            cfg!(target_os = "linux")
         );
     }
 

@@ -103,29 +103,54 @@ struct TurnLifecycleState {
     transcript_rules: Vec<TranscriptSanitizationRule>,
     /// 用户在 turn 已提交但尚未收到 `TurnStarted` 时请求了取消。
     ///
-    /// CodeWhale Engine 在每个新轮次入口**无条件**调
-    /// `reset_cancel_token()`（`core/engine.rs:2664`，在 `TurnStarted`
-    /// 之前），用全新 token 覆盖当前共享 token。若 cancel 恰好在这个窗口
-    /// 调了 `cancel_current()`，取消信号会被重置丢弃。
+    /// At every new-turn entry the CodeWhale engine unconditionally calls
+    /// `install_turn_cancel_token()` (before `TurnStarted`), swapping the
+    /// shared slot for a fresh token bound to the new turn's identity. A
+    /// `cancel_current()` landing inside that window has its cancel signal
+    /// dropped by the swap.
     ///
     /// 此标记由 [`arm_pending_cancel`] 在 cancel 路径设置（仅当 turn 尚未
     /// started），由事件转发器在收到 `TurnStarted` 后通过
-    /// [`take_pending_cancel`] atomically takes it and replays
-    /// `cancel_with_mode` with the stored mode — by then
-    /// `reset_cancel_token()` has already run, so the cancel hits the current
-    /// turn's active token. The mode must be saved together with the flag: a
-    /// replay that falls back to the mode-less `cancel()` (hard-coded
-    /// StopDropInbox) would make a ⚡ (InterruptKeepInbox) interrupt in the
+    /// [`take_pending_cancel`] atomically takes it and replays the cancel
+    /// turn-bound (`EngineHandle::cancel_turn(turn_id, …)`) with the stored
+    /// mode — by then the engine has already installed this turn's bound
+    /// token, so the replay
+    /// fires exactly the named turn's own token, and the foundation drops it
+    /// wholesale if the slot has already moved on to a newer turn (issue
+    /// #254). The mode must be saved together with the flag: a replay that
+    /// falls back to the mode-less `cancel()` (hard-coded StopDropInbox)
+    /// would make a ⚡ (InterruptKeepInbox) interrupt in the
     /// submit→TurnStarted window wrongly clear un-injected queued steers.
     ///
-    /// 携带 arming 时的 [`turn_epoch`]：并发取消请求（C1/C2）中，排队较晚的
-    /// C2 在恢复后读到的是「当前 lifecycle」（可能已是新轮）。`take_pending_cancel`
-    /// 会校验 epoch 仍是当前轮，跨轮泄漏的 stale pending 被丢弃，不误取消新轮。
+    /// The arming-time [`turn_epoch`] is recorded for provenance: the arming
+    /// site still validates it, so a queued-later concurrent cancel (C2)
+    /// resuming onto a newer lifecycle can never arm its stale pending onto
+    /// that new turn. It does not gate consumption — an unrelated
+    /// autonomous lifecycle inside the target's submit→TurnStarted window
+    /// legitimately advances the epoch before the target's own echo arrives
+    /// — because the correlation token below is the consumption gate.
+    ///
+    /// The replay is additionally bound to the submission correlation token
+    /// recorded at submit time (see [`Self::submission_id`]): the forwarder
+    /// only consumes the replay when the arriving `TurnStarted` echoes the
+    /// same token, so a runtime self-started follow-up whose `TurnStarted`
+    /// overtakes the submitted turn's (the two events are indistinguishable
+    /// by epoch alone) can neither consume nor be killed by the replay
+    /// (issue #254 review round).
     ///
     /// [`arm_pending_cancel`]: TurnLifecycle::arm_pending_cancel_and_cancel
     /// [`take_pending_cancel`]: TurnLifecycle::take_pending_cancel
     /// [`turn_epoch`]: TurnLifecycleState::turn_epoch
-    pending_cancel: Option<(u64, deepseek_tui::core::engine::CancelMode)>,
+    pending_cancel: Option<(u64, deepseek_tui::core::engine::CancelMode, Option<String>)>,
+    /// The host-supplied submission correlation token stamped on the op
+    /// submitted for the active turn (`Op::SendMessage` /
+    /// `Op::EditLastTurn::submission_id`). Set at submit time, cleared on
+    /// reserve; it stays `Some` for the whole active turn (starting does
+    /// not clear it). The submit→`TurnStarted` window the pending replay
+    /// guards is enforced by the `turn_id.is_none()` arm guard, not by
+    /// this field's lifetime: arming stores the token and the forwarder
+    /// matches the event echo against it.
+    submission_id: Option<String>,
 }
 
 /// The durable, user-visible meaning of a submitted engine operation.
@@ -154,7 +179,6 @@ struct TranscriptSanitizationRule {
     actual_user_content: String,
     display_message: Message,
     display_content: String,
-    #[allow(dead_code)]
     operation: TranscriptOperation,
     baseline_revision: Option<String>,
     admission_metadata: Option<TurnAdmissionMetadata>,
@@ -342,9 +366,9 @@ impl TurnReservation {
         )
     }
 
-    fn mark_submitted(mut self) {
+    fn mark_submitted(mut self, submission_id: Option<String>) {
         self.lifecycle
-            .mark_reservation_submitted(self.reservation_id);
+            .mark_reservation_submitted(self.reservation_id, submission_id);
         self.submitted = true;
     }
 }
@@ -353,6 +377,147 @@ impl Drop for TurnReservation {
     fn drop(&mut self) {
         if !self.submitted {
             self.lifecycle.on_reservation_failed(self.reservation_id);
+        }
+    }
+}
+
+/// The submission correlation token carried by a host-submitted turn op
+/// (`None` for op kinds that start no correlated turn). Recorded into the
+/// lifecycle at submit time so the armed pending replay can be matched
+/// against the `TurnStarted` echo (issue #254).
+fn op_submission_id(op: &Op) -> Option<String> {
+    match op {
+        Op::SendMessage { submission_id, .. } | Op::EditLastTurn { submission_id, .. } => {
+            submission_id.clone()
+        }
+        _ => None,
+    }
+}
+
+/// Same-source turn identity captured under the lifecycle state lock and
+/// handed to the cancel closure by
+/// [`TurnLifecycle::arm_pending_cancel_and_cancel`]. The closure runs inside
+/// that same critical section, so the snapshot cannot interleave with a turn
+/// switch (epoch from one turn, turn id from another) and cannot go stale
+/// between snapshot and dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnIdentity {
+    pub(crate) epoch: u64,
+    /// Turn id observed by the forwarder via `TurnStarted`. `None` covers
+    /// both the submit→TurnStarted window and the terminal-closing window
+    /// (where the claim already took the id into the terminal payload).
+    pub(crate) turn_id: Option<String>,
+    /// Terminal-closing window (`terminal_closing`): the target turn already
+    /// ended. Same shape as reserved-but-unstarted `(epoch, None)` but the
+    /// opposite meaning — neither may fire a token (issue #254), and the
+    /// discriminator keeps the two documented apart in the dispatch.
+    pub(crate) closing: bool,
+}
+
+/// What the cancel closure may do to the engine for a given identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TurnBoundCancelAction {
+    /// The engine slot names the target turn: cancel exactly that turn via
+    /// the foundation's turn-bound `cancel_turn`. If the slot has already
+    /// moved on, the foundation skips wholesale — the target turn is over and
+    /// the newer turn is not this stop's object.
+    BoundTurn(String),
+    /// Reserved but not yet observed as started (submit→TurnStarted window).
+    /// The slot can hold anything: the previous turn's dead token, this
+    /// turn's freshly installed token, or — when a delayed forwarder has not
+    /// yet observed this turn's lifecycle — a runtime self-started follow-up
+    /// turn's live token (issue #254). The app cannot tell those apart, so
+    /// no token may fire here: the stop publishes its disposition only, and
+    /// the genuinely pending target is cancelled by the forwarder's
+    /// turn-bound `pending_cancel` replay once its `TurnStarted` is observed
+    /// (the replay is armed in the same critical section that produced this
+    /// verdict, and the foundation's identity check drops the replay if the
+    /// slot has since moved on).
+    Unbound,
+    /// Terminal closing (or the defensive no-identity case): the target turn
+    /// already ended, so there is nothing legitimate to cancel while the slot
+    /// may hold a self-started follow-up's live token — publish the stop
+    /// disposition (drop parked steers, latch the cancel reason) and never
+    /// fire (issue #254).
+    DispositionOnly,
+}
+
+/// Map a same-source identity snapshot to the cancel closure's verdict.
+/// Pure function so every interleaving can be exhaustively unit-tested; the
+/// actual firing goes through [`TurnBoundCancelOps`].
+pub(crate) fn turn_bound_cancel_action(identity: Option<&TurnIdentity>) -> TurnBoundCancelAction {
+    match identity {
+        Some(TurnIdentity {
+            turn_id: Some(turn_id),
+            closing: false,
+            ..
+        }) => TurnBoundCancelAction::BoundTurn(turn_id.clone()),
+        // Reserved but unstarted: never fire blind — the replay carries the
+        // cancel (see the Unbound docs).
+        Some(TurnIdentity { closing: false, .. }) => TurnBoundCancelAction::Unbound,
+        // Terminal closing / no identity: disposition only, never fire.
+        Some(TurnIdentity { closing: true, .. }) | None => TurnBoundCancelAction::DispositionOnly,
+    }
+}
+
+/// Engine-facing operations the turn-bound stop dispatch needs. `AppEngine`
+/// implements it with the foundation's turn-bound entries; the wiring tests
+/// implement it against a fake of the foundation slot contract so the shared
+/// dispatch itself is exercised (issue #254 review round).
+pub(crate) trait TurnBoundCancelOps {
+    /// Cancel exactly `turn_id` while it still holds the engine slot
+    /// (foundation `cancel_turn`). `false` = the slot moved on: the
+    /// foundation cancelled nothing and published no disposition — the target
+    /// turn is already gone, which is the arbitration working as designed.
+    fn cancel_bound_turn(
+        &self,
+        turn_id: &str,
+        mode: deepseek_tui::core::engine::CancelMode,
+    ) -> bool;
+
+    /// Publish the stop disposition (drop parked steers, latch the cancel
+    /// reason) without firing any token (foundation
+    /// `publish_stop_disposition`).
+    fn publish_stop_disposition_only(&self, mode: deepseek_tui::core::engine::CancelMode);
+}
+
+impl TurnBoundCancelOps for AppEngine {
+    fn cancel_bound_turn(
+        &self,
+        turn_id: &str,
+        mode: deepseek_tui::core::engine::CancelMode,
+    ) -> bool {
+        self.cancel_turn_with_mode(turn_id, mode)
+    }
+
+    fn publish_stop_disposition_only(&self, mode: deepseek_tui::core::engine::CancelMode) {
+        self.publish_stop_disposition(mode)
+    }
+}
+
+/// Dispatch a stop onto the engine according to the identity snapshot.
+/// Shared verbatim by `EnginePool::cancel`'s production closure and the
+/// wiring tests so the two cannot drift (issue #254 review round).
+///
+/// The no-fire invariant: whenever the identity cannot prove the slot still
+/// belongs to the intended target — unobserved submit→TurnStarted window,
+/// terminal closing, or no identity at all — only the disposition is
+/// published. A delayed forwarder means the slot may already hold a runtime
+/// self-started follow-up turn's live token, and firing it would resurrect
+/// exactly the #254 wrong-turn cancellation this dispatch exists to close.
+pub(crate) fn dispatch_turn_bound_cancel<E: TurnBoundCancelOps + ?Sized>(
+    engine: &E,
+    identity: Option<&TurnIdentity>,
+    mode: deepseek_tui::core::engine::CancelMode,
+) {
+    match turn_bound_cancel_action(identity) {
+        TurnBoundCancelAction::BoundTurn(turn_id) => {
+            engine.cancel_bound_turn(&turn_id, mode);
+        }
+        // Unbound and terminal closing converge on purpose: neither identity
+        // proves what the slot holds, so neither may fire a token.
+        TurnBoundCancelAction::Unbound | TurnBoundCancelAction::DispositionOnly => {
+            engine.publish_stop_disposition_only(mode);
         }
     }
 }
@@ -555,6 +720,7 @@ impl TurnLifecycle {
             state.admission_emitted = false;
             state.active_reservation_id = Some(reservation_id);
             state.pending_cancel = None;
+            state.submission_id = None;
             (reservation_id, state.turn_epoch)
         };
         crate::features::connectors::visibility::turn_submitted();
@@ -633,7 +799,7 @@ impl TurnLifecycle {
         }
     }
 
-    fn mark_reservation_submitted(&self, reservation_id: u64) {
+    fn mark_reservation_submitted(&self, reservation_id: u64, submission_id: Option<String>) {
         let mut state = self.state.lock();
         if let Some(rule) = state
             .transcript_rules
@@ -644,6 +810,7 @@ impl TurnLifecycle {
         }
         if state.active && state.active_reservation_id == Some(reservation_id) {
             state.submitted = true;
+            state.submission_id = submission_id;
         }
     }
 
@@ -796,7 +963,7 @@ impl TurnLifecycle {
         }
     }
 
-    pub(crate) fn on_submitted(&self) -> bool {
+    pub(crate) fn on_submitted(&self, submission_id: Option<String>) -> bool {
         let mut state = self.state.lock();
         if !state.active && !state.terminal_closing {
             state.turn_epoch = state.turn_epoch.wrapping_add(1).max(1);
@@ -807,6 +974,10 @@ impl TurnLifecycle {
             state.reclaimed = false;
             state.admission_emitted = false;
             state.active_reservation_id = None;
+            state.submission_id = submission_id;
+            // pending_cancel is intentionally left untouched: consumption is
+            // echo-gated, so a stale arm can never fire onto this new turn;
+            // reserve() (or the next arm) clears it.
             crate::features::connectors::visibility::turn_submitted();
             true
         } else {
@@ -866,7 +1037,7 @@ impl TurnLifecycle {
     }
 
     #[cfg(test)]
-    fn on_started(&self, turn_id: String) {
+    pub(crate) fn on_started(&self, turn_id: String) {
         let _ = self.on_started_transition(turn_id);
     }
 
@@ -951,9 +1122,10 @@ impl TurnLifecycle {
     }
 
     /// 测试专用：认领一个未提交 turn 的终态并立即重开闸门，等价于
-    /// `emit_unsubmitted_interrupted_terminal` 去掉发 `chat:done` 的副作用，
-    /// 供跨模块测试（engine_pool 的 cancel 并发测试）驱动 turn 收尾而无需 AppHandle。
-    /// 不发终态信号——这些测试只关心 lifecycle 状态机的轮次切换，不验证 emit。
+    /// `emit_unsubmitted_interrupted_terminal_for_epoch` with the epoch check and the
+    /// `chat:done` side effect removed, letting cross-module tests (engine_pool's cancel
+    /// concurrency tests) drive turn finalization without an AppHandle. No terminal
+    /// signals are emitted — these tests only care about lifecycle turn transitions, not emit verification.
     #[cfg(test)]
     pub(crate) fn finish_unsubmitted_once(&self) -> bool {
         if self.claim_unsubmitted_terminal() {
@@ -985,7 +1157,10 @@ impl TurnLifecycle {
         Some(emitted)
     }
 
-    fn finish_terminal_emission(&self) {
+    /// Crate-visible so the engine-pool wiring tests can drive the closing
+    /// window end to end; the authoritative forwarder path (engine's own
+    /// child module) remains the only production caller.
+    pub(crate) fn finish_terminal_emission(&self) {
         self.state.lock().terminal_closing = false;
         self.last_terminal_epoch_ms.store(
             std::time::SystemTime::now()
@@ -1083,51 +1258,16 @@ impl TurnLifecycle {
         true
     }
 
-    /// 认领一个未提交 turn 的终态并补发 `chat:done`，最后重置闸门。
-    ///
-    /// 给 cancel 在 engine 尚未 spawn（reservation 处于 reserved 未 submitted 阶段）
-    /// Atomic claim (closing the gate against re-entry) → reopen the gate →
-    /// emit the `Interrupted` terminal. Wrapped into one
-    /// 个方法是为了让调用方（`EnginePool::cancel`，跨模块）不必直接触碰私有的
-    /// 终态收尾逻辑，与权威终态路径一样自包含「发完即重置」。
-    ///
-    /// **Emit-last**: `finish_terminal_emission` must run before the emit so
-    /// that when `chat:done` arrives the reserve gate is already reopened
-    /// (P0-B contract: chat:done ⇒ slot released). The frontend's
-    /// interruptAndSend no longer needs a fixed sleep to cover the window.
-    /// The generation is read before finish (afterwards
-    /// `current_turn_generation` returns to None) and sent in the payload.
-    pub(crate) fn emit_unsubmitted_interrupted_terminal(
-        &self,
-        app: &AppHandle,
-        session_id: &str,
-    ) -> bool {
-        if !self.claim_unsubmitted_terminal() {
-            return false;
-        }
-        let generation = self.current_turn_generation().unwrap_or(0);
-        self.finish_terminal_emission();
-        emit_chat_terminal(
-            app,
-            session_id,
-            generation,
-            TurnOutcomeStatus::Interrupted,
-            None,
-            false,
-            false,
-        );
-        true
-    }
-
     /// 带目标 epoch 的未提交认领 + 补发 `chat:done`：认领在 state 锁内与
     /// `turn_epoch == target` 校验原子完成，目标轮已结束（新轮已 reserve）时
     /// 返回 `false` 且无副作用，避免把新轮 reservation 误认领为 Interrupted。
     ///
-    /// Structurally identical to [`emit_unsubmitted_interrupted_terminal`]:
-    /// reopen the gate before emitting the terminal (P0-B: chat:done ⇒ slot
-    /// released); the generation is the target (= the epoch of the turn the
-    /// cancel was initiated against, the claim check already guarantees they
-    /// match).
+    /// **Emit-last**: the gate is reopened before emitting the terminal
+    /// (P0-B: chat:done ⇒ slot released), so when `chat:done` arrives the
+    /// reserve gate is already open and the frontend's interruptAndSend needs
+    /// no fixed sleep to cover the window. The generation is the target (the
+    /// epoch of the turn the cancel was initiated against; the claim check
+    /// already guarantees they match).
     pub(crate) fn emit_unsubmitted_interrupted_terminal_for_epoch(
         &self,
         app: &AppHandle,
@@ -1150,53 +1290,69 @@ impl TurnLifecycle {
         true
     }
 
-    /// 标记「cancel 在 turn 已 submit 但尚未 TurnStarted 时发起」。
+    /// Marks a cancel issued after the turn was submitted but before `TurnStarted` arrived.
     ///
-    /// 仅当 turn 处于 active、已 `submitted`、且 `turn_id` 仍为 None（TurnStarted
-    /// 未抵达）、且 `turn_epoch == epoch`（仍是发起 cancel 的那一轮）时设置
-    /// `pending_cancel = Some((epoch, mode))`：
-    /// - 必须 `submitted`：未提交的 reservation（消息尚未入队 engine）应由 cancel
-    ///   走未提交认领终态路径（`emit_unsubmitted_interrupted_terminal`）立即发
-    ///   `chat:done` 使 reservation 失效，而不是挂成 pending——否则空闲 engine 仍
-    ///   存在时 cancel 不发终态、reservation 仍有效，原 chat future 后续照常提交，
-    ///   前端 busy 在 cancel 后到 TurnStarted 之间无法复位。
-    /// - 若 `turn_id` 已有值说明 TurnStarted 已被转发器消费，`cancel_current()`
-    ///   直接命中当前活跃 token，无需补打。
-    /// - 必须 `turn_epoch == epoch`：并发取消请求（C1/C2）中，排队较晚的 C2 在
-    ///   持锁恢复后读到的是「当前 lifecycle」。cancel 已在取 `turn_lock` 前后比对
-    ///   过 epoch（见 [`current_turn_generation`]/cancel 路径），此处传入**当前**
-    ///   epoch 作二次锚定，确保 pending 只 arm 到目标轮，不跨轮泄漏到新轮的
-    ///   TurnStarted（forwarder 经 [`take_pending_cancel`] 校验 epoch 后才重放）。
+    /// The marker is set only when the turn is active, already `submitted`,
+    /// and its `turn_id` is still `None` (`TurnStarted` not yet arrived),
+    /// and `turn_epoch == epoch` (still the turn the cancel was issued for),
+    /// recording `pending_cancel = Some((epoch, mode, submission_id))`:
+    /// - Must be `submitted`: an unsubmitted reservation (message not yet enqueued
+    ///   to the engine) is handled by the cancel path's unsubmitted-claim terminal
+    ///   (`emit_unsubmitted_interrupted_terminal_for_epoch`), which immediately
+    ///   emits `chat:done` to invalidate the reservation instead of leaving it
+    ///   pending — otherwise, while an idle engine still exists, cancel would not
+    ///   emit a terminal state and the reservation would stay valid; the original
+    ///   chat future would go on submitting as usual and the frontend busy flag
+    ///   could not reset between the cancel and TurnStarted.
+    /// - A set `turn_id` means the forwarder already consumed `TurnStarted`:
+    ///   the cancel closure dispatches turn-bound under that identity and
+    ///   hits exactly this turn's own token, with no replay needed.
+    /// - The arming-time `turn_epoch` must still equal the lifecycle's: of
+    ///   concurrent cancel requests (C1/C2), the later-queued C2 resumes
+    ///   under the state lock onto the *current* lifecycle. The cancel path
+    ///   already compares epochs around `turn_lock` (see
+    ///   [`current_turn_generation`]); passing the **current** epoch here
+    ///   re-anchors the arm so the pending can only ever be armed for the
+    ///   targeted turn and never leaks onto a newer turn's `TurnStarted`
+    ///   (the forwarder replays only after an exact submission-token echo
+    ///   match via `take_pending_cancel`; the arming epoch does not gate
+    ///   consumption).
     ///
-    /// **调用顺序**：必须在 `cancel_current()` **之前**调用。两者取不同的锁
-    /// （lifecycle state mutex vs cancel_token mutex），无法原子合并。先 arm
-    /// 再 cancel 保证：即使 TurnStarted 在两步之间抵达转发器并消费了标记，
-    /// 随后的 `cancel_current()` 也只是幂等 no-op（转发器已重新 cancel）。
+    /// **Dispatch**: the `cancel` closure runs while the state lock is
+    /// still held and receives the same-lock [`TurnIdentity`] snapshot; the
+    /// verdict itself lives in `turn_bound_cancel_action` /
+    /// `dispatch_turn_bound_cancel` — a slot match cancels via
+    /// `cancel_turn_with_mode`, while the unobserved submit→`TurnStarted`
+    /// window and the terminal-closing window converge on
+    /// disposition-only and never fire (issue #254); the genuinely pending
+    /// target is delivered by the forwarder's `pending_cancel` replay once
+    /// its `TurnStarted` is processed.
     ///
-    /// **返回值**：`false` 表示 `state.turn_epoch != epoch`——generation 复查
-    /// 通过之后、arm 之前另一 worker 已结束目标轮并启动新轮（`reserve_turn`
-    /// 不取 `turn_lock`，可在 cancel 的同步段中间完成切换）。调用方**必须**
-    /// 在收到 `false` 时跳过 `cancel_current` 及其级联副作用，否则取消会命中
-    /// 新轮已 `reset_cancel_token` 的活跃 token，造成跨轮误取消。
+    /// **Return value**: `false` means `state.turn_epoch != epoch` —
+    /// between the caller's generation re-check and the arm, another worker
+    /// ended the target turn and started a new one (`reserve_turn` takes no
+    /// `turn_lock`, so the switch can land mid-cancel). The caller must
+    /// treat `false` as a wholesale no-op: the closure does not run, and
+    /// any follow-up cascade must be re-arbitrated against the new
+    /// lifecycle instead of fired blind.
     ///
-    /// 其余条件不满足（未 submitted / 已 started / 非 active）时仍返回 `true`：
-    /// 这些情况 epoch 匹配、仍是目标轮，`cancel_current` 命中目标轮 token
-    /// （已 started 直接命中活跃 token；未 submitted 时 engine 尚无该轮 token，
-    /// 取消是幂等 no-op），调用方可以安全继续。
+    /// Epoch-matching but otherwise unusual states (not submitted / already
+    /// started / terminal closing) still return `true` with the closure
+    /// run; the closure's own identity snapshot decides bound vs
+    /// disposition-only, so the stop can never fire a token the targeted
+    /// turn does not own.
     ///
     /// [`current_turn_generation`]: Self::current_turn_generation
     /// [`take_pending_cancel`]: Self::take_pending_cancel
     ///
     /// 在 lifecycle state 锁内原子完成「epoch 校验 + arm pending + 同步取消」。
     ///
-    /// 与 [`arm_pending_cancel`] 的区别：`cancel` 闭包在**同一临界区内**持锁
-    /// 执行。单独 arm 时锁在校验后即释放，调用方随后才执行 `cancel_current`，
-    /// 两条同步调用之间没有 `.await` 也不构成原子性保证——多线程 runtime/OS
-    /// 可以在任意指令边界切换线程。若另一 worker 在该窗口内完成「旧轮终态
-    /// 收口 + 新轮 reserve/send + `reset_cancel_token`」，恢复后的旧 cancel 会
-    /// 命中新轮活跃 token（reviewer 点 8）。把取消闭包移入同一临界区后，
-    /// `reserve_turn`（取同一把 state 锁）无法插入「校验/arm」与「取消」之间，
-    /// 跨轮窗口闭合。
+    /// The closure runs inside this critical section on purpose (reviewer
+    /// point 8): arm-then-cancel as two separate locked steps left a window
+    /// where another worker could finish the old turn's terminal close plus
+    /// a new reserve/send in between, and the resumed stale cancel would
+    /// hit the new turn's active token. Holding the state lock across both
+    /// makes that insertion impossible: `reserve_turn` needs the same lock.
     ///
     /// **idle 守卫**（G2/epoch-0 哨兵）：`turn_epoch` 从 1 起自增，但 fresh
     /// 会话（从未有过 turn）初始为 0。此时发起 cancel 快照 `target = None`，
@@ -1209,21 +1365,41 @@ impl TurnLifecycle {
     /// 让调用方继续（级联取消仍由调用方按 armed 路径执行，只取消 engine 遗留
     /// 子代理、不取消尚未启动的轮）。
     ///
-    /// 锁序：本方法持 lifecycle state 锁调用 `cancel` 闭包，闭包内
-    /// `engine.cancel_current()` 取 engine 的 cancel_token 锁（与 state 锁无
-    /// 反向依赖，forwarder 消费 pending 也是先 state 后 token），无死锁。
-    /// `cancel` 必须同步、不 panic（panic 会使 Mutex 中毒），且不得再次获取
-    /// 本 lifecycle 的 state 锁。
+    /// Lock order: this method holds the lifecycle state lock while
+    /// running the `cancel` closure; the closure's foundation entries take
+    /// the engine slot lock (no reverse dependency — the forwarder also
+    /// takes the state lock before the slot lock when it consumes the
+    /// pending), so no deadlock. The closure must be synchronous and must
+    /// not panic (a panic would poison the mutex) or re-acquire this
+    /// lifecycle's state lock.
     ///
-    /// 其余语义与 [`arm_pending_cancel`] 一致：epoch 匹配则设置 pending（条件
-    /// 满足时）并执行 `cancel` 后返回 `true`；epoch 不匹配返回 `false` 且
-    /// **不执行** `cancel`，调用方必须整体 no-op。
+    /// `cancel` receives the same-lock [`TurnIdentity`] snapshot
+    /// (epoch + observed turn id + closing) so the turn-bound dispatch can
+    /// never act on a stale cross-turn view — see
+    /// `dispatch_turn_bound_cancel` (issue #254 review round).
     ///
-    /// pending records `(epoch, mode)`: on replay the forwarder re-runs
-    /// `cancel_with_mode` with the steer disposition mode
-    /// (`InterruptKeepInbox`/`StopDropInbox`) the caller passed at arming
-    /// time, not the mode-less `cancel()` (hard-coded StopDropInbox) —
-    /// otherwise ⚡'s keepInbox semantics would be lost on the replay path.
+    /// Epoch mismatch returns `false` and does **not** run the closure —
+    /// the caller must treat it as a wholesale no-op; every matching path
+    /// arms (when the submitted-and-unobserved precondition holds) and runs
+    /// the closure before returning `true`.
+    ///
+    /// pending records `(epoch, mode, submission_id)`: on replay the
+    /// forwarder re-runs the cancel turn-bound
+    /// (`EngineHandle::cancel_turn(turn_id, …)`) with the steer disposition
+    /// mode (`InterruptKeepInbox`/`StopDropInbox`) the caller passed at
+    /// arming time, not the mode-less `cancel()` (hard-coded StopDropInbox)
+    /// — otherwise ⚡'s keepInbox semantics would be lost on the replay
+    /// path. The turn-bound form also means a replay can never fire a token
+    /// the named turn does not own: if the slot has already moved on (a
+    /// runtime self-started follow-up turn), the foundation skips the replay
+    /// wholesale, issue #254.
+    ///
+    /// `submission_id` carries the correlation token of the submission the
+    /// pending was armed for (see [`TurnLifecycleState::submission_id`]):
+    /// the forwarder consumes the replay only when the arriving
+    /// `TurnStarted` echoes the same token, so an overtaking self-started
+    /// turn's `TurnStarted` (no token) can neither consume the replay nor
+    /// redirect its cancel onto itself (issue #254 review round).
     ///
     /// [`arm_pending_cancel`]: Self::arm_pending_cancel_and_cancel
     pub(crate) fn arm_pending_cancel_and_cancel<F>(
@@ -1233,7 +1409,7 @@ impl TurnLifecycle {
         cancel: F,
     ) -> bool
     where
-        F: FnOnce(),
+        F: FnOnce(Option<TurnIdentity>),
     {
         let mut state = self.state.lock();
         if state.turn_epoch != epoch {
@@ -1248,35 +1424,95 @@ impl TurnLifecycle {
             // 级联取消只清 engine 遗留子代理，不误伤尚未启动的轮。
             return true;
         }
+        // Same-source identity snapshot for the closure, taken under this
+        // same state lock immediately before the dispatch (issue #254
+        // review round): the closure runs inside the critical section, so
+        // the verdict can never act on a stale cross-turn view. In
+        // particular, a `TurnStarted` that arrived while the cancel was
+        // still awaiting shows up here as a known turn id and is cancelled
+        // bound; an unobserved id keeps the stop to disposition-only with
+        // the replay armed below as the delivery path.
+        let identity = Some(TurnIdentity {
+            epoch: state.turn_epoch,
+            turn_id: state.turn_id.clone(),
+            closing: state.terminal_closing,
+        });
         if state.submitted && state.turn_id.is_none() && state.active {
-            state.pending_cancel = Some((epoch, mode));
+            if state.submission_id.is_none() {
+                // A replay armed without a submission id can never be
+                // delivered: take_pending_cancel matches only the armed id
+                // against the arriving TurnStarted echo, and every runtime
+                // self-start echoes None. All host-submitted op paths mint
+                // an id today; if one ever stops doing so, this warning is
+                // the loud signal instead of a silently dead stop button
+                // (issue #254).
+                log::warn!(
+                    "[turn_lifecycle] pending cancel armed without a submission id; the stop replay can never be delivered"
+                );
+            }
+            state.pending_cancel = Some((epoch, mode, state.submission_id.clone()));
         }
         // 持锁执行同步取消：reserve_turn 需要同一把 state 锁，无法在
         // 「校验/arm」与「取消」之间插入轮次切换，旧 cancel 不可能命中新轮。
-        cancel();
+        cancel(identity);
         true
     }
 
     /// 原子取出并清除 `pending_cancel` 标记。
     ///
-    /// 由事件转发器在收到 `TurnStarted` 后调用：此时 CodeWhale 的
-    /// `reset_cancel_token()` 已执行完毕（它在 `TurnStarted` 之前），
-    /// Re-running `cancel_with_mode` with the taken mode hits exactly this
-    /// turn's active token.
+    /// Called by the event forwarder after `TurnStarted` arrives: the
+    /// engine has by then already installed this turn's bound token (the
+    /// install runs before `TurnStarted`).
+    /// The turn-bound replay (`EngineHandle::cancel_turn(turn_id, …)`) fires
+    /// exactly the named turn's own token, and is dropped wholesale if the
+    /// slot has already moved on to a newer turn (issue #254).
     ///
-    /// 仅当记录的 epoch 仍是 `current_epoch`（仍是 arming 时的那一轮）时才取出
-    /// 并返回 `Some`，否则清空并返回 `None`：跨轮泄漏的 stale pending（cancel
-    /// arm 到旧轮后，新一轮 TurnStarted 先抵达）被丢弃，不误取消新轮。空闲时
-    /// `current_epoch` 由调用方传 0（epoch 自增从 1 起，恒不匹配）。
+    /// The record is consumed only when the arriving event echoes the
+    /// submission correlation token recorded at arming time. The host app
+    /// stamps every host submission with a unique token at op construction,
+    /// and the foundation echoes it back verbatim
+    /// on that turn's `TurnStarted`, while runtime self-started turns
+    /// (sub-agent completion / shell wake / goal continuation) stay
+    /// untagged, so a matching echo identifies exactly the submitted turn
+    /// the stop was armed for. The arming-time epoch is deliberately not
+    /// part of the gate: an unrelated autonomous turn can run its full
+    /// start→terminal lifecycle inside the target's submit→TurnStarted
+    /// window, and the target's own start then looks newly-active and
+    /// advances the epoch — gating on it would reject the matching echo and
+    /// silently lose the user's stop (issue #254 review round). A stale
+    /// replay cannot reach a foreign turn through this gate: only the armed
+    /// submission's own echo matches, and the replay still fires turn-bound,
+    /// so a slot that has moved on is dropped wholesale by the foundation
+    /// identity check.
+    ///
+    /// A non-matching event consumes nothing and clears nothing: the replay
+    /// stays armed but can only ever be consumed by the armed submission's
+    /// own echo. A `reserve()` wholesale-clears it and the next arm
+    /// overwrites it; on scheduled paths that skip reservation it can stay
+    /// armed but inert across consecutive turns — un-firable by
+    /// construction, so no cancel ever leaks across turns. A replay armed
+    /// without
+    /// a recorded id matches no echo at all (including `None`) and can never
+    /// be delivered — every host-submitted path must carry a submission id,
+    /// and the arming site warns loudly when one does not (see
+    /// [`TurnLifecycle::arm_pending_cancel_and_cancel`]).
     pub(crate) fn take_pending_cancel(
         &self,
-        current_epoch: u64,
+        event_submission_id: Option<&str>,
     ) -> Option<(u64, deepseek_tui::core::engine::CancelMode)> {
         let mut state = self.state.lock();
-        match state.pending_cancel.take() {
-            Some((epoch, mode)) if epoch == current_epoch => Some((epoch, mode)),
+        let matched = match &state.pending_cancel {
+            Some((epoch, mode, Some(armed_submission)))
+                if Some(armed_submission.as_str()) == event_submission_id =>
+            {
+                Some((*epoch, *mode))
+            }
             _ => None,
+        };
+        if matched.is_some() {
+            state.pending_cancel = None;
         }
+        matched
     }
 }
 
@@ -1442,9 +1678,17 @@ impl AppEngine {
         // the bool and the Option.
         let mut engine_config = match expert_snapshot.as_deref() {
             Some(snapshot) => {
-                // 多智能体面：装配专家名册和专用资源上限；工具面仍与普通会话
-                // 完全一致，普通会话不继承这些限制。
-                bridge.build_engine_config_for_multi_agent(session_id, roots, snapshot)
+                // Multi-agent surface: assemble the expert roster and the
+                // dedicated resource caps; the tool surface stays identical to
+                // a plain session, which inherits none of these limits. The
+                // swarm switch and the session's multi_agent switch share one
+                // source (the mode_state just read above).
+                bridge.build_engine_config_for_multi_agent(
+                    session_id,
+                    roots,
+                    snapshot,
+                    multi_agent_enabled,
+                )
             }
             None => bridge.build_engine_config_for_session_roots(session_id, roots),
         };
@@ -1534,7 +1778,9 @@ impl AppEngine {
     ///
     /// 不复用 `spawn_for_session` 是因为它强依赖 Tauri AppHandle (`spawn_event_forwarder`
     /// 里 `app.emit(...)`),测试场景没有 webview/event 系统跑不起来。
-    #[allow(dead_code)] // L1 runner 接入前临时 unused
+    /// Headless entry for the L1 dialog integration harness (tests/l1_dialog_harness);
+    /// production builds have no caller, hence the allow.
+    #[allow(dead_code)]
     pub async fn spawn_headless(bridge: Pinvou3Bridge) -> Result<Self> {
         let mut engine_config = bridge.build_engine_config();
         // The headless engine carries the same hard-deny ruleset as real
@@ -1568,9 +1814,15 @@ impl AppEngine {
 
     /// 发用户消息给 Engine。Engine 内部自管 session，多轮自然累积。
     ///
-    /// `mode` + `phase` 由 commands::chat 从 SessionStore 取当前 session 的
-    /// mode_state，注入 Op::SendMessage。底座按 mode 自动切工具白名单 + sandbox。
-    /// M1 弱模型加固:bridge 按 phase 在 user content 前 prepend `<system-reminder>`。
+    /// 仅测试入口（lib 单元测试与 `tests/` 集成 harness；生产发送走
+    /// `send_reserved_user_message`，其快照/候选来自
+    /// `prepare_delegation_turn` 的同源捕获）。不加 `#[cfg(test)]`：
+    /// 集成测试以外部 crate 视角链接本库，看不到 cfg(test) 条目。
+    ///
+    /// `mode` 由调用方从 SessionStore 取当前 session 的 mode_state，注入
+    /// Op::SendMessage。底座按 mode 自动切工具白名单 + sandbox。
+    /// M1 弱模型加固:bridge 按 mode 在多智能体轮的 user content 前
+    /// prepend `<system-reminder>` 信封。
     pub async fn send_user_message(
         &self,
         content: String,
@@ -1579,16 +1831,29 @@ impl AppEngine {
         restrict_tools: bool,
     ) -> Result<()> {
         let expert_snapshot = self.multi_agent_enabled.then(ExpertRosterSnapshot::capture);
+        // 候选行必须与快照同源（同一次 capture 产出），对齐
+        // commands::multiagent::prepare_delegation_turn 的计算；
+        // 带快照却传空候选会让该轮静默退化为名册兜底提示。注意：这里的
+        // 匹配输入是 `content` 本身——生产路径用 `MatchSource` 把「匹配看
+        // 原文、发送看组装稿」钉成编译期约束，本测试入口没有那层类型
+        // 保护，调用方必须传用户原文，传组装稿会复现「注入文本抬升无关
+        // 专家卡得分」的旧缺陷。
+        let expert_candidates = expert_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.available_role_lines(&content))
+            .unwrap_or_default();
         let op = self.build_interactive_send_message_op(
             content,
             mode,
             persona_reminder,
             restrict_tools,
             expert_snapshot,
+            expert_candidates,
         )?;
         self.send_turn_op(op).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_reserved_user_message(
         &self,
         content: String,
@@ -1596,6 +1861,7 @@ impl AppEngine {
         persona_reminder: Option<String>,
         restrict_tools: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        expert_candidates: Vec<String>,
         reservation: TurnReservation,
     ) -> Result<()> {
         let op = self.build_interactive_send_message_op(
@@ -1604,6 +1870,7 @@ impl AppEngine {
             persona_reminder,
             restrict_tools,
             expert_snapshot,
+            expert_candidates,
         )?;
         self.send_reserved_turn_op(op, reservation).await
     }
@@ -1628,6 +1895,7 @@ impl AppEngine {
         persona_reminder: Option<String>,
         restrict_tools: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        expert_candidates: Vec<String>,
     ) -> Result<Op> {
         if self.multi_agent_enabled {
             let snapshot = expert_snapshot
@@ -1641,11 +1909,15 @@ impl AppEngine {
                 restrict_tools,
                 &self.workspace,
                 snapshot,
+                &expert_candidates,
             )
         } else {
-            if expert_snapshot.is_some() {
-                anyhow::bail!("ordinary turn must not carry a multi-agent expert snapshot");
-            }
+            // 普通会话不吃候选行：候选只随多智能体快照同源产生。误传与快照
+            // 误传同等对待（hard-error），保持消息与普通对话逐字一致的不变式。
+            validate_ordinary_turn_has_no_expert_material(
+                expert_snapshot.is_some(),
+                expert_candidates.len(),
+            )?;
             self.bridge.build_send_message_op(
                 &self.session_id,
                 content,
@@ -1710,8 +1982,41 @@ impl AppEngine {
             .cancel_with_mode(deepseek_tui::core::engine::CancelReason::User, mode);
     }
 
+    /// Cancel only the turn that still owns the engine slot under `turn_id`
+    /// (foundation r13+ turn-bound cancel). Returns `false` when the slot has
+    /// already moved on — typically because the engine self-started a
+    /// follow-up turn (idle sub-agent completion / background shell wake /
+    /// goal continuation) whose token was swapped in before the app observed
+    /// its `TurnStarted`; the old turn's stop must never hit that newer turn
+    /// (issue #254). On `false` the foundation publishes no steer disposition
+    /// and no cancel reason either.
+    pub(crate) fn cancel_turn_with_mode(
+        &self,
+        turn_id: &str,
+        mode: deepseek_tui::core::engine::CancelMode,
+    ) -> bool {
+        self.handle.cancel_turn(
+            turn_id,
+            deepseek_tui::core::engine::CancelReason::User,
+            mode,
+        )
+    }
+
+    /// Publish the stop disposition only (drop parked steers, latch the
+    /// cancel reason) and never fire any cancel token (foundation r13+
+    /// disposition-only entry). Used for stops whose target turn has already
+    /// ended, and for identities that cannot prove what the slot holds: the
+    /// steer-loss contract must be preserved, but the slot may hold a
+    /// self-started follow-up turn's live token and any fire would replay
+    /// issue #254.
+    pub(crate) fn publish_stop_disposition(&self, mode: deepseek_tui::core::engine::CancelMode) {
+        self.handle
+            .publish_stop_disposition(deepseek_tui::core::engine::CancelReason::User, mode);
+    }
+
     async fn send_turn_op(&self, op: Op) -> Result<()> {
-        let activated = self.turn_lifecycle.on_submitted();
+        let submission_id = op_submission_id(&op);
+        let activated = self.turn_lifecycle.on_submitted(submission_id);
         if !activated {
             anyhow::bail!("session_turn_in_progress");
         }
@@ -1744,9 +2049,13 @@ impl AppEngine {
             anyhow::bail!("turn reservation belongs to a different session");
         }
         reservation.ensure_active()?;
+        let submission_id = op_submission_id(&op);
         let actual_user_content = match &op {
             Op::SendMessage { content, .. } => content.clone(),
-            Op::EditLastTurn { new_message } => new_message.clone(),
+            Op::EditLastTurn {
+                new_message,
+                submission_id: _,
+            } => new_message.clone(),
             _ => anyhow::bail!("reserved turn requires a user-message operation"),
         };
         reservation.prepare_actual_user_content(actual_user_content)?;
@@ -1764,7 +2073,7 @@ impl AppEngine {
                 if let Some(scope) = shell_scope {
                     scope.commit();
                 }
-                reservation.mark_submitted();
+                reservation.mark_submitted(submission_id);
                 Ok(())
             }
             Err(error) => Err(error.into()),
@@ -1821,7 +2130,11 @@ impl AppEngine {
     /// 上游 [`Op::EditLastTurn`] 行为：砍掉 session 末尾最近的 user 消息及之后
     /// 所有消息，然后用 `new_message` 当成新 user 消息重新发送。
     pub async fn edit_last_turn(&self, new_message: String) -> Result<()> {
-        self.send_turn_op(Op::EditLastTurn { new_message }).await
+        self.send_turn_op(Op::EditLastTurn {
+            new_message,
+            submission_id: Some(self.bridge.next_submission_id()),
+        })
+        .await
     }
 
     pub(crate) async fn edit_last_turn_reserved(
@@ -1829,8 +2142,14 @@ impl AppEngine {
         new_message: String,
         reservation: TurnReservation,
     ) -> Result<()> {
-        self.send_reserved_turn_op(Op::EditLastTurn { new_message }, reservation)
-            .await
+        self.send_reserved_turn_op(
+            Op::EditLastTurn {
+                new_message,
+                submission_id: Some(self.bridge.next_submission_id()),
+            },
+            reservation,
+        )
+        .await
     }
 
     /// 手动触发上下文压缩（用户点 token 进度条 → 立即压缩）。
@@ -1948,11 +2267,6 @@ fn tool_call_result_parts(
 mod forwarder;
 pub(crate) use forwarder::spawn_event_forwarder;
 
-/// 让 main.rs 编译时知道这个模块（供 docs/CI 用）。
-pub fn _force_link() -> Arc<()> {
-    Arc::new(())
-}
-
 #[cfg(test)]
 mod tool_result_projection_tests {
     use super::tool_call_result_parts;
@@ -1970,7 +2284,11 @@ mod tool_result_projection_tests {
 
 #[cfg(test)]
 mod turn_lifecycle_tests {
-    use super::{EmittedTerminal, TranscriptOperation, TurnAdmissionMetadata, TurnLifecycle};
+    const TEST_SUBMISSION: &str = "sub-test";
+    use super::{
+        EmittedTerminal, TranscriptOperation, TurnAdmissionMetadata, TurnBoundCancelAction,
+        TurnIdentity, TurnLifecycle, turn_bound_cancel_action,
+    };
     use crate::features::sessions::SessionModeState;
     use deepseek_tui::models::{ContentBlock, Message};
     use std::cell::Cell;
@@ -2009,7 +2327,7 @@ mod turn_lifecycle_tests {
         let emitted = Cell::new(0_u8);
 
         assert_eq!(lifecycle.finish_once(|| emitted.set(99)), None);
-        lifecycle.on_submitted();
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         lifecycle.on_started("turn-1".to_string());
         assert_eq!(
             lifecycle.finish_once(|| emitted.set(emitted.get() + 1)),
@@ -2020,7 +2338,7 @@ mod turn_lifecycle_tests {
         assert_eq!(lifecycle.finish_once(|| emitted.set(99)), None);
         assert_eq!(emitted.get(), 1);
 
-        lifecycle.on_submitted();
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         lifecycle.on_started("turn-2".to_string());
         assert!(
             lifecycle
@@ -2033,7 +2351,7 @@ mod turn_lifecycle_tests {
     #[test]
     fn failed_submission_and_idle_cancel_do_not_fake_a_terminal() {
         let lifecycle = TurnLifecycle::default();
-        let activated = lifecycle.on_submitted();
+        let activated = lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         lifecycle.on_submission_failed(activated);
         assert_eq!(lifecycle.finish_once(|| panic!("must remain idle")), None);
     }
@@ -2051,7 +2369,7 @@ mod turn_lifecycle_tests {
         let reservation = lifecycle.reserve().expect("reserve");
         assert!(lifecycle.invalidate_unsubmitted_reservation());
         // invalidate 已收尾，标记 reservation submitted 以免 Drop 二次清理。
-        reservation.mark_submitted();
+        reservation.mark_submitted(None);
 
         // reserve → on_started_transition（引擎真正接手，设 submitted=true）
         // → invalidate 必须返回 false：engine 已在跑，cancel 应走 cancel_current
@@ -2063,7 +2381,7 @@ mod turn_lifecycle_tests {
                 .is_some()
         );
         assert!(!lifecycle.invalidate_unsubmitted_reservation());
-        reservation2.mark_submitted();
+        reservation2.mark_submitted(None);
     }
 
     #[test]
@@ -2078,7 +2396,7 @@ mod turn_lifecycle_tests {
         let reservation = lifecycle.reserve().expect("reserve");
         // claim 成功 = 进入「终态发送中」临界区。
         assert!(lifecycle.claim_unsubmitted_terminal());
-        reservation.mark_submitted();
+        reservation.mark_submitted(None);
 
         // 关键不变量：终态尚未发完（terminal_closing=true）时，下一轮 reserve
         // 必须失败——否则上一轮迟到的 chat:done 会污染新一轮 busy 状态。
@@ -2099,7 +2417,7 @@ mod turn_lifecycle_tests {
                 .is_some()
         );
         assert!(!lifecycle.claim_unsubmitted_terminal());
-        reservation2.mark_submitted();
+        reservation2.mark_submitted(None);
     }
 
     #[test]
@@ -2114,8 +2432,11 @@ mod turn_lifecycle_tests {
         let lifecycle = Arc::new(TurnLifecycle::default());
         let reservation = lifecycle.reserve().expect("reserve");
         let epoch = lifecycle.current_turn_generation().expect("active epoch");
-        lifecycle.mark_reservation_submitted(reservation.reservation_id);
-        reservation.mark_submitted();
+        lifecycle.mark_reservation_submitted(
+            reservation.reservation_id,
+            Some(TEST_SUBMISSION.to_string()),
+        );
+        reservation.mark_submitted(None);
 
         // Running turn: gate closed.
         assert!(!lifecycle.is_reserve_gate_open_for(Some(epoch)));
@@ -2147,8 +2468,11 @@ mod turn_lifecycle_tests {
         let lifecycle = Arc::new(TurnLifecycle::default());
         let reservation = lifecycle.reserve().expect("reserve");
         let old_epoch = lifecycle.current_turn_generation().expect("active epoch");
-        lifecycle.mark_reservation_submitted(reservation.reservation_id);
-        reservation.mark_submitted();
+        lifecycle.mark_reservation_submitted(
+            reservation.reservation_id,
+            Some(TEST_SUBMISSION.to_string()),
+        );
+        reservation.mark_submitted(None);
 
         // Old turn's terminal fully closed (claim → finish, i.e. chat:done
         // already emitted).
@@ -2167,7 +2491,7 @@ mod turn_lifecycle_tests {
         // The gate for the new turn's own epoch is still closed (the new
         // turn is running, terminal not yet closed).
         assert!(!lifecycle.is_reserve_gate_open_for(Some(new_epoch)));
-        reservation2.mark_submitted();
+        reservation2.mark_submitted(None);
     }
 
     #[test]
@@ -2187,8 +2511,8 @@ mod turn_lifecycle_tests {
         // engine 时，cancel 第二阶段若按「engine 是否存在」分流会错误走 pending
         // 分支。arm_pending_cancel 必须显式要求 submitted——只有消息确实已入队
         // engine、需要防 reset_cancel_token 覆盖时才 arm；未提交 reservation 应由
-        // cancel 走未提交认领终态路径（emit_unsubmitted_interrupted_terminal）立即
-        // 发 chat:done 使其失效，而不是挂成 pending。
+        // cancel goes through the unsubmitted-claim terminal path (emit_unsubmitted_interrupted_terminal_for_epoch)
+        // which immediately emits chat:done to invalidate it, instead of hanging it as pending.
         let lifecycle = Arc::new(TurnLifecycle::default());
 
         // reserve 后 active=true 但 submitted=false → arm 不得置位。
@@ -2197,27 +2521,34 @@ mod turn_lifecycle_tests {
         lifecycle.arm_pending_cancel_and_cancel(
             epoch,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
         assert!(
-            lifecycle.take_pending_cancel(epoch).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "must not arm pending_cancel for an unsubmitted reservation"
         );
 
         // 走真实 send 路径：handle.send 成功后 mark_submitted → submitted=true。
-        lifecycle.mark_reservation_submitted(reservation.reservation_id);
+        lifecycle.mark_reservation_submitted(
+            reservation.reservation_id,
+            Some(TEST_SUBMISSION.to_string()),
+        );
         // 已 submitted + active + turn_id=None（TurnStarted 未抵达）→ arm 置位。
         lifecycle.arm_pending_cancel_and_cancel(
             epoch,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
         assert!(
-            lifecycle.take_pending_cancel(epoch).is_some(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
             "pending_cancel must be armed after submission, before TurnStarted"
         );
         // 消费 reservation 避免 Drop 副作用。
-        reservation.mark_submitted();
+        reservation.mark_submitted(None);
     }
 
     #[test]
@@ -2235,75 +2566,93 @@ mod turn_lifecycle_tests {
             lifecycle.reserve().is_err(),
             "terminal emission must keep admission closed"
         );
-        reservation.mark_submitted();
+        // 防 Drop 二次清理：claim 已收尾，标记 submitted 阻止 on_reservation_failed。
+        reservation.mark_submitted(None);
 
         lifecycle.finish_terminal_emission();
         assert!(lifecycle.reserve().is_ok());
     }
 
     #[test]
-    fn submitted_reservation_cannot_be_claimed_as_unsubmitted() {
+    fn pending_cancel_is_armed_only_before_turn_started_and_consumed_once() {
+        // reset_cancel_token 竞态修复的核心不变量：
+        // 1. arm 仅在「active、已 submitted、且 turn_id=None（TurnStarted 未抵达）」
+        //    时置标记（submitted 前置见 arm_pending_cancel_requires_submitted_reservation）；
+        // 2. take 原子取出并清除（防跨轮泄漏）；
+        // 3. 已 started 的 turn 不 arm（cancel_current 直接命中活跃 token）。
         let lifecycle = Arc::new(TurnLifecycle::default());
-        let reservation = lifecycle.reserve().expect("reserve");
-        lifecycle.mark_reservation_submitted(reservation.reservation_id);
 
-        assert!(!lifecycle.claim_unsubmitted_terminal());
-        reservation.mark_submitted();
-        assert!(lifecycle.finish_once(|| {}).is_some());
-    }
-
-    #[test]
-    fn pending_cancel_requires_submission_and_is_consumed_once() {
-        let lifecycle = Arc::new(TurnLifecycle::default());
-        let reservation = lifecycle.reserve().expect("reserve");
-
-        let epoch = lifecycle.current_turn_generation().expect("active epoch");
+        // --- 场景 A：submit 后、TurnStarted 前 arm → take 返回 Some ---
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
+        let epoch_a = lifecycle.current_turn_generation().expect("active epoch");
         lifecycle.arm_pending_cancel_and_cancel(
-            epoch,
+            epoch_a,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
         assert!(
-            lifecycle.take_pending_cancel(epoch).is_none(),
-            "pending_cancel must not arm before the reservation is submitted"
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
+            "pending_cancel must be armed before TurnStarted"
         );
-
-        lifecycle.mark_reservation_submitted(reservation.reservation_id);
-        lifecycle.arm_pending_cancel_and_cancel(
-            epoch,
-            deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
-        );
+        // take 已消费，再次取返回 None。
         assert!(
-            lifecycle.take_pending_cancel(epoch).is_some(),
-            "pending_cancel must arm after submission and before TurnStarted"
-        );
-        assert!(
-            lifecycle.take_pending_cancel(epoch).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "pending_cancel must be consumed exactly once"
         );
 
-        reservation.mark_submitted();
-        assert!(lifecycle.finish_once(|| {}).is_some());
-    }
-
-    #[test]
-    fn pending_cancel_is_not_armed_after_turn_started() {
-        let lifecycle = TurnLifecycle::default();
-        lifecycle.on_submitted();
+        // --- 场景 B：TurnStarted 后 arm → 不置标记 ---
         lifecycle.on_started("turn-1".to_string());
         let epoch_b = lifecycle.current_turn_generation().expect("active epoch");
         lifecycle.arm_pending_cancel_and_cancel(
             epoch_b,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
         assert!(
-            lifecycle.take_pending_cancel(epoch_b).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "must not arm pending_cancel after TurnStarted"
         );
 
         // 清理：结束当前 turn。
+        assert!(lifecycle.finish_once(|| {}).is_some());
+    }
+
+    #[test]
+    fn pending_cancel_armed_without_submission_id_is_never_consumed() {
+        // Pins the None-arm trap: a replay armed with a None submission id
+        // is consumable by no echo at all — not even a None echo (otherwise
+        // the #254 self-start overtake window would reopen). Every
+        // host-submitted path mints an id today, so the state is
+        // unreachable; if a future path ever stops minting, the arming-site
+        // warning fires loudly. This test locks the degraded behavior in:
+        // the stop no longer mis-fires (no token is fired), it just goes
+        // undelivered.
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        lifecycle.on_submitted(None);
+        let epoch = lifecycle.current_turn_generation().expect("active epoch");
+        lifecycle.arm_pending_cancel_and_cancel(
+            epoch,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            |_identity: Option<TurnIdentity>| {},
+        );
+        assert!(
+            lifecycle.take_pending_cancel(None).is_none(),
+            "a None-armed replay must never be consumed, not even by a None echo"
+        );
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some("sub-other-turn"))
+                .is_none(),
+            "a None-armed replay must not match a foreign echo"
+        );
+        // Wrap up: end the current turn (a leftover pending is cleared
+        // wholesale by reserve, so it never dangles).
         assert!(lifecycle.finish_once(|| {}).is_some());
     }
 
@@ -2315,7 +2664,7 @@ mod turn_lifecycle_tests {
         let lifecycle = Arc::new(TurnLifecycle::default());
 
         // turn1：on_submitted 激活（active+submitted+epoch=1，turn_id=None）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
         let target = lifecycle
             .current_turn_generation()
             .expect("turn1 active epoch");
@@ -2323,7 +2672,10 @@ mod turn_lifecycle_tests {
         // 轮次切换：turn1 终态 → turn2 reserve + 提交（epoch=2）。
         assert!(lifecycle.finish_once(|| {}).is_some());
         let reservation2 = lifecycle.reserve().expect("turn2 reserve");
-        lifecycle.mark_reservation_submitted(reservation2.reservation_id);
+        lifecycle.mark_reservation_submitted(
+            reservation2.reservation_id,
+            Some(TEST_SUBMISSION.to_string()),
+        );
         let epoch2 = lifecycle
             .current_turn_generation()
             .expect("turn2 active epoch");
@@ -2333,10 +2685,12 @@ mod turn_lifecycle_tests {
         assert!(!lifecycle.arm_pending_cancel_and_cancel(
             target,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {}
+            |_identity: Option<TurnIdentity>| {}
         ));
         assert!(
-            lifecycle.take_pending_cancel(epoch2).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "rejected arm must not set pending on the new turn"
         );
 
@@ -2344,15 +2698,17 @@ mod turn_lifecycle_tests {
         assert!(lifecycle.arm_pending_cancel_and_cancel(
             epoch2,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {}
+            |_identity: Option<TurnIdentity>| {}
         ));
         assert!(
-            lifecycle.take_pending_cancel(epoch2).is_some(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_some(),
             "accepted arm must set pending for the current turn"
         );
 
         // 防 Drop 副作用。
-        reservation2.mark_submitted();
+        reservation2.mark_submitted(None);
     }
 
     #[test]
@@ -2368,7 +2724,7 @@ mod turn_lifecycle_tests {
         // cancel 放在锁外，reserve 会在 cancel 完成前成功，断言失败。
         let lifecycle = Arc::new(TurnLifecycle::default());
         // turn1：on_submitted 激活（active+submitted+epoch=1），cancel 目标轮。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
         let target = lifecycle.current_turn_generation().expect("turn1 epoch");
 
         let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
@@ -2381,7 +2737,7 @@ mod turn_lifecycle_tests {
             let ok = lc_for_cancel.arm_pending_cancel_and_cancel(
                 target,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
-                || {
+                |_identity: Option<TurnIdentity>| {
                     entered_tx.send(()).expect("entered");
                     release_rx.recv().expect("release");
                 },
@@ -2426,13 +2782,16 @@ mod turn_lifecycle_tests {
         // 执行——stale 的取消不能落到新轮已 reset_cancel_token 的活跃 token 上。
         let lifecycle = Arc::new(TurnLifecycle::default());
         // turn1：on_submitted 激活（epoch=1）。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
         let target = lifecycle.current_turn_generation().expect("turn1 epoch");
 
         // 轮次切换：turn1 终态 → turn2 reserve + 提交（epoch=2）。
         assert!(lifecycle.finish_once(|| {}).is_some());
         let reservation2 = lifecycle.reserve().expect("turn2 reserve");
-        lifecycle.mark_reservation_submitted(reservation2.reservation_id);
+        lifecycle.mark_reservation_submitted(
+            reservation2.reservation_id,
+            Some(TEST_SUBMISSION.to_string()),
+        );
         let epoch2 = lifecycle
             .current_turn_generation()
             .expect("turn2 active epoch");
@@ -2446,7 +2805,7 @@ mod turn_lifecycle_tests {
             !lifecycle.arm_pending_cancel_and_cancel(
                 target,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
-                move || {
+                move |_identity: Option<TurnIdentity>| {
                     probe.store(true, Ordering::Release);
                 }
             ),
@@ -2457,12 +2816,14 @@ mod turn_lifecycle_tests {
             "cancel closure must not run when the epoch no longer matches"
         );
         assert!(
-            lifecycle.take_pending_cancel(epoch2).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "stale cancel must not bind pending to the new turn"
         );
 
         // 防 Drop 副作用。
-        reservation2.mark_submitted();
+        reservation2.mark_submitted(None);
     }
 
     #[test]
@@ -2490,7 +2851,7 @@ mod turn_lifecycle_tests {
             lifecycle.arm_pending_cancel_and_cancel(
                 0,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
-                move || {
+                move |_identity: Option<TurnIdentity>| {
                     probe.store(true, Ordering::Release);
                 }
             ),
@@ -2501,8 +2862,121 @@ mod turn_lifecycle_tests {
             "cancel closure must not run on an idle fresh session (epoch-0 sentinel)"
         );
         assert!(
-            lifecycle.take_pending_cancel(0).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "idle must not arm pending_cancel"
+        );
+    }
+
+    #[test]
+    fn arm_pending_cancel_and_cancel_passes_the_same_lock_identity_to_the_closure() {
+        // issue #254 review round: the turn-bound dispatch must see the
+        // identity of the turn that holds the state lock at dispatch time —
+        // not a snapshot taken earlier outside the lock (a `TurnStarted`
+        // that lands between an outer snapshot and the closure would be
+        // missed by an Unbound verdict and the stop would be lost). The
+        // closure receives the same-lock identity in every lifecycle state.
+        let lifecycle = Arc::new(TurnLifecycle::default());
+
+        // Reserved + submitted, TurnStarted not yet observed: the closure
+        // sees (epoch, None, not closing) — the Unbound verdict whose
+        // pending replay is armed in the same critical section.
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        let epoch = lifecycle.current_turn_generation().expect("active epoch");
+        let mut seen: Option<TurnIdentity> = None;
+        lifecycle.arm_pending_cancel_and_cancel(
+            epoch,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            |identity| seen = identity,
+        );
+        let unbound = seen.expect("identity passed to the closure");
+        assert_eq!(unbound.epoch, epoch);
+        assert_eq!(
+            unbound.turn_id, None,
+            "reserved turn has not observed TurnStarted"
+        );
+        assert!(!unbound.closing, "reserved-but-unstarted is not closing");
+
+        // TurnStarted observed: the same epoch now carries the turn id, so
+        // the dispatch binds the cancel to that id instead of relying on the
+        // stale outer view.
+        lifecycle.on_started("turn-1".to_string());
+        let mut started_seen: Option<TurnIdentity> = None;
+        lifecycle.arm_pending_cancel_and_cancel(
+            epoch,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            |identity| started_seen = identity,
+        );
+        let started = started_seen.expect("identity passed to the closure");
+        assert_eq!(started.epoch, epoch, "TurnStarted keeps the reserved epoch");
+        assert_eq!(started.turn_id.as_deref(), Some("turn-1"));
+        assert!(!started.closing);
+
+        // Terminal closing: the claim took the turn id into the terminal
+        // payload; the closing bit is what keeps this shape distinguishable
+        // from reserved-but-unstarted — both must never fire a token
+        // (issue #254).
+        lifecycle.claim_terminal().expect("claim terminal");
+        let mut closing_seen: Option<TurnIdentity> = None;
+        lifecycle.arm_pending_cancel_and_cancel(
+            epoch,
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            |identity| closing_seen = identity,
+        );
+        let closing = closing_seen.expect("identity passed to the closure");
+        assert_eq!(closing.epoch, epoch);
+        assert_eq!(
+            closing.turn_id, None,
+            "terminal claim takes the turn_id into the terminal payload"
+        );
+        assert!(
+            closing.closing,
+            "terminal closing must carry the discriminator"
+        );
+    }
+
+    #[test]
+    fn turn_bound_cancel_action_covers_every_identity_interleaving() {
+        // issue #254 verdict exhaustion: identity → cancel closure action.
+        // Slot names the target turn: turn-bound cancel.
+        assert_eq!(
+            turn_bound_cancel_action(Some(&TurnIdentity {
+                epoch: 3,
+                turn_id: Some("turn-3".to_string()),
+                closing: false,
+            })),
+            TurnBoundCancelAction::BoundTurn("turn-3".to_string()),
+        );
+        // Reserved but unstarted (submit→TurnStarted window): never fire —
+        // the slot can already hold a self-started follow-up turn's live
+        // token when the forwarder is delayed; the stop publishes its
+        // disposition and the turn-bound pending_cancel replay carries the
+        // cancel.
+        assert_eq!(
+            turn_bound_cancel_action(Some(&TurnIdentity {
+                epoch: 3,
+                turn_id: None,
+                closing: false,
+            })),
+            TurnBoundCancelAction::Unbound,
+        );
+        // Terminal closing: disposition only, never fire — the slot can hold
+        // a self-started follow-up turn's live token (#254 residual shape).
+        assert_eq!(
+            turn_bound_cancel_action(Some(&TurnIdentity {
+                epoch: 3,
+                turn_id: None,
+                closing: true,
+            })),
+            TurnBoundCancelAction::DispositionOnly,
+        );
+        // Defensive None (the closure only runs under active||closing, so
+        // this is unreachable in production): same as closing — prefer not
+        // firing.
+        assert_eq!(
+            turn_bound_cancel_action(None),
+            TurnBoundCancelAction::DispositionOnly,
         );
     }
 
@@ -2561,28 +3035,32 @@ mod turn_lifecycle_tests {
         let lifecycle = Arc::new(TurnLifecycle::default());
 
         // submit（op 入队，turn_lock 已释放，但 Engine 尚未 dequeue）。
-        lifecycle.on_submitted();
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
 
         // cancel 路径：arm_pending_cancel（turn_id 仍为 None → 置标记）。
         let epoch = lifecycle.current_turn_generation().expect("active epoch");
         lifecycle.arm_pending_cancel_and_cancel(
             epoch,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
 
         // Engine 执行 reset_cancel_token + 发 TurnStarted → 转发器先
         // on_started_transition（设 turn_id），再 take_pending_cancel。
         // 同一轮内 on_started 不 bump epoch（active 已 true），take 仍匹配。
         lifecycle.on_started("turn-reset".to_string());
-        let pending = lifecycle.take_pending_cancel(epoch);
+        let pending = lifecycle.take_pending_cancel(Some(TEST_SUBMISSION));
         assert!(
             pending.is_some(),
             "pending_cancel must survive until TurnStarted consumes it"
         );
 
         // 消费后标记清除，下一轮不受影响。
-        assert!(lifecycle.take_pending_cancel(epoch).is_none());
+        assert!(
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none()
+        );
         assert!(lifecycle.finish_once(|| {}).is_some());
     }
 
@@ -2595,16 +3073,16 @@ mod turn_lifecycle_tests {
         // submit→TurnStarted window wrongly clear un-injected queued steers
         // (PR #308 fifth review round MAJOR).
         let lifecycle = Arc::new(TurnLifecycle::default());
-        lifecycle.on_submitted();
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         let epoch = lifecycle.current_turn_generation().expect("active epoch");
         lifecycle.arm_pending_cancel_and_cancel(
             epoch,
             deepseek_tui::core::engine::CancelMode::InterruptKeepInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
         lifecycle.on_started("turn-zap".to_string());
         assert_eq!(
-            lifecycle.take_pending_cancel(epoch),
+            lifecycle.take_pending_cancel(Some(TEST_SUBMISSION)),
             Some((
                 epoch,
                 deepseek_tui::core::engine::CancelMode::InterruptKeepInbox
@@ -2646,7 +3124,7 @@ mod turn_lifecycle_tests {
         assert_eq!(lifecycle.current_turn_generation(), None);
 
         // on_submitted（定时任务路径，非 reservation）推进到 epoch=2。
-        assert!(lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
         assert_eq!(lifecycle.current_turn_generation(), Some(2));
         assert!(lifecycle.finish_once(|| {}).is_some());
 
@@ -2662,19 +3140,21 @@ mod turn_lifecycle_tests {
 
     #[test]
     fn pending_cancel_tied_to_epoch_is_dropped_after_turn_change() {
-        // reviewer 点 4 的核心回归：并发取消请求 C2 在旧轮 arm 了 pending_cancel，
-        // 恢复时已变成新轮。pending_cancel 携带 epoch，take 时校验不匹配 → 丢弃，
-        // 不误取消新轮（不触发 approve_handle.cancel 重放）。reserve() 也必须清除
-        // 旧轮遗留的 stale pending_cancel，防跨轮污染。
+        // Core regression for reviewer point 4: concurrent cancel request
+        // C2 armed pending_cancel on the old turn and resumes onto what has
+        // become a new turn. The take below passes the stale arm's own
+        // token — the exact-echo gate alone would still match it, so the
+        // None outcome comes solely from reserve()'s wholesale clear of the
+        // stale pending_cancel: no consumption, no replay.
         let lifecycle = Arc::new(TurnLifecycle::default());
 
         // 旧轮：submit（epoch=1），arm pending_cancel 绑定到 epoch=1。
-        lifecycle.on_submitted();
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         let epoch_old = lifecycle.current_turn_generation().expect("old epoch");
         lifecycle.arm_pending_cancel_and_cancel(
             epoch_old,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
-            || {},
+            |_identity: Option<TurnIdentity>| {},
         );
 
         // 结束旧轮，新一轮 reserve（epoch=2）。
@@ -2683,10 +3163,13 @@ mod turn_lifecycle_tests {
         let epoch_new = lifecycle.current_turn_generation().expect("new epoch");
         assert_ne!(epoch_old, epoch_new);
 
-        // forwarder 在新轮 TurnStarted 后用新轮 epoch 取 pending_cancel：
-        // C2 留下的 stale pending（epoch_old）必须被丢弃，不重放 cancel。
+        // After the new turn's TurnStarted, the forwarder takes
+        // pending_cancel by echo token: reserve() has already wholesale-
+        // cleared C2's stale pending, so no cancel is replayed.
         assert!(
-            lifecycle.take_pending_cancel(epoch_new).is_none(),
+            lifecycle
+                .take_pending_cancel(Some(TEST_SUBMISSION))
+                .is_none(),
             "stale pending_cancel bound to a previous epoch must be dropped, not replayed onto the new turn"
         );
     }
@@ -2694,26 +3177,17 @@ mod turn_lifecycle_tests {
     #[test]
     fn concurrent_submission_is_rejected_until_the_active_turn_finishes() {
         let lifecycle = TurnLifecycle::default();
-        assert!(lifecycle.on_submitted());
-        assert!(!lifecycle.on_submitted());
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
+        assert!(!lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
         assert!(lifecycle.finish_once(|| {}).is_some());
-        assert!(lifecycle.on_submitted());
-    }
-
-    #[test]
-    fn forwarder_stop_and_reclaim_share_the_same_terminal_gate() {
-        let lifecycle = TurnLifecycle::default();
-        lifecycle.on_submitted();
-        lifecycle.on_started("turn-1".to_string());
-        assert!(lifecycle.finish_once(|| {}).is_some());
-        assert_eq!(lifecycle.finish_once(|| panic!("duplicate terminal")), None);
+        assert!(lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string())));
     }
 
     #[test]
     fn terminal_side_effects_run_only_for_the_path_that_claimed_the_turn() {
         let lifecycle = TurnLifecycle::default();
         let effects = Cell::new(0_u8);
-        lifecycle.on_submitted();
+        lifecycle.on_submitted(Some(TEST_SUBMISSION.to_string()));
         lifecycle.on_started("turn-claim".to_string());
 
         if lifecycle.claim_terminal().is_some() {
@@ -2843,7 +3317,7 @@ mod turn_lifecycle_tests {
         reservation
             .prepare_actual_user_content("execute approved plan".to_string())
             .expect("actual prompt");
-        reservation.mark_submitted();
+        reservation.mark_submitted(None);
 
         let reclaimed = lifecycle
             .claim_reclaimed_transition()
@@ -2953,7 +3427,7 @@ mod turn_lifecycle_tests {
         first
             .prepare_actual_user_content("same raw prompt".to_string())
             .unwrap();
-        first.mark_submitted();
+        first.mark_submitted(None);
         assert!(lifecycle.finish_once(|| {}).is_some());
 
         let mut second = lifecycle.reserve().expect("second reserve");
@@ -3068,7 +3542,7 @@ mod turn_lifecycle_tests {
                 .set_transcript(TranscriptOperation::Append, message("user", &display_text))
                 .unwrap();
             reservation.prepare_actual_user_content(raw_text).unwrap();
-            reservation.mark_submitted();
+            reservation.mark_submitted(None);
             assert!(lifecycle.finish_once(|| {}).is_some());
         }
 
@@ -3094,7 +3568,7 @@ mod turn_lifecycle_tests {
         assert_eq!(sanitized, vec![message("user", "live display")]);
 
         // Engine reclaim (idle, no in-flight reservation): no rule can match anymore; clear the whole section.
-        active.mark_submitted();
+        active.mark_submitted(None);
         assert!(lifecycle.finish_once(|| {}).is_some());
         lifecycle.prune_stale_transcript_rules();
         let (messages, matched) = lifecycle.sanitize_messages(vec![engine_user("live raw")]);
@@ -3150,6 +3624,11 @@ mod scheduled_turn_tests {
             verbosity: None,
             provenance: UserInputProvenance::Runtime,
             turn_tool_security: None,
+            // Bare fixture: deliberately untagged. Production paths mint a
+            // submission id; keeping None here preserves the untagged op
+            // shape whose stop replay is undeliverable by contract (pinned
+            // by pending_cancel_armed_without_submission_id_is_never_consumed).
+            submission_id: None,
         }
     }
 
@@ -3571,5 +4050,54 @@ mod live_tests {
             );
             assert!(s.tps_time_s > 0.0, "TPS 时长未记 seq={seq:?}");
         }
+    }
+}
+
+/// 普通引擎不得携带多智能体装配材料（快照或候选行）：候选只随多智能体快照
+/// 同源产生。误传与快照误传同等对待（hard-error），与多智能体 turn 缺快照的
+/// hard-error 双向对称（生产调用点：[`Self::build_interactive_send_message_op`]）。
+fn validate_ordinary_turn_has_no_expert_material(
+    carries_snapshot: bool,
+    candidate_lines: usize,
+) -> Result<()> {
+    if carries_snapshot {
+        anyhow::bail!("ordinary turn must not carry a multi-agent expert snapshot");
+    }
+    if candidate_lines > 0 {
+        anyhow::bail!("ordinary turn must not carry expert candidate lines");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod expert_turn_invariant_tests {
+    use super::validate_ordinary_turn_has_no_expert_material;
+
+    /// 普通轮 hard-error 不变式（双向对称性的普通侧）：不带任何专家材料时
+    /// 放行；带快照、带候选行分别硬错，且快照守卫先触发。
+    #[test]
+    fn ordinary_turn_rejects_snapshot_and_candidate_lines_symmetrically() {
+        assert!(
+            validate_ordinary_turn_has_no_expert_material(false, 0).is_ok(),
+            "普通轮不带专家材料必须放行"
+        );
+        let snapshot_error =
+            validate_ordinary_turn_has_no_expert_material(true, 0).expect_err("快照误传必须硬错");
+        assert!(
+            snapshot_error.to_string().contains("expert snapshot"),
+            "错误信息必须点明快照误传: {snapshot_error}"
+        );
+        let candidates_error = validate_ordinary_turn_has_no_expert_material(false, 2)
+            .expect_err("候选行误传必须硬错");
+        assert!(
+            candidates_error.to_string().contains("candidate lines"),
+            "错误信息必须点明候选行误传: {candidates_error}"
+        );
+        let both = validate_ordinary_turn_has_no_expert_material(true, 2)
+            .expect_err("双材料同传也必须硬错");
+        assert!(
+            both.to_string().contains("expert snapshot"),
+            "快照守卫必须先于候选行守卫（与生产装配顺序一致）: {both}"
+        );
     }
 }

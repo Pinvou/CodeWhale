@@ -131,16 +131,14 @@ pub fn read_artifact_chunk(
     limit: Option<usize>,
 ) -> Result<ArtifactChunk, String> {
     let session_id = require_explicit_session_id(session_id)?;
-    let limit = limit.unwrap_or(MAX_TRANSFER_CHUNK_BYTES);
-    if limit == 0 || limit > MAX_TRANSFER_CHUNK_BYTES {
-        return Err(format!(
-            "artifact chunk limit must be between 1 and {MAX_TRANSFER_CHUNK_BYTES}"
-        ));
-    }
     let resolved = resolve_session_artifact_path(store, session_id, path)?;
-    read_resolved_file_chunk_with_limit(&resolved, offset, limit)
+    read_resolved_file_chunk(&resolved, offset, limit)
 }
 
+/// Read a bounded chunk from an already-resolved absolute path. Callers must
+/// pass a path that cleared the host-root / session-scope resolution
+/// (`resolve_session_artifact_path`, `resolve_conversation_attachment_path`);
+/// this function performs no authorization of its own.
 pub(crate) fn read_resolved_file_chunk(
     resolved: &Path,
     offset: u64,
@@ -152,14 +150,6 @@ pub(crate) fn read_resolved_file_chunk(
             "artifact chunk limit must be between 1 and {MAX_TRANSFER_CHUNK_BYTES}"
         ));
     }
-    read_resolved_file_chunk_with_limit(resolved, offset, limit)
-}
-
-fn read_resolved_file_chunk_with_limit(
-    resolved: &Path,
-    offset: u64,
-    limit: usize,
-) -> Result<ArtifactChunk, String> {
     let mut file = File::open(resolved)
         .map_err(|error| format!("open artifact {}: {error}", resolved.display()))?;
     let size = file

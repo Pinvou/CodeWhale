@@ -11,7 +11,7 @@ import { Toggle } from '../../components/Toggle.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
 import { selectableModels } from '../../shared/model-options.js';
 import { can } from '../../shared/platform.js';
-import { buildComposerToolMenuState } from './composer-tool-menu-logic.js';
+import { buildComposerToolMenuState, createToggleWriteGate, TOGGLE_WRITE_KEY_PROJECT_SKILLS } from './composer-tool-menu-logic.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
 import {
   artifactPreviewExternalUrlFromMessage,
@@ -74,6 +74,8 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       const canSwitchModels = can('sessionModelSwitch');
       // 多智能体模式 = 模型列表下方的会话级开关（ADR-0006）。状态权威在
       // 后端 mode_state，这里只读 bs 镜像；翻转后 bridge 回写权威状态。
+      // 可用性由调用方以 multiAgentAvailable 显式传入（定时会话在后端被
+      // swarm_mode_available 排除：引擎永远按普通配置装配，开关必须隐藏）。
       const canMultiAgent = can('multiAgent') && multiAgentAvailableProp !== false;
       const multiAgentOn = multiAgentEnabledProp !== undefined
         ? Boolean(multiAgentEnabledProp)
@@ -416,6 +418,18 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       );
     };
 
+    // CLI 连接器（飞书/企微/钉钉/腾讯会议）共用一份配置表：探测命令（固定
+    // `<key>_skills_state`）与菜单行标题 key 都由它派生，避免四份手写拷贝漂移。
+    const COMPOSER_CONNECTORS = [
+      { key: 'feishu', titleKey: 'serviceFeishu' },
+      { key: 'wecom', titleKey: 'serviceWecom' },
+      { key: 'dingtalk', titleKey: 'serviceDingtalk' },
+      { key: 'tmeet', titleKey: 'serviceTmeet' },
+    ];
+    const initialConnectorStates = () => Object.fromEntries(
+      COMPOSER_CONNECTORS.map(({ key }) => [key, { on: false, enabled: true }]),
+    );
+
     // 输入框底栏:工具菜单(只展示已装工具 + 跳工具商店;无会话级开关——后端无此概念)。
     // 可选触发器变体：triggerVariant='pill' 时触发器渲染为代码页配置组同款 pill
     //（triggerLabel 为可选 10px 前缀文案；triggerTestId 覆盖默认 testid），
@@ -444,6 +458,17 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       const [hidden, setHidden] = useState(() => new Set()); // 被不可见的包 id(可见性预过滤，按 scope 持久)
       const [projectSkillsEnabled, setProjectSkillsEnabled] = useState(false); // 项目级 skills(仅 code scope 生效)
       const [projectSkillsHelp, setProjectSkillsHelp] = useState(false); // 项目技能帮助弹窗(功能说明+扫描目录)
+      // Persistence-failure line for the tool-menu toggles/project-skills: the
+      // backend propagates governance-write failures to the command boundary;
+      // roll back the optimistic state here and show it (cleared before the next
+      // toggle attempt), never report it as success.
+      const [toggleError, setToggleError] = useState('');
+      // Governance write generation gate (see createToggleWriteGate): per control,
+      // only the latest write's completion may apply rollback/error reporting; a
+      // late stale failure must not overwrite a newer completion's optimistic state.
+      const writeGateRef = useRef(null);
+      if (writeGateRef.current === null) writeGateRef.current = createToggleWriteGate();
+      // CLI 连接器连接/技能状态：key → { on: 是否已连接, enabled: 技能是否启用(未手动停用) }。
       const [feishuOn, setFeishuOn] = useState(false); // 飞书是否已连接(CLI 路线)
       const [feishuEnabled, setFeishuEnabled] = useState(true); // 飞书技能是否启用(未手动停用)
       const [wecomOn, setWecomOn] = useState(false); // 企微是否已连接(CLI 路线)
@@ -536,26 +561,60 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
         if (toolSwitchDisabled || (hasActiveSession && enabled && !pending.ids.has(id))) return;
         // scope 收敛后：工具/技能/CLI 开关统一为包 id 单一禁用集（后端
         // disabled_bundles.json），技能行 id 即包 id，不再带 `skill:` 前缀。
+        setToggleError('');
         const next = new Set(disabled);
         next.has(id) ? next.delete(id) : next.add(id);
         setDisabled(next);
         // 记录/撤销未提交的「打开」：发送新一轮后由 pinvou:chat-round-committed 转正锁死。
+        const wasPending = pending.ids.has(id);
         if (enabled) pending.ids.delete(id); else pending.ids.add(id);
         // 按 scope 持久:落盘 + 广播给所有在跑引擎,关一次该 scope 所有新对话/新窗口都继承。
+        // If persistence fails the backend has already propagated the error to the
+        // command boundary: roll back the optimistic set and the pending record and
+        // show the failure; do not swallow it and leave the switch in a false-success
+        // state.
         if (bridge.available) {
+          const generation = writeGateRef.current.begin(id);
           invokeTauri('set_disabled_connectors',
-            { connectorIds: Array.from(next), scope: toolScope }).catch(() => {});
+            { connectorIds: [...next], scope: toolScope })
+            .catch((error) => {
+              // Only the control's latest write may roll back or report: with rapid
+              // toggles an earlier write can fail after a newer write succeeded
+              // (out-of-order completion); on a generation mismatch skip entirely —
+              // the control's outcome belongs to its latest write. A current-
+              // generation failure rolls back to backend truth (re-read the
+              // disabled/visibility/project-skills tri-state) instead of replaying
+              // the local snapshot; the pending uncommitted "on" is inverted by
+              // pre-toggle membership.
+              if (!writeGateRef.current.isCurrent(id, generation)) return;
+              refreshToolsMenu(() => true);
+              if (wasPending) pending.ids.add(id); else pending.ids.delete(id);
+              const copy = t && t.uiToolStore && t.uiToolStore.operationFailedWith;
+              setToggleError(copy ? copy(String(error)) : String(error));
+            });
         }
       }
       function toggleProjectSkills() {
         // 与 toggleTool 同一规则：pending 的「打开」在发送新一轮前可改回。
         const pending = pendingEnablesFor(toolScope);
         if (toolSwitchDisabled || (hasActiveSession && projectSkillsEnabled && !pending.projectSkills)) return;
+        setToggleError('');
         const next = !projectSkillsEnabled;
         setProjectSkillsEnabled(next);
+        const wasPending = pending.projectSkills;
         pending.projectSkills = next;
         if (bridge.available) {
-          invokeTauri('set_project_skills_enabled', { enabled: next }).catch(() => {});
+          // Rollback on persistence failure mirrors toggleTool: a user governance
+          // write must not stay in a false-success state; the generation gate
+          // likewise lets only the control's latest write failure apply.
+          const generation = writeGateRef.current.begin(TOGGLE_WRITE_KEY_PROJECT_SKILLS);
+          invokeTauri('set_project_skills_enabled', { enabled: next }).catch((error) => {
+            if (!writeGateRef.current.isCurrent(TOGGLE_WRITE_KEY_PROJECT_SKILLS, generation)) return;
+            refreshToolsMenu(() => true);
+            pending.projectSkills = wasPending;
+            const copy = t && t.uiToolStore && t.uiToolStore.operationFailedWith;
+            setToggleError(copy ? copy(String(error)) : String(error));
+          });
         }
       }
       const menuState = buildComposerToolMenuState({
@@ -663,6 +722,9 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           <ComposerPopover open={open} onClose={() => setOpen(false)} triggerRef={triggerRef} compact={compact}
             menuProps={{ 'data-testid': 'composer-tool-menu' }}
             desktopClassName="absolute bottom-full left-0 mb-2 w-72 max-h-[420px] z-50 overflow-y-auto custom-scrollbar bg-white dark:bg-[#1E1E20] border border-black/5 dark:border-white/10 rounded-2xl shadow-xl p-1.5">
+                {toggleError && (
+                  <div className="px-3 py-1.5 text-[11px] leading-4 text-[#FF3B30] dark:text-[#FF6B6B]" data-testid="composer-tool-menu-error">{toggleError}</div>
+                )}
                 {connectedServices.map(switchRow)}
                 {toolRows.map(switchRow)}
                 {localizedSkillRows.length === 0 ? (

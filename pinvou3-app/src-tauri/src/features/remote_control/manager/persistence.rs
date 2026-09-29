@@ -38,13 +38,20 @@ pub(super) fn fresh_config(allow_host_workspace: bool) -> WebAccessConfig {
     }
 }
 
-pub(super) fn validate_config(config: &WebAccessConfig) -> Result<(), String> {
-    if config.relay_url.len() > 2_048
-        || !(config.relay_url.starts_with("ws://") || config.relay_url.starts_with("wss://"))
-        || config.relay_url.chars().any(char::is_whitespace)
+/// ws(s) 地址统一校验：长度上限、`ws://` 或 `wss://` 前缀、不含空白；
+/// 失败文案由调用方保留原样。
+fn validate_ws_url(url: &str, invalid_message: &str) -> Result<(), String> {
+    if url.len() > 2_048
+        || !(url.starts_with("ws://") || url.starts_with("wss://"))
+        || url.chars().any(char::is_whitespace)
     {
-        return Err("Web access relay_url is invalid".to_string());
+        return Err(invalid_message.to_string());
     }
+    Ok(())
+}
+
+pub(super) fn validate_config(config: &WebAccessConfig) -> Result<(), String> {
+    validate_ws_url(&config.relay_url, "Web access relay_url is invalid")?;
     if config.endpoint_id.len() < 8
         || config.endpoint_id.len() > 128
         || !config
@@ -205,12 +212,10 @@ pub(super) fn relay_settings_path() -> PathBuf {
 }
 
 pub(super) fn validate_relay_settings(settings: &RelaySettings) -> Result<(), String> {
-    if settings.relay_url.len() > 2_048
-        || !(settings.relay_url.starts_with("ws://") || settings.relay_url.starts_with("wss://"))
-        || settings.relay_url.chars().any(char::is_whitespace)
-    {
-        return Err("relay address does not normalize to a valid ws(s) URL".to_string());
-    }
+    validate_ws_url(
+        &settings.relay_url,
+        "relay address does not normalize to a valid ws(s) URL",
+    )?;
     if settings.public_base_url.len() > 2_048
         || !(settings.public_base_url.starts_with("http://")
             || settings.public_base_url.starts_with("https://"))
@@ -295,12 +300,10 @@ pub(super) fn pending_revocation_key(pending: &PendingRevocation) -> String {
 }
 
 pub(super) fn validate_pending_revocation(pending: &PendingRevocation) -> Result<(), String> {
-    if pending.relay_url.len() > 2_048
-        || !(pending.relay_url.starts_with("ws://") || pending.relay_url.starts_with("wss://"))
-        || pending.relay_url.chars().any(char::is_whitespace)
-    {
-        return Err("pending Web revocation has an invalid relay_url".to_string());
-    }
+    validate_ws_url(
+        &pending.relay_url,
+        "pending Web revocation has an invalid relay_url",
+    )?;
     if pending.endpoint_id.len() < 4
         || pending.endpoint_id.len() > 128
         || !pending
@@ -449,19 +452,13 @@ pub(super) fn eligible_pending_revocations(
         .collect()
 }
 
+/// Terminal-message predicate for the pending-revocation replay. The live
+/// relay loop and this replay previously kept two hand-parallel classifiers;
+/// both now consume the single shared helper
+/// `relay_client::terminal_relay_message` (revoked / replaced /
+/// endpoint-not-found), so the replay cannot drift from the live semantics.
 pub(super) fn pending_revocation_ack(value: &Value, endpoint_id: &str) -> bool {
-    let message_endpoint = value.get("endpoint_id").and_then(Value::as_str);
-    match value.get("type").and_then(Value::as_str) {
-        Some("desktop_endpoint_revoked") | Some("desktop_endpoint_replaced") => {
-            message_endpoint == Some(endpoint_id)
-        }
-        Some("error")
-            if value.get("code").and_then(Value::as_str) == Some("endpoint_not_found") =>
-        {
-            message_endpoint.is_none_or(|value| value == endpoint_id)
-        }
-        _ => false,
-    }
+    crate::features::remote_control::relay_client::terminal_relay_message(value, endpoint_id)
 }
 
 pub(super) fn load_or_initialize_rpc_ledger(endpoint_id: &str) -> Result<RpcLedger, String> {

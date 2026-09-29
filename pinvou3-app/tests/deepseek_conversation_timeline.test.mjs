@@ -146,10 +146,6 @@ try {
   assert.deepEqual(projected.turns[1].usage, {
     inputTokens: 120,
     outputTokens: 30,
-    cacheHitTokens: 0,
-    cacheMissTokens: 0,
-    cacheWriteTokens: 0,
-    reasoningTokens: 0,
   });
   assert.equal(projected.turns[1].items[2].legacyItem, chatItems[4], 'tool cards must retain the original item for provider rendering');
   assert.equal(projected.turns[1].items[3].tool.name, 'read', 'shared presentation must retain the provider tool name');
@@ -340,6 +336,19 @@ try {
   assert.equal(paired.length, 1, 'send_error timing records must not shift visible user turns');
   assert.equal(paired[0].status, 'incomplete');
 
+  const behaviorIdentity = pairDeepSeekTimeline([
+    { turn_id: 'timeline-turn', event: 'user_start', timestamp: 10 },
+    {
+      turn_id: 'timeline-turn',
+      behavior_turn_id: 'engine-turn-authoritative',
+      event: 'assistant_done',
+      timestamp: 20,
+      status: 'Completed',
+    },
+  ]);
+  assert.equal(behaviorIdentity[0].id, 'timeline-turn');
+  assert.equal(behaviorIdentity[0].behaviorTurnId, 'engine-turn-authoritative');
+
   // A timeline's bare error feeds the red-text fallback: gateway/provider
   // bodies the gate missed must be redacted at the projection layer too
   // (classification may miss, credentials must not); userError cards go
@@ -434,6 +443,7 @@ try {
   const conversationView = readFileSync(path.join(root, 'src', 'features', 'conversation', 'ConversationTimeline.jsx'), 'utf8');
   const questionChoiceCard = readFileSync(path.join(root, 'src', 'features', 'conversation', 'QuestionChoiceCard.jsx'), 'utf8');
   const toolRenderers = readFileSync(path.join(root, 'src', 'features', 'tools', 'tool-renderers.jsx'), 'utf8');
+  const userInputShared = readFileSync(path.join(root, 'src', 'shared', 'user-input-shared.js'), 'utf8');
   // The busy block must clear userError in lockstep with error (R2 L1):
   // when a turn re-runs, a leftover userError card would show the previous
   // turn's "has stopped" wording while the turn claims to be running.
@@ -473,7 +483,7 @@ try {
   assert.ok(toolRenderers.includes('<QuestionChoiceCard'),
     'DeepSeek request_user_input must use the shared Codex-style choice card');
   assert.ok(toolRenderers.includes('isFreeTextPlaceholderOption')
-    && toolRenderers.includes('!allowOther || !isFreeTextPlaceholderOption(option)'),
+    && userInputShared.includes('!allowOther || !isFreeTextPlaceholderOption(option)'),
   'free-text questions must not render duplicate Other placeholder choices');
   assert.ok(toolRenderers.includes('otherPlaceholder={t.uiToolRender.other}'),
     'DeepSeek and Codex question cards must use the same free-text placeholder');
@@ -494,27 +504,30 @@ try {
       label: 'one completed pair (real disk shape, no ui_turn_index)',
       timelineEvents: [
         { turn_id: 't0', event: 'user_start', timestamp: 100 },
-        { turn_id: 't0', event: 'assistant_done', timestamp: 200, status: 'Completed' },
+        { turn_id: 't0', behavior_turn_id: 'engine-t0', event: 'assistant_done', timestamp: 200, status: 'Completed' },
       ],
       expectedSteered: 'Completed',
+      expectedBehaviorTurnId: 'engine-t0',
     },
     {
       label: 'orphan resume user_start without its own terminal',
       timelineEvents: [
         { turn_id: 't0', event: 'user_start', timestamp: 100 },
-        { turn_id: 't0', event: 'assistant_done', timestamp: 200, status: 'Completed' },
+        { turn_id: 't0', behavior_turn_id: 'engine-t0', event: 'assistant_done', timestamp: 200, status: 'Completed' },
         { turn_id: 't1', event: 'user_start', timestamp: 300 },
       ],
       expectedSteered: 'Completed',
+      expectedBehaviorTurnId: 'engine-t0',
     },
     {
       label: 'genuine stop during the continuation inherits the honest interrupted terminal',
       timelineEvents: [
         { turn_id: 't0', event: 'user_start', timestamp: 100 },
         { turn_id: 't1', event: 'user_start', timestamp: 300 },
-        { turn_id: 't1', event: 'assistant_done', timestamp: 400, status: 'Interrupted' },
+        { turn_id: 't1', behavior_turn_id: 'engine-t1', event: 'assistant_done', timestamp: 400, status: 'Interrupted' },
       ],
       expectedSteered: 'Interrupted',
+      expectedBehaviorTurnId: 'engine-t1',
     },
   ];
   for (const steerCase of steerBadgeCases) {
@@ -536,6 +549,7 @@ try {
       `the run head carries no badge once the terminal moved to the tail (${steerCase.label})`,
     );
     assert.equal(steeredProjection.turns[1].status, steerCase.expectedSteered, `the run tail shows the engine turn's terminal (${steerCase.label})`);
+    assert.equal(steeredProjection.turns[1].behaviorTurnId, steerCase.expectedBehaviorTurnId, `the run tail keeps the authoritative behavior turn id (${steerCase.label})`);
   }
 
   // While the turn is still running, the admitted turn's user_start has no

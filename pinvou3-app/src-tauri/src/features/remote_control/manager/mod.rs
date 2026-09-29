@@ -48,12 +48,12 @@ use persistence::{
 // the pure helpers, so the whole surface is imported by name.
 use rpc::{
     EventSource, NewRpcAdmission, ReplayMessageContext, RpcReadyAction, RpcRequestAction,
-    bounded_rpc_completion, enqueue_stream_reset, event_message, is_event_subscribed,
-    prepare_bridge_generation, prepare_new_rpc_admission, prune_rpc_cache,
-    request_conflict_completion, rpc_admission_rejection, rpc_error_completion, rpc_fingerprint,
-    rpc_in_flight_expired, rpc_response, snapshot_message, stream_reset_message,
-    subscription_filtered_replay_messages, tombstone_completion, try_enqueue_message_batch,
-    validate_bridge_generation, validate_rpc_command, validate_web_rpc_scope,
+    bounded_rpc_completion, enqueue_stream_reset, event_message, prepare_bridge_generation,
+    prepare_new_rpc_admission, prune_rpc_cache, request_conflict_completion,
+    rpc_admission_rejection, rpc_error_completion, rpc_fingerprint, rpc_in_flight_expired,
+    rpc_response, snapshot_message, stream_reset_message, subscription_filtered_replay_messages,
+    tombstone_completion, try_enqueue_message_batch, validate_bridge_generation,
+    validate_rpc_command, validate_web_rpc_scope,
 };
 
 // The transfer buffer helpers mutate `Inner` through borrowed guards. They are
@@ -204,13 +204,10 @@ const MAX_WEB_ATTACHMENT_UPLOAD_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// 浏览器本机上传在桌面端的短生命周期暂存目录前缀。仅带此前缀的目录会被
 /// 启动清扫与附件消费清理删除，避免波及旧版 E2E 使用的其他 uploads 子目录。
 pub(crate) const WEB_ATTACHMENT_UPLOAD_DIR_PREFIX: &str = "webup_";
-const MAX_WEB_SESSION_UPLOADS: usize = 4;
-const MAX_WEB_SESSION_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 const MAX_WEB_SESSION_DOWNLOADS: usize = 2;
 const PENDING_REVOCATIONS_VERSION: u8 = 1;
 const MAX_PENDING_REVOCATIONS: usize = 32;
 const MAX_PENDING_REVOCATIONS_FILE_BYTES: usize = 256 * 1024;
-const MAX_WEB_SESSION_UPLOAD_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_WEB_SESSION_DOWNLOAD_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const WEB_SESSION_TRANSFER_TTL: Duration = Duration::from_secs(10 * 60);
 const WEB_SESSION_TRANSFER_REAPER_INTERVAL: Duration = Duration::from_secs(60);
@@ -328,8 +325,6 @@ struct Inner {
     web_attachment_uploads: HashMap<String, WebAttachmentUpload>,
     web_attachment_upload_order: VecDeque<String>,
     web_workspace_grants: WebWorkspaceGrantStore,
-    web_session_uploads: HashMap<String, WebSessionUpload>,
-    web_session_upload_order: VecDeque<String>,
     web_session_downloads: HashMap<String, WebSessionDownload>,
     web_session_download_order: VecDeque<String>,
     pending_revocations_in_flight: HashSet<String>,
@@ -358,8 +353,6 @@ impl Default for Inner {
             web_attachment_uploads: HashMap::new(),
             web_attachment_upload_order: VecDeque::new(),
             web_workspace_grants: WebWorkspaceGrantStore::default(),
-            web_session_uploads: HashMap::new(),
-            web_session_upload_order: VecDeque::new(),
             web_session_downloads: HashMap::new(),
             web_session_download_order: VecDeque::new(),
             pending_revocations_in_flight: HashSet::new(),
@@ -434,7 +427,6 @@ struct WebSessionUpload {
     data: Vec<u8>,
     last_touched: Instant,
 }
-
 /// 浏览器本机文件分块上传的内存累积缓冲。落盘与 ingest 只发生在最后一块提交时。
 #[derive(Debug)]
 struct WebAttachmentUpload {
@@ -894,6 +886,17 @@ impl AccessPolicy {
     }
 }
 
+/// Tear down per-endpoint Web state shared by every lifecycle transition
+/// (rotate, stop, revoke, replace). Callers that also retire the durable RPC
+/// ledger or the stream journal reset those next to this helper.
+fn reset_web_state(inner: &mut Inner) {
+    inner.subscriptions.clear();
+    inner.rpc_cache.clear();
+    inner.rpc_order.clear();
+    clear_web_attachments(inner);
+    inner.web_workspace_grants.clear();
+}
+
 impl RemoteControlManager {
     pub fn new(app: AppHandle) -> Self {
         let (policy, policy_error) = match AccessPolicy::load() {
@@ -1151,13 +1154,9 @@ impl RemoteControlManager {
         persist_config(&config)?;
         let previous = {
             let mut inner = self.inner.lock();
-            inner.subscriptions.clear();
             inner.rpc_ledger = RpcLedger::default();
-            inner.rpc_cache.clear();
-            inner.rpc_order.clear();
-            clear_web_attachments(&mut inner);
+            reset_web_state(&mut inner);
             inner.stream.reset();
-            inner.web_workspace_grants.clear();
             inner.endpoint.take()
         };
         if let Some(previous) = previous {
@@ -1294,11 +1293,7 @@ impl RemoteControlManager {
         remove_config()?;
         let endpoint = {
             let mut inner = self.inner.lock();
-            inner.subscriptions.clear();
-            inner.rpc_cache.clear();
-            inner.rpc_order.clear();
-            clear_web_attachments(&mut inner);
-            inner.web_workspace_grants.clear();
+            reset_web_state(&mut inner);
             inner.rpc_ledger = RpcLedger::default();
             inner.stream.reset();
             inner.idle_status = WebAccessStatusKind::Stopped;
@@ -1671,9 +1666,8 @@ impl RemoteControlManager {
     }
 
     /// 累积浏览器本机文件的一个有界分块；最后一块 `commit` 时返回完整文件名
-    /// 与字节。校验、容量与 TTL 语义对齐 `append_web_session_upload`，单文件
-    /// 上限收紧为 `file_ingest::MAX_FILE_BYTES`，避免传完 20 MiB 才拿到一个
-    /// oversize 降级附件。
+    /// 与字节。单文件上限收紧为 `file_ingest::MAX_FILE_BYTES`，避免传完
+    /// 20 MiB 才拿到一个 oversize 降级附件。
     pub fn append_web_attachment_upload(
         &self,
         upload_id: &str,
@@ -1700,114 +1694,6 @@ impl RemoteControlManager {
     /// ID 幂等——迟到的取消不应产生错误。
     pub fn abort_web_attachment_upload(&self, upload_id: &str) {
         discard_web_attachment_upload(&mut self.inner.lock(), upload_id);
-    }
-
-    pub fn append_web_session_upload(
-        &self,
-        upload_id: &str,
-        session_id: &str,
-        expected_revision: &str,
-        offset: usize,
-        total: usize,
-        data: &[u8],
-        commit: bool,
-    ) -> Result<Option<Vec<u8>>, String> {
-        if upload_id.len() < 8
-            || upload_id.len() > 128
-            || !upload_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err("远程控制会话上传 ID 无效".into());
-        }
-        if total > MAX_WEB_SESSION_UPLOAD_BYTES {
-            return Err(format!(
-                "会话数据超过远程控制 {} MiB 上限",
-                MAX_WEB_SESSION_UPLOAD_BYTES / (1024 * 1024)
-            ));
-        }
-        if expected_revision.trim().is_empty() || expected_revision.len() > 128 {
-            return Err("远程控制会话上传需要有效的预期版本".into());
-        }
-        let mut inner = self.inner.lock();
-        prune_expired_web_session_transfers(&mut inner);
-        if offset == 0 {
-            if let Some(previous) = inner.web_session_uploads.remove(upload_id) {
-                drop(previous);
-            }
-            while inner.web_session_uploads.len() >= MAX_WEB_SESSION_UPLOADS {
-                let Some(oldest) = inner.web_session_upload_order.pop_front() else {
-                    break;
-                };
-                inner.web_session_uploads.remove(&oldest);
-            }
-            inner.web_session_upload_order.retain(|id| id != upload_id);
-            inner
-                .web_session_upload_order
-                .push_back(upload_id.to_string());
-            inner.web_session_uploads.insert(
-                upload_id.to_string(),
-                WebSessionUpload {
-                    session_id: session_id.to_string(),
-                    expected_revision: expected_revision.to_string(),
-                    total,
-                    data: Vec::with_capacity(total.min(4 * 1024 * 1024)),
-                    last_touched: Instant::now(),
-                },
-            );
-        }
-        let retained_upload_bytes: usize = inner
-            .web_session_uploads
-            .iter()
-            .filter(|(id, _)| id.as_str() != upload_id)
-            .map(|(_, upload)| upload.data.len())
-            .sum();
-        if retained_upload_bytes
-            .saturating_add(offset)
-            .saturating_add(data.len())
-            > MAX_WEB_SESSION_UPLOAD_TOTAL_BYTES
-        {
-            return Err("远程控制会话上传缓存超过总容量上限".into());
-        }
-        let upload = inner
-            .web_session_uploads
-            .get_mut(upload_id)
-            .ok_or_else(|| "远程控制会话上传不存在或已过期".to_string())?;
-        if upload.session_id != session_id
-            || upload.expected_revision != expected_revision
-            || upload.total != total
-        {
-            return Err("远程控制会话上传元数据已变化".into());
-        }
-        if upload.data.len() != offset {
-            return Err(format!(
-                "远程控制会话上传预期偏移量为 {}，实际为 {offset}",
-                upload.data.len()
-            ));
-        }
-        if upload.data.len().saturating_add(data.len()) > total {
-            return Err("远程控制会话上传超过声明大小".into());
-        }
-        upload.data.extend_from_slice(data);
-        upload.last_touched = Instant::now();
-        if !commit {
-            return Ok(None);
-        }
-        if upload.data.len() != total {
-            return Err(format!(
-                "远程控制会话上传不完整：已上传 {} / {total} 字节",
-                upload.data.len()
-            ));
-        }
-        // Presence was just verified via get_mut within the same borrow
-        // above; still return an error as a fallback instead of panicking.
-        let completed = inner
-            .web_session_uploads
-            .remove(upload_id)
-            .ok_or("远程控制会话上传不存在或已过期")?
-            .data;
-        inner.web_session_upload_order.retain(|id| id != upload_id);
-        Ok(Some(completed))
     }
 
     pub fn begin_web_session_download(
@@ -2289,11 +2175,10 @@ impl RemoteControlManager {
             if endpoint.config.endpoint_id != endpoint_id {
                 return;
             }
+            endpoint.status = WebAccessStatusKind::ConnectingRelay;
             if connected {
-                endpoint.status = WebAccessStatusKind::ConnectingRelay;
                 endpoint.last_error = None;
             } else {
-                endpoint.status = WebAccessStatusKind::ConnectingRelay;
                 endpoint.web_client_connected = false;
                 endpoint.lease_id = None;
                 endpoint.fresh_baseline_seq = None;
@@ -2491,13 +2376,9 @@ impl RemoteControlManager {
                 return;
             }
             let revoked = inner.endpoint.take();
-            inner.subscriptions.clear();
             inner.rpc_ledger = RpcLedger::default();
-            inner.rpc_cache.clear();
-            inner.rpc_order.clear();
-            clear_web_attachments(&mut inner);
+            reset_web_state(&mut inner);
             inner.stream.reset();
-            inner.web_workspace_grants.clear();
             inner.idle_status = WebAccessStatusKind::Revoked;
             inner.idle_error = None;
             revoked
@@ -2538,11 +2419,7 @@ impl RemoteControlManager {
                 "this endpoint is active in another desktop process; rotate Web access to take a new endpoint"
                     .to_string(),
             );
-            inner.subscriptions.clear();
-            inner.rpc_cache.clear();
-            inner.rpc_order.clear();
-            clear_web_attachments(&mut inner);
-            inner.web_workspace_grants.clear();
+            reset_web_state(&mut inner);
         }
         self.emit_status();
     }
@@ -2572,6 +2449,29 @@ impl RemoteControlManager {
                 .app
                 .emit_to("main", bridge_event, json!({ "event": event }));
         }
+    }
+
+    /// Terminal-settle epilogue shared by the admission/rejection/persist-failure
+    /// branches of `handle_rpc_request`: record the completion in the RPC cache
+    /// and append the request to the journal order before pruning. Must be
+    /// called while `Inner` is locked (the caller's `inner.lock()` guard);
+    /// the cache insert, order push, and prune are kept one unit so no branch
+    /// can forget the ordering bookkeeping that keeps replays exact.
+    fn settle_complete(
+        inner: &mut Inner,
+        request_id: &str,
+        fingerprint: String,
+        completion: RpcCompletion,
+    ) {
+        inner.rpc_cache.insert(
+            request_id.to_string(),
+            RpcCacheEntry::Complete {
+                fingerprint,
+                completion,
+            },
+        );
+        inner.rpc_order.push_back(request_id.to_string());
+        prune_rpc_cache(inner);
     }
 
     fn handle_rpc_request(&self, value: &Value) {
@@ -2723,15 +2623,12 @@ impl RemoteControlManager {
                     if let Some(tombstone) = inner.rpc_ledger.get(&request_id).cloned() {
                         if tombstone.fingerprint != fingerprint || tombstone.acknowledged {
                             let completion = tombstone_completion(&tombstone, &fingerprint);
-                            inner.rpc_cache.insert(
-                                request_id.clone(),
-                                RpcCacheEntry::Complete {
-                                    fingerprint: tombstone.fingerprint,
-                                    completion: completion.clone(),
-                                },
+                            Self::settle_complete(
+                                &mut inner,
+                                &request_id,
+                                tombstone.fingerprint,
+                                completion.clone(),
                             );
-                            inner.rpc_order.push_back(request_id.clone());
-                            prune_rpc_cache(&mut inner);
                             RpcRequestAction::Respond(
                                 sender,
                                 rpc_response(&endpoint_id, &lease_id, &request_id, &completion),
@@ -2748,15 +2645,12 @@ impl RemoteControlManager {
                                 in_flight_count,
                             );
                             if let Some(completion) = rejection {
-                                inner.rpc_cache.insert(
-                                    request_id.clone(),
-                                    RpcCacheEntry::Complete {
-                                        fingerprint: fingerprint.clone(),
-                                        completion: completion.clone(),
-                                    },
+                                Self::settle_complete(
+                                    &mut inner,
+                                    &request_id,
+                                    fingerprint.clone(),
+                                    completion.clone(),
                                 );
-                                inner.rpc_order.push_back(request_id.clone());
-                                prune_rpc_cache(&mut inner);
                                 RpcRequestAction::Respond(
                                     sender,
                                     rpc_response(&endpoint_id, &lease_id, &request_id, &completion),
@@ -2798,15 +2692,12 @@ impl RemoteControlManager {
                             in_flight_count,
                         ) {
                             Ok(NewRpcAdmission::Rejected(completion)) => {
-                                inner.rpc_cache.insert(
-                                    request_id.clone(),
-                                    RpcCacheEntry::Complete {
-                                        fingerprint: fingerprint.clone(),
-                                        completion: completion.clone(),
-                                    },
+                                Self::settle_complete(
+                                    &mut inner,
+                                    &request_id,
+                                    fingerprint.clone(),
+                                    completion.clone(),
                                 );
-                                inner.rpc_order.push_back(request_id.clone());
-                                prune_rpc_cache(&mut inner);
                                 RpcRequestAction::Respond(
                                     sender,
                                     rpc_response(&endpoint_id, &lease_id, &request_id, &completion),
@@ -2818,15 +2709,12 @@ impl RemoteControlManager {
                                         "rpc_ledger_unavailable",
                                         format!("cannot durably accept Web RPC: {error}"),
                                     );
-                                    inner.rpc_cache.insert(
-                                        request_id.clone(),
-                                        RpcCacheEntry::Complete {
-                                            fingerprint: fingerprint.clone(),
-                                            completion: completion.clone(),
-                                        },
+                                    Self::settle_complete(
+                                        &mut inner,
+                                        &request_id,
+                                        fingerprint.clone(),
+                                        completion.clone(),
                                     );
-                                    inner.rpc_order.push_back(request_id.clone());
-                                    prune_rpc_cache(&mut inner);
                                     RpcRequestAction::Respond(
                                         sender,
                                         rpc_response(
@@ -2869,15 +2757,12 @@ impl RemoteControlManager {
                                     "rpc_ledger_unavailable",
                                     format!("cannot durably accept Web RPC: {error}"),
                                 );
-                                inner.rpc_cache.insert(
-                                    request_id.clone(),
-                                    RpcCacheEntry::Complete {
-                                        fingerprint: fingerprint.clone(),
-                                        completion: completion.clone(),
-                                    },
+                                Self::settle_complete(
+                                    &mut inner,
+                                    &request_id,
+                                    fingerprint.clone(),
+                                    completion.clone(),
                                 );
-                                inner.rpc_order.push_back(request_id.clone());
-                                prune_rpc_cache(&mut inner);
                                 RpcRequestAction::Respond(
                                     sender,
                                     rpc_response(&endpoint_id, &lease_id, &request_id, &completion),
@@ -3102,9 +2987,10 @@ impl RemoteControlManager {
             // Enqueue the complete replay while holding the stream lock. Live
             // events also enqueue under this lock, so seq N+1 cannot overtake
             // the replay suffix ending at N.
-            if !try_enqueue_message_batch(messages, |message| {
+            let replay_enqueued = try_enqueue_message_batch(messages, |message| {
                 sender.try_send(RelayOutbound::Message(message)).is_ok()
-            }) {
+            });
+            if !replay_enqueued {
                 // A partially enqueued suffix is always followed by a reset;
                 // never advertise readiness after silently losing its tail.
                 inner.stream.reset();
@@ -3170,7 +3056,7 @@ impl RemoteControlManager {
             let lease_id = endpoint.lease_id.clone();
             let client_ready = endpoint.client_ready;
             let sender = endpoint.sender.clone();
-            let subscribed = is_event_subscribed(&inner.subscriptions, event);
+            let subscribed = inner.subscriptions.contains(event);
             // Journal every allowlisted event independently of the current
             // lease's subscribe handshake. A reconnect can otherwise lose
             // deltas emitted between `web_client_connected` and the browser's
@@ -4008,12 +3894,9 @@ mod tests {
         }
         assert!(!policy.commands.contains("list_sessions"));
         assert!(!policy.commands.contains("list_archived_sessions"));
-        assert!(
-            !policy
-                .commands
-                .contains("web_access_save_session_messages_chunk"),
-            "frontend transcript writes must stay blocked"
-        );
+        // The native clipboard fallback must stay desktop-only: a browser relay
+        // session must never be able to read the host clipboard.
+        assert!(!policy.commands.contains("paste_clipboard_image"));
         assert!(policy.events.contains("chat:delta"));
         assert!(policy.events.contains("chat:reasoning_start"));
         assert!(policy.events.contains("chat:reasoning_delta"));
@@ -4279,7 +4162,9 @@ mod tests {
     #[test]
     fn native_active_session_fallbacks_are_not_valid_web_scopes() {
         for command in [
-            "cancel_codex_acp",
+            // `cancel_codex_acp` is not listed here: it is desktop-only and
+            // absent from the Web access policy, so it never reaches the scope
+            // table (the table no longer carries a dead entry for it).
             "cancel_generation",
             "compact_now",
             "edit_last_turn",
@@ -4328,7 +4213,6 @@ mod tests {
             ("set_session_archived", "id"),
             ("set_session_pinned", "id"),
             ("save_session_artifacts", "id"),
-            ("web_access_save_session_messages_chunk", "id"),
             ("web_access_write_artifact_text", "sessionId"),
             ("web_access_render_artifact_visual", "sessionId"),
         ];

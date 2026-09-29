@@ -21,6 +21,22 @@ const button = 'inline-flex h-9 items-center justify-center gap-1.5 whitespace-n
 const primary = `${button} bg-[#0B57D0] text-white hover:bg-[#0848ad] dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#c2d8fb]`;
 const soft = `${button} bg-[#F0F4F9] text-[#0B57D0] hover:bg-[#E1E5EA] dark:bg-[#2A2B2D] dark:text-[#A8C7FA] dark:hover:bg-[#333537]`;
 const quiet = `${button} px-3 text-[#444746] hover:bg-[#F0F4F9] dark:text-[#C4C7C5] dark:hover:bg-[#333537]`;
+
+// How long the join/connect success feedback stays visible (both connector entry points share the same timing).
+const JOIN_FEEDBACK_SETTLE_MS = 550;
+
+// Backend document status → queue state (one mapping shared by upload finalization and polling): ready→success,
+// failed→index_failed, everything else (submitting/indexing)→pending_index; duplicate=true
+// selects the "same path already exists" variant (duplicate / duplicate_failed / duplicate_pending).
+function classifyUploadedDocument(document, duplicate) {
+  const base = document?.status === 'ready' ? 'success'
+    : document?.status === 'failed' ? 'index_failed'
+      : 'pending_index';
+  if (!duplicate) return base;
+  return base === 'success' ? 'duplicate'
+    : base === 'index_failed' ? 'duplicate_failed'
+      : 'duplicate_pending';
+}
 const danger = `${button} px-3 text-[#d63a3a] hover:bg-[#d63a3a]/10`;
 const iconButton = 'grid h-8 w-8 shrink-0 place-items-center rounded-full text-[#444746] transition-colors hover:bg-[#E1E5EA] dark:text-[#C4C7C5] dark:hover:bg-[#333537] disabled:cursor-not-allowed disabled:opacity-45';
 const field = 'h-10 w-full rounded-xl border border-[#dfe3ea] bg-white px-3.5 text-[13px] text-[#1F1F1F] outline-none transition-shadow placeholder:text-[#8b8d94] focus:border-[#0B57D0] focus:ring-2 focus:ring-[#0B57D0]/10 dark:border-white/10 dark:bg-[#171719] dark:text-[#E3E3E3] dark:focus:border-[#A8C7FA]';
@@ -218,6 +234,17 @@ function RemoteKnowledgeView({ t, embedded = false }) {
   ));
   const isBusy = useCallback(key => Boolean(busyCounts[key]), [busyCounts]);
   const anyBusy = Object.keys(busyCounts).length > 0;
+  // Release a busy key: concurrent holders only decrement it, and the last
+  // holder removes the key entirely so anyBusy never lingers on zero counts.
+  const releaseBusy = useCallback((key) => {
+    setBusyCounts(current => {
+      const count = current[key] || 0;
+      if (count > 1) return { ...current, [key]: count - 1 };
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }, []);
   const connecting = isBusy('connect');
   const invitationIsShareLink = invitation.trim().startsWith('pinvou-knowledge://share');
   const connectionDetailsReady = Boolean(deviceName.trim() && invitation.trim());
@@ -261,15 +288,12 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       setNotice({ type: 'error', text: String(error) });
       return undefined;
     } finally {
-      setBusyCounts(current => {
-        const count = current[key] || 0;
-        if (count > 1) return { ...current, [key]: count - 1 };
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
+      releaseBusy(key);
     }
-  }, []);
+  // releaseBusy 是 useCallback([]) 恒稳定引用；oxlint memo-dependencies 视为多余依赖，
+  // 而 eslint exhaustive-deps 要求列入——保留依赖并豁免 oxlint 这一条。
+  // oxlint-disable-next-line react/memo-dependencies -- stable useCallback([]) reference
+  }, [releaseBusy]);
 
   async function copyWithFeedback(value, successMessage, local = false) {
     const copied = await copyClipboardText(value);
@@ -451,7 +475,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
             status: 'approved',
             serverName: connected.name || current?.serverName,
           }));
-          await wait(550);
+          await wait(JOIN_FEEDBACK_SETTLE_MS);
           setShowConnector(false);
           setJoinFeedback(null);
         }
@@ -667,7 +691,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
         await loadConnections();
         selectServer(outcome.connection.serverId);
         setNotice({ type: 'success', text: t.remoteKbConnected });
-        await wait(550);
+        await wait(JOIN_FEEDBACK_SETTLE_MS);
         setShowConnector(false);
         setJoinFeedback(null);
       } else {
@@ -762,11 +786,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       setNotice({ type: 'error', text: message });
     } finally {
       hostOperationInFlightRef.current = false;
-      setBusyCounts(current => {
-        const next = { ...current };
-        delete next[busyKey];
-        return next;
-      });
+      releaseBusy(busyKey);
     }
   }
 
@@ -1043,6 +1063,19 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     setShowPublishDialog(true);
   }
 
+  // The three upload entry points (publish / pick files / pick folders) build
+  // the same queue item shape; only how a path maps to a display name differs
+  // (publish reuses the local document's own name, pickers derive it from the
+  // path). Every item starts queued with no error and no poll timeout.
+  const uploadEntryName = path => String(path).split(/[\\/]/).pop() || String(path);
+  const queueUploads = entries => setUploadQueue(entries.map(({ path, name }) => ({
+    path,
+    name,
+    status: 'queued',
+    error: '',
+    pollTimedOut: false,
+  })));
+
   async function preparePublish() {
     const localCollection = localCollections.find(item => String(item.id) === String(publishCollectionId));
     if (!localCollection || !selectedServerId) return;
@@ -1060,12 +1093,9 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       name: prepared.localCollection.name,
       description: prepared.localCollection.description || null,
     });
-    setUploadQueue(prepared.localDocuments.map(document => ({
+    queueUploads(prepared.localDocuments.map(document => ({
       path: document.path,
       name: document.name,
-      status: 'queued',
-      error: '',
-      pollTimedOut: false,
     })));
     setUploadDiscovery({ count: prepared.localDocuments.length, skipped: 0 });
     setShowPublishDialog(false);
@@ -1099,13 +1129,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
     const selected = Array.isArray(paths) ? paths : (paths ? [paths] : []);
     if (!selected.length) return;
     setPublishDraft(null);
-    setUploadQueue(selected.map(path => ({
-      path,
-      name: String(path).split(/[\\/]/).pop() || String(path),
-      status: 'queued',
-      error: '',
-      pollTimedOut: false,
-    })));
+    queueUploads(selected.map(path => ({ path, name: uploadEntryName(path) })));
     setUploadDiscovery(null);
     setShowUploadDialog(true);
   }
@@ -1129,13 +1153,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       return;
     }
     setPublishDraft(null);
-    setUploadQueue(discovery.paths.map(path => ({
-      path,
-      name: String(path).split(/[\\/]/).pop() || String(path),
-      status: 'queued',
-      error: '',
-      pollTimedOut: false,
-    })));
+    queueUploads(discovery.paths.map(path => ({ path, name: uploadEntryName(path) })));
     setUploadDiscovery({ count: discovery.paths.length, skipped: discovery.skipped || 0 });
     setShowUploadDialog(true);
   }
@@ -1162,11 +1180,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
         selectCollection(collectionId);
         await loadCollections(serverId);
       } catch (error) {
-        setBusyCounts(current => {
-          const next = { ...current };
-          delete next.upload;
-          return next;
-        });
+        releaseBusy('upload');
         setUploadInProgress(false);
         setNotice({ type: 'error', text: String(error) });
         return;
@@ -1189,9 +1203,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
         nextQueue[index] = {
           ...nextQueue[index],
           documentId: document?.id,
-          status: duplicate
-            ? (document?.status === 'ready' ? 'duplicate' : (document?.status === 'failed' ? 'duplicate_failed' : 'duplicate_pending'))
-            : (document?.status === 'ready' ? 'success' : (document?.status === 'failed' ? 'index_failed' : 'pending_index')),
+          status: classifyUploadedDocument(document, duplicate),
           error: document?.status === 'failed' ? (document.error || t.remoteKbUploadIndexFailed) : '',
           pollTimedOut: false,
         };
@@ -1203,13 +1215,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
 
     // Uploading is complete at this point. Indexing continues on the server, so
     // keep live status updates without blocking the rest of the application.
-    setBusyCounts(current => {
-      const count = current.upload || 0;
-      if (count > 1) return { ...current, upload: count - 1 };
-      const next = { ...current };
-      delete next.upload;
-      return next;
-    });
+    releaseBusy('upload');
     let refreshError = '';
     const pollInterval = uploadPollSetting('__REMOTE_UPLOAD_POLL_INTERVAL_MS__', uploadIndexPollIntervalMs);
     const pollDeadline = Date.now()
@@ -1227,13 +1233,12 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       nextQueue.forEach((item, index) => {
         if (!pending(item) || !item.documentId) return;
         const document = byId.get(item.documentId);
-        if (document?.status === 'ready') {
-          nextQueue[index] = { ...item, status: item.status === 'duplicate_pending' ? 'duplicate' : 'success', error: '' };
-        } else if (document?.status === 'failed') {
+        const settled = document?.status === 'ready' || document?.status === 'failed';
+        if (settled) {
           nextQueue[index] = {
             ...item,
-            status: item.status === 'duplicate_pending' ? 'duplicate_failed' : 'index_failed',
-            error: document.error || t.remoteKbUploadIndexFailed,
+            status: classifyUploadedDocument(document, item.status === 'duplicate_pending'),
+            error: document?.status === 'failed' ? (document.error || t.remoteKbUploadIndexFailed) : '',
           };
         }
       });
@@ -1316,13 +1321,7 @@ function RemoteKnowledgeView({ t, embedded = false }) {
       setNotice({ type: 'error', text: String(error) });
       return;
     } finally {
-      setBusyCounts(current => {
-        const count = current[busyKey] || 0;
-        if (count > 1) return { ...current, [busyKey]: count - 1 };
-        const next = { ...current };
-        delete next[busyKey];
-        return next;
-      });
+      releaseBusy(busyKey);
     }
     await Promise.all([
       loadCollections(serverId),

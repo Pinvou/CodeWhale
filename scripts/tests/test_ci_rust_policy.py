@@ -99,10 +99,17 @@ def release_changes(old="0.9.0", new="0.9.1"):
         ),
         change(
             "pinvou-cli/Cargo.lock",
+            f'[[package]]\nname = "pinvou-cli"\nversion = "{old}"\n\n'
             f'[[package]]\nname = "pinvou-knowledge"\nversion = "{old}"\n\n'
             f'[[package]]\nname = "pinvou3-tauri"\nversion = "{old}"\n',
+            f'[[package]]\nname = "pinvou-cli"\nversion = "{new}"\n\n'
             f'[[package]]\nname = "pinvou-knowledge"\nversion = "{new}"\n\n'
             f'[[package]]\nname = "pinvou3-tauri"\nversion = "{new}"\n',
+        ),
+        change(
+            "pinvou-cli/crates/cli/Cargo.toml",
+            f'[package]\nname = "pinvou-cli"\nversion = "{old}"\n',
+            f'[package]\nname = "pinvou-cli"\nversion = "{new}"\n',
         ),
         change(
             "pinvou3-app/package.json",

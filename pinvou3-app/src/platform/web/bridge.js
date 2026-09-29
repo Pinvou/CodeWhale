@@ -172,6 +172,9 @@
     // 复位 effect 挂它 → 即便 activeSessionId 没变(draft→draft)也能重新求值,否则残留的工具欢迎卡
     // 会一直顶掉「你好」欢迎语(该 tool 无 welcomeQueries 时整块空白)。
     draftEpoch: 0,
+    // Same-shape desktop-slice stub: draft workspace directory binding is a desktop-only capability (the web has
+    // no system directory picker channel); always null on the web, but the sessions slice must match desktop key-by-key (see the bridge_state_domains contract).
+    draftWorkspacePath: null,
     // 跨页面预填输入框请求。比如侧边栏「产出物」一级入口点击「续写/新项目」：
     // 只把草稿放进 composer，不自动发送给模型。
     composerPrefill: { id: 0, text: "" },
@@ -257,6 +260,8 @@
     // 仅驻内存(后端也只驻内存),重启回到未挂载。名字由前端用知识集列表解析。
     mountedCollection: null,
     mountedCollections: [],
+    // Same-shape desktop-slice stub: remote knowledge-base mounting is operable only on desktop; always an empty array on the web.
+    mountedRemoteCollections: [],
     mountedCollectionsRevision: 0,
     // personaPool 只放轻量元信息(loadState),1078 张卡放模块级 personaPoolCache,
     // 不进 state/订阅快照，避免每个流式 token 都复制完整卡池。
@@ -505,6 +510,7 @@
       folderPickerUnavailable: "The folder picker cannot be opened in this environment",
       pickFolderTitle: "Choose a working directory",
       kbPickFolderTitle: "Choose a folder to import into the knowledge base",
+      rebindPickFolderTitle: "Choose the folder to rebind this project to",
       gateApproveFailed: "⚠️ Approval failed: ",
       gateRejectFailed: "⚠️ Rejection failed: ",
       roleRetried: (roleId, result) => "🔄 Rerunning " + roleId + ": " + result,
@@ -637,6 +643,7 @@
       folderPickerUnavailable: "現在の環境ではフォルダー選択を開けません",
       pickFolderTitle: "作業ディレクトリを選択",
       kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
+      rebindPickFolderTitle: "このプロジェクトの再バインド先フォルダーを選択",
       gateApproveFailed: "⚠️ 承認に失敗: ",
       gateRejectFailed: "⚠️ 差し戻しに失敗: ",
       roleRetried: (roleId, result) => "🔄 再実行 " + roleId + ": " + result,
@@ -769,6 +776,7 @@
       folderPickerUnavailable: "当前环境无法打开文件夹选择器",
       pickFolderTitle: "选择工作目录",
       kbPickFolderTitle: "选择要导入知识库的文件夹",
+      rebindPickFolderTitle: "选择重绑定项目的新文件夹",
       gateApproveFailed: "⚠️ 通过失败: ",
       gateRejectFailed: "⚠️ 打回失败: ",
       roleRetried: (roleId, result) => "🔄 重跑 " + roleId + ": " + result,
@@ -947,6 +955,10 @@
   var sessionBufferTouchClock = 0;
   var scheduledRunOwnerTouchClock = 0;
   var suppressNotify = false;
+  // init() 启动窗口内的批量抑制:置位期间 loader 的 notify 全部静默(状态照
+  // 写),窗口结束在 finally 里翻转并发布一个连贯快照,与 tauri 桥
+  // startupNotificationBatching 同口径。启动完成后此值恒为 false。
+  var startupNotificationBatching = false;
   // sessionId → true:标题当前是「卡牌占位名」(加卡时自动取的),可被首条用户消息覆盖。
   // 卡牌名只在「加了卡但还没开口」时当临时标题;一旦开始对话,对话内容更能区分同卡会话。
   // 内存态(不持久化):重启后丢标记仅影响「加卡→重启→才发首条消息」这一冷门路径。
@@ -1061,7 +1073,7 @@
       planSnapshot: { plan: null, todos: null },
       modeState: { mode: "yolo" },
       thinking: { active: false, phase: "thinking", toolName: "", startedAt: 0 },
-      tokens: { input: 0, max: maxModelLen },
+      tokens: { input: 0, max: 0 },
       activePersona: null, // 卡片池: 该 session 加持的专家面具(挂件用)
       mountedCollection: null, // 知识库: 该 session 挂载的知识集 id 或 null
       mountedCollections: [], // 多知识库挂载项 [{ collectionId, enabled }]
@@ -1169,6 +1181,7 @@
   }
   function purgeSessionBuffer(id) {
     if (typeof id !== "string" || !id) return;
+    cancelStreamTimers(id);
     delete sessionStates[id];
     // Real session deletion: any stashed draft is invalidated too and must not flow back into a rebuilt buffer with the same id.
     delete evictedSessionDrafts[id];
@@ -1661,7 +1674,7 @@
     // 手机可能在桌面仍停留草稿页/其他 session 时先唤醒这个后台 session。
     // 仅 hydrate messages 而把 chatItems 留空，会让后续 switchToSession 命中缓存快路径，
     // 不再 rerenderFromMessages，桌面便只看得到手机唤醒后的新内容，历史像是“丢了”。
-    // 在首次磁盘 hydration 后先完整重建展示层，再由 mobile_user_message 追加当前轮；
+    // 在首次磁盘 hydration 后先完整重建展示层，流式增量随后照常追加；
     // buf.busy 时上方已提前返回，不会覆盖正在流式生成的实时 chatItems。
     runSyncOnSession(sid, function () {
       resetPendingAssistant();
@@ -1752,7 +1765,7 @@
       }, authoritySyncBufferSnapshot(sid, buf)));
     }
   }
-  function onSessionEvent(e, fn) {
+  function onSessionEvent(e, fn, options) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
     if (sid) {
       var eventBuffer = getBuffer(sid);
@@ -1764,7 +1777,7 @@
     }
     var isBg = sid && sid !== state.activeSessionId;
     runSyncOnSession(sid, fn);
-    if (isBg) notify();
+    if (isBg && !(options && options.deferBackgroundNotify)) notify();
   }
   function isScheduledRunSession(sid) {
     return !!sid && (
@@ -2141,7 +2154,19 @@
   var notificationQueue = [];
   var notificationDispatching = false;
   function notify() {
+    // Any ordinary publication is a semantic stream boundary. Its snapshot
+    // already contains all accumulated text, so cancel the pending frame to
+    // avoid a duplicate callback after done/error/tool/session events. The
+    // cancel runs before the suppression check on purpose — the desktop
+    // bridge also cancels the pending frame while a background working set
+    // has suppressed callbacks, because the semantic publication that
+    // follows the restore carries the accumulated content.
+    cancelPendingStreamNotify(state.activeSessionId);
+    immediateNotify();
+  }
+  function immediateNotify() {
     if (suppressNotify) return;
+    if (startupNotificationBatching) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
@@ -4414,7 +4439,8 @@
     return null;
   }
 
-  const SHELL_TOOL_NAMES = ["bash", "exec_shell", "task_shell_start", "shell", "Bash"];
+  // keep in sync with tauri/bridge/terminal.js
+  const SHELL_TOOL_NAMES = ["bash", "exec_shell", "exec_shell_wait", "exec_wait", "task_shell_start", "task_shell_wait", "shell", "Bash"];
   const SHELL_WAIT_TOOL_NAMES = ["exec_shell_wait", "exec_wait", "task_shell_wait"];
 
   function isShellExecutionTool(name) {
@@ -5139,7 +5165,7 @@
           error_present: true,
         }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
         if (turnOwnerBuffer) turnOwnerBuffer.localTurnOwned = false;
-        emitPetEvent("pet:turn_end", sid);
+        emitPetEvent();
         runSyncOnSession(sid, function () {
           // 按引用移除本地乐观提交：buffer 权威重载后引用自然消失，无需按位置
           // 二次限定（位置过滤在"引用仍在但位置移动"时会残留本地消息，且与
@@ -5915,10 +5941,29 @@
     return invoke("save_session_pinvou_reviews", { sessionId: state.activeSessionId, reviews: snapshot }).catch(function () {});
   }
 
+  // Same transport timeout as the Tauri bridge's stop/interrupt cancels
+  // (STEER_INVOKE_TIMEOUT_MS there): a wedged engine never settles the
+  // invoke, and without the race this function never returns — ChatView's
+  // single-flight flag never clears and the stop button stays disabled
+  // forever. Cancel is idempotent, so a late settle/rejection is harmless.
+  const CANCEL_INVOKE_TIMEOUT_MS = 25_000;
+
   async function cancelGeneration() {
     if (!state.busy) return;
     try {
-      await invoke("cancel_generation", { sessionId: state.activeSessionId });
+      const cancelPromise = invoke("cancel_generation", { sessionId: state.activeSessionId });
+      let cancelTimeoutId = null;
+      const cancelTimeout = new Promise(function (_, reject) {
+        cancelTimeoutId = setTimeout(function () {
+          reject(new Error("cancel_generation timed out"));
+        }, CANCEL_INVOKE_TIMEOUT_MS);
+      });
+      cancelPromise.catch(function () { /* swallow the late rejection after a timeout */ });
+      try {
+        await Promise.race([cancelPromise, cancelTimeout]);
+      } finally {
+        clearTimeout(cancelTimeoutId);
+      }
     } catch (e) {
       console.warn("cancel failed", e);
     }
@@ -6020,12 +6065,18 @@
               break;
             }
           }
+          // Stream throttle invariant: the flush must precede the stream
+          // state reset. The old streaming bubble was already removed by the
+          // splice above, so the flush has no render target and only cancels
+          // the session's trailing-edge timer.
+          flushPendingStreamRender();
           resetPendingAssistant();
         }
         addChatItem({ type: "user", text: content, time: timeStr() });
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();
+      flushPendingStreamRender(); // the old streaming bubble gets its final html before the new turn resets stream state
       currentStreamText = "";
       currentStreamId = 0;
     });
@@ -6182,7 +6233,102 @@
     }
   }
 
+  // Keep Web and Tauri streaming cadence aligned. requestAnimationFrame gives
+  // foreground rendering one update per paint; the timer keeps hidden tabs
+  // and throttled WebViews bounded. State is isolated per session so remote
+  // background streams cannot overwrite the visible working set.
+  var STREAM_NOTIFY_MAX_WAIT_MS = 32;
+  var pendingStreamNotifications = Object.create(null);
+  function cancelPendingStreamNotify(sid) {
+    if (!pendingStreamNotifications) return;
+    var pending = sid && pendingStreamNotifications[sid];
+    if (!pending) return;
+    if (pending.frame !== null && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(pending.frame);
+    }
+    if (pending.timer !== null && typeof clearTimeout === "function") clearTimeout(pending.timer);
+    delete pendingStreamNotifications[sid];
+  }
+  function scheduleStreamNotify(sid, firstDelta) {
+    // A first delta publishes immediately so the visible bubble paints
+    // without waiting for a frame. Inside a background working set the
+    // immediate notify is suppressed and schedules no frame at all, so the
+    // session's first delta would never publish — a suppressed first delta
+    // must fall through to the coalesced frame below, whose publish() runs
+    // after the working set is restored and carries the accumulated text.
+    if (!sid || (firstDelta && !suppressNotify) || typeof setTimeout !== "function") {
+      notify();
+      return;
+    }
+    if (pendingStreamNotifications[sid]) return;
+    var pending = { frame: null, timer: null };
+    pendingStreamNotifications[sid] = pending;
+    function publish() {
+      if (pendingStreamNotifications[sid] !== pending) return;
+      cancelPendingStreamNotify(sid);
+      var didRun = false;
+      var wasBackground = sid !== state.activeSessionId;
+      runSyncOnSession(sid, function () {
+        didRun = true;
+        immediateNotify();
+      });
+      if (didRun && wasBackground) immediateNotify();
+    }
+    if (typeof window.requestAnimationFrame === "function") {
+      pending.frame = window.requestAnimationFrame(publish);
+    }
+    pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+  }
+
+  // Markdown parsing is substantially heavier than snapshot publication in a
+  // real browser. Match the desktop bridge: render the first delta immediately
+  // and accumulate subsequent text behind one trailing-edge render per
+  // session. Every stream transition flushes synchronously before resetting
+  // the bubble, so final text and terminal cards cannot observe stale HTML.
+  var STREAM_RENDER_THROTTLE_MS = 180;
+  var streamRenderTimers = Object.create(null);
+  function renderStreamItemHtml() {
+    var item = state.chatItems.find(function (candidate) { return candidate.id === currentStreamId; });
+    if (!item) return false;
+    item.text = currentStreamText;
+    item.html = renderMarkdown(currentStreamText);
+    return true;
+  }
+  function flushPendingStreamRender() {
+    var sid = state.activeSessionId;
+    if (sid && streamRenderTimers[sid]) {
+      clearTimeout(streamRenderTimers[sid]);
+      delete streamRenderTimers[sid];
+    }
+    if (!currentStreamId || !currentStreamText) return false;
+    return renderStreamItemHtml();
+  }
+  function scheduleStreamRender(sid) {
+    if (!sid || typeof setTimeout !== "function") {
+      if (currentStreamId && currentStreamText) renderStreamItemHtml();
+      return;
+    }
+    if (streamRenderTimers[sid]) return;
+    streamRenderTimers[sid] = setTimeout(function () {
+      delete streamRenderTimers[sid];
+      var rendered = false;
+      runSyncOnSession(sid, function () {
+        if (!currentStreamId || !currentStreamText) return;
+        rendered = renderStreamItemHtml();
+      });
+      if (rendered) notify();
+    }, STREAM_RENDER_THROTTLE_MS);
+  }
+  function cancelStreamTimers(sid) {
+    cancelPendingStreamNotify(sid);
+    if (sid && streamRenderTimers[sid]) {
+      clearTimeout(streamRenderTimers[sid]);
+      delete streamRenderTimers[sid];
+    }
+  }
+
   function finalizeAssistantStreamBeforeReasoning() {
+    flushPendingStreamRender();
     flushPendingTextBlock();
     var item = state.chatItems.find(function (it) { return it.id === currentStreamId; });
     if (item) {
@@ -6231,10 +6377,11 @@
     if (!item) {
       item = startReasoningBlock(index);
     }
+    var firstDelta = !item.text;
     item.text += text;
     appendReasoningBlock(text);
-    notify();
-  }); });
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("chat:reasoning_done", function (e) { onSessionEvent(e, function () {
     var index = reasoningEventIndex(e);
@@ -6255,9 +6402,10 @@
     currentStreamText += text;
     // Update the streaming chat item
     var item = state.chatItems.find(function (it) { return it.id === currentStreamId; });
+    var firstDelta = !item;
     if (item) {
       item.text = currentStreamText;
-      item.html = renderMarkdown(currentStreamText);
+      if (!item.html) item.html = renderMarkdown(currentStreamText);
       item.streaming = true;
     } else {
       // New bubble needed (after tool card)
@@ -6271,8 +6419,9 @@
         streaming: true,
       });
     }
-    notify();
-  }); });
+    scheduleStreamRender(e.payload && e.payload.session_id || state.activeSessionId);
+    scheduleStreamNotify(e.payload && e.payload.session_id || state.activeSessionId, firstDelta);
+  }, { deferBackgroundNotify: true }); });
 
   listen("scheduled_task:run_updated", function (e) {
     scheduleScheduledRunRefresh();
@@ -6353,6 +6502,7 @@
     pendingAssistantBlocks.push({ type: "tool_use", id: p.id, name: p.name, input: p.args || {} });
 
     // Finalize current streaming bubble
+    flushPendingStreamRender();
     var streamItem = state.chatItems.find(function (it) { return it.id === currentStreamId; });
     if (streamItem) {
       streamItem.streaming = false;
@@ -6409,6 +6559,7 @@
         { resolved: true, cardState: p.success ? "submitted" : "cancelled" }
       );
       delete toolMeta[p.id];
+      flushPendingStreamRender(); // terminal path: emit final html before the reset
       currentStreamText = ""; currentStreamId = 0;
       notify();
       return;
@@ -6437,6 +6588,7 @@
         // 不走 write_file 的工具(如 make_pptx)→ 卡有、面板无」。trackArtifact 已去重。
         if (presentedPath) trackArtifact(presentedPath);
         delete toolMeta[p.id];
+        flushPendingStreamRender(); // terminal path: emit final html before the reset
         currentStreamText = ""; currentStreamId = 0;
         notify();
         // Keep the web adapter aligned with desktop: an in-place card update does
@@ -6456,6 +6608,7 @@
         output: p.output, success: false, state: "done",
       });
       delete toolMeta[p.id];
+      flushPendingStreamRender(); // terminal path: emit final html before the reset
       currentStreamText = ""; currentStreamId = 0;
       notify();
       return;
@@ -6545,6 +6698,7 @@
     }
 
     delete toolMeta[p.id];
+    flushPendingStreamRender(); // terminal path: emit final html before the reset
     currentStreamText = "";
     currentStreamId = 0;
     notify();
@@ -6642,6 +6796,7 @@
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = terminalStatus === "interrupted" ||
         terminalStatus === "cancelled" || terminalStatus === "canceled";
+      flushPendingStreamRender();
       if (interrupted) preserveInterruptedAssistantPresentation();
       else flushAssistantMessageToHistory();
       // Refresh artifacts written in this turn in place when already presented.
@@ -7061,11 +7216,57 @@
     return { running: running, waiting: waiting };
   }
 
+  // MonitorView only consumes state.monitor._fmt (plus one level of vllmRaw
+  // nesting), so shallow equality means display equivalence. The poll runs
+  // once per second; when a snapshot is display-equivalent, skip the
+  // assignment + notify to avoid a full App re-render every second while the
+  // monitor page is open. Numeric values jitter naturally (cpu/gpu
+  // percentages etc.), so comparisons allow a 0.5 tolerance (prefer one
+  // extra notify over ever getting stuck); counters are mostly strings after
+  // toFixed/round and compare exactly. updatedAt is a poll-tick marker (never
+  // rendered, only a sampling trigger) and must be excluded, otherwise every
+  // second counts as "changed"; the page clock is driven by MonitorView's
+  // local 1s timer and does not depend on it.
+  function monitorFmtEqual(prev, next) {
+    if (prev === next) return true;
+    if (!prev || !next) return false;
+    const numEq = function (a, b) {
+      if (a === b) return true;
+      return typeof a === "number" && typeof b === "number"
+        && Number.isFinite(a) && Number.isFinite(b)
+        && Math.abs(a - b) <= 0.5;
+    };
+    const keys = Object.keys(next);
+    if (keys.length !== Object.keys(prev).length) return false;
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (key === "updatedAt") continue;
+      const a = prev[key];
+      const b = next[key];
+      if (a && b && typeof a === "object" && typeof b === "object") {
+        const inner = Object.keys(b);
+        if (inner.length !== Object.keys(a).length) return false;
+        let same = true;
+        for (let j = 0; j < inner.length; j++) {
+          if (!numEq(a[inner[j]], b[inner[j]])) { same = false; break; }
+        }
+        if (!same) return false;
+        continue;
+      }
+      if (!numEq(a, b)) return false;
+    }
+    return true;
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   async function pollMonitor() {
     if (monitorPollInFlight) return;
     monitorPollInFlight = true;
     try {
       var snap = await invoke("get_monitor_snapshot");
+      // The previous round errored → this round must notify once so the
+      // "read failed" banner switches back to the normal panel.
+      const hadMonitorError = !!state.monitorError;
       state.monitorError = null;
       // GPU util sliding window
       if (snap.gpu) {
@@ -7165,11 +7366,15 @@
         updatedAt: snap.generated_at_ms ? new Date(snap.generated_at_ms).toLocaleTimeString() : "—",
       };
       if (snap.vllm && snap.vllm.max_model_len) {
-        maxModelLen = snap.vllm.max_model_len;
-        state.tokens.max = maxModelLen;
+        state.tokens.max = snap.vllm.max_model_len;
       }
-      state.monitor = snap;
-      notify();
+      // Display-equivalent snapshots neither overwrite state.monitor nor
+      // notify (must send on the first frame or after an errored round).
+      const prevFmt = state.monitor && state.monitor._fmt;
+      if (hadMonitorError || !prevFmt || !monitorFmtEqual(prevFmt, snap._fmt)) {
+        state.monitor = snap;
+        notify();
+      }
     } catch (e) {
       state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
       console.warn("monitor poll failed", e);
@@ -7202,8 +7407,7 @@
       state.backendOnline = !!s.vllm_online;
       // 修 token 分母时机 bug：不再依赖用户打开监控页才拿到真实 max_model_len
       if (s.max_model_len) {
-        maxModelLen = s.max_model_len;
-        state.tokens.max = maxModelLen;
+        state.tokens.max = s.max_model_len;
       }
     } catch (e) {
       state.backendOnline = false;
@@ -7327,6 +7531,7 @@
         } else {
           state.settings = await invoke("update_search_settings", { search: search });
         }
+        await loadEffectiveModelConfig();
         notify();
         return true;
       } catch (e) {
@@ -7550,6 +7755,15 @@
       notify();
     }
   }
+  // The desktop-side companion queries for bound-workspace sessions have no
+  // web backend counterpart (web/remote sessions carry no directory binding):
+  // same-named stub methods keep the bridge API symmetric on both sides — the
+  // binding query always returns null (UI shows no binding indicator and the
+  // YOLO confirmation gate never fires), code permission prefs always read
+  // null, and the confirm write is a no-op.
+  async function getSessionWorkspaceBinding() { return null; }
+  async function getCodePermissionPrefs() { return null; }
+  async function confirmCodeYolo() { return null; }
   // 草稿态 chip 切换：写本 lane 全局默认（不物化会话——物化时由
   // ensureSession 把 lane 默认应用到新会话）。
   async function setDraftMode(target) {
@@ -8165,14 +8379,23 @@
     }
     notify();
   }
-  async function exitPlanToYolo() {
-    var sid = state.activeSessionId;
-    // 草稿态：不物化会话，改写本 lane 全局默认（两分 lane 语义）。
+  async function exitPlanToYolo(targetSessionId) {
+    // The caller may pin the target session explicitly: the YOLO confirmation
+    // gate issues the switch only after several await round-trips, by which
+    // time the user may have switched away and the live active session is no
+    // longer the ruling one (same signature as the tauri bridge). No-argument
+    // calls keep the original semantics: act on the live active session at
+    // invocation time (bulb / plan-stuck card).
+    const sid = typeof targetSessionId === 'string' && targetSessionId
+      ? targetSessionId
+      : state.activeSessionId;
+    // Draft state: do not materialize a session; rewrite this lane's global
+    // default (two-lane semantics).
     if (!sid) { await setDraftMode("yolo"); return; }
     try {
-      // invoke 形状保持 { sessionId: state.activeSessionId }（协议指纹按文本
-      // 计算）；await 返回后按发起时 sid 定向写回并 bump modeSyncSeq。
-      var st = await invoke("exit_plan_to_yolo", { sessionId: state.activeSessionId });
+      // The invoke targets sid directly at issue time; after the await, the
+      // result is written back to the same sid and modeSyncSeq is bumped.
+      const st = await invoke("exit_plan_to_yolo", { sessionId: sid });
       applyAuthoritativeModeState(sid, st);
     } catch (e) { addSystemItemFor(sid, bt("exitPlanFailed") + e); }
     notify();
@@ -8194,11 +8417,16 @@
     patchItemById(itemId, { resolved: true, statusLabel: bt("replanRequested") }); notify();
     await sendMessage(bt("planStuckReplanPrompt"));
   }
-  async function planStuckGo(itemId) {
-    var sid = state.activeSessionId;
+  async function planStuckGo(itemId, targetSessionId) {
+    // Explicit target session (same contract as the tauri bridge): the
+    // plan-stuck card's session is adjudicated in ChatView; no-arg legacy
+    // calls keep targeting live-active at invoke time.
+    const sid = typeof targetSessionId === 'string' && targetSessionId
+      ? targetSessionId
+      : state.activeSessionId;
     if (!sid) return;
     patchItemById(itemId, { resolved: true }); notify();
-    await exitPlanToYolo();
+    await exitPlanToYolo(sid);
     // 补充指令必须发往触发会话：await exitPlanToYolo 期间用户可能已切走，
     // 直接 sendMessage 会把"继续执行"发到切换后的会话（审计遗漏补修）。
     // sendMessageToSession 校验失败（会话已删/对账中）会 throw，必须接住并
@@ -8309,7 +8537,7 @@
     if (editBuffer) saveWorkingSetTo(editBuffer);
     notify();
     turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护
-    emitPetEvent("pet:turn_start", sid);
+    emitPetEvent();
     try {
       await invoke("edit_last_turn", {
         newMessage: newText,
@@ -8500,9 +8728,24 @@
     if (ext === "md") return "markdown";
     return "other";
   }
-  function trackArtifactExported(path) {
+  function artifactsForSession(sessionId) {
+    var targetSessionId = sessionId || state.activeSessionId;
+    if (!targetSessionId) return [];
+    if (targetSessionId === state.activeSessionId) return state.artifacts || [];
+    return sessionStates[targetSessionId] && sessionStates[targetSessionId].artifacts || [];
+  }
+  function trackArtifactExported(path, sessionId) {
     var bn = basename(path);
-    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    var candidates = artifactsForSession(sessionId);
+    var exactMatches = candidates.filter(function (item) {
+      return String(item.path || "") === String(path || "");
+    });
+    var basenameMatches = exactMatches.length ? [] : candidates.filter(function (item) {
+      return basename(item.path) === bn;
+    });
+    var artifact = exactMatches.length === 1
+      ? exactMatches[0]
+      : (basenameMatches.length === 1 ? basenameMatches[0] : null);
     if (!artifact || !artifact.telemetryId) return;
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
       eventName: "artifact_exported", artifactId: artifact.telemetryId,
@@ -8517,7 +8760,7 @@
     }
     try {
       var downloaded = await downloadArtifactRaw(path, sessionId);
-      if (downloaded) trackArtifactExported(path);
+      if (downloaded) trackArtifactExported(path, sessionId);
       return downloaded;
     } catch (e) {
       addSystemItem(bt("downloadFailed") + String((e && e.message) || e));
@@ -9252,8 +9495,10 @@
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
         await invoke("install_update", { installerPath: downloadResult.installer_path, info: state.updateInfo });
       } else {
-        // Linux/macOS:download_update 返回纯路径字符串(JSON untagged),走 debPath 分支。
-        // 传 info 让 macOS 后端做安装前 sha256 复验(TOCTOU 纵深防御);Linux 后端目前忽略此参数。
+        // Linux/macOS: download_update now only fetches and reports progress
+        // (resolves null); install_update's debPath argument is reserved for
+        // future platform implementations. `info` is still passed so the
+        // backend can re-verify sha256 before installing (TOCTOU defense).
         await invoke("install_update", { debPath: downloadResult, info: state.updateInfo });
       }
       state.updateReady = true;
@@ -9910,9 +10155,10 @@
   }
 
   // The web lane has no local ASR model download (startVoiceInput fails fast with
-  // dependency_unavailable when missing), so there is no interruptible install process;
-  // keep a same-named cancel entry as desktop that just collapses the install dialog and
-  // resolves, avoiding a TypeError when ChatView calls it on web.
+  // dependency_unavailable when missing; the install_voice_asr command is not on
+  // the web access-policy allowlist either), so there is no interruptible install
+  // process; keep a same-named cancel entry as desktop that just collapses the
+  // install dialog and resolves, avoiding a TypeError when ChatView calls it on web.
   async function cancelVoiceAsrSetup() {
     closeVoiceAsrSetup();
   }
@@ -10195,20 +10441,6 @@
     return left + (/[。！？.!?，,;；:]$/.test(left) ? " " : "\n") + right;
   }
 
-  function runVoiceInputDebugAssertions() {
-    var denied = normalizeVoiceError({ name: "NotAllowedError" });
-    var noDevice = normalizeVoiceError({ name: "NotFoundError" });
-    var unsupportedConstraint = normalizeVoiceError({ name: "OverconstrainedError", message: "Invalid constraint", constraint: "channelCount" });
-    var mismatch = normalizeVoiceError({ category: "context_mismatch" });
-    console.assert(denied.category === "permission_denied", "permission error classified");
-    console.assert(noDevice.category === "device_unavailable", "device error classified");
-    console.assert(unsupportedConstraint.category === "constraint_unsupported", "unsupported constraint classified");
-    console.assert(unsupportedConstraint.diagnostic === "unsupported media constraint: channelCount", "unsupported constraint diagnostic");
-    console.assert(mismatch.stage === "writeback", "context mismatch classified");
-    console.assert(appendVoiceText("草稿", "识别文本") === "草稿\n识别文本", "voice text appended");
-    return true;
-  }
-
   async function pickFiles() {
     if (!dialogOpen) { addSystemItem(bt("filePickUnavailable")); return []; }
     var selected = await dialogOpen({ multiple: true });
@@ -10233,6 +10465,15 @@
     if (!selected) return [];
     var p = Array.isArray(selected) ? selected[0] : selected;
     return p ? [p] : [];
+  }
+  // Dedicated picker for directory rebind (broken-link repair): single
+  // selection with a title that matches the rebind semantics; same surface as
+  // the desktop bridge (review #463 Minor 6).
+  async function pickRebindFolder() {
+    if (!dialogOpen) { addSystemItem(bt("filePickUnavailable")); return null; }
+    const selected = await dialogOpen({ directory: true, multiple: false, title: bt("rebindPickFolderTitle") });
+    if (!selected) return null;
+    return Array.isArray(selected) ? (selected[0] || null) : selected;
   }
   async function pickFeedbackFiles() {
     if (!dialogOpen) return [];
@@ -10276,6 +10517,11 @@
     // 错误并落兜底值),串行 await 会把多个 RPC 往返叠进首屏延迟——并行后往返
     // 宽度收敛为 1。enterDraft/markStateReady 必须等本组完成后才走(durable
     // state 未就绪前不得放行桌面事件重放,这是 web 重试契约的前提)。
+    // 与 tauri 桥同口径:启动窗口内抑制 notify(状态照写),try/finally 结束
+    // 后发布一个连贯快照并把通知恢复为立即发布。
+    startupNotificationBatching = true;
+    var initFailure;
+    try {
     var parallelLoads = [
       loadSettings(),
       hasCapability("pet") ? loadSelectedPet() : Promise.resolve(),
@@ -10308,7 +10554,24 @@
       checkForUpdateSilently();
     }
     if (hasCapability("webAccessAdmin")) refreshWebAccessStatus();
-    notify();
+    } catch (initError) {
+      initFailure = initError;
+    } finally {
+      // finally 而非仅成功路径:即使启动中途抛错,也必须恢复立即发布,
+      // 否则抑制位会永久吞掉此后所有通知(上文 loadScheduledTasks 等
+      // fire-and-forget 仍需照常发布)。
+      startupNotificationBatching = false;
+    }
+    // 连贯快照在 finally 之外发布:notify() 会原样上抛订阅者回调的异常,
+    // 而 finally 内抛出的异常会顶替进行中的 init 错误。失败路径照常发布,
+    // 但只让真正的 init 错误向外传播;成功路径上发布失败仍按原样使 init
+    // 失败。此段同步执行,标志复位与发布之间不会插入其他通知。
+    try {
+      notify();
+    } catch (notifyError) {
+      if (!initFailure) throw notifyError;
+    }
+    if (initFailure) throw initFailure;
     })();
     initPromise = attempt.then(function (result) {
       disarmWebInitRetry();
@@ -10360,7 +10623,6 @@
     completeVoiceSubmission: completeVoiceSubmission,
     dismissVoiceInput: dismissVoiceInput,
     appendVoiceText: appendVoiceText,
-    runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     loadScheduledTasks: loadScheduledTasks,
     readScheduledTask: readScheduledTask,
     loadScheduledTaskRuns: loadScheduledTaskRuns,
@@ -10436,6 +10698,10 @@
     setDraftMode: setDraftMode,
     setModeLane: setModeLane,
     refreshModeDefaults: refreshModeDefaults,
+    // Web stubs keep the API symmetric for desktop-only workspace gates.
+    getSessionWorkspaceBinding: getSessionWorkspaceBinding,
+    getCodePermissionPrefs: getCodePermissionPrefs,
+    confirmCodeYolo: confirmCodeYolo,
     planStuckReplan: planStuckReplan,
     planStuckGo: planStuckGo,
     // 用户交互
@@ -10476,9 +10742,10 @@
     revealConversationAttachment: revealConversationAttachment,
     markResolved: markResolved,
     // 通用宿主文件选择器（知识库、反馈等功能继续复用）。
-    pickFiles: pickFiles,
-    pickFolders: pickFolders,
-    pickFeedbackFiles: pickFeedbackFiles,
+    pickFiles,
+    pickFolders,
+    pickRebindFolder,
+    pickFeedbackFiles,
     // 卡片池: 专家面具
     loadPersonas: loadPersonas,
     getPersonas: function () { return personaPoolCache; }, // 返回引用(只读),不进 notify 快照

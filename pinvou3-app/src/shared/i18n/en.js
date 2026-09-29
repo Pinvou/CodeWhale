@@ -8,7 +8,7 @@
 import { browserEn } from './browser.js';
 
 const conversationEn = {
-  completed:'Completed', failed:'Failed', interrupted:'Interrupted', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
+  completed:'Completed', failed:'Failed', interrupted:'Interrupted', cancelled:'Cancelled', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
   waitingPermission:'Waiting for permission', waitingInput:'Waiting for your input', waitingInputShort:'Waiting for input',
   goLatest:label=>`${label}. Go to latest message`,
   elapsed:milliseconds=>{ const seconds=Math.max(0,Math.floor(milliseconds/1000)); if(seconds<60)return `${seconds}s`; const minutes=Math.floor(seconds/60); const remaining=seconds%60; return remaining?`${minutes}m ${remaining}s`:`${minutes}m`; },
@@ -32,7 +32,7 @@ const conversationEn = {
 
 const codexEn = {
   unknownDirectory:'Unknown directory', temporaryWorkspace:'Temporary workspace', projectMissing:'Original project directory no longer exists',
-  applyingConfig:'Applying configuration…', workspace:'Workspace', workspaceTitle:'View Agent workspace files and changes',
+  applyingConfig:'Applying configuration…', stop:'Stop', workspace:'Workspace', workspaceTitle:'View Agent workspace files and changes',
   branches:'Branches', branchTooltip:'View and switch Git branches',
   branchSwitchDirtyConfirm:(branch, count)=>`The workspace has ${count} uncommitted change(s). Choose how to switch to "${branch}":`,
   branchSwitchCancel:'Cancel',
@@ -53,7 +53,7 @@ const codexEn = {
   relayNoModelHint:'The active relay provider has no model configured: official models will not work through it. Set a model for this provider in Settings first.',
   configLabels:{ mode:'Permission mode', collaboration_mode:'Collaboration mode', model:'Model', reasoning_effort:'Reasoning effort', 'fast-mode':'Fast mode' },
   agentCommands:'Agent commands',
-  placeholder:'Ask the coding Agent to edit code, run commands, or explain the repository…', temporarySession:'Temporary session',
+  placeholder:'Ask the coding Agent to edit code, run commands, or explain the repository…', temporarySession:'Temporary session', untitledSession:'Untitled code session',
   chooseProject:'Choose project directory', chooseProjectDesc:'Let the Agent work directly in a real project',
   temporarySessionDesc:'Use an isolated directory managed by Pinvou', recentProjects:'Recent projects',
   nativeBlockedNotice:'A dangerous command was blocked and not executed',
@@ -127,6 +127,18 @@ const codexEn = {
   accountRecoveryHint:'This account may be expired or out of quota. Switch accounts to continue; existing sessions and messages are preserved.',
   serviceRecoveryHint:'Check the service again. If the issue continues, retry later or switch accounts.',
   errorDetails:'View error details', dismissNotice:'Dismiss',
+  agentUnresponsive:agent=>`${agent} has stopped responding`,
+  agentStderr:agent=>`${agent} reported a problem`,
+  agentStallHint:'No new events in this turn yet. You can keep waiting, or press Stop to settle it.',
+  agentStallCancelHint:'The agent is still unresponsive, so Stop was requested automatically. Waiting for it to settle.',
+  agentStallSettledHint:'The agent stopped responding for too long, so this turn was settled as interrupted. You can send again or continue.',
+  agentCancelTimeoutHint:'Stop was not acknowledged by the agent, so this turn was settled as interrupted.',
+  agentStderrHint:'Agent adapter error shown with sensitive details redacted; the original is recorded only in the session log.',
+  agentStderrNoDetailHint:'The agent adapter reported a problem; raw details remain available only in the desktop session log.',
+  agentRestarted:agent=>`${agent} session restarted`,
+  agentStallRestartHint:'The same session stopped responding repeatedly, so your next message will continue in a fresh agent session; whether the earlier conversation comes along depends on that agent\'s resume support, and we will tell you which one happened after the switch.',
+  agentRestartHint:'The previous agent session stopped responding repeatedly, so a fresh one took over; the conversation history is kept, and any unfinished turn needs to be sent again.',
+  agentRestartFreshHint:'The previous agent session stopped responding repeatedly, so a fresh one took over. This agent could not restore the earlier conversation, so please restate the context you need; any unfinished turn needs to be sent again.',
   runtimeSources:{ system:'System CLI', override:'Custom CLI', bundled:'Bundled bridge', legacy_bundled:'Bundled Codex' },
 };
 
@@ -174,10 +186,10 @@ export const dictEn = {
   ...browserEn,
         langTag: 'en',
         acpAgent: 'ACP Agent',
-        newChat: 'New chat', currentChat: 'Current chat', searchChats: 'Search chats', scheduledPlans: 'Scheduled tasks', monitor: 'Status', workflow: 'Workflow', multiAgent: 'Multi-agent', multiAgentDesktopOnly: 'This multi-agent conversation is currently available only in the desktop app.', toolStore: 'Plugin Center', cardPool: 'Card Deck', recent: 'History', pinnedTasks: 'Pinned tasks', regularTasks: 'Tasks', sidebarTaskList: 'Tasks', sidebarTaskFilter: 'Filter', sidebarTaskFilterAll: 'All', sidebarTaskFilterPinned: 'Pinned', sidebarTaskFilterCode: 'Code', sidebarTaskFilterCodeSessions: 'Code sessions', sidebarTaskFilterScheduled: 'Scheduled tasks', sidebarTaskSort: 'Sort', sidebarTaskSortPinnedFirst: 'Pinned first', sidebarTaskSortRecent: 'Recent', sidebarTaskEmpty: 'No tasks', sidebarViewAll: 'View all', sidebarSection: 'Task list', sidebarDateGrouping: 'Group by date', sidebarDateGroupingDesc: 'Group tasks by date; today stays expanded', sidebarNavExpand: 'Expand navigation', sidebarNavCollapse: 'Collapse navigation', sidebarCollapseAll: 'Collapse', sidebarExpandAll: 'Expand', sidebarTaskStyle: 'Style', sidebarResize: 'Drag to resize the sidebar; double-click to reset', settings: 'Settings', localEnv: 'Local Env', megacubeSite: 'Open MegaCube site', tearoffTitle: 'Detached', tearoffHint: 'Pop out to its own window', mobileMore: 'More',
-        previewTaskDailyBrief: 'Daily Briefing', previewTaskFollowUp: 'Follow-up Monitor', previewTaskSalesWeekly: 'Sales Leads Weekly',
+        newChat: 'New chat', currentChat: 'Current chat', searchChats: 'Search chats', scheduledPlans: 'Scheduled tasks', monitor: 'Status', workflow: 'Workflow', multiAgent: 'Swarm Mode', multiAgentDesktopOnly: 'This swarm conversation is currently available only in the desktop app.', toolStore: 'Plugin Center', modelStore: 'Model Store', cardPool: 'Card Deck', recent: 'History', pinnedTasks: 'Pinned tasks', regularTasks: 'Tasks', sidebarTaskList: 'Tasks', sidebarTaskFilter: 'Filter', sidebarTaskFilterAll: 'All', sidebarTaskFilterPinned: 'Pinned', sidebarTaskFilterCode: 'Projects', sidebarTaskFilterCodeSessions: 'Code sessions', sidebarTaskFilterScheduled: 'Scheduled tasks', sidebarTaskSort: 'Sort', sidebarTaskSortPinnedFirst: 'Pinned first', sidebarTaskSortRecent: 'Recent', sidebarTaskEmpty: 'No tasks', sidebarViewAll: 'View all', sidebarSection: 'Task list', sidebarDateGrouping: 'Group by date', sidebarDateGroupingDesc: 'Group tasks by date; today stays expanded', sidebarNavExpand: 'Expand navigation', sidebarNavCollapse: 'Collapse navigation', sidebarCollapseAll: 'Collapse', sidebarExpandAll: 'Expand', sidebarTaskStyle: 'Style', sidebarResize: 'Drag to resize the sidebar; double-click to reset', settings: 'Settings', localEnv: 'Local Env', megacubeSite: 'Open MegaCube site', tearoffTitle: 'Detached', tearoffHint: 'Pop out to its own window', mobileMore: 'More',        previewTaskDailyBrief: 'Daily Briefing', previewTaskFollowUp: 'Follow-up Monitor', previewTaskSalesWeekly: 'Sales Leads Weekly',
         archiveSession: 'Archive', archiveConfirmTitle: 'Archive this task?', archiveConfirmMessage: 'This task will leave the sidebar.', archiveConfirmDetail: 'The conversation and artifacts stay saved, and can be restored on the chat manager page.', archiveConfirmAction: 'Archive',
         archiveSuccess: 'Archived', archiveSuccessView: 'View',
+        exportSessionArchive: 'Export session log', exportSessionDone: path => `Session log exported to ${path}`, exportSessionFailed: 'Failed to export the session log',
         sessionBatchFailed: n => `${n} task operation${n === 1 ? '' : 's'} failed. Please retry.`,
         archivedTasks: 'Tasks archived in Settings', archivedTasksDesc: '', archivedEmpty: 'No archived tasks yet', restoreArchived: 'Restore to list',
         archivedDeleteTitle: 'Delete archived task?', archivedDeleteMessage: 'This permanently deletes the task and its contents. This cannot be undone.', archivedDeleteAction: 'Delete',
@@ -245,10 +257,10 @@ export const dictEn = {
         sysStatus: 'System Status', sysDesc: 'Real-time performance metrics', gpu: 'GPU', gpuUnavail: 'Unavailable', noSmi: 'nvidia-smi not found',
         cpu: 'CPU', cpuUnavail: 'CPU info unavailable', cpuTotal: 'Total Usage', cpuProcess: 'App Usage', cpuLogical: 'logical processors',
         vram: 'VRAM Usage', core: 'Core Usage', temp: 'Temp', power: 'Power', unifiedMem: 'Unified Memory',
-        ram: 'System RAM', used: 'Used', physical: 'Physical RAM', total: 'Total', swap: 'Swap Space',
-        vllm: 'Inference Engine', ctx: 'Context Length', ctxWarn: '⚠️ Small context window (%s, below 128k). Long chats compact often and keep less history; use a model with ≥128k window or raise --max-model-len', queue: 'Task Queue', kv: 'KV Hit Rate', ttft: 'TTFT', tps: 'TPS (Generation Speed)', tokTotal: 'Total Tokens · gen/prompt', clearHold: 'Hold to reset', clearHolding: 'Keep holding…', clearDone: 'Cleared', clearHint: 'Hold "Reset" until full to clear · release to cancel', statsSince: 'Since %t', statsAge: ' · %m min running', statsJustReset: ' · just reset', statsLifetime: 'Lifetime total', app: 'App Service', appRunning: 'Core daemon running',
-        curVer: 'App Version', uiVer: 'UI Version', uptime: 'Uptime', runningMemory: 'Active Memory', temporaryMemory: 'Temporary Memory', memoryPressure: 'Memory Pressure', normal: 'Normal', localProcessor: 'Local Compute', processorLoad: 'Processor Load', graphicsLoad: 'Graphics Load', sharedMemory: 'Shared Memory', deviceTemp: 'Device Temp', currentModel: 'Current Model', localRunning: 'Local', remoteService: 'Remote', available: 'Available', unavailable: 'Unavailable', historyReuse: 'Reuse Rate', modelTextVolume: 'Model Text Volume', modelReadAmount: 'Model Reads', modelOutputAmount: 'Model Outputs', modelReadHint: 'More input means slower responses and higher usage', modelOutputHint: 'More output means longer replies and higher usage', resetCount: 'Reset Count', contextHint: 'Conversation range kept in memory', queueHint: 'Running / waiting', ttftHint: 'Wait before the first word', tpsHint: 'Reply output speed', reuseHint: 'Higher is faster and saves tokens', totalMemory: 'Total Memory',
-        appearance: 'Appearance & Language', lang: 'Language', langDesc: 'Switch application display language', theme: 'Theme', themeDesc: 'Choose your color style',
+        ram: 'System RAM', used: 'Used', total: 'Total', swap: 'Swap Space',
+        vllm: 'Inference Engine', ctx: 'Context Length', queue: 'Task Queue', kv: 'KV Hit Rate', ttft: 'TTFT', tps: 'TPS (Generation Speed)', tokTotal: 'Total Tokens · gen/prompt', statsSince: 'Since %t', statsAge: ' · %m min running', statsJustReset: ' · just reset', statsLifetime: 'Lifetime total', app: 'App Service',
+        curVer: 'App Version', uptime: 'Uptime', runningMemory: 'Active Memory', temporaryMemory: 'Temporary Memory', localProcessor: 'Local Compute', processorLoad: 'Processor Load', graphicsLoad: 'Graphics Load', sharedMemory: 'Shared Memory', deviceTemp: 'Device Temp', currentModel: 'Current Model', localRunning: 'Local', remoteService: 'Remote', available: 'Available', unavailable: 'Unavailable', historyReuse: 'Reuse Rate', modelReadAmount: 'Model Reads', modelOutputAmount: 'Model Outputs', modelReadHint: 'More input means slower responses and higher usage', modelOutputHint: 'More output means longer replies and higher usage', resetCount: 'Reset Count', contextHint: 'Conversation range kept in memory', queueHint: 'Running / waiting', ttftHint: 'Wait before the first word', tpsHint: 'Reply output speed', reuseHint: 'Higher is faster and saves tokens', totalMemory: 'Total Memory', memoryPressure: 'Memory Pressure', normal: 'Normal',
+        appearance: 'Appearance & Language', lang: 'Language', theme: 'Theme', themeDesc: 'Choose your color style',
         light: 'Light', dark: 'Dark', followSystem: 'Follow System',
         notifications: 'Notifications',
         taskCompletedNotif: 'Task completion alert',
@@ -322,7 +334,7 @@ export const dictEn = {
         uiMonitor: { bridgeNotReady:'Bridge not ready', readFailed:'Read failed', reading:'Loading', configError:'Configuration error', unverified:'Unverified', authFailed:'Authentication failed', bridgeError:'Monitor bridge is not ready. Open this page in the Tauri app window.', readError:e=>`Monitor read failed: ${e}`, activity:'Activity' },
 
         uiSettings: { common:'Common', system:'System', general:'General', model:'Models', search:'Search', memory:'Memory', community:'User Community', permissions:'Permissions & Environment', data:'Data Management', update:'Updates', help:'Help & Feedback', appearance:'Appearance', language:'Interface Language', languageDesc:'Change the app display language', theme:'Theme', themeDesc:'Follow the system, or choose light / dark', notifications:'Notifications', taskNotice:'Task Completion Alerts', taskNoticeDesc:'Show a system notification when a task finishes', voiceShortcuts:'Voice Shortcuts', voiceShortcutEnable:'Enable Alt voice shortcut', voiceShortcutEnableDesc:'Alt starts voice input. When the input box already has text, Alt edits the current text. Off by default.', voiceShortcutHelp:'View Alt voice shortcut guide', voiceShortcutUnsupportedDesc:'The global Alt shortcut is only supported on Windows. On this platform, Alt voice input works while the app window is focused.', voicePostprocess:'Smart organize', voicePostprocessDesc:'Sends the recognized text — together with any existing input-box draft — to your configured model service to fix errors and organize it into structured input. When off, only on-device rule-based fixes are applied.', voiceShortcutWebDesc:'In the browser, Alt voice input works inside the app window. The global shortcut is unavailable, and only plain transcription is provided — no smart organize or voice editing.', desktopAssistant:'Desktop Assistant', pet:'Desktop Companion', petDesc:'Show a persistent companion on the desktop', version:'Version', currentVersion:'Current Version', beta:'Beta', releaseNotes:'Release Notes', noReleaseNotes:'No release notes', downloading:p=>`Downloading update ${p}%`, installingUpdate:'Installing update…', installerStarted:'Installer Started', cancelDownload:'Cancel Download', providers:'ACP' },
-        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '最新通用模型':'Latest general-purpose model', '代码场景':'Coding tasks', '高速代码场景':'High-speed coding tasks', '稳定可用':'Stable release', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '高速响应':'High-speed responses', '稳定通用':'Stable general-purpose model', '轻量模型':'Lightweight model' } },
+        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '最新通用模型':'Latest general-purpose model', '代码场景':'Coding tasks', '高速代码场景':'High-speed coding tasks', '稳定可用':'Stable release', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '高速响应':'High-speed responses', '轻量模型':'Lightweight model' } },
 
         uiPetSettings: { choose:'Choose a companion', placeholder:'Coming soon', preparing:'Preparing animation', animationFailed:'Animation failed to load', coverFailed:'Cover failed to load', retry:'Retry', pets:{ lingling:{name:'Lingling',description:'Star-patterned tail, always lively'}, langlang:{name:'Langlang',description:'Black outfit and glasses, calmly by your side'}, 'ace-taffy':{name:'Ace Taffy',description:'Pink hair and crown, cheering you on'} } },
         uiScheduled: { title:'Scheduled Tasks', subtitle:'Let PINVOU automatically handle recurring work', newTask:'New Task', templates:'Recommended Templates', myTasks:'My Tasks', loading:'Loading scheduled tasks…', empty:'No matching scheduled tasks', view:n=>`View scheduled task: ${n}`, useTemplate:n=>`Use ${n} template`, running:'Task is running', unread:'Unviewed run conversation', navUnreadAria:'Scheduled tasks have unviewed run conversations', closeError:'Dismiss error', deleteTitle:'Delete scheduled task?', deleteDescription:n=>`“${n}” will stop running and be removed from the task list. Previous run history will be kept.`, cancel:'Cancel', delete:'Delete', save:'Save', filterAll:'All', filterActive:'Enabled', filterPaused:'Paused', active:'Active', paused:'Paused', enabled:'Enabled', unknown:'Unknown', notScheduled:'Not scheduled', noSchedule:'No schedule', waitingDispatch:'Waiting to run', soon:'Starting soon', nextRun:(time,remaining)=>`Next: ${time} (${remaining})`, date:(month,day)=>`${month}/${day} `, daysAfter:(days,hours)=>`in ${days}d${hours ? ` ${hours}h` : ''}`, hoursAfter:(hours,minutes)=>`in ${hours}h${minutes ? ` ${minutes}m` : ''}`, minutesAfter:(minutes,seconds)=>`in ${minutes}m ${seconds}s`, secondsAfter:seconds=>`in ${seconds}s`, runStatus:{ queued:'Queued', running:'Running', completed:'Completed', failed:'Failed', canceled:'Canceled' }, weekdays:[['Monday','Mon'],['Tuesday','Tue'],['Wednesday','Wed'],['Thursday','Thu'],['Friday','Fri'],['Saturday','Sat'],['Sunday','Sun']], hourCount:n=>`${n} hour${n === 1 ? '' : 's'}`, choose:'Choose', autoModel:'Auto select', currentModel:'Current model', reselectModel:n=>`Choose another model · ${n}`, repeatOptions:{ workdays:'Weekdays', daily:'Daily', weekly:'Weekly', hourly:'Hourly', once:'Once', custom:'Custom' }, everyHours:n=>`Every ${n} hours`, startsAt:time=>`from ${time}`, repeat:'Repeat', interval:'Interval', dateLabel:'Days', startTime:'Start time', time:'Time', chooseRepeat:'Choose repeat frequency', chooseInterval:'Choose hourly interval', chooseDate:'Choose run days', chooseStartTime:'Choose start time', chooseRunTime:'Choose run time', setStart:'Set start', createFromTemplate:'Create from template', closeCreate:'Close new task', taskName:'Task name', taskNamePlaceholder:'For example: Daily data backup', taskPrompt:'Instructions', taskPromptPlaceholder:'Describe what should be done on each run…', saveTask:'Save task', editTask:'Edit task', closeDetail:'Close task details', taskNameAria:'Scheduled task name', taskPromptAria:'Scheduled task instructions', aiModel:'AI model', chooseModel:'Choose scheduled task model', runningStatus:'Status', nextExecution:'Next run', enableTask:'Enable task', runNow:'Run now', openFolder:'Open folder', runHistory:'Run history', records:n=>`${n} record${n === 1 ? '' : 's'}`, noRecords:'No records', openRun:'Open run conversation', noOpenRun:'This run has no conversation to open', openRunLabel:s=>`Open run: ${s}`, runInProgress:'Run in progress', viewRunResult:'Open the conversation to view results', noRunSession:'No conversation available', noRunHistory:'No run history yet', saveState:{ saving:'Saving…', saved:'Saved', invalid:'Name and instructions are required', error:'Save failed' }, pause:n=>`Pause ${n}`, resume:n=>`Resume ${n}`, templateMap:{ 'daily-brief':{name:'Daily Briefing',schedule:'Daily at 8:00',description:'Summarize important news, industry updates, and connected workplace announcements',prompt:'Summarize important news and industry updates from the past 24 hours with sources and links; when Lark or WeCom is connected, include company announcements. Do not scan user directories; save results to the task workspace.'}, 'follow-up-monitor':{name:'Follow-up Monitor',schedule:'Weekdays at 9:00',description:'Review overdue and upcoming items, highlighting risks and next steps',prompt:'Summarize overdue, due-today, and upcoming (next 3 workdays) items from connected Lark or WeCom, with risks and next steps by priority. Query and organize only — do not send, approve, or modify; do not scan user directories.'}, 'weekly-review':{name:'Weekly Review',schedule:'Friday at 16:00',description:'Create a structured weekly report from this week’s workplace activity',prompt:'Create a weekly report from this week’s calendar, to-dos, and workplace messages in connected Lark or WeCom, covering progress, carry-over items, risks, and next week’s plan. Do not scan user directories or send automatically.'}, 'memory-organize':{name:'Memory Organizer',schedule:'Weekdays at 9:30',description:'Keep long-term memory tidy on a schedule: merge duplicates, prune stale items, fix wording',prompt:'Periodically organize my long-term memory: merge duplicate entries, remove outdated or invalid items, and fix vague wording so memory stays concise and accurate. This task runs automatically without opening a conversation; it only organizes memory and does not send messages or make other changes.'} } },
@@ -330,22 +342,216 @@ export const dictEn = {
         uiChatExtra: { transferRevision:type=>`Pinvou · ${type} · Revision handoff`, draftingScheduled:'⏰ Preparing scheduled task draft…' },
         expertPoolIndividualTab:'Individual Experts', expertPoolTeamTab:'Expert Teams',
         uiWorkflow: { pick:'Choose a workflow template to begin', empty:'No workflows are available. Check the bundled workflow resources.', workflow:'Workflow', stopFailed:e=>`Failed to stop workflow: ${e}`, completed:'🎉 Workflow complete' },
+        uiModelStore: {
+          title:'Model Store', subtitle:'Browse, download, and deploy large models on this machine.',
+          tabStore:'Marketplace', tabLibrary:'My Models',
+          sectionInstalled:'On this device', sectionAvailable:'Available',
+          filterAll:'All', filterInstalled:'Installed', filterRunning:'Running',
+          statusAvailable:'Available',
+          linkRowRemoved:(name,n)=>`Also removed ${n} PINVOU model entr${n===1?'y':'ies'} for "${name}"`,
+          linkRowStale:(name,e)=>`"${name}" was uninstalled, but its entry in the PINVOU model list could not be removed (${e}). That entry no longer works — delete it in Settings or switch to another model.`,
+          uninstallStopFirst:n=>`"${n}" is running. Stop it first, then delete. Deleting while it runs can remove the weights before the service is fully stopped, leaving a process no screen can stop.`,
+          uninstallLinksLeft:n=>`"${n}" was uninstalled, but the entries pointing at it in the PINVOU model list could not be cleaned up automatically. They now point at a local service that no longer exists — please delete them in Settings.`,
+          emptyInstalled:'No models downloaded on this device yet',
+          emptyInstalledHint:'Pick one from Available below. Once downloaded you can deploy it and use it in PINVOU directly.',
+          search:'Search models, providers, or engines', clearSearch:'Clear search', refresh:'Refresh', retry:'Retry', loading:'Loading…',
+          loadFailed:e=>`Failed to load: ${e}`,
+          storeLoadFailed:e=>`Failed to load the store listing: ${e}`,
+          libraryLoadFailed:e=>`Failed to load the local model library: ${e}`,
+          guideNotInstalledTitle:'Local model management must be installed on this machine',
+          guideNotInstalledHint:'Downloads and on-device deployment are handled by the Local Model Management component, which is not installed on this device yet.',
+          guideStoppedTitle:'Local model management is not running',
+          guideStoppedHint:'Start it to browse the marketplace, download models, and deploy them on this machine.',
+          guideUnsupportedTitle:'The model store is not available on this platform',
+          accessLocalOnly:'This is a loopback address — it only works on this device. Letting other machines on your network connect requires the API gateway, which is not part of this version yet.',
+          guideLoadingTitle:'Starting local model management…',
+          guideErrorTitle:'Local model management is unavailable',
+          guideStart:'Start', guideStarting:'Starting…', guideStartFailed:e=>`Failed to start: ${e}`, guideVersion:v=>`Version ${v}`,
+          storeEmpty:'No models are listed in the store yet', storeSearchEmpty:'No matching models', cardNoDescription:'(No description)',
+          download:'Download', downloading:'Downloading…', downloaded:'Downloaded',
+          taskDownload:n=>`Downloading "${n}"`, downloadDone:n=>`"${n}" downloaded; deploy it from My Models`, downloadCancelled:'Download cancelled',
+          detailProvider:'Provider', detailEngine:'Inference engine', detailQuantization:'Quantization', detailSize:'Size',
+          detailSizeDual:'(one copy per device)', detailClose:'Close',
+          // Fallback title for the detail dialog while loading or after a failed
+          // load: the title bar (and the close button it carries) must never vanish.
+          detailTitle:'Model details',
+          topologyDual:'Dual-device', topologySingle:'Single device',
+          openDetail:'View details',
+          dualNotice:'This is a dual-device deployment: two machines connected by a QSFP direct cable. Whichever device downloads and deploys becomes the primary; the other is the secondary.',
+          dualNoticeDownload:'Downloading only needs this device — no direct cable and no secondary machine required.',
+          dualNoticeDeploy:'Deploying asks once for the secondary machine’s management IP, username, and password. Networking, package push, pairing, weight distribution, and startup are then fully automatic.',
+          weightVerifyTitle:'Weight integrity: no per-file checksum',
+          weightVerifyNone:'This card calls the download finished as soon as every file is present. It never compares them against official checksums, so a copy that was swapped out on the download source would go unnoticed here.',
+          weightVerifyManifest:'This card does check every file against a checksum, but that checksum comes from the same place as the weights. It catches a corrupted transfer or a later edit; it cannot catch a source that was already bad.',
+          weightVerifyAdvice:'This does not mean the card is compromised — every built-in card comes from the research team. To be safer: download over a network you trust, don’t point the mirror setting at an unfamiliar address, and if the weights were copied from someone else’s USB drive, download them again instead.',
+          libraryEmpty:'No models downloaded yet — take a look at the marketplace',
+          statusRunning:'Running', statusDeployed:'Deployed', statusPending:'Not deployed',
+          deploy:'Deploy', deploying:'Deploying…', redeploy:'Redeploy',
+          enable:'Enable', enabling:'Enabling…', stop:'Stop', stopping:'Stopping…', uninstall:'Uninstall', uninstalling:'Uninstalling…',
+          taskDeploy:n=>`Deploying "${n}"`, taskEnable:n=>`Enabling "${n}"`, taskStop:n=>`Stopping "${n}"`, taskUninstall:n=>`Uninstalling "${n}"`,
+          deployDone:n=>`"${n}" deployed`, enableDone:n=>`"${n}" enabled`, stopDone:n=>`"${n}" stopped`, uninstallDonePurged:(n,s)=>`"${n}" uninstalled, weights deleted, ${s} freed`, uninstallDoneResidual:(n,c)=>`"${n}" uninstalled, but ${c} weight path(s) could not be deleted; no disk space was freed`, uninstallDoneKept:n=>`"${n}" uninstalled — weights kept and the card stays in your library, ready to redeploy`,
+          corrected:n=>`The run state of "${n}" was corrected to not running based on the actual container state`,
+          profileTitle:'Choose a deployment profile', profileStart:'Start deployment',
+          uninstallTitle:'Uninstall or delete model',
+          uninstallIntro:n=>`What do you want to do with "${n}"? Both options stop the service and remove its deployment configuration. The engine container image is kept either way — other models on the same engine still need it.`,
+          uninstallOptionKeep:s=>`Uninstall: takes the model off the engine only. The downloaded weights (about ${s}) stay on disk and the card stays in your model library, so you can redeploy it with one click instead of downloading everything again.`,
+          uninstallOptionPurge:s=>`Delete: removes the model weights (about ${s}) as well, reclaiming that disk space, and takes the card out of your model library. This cannot be undone — using the model again means downloading it from scratch.`,
+          uninstallKeep:'Uninstall (keep weights)',
+          uninstallPurge:'Delete (with weights)',
+          uninstallIntroDownloaded:n=>`"${n}" is only downloaded on this machine — it has never been deployed to an engine, so there is no service to uninstall. Deleting removes the model weights from disk and takes the card out of your model library.`,
+          forceRemoveEntry:'Force-remove from list',
+          forceRemoveTitle:'Force-remove from list?',
+          forceRemoveIntro:(n,s)=>`Uninstalling "${n}" did not finish, so its record is still in the model library and the card still shows up in the list. Force-remove deletes that record so the card disappears. The card records a size of ${s} — that space will not be reclaimed.`,
+          forceRemovePointRecordOnly:'Only the library record and the API keys for this model are deleted. Not a single byte is removed from disk.',
+          forceRemovePointResidual:'Downloaded weights and deployment packages stay on disk exactly as they are, so the space will not come back. Directories confirmed to still exist will be listed after removal.',
+          forceRemovePointAfter:'You will have to clean up those files yourself, or fix the environment first (for example, get the secondary machine back online) and run a normal uninstall again. This cannot be undone.',
+          forceRemoveConfirm:'Force-remove',
+          forceRemoveResultTitle:'Removed from the list',
+          forceRemoveResidualTitle:n=>`Directories still on disk (${n})`,
+          forceRemoveDone:(n,c)=>`"${n}" removed from the list. No files were deleted; ${c} leftover path${c===1?'':'s'} confirmed on disk`,
+          forceRemoveFailed:e=>`Force-remove failed: ${e}`,
+          detailStatus:'Status', detailEndpoint:'Local endpoint',
+          runtimeTitle:'Runtime', runtimeEmpty:'No runtime data yet',
+          accessTitle:'Connect an agent app', accessModelId:'Model ID', accessApiUrl:'API endpoint', accessApiKey:'API key',
+          accessGatewayOff:'The API gateway is off. Start it to get an endpoint reachable on the local network.',
+          startGateway:'Start gateway', gatewayStarted:'API gateway started',
+          keysEmpty:'No keys yet — use "Create key"', keysHint:'Create multiple keys to hand out per caller. Revoking a single key is not supported yet: existing keys only stop working when the card itself leaves your model library ("Delete (with weights)" or "Force-remove from list").',
+          addKey:'Create key', keyCreated:'New API key created',
+          copy:'Copy', copied:'Copied to clipboard', copyFailed:'Copy failed — select and copy manually',
+          notRunningHint:'This model is not enabled, so agents calling it now will get "model not enabled".',
+          tasksTitle:'In progress', taskRunning:'Working…', taskCancelling:'Cancelling…', taskCancelled: 'Cancelled', taskWaitingInput:'Waiting for your input…',
+          taskCancel:'Cancel', taskClose:'Close', taskExpand:'Show log', taskCollapse:'Hide log', taskNoOutput:'(No output)',
+          taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`${d} left`,
+          etaSec:n=>`${n}s`, etaMin:n=>`${n} min`, etaHour:(h,m)=>`${h} h ${m} min`,
+          promptTitle:'A few details are needed', promptSubmit:'OK', promptCancel:'Cancel', promptYes:'Yes', promptNo:'No',
+
+          linkUse: 'Use in PINVOU',
+          linkDone: 'Connected to PINVOU. You can start chatting now.',
+          linkFailed: 'Failed to connect',
+          linkNoRecord: 'Model details are not loaded yet. Please retry.',
+          linkNotRunning: 'Enable this model first, then connect it to PINVOU.',
+          linkNotChatModel: 'This is not a chat model — it does not expose an OpenAI-compatible chat endpoint — so it cannot be used as a PINVOU chat model. External programs can still call it through its own API.',
+          linkNotLocalEndpoint: 'The endpoint this model reports is not on this machine, so it cannot be connected: every message you send would be forwarded to that host. Check whether this card comes from a source you trust.',
+          linkNoModelName: 'This model has no model name and cannot be connected.',
+          linkNoKey: 'Could not obtain an API key',
+          linkBridgeMissing: 'Writing model settings is not supported here',
+          linkKeyLabel: 'PINVOU',
+          linkModelName: (name) => `Local · ${name}`,
+          // —— Startup reclamation of leftover processes ——
+          // Download processes left behind by a previous hard kill keep a lock on
+          // the weights directory and silently block the next download (16 hours
+          // once, on real hardware). Say so when they are reclaimed -- and
+          // especially when they cannot be.
+          startupCleanupKilled: (n) => `Cleaned up ${n} leftover background task(s) from the previous session`,
+          startupCleanupStuck: (n) => `${n} leftover background task(s) run as root and could not be cleaned up automatically; they may stall new downloads`,
+          // —— Storage and import scan ——
+          // If the weights directory does not match where the user actually put
+          // the model, a download burns dozens of hours and nothing on screen
+          // looks wrong. Both settings have to be visible and editable.
+          storageButton: 'Storage',
+          storageTitle: 'Storage and import',
+          storageModelsDirLabel: 'Model weights directory',
+          // These two (storageModelsDirHint / storageScanHint) must not assert either
+          // direction: the host does not decide whether reuse happens.
+          //
+          // The split is: the host answers "where to look" (roots go out via
+          // LMM_IMPORT_DIRS, hits via LMM_IMPORT_CANDIDATES, and both land in the run
+          // log); the card script answers "is this copy good, and do I use it". So the
+          // two sets of cards behave differently:
+          //   - Official store cards: already consume LMM_IMPORT_DIRS (shipped to
+          //     production 2026-09-21; 7 of the 7 listed cards). They reuse a complete
+          //     local copy instead of downloading again.
+          //   - Built-in test store cards (data/test-store/ compiled into the binary):
+          //     not wired up, still download. That copy is stale w.r.t. production.
+          //
+          // Both earlier versions of this copy lied, in opposite directions. Describe
+          // what the host does and leave reuse to the card, and neither side lies.
+          storageModelsDirHint: 'Changing this does not move weights you already downloaded. Models in the old directory stay on this machine, but it is no longer searched automatically — add the old path under "Additional search directories" to keep reusing them.',
+          storageFree: (size) => `${size} free`,
+          storageImportLabel: 'Additional search directories',
+          storageImportHint: 'One absolute path per line. Add the places we cannot guess, such as a second data drive.',
+          storageScanLabel: 'Where downloads look first',
+          storageScanHint: 'Searched in this order. Results are written to the run log and handed to the model card to verify. Reuse is up to the card script: official store cards reuse a complete local copy, while the built-in test store cards do not support this yet and still download over the network. USB and external drives are included automatically.',
+          storageRemovable: 'removable',
+          storageSave: 'Save',
+          storageCancel: 'Cancel',
+          storageSaved: 'Saved',
+          // Shown when the settings could not be read: Save is disabled, because an
+          // empty "additional search directories" box would submit as an empty list
+          // and silently wipe the directories the user had saved.
+          storageLoadFailedHint: 'Could not read your current storage settings, so saving is disabled to avoid overwriting the search directories you already saved. Close this dialog and open it again.',
+          // —— Test model store (hidden entry: tap the version line 7 times) ——
+          testStoreUnlockTitle: 'Enable the test model store',
+          testStoreUnlockHint: 'Test store cards and scripts ship inside the app and do not depend on the store server. They exist only to verify the scripts themselves.',
+          testStorePasswordPlaceholder: 'Passphrase',
+          testStoreUnlockConfirm: 'Enable',
+          testStoreUnlockCancel: 'Cancel',
+          testStoreWrongPassword: 'Wrong passphrase',
+          testStoreUnlocked: 'Test model store enabled. Switch the data source above.',
+          testStoreBanner: 'Test model store is on (for development checks only; cards ship inside the app)',
+          testStoreDisable: 'Turn off',
+          testStoreDisabled: 'Test model store turned off. Enabling it again needs the passphrase.',
+          sourceOfficial: 'Official store',
+          sourceTest: 'Test store',
+        },
         uiToolStore: { title:'Plugin Center', search:'Search connectors, skills, and plugins', myTools:'My Plugins', installedOnly:'Installed only', results:'Search Results', back:'Back to Plugin Center', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Plugins', internalCount:n=>`${n} plugins · Intranet required`, view:'View', modePlain:'Plain', modeCode:'Code', modeVisibilityHint:'Configure plugin visibility per session mode', manageVisibility:'Manage Visibility', doneManagingVisibility:'Done', guide:{ title:'Plugin Guide', close:'Close', dragTitle:'Drag to install', dragDesc:'Drag a standard skill, a single .md, an MCP server, or a Pinvou plugin .zip directly into this window to import it, or click "Upload" in the top-right to choose a file.', typesTitle:'Supported forms', types:['Standard skill (SKILL.md folder)','Single .md skill file','MCP server','Pinvou plugin package (recommended)'], formatsNote:'Standard skills, .md, MCP, and Pinvou plugin packages are all importable; the Pinvou plugin package is just the recommended standard form, and the rest are auto-normalized.', dragHintShort:'Drag in a package to add a custom plugin', introTitle:'What is a Pinvou plugin package', introDesc:'One package = one card = one switch. Pack skills, MCP servers (or their combinations) into a zip; on import the type is auto-detected from content, validated, and registered, then toggled and uninstalled uniformly in the store and at runtime.', specTitle:'Plugin package spec', specDesc:'See the "Plugin Package Spec" for the full rules: zip layout, plugin.json (schema v1), mcp manifest.json, SKILL.md, icons, and naming safety.', downloadSpec:'Download spec (Markdown)', downloadHint:'Download and share with third-party package authors; the desktop app opens a save dialog.' } },
         artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },
         uiToolDetails: { tools:{
           ima:{ title:'Tencent ima', subtitle:'Manage ima notes and knowledge bases through OpenAPI', latency:'Cloud', desc:'Connect the Tencent ima OpenAPI Skill to search, read, create, and append notes, or search and browse knowledge bases and import web pages or content. Credentials stay on this device.', configTitle:'Connect Tencent ima', configDescription:'Credentials stay on this device and are used only to enable the IMA OpenAPI Skill.', configDocLabel:'Get Client ID / API Key', welcomeQueries:['Search my ima knowledge bases','List my ima notes','Create an ima note from this content','Find the product plan in my ima knowledge base'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'Manage meetings, recordings, minutes, and attendance reports as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official Tencent Meeting CLI and skill to create, query, update, and cancel meetings, and access attendance reports, recordings, transcripts, and AI minutes. Connecting opens the authorization page for QR-code sign-in.', welcomeQueries:['Create a Tencent Meeting for me','Show my Tencent Meeting recordings','Show the latest AI meeting minutes','List the attendees of this Tencent Meeting'] },
         } },
-        uiPet: { waiting:'Input needed', failed:'Needs attention', review:'Ready to review', running:'Working', sendFailed:'Send failed', noMain:'Cannot connect to the main window', scheduledDone:'Scheduled task complete', done:'Completed', reply:'Reply', collapseReply:'Collapse reply', expandReply:'Expand reply', collapse:'Collapse', expand:'Expand', replyPlaceholder:'Type a reply…', sendReply:'Send reply', back:'Back to PINVOU', ready:n=>`${n} is ready`, backHint:'Click to return to PINVOU', drag:n=>`Click to return to PINVOU; drag ${n} to move`, openScheduled:n=>`Open the latest run of scheduled task ${n}`, closeScheduled:'Dismiss scheduled task completion', openChat:n=>`Open ${n} chat`, closeNotice:n=>`Dismiss ${n} notification`, replyTo:n=>`Reply to ${n}`, expandActivities:n=>`Expand ${n} activities`, collapseActivities:'Collapse activity cards', expandActivity:'Expand activities', collapseActivity:'Collapse activities', loadFailed:'Companion failed to load', retry:'Click to retry', resize:'Drag to resize companion', resizeTitle:'Drag to resize', hide:'Hide Companion' },
+        uiPet: { waiting:'Input needed', failed:'Needs attention', review:'Ready to review', running:'Working', sendFailed:'Send failed', noMain:'Cannot connect to the main window', scheduledDone:'Scheduled task complete', done:'Completed', reply:'Reply', collapseReply:'Collapse reply', expandReply:'Expand reply', collapse:'Collapse', expand:'Expand', replyPlaceholder:'Type a reply…', sendReply:'Send reply', back:'Back to PINVOU', ready:n=>`${n} is ready`, backHint:'Click to return to PINVOU', drag:n=>`Click to return to PINVOU; drag ${n} to move`, openScheduled:n=>`Open the latest run of scheduled task ${n}`, closeScheduled:'Dismiss scheduled task completion', openChat:n=>`Open ${n} chat`, closeNotice:n=>`Dismiss ${n} notification`, replyTo:n=>`Reply to ${n}`, expandActivities:n=>`Expand ${n} activities`, collapseActivities:'Collapse activity cards', expandActivity:'Expand activities', collapseActivity:'Collapse activities', loadFailed:'Companion failed to load', retry:'Click to retry', resizeTitle:'Drag to resize', hide:'Hide Companion' },
         uiWebConnection: { idle:['Preparing remote control','Initializing browser connection…'], connecting:['Connecting to desktop','Interrupted connections retry automatically; unconfirmed actions are not repeated.'], desktop_offline:['Desktop is offline','Keep this page open; it will reconnect when the desktop returns.'], credentials_missing:['Incomplete link','Enable remote control on the desktop and paste the complete link.'], denied:['Access denied','The link is invalid or was refreshed. Copy a new link from the desktop.'], revoked:['Access stopped','The desktop stopped this remote control link.'], replaced:['Taken over by another browser','Only one active browser is allowed. Refresh this page to take over again.'], incompatible_desktop:['Desktop version incompatible','Update the desktop app, then reopen this link.'], error:['Connection error','Remote control will keep trying to reconnect.'] },
         uiConversation: conversationEn,
+        uiComputerUse: {
+          settingsSection:'Computer use',
+          settingsToggle:'Computer use (allow the agent to see and control your screen)',
+          settingsHint:'When enabled, the agent can take screenshots and control your mouse and keyboard, which carries a risk of unintended actions. The agent asks for your consent again before the first control of each session, and consequential actions need per-action confirmation.',
+          platformUnsupportedHint:'Computer use is not available on this platform: there is no computer-use backend for this operating system.',
+          settingsStoppedHint:'Computer use is stopped. Turn it off and back on to resume agent control.',
+          bannerTitle:'Agent is controlling your computer',
+          bannerNote:'The agent can see your screen and move the mouse and keyboard. You can stop it at any time.',
+          bannerStop:'Stop control',
+          grantTitle:'The agent requests control of your computer',
+          grantDesc:'If you allow it, the agent can see your screen and operate the mouse and keyboard for this session. Only allow this if you trust the current task; consequential actions still ask for confirmation one by one.',
+          grantAllow:'Allow control for this session',
+          grantDeny:'Deny',
+          confirmTitle:'Confirm this action',
+          confirmActionLabel:'Action',
+          confirmElementLabel:'Target element',
+          confirmOnce:'Allow this once',
+          confirmDeny:'Deny',
+          fullTextWarning:'The agent will type exactly this text.',
+          textTooLongToPreview:'The text is too long to preview in full.',
+          buttonName:{ left:'Left', right:'Right', middle:'Middle' },
+          confirmClick1:'click', confirmClick2:'double-click', confirmClick3:'triple-click',
+          confirmClick:(button, verb)=>`${button} ${verb}`,
+          confirmClickAt:(button, verb, point)=>`${button} ${verb} at ${point}`,
+          confirmTypeCount:count=>count===1?`Type ${count} character`:`Type ${count} characters`,
+          confirmKeyChord:chord=>`Press ${chord}`,
+          confirmHoldKey:(chord, ms)=>`Hold ${chord} for ${ms} ms`,
+          confirmKeyChordMasked:(chord, count)=>chord?(count===1?`Press ${chord} + ${count} masked character`:`Press ${chord} + ${count} masked characters`):(count===1?`Press ${count} masked character`:`Press ${count} masked characters`),
+          confirmHoldKeyMasked:(chord, count, ms)=>chord?(count===1?`Hold ${chord} + ${count} masked character for ${ms} ms`:`Hold ${chord} + ${count} masked characters for ${ms} ms`):(count===1?`Hold ${count} masked character for ${ms} ms`:`Hold ${count} masked characters for ${ms} ms`),
+          confirmDrag:(from, to)=>`Drag from ${from} to ${to}`,
+          confirmMouseMove:point=>`Move mouse to ${point}`,
+          confirmMouseDown:button=>`Press and hold the ${button} mouse button`,
+          confirmMouseUp:button=>`Release the ${button} mouse button`,
+          screenshotCaption:'Screenshot',
+          screenshotLoading:'Loading screenshot…',
+          actionFailed:e=>`Action failed: ${e}`,
+        },
         uiMultiAgent: {
-          toggleLabel:'Multi-agent mode',
-          toggleHint:'Let this conversation delegate to subagents (expert collaboration); turning it off recycles the engine and cancels any subagents still running',
+          toggleLabel:'Swarm Mode',
+          toggleHint:'Let this conversation delegate to subagents (swarm collaboration); while on, the subagent cap in advanced settings is ignored; turning it off recycles the engine and cancels any subagents still running',
+          spawnedAgentsRow:count=>`Pinvou spawned ${count} agent${count === 1 ? '' : 's'}`,
+          spawnedAgentsRowHint:'Click to view the subagent list',
+          runningAgentsTitle:'Running agents',
+          runningAgentsCount:count=>`${count} running`,
+          runningAgentsCollapse:'Collapse running agents', runningAgentsExpand:'Expand running agents',
           drawerTitle:role=>`Subagent · ${role}`, close:'Close', loadingTranscript:'Loading conversation…',
           emptyTranscript:'No saved conversation yet. The subagent may have just started.',
           panelResize:'Resize panel', panelResizeHint:'Drag to resize; double-click to reset',
-          agentCard:{ spawning:'Dispatching', working:'Working', completed:'Completed', failed:'Failed', spawnFailed:'Dispatch failed', interrupted:'Interrupted' },
+          agentCard:{ working:'Working', completed:'Completed', failed:'Failed', spawnFailed:'Dispatch failed', interrupted:'Interrupted', cancelled:'Cancelled' },
           agentsListTitle:'Subagents', agentsEmpty:'No subagents have been dispatched in this conversation yet.', backToAgents:'Back to subagent list',
           agentsListSummary:(roots,total)=>roots === total ? `${total} total` : `${roots} direct · ${total} total`,
           childAgentCount:count=>`${count} child${count === 1 ? '' : 'ren'}`, expandChildren:name=>`Expand children of ${name}`, collapseChildren:name=>`Collapse children of ${name}`,
@@ -356,16 +562,15 @@ export const dictEn = {
           agentNoTranscript:error=>error ? `The subagent ended before creating a conversation record: ${error}` : 'The subagent ended without creating a conversation record.',
           showEarlierTranscript:count=>`Show ${count} earlier execution item${count === 1 ? '' : 's'}`,
           listReadFailed:'⚠️ Failed to read the subagent list; retrying automatically…',
-          webActionHint:'Multi-agent conversations are read-only on the web; perform this action on desktop.',
+          webActionHint:'Swarm conversations are read-only on the web; perform this action on desktop.',
           transcriptReadFailed:'⚠️ Failed to read the conversation; retrying automatically…',
         },
         uiHomeMode: { work:'Work', code:'Code', providerSettings:'Provider settings' },
         uiAttachments: { parsing:'Parsing', failed:'Failed', remove:name=>`Remove attachment ${name}`, dropRelease:'Drop to attach', dropWebTitle:'Add anything', dropWebHint:'Drop any file here to add it to the conversation', fileTooLarge:'The file exceeds the 20 MB attachment limit and cannot be added', archiveTooManyEntries:'The archive contains more than 50 entries and cannot be added', archiveExpandedTooLarge:'The archive expands beyond 100 MB and cannot be added', archiveUnsafeEntry:'The archive contains unsafe links or paths and cannot be added' },
         uiCodex: codexEn,
         uiAcpProviders: acpProvidersEn,
-        uiProjects: { convertToProject:'Convert to project', projectNamePlaceholder:'Project name', renameProject:'Rename project', deleteProject:'Delete project', deleteConfirmLabel:'Delete this project?', deleteProjectHint:'Conversations are kept and return to ungrouped', moveToProject:'Move to project…', moveOut:'Remove from project', moveToUngrouped:'Move to ungrouped', temporaryBadge:'Temporary workspace', folderUnavailable:'Folder unavailable', rebindFolder:'Rebind', addFolderTitle:'Add folder to project?', addFolderBody:folder=>`The project will include folder ${folder}; new sessions created there will join this project automatically.`, searchPlaceholder:'Search projects', noProjects:'No projects yet', ungrouped:'Ungrouped', currentProject:'Current project', movedNotice:'Conversation moved', opFailed:'Project operation failed' },
-
-        uiCodexWorkspace: { changes:{added:'Added',modified:'Modified',deleted:'Deleted',renamed:'Renamed',copied:'Copied',conflict:'Conflict',untracked:'Untracked',unknown:'File'}, origins:{session:'This session',preexisting:'Existed before session',preexisting_modified:'Existed before session · modified in this session',unknown:'Source not recorded'}, addedPath:path=>`Added ${path}`, addPath:path=>`Add ${path} to conversation`, added:'Added to conversation', add:'Add to conversation', back:'Back to workspace list', copyPath:'Copy relative path', reveal:'Show in file manager', open:'Open with system application', reading:'Reading…', noDiff:'No text diff to display', tooLarge:'The file is too large for an embedded preview.', unsupported:'This file does not support embedded preview.', openHint:'You can open it with a system application.', truncated:'Content is too large; only the beginning is shown.', resize:'Resize workspace', resizeHint:'Drag to resize; double-click to restore default', title:'Workspace', temporary:'Temporary workspace', refresh:'Refresh workspace', close:'Close workspace', files:'Files', changed:'Changes', search:'Search files', noFiles:'No matching files', noBaseline:'This older session has no creation baseline, so changes made by this session cannot be determined.', branch:'Branch', staged:'Staged', noChanges:'No workspace changes', copyContent:'Copy content', copied:'Copied', closeViewer:'Close preview', loadFailed:'Failed to load file', resizeWidth:'Resize viewer width', resizeHeight:'Resize viewer height', resizeCorner:'Resize viewer; double-click to restore default', fontDecrease:'Decrease font size', fontIncrease:'Increase font size', openInNewWindow:'Open in code reader', diffSuffix:'(diff)', readerTitle:'Code Reader', readerEmpty:'Choose "Open in code reader" from a workspace file preview; files accumulate here as tabs.', closeTab:'Close tab', noSessionChanges:'Once a session is created, changes made by the session will be listed here.' },
+        uiProjects: { convertToProject:'Convert to project', projectNamePlaceholder:'Project name', renameProject:'Rename project', deleteProject:'Delete project', deleteConfirmLabel:'Delete this project?', deleteProjectHint:'Conversations are kept and return to ungrouped', moveToProject:'Move to project…', moveToUngrouped:'Move to ungrouped', alreadyUngrouped:'Already ungrouped', folderUnavailable:'Folder unavailable', rebindFolder:'Rebind', moveConfirmTitle:'Move conversation into this project?', moveConfirmBody:(project, folder)=>`The conversation moves into "${project}". Its folder ${folder} stays outside the project; only this conversation is filed.`, moveConfirm:'Move', searchPlaceholder:'Search projects', noProjects:'No projects yet', currentProject:'Current project', movedNotice:'Conversation moved', movedNoticeWithFolder:folder=>`Conversation moved; folder ${folder} added`, noMatchProject:'No matching projects', opFailed:'Project operation failed' , rebindTitle:'Rebind project folder', rebindConfirm:'Move and rebind', rebindSessionsHint:()=>'Every session under this folder will switch to the new directory', rebindSuccess:n=>`Rebound ${n} session(s)`, rebindUpToDate:'No sessions needed rebinding', rebindOldExistsWarn:'The original folder still exists; the two locations will point to different directories. Continue anyway?', rebindPartial:(ok, failed)=>`Rebound ${ok} sessions; ${failed} failed - retry the rest`, rebindBusyAfter:n=>`${n} sessions started a new turn during the rebind; if they misbehave, retry once when idle` , rebindRetryRemaining:'Retry remaining', rebindFailedSessions:'Failed sessions', rebindInProgress:'Another folder rebind is already in progress' , rebindBusyHint:'Those sessions are still running a turn. Wait for them to go idle, then retry', rebindToRoot:'That destination is the filesystem root. Pick an ordinary folder instead', rebindToNested:'The destination cannot sit inside the original folder', rebindToUnusable:'That destination folder cannot be used. Pick another one', rebindRootsConflict:'That folder overlaps another project’s folder. Pick one outside the other projects’ folders', rebindRootsExpand:'Show all unavailable folders', rebindRootsCollapse:'Show only the first unavailable folder' },
+        uiCodexWorkspace: { changes:{added:'Added',modified:'Modified',deleted:'Deleted',renamed:'Renamed',copied:'Copied',conflict:'Conflict',untracked:'Untracked',unknown:'File'}, origins:{session:'This session',preexisting:'Existed before session',preexisting_modified:'Existed before session · modified in this session',unknown:'Source not recorded'}, addedPath:path=>`Added ${path}`, addPath:path=>`Add ${path} to conversation`, added:'Added to conversation', add:'Add to conversation', back:'Back to workspace list', copyPath:'Copy relative path', reveal:'Show in file manager', open:'Open with system application', reading:'Reading…', noDiff:'No text diff to display',  tooLarge:'The file is too large for an embedded preview.', unsupported:'This file does not support embedded preview.', openHint:'You can open it with a system application.', truncated:'Content is too large; only the beginning is shown.', resize:'Resize workspace', resizeHint:'Drag to resize; double-click to restore default', title:'Workspace', temporary:'Temporary workspace', refresh:'Refresh workspace', close:'Close workspace', files:'Files', changed:'Changes', search:'Search files', noFiles:'No matching files', noBaseline:'This older session has no creation baseline, so changes made by this session cannot be determined.', branch:'Branch', staged:'Staged', noChanges:'No workspace changes', copyContent:'Copy content', copied:'Copied', closeViewer:'Close preview', loadFailed:'Failed to load file', resizeWidth:'Resize viewer width', resizeHeight:'Resize viewer height', resizeCorner:'Resize viewer; double-click to restore default', fontDecrease:'Decrease font size', fontIncrease:'Increase font size', openInNewWindow:'Open in code reader', diffSuffix:'(diff)', readerTitle:'Code Reader', readerEmpty:'Choose "Open in code reader" from a workspace file preview; files accumulate here as tabs.', closeTab:'Close tab', noSessionChanges:'Once a session is created, changes made by the session will be listed here.' },
 
         checkUpdate: 'Check for Updates', checking: 'Checking…', upToDate: 'Up to date',
         newVersionFound: 'New version available', updateNotes: 'Release Notes',
@@ -581,7 +786,7 @@ Object.assign(dictEn.uiToolDetails.tools, {
   dingtalk:{ title:'DingTalk', subtitle:'Manage DingTalk docs, calendars, sheets, and messages as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official DingTalk Workspace CLI (dws, Apache-2.0) and official skills: let AI read and write DingTalk docs, view and edit calendars, work with AI sheets and online sheets, send and receive group messages, and handle to-dos, approvals, logs, and mail as yourself. Click \u201cConnect\u201d and authorize by scanning a QR code with the DingTalk app\u2014no key required.', welcomeQueries:['Read my DingTalk docs','Check my DingTalk schedule today','Query data in a DingTalk AI sheet','Show my DingTalk to-dos'] },
   card11:{ title:'TAPD Agile R&D', subtitle:'Automated tracking of defects and iterations', desc:'A core R&D management tool. Lets AI query project iteration progress, automatically break down requirement items, and update defect status, digitizing the full R&D lifecycle from requirements to release.' },
   card12:{ title:'CNB Cloud-Native Pipeline', subtitle:'Code repositories and CI/CD orchestration', desc:'Brings cloud-native development capabilities to the model. Use natural language to search code repositories, file issues, review PRs, and trigger and monitor pipeline deployments.' },
-  qcc:{ title:'Qichacha', subtitle:'Authorized queries of business registration data', latency:'Cloud', desc:'Connect the qcc-company remote MCP from the Qichacha agent data platform. Clicking \u201cConnect\u201d opens the browser for OAuth authorization with your Qichacha account\u2014no API Key required.', welcomeQueries:['Look up Huawei\u2019s business registration info','Tencent\u2019s business registration details','BYD\u2019s outbound investments','Alibaba\u2019s shareholder structure'] },
+  qcc:{ title:'Qichacha', subtitle:'Authorized queries of business registration data', latency:'Cloud', desc:'Connect the qcc-company remote MCP from the Qichacha agent data platform. Clicking \u201CConnect\u201D authorizes with your Qichacha account via OAuth by default; you may optionally paste a Qichacha API Key instead\u2014it is stored only in this device\u2019s system credentials.', configTitle:'Qichacha API Key (optional)', configDescription:'The API Key is stored only in this device\u2019s system credentials and is never written to mcp.json. Leave it empty to connect with OAuth.', configFields:[{key:'QCC_API_KEY', label:'Qichacha API Key', helpText:'Optional. OAuth is the default; fill this in only for API-key access.', placeholder:'Paste your Qichacha API Key (optional)'}], welcomeQueries:['Look up Huawei\u2019s business registration info','Tencent\u2019s business registration details','BYD\u2019s outbound investments','Alibaba\u2019s shareholder structure'] },
   'patsnap-search':{ title:'Patsnap Patents & Literature', subtitle:'Unified global patent and paper search, with detail retrieval by publication number', latency:'Cloud', desc:'Connect the Patsnap remote MCP to run unified searches across global patent and literature databases, with natural-language, semantic, and keyword search plus multi-dimensional filtering, and pull Markdown details by patent publication number or result URL. You need to enter a Patsnap API Key; the key is written only to this device\u2019s system credentials, and mcp.json stores only an environment-variable placeholder.', configTitle:'Enter your Patsnap API Key', configDescription:'The API Key is stored only in this device\u2019s system credentials and is never written to mcp.json in plain text; it is sent in the Authorization header when connecting to Patsnap services.', configDocLabel:'How to get an API Key', configFields:[{key:'PATSNAP_API_KEY', label:'Patsnap API Key', helpText:'Get it from the Patsnap open platform or the MCP/API credentials provided by your enterprise administrator.', placeholder:'Paste your Patsnap API Key'}], welcomeQueries:['Search patents and papers on solid-state battery electrolytes','Find core CRISPR delivery-system patents and literature from the past five years','Get patent details for publication CN109123456A','Analyze CATL\u2019s patent layout in sodium-ion batteries'] },
   'canva-mcp':{ title:'Canva', subtitle:'Poster, presentation, cover, and brand template design', latency:'Cloud', desc:'Connect the Canva remote MCP. Generate and edit posters, presentations, Xiaohongshu covers, brand templates, and more with natural language; clicking \u201cConnect\u201d opens the browser to authorize with your Canva account\u2014no API Key required. Design instructions, assets, folders, and brand template content are sent to the Canva remote MCP service.', welcomeQueries:['Generate a product launch poster','Make a three-page product intro presentation','Design a Xiaohongshu cover','Create an event promo image from a brand template'] },
   obsidian:{ title:'Obsidian Knowledge Base', subtitle:'Search and manage local Obsidian notes; read and write your personal knowledge', desc:'Connect your local Obsidian vault to the model. Supports full-text search, reading, creating, editing, renaming (with automatic wikilink fixing), and deletion\u2014so AI can build on and maintain the knowledge you have accumulated. The currently open vault is detected automatically; no manual setup. Notes stay on this device and so does the model; your knowledge and compute never leave the device.', welcomeQueries:['Search my notes','Create a note to record today\u2019s ideas','What documents are in my knowledge base?','Summarize my notes'] },
@@ -823,7 +1028,7 @@ dictEn.uiArtifacts = {
   diSecAppearance:'Appearance', diBgColor:'Background', diBorderColor:'Border color', diRadius:'Corner radius', diOpacity:'Opacity', diBgImage:'Background image',
   diSecSize:'Size', diWidth:'Width', diHeight:'Height',
   diSecAdvanced:'Advanced styles', diCollapse:'Collapse', diExpand:'Expand',
-  diLineHeight:'Line height', diLetterSpacing:'Letter spacing', diBgSize:'Background size', diBgPosition:'Background position',
+  diLineHeight:'Line height', diLetterSpacing:'Letter spacing', diBgSize:'Background size', diBgSizePlaceholder:'cover / contain', diBgPosition:'Background position',
   diRepeat:'Repeat', diRepeatNone:'No repeat', diRepeatX:'Repeat horizontally', diRepeatY:'Repeat vertically',
   diMinWidth:'Min width', diMaxWidth:'Max width', diMinHeight:'Min height', diMaxHeight:'Max height',
   diMarginTop:'Margin top', diMarginRight:'Margin right', diMarginBottom:'Margin bottom', diMarginLeft:'Margin left',
@@ -944,6 +1149,20 @@ Object.assign(dictEn, {
   remoteKbFolderSummary:'{count} documents found', remoteKbFolderSkipped:'{count} skipped', remoteKbFolderEmpty:'No supported documents were found in this folder', remoteKbFolderLimitExceeded:'A folder import can contain at most 10,000 documents',
 });
 
+// Draft-state working directory selector for normal chat
+// (features/chat/ComposerWorkspaceSelector.jsx), mirroring the code-mode
+// draft selector copy in uiCodex.
+dictEn.uiChatWorkspace = {
+  defaultWorkspace:'Default workspace', defaultWorkspaceDesc:'Use a Pinvou-managed session directory',
+  chooseDirectory:'Choose directory…', chooseDirectoryDesc:'Let the Agent work directly in that directory',
+  recentDirectories:'Recent', unknownDirectory:'Unknown directory',
+  // One-time confirmation card for the first YOLO switch on a session bound to
+  // a working directory (mirrors uiCodex modeYoloConfirm*, but says "working
+  // directory" instead of "project directory", hence separate keys).
+  yoloConfirmTitle:'Switch to YOLO mode?', yoloConfirmBody:'In this mode the model reads and writes your working directory fully automatically and can run shell commands, without step-by-step approvals.',
+  yoloConfirmHint:'Remembered globally once confirmed — you will not be asked again.', yoloConfirmOk:'Confirm', yoloConfirmCancel:'Cancel',
+};
+
 dictEn.uiSettingsDetail.memoryLoadFailed = 'Failed to load memory profile. Please try again.';
 
 dictEn.uiSettingsDetail.memorySaveFailed = 'Failed to save memory profile. Please try again.';
@@ -972,7 +1191,7 @@ Object.assign(dictEn.uiSettingsDetail, {
   autoDetectLocalModel:'Automatically detect local models',
   codingPlanTestUnavailable:'This provider endpoint cannot be tested right now, but you can still save the configuration',
   connectionMessages:{ ok:'Connection successful; service available', auth_invalid:'Invalid API Key. Check it and try again', auth_forbidden:'This API Key does not have access', billing:'Account balance is insufficient. Add balance or switch to another model', rate_limited:'Too many requests or insufficient quota. Try again later', redirect:'The endpoint redirected; availability could not be confirmed', request_invalid:'The request format was not accepted. Check the model configuration', timeout:'Connection timed out. Check the network or whether a local service is running', tls_error:'Security certificate verification failed. Check the proxy or network environment', dns_failed:'Could not resolve the service address. Check the network', connection_refused:'Could not connect. Make sure the local model service is running', server_unavailable:'Service is temporarily unavailable. Try again later', endpoint_not_found:'Endpoint unavailable', method_not_allowed:'The endpoint does not support test requests', http_error:'Connection failed. Check the configuration and retry', unknown:'Connection failed. Try again later' },
-  catalogSections:{ coding_plan:'Coding Plan', official_api:'Official APIs', custom:'Custom compatible endpoints' },
+  catalogSections:{ coding_plan:'Coding Plan', official_api:'Official APIs', aggregator:'Aggregators', custom:'Custom compatible endpoints' },
   providerCatalog:{
     local:{title:'Local Model',desc:'Default model for the local service'}, glm_coding_plan:{title:'Zhipu Coding Plan / GLM Coding Plan',configTitle:'Zhipu Coding Plan',desc:'Dedicated endpoint for coding and agent tasks'},
     tencent_coding_plan:{title:'Tencent Cloud Coding Plan',configTitle:'Tencent Cloud Coding Plan',desc:'Tencent Cloud coding-plan endpoint'},
@@ -992,6 +1211,11 @@ Object.assign(dictEn.uiSettingsDetail, {
     anthropic:{title:'Anthropic Claude',configTitle:'Anthropic Claude',desc:'Official Anthropic API (native Messages protocol)'},
     gemini:{title:'Google Gemini',configTitle:'Google Gemini',desc:'Gemini API (OpenAI-compatible endpoint)'},
     xai:{title:'xAI Grok',configTitle:'xAI Grok',desc:'Official xAI API'},
+    volcengine_coding_plan:{title:'Volcengine Ark Coding Plan',configTitle:'Volcengine Ark Coding Plan',desc:'Dedicated endpoint for the Volcengine Ark coding plan'},
+    qwen_coding_plan:{title:'Qwen Coding Plan',configTitle:'Qwen Coding Plan',desc:'Dedicated Alibaba Model Studio Coding Plan endpoint'},
+    openrouter:{title:'OpenRouter',configTitle:'OpenRouter',desc:'Official OpenRouter aggregator API'},
+    siliconflow:{title:'SiliconFlow China',configTitle:'SiliconFlow',desc:'Official SiliconFlow China API'},
+    siliconflow_global:{title:'SiliconFlow Global',configTitle:'SiliconFlow Global',desc:'SiliconFlow international API (keys are region-locked)'},
     openai_compatible:{title:'OpenAI Compatible',desc:'Custom OpenAI-compatible endpoint'},
   },
   imageCapability:'Image input', imageCapabilityEnabled:'Supports images', imageCapabilityDisabled:'No image support', imageCapabilityPinvou:'Handled automatically',
@@ -1020,13 +1244,14 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   'Coding Plan 自动模型':'Coding Plan automatic model',
   '自动模型，智能路由':'Automatic model with smart routing',
   'Hy 套餐专属模型':'Exclusive to the Hy plan',
-  '标准编码模型':'Standard coding model',
+  'K2.8 Preview，全档 1M 上下文':'K2.8 Preview, 1M context on all tiers',
   'K3 长上下文模型':'K3 long-context model', '高速编码模型':'High-speed coding model',
   'K3 256K 上下文，价格更低':'K3 with 256K context at a lower price',
   '官方已转 Legacy，兼容保留':'Officially legacy; kept for compatibility',
   '官方已转 Legacy，兼容高速':'Officially legacy; high-speed compatibility',
   '最新旗舰':'Latest flagship', '上代旗舰推理':'Previous-generation flagship reasoning',
   '均衡性价比':'Balanced and cost-effective', '快速高性价比':'Fast and cost-effective',
+  '快速高性价比，夜间同样四折':'Fast and cost-effective, also 40% credit cost at night',
   '旗舰推理与编码':'Flagship reasoning and coding', '均衡智能与成本':'Balanced intelligence and cost',
   '低成本高并发':'Low cost, high volume', '上代旗舰':'Previous-generation flagship',
   '快速经济':'Fast and economical',
@@ -1035,29 +1260,36 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
   '旗舰推理（预览）':'Flagship reasoning (preview)',
   // Model catalog entries (src/features/settings/model-catalog.js items[].desc)
   '旗舰编码模型，全套餐支持':'Flagship coding model, all plans', '原生多模态编码模型，额度三倍':'Native multimodal coding model, 3x quota',
+  '极速多模态，200 tokens/s':'Fast multimodal, 200 tokens/s',
   '历史模型，请求自动切换至 GLM-5.3':'Legacy model, requests auto-switch to GLM-5.3', '历史模型，自动切换至 GLM-5.3-Flash':'Legacy model, auto-switch to GLM-5.3-Flash',
   '历史模型，请求自动路由至 GLM-5.3':'Legacy model, requests auto-route to GLM-5.3', '历史模型，自动路由至 GLM-5.3-Flash':'Legacy model, auto-routes to GLM-5.3-Flash',
   '旗舰编码模型，官方将于 2026-10-09 下线':'Flagship coding model, will be retired on 2026-10-09', '官方将于 2026-10-09 下线':'Will be retired on 2026-10-09',
   '通用推理，官方将于 2026-10-09 下线':'General-purpose reasoning, will be retired on 2026-10-09',
+  '官方将于 2026-10-21 下线':'Will be retired on 2026-10-21',
   '多模态高性价比':'Multimodal and cost-effective', '最新多模态高性价比':'Latest multimodal, cost-effective',
+  '新预览旗舰，仅订阅渠道':'New preview flagship, subscription channels only',
   'Kimi 最新旗舰':'Latest Kimi flagship', 'Kimi 编码模型':'Kimi coding model', 'MiniMax 最新旗舰':'Latest MiniMax flagship',
-  'Hy4 预览，高峰期可能限频':'Hy4 preview; may be rate-limited at peak',
   'V4.1-Flash 主力，1M 上下文，支持图片输入':'V4.1-Flash mainline, 1M context, image input', '在售；官方确认 2026-09-14 后继续提供且计费不变':'On sale; officially continues past 2026-09-14 with billing unchanged',
   '最新旗舰，强制思考':'Latest flagship, thinking always on', '最新旗舰，1M 上下文多模态':'Latest flagship, 1M context, multimodal',
-  '最新旗舰，1M 上下文':'Latest flagship, 1M context', '全模态理解（图片/视频）':'Full-modal understanding (image/video)',
+  '最新旗舰，1M 上下文':'Latest flagship, 1M context',
+  'Hy4 预览':'Hy4 preview',
   '上代旗舰推理（纯文本）':'Previous-generation flagship reasoning (text-only)', '上代快速款':'Previous-generation fast model',
-  '正式旗舰，夜间 22:00-08:00 五折（个人版）':'GA flagship, 50% off 22:00-08:00 (personal plan)',
-  '轻量兼容款，支持图像输入':'Lightweight compatibility option, image input', '快速响应，暂不支持 Responses API':'Fast responses; Responses API not yet supported',
-  '最新推荐，周级滚动升级':'Latest recommended, weekly rolling updates', '低成本低时延，效果比肩 2-1-pro':'Low cost, low latency, near 2-1-pro quality',
-  '编程特化（预览）':'Coding-specialized (preview)', '最强旗舰；仅 Responses 协议支持函数调用':'Strongest flagship; function calling only via Responses API',
+  '正式旗舰，夜间 22:00-08:00 四折（个人版）':'GA flagship, 40% credit cost 22:00-08:00 (personal plan)',
+  '轻量兼容款，支持图像输入':'Lightweight compatibility option, image input',
+  '最新推荐，统一模型 ID 自动升级':'Latest recommended, auto-updating under one Model ID', '低成本低时延，效果比肩 2-1-pro':'Low cost, low latency, near 2-1-pro quality',
+  '编程特化（预览），官方即将下线':'Coding-specialized (preview); retiring soon per official docs', '稳定通用，官方即将下线':'Stable general-purpose model; retiring soon per official docs', '最强旗舰；仅 Responses 协议支持函数调用':'Strongest flagship; function calling only via Responses API',
+  '编码与 Agent 新旗舰；Chat 协议仅 effort=none 支持函数调用':'New coding/agent flagship; Chat wire function calling only at effort=none',
+  '低价高效；Chat 协议仅 effort=none 支持函数调用':'Low-cost and efficient; Chat wire function calling only at effort=none',
   'GPT-5.6 家族旗舰，推理与编码':'GPT-5.6 family flagship, reasoning and coding',
   '最强旗舰，高难推理与长程 Agent':'Strongest flagship, hard reasoning and long-running agents',
-  '上代旗舰，兼容保留':'Previous-generation flagship, kept for compatibility', '复杂 Agent 编码，默认推荐':'Complex agentic coding, recommended default',
+  '官方默认推荐，复杂 Agent 编码':'Official default recommendation, complex agentic coding',
+  '上代旗舰，兼容保留':'Previous-generation flagship, kept for compatibility',
   '最快，200K 上下文':'Fastest, 200K context', '上一代 Flash':'Previous-generation Flash',
   '基线速度，兼容保留':'Baseline speed, kept for compatibility',
   '旗舰，编码与 Agent 默认推荐':'Flagship, default pick for coding and agents', '上代旗舰，编码与 Agent':'Previous-generation flagship, coding and agents',
   '4.20 推理，1M 上下文':'4.20 reasoning, 1M context', '4.20 非推理，1M 上下文':'4.20 non-reasoning, 1M context',
   '快速可靠，强工具调用':'Fast and reliable, strong tool calling', '代码 Agent，256K 上下文':'Coding agent, 256K context',
+  '全模态，低成本':'Full-modal, low cost', '旗舰效果，极速输出':'Flagship quality, ultra-fast output',
 });
 
 dictEn.uiSettingsDetail.customCodingPlanDesc = 'Enter a Coding Plan model ID manually';
@@ -1069,6 +1301,8 @@ dictEn.uiSettingsDetail.customModelTitles = {
   glm:'Custom GLM model', qwen:'Custom Qwen model',
   openai_compatible:'Custom compatible model', glm_coding_plan:'Custom GLM Coding Plan model',
   tencent_coding_plan:'Custom Tencent Cloud Coding Plan model', tencent_token_plan:'Custom Tencent Cloud Token Plan model', kimi_coding_plan:'Custom Kimi Coding Plan model',
+  volcengine_coding_plan:'Custom Volcengine Ark Coding Plan model', qwen_coding_plan:'Custom Qwen Coding Plan model',
+  openrouter:'Custom OpenRouter model', siliconflow:'Custom SiliconFlow model', siliconflow_global:'Custom SiliconFlow model',
 };
 
 // Official 主线在词典拆分基线之后新增或调整的文案。
@@ -1962,7 +2196,6 @@ Object.assign(dictEn.uiChat, {
   bgTasks: 'Background Tasks',
   bgTasksRunning: n => `${n} background task${n === 1 ? '' : 's'} running`,
 });
-
 // Windows desktop remote control: controlled-device panel (DEV-21).
 dictEn["controlledDevice"] = {
   connectionTitle: "Connection status",
@@ -2243,3 +2476,6 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 // (same pattern as "Help & Feedback → Behavior analytics").
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
+// restored: baseline catalog descriptions (referenced by the model catalog data)
+Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
+});

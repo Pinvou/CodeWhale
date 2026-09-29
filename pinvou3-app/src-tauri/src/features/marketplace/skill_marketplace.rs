@@ -35,8 +35,7 @@ static MARKETPLACE_DIR: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/common/skill-marketplace");
 
 /// 单个 skill 子树未压缩大小上限(防御性,预置/上传都适用)。
-/// `pub(crate)`:命令层 `import_skill_package_bytes` 复用同一上限。
-pub(crate) const MAX_SKILL_SIZE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_SKILL_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// 安装来源标记文件名。卸载时校验它存在,避免误删内置/手放的 skill。
 const INSTALLED_FROM_MARKER: &str = ".installed-from";
@@ -76,7 +75,7 @@ fn preset_manifests() -> &'static [SkillManifest] {
             source_dir: "government-writing",
             title: "党政机关公文写作",
             subtitle: "通知/意见等法定文种，套话术、层级序号、自检",
-            description: "撰写规范的党政机关公文（通知、意见…）：内置文种结构骨架、固定话术库、层级序号体系与立账核账自检，产出结构化公文内容。配合工具商店的「公文写作」工具即可直出 GB/T 9704 合规 .docx。",
+            description: "撰写规范的党政机关公文（通知、意见…）：内置文种结构骨架、固定话术库、层级序号体系与立账核账自检，产出结构化公文内容。配合插件中心的「公文写作」工具即可直出 GB/T 9704 合规 .docx。",
             icon: "FileText",
             color: "bg-gradient-to-b from-red-500 to-rose-700",
         },
@@ -86,7 +85,7 @@ fn preset_manifests() -> &'static [SkillManifest] {
             source_dir: "pptx",
             title: "PPT 生成",
             subtitle: "本地直出可编辑 PowerPoint，套主题模板、真图表、带封面",
-            description: "本地直出可编辑 PowerPoint（.pptx）：先列大纲确认，再按内容自动选主题（9 套）产结构化 deck，渲染器套主题模板生成真·可编辑图表、自带封面缩略图的演示文稿，数据不出机。配合工具商店的「PPT 生成」工具即可直出 .pptx。",
+            description: "本地直出可编辑 PowerPoint（.pptx）：先列大纲确认，再按内容自动选主题（9 套）产结构化 deck，渲染器套主题模板生成真·可编辑图表、自带封面缩略图的演示文稿，数据不出机。配合插件中心的「PPT 生成」工具即可直出 .pptx。",
             icon: "Presentation",
             color: "bg-gradient-to-b from-orange-400 to-rose-500",
         },
@@ -136,7 +135,7 @@ fn preset_manifests() -> &'static [SkillManifest] {
             source_dir: "tencent-docs-skill",
             title: "腾讯文档",
             subtitle: "在线文档/表格/幻灯片/智能表格 创建、编辑、管理",
-            description: "腾讯文档官方 MCP Skill（v1.0.41 适配版）：配合工具商店「腾讯文档 MCP」连接器使用，内置官方品类路由（智能文档/Word/Excel/PPT/思维导图/流程图/智能表格）与完整工具 API 参考。Token 由连接器写入本机系统凭据。",
+            description: "腾讯文档官方 MCP Skill（v1.0.41 适配版）：配合插件中心「腾讯文档 MCP」连接器使用，内置官方品类路由（智能文档/Word/Excel/PPT/思维导图/流程图/智能表格）与完整工具 API 参考。Token 由连接器写入本机系统凭据。",
             icon: "FileText",
             color: "bg-gradient-to-b from-blue-500 to-indigo-600",
         },
@@ -293,15 +292,15 @@ impl SkillMarketplaceManager {
                     if !dir.join("SKILL.md").is_file() {
                         continue;
                     }
-                    // 用户自定义展示覆盖（bundles.json extra）优先；空/缺 key 回退
-                    // 现状（title=上传文件名去扩展名 → 记录 id、description=SKILL.md
-                    // frontmatter）。
-                    let display_name =
-                        super::store::display_override(&record, super::store::EXTRA_DISPLAY_NAME);
-                    let display_description = super::store::display_override(
-                        &record,
-                        super::store::EXTRA_DISPLAY_DESCRIPTION,
-                    );
+                    // User-defined display overrides (bundles.json extra) win;
+                    // an empty/missing key falls back to the current behavior
+                    // (title = uploaded filename without extension → record id,
+                    // description = SKILL.md frontmatter). Records are already
+                    // filtered to the Upload source, and this override lookup
+                    // shares `apply_display_override` with the other two lists
+                    // (list_tools / list_bundles).
+                    let (display_name, display_description) =
+                        super::store::apply_display_override(&record, None, None);
                     out.push(MarketplaceSkillInfo {
                         id: record.id.clone(),
                         title: display_name
@@ -366,30 +365,132 @@ impl SkillMarketplaceManager {
         }
     }
 
-    /// 已安装技能的市场 id（含预置与用户上传）。code scope 未初始化「默认全禁
-    /// 已装技能」的兜底集合来源（见 `skill_materialization::load_disabled_skills_for`）。
+    /// Market ids of installed skills (presets and user uploads). Source of the
+    /// "deny all installed skills by default" fallback set for an uninitialized
+    /// code scope (see `scope::load_disabled_bundles_for`), plus the display/list
+    /// paths.
+    ///
+    /// Deliberately does not go through `list_skills`: that assembly path computes
+    /// a directory-tree SHA-256 fingerprint per installed preset skill
+    /// (`preset_update_available`); these paths only care about install state.
+    /// Lenient read: a per-entry IO failure counts as "not installed" and is
+    /// swallowed — fine for display/list paths, fail-open for a consent gate.
+    /// The DenyAll default computation must use `installed_skill_ids_strict`.
     pub fn installed_skill_ids(&self) -> Vec<String> {
-        self.list_skills()
+        let mut out: Vec<String> = preset_manifests()
+            .iter()
+            .filter(|m| self.is_installed(m.skill_name))
+            .map(|m| m.id.to_string())
+            .collect();
+        match self.bundle_store.records() {
+            Ok(records) => {
+                for record in records {
+                    if !matches!(record.source, super::store::BundleSource::Upload(_)) {
+                        continue;
+                    }
+                    if self.is_installed(&record.id) {
+                        out.push(record.id);
+                    }
+                }
+            }
+            Err(e) => log::warn!(
+                "[skill-marketplace] failed to read BundleStore; installed_skill_ids falls back to bundled skills only: {e}"
+            ),
+        }
+        out
+    }
+
+    /// Strict variant of `installed_skill_ids`, used only by the DenyAll default
+    /// deny-list computation (`resolve_scope_disabled_ids`); display/list paths
+    /// keep the lenient read. Returns `(ids, degraded)`:
+    ///
+    /// - `degraded = false`: `ids` is the trusted full set, with the same id
+    ///   vocabulary as the lenient path (preset market ids / upload skill names).
+    /// - `degraded = true`: some probe could not distinguish "installed" from
+    ///   "absent" (permissions / transient IO, #531), so `ids` may be missing
+    ///   installed skills. The caller must then blanket over-deny — see
+    ///   `scope::resolve_scope_disabled_ids`, which unions the owner packages
+    ///   of all preset skills and all store-known upload records (a superset of
+    ///   everything this enumeration can name).
+    ///
+    /// Accepted residuals, logged loudly when hit: with an unreadable bundle
+    /// store the upload population itself is unknowable, and a *missing* store
+    /// file reads as "no uploads" (a fresh install is indistinguishable from an
+    /// empty registry). A packages root that is structurally not a directory
+    /// (NotFound / ENOTDIR family) answers "no skills on disk" without
+    /// degrading.
+    pub(crate) fn installed_skill_ids_strict(&self) -> (Vec<String>, bool) {
+        let mut degraded = false;
+        // A packages-root read failure (non-structural) blinds both the
+        // claimed-dir context checks and the straggler-copy scan.
+        if let Err(e) = std::fs::read_dir(&self.packages_root) {
+            if !matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) {
+                log::warn!(
+                    "[skill-marketplace] failed to scan {} ({e}); DenyAll default degrades (over-deny)",
+                    self.packages_root.display()
+                );
+                degraded = true;
+            }
+        }
+        let mut ids: Vec<String> = Vec::new();
+        for m in preset_manifests() {
+            if probe_installed_by_name(self, m.skill_name, &mut degraded) {
+                ids.push(m.id.to_string());
+            }
+        }
+        // Uploads: an unreadable store makes the population unknowable (no
+        // recoverable truth) → degrade. A missing skill dir still reads as
+        // "uninstalled" (same semantics as the lenient path); only a failed
+        // probe degrades.
+        match self.bundle_store.records() {
+            Ok(records) => {
+                for record in records {
+                    if !matches!(record.source, super::store::BundleSource::Upload(_)) {
+                        continue;
+                    }
+                    if probe_installed_by_name(self, &record.id, &mut degraded) {
+                        ids.push(record.id.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "[skill-marketplace] failed to read the bundle store; upload skills unenumerable ({e}); DenyAll default degrades (over-deny)"
+                );
+                degraded = true;
+            }
+        }
+        (ids, degraded)
+    }
+
+    /// Market ids of all preset skills (compile-time embedded manifests, disk
+    /// independent). The DenyAll default computation blanket-unions their owner
+    /// packages into the deny set when enumeration degrades (over-denial
+    /// fallback).
+    pub(crate) fn preset_skill_ids() -> impl Iterator<Item = String> {
+        preset_manifests().iter().map(|m| m.id.to_string())
+    }
+
+    /// Market ids of user-uploaded skills, read leniently from the bundle store
+    /// (a failing store yields an empty list). Used only by the DenyAll default
+    /// computation's degraded blanket union in `resolve_scope_disabled_ids`, to
+    /// keep possibly-installed upload owner packages denied when per-skill
+    /// probes are blinded (e.g. by an unreadable packages root).
+    pub(crate) fn uploaded_skill_ids(&self) -> Vec<String> {
+        self.bundle_store
+            .records()
+            .unwrap_or_default()
             .into_iter()
-            .filter(|s| s.installed)
-            .map(|s| s.id)
+            .filter(|record| matches!(record.source, super::store::BundleSource::Upload(_)))
+            .map(|record| record.id)
             .collect()
     }
 
     fn preset(&self, id: &str) -> Option<&'static SkillManifest> {
         preset_manifests().iter().find(|m| m.id == id)
-    }
-
-    /// 市场 id → 落盘 skill 名(= SKILL.md frontmatter `name` = 底座 `Skill.name`)。
-    /// 预置查清单(id 可与 skill_name 不同);上传技能的 id 即目录名,直通。底座按此名过滤。
-    pub fn model_skill_names(&self, ids: &[String]) -> Vec<String> {
-        ids.iter()
-            .map(|id| {
-                self.preset(id)
-                    .map(|m| m.skill_name.to_string())
-                    .unwrap_or_else(|| id.clone())
-            })
-            .collect()
     }
 
     /// 安装预置技能:从嵌入资源复制到 `bundles/<owner>/skills/<name>/`
@@ -761,22 +862,23 @@ impl SkillMarketplaceManager {
                 let owner = super::bundle::skill_owner_package(&dir_name);
                 let pkg_dir = self.packages_root.join(skill_id);
                 if owner == skill_id && pkg_dir.is_dir() {
-                    // 独立上传技能包：整个 bundles/<id>/ 搬入回收站（技能内容是
-                    // 用户唯一副本），跳过下方 remove_dir_all。
-                    let display_name = match &record.source {
-                        super::store::BundleSource::Upload(zip) => zip.clone(),
-                        _ => skill_id.to_string(),
-                    };
+                    // Standalone uploaded skill package: move the whole
+                    // bundles/<id>/ into the recycle bin (the skill content is
+                    // the user's only copy) and skip the remove_dir_all below.
+                    // kind is pinned to KIND_SKILL (the record id is the skill
+                    // name; no directory-shape inference); it shares the
+                    // recycle_upload_package core with the two MCP recycle
+                    // paths.
                     if let Err(e) = self.bundle_store.remove(skill_id) {
                         log::warn!(
                             "[skill-marketplace] bundles.json 镜像删除失败（uninstall {skill_id}）: {e}"
                         );
                     }
-                    if let Err(e) = self.recycle_bin.recycle_package(
+                    if let Err(e) = super::recycle_bin::recycle_upload_package(
+                        &self.recycle_bin,
                         skill_id,
+                        &record,
                         super::recycle_bin::KIND_SKILL,
-                        &display_name,
-                        record.clone(),
                     ) {
                         // 回收失败（目录已回滚原位）：登记回写保持一致，卸载 fail loud。
                         if let Err(re) = self.bundle_store.upsert(record) {
@@ -838,7 +940,9 @@ impl SkillMarketplaceManager {
 
     /// 导入用户上传的 zip 技能包:解压找 SKILL.md → 安全校验 → 落盘到
     /// `bundle/skills/<name>/`。穿越/symlink/大小防护对齐底座 install.rs。
-    /// 返回落盘技能名(frontmatter name),供命令层同步 scope 禁用集。
+    /// 返回落盘技能名(frontmatter name)。生产通道走 `import_package_named`;
+    /// 本封装仅剩契约测试在用。
+    #[cfg(test)]
     pub fn import_package(&self, zip_path: &str) -> Result<String, String> {
         let fname = Path::new(zip_path)
             .file_name()
@@ -1119,13 +1223,13 @@ impl SkillMarketplaceManager {
     /// 恢复原值；模型侧看到的技能描述与展示侧一致，展示层仍由 extra 覆盖优先）。
     ///
     /// 仅当 `bundles/<id>/skills/` 下恰有一个技能目录且内含 SKILL.md 时动文件；
-    /// 多技能包、纯 MCP 包、目录缺失一律跳过（返回 Ok(false)，不报错）。改文件后
+    /// 多技能包、纯 MCP 包、目录缺失一律跳过（返回 Ok(())，不报错）。改文件后
     /// 重算**整包目录**内容指纹并经 upsert_preserving 补写登记（保留
     /// extra/来源/首装时间——display_* 覆盖与说明备份都在 extra，一并保留）。
-    fn sync_display_description(&self, bundle_id: &str, dir: SyncDesc<'_>) -> Result<bool, String> {
+    fn sync_display_description(&self, bundle_id: &str, dir: SyncDesc<'_>) -> Result<(), String> {
         let skills_dir = self.packages_root.join(bundle_id).join("skills");
         let Ok(rd) = std::fs::read_dir(&skills_dir) else {
-            return Ok(false); // 非按包布局（纯 MCP 包/旧扁平残留）→ 跳过
+            return Ok(()); // 非按包布局（纯 MCP 包/旧扁平残留）→ 跳过
         };
         let dirs: Vec<PathBuf> = rd
             .flatten()
@@ -1140,11 +1244,11 @@ impl SkillMarketplaceManager {
                 skills_dir.display(),
                 dirs.len()
             );
-            return Ok(false); // 多技能包/空包/杂目录 → 跳过
+            return Ok(()); // 多技能包/空包/杂目录 → 跳过
         }
         let md_path = dirs[0].join("SKILL.md");
         if !md_path.is_file() {
-            return Ok(false);
+            return Ok(());
         }
         match dir {
             SyncDesc::Set(desc) => {
@@ -1166,12 +1270,12 @@ impl SkillMarketplaceManager {
                     )?;
                 }
                 self.write_skill_md_and_fingerprint(bundle_id, &md_path, content, new_content)?;
-                Ok(true)
+                Ok(())
             }
             SyncDesc::Restore => {
                 // 无备份（从未回写过，或非单技能包形态）→ 不动文件。
                 let Some(backup) = self.bundle_store.skill_desc_backup(bundle_id)? else {
-                    return Ok(false);
+                    return Ok(());
                 };
                 let content = std::fs::read_to_string(&md_path)
                     .map_err(|e| format!("读取 {} 失败: {e}", md_path.display()))?;
@@ -1192,7 +1296,7 @@ impl SkillMarketplaceManager {
                 }
                 // 恢复完成（或本就是原值）→ 清备份 key，回到「从未回写过」状态。
                 self.bundle_store.set_skill_desc_backup(bundle_id, None)?;
-                Ok(true)
+                Ok(())
             }
         }
     }
@@ -1389,6 +1493,89 @@ impl SkillMarketplaceManager {
     }
 }
 
+/// Per-skill installation probe for
+/// `SkillMarketplaceManager::installed_skill_ids_strict`: candidate dirs in the
+/// same order as `find_skill_dir` (claimed dir → straggler copies → legacy flat
+/// layout), each probed with an error-visible SKILL.md check.
+///
+/// - `NotFound` / `NotADirectory` continue as "not installed": both structurally
+///   answer "no skill dir here" (a stray file in the packages root makes joined
+///   candidates ENOTDIR and must not read as degradation on a healthy system).
+/// - Any other IO error (permissions / transient IO) may hide an installed
+///   skill: it is logged loudly and recorded in `degraded`, so the caller can
+///   bias its default toward over-denial instead of trusting a shrunk list.
+///
+/// Unlike `find_skill_dir` (first existing dir wins), acceptance ORs SKILL.md
+/// across all candidates — a deliberately stricter "installed" verdict for a
+/// consent-gate default. Returns whether the skill is installed.
+fn probe_installed_by_name(
+    manager: &SkillMarketplaceManager,
+    name: &str,
+    degraded: &mut bool,
+) -> bool {
+    let mut candidates = vec![manager.package_skill_dir(name)];
+    match std::fs::read_dir(&manager.packages_root) {
+        Ok(rd) => {
+            for entry in rd {
+                // A mid-listing error can hide straggler copies; swallowing it
+                // would read as "absent", so it must degrade instead.
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        log::warn!(
+                            "[skill-marketplace] failed to list entries under {} ({e}); DenyAll default degrades (over-deny)",
+                            manager.packages_root.display()
+                        );
+                        *degraded = true;
+                        continue;
+                    }
+                };
+                let cand = entry.path().join("skills").join(name);
+                if !candidates.contains(&cand) {
+                    candidates.push(cand);
+                }
+            }
+        }
+        // Structural absence (or not-a-directory) of the packages root answers
+        // "no straggler copies"; the caller's preamble flags every other
+        // root-read failure.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
+        Err(e) => {
+            log::warn!(
+                "[skill-marketplace] failed to scan {} ({e}); DenyAll default degrades (over-deny)",
+                manager.packages_root.display()
+            );
+            *degraded = true;
+        }
+    }
+    candidates.push(manager.legacy_skills_dir.join(name));
+    let mut installed = false;
+    for cand in candidates {
+        let md_path = cand.join("SKILL.md");
+        match std::fs::metadata(&md_path) {
+            Ok(md) => installed |= md.is_file(),
+            // ENOTDIR joins NotFound as structural absence (see fn doc).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => {
+                log::warn!(
+                    "[skill-marketplace] failed to probe {} ({e}); DenyAll default degrades (over-deny)",
+                    md_path.display()
+                );
+                *degraded = true;
+            }
+        }
+    }
+    installed
+}
+
 /// 技能布局迁移报告（启动标记/日志观测用）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillsMigrationReport {
@@ -1502,10 +1689,14 @@ impl std::ops::Deref for LockedSkillManager {
     }
 }
 
-/// 收集嵌入资源子树的 `(相对路径, 内容)` 列表,供更新检测比对。
-/// 口径与 [`extract_embedded_subdir`] 一致:strip `source_dir` 前缀、跳过 SOURCE.md、
-/// 跳过 `__pycache__`/`*.pyc`——否则构建期混入的 pyc 会让内嵌指纹永远 ≠ 落盘
-/// 指纹，`update_available` 幽灵常亮（G6）。
+/// Collect the `(relative path, contents)` list of the embedded resource
+/// subtree for update detection.
+/// Same rules as [`extract_embedded_subdir`]: strip the `source_dir` prefix,
+/// skip SOURCE.md, and skip `__pycache__`/`*.pyc` (the shared
+/// `plugin_import::is_python_cache_rel_path` predicate used by package import
+/// comparison and package export) — otherwise pyc files mixed in at build
+/// time would make the embedded fingerprint permanently differ from the
+/// on-disk fingerprint, keeping `update_available` stuck on (G6).
 fn collect_embedded_files(dir: &Dir<'_>, source_dir: &str, out: &mut Vec<(String, Vec<u8>)>) {
     let prefix = format!("{source_dir}/");
     for file in dir.files() {
@@ -1514,7 +1705,7 @@ fn collect_embedded_files(dir: &Dir<'_>, source_dir: &str, out: &mut Vec<(String
         if Path::new(rel).file_name().and_then(|s| s.to_str()) == Some("SOURCE.md") {
             continue;
         }
-        if is_python_cache_path(Path::new(rel)) {
+        if super::plugin_import::is_python_cache_rel_path(rel) {
             continue;
         }
         out.push((rel.to_string(), file.contents().to_vec()));
@@ -1624,13 +1815,13 @@ fn fingerprint_of(files: &mut [(String, Vec<u8>)]) -> String {
     crate::platform::encoding::hex_lower(&digest.finalize())
 }
 
-/// 相对 include_dir 根的路径是否属于 Python 编译缓存(`__pycache__/` 子树内
-/// 或任意层级的 `.pyc`,大小写不敏感)。纯函数便于单测。
+/// Whether a path relative to the include_dir root is Python compilation
+/// cache (inside a `__pycache__/` subtree or a `.pyc` at any level, case
+/// insensitive). Pure function for easy unit testing; the predicate is the
+/// single `plugin_import::is_python_cache_rel_path` rule shared with package
+/// import comparison and package export.
 fn is_python_cache_path(rel: &std::path::Path) -> bool {
-    rel.components().any(|c| c.as_os_str() == "__pycache__")
-        || rel
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("pyc"))
+    super::plugin_import::is_python_cache_rel_path(&rel.to_string_lossy())
 }
 
 fn read_skill_name(md_path: &Path) -> Option<String> {
@@ -1692,7 +1883,7 @@ fn read_skill_description(md_path: &Path) -> Option<String> {
 /// 一致由本镜像 + `skill_description_mirrors_engine_flat_parser` 测试钉住
 /// ——该测试锁定的是语义清单而非引擎本身，CodeWhale 侧改动 `parse_skill`
 /// 时须人工对照同步这里。改这里前先对照引擎实现。
-pub(crate) fn read_skill_description_from_str(content: &str) -> Option<String> {
+fn read_skill_description_from_str(content: &str) -> Option<String> {
     if !content.trim_start().starts_with("---") {
         return None;
     }
@@ -2820,7 +3011,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 保护契约回归：只剩无标记旧扁平目录（内置/手放）时仍拒绝删除。
+    /// 保护契约回归：只剩无标记旧扁平目录（内置/手放,任意名字含历史用例 pua）时
+    /// 仍拒绝删除。
     #[test]
     fn uninstall_still_protects_unmarked_legacy_dir() {
         let tmp = fresh_dir("protect_unmarked");
@@ -3448,19 +3640,6 @@ mod tests {
             mgr.uninstall("tencent-docs-skill").unwrap();
             assert!(!skill_dir.exists(), "卸载应删目录");
         });
-    }
-
-    /// 不在包目录的目录（旧布局内置/手放）拒绝卸载,防误删。
-    #[test]
-    fn uninstall_refuses_non_market_dir() {
-        let tmp = fresh_dir("protect");
-        let legacy = tmp.join("bundle/skills");
-        std::fs::create_dir_all(legacy.join("pua")).unwrap();
-        std::fs::write(legacy.join("pua").join("SKILL.md"), "---\nname: pua\n---").unwrap();
-        let mgr = SkillMarketplaceManager::with_roots(tmp.clone());
-        assert!(mgr.uninstall("pua").is_err(), "非市场目录应拒删");
-        assert!(legacy.join("pua").exists(), "目录应保留");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// 用户上传 zip:解压找 SKILL.md → 按 frontmatter name 落盘 → list 标 user_uploaded。

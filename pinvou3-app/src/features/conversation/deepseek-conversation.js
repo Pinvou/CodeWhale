@@ -107,6 +107,7 @@ function emptyTurn(id) {
     startedAt: null,
     completedAt: null,
     lifecycleKnown: false,
+    behaviorTurnId: null,
     operationCount: 0,
     failedOperationCount: 0,
   };
@@ -126,10 +127,6 @@ function timelineUsage(usage) {
   return {
     inputTokens: Number(usage.input_tokens || 0),
     outputTokens: Number(usage.output_tokens || 0),
-    cacheHitTokens: Number(usage.cache_hit_tokens || 0),
-    cacheMissTokens: Number(usage.cache_miss_tokens || 0),
-    cacheWriteTokens: Number(usage.cache_write_tokens || 0),
-    reasoningTokens: Number(usage.reasoning_tokens || 0),
   };
 }
 
@@ -171,6 +168,8 @@ export function timelineDisplayError(error, options = {}) {
 /**
  * timing_events.jsonl 是 DeepSeek 回合生命周期的事实源。这里把
  * user_start / assistant_done 配成只读 Turn 元数据，不改写消息历史。
+ * Exported for tests (deepseek_conversation_timeline.test.mjs) — no runtime
+ * consumer outside this module.
  */
 export function pairDeepSeekTimeline(events = [], options = {}) {
   const ordered = [...events]
@@ -192,6 +191,7 @@ export function pairDeepSeekTimeline(events = [], options = {}) {
         error: null,
         userError: null,
         usage: null,
+        behaviorTurnId: null,
       };
       byId.set(id, record);
       records.push(record);
@@ -200,6 +200,9 @@ export function pairDeepSeekTimeline(events = [], options = {}) {
       record.startedAt = Number(event.timestamp || 0) || event.ts || null;
       if (Number.isInteger(event.ui_turn_index)) record.turnIndex = event.ui_turn_index;
     } else {
+      if (event.behavior_turn_id) {
+        record.behaviorTurnId = String(event.behavior_turn_id);
+      }
       record.completedAt = Number(event.timestamp || 0) || event.ts || null;
       record.rawStatus = String(event.status || '');
       record.status = normalizeTurnStatus(event.status, true);
@@ -243,6 +246,7 @@ function assignDeepSeekTimelines(userTurns, timelineEvents, busy, options) {
       startedAt: record.startedAt,
       completedAt: record.completedAt,
       usage: record.usage,
+      behaviorTurnId: record.behaviorTurnId,
       lifecycleKnown: true,
     });
     assigned.add(record.id);
@@ -265,6 +269,7 @@ function assignDeepSeekTimelines(userTurns, timelineEvents, busy, options) {
       startedAt: record.startedAt,
       completedAt: record.completedAt,
       usage: record.usage,
+      behaviorTurnId: record.behaviorTurnId,
       lifecycleKnown: true,
     });
   });
@@ -295,6 +300,7 @@ function transferSteeredRunTerminals(turns) {
         tail.startedAt = head.startedAt;
         tail.completedAt = head.completedAt;
         tail.usage = head.usage;
+        tail.behaviorTurnId = head.behaviorTurnId;
         tail.lifecycleKnown = true;
         for (let clear = start; clear < end; clear += 1) {
           turns[clear].status = 'completed';
@@ -302,6 +308,7 @@ function transferSteeredRunTerminals(turns) {
           turns[clear].userError = null;
           turns[clear].completedAt = null;
           turns[clear].usage = null;
+          turns[clear].behaviorTurnId = null;
           turns[clear].lifecycleKnown = false;
         }
       }

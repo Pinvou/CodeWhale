@@ -15,8 +15,8 @@ use crate::features::connectors::connector_cli::{self as cc, CliCtx, ConnectorCo
 use crate::features::connectors::skill_gate::ConnectorSkillGate;
 
 const ID: &str = "tmeet";
-const TMEET_NPM_SPEC: &str = "@tencentcloud/tmeet@1.0.15";
-const TMEET_MIN_VERSION: (u64, u64, u64) = (1, 0, 15);
+const TMEET_NPM_SPEC: &str = "@tencentcloud/tmeet@1.0.18";
+const TMEET_MIN_VERSION: (u64, u64, u64) = (1, 0, 18);
 
 const TMEET_CTX: CliCtx = CliCtx {
     cli_bin: "tmeet",
@@ -45,23 +45,25 @@ fn parse_tmeet_version(s: &str) -> Option<(u64, u64, u64)> {
     cc::parse_semver3(version)
 }
 
-fn version_at_least(v: (u64, u64, u64), min: (u64, u64, u64)) -> bool {
-    v >= min
+fn tmeet_cli_version() -> Option<(u64, u64, u64)> {
+    tmeet_cli_version_probe().ok().flatten()
 }
 
-fn tmeet_cli_version() -> Option<(u64, u64, u64)> {
-    let Ok((ok, so, se)) = cc::run(tmeet(&["--version"])) else {
-        return None;
-    };
+/// `--version` 探测三态:`Ok(Some(v))` 已安装可用;`Ok(None)` 已安装但退出
+/// 非零/版本无法解析;`Err(ProbeError)` 探测本身失败,按 Spawn/Timeout/Other
+/// 分型。状态轮询把失败都折叠成「未连接」;断开登录路径必须按分型与探测
+/// 结果区别对待,见 [`tmeet_logout`]。
+fn tmeet_cli_version_probe() -> Result<Option<(u64, u64, u64)>, cc::ProbeError> {
+    let (ok, so, se) = cc::run_probe(tmeet(&["--version"]))?;
     if !ok {
-        return None;
+        return Ok(None);
     }
-    parse_tmeet_version(&so).or_else(|| parse_tmeet_version(&se))
+    Ok(parse_tmeet_version(&so).or_else(|| parse_tmeet_version(&se)))
 }
 
 fn tmeet_cli_present() -> bool {
     tmeet_cli_version()
-        .map(|v| version_at_least(v, TMEET_MIN_VERSION))
+        .map(|v| v >= TMEET_MIN_VERSION)
         .unwrap_or(false)
 }
 
@@ -106,30 +108,59 @@ fn auth_lines_say_already_logged_in(auth_lines: &std::collections::VecDeque<Stri
 }
 
 fn safe_auth_log_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("access_token")
-        || lower.contains("refresh_token")
-        || lower.contains("authorization:")
-        || lower.contains("bearer ")
-        || lower.contains("token")
-    {
-        return Some("[redacted credential line]".to_string());
-    }
-    Some(trimmed.chars().take(320).collect())
+    cc::safe_auth_log_line(line, true)
 }
 
 fn install_tmeet_cli() -> Result<bool, String> {
-    let mut c = TMEET_CTX.base_cmd("npm");
-    cc::apply_user_npm_prefix(&mut c);
-    c.args(["install", "-g", TMEET_NPM_SPEC]);
-    cc::run_with_timeout(c, 180)
+    // registry.npmjs.org is often unreachable on China networks: after the
+    // default registry fails outright, retry this invocation once via
+    // npmmirror (only appending --registry, never reading or writing the
+    // user's npm config), the same policy as the codex/claude npm upgrade
+    // mirror retry; both attempts' output is separated by marker lines and
+    // appended in order to cli-install.log, so the first failure's cause is
+    // not lost.
+    let attempt = |registry: Option<&str>| -> Result<bool, String> {
+        let mut c = TMEET_CTX.base_cmd("npm");
+        cc::apply_user_npm_prefix(&mut c);
+        c.args(["install", "-g", TMEET_NPM_SPEC]);
+        if let Some(registry) = registry {
+            c.arg(format!("--registry={registry}"));
+        }
+        // run_with_timeout only returns a success boolean; output is
+        // uniformly appended to cli-install.log for diagnosis.
+        cc::run_with_timeout(c, 180)
+    };
+    cc::append_cli_install_log("── npm install @tencentcloud/tmeet (default npm registry) ──");
+    let first = attempt(None);
+    if first.as_ref().is_ok_and(|ok| *ok) {
+        return Ok(true);
+    }
+    cc::append_cli_install_log("── default registry failed, retrying via npmmirror ──");
+    let second = attempt(Some(crate::platform::download::NPM_MIRROR_REGISTRY));
+    if second.as_ref().is_ok_and(|ok| *ok) {
+        return Ok(true);
+    }
+    // When both attempts fail, preserve the causal chain starting from the
+    // first error: reporting only the retry error would bury a first failure
+    // unrelated to the network (EACCES / disk full etc.) in the log.
+    let mut causes: Vec<String> = Vec::new();
+    if let Err(primary) = &first {
+        causes.push(format!("default registry error: {primary}"));
+    }
+    if let Err(retry) = &second {
+        causes.push(format!("npmmirror retry error: {retry}"));
+    }
+    let detail = if causes.is_empty() {
+        "both the default registry and the npmmirror mirror failed".to_string()
+    } else {
+        causes.join("; ")
+    };
+    Err(format!(
+        "Tencent Meeting CLI install failed: {detail}; see ~/.pinvou3/cli-install.log for details"
+    ))
 }
 
-/// 引导:确保 tmeet 装好且版本不低于 1.0.15。
+/// Bootstrap: ensure the tmeet CLI is installed and at least 1.0.18.
 pub async fn tmeet_ensure_cli() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         if tmeet_cli_present() {
@@ -148,17 +179,14 @@ pub async fn tmeet_ensure_cli() -> Result<Value, String> {
 }
 
 /// 查询当前腾讯会议连接状态。只返回布尔,不把身份 / token 信息带进 webview。
+/// (Only called internally by the command layer's `bundle_readiness` CLI dispatch; there is no standalone Tauri command anymore.)
 pub async fn tmeet_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
+        // Don't spawn auth status when the CLI isn't installed. Overly old versions report installed:true
+        // just like usable ones; upgrade guidance is handled by ensure_cli's version gate (tmeet_cli_present).
         if tmeet_cli_version().is_none() {
             return Ok::<Value, String>(json!({
                 "ok": false, "connected": false, "installed": false
-            }));
-        }
-        let supported = tmeet_cli_present();
-        if !supported {
-            return Ok::<Value, String>(json!({
-                "ok": false, "connected": false, "installed": true, "upgrade_required": true
             }));
         }
         let (ok, so, se) = cc::run(tmeet(&["auth", "status"]))?;
@@ -166,8 +194,7 @@ pub async fn tmeet_status() -> Result<Value, String> {
         Ok::<Value, String>(json!({
             "ok": ok,
             "connected": connected,
-            "installed": true,
-            "upgrade_required": false
+            "installed": true
         }))
     })
     .await
@@ -213,7 +240,15 @@ fn drain_for_auth_url<R: std::io::Read + Send + 'static>(
     tx: mpsc::Sender<(Option<String>, Option<String>)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for line in std::io::BufRead::lines(std::io::BufReader::new(r)).flatten() {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(r)) {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    // 管道读取错误通常不可恢复；继续迭代可能反复返回 Err 并空转。
+                    log::warn!("[tmeet] 授权输出读取失败，停止排空：{error}");
+                    break;
+                }
+            };
             let safe = safe_auth_log_line(&line);
             let url = TMEET_CTX.extract_url(&line);
             let _ = tx.send((url, safe));
@@ -250,6 +285,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
         let now = std::time::Instant::now();
         if now >= deadline {
             let _ = child.kill();
+            cc::reap_after_kill(&mut child);
             conn.set_pid(ID, None);
             return Err(auth_failure_message(
                 &auth_lines,
@@ -298,6 +334,7 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
     loop {
         if conn.is_cancelled(ID) {
             let _ = child.kill();
+            cc::reap_after_kill(&mut child);
             conn.set_pid(ID, None);
             return Ok(());
         }
@@ -307,19 +344,15 @@ fn phase_scan(app: &AppHandle) -> Result<(), String> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 conn.set_pid(ID, None);
+                // A single status wait is enough: the already flag is decided from the captured output lines,
+                // with no second 5s polling run just to fill in already:true.
                 if wait_logged_in(Duration::from_secs(5)) {
                     cc::bundle_store_on_connected(ID);
-                    cc::emit(app, "tmeet:connected", json!({ "ok": true }));
-                    return Ok(());
-                }
-                if auth_lines_say_already_logged_in(&auth_lines)
-                    && wait_logged_in(Duration::from_secs(5))
-                {
-                    cc::bundle_store_on_connected(ID);
+                    let already = auth_lines_say_already_logged_in(&auth_lines);
                     cc::emit(
                         app,
                         "tmeet:connected",
-                        json!({ "ok": true, "already": true }),
+                        json!({ "ok": true, "already": already }),
                     );
                     return Ok(());
                 }
@@ -387,11 +420,26 @@ pub async fn tmeet_cancel(app: AppHandle) -> Result<Value, String> {
 }
 
 /// 断开腾讯会议:`tmeet auth logout`。未安装时也视为已断开。
+///
+/// 探测的任何非成功结果都不能沿用状态轮询的「按未安装降级」:无论是
+/// 超时/执行异常(CLI 挂死),还是版本探测成功执行但报非成功(`--version`
+/// 退出非零、或版本无法解析/输出格式变更——只证明它没能正常自报版本,
+/// 不能证明不存在),`auth logout` 都未曾执行、token 未撤销,返回
+/// `ok:true/installed:false` 会向用户谎报已断开。只有
+/// [`cc::ProbeError::Spawn`](≈二进制不存在,真未安装)保留原降级。
+/// 裁决统一走 [`cc::logout_probe_verdict`],其余按分型转为人类可读
+/// 文案原样上抛(超时文案自带重试指引)。
 pub async fn tmeet_logout() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
-        if tmeet_cli_version().is_none() {
+        let not_installed = || {
             cc::bundle_store_on_disconnected(ID);
-            return Ok::<Value, String>(json!({ "ok": true, "installed": false }));
+            Ok::<Value, String>(json!({ "ok": true, "installed": false }))
+        };
+        let probe = tmeet_cli_version_probe().map(|version| version.is_some());
+        match cc::logout_probe_verdict("腾讯会议", probe) {
+            cc::LogoutProbeVerdict::Installed => {}
+            cc::LogoutProbeVerdict::NotInstalled => return not_installed(),
+            cc::LogoutProbeVerdict::Unconfirmed(message) => return Err(message),
         }
         let (ok, _, _) = cc::run(tmeet(&["auth", "logout"]))?;
         if !ok {
@@ -413,9 +461,6 @@ impl ConnectorSkillGate for TmeetGate {
     fn id(&self) -> &'static str {
         ID
     }
-    fn display_name(&self) -> &'static str {
-        "腾讯会议"
-    }
     fn disabled_filename(&self) -> &'static str {
         "tmeet_disabled"
     }
@@ -427,12 +472,8 @@ impl ConnectorSkillGate for TmeetGate {
 }
 const GATE: TmeetGate = TmeetGate;
 
-pub fn is_tmeet_disabled() -> bool {
+fn is_tmeet_disabled() -> bool {
     GATE.is_disabled()
-}
-
-fn set_tmeet_disabled_flag(disabled: bool) -> Result<(), String> {
-    GATE.set_disabled_flag(disabled)
 }
 
 pub fn tmeet_skills_should_show() -> bool {
@@ -454,20 +495,6 @@ pub async fn tmeet_apply_skills() -> Result<Value, String> {
     Ok(json!({ "visible": show }))
 }
 
-pub async fn set_tmeet_enabled(enabled: bool) -> Result<Value, String> {
-    let show = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        set_tmeet_disabled_flag(!enabled)?;
-        // 停用标志 ↔ 统一禁用集桥接（见 set_feishu_enabled 同名注释）。
-        crate::features::marketplace::sync_disabled_bundles_for_connector_switch("tmeet", enabled);
-        let show = tmeet_skills_should_show();
-        GATE.apply_skills(show)?;
-        Ok(show)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))??;
-    Ok(json!({ "ok": true, "visible": show }))
-}
-
 pub async fn tmeet_skills_state() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
         let disabled = is_tmeet_disabled();
@@ -485,7 +512,6 @@ pub async fn tmeet_skills_state() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::paths::tests::ENV_LOCK;
 
     #[test]
     fn status_detects_logged_in() {
@@ -505,14 +531,6 @@ mod tests {
         assert_eq!(parse_tmeet_version("v2.3.4"), Some((2, 3, 4)));
         assert_eq!(parse_tmeet_version("tmeet version 1.2"), Some((1, 2, 0)));
         assert_eq!(parse_tmeet_version("hello"), None);
-    }
-
-    #[test]
-    fn version_comparison_uses_semver_order() {
-        assert!(version_at_least((1, 0, 15), TMEET_MIN_VERSION));
-        assert!(version_at_least((1, 1, 0), TMEET_MIN_VERSION));
-        assert!(!version_at_least((1, 0, 14), TMEET_MIN_VERSION));
-        assert!(!version_at_least((0, 9, 99), TMEET_MIN_VERSION));
     }
 
     #[test]
@@ -550,37 +568,5 @@ mod tests {
         );
         assert_eq!(safe_auth_log_line("  hello  ").as_deref(), Some("hello"));
         assert_eq!(safe_auth_log_line("   "), None);
-    }
-
-    #[test]
-    fn tmeet_disabled_flag_roundtrip() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = format!(
-            "{}/pinvou3-tmeet-test-{}",
-            std::env::temp_dir().display(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let previous = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
-        let _ = std::fs::create_dir_all(crate::platform::paths::pinvou3_home());
-
-        set_tmeet_disabled_flag(false).unwrap();
-        assert!(!is_tmeet_disabled());
-        set_tmeet_disabled_flag(true).unwrap();
-        assert!(is_tmeet_disabled());
-        set_tmeet_disabled_flag(false).unwrap();
-        assert!(!is_tmeet_disabled());
-
-        match previous {
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -89,6 +89,20 @@ command_protocol!(
     ["chat", "steer_chat", "withdraw_steer"]
 );
 command_protocol!(
+    computer_use_protocol,
+    "computer_use.rs",
+    [
+        "computer_use_get_status",
+        "computer_use_grant",
+        "computer_use_revoke",
+        "computer_use_stop",
+        "computer_use_confirm",
+        "computer_use_deny",
+        "computer_use_set_enabled",
+        "computer_use_request_permissions"
+    ]
+);
+command_protocol!(
     connectors_protocol,
     "connectors.rs",
     [
@@ -96,34 +110,26 @@ command_protocol!(
         "get_disabled_connectors",
         "set_bundle_visibility",
         "get_bundle_visibility",
-        "set_disabled_skills",
-        "get_disabled_skills",
         "set_project_skills_enabled",
         "get_project_skills_enabled",
         "refresh_connector_auth_gates",
         "feishu_ensure_cli",
-        "feishu_status",
         "feishu_connect_begin",
         "feishu_cancel",
         "feishu_logout",
         "feishu_apply_skills",
-        "set_feishu_enabled",
         "feishu_skills_state",
         "wecom_ensure_cli",
-        "wecom_status",
         "wecom_connect_begin",
         "wecom_cancel",
         "wecom_logout",
         "wecom_apply_skills",
-        "set_wecom_enabled",
         "wecom_skills_state",
         "dingtalk_ensure_cli",
-        "dingtalk_status",
         "dingtalk_connect_begin",
         "dingtalk_cancel",
         "dingtalk_logout",
         "dingtalk_apply_skills",
-        "set_dingtalk_enabled",
         "dingtalk_skills_state",
         "eip_status",
         "eip_connect_begin",
@@ -134,14 +140,11 @@ command_protocol!(
         "zhidao_cancel",
         "zhidao_logout",
         "tmeet_ensure_cli",
-        "tmeet_status",
         "tmeet_connect_begin",
         "tmeet_cancel",
         "tmeet_logout",
         "tmeet_apply_skills",
-        "set_tmeet_enabled",
         "tmeet_skills_state",
-        "ima_status",
         "ima_connect",
         "ima_logout"
     ]
@@ -159,15 +162,14 @@ command_protocol!(
         "ingest_draft_file_chunk",
         "cancel_draft_file_upload",
         "adopt_draft_attachment",
-        "ingest_dropped_file_chunk",
-        "cancel_dropped_file_upload",
         "discard_dropped_attachment",
         "resolve_conversation_attachment",
         "open_conversation_attachment",
         "reveal_conversation_attachment",
         "detect_system_tools",
         "save_paste_image",
-        "verify_upload"
+        "verify_upload",
+        "paste_clipboard_image",
     ]
 );
 command_protocol!(
@@ -186,12 +188,10 @@ command_protocol!(
         "accept_plan",
         "get_super_permission_status",
         "set_super_permission",
-        "read_skill_body",
         "discard_plan",
         "submit_user_input",
         "cancel_user_input",
         "get_pending_user_inputs",
-        "restart_engine",
         "summon_pinvou"
     ]
 );
@@ -200,7 +200,6 @@ command_protocol!(
     "knowledge.rs",
     [
         "session_mount_collection",
-        "session_set_mounted_collections",
         "session_add_mounted_collection",
         "session_set_mounted_collection_enabled",
         "session_remove_mounted_collection",
@@ -210,7 +209,6 @@ command_protocol!(
         "session_mounted_collections_snapshot",
         "kb_start_scan",
         "kb_scan_status",
-        "kb_cancel_scan",
         "kb_type_counts",
         "kb_collection_list",
         "kb_collection_create",
@@ -277,11 +275,9 @@ command_protocol!(
         "install_marketplace_skill",
         "update_marketplace_skill",
         "update_bundle_display_meta",
-        "import_skill_package",
         "import_plugin_package_cmd",
         "import_plugin_package_bytes_cmd",
         "import_skill_md_bytes",
-        "import_skill_package_bytes",
         "uninstall_marketplace_skill",
         "list_recycled_plugins",
         "restore_recycled_plugin",
@@ -347,7 +343,6 @@ command_protocol!(
     pet_protocol,
     "pet.rs",
     [
-        "open_detached_window",
         "begin_detach_drag",
         "set_pet_enabled",
         "get_pet_scale",
@@ -389,7 +384,8 @@ command_protocol!(
         "create_project",
         "update_project",
         "delete_project",
-        "move_session_to_project"
+        "move_session_to_project",
+        "rebind_workspace_root"
     ]
 );
 command_protocol!(
@@ -452,7 +448,6 @@ command_protocol!(
         "web_access_list_codex_acp_sessions",
         "web_access_list_acp_agents",
         "web_access_get_acp_agent_status",
-        "web_access_save_session_messages_chunk",
         "web_access_transcribe_voice_audio",
         "web_access_track_behavior_event",
         "web_access_read_artifact_chunk",
@@ -492,8 +487,10 @@ command_protocol!(
         "list_sessions",
         "list_archived_sessions",
         "create_session",
+        "get_session_workspace_binding",
         "load_session",
         "delete_session",
+        "export_session",
         "rename_session",
         "set_session_pinned",
         "set_session_archived",
@@ -615,4 +612,91 @@ command_protocol!(
     multiagent_protocol,
     "multiagent.rs",
     ["list_subagent_transcripts", "read_subagent_transcript"]
+);
+// The four files below were previously outside the protocol snapshot; this is
+// additive coverage, and the command lists match the current source files.
+command_protocol!(
+    acp_providers_protocol,
+    "acp_providers.rs",
+    [
+        "list_acp_providers",
+        "save_acp_provider",
+        "delete_acp_provider",
+        "switch_acp_provider",
+        "switch_acp_provider_official",
+        "uninstall_acp_agent",
+        "cancel_acp_agent_install",
+        "get_acp_provider_key",
+        "logout_acp_agent",
+        "export_acp_providers",
+        "import_acp_providers",
+        "probe_acp_agent_models",
+        "set_codex_acp_session_provider"
+    ]
+);
+command_protocol!(
+    remote_knowledge_protocol,
+    "remote_knowledge.rs",
+    [
+        "remote_kb_connections",
+        "remote_kb_request_join",
+        "remote_kb_probe_private_endpoint",
+        "remote_kb_request_join_confirmed",
+        "remote_kb_connection_identity",
+        "remote_kb_pending_joins",
+        "remote_kb_refresh_join",
+        "remote_kb_cancel_join",
+        "remote_kb_create_share",
+        "remote_kb_shares",
+        "remote_kb_stop_share",
+        "remote_kb_join_requests",
+        "remote_kb_approve_join_request",
+        "remote_kb_reject_join_request",
+        "remote_kb_model_status",
+        "remote_kb_download_model",
+        "remote_kb_devices",
+        "remote_kb_update_device",
+        "remote_kb_remove_device",
+        "remote_kb_permanently_delete_collection",
+        "remote_kb_permanently_delete_document",
+        "remote_kb_remove_connection",
+        "remote_kb_collections",
+        "remote_kb_create_collection",
+        "remote_kb_delete_collection",
+        "remote_kb_restore_collection",
+        "remote_kb_documents",
+        "remote_kb_document_statuses",
+        "remote_kb_discover_folder_files",
+        "remote_kb_upload_files",
+        "remote_kb_replace_document",
+        "remote_kb_delete_document",
+        "remote_kb_restore_document",
+        "remote_kb_download_document",
+        "remote_kb_search",
+        "session_mounted_remote_collections",
+        "session_add_mounted_remote_collection",
+        "session_set_mounted_remote_collection_enabled",
+        "session_remove_mounted_remote_collection"
+    ]
+);
+command_protocol!(
+    shared_knowledge_host_protocol,
+    "shared_knowledge_host.rs",
+    [
+        "shared_kb_host_status",
+        "shared_kb_host_lan_endpoints",
+        "shared_kb_discover_nearby",
+        "shared_kb_host_install",
+        "shared_kb_host_upgrade",
+        "shared_kb_host_reconnect",
+        "shared_kb_host_set_owner_device",
+        "shared_kb_host_remove",
+        "shared_kb_host_backup",
+        "shared_kb_host_restore"
+    ]
+);
+command_protocol!(
+    diagnostics_protocol,
+    "diagnostics.rs",
+    ["record_authority_sync_diagnostics"]
 );

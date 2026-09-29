@@ -1,9 +1,10 @@
-import React, { memo, useEffect, useState } from 'react';
+import React, { memo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, Check, Edit2, FolderOpen, MoreHorizontal, PinIcon, PinOffIcon, Sparkles, Trash2, X } from '../icons.jsx';
+import { Archive, Check, Download, Edit2, FolderOpen, Layers, MoreHorizontal, PinIcon, PinOffIcon, Sparkles, Trash2, X } from '../icons.jsx';
 import { useLongPressDrag } from '../../hooks/useLongPressDrag.js';
 import { usePortalMenu } from '../../hooks/usePortalMenu.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
+import { PROJECT_SESSION_DRAG_TYPE } from '../../features/projects/projectGrouping.js';
 
 // NavItem memoization: the main nav re-renders on every App bridge
 // notify (including background streaming tokens); when the props are
@@ -42,157 +43,6 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
       );
     });
 
-    const ArchiveConfirmDialog = ({ theme, t, onCancel, onConfirm }) => {
-      const isDark = theme === 'dark';
-      useEffect(() => {
-        const onKey = (e) => {
-          if (e.key === 'Escape') onCancel();
-        };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-      }, [onCancel]);
-      return (
-        <div
-          role="presentation"
-          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-          style={{
-            background: 'rgba(0,0,0,.34)',
-            backdropFilter: 'blur(14px) saturate(140%)',
-            WebkitBackdropFilter: 'blur(14px) saturate(140%)',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif'
-          }}
-          onClick={onCancel}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="archive-confirm-title"
-            className="w-[320px] max-w-[calc(100vw-48px)] overflow-hidden rounded-[16px] shadow-2xl bg-[rgba(250,250,250,.96)] dark:bg-[rgba(44,44,46,.96)] text-[#000] dark:text-[#F2F2F7]"
-            style={{
-              // isDark dynamic-value: 保留 (boxShadow)
-              boxShadow: isDark ? '0 24px 60px rgba(0,0,0,.55)' : '0 24px 60px rgba(0,0,0,.22)'
-            }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="px-6 pt-6 pb-5 text-center">
-              <div id="archive-confirm-title" className="text-[20px] font-semibold leading-[26px]">{t.archiveConfirmTitle}</div>
-              <div className="mt-2.5 text-[15px] leading-[22px] text-[rgba(60,60,67,.72)] dark:text-[rgba(235,235,245,.72)]">
-                <div>{t.archiveConfirmMessage}</div>
-                {t.archiveConfirmDetail && <div className="mt-1">{t.archiveConfirmDetail}</div>}
-              </div>
-            </div>
-            <div className="h-px bg-[rgba(60,60,67,.24)] dark:bg-[rgba(84,84,88,.65)]" />
-            <div className="grid grid-cols-2">
-              <button
-                type="button"
-                onClick={onCancel}
-                className="h-[50px] text-[17px] active:opacity-70 text-[#007AFF] dark:text-[#0A84FF]"
-              >
-                {t.cpCancel}
-              </button>
-              <button
-                type="button"
-                onClick={onConfirm}
-                className="h-[50px] text-[17px] font-semibold active:opacity-70 text-[#007AFF] dark:text-[#0A84FF] border-l border-l-[rgba(60,60,67,.24)] dark:border-l-[rgba(84,84,88,.65)]"
-              >
-                {t.archiveConfirmAction}
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    const ArchivedDeleteConfirmDialog = ({ theme, t, onCancel, onConfirm }) => {
-      const isDark = theme === 'dark';
-      useEffect(() => {
-        const onKey = (e) => {
-          if (e.key === 'Escape') onCancel();
-        };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-      }, [onCancel]);
-      return (
-        <div
-          role="presentation"
-          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-          style={{
-            background: 'rgba(0,0,0,.34)',
-            backdropFilter: 'blur(14px) saturate(140%)',
-            WebkitBackdropFilter: 'blur(14px) saturate(140%)',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif'
-          }}
-          onClick={onCancel}
-        >
-          <div
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="archived-delete-confirm-title"
-            className="w-[320px] max-w-[calc(100vw-48px)] overflow-hidden rounded-[16px] shadow-2xl bg-[rgba(250,250,250,.96)] dark:bg-[rgba(44,44,46,.96)] text-[#000] dark:text-[#F2F2F7]"
-            style={{
-              // isDark dynamic-value: 保留 (boxShadow)
-              boxShadow: isDark ? '0 24px 60px rgba(0,0,0,.55)' : '0 24px 60px rgba(0,0,0,.22)'
-            }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="px-6 pt-6 pb-5 text-center">
-              <div id="archived-delete-confirm-title" className="text-[20px] font-semibold leading-[26px]">{t.archivedDeleteTitle}</div>
-              <div className="mt-2.5 text-[15px] leading-[22px] text-[rgba(60,60,67,.72)] dark:text-[rgba(235,235,245,.72)]">
-                {t.archivedDeleteMessage}
-              </div>
-            </div>
-            <div className="h-px bg-[rgba(60,60,67,.24)] dark:bg-[rgba(84,84,88,.65)]" />
-            <div className="grid grid-cols-2">
-              <button
-                type="button"
-                onClick={onCancel}
-                className="h-[50px] text-[17px] active:opacity-70 text-[#007AFF] dark:text-[#0A84FF]"
-              >
-                {t.cpCancel}
-              </button>
-              <button
-                type="button"
-                onClick={onConfirm}
-                className="h-[50px] text-[17px] font-semibold active:opacity-70 text-[#FF3B30] border-l border-l-[rgba(60,60,67,.24)] dark:border-l-[rgba(84,84,88,.65)]"
-              >
-                {t.archivedDeleteAction}
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    const ArchiveToast = ({ theme, t, onClose, onView }) => {
-      return (
-        <div
-          className="fixed left-1/2 top-6 z-[210] -translate-x-1/2 px-2 py-2 rounded-[18px] flex items-center gap-1 shadow-2xl bg-[rgba(250,250,250,.94)] dark:bg-[rgba(44,44,46,.94)] text-[#1C1C1E] dark:text-[#F2F2F7] border border-[rgba(0,0,0,.08)] dark:border-[rgba(255,255,255,.10)]"
-          style={{
-            backdropFilter: 'blur(18px) saturate(150%)',
-            WebkitBackdropFilter: 'blur(18px) saturate(150%)',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif'
-          }}
-        >
-          <div className="pl-3 pr-2 text-[14px] leading-5 whitespace-nowrap">{t.archiveSuccess}</div>
-          <button
-            type="button"
-            onClick={onView}
-            className="h-8 min-w-[76px] px-3 rounded-[12px] text-[14px] font-semibold whitespace-nowrap active:opacity-70 text-[#007AFF] dark:text-[#0A84FF] bg-[rgba(0,122,255,.10)] dark:bg-[rgba(10,132,255,.12)]"
-          >
-            {t.archiveSuccessView}
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-8 h-8 rounded-full text-[18px] leading-none active:opacity-70 text-[rgba(60,60,67,.62)] dark:text-[rgba(235,235,245,.62)]"
-            aria-label={t.cpCancel}
-          >
-            ×
-          </button>
-        </div>
-      );
-    };
-
     // 近期会话项：支持重命名(内联编辑) + 删除(内联二次确认)
     // Inline styles are extracted into pure functions: dragging lowers opacity; the persona target row builds its highlight color at runtime (isDark-dependent, cannot use static dark: variants).
     const recentItemRowStyle = (dragging, personaTarget, isDark) => {
@@ -209,7 +59,7 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
     // derived by the parent's useMemo and callbacks come from the parent's
     // useCallback / per-item closure cache (see renderSidebarTaskItem in
     // main.jsx); the default shallow compare then skips correctly.
-    const RecentItem = memo(function RecentItem({ chat, active, personaTarget, theme, t, onSelect, onRename, onDelete, onTogglePinned, onOpenFolder, onArchive, dragKind = 'session', dragging, onPickUp }) {
+    const RecentItem = memo(function RecentItem({ chat, active, personaTarget, theme, t, onSelect, onRename, onDelete, onTogglePinned, onOpenFolder, onExportArchive, onArchive, onMoveToProject, dragKind = 'session', dragging, onPickUp, dndPayload, dndDisabled, onDragEnd }) {
       const isDark = theme === 'dark';
       const [editing, setEditing] = useState(false);
       const [confirming, setConfirming] = useState(false);
@@ -220,8 +70,19 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
       const selectChat = () => onSelect(chat.id);
       function save() { const tx = val.trim(); setEditing(false); if (onRename && tx && tx !== chat.title) onRename(chat.id, tx); }
       // Portal "more" menu placement/close lives in the shared hook (same
-      // plumbing as the project-group header menu).
-      const { menuOpen, menuStyle, closeMenu, toggleMenu, openMenuAt } = usePortalMenu({ height: 184 });
+      // plumbing as the project-group header menu). Height covers the tallest
+      // variant actually rendered — 6 menu items at h-9 (36px) + 9px divider +
+      // 8px vertical padding ≈ 233: codex rows render move-to-project, other
+      // rows render export-archive, and the two are taskKind-exclusive. It
+      // only drives the bottom-edge flip decision and the portal clips
+      // (per-menu height convention, see ProjectGroupHeader).
+      const { menuOpen, menuStyle, closeMenu, toggleMenu, openMenuAt } = usePortalMenu({ height: 233 });
+      // 移动菜单项把流程移交给 App 级弹窗:菜单门户与弹窗在同一次提交里
+      // 卸载/挂载,被聚焦的菜单项随门户消失,弹窗的焦点还原来不及捕获它;
+      // 且此刻行的 :hover/focus-within 都已失效,hover 显隐的按钮容器是
+      // display:none,往里面聚焦是空操作。只能交接给常驻的行标签按钮,
+      // 弹窗关闭后焦点回到出发点所在的行。
+      const rowLabelRef = useRef(null);
       const openContextMenu = openMenuAt;
       const menuItemCls = `w-full h-9 px-3 flex items-center gap-2 text-left text-[14px] whitespace-nowrap transition-colors text-[#1F1F1F] hover:bg-[#F1F3F4] dark:text-[#E3E3E3] dark:hover:bg-[#303134]`;
       const menu = menuOpen && menuStyle && typeof document !== 'undefined' ? createPortal(
@@ -237,6 +98,12 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
             <Edit2 size={15} />
             <span>{t.riRename}</span>
           </button>}
+          {onMoveToProject && (
+            <button type="button" className={menuItemCls} onClick={() => { rowLabelRef.current?.focus(); closeMenu(); onMoveToProject(chat); }}>
+              <Layers size={15} />
+              <span>{t.uiProjects.moveToProject}</span>
+            </button>
+          )}
           <button className={`${menuItemCls} text-[#C5221F] hover:bg-[#FAD2CF] dark:text-[#F28B82] dark:hover:bg-[#5c2b29]`} onClick={() => { closeMenu(); setConfirming(true); }}>
             <Trash2 size={15} />
             <span>{t.cpDelete}</span>
@@ -248,6 +115,12 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
             <button className={menuItemCls} onClick={() => { closeMenu(); onOpenFolder(chat.id); }}>
               <FolderOpen size={15} />
               <span>{t.riOpenFolder}</span>
+            </button>
+          )}
+          {onExportArchive && (
+            <button type="button" className={menuItemCls} data-testid="session-export-archive" onClick={() => { closeMenu(); onExportArchive(chat.id); }}>
+              <Download size={15} />
+              <span>{t.exportSessionArchive}</span>
             </button>
           )}
           {onArchive && (
@@ -276,6 +149,7 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
         <div
           role="presentation"
           onContextMenu={openContextMenu}
+          data-session-key={chat.id}
           data-drag-kind={sessionDragKind || undefined}
           title={personaTarget ? t.cpTargetMarkTitle : undefined}
           style={ dragging ? { opacity: 0.4 } : (personaTarget ? { background: isDark?'rgba(10,132,255,.20)':'rgba(0,122,255,.12)', boxShadow:'inset 0 0 0 1px '+(isDark?'rgba(10,132,255,.6)':'rgba(0,122,255,.45)'), color: isDark?'#fff':'#1F1F1F' } : undefined) }
@@ -284,9 +158,23 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
               : active ? 'bg-[#E1E5EA] text-[#1F1F1F] dark:bg-[#333537] dark:text-white'
                      : 'text-[#1F1F1F] hover:bg-[#E1E5EA] dark:text-[#E3E3E3] dark:hover:bg-[#282A2C]'}`}>{/* isDark dynamic-value: 保留 (personaTarget boxShadow 运行时拼色,与 background/color 同对象) */}
           <button
+            ref={rowLabelRef}
             type="button"
             data-testid={chat.testId}
             data-drag-surface
+            // HTML5 拖拽(移动到项目)与 tear-off(长按 350ms)共享同一手势
+            // 面:都只从标签按钮(data-drag-surface)启动,置顶/更多/删除等
+            // 动作按钮起手不会拖走整行(useLongPressDrag 的按钮排除同源)。
+            // 两者互斥由 hook 的工程手段提供:pointerdown 时装 capture 阶段
+            // dragstart 监听({once}) + pointercancel 兜底,clearPress 幂等,
+            // 自然竞态被消除;不要因"看起来多余"而删联锁。tear-off 进行中
+            // (dndDisabled)不再启动 HTML5 拖拽。
+            draggable={dndPayload && !dndDisabled ? true : undefined}
+            onDragEnd={onDragEnd}
+            onDragStart={dndPayload && !dndDisabled ? (e) => {
+              e.dataTransfer.setData(PROJECT_SESSION_DRAG_TYPE, dndPayload.sessionId);
+              e.dataTransfer.effectAllowed = 'move';
+            } : undefined}
             onClick={sessionDragKind ? drag.guardClick(selectChat) : selectChat}
             {...dragProps}
             className="flex min-w-0 flex-1 cursor-pointer items-center self-stretch border-0 bg-transparent px-4 text-left">
@@ -327,11 +215,11 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
               {/* 默认: 显示日期(辨识每条会话什么时候发生);hover/active 时换成置顶/更多按钮,重命名/收纳/删除在更多菜单里。
                   窄屏无 hover：按钮组常显、日期让位，保证触屏可达。 */}
               {chat.date && (
-                <span className="text-[11px] mr-4 shrink-0 opacity-60 whitespace-nowrap group-hover:hidden max-sm:hidden text-[#5F6368] dark:text-[#9AA0A6]">
+                <span className="text-[11px] mr-4 shrink-0 opacity-60 whitespace-nowrap group-hover:hidden group-focus-within:hidden max-sm:hidden text-[#5F6368] dark:text-[#9AA0A6]">
                   {chat.date}
                 </span>
               )}
-              <div className="mr-4 hidden group-hover:flex max-sm:flex items-center gap-0.5 shrink-0">
+              <div className="mr-4 hidden group-hover:flex group-focus-within:flex max-sm:flex items-center gap-0.5 shrink-0">
                 {onTogglePinned && <button title={chat.pinned ? t.riUnpin : t.riPin} onClick={(e) => { e.stopPropagation(); onTogglePinned(chat.id, !chat.pinned); }}
                   className="w-6 h-6 rounded-full flex items-center justify-center transition-colors text-[#5F6368] hover:bg-[#D3D7DB] dark:text-[#C4C7C5] dark:hover:bg-[#444746]">
                   {chat.pinned ? <PinOffIcon size={13} /> : <PinIcon size={13} />}
@@ -349,4 +237,4 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
       );
     });
 
-export { NavItem, ArchiveConfirmDialog, ArchivedDeleteConfirmDialog, ArchiveToast, RecentItem };
+export { NavItem, RecentItem };

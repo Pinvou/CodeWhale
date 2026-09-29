@@ -1,4 +1,5 @@
-import React, { useEffect, useId, useMemo, useState, useSyncExternalStore } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { StatusDot } from '../../components/StatusDot.jsx';
 import { dict } from '../../shared/i18n.js';
@@ -29,6 +30,11 @@ import {
 } from './conversation-model.js';
 import { AssistantMessageActions, AssistantMessageFooter } from './AssistantMessageActions.jsx';
 import { assistantResponseAvailable, assistantResponseText } from './message-clipboard.js';
+import {
+  CONVERSATION_VIRTUALIZATION_THRESHOLD,
+  shouldVirtualizeConversationTurns,
+  splitConversationLiveTail,
+} from './conversation-virtualization.js';
 
 // Fallback copy derives from the zh dictionary instead of duplicating its strings here:
 // dictionary tweaks in shared/i18n propagate automatically, and a caller that forgets to
@@ -57,6 +63,14 @@ function conversationCopy(copy) {
 // a full rerun for every streaming delta (O(n²)). When streaming ends, useThrottledValue
 // guarantees a verbatim replay of the final full text.
 const STREAMING_MARKDOWN_THROTTLE_MS = 200;
+
+// Short conversations stay in normal document flow. The virtualizer only pays
+// for itself once history is large enough to create a material DOM and mount
+// cost; the running final turn remains outside the virtual history so streamed
+// height growth never waits for ResizeObserver before reaching the bottom.
+const CONVERSATION_ROW_ESTIMATE_PX = 240;
+const CONVERSATION_ROW_OVERSCAN = 5;
+const DEFAULT_CONVERSATION_ROW_GAP_PX = 16;
 
 // The 1s clock is scoped to the smallest display subtree: the per-second tick used to live on
 // ChatView top-level state, re-rendering the whole transcript every second while busy; now only
@@ -131,15 +145,22 @@ export function ConversationStatusBadge({ status, copy }) {
   const done = ['Completed', 'completed', 'done', 'end_turn'].includes(status);
   const failed = ['Failed', 'failed', 'Refused'].includes(status);
   const interrupted = ['Interrupted', 'interrupted', 'incomplete'].includes(status);
-  const stopped = interrupted || status === 'LimitReached';
+  // A swarm-off cancellation is an operator-level ending, not the agent's
+  // failure: keep it out of the red bucket so the panel agrees with the
+  // running-agents overlay (agentCard.cancelled). The ledger token is
+  // lowercase; compare case-insensitively like the other consumers.
+  const cancelled = typeof status === 'string' && status.toLowerCase() === 'cancelled';
+  const stopped = interrupted || cancelled || status === 'LimitReached';
   const label = done
     ? c.completed
     : failed
       ? c.failed
-      : interrupted
-        ? c.interrupted
-        : status === 'LimitReached'
-          ? c.limitReached
+      : cancelled
+        ? (c.cancelled || c.interrupted)
+        : interrupted
+          ? c.interrupted
+          : status === 'LimitReached'
+            ? c.limitReached
           : c.processing;
   return (
     <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
@@ -158,6 +179,8 @@ export function ConversationStatusBadge({ status, copy }) {
   );
 }
 
+// ChatView 与 CodexAcpView 的 LiveConversationActivityIndicator 仍跨文件消费此
+// 组件,保持模块表面导出(Community 端为文件内私有)。
 export function ConversationActivityIndicator({
   turn,
   now,
@@ -203,7 +226,7 @@ export function ConversationActivityIndicator({
   return <div role="status" aria-live="polite" className={sharedClass}>{content}</div>;
 }
 
-export function TerminalBlock({ label, text }) {
+function TerminalBlock({ label, text }) {
   if (!text) return null;
   return (
     <div className="mt-3 min-w-0 max-w-full">
@@ -213,7 +236,7 @@ export function TerminalBlock({ label, text }) {
   );
 }
 
-export function StructuredValue({ label, value }) {
+function StructuredValue({ label, value }) {
   if (value == null || value === '' || (Array.isArray(value) && !value.length)) return null;
   if (typeof value !== 'object') return <TerminalBlock label={label} text={String(value)} />;
   const entries = Object.entries(value);
@@ -235,7 +258,7 @@ export function StructuredValue({ label, value }) {
   );
 }
 
-export function CompactItemRow({ icon, title, meta, status, open, onToggle, controlsId }) {
+function CompactItemRow({ icon, title, meta, status, open, onToggle, controlsId }) {
   const tone = status === 'failed'
     ? 'text-red-500 bg-red-500/10'
     : status === 'warning'
@@ -448,7 +471,7 @@ function FetchToolItem({ item, now, onOpenExternal, copy }) {
   );
 }
 
-export function WorkspaceResourceButtons({ resources, onOpenResource }) {
+function WorkspaceResourceButtons({ resources, onOpenResource }) {
   if (!resources.length) return null;
   return (
     <div className="flex flex-wrap gap-1.5 px-3 pb-2">
@@ -603,7 +626,7 @@ function ReasoningItem({ item, now, copy }) {
   );
 }
 
-export function PlanBlock({ plan, copy }) {
+function PlanBlock({ plan, copy }) {
   const c = conversationCopy(copy);
   const entries = plan && plan.entries || [];
   if (!entries.length) return null;
@@ -798,6 +821,7 @@ function areConversationTurnPropsEqual(prev, next) {
 
 function ConversationTurnView({
   turn,
+  virtualized = false,
   sessionId,
   onRetry,
   now,
@@ -873,7 +897,11 @@ function ConversationTurnView({
       : null;
 
   return (
-    <section className="space-y-4" data-conversation-turn={turn.id} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 600px' }}>
+    <section
+      className="space-y-4"
+      data-conversation-turn={turn.id}
+      style={virtualized ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 600px' }}
+    >
       {userContent}
       {assistantRowVisible && (
       <div className="flex items-start gap-3">
@@ -918,6 +946,7 @@ function ConversationTurnView({
                 copy={c}
                 sessionId={sessionId}
                 turnId={turn.lifecycleKnown ? turn.id : null}
+                telemetryTurnId={turn.lifecycleKnown ? turn.behaviorTurnId : null}
                 onRetry={onRetry ? () => onRetry(turn) : undefined}
               />
             )}
@@ -966,17 +995,226 @@ function ConversationTurnView({
 // pollute the inference in reverse.
 export const ConversationTurn = React.memo(ConversationTurnView, areConversationTurnPropsEqual);
 
-export function ConversationTimeline({ turns = EMPTY_TURNS, ...props }) {
-  return (
-    <>
-      {turns.map((turn, index) => (
+/**
+ * @param {HTMLElement | null} timelineElement
+ * @param {HTMLElement | null} scrollElement
+ */
+function conversationTimelineScrollMargin(timelineElement, scrollElement) {
+  if (!timelineElement || !scrollElement) return 0;
+  const timelineRect = timelineElement.getBoundingClientRect();
+  const scrollRect = scrollElement.getBoundingClientRect();
+  return Math.max(0, timelineRect.top - scrollRect.top + scrollElement.scrollTop);
+}
+
+export function ConversationTimeline({
+  turns = EMPTY_TURNS,
+  scrollElementRef,
+  virtualizationThreshold = CONVERSATION_VIRTUALIZATION_THRESHOLD,
+  busy = false,
+  turnGapPx = DEFAULT_CONVERSATION_ROW_GAP_PX,
+  followOutputRef,
+  renderBeforeTurn,
+  ...props
+}) {
+  "use no memo";
+  const virtualized = shouldVirtualizeConversationTurns(
+    turns.length,
+    scrollElementRef,
+    virtualizationThreshold,
+  );
+  const { historyTurns, liveTurn, liveTurnIndex } = useMemo(
+    () => splitConversationLiveTail(turns, virtualized, busy),
+    [busy, turns, virtualized],
+  );
+  const liveTailElementRef = useRef(null);
+  const measuredLiveTailRef = useRef({ key: '', height: 0 });
+  const timelineRef = useRef(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const conversationKey = props.sessionId || turns[0]?.id || 'conversation';
+  const getScrollElement = useCallback(
+    () => scrollElementRef?.current || null,
+    [scrollElementRef],
+  );
+  const getItemKey = useCallback(
+    /** @param {number} index */
+    index => `${conversationKey}:${historyTurns[index]?.id || index}`,
+    [conversationKey, historyTurns],
+  );
+  const estimateRowSize = useCallback(
+    /** @param {number} index */
+    index => {
+      const measured = measuredLiveTailRef.current;
+      return measured.key === getItemKey(index) ? measured.height : CONVERSATION_ROW_ESTIMATE_PX;
+    },
+    [getItemKey],
+  );
+  // oxlint-disable-next-line react/incompatible-library -- TanStack Virtual owns row memoization and measurement; React Compiler must leave this timeline uncompiled.
+  const virtualizer = useVirtualizer({
+    enabled: virtualized,
+    count: virtualized ? historyTurns.length : 0,
+    getScrollElement,
+    getItemKey,
+    estimateSize: estimateRowSize,
+    overscan: CONVERSATION_ROW_OVERSCAN,
+    scrollMargin,
+    gap: turnGapPx,
+  });
+
+  const liveTailKey = liveTurn ? `${conversationKey}:${liveTurn.id || liveTurnIndex}` : '';
+  useLayoutEffect(() => {
+    if (!virtualized || !liveTailKey) return undefined;
+    const element = liveTailElementRef.current;
+    if (!element) return undefined;
+    const rememberSize = () => {
+      const height = element.getBoundingClientRect().height;
+      if (height > 0) measuredLiveTailRef.current = { key: liveTailKey, height };
+    };
+    rememberSize();
+    const observer = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(rememberSize)
+      : null;
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [liveTailKey, virtualized]);
+
+  useLayoutEffect(() => {
+    if (!virtualized) return undefined;
+    const scrollElement = getScrollElement();
+    const timelineElement = timelineRef.current;
+    if (!scrollElement || !timelineElement) return undefined;
+    const refreshScrollMargin = () => {
+      const nextMargin = conversationTimelineScrollMargin(timelineElement, scrollElement);
+      setScrollMargin(current => Math.abs(current - nextMargin) < 0.5 ? current : nextMargin);
+    };
+    refreshScrollMargin();
+    const viewportObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(refreshScrollMargin)
+      : null;
+    const layoutObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(refreshScrollMargin)
+      : null;
+    viewportObserver?.observe(scrollElement);
+    if (timelineElement.parentElement) layoutObserver?.observe(timelineElement.parentElement);
+    window.addEventListener('resize', refreshScrollMargin);
+    return () => {
+      viewportObserver?.disconnect();
+      layoutObserver?.disconnect();
+      window.removeEventListener('resize', refreshScrollMargin);
+    };
+  }, [getScrollElement, props.sessionId, virtualized, virtualizer]);
+
+  useLayoutEffect(() => {
+    if (!virtualized) return undefined;
+    const scrollElement = getScrollElement();
+    if (!scrollElement || followOutputRef?.current !== true) return undefined;
+    // A long session initially has estimated rows only. Re-stick during the first two layout
+    // frames while the bottom range mounts and is measured; otherwise the first estimated
+    // scrollHeight can expose the middle of the transcript before the caller's follower runs.
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const stickToBottom = () => {
+      if (followOutputRef?.current !== true) return false;
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+      return true;
+    };
+    stickToBottom();
+    firstFrame = window.requestAnimationFrame(() => {
+      if (!stickToBottom()) return;
+      secondFrame = window.requestAnimationFrame(() => {
+        stickToBottom();
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [followOutputRef, getScrollElement, historyTurns.length, props.sessionId, virtualized]);
+
+  if (!virtualized) {
+    return (
+      <>
+        {turns.map((turn, index) => (
+          <React.Fragment key={turn.id}>
+            {renderBeforeTurn?.(turn, index)}
+            <ConversationTurn
+              turn={turn}
+              {...props}
+              virtualized={false}
+              onRetry={index === turns.length - 1 ? props.onRetry : undefined}
+            />
+          </React.Fragment>
+        ))}
+      </>
+    );
+  }
+
+  const virtualRows = virtualizer.getVirtualItems();
+  const renderedRows = virtualRows.map(virtualRow => {
+    const turn = historyTurns[virtualRow.index];
+    if (!turn) return null;
+    const beforeTurn = renderBeforeTurn?.(turn, virtualRow.index);
+    return (
+      <div
+        key={virtualRow.key}
+        ref={virtualizer.measureElement}
+        data-index={virtualRow.index}
+        data-conversation-virtual-row=""
+        data-conversation-virtual-start={virtualRow.start}
+        data-conversation-virtual-size={virtualRow.size}
+        className={`absolute left-0 top-0 w-full ${beforeTurn ? 'flex flex-col' : ''}`}
+        style={{
+          gap: beforeTurn ? `${turnGapPx}px` : undefined,
+          transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+        }}
+      >
+        {beforeTurn}
         <ConversationTurn
-          key={turn.id}
           turn={turn}
           {...props}
-          onRetry={index === turns.length - 1 ? props.onRetry : undefined}
+          virtualized
+          onRetry={virtualRow.index === turns.length - 1 ? props.onRetry : undefined}
         />
-      ))}
-    </>
+      </div>
+    );
+  });
+  if (liveTurn) {
+    renderedRows.push(
+      <div
+        key={liveTailKey}
+        ref={liveTailElementRef}
+        data-conversation-live-tail=""
+        className={renderBeforeTurn ? 'flex flex-col' : ''}
+        style={{
+          gap: renderBeforeTurn ? `${turnGapPx}px` : undefined,
+          marginTop: historyTurns.length ? `${turnGapPx}px` : undefined,
+        }}
+      >
+        {renderBeforeTurn?.(liveTurn, liveTurnIndex)}
+        <ConversationTurn
+          turn={liveTurn}
+          {...props}
+          virtualized
+          onRetry={liveTurnIndex === turns.length - 1 ? props.onRetry : undefined}
+        />
+      </div>,
+    );
+  }
+  return (
+    <div
+      ref={timelineRef}
+      data-conversation-virtual-timeline=""
+      data-conversation-virtual-row-count={virtualRows.length}
+      data-conversation-scroll-margin={scrollMargin}
+      className="relative w-full"
+      style={{ overflowAnchor: 'none' }}
+    >
+      <div
+        data-conversation-virtual-history=""
+        aria-hidden="true"
+        className="w-full"
+        style={{ height: `${virtualizer.getTotalSize()}px` }}
+      />
+      {renderedRows}
+    </div>
   );
 }

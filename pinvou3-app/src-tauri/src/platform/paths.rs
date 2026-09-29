@@ -29,11 +29,6 @@ pub fn settings_path() -> PathBuf {
     pinvou3_home().join("settings.json")
 }
 
-/// `~/.pinvou3/eval/` —— 产品模式与官方兼容模式的评测报告目录。
-pub fn eval_reports_dir() -> PathBuf {
-    pinvou3_home().join("eval")
-}
-
 /// `~/.pinvou3/logs/memory-review.log` —— 对话记忆复盘诊断日志。
 /// 只记录阶段、分类和计数，不记录对话原文或记忆正文。
 pub fn memory_review_log() -> PathBuf {
@@ -252,12 +247,19 @@ pub fn browser_session_mcp_json(session_id: &str) -> PathBuf {
 /// and initial-page markers, not authentication. Requests retain the complete session_id,
 /// which the main application recomputes and validates.
 pub fn browser_session_token(session_id: &str) -> String {
+    format!("{:016x}", fnv1a64(session_id.as_bytes()))
+}
+
+/// Raw FNV-1a 64-bit hash. Used for stable local identifiers (local filenames,
+/// WebView labels); callers format the returned value for their own needs. Not
+/// authentication.
+pub(crate) fn fnv1a64(data: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in session_id.as_bytes() {
+    for byte in data {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 /// Browser MCP wrapper embedded at compile time and extracted to
 /// `~/.pinvou3/bundle/mcp-servers/`.
@@ -732,23 +734,6 @@ pub(crate) mod tests {
             None => unsafe { std::env::remove_var("PINVOU3_PYTHON") },
         }
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn eval_reports_are_scoped_under_pinvou_home() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = std::env::var_os("PINVOU3_HOME");
-        // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
-        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-eval-paths") };
-
-        assert_eq!(eval_reports_dir(), pinvou3_home().join("eval"));
-
-        match previous {
-            // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
-            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
-            // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
     }
 
     #[test]

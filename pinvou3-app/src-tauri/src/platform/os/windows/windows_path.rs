@@ -265,7 +265,9 @@ fn prepend_connector_path_entries(cmd: &mut Command, dirs: impl IntoIterator<Ite
     }
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+/// Canonical Windows path equality (trailing separators ignored, ASCII
+/// case-insensitive); shared with windows_system's PATH dedup.
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     left.to_string_lossy()
         .trim_end_matches(['\\', '/'])
         .eq_ignore_ascii_case(right.to_string_lossy().trim_end_matches(['\\', '/']))
@@ -503,12 +505,6 @@ pub fn bundled_asr_backend_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|exe| bundled_asr_backend_path_for_exe(&exe))
-}
-
-pub fn bundled_asr_model_path() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| bundled_asr_model_path_for_exe(&exe))
 }
 
 pub fn user_asr_model_path() -> PathBuf {

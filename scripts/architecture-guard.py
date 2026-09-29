@@ -1132,6 +1132,7 @@ def scan_rust(
         "rust_remote_control_host_api": Counter(),
         "rust_session_application_export_drift": Counter(),
         "rust_external_group_kill_spawn": Counter(),
+        "rust_cli_reaches_past_pinvou3_lib": Counter(),
     }
     rust_root = root / "pinvou3-app/src-tauri/src"
     rust_files = list(source_files(root, "pinvou3-app/src-tauri/src", {".rs"}))
@@ -1254,6 +1255,30 @@ def scan_rust(
                     "crate::app::commands::"
                 ):
                     rules["rust_tauri_handler_outside_app"][f"{relative}:{entry}"] += 1
+    # The CLI crates reach the app through the pinvou3_lib surface only: no
+    # direct foundation (deepseek_tui) or Tauri references, so the headless
+    # build cannot silently couple to the GUI stack or skip the app's own
+    # layering. Comment lines are ignored (docs may name the crates). The
+    # `use`-statement patterns catch every import form (plain, `as`-aliased,
+    # glob); the qualified-path patterns catch inline references.
+    cli_reference_patterns = [
+        re.compile(r"\bdeepseek_tui\s*::"),
+        re.compile(r"\btauri\s*::\s*[A-Za-z_{]"),
+        re.compile(r"\buse\s+(tauri|deepseek_tui)\s*(::|;|as\b)"),
+    ]
+    for path in source_files(root, "pinvou-cli/crates", {".rs"}):
+        text = read_text(path)
+        code_lines = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("//")
+        )
+        reference_count = sum(
+            len(pattern.findall(code_lines)) for pattern in cli_reference_patterns
+        )
+        if reference_count:
+            rules["rust_cli_reaches_past_pinvou3_lib"][normalize(path, root)] += (
+                reference_count
+            )
+
     cycles = strongly_connected_components(graph)
     for source_target, count in feature_edge_counts.items():
         source, target = source_target

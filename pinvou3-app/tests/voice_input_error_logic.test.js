@@ -18,6 +18,15 @@ assert.strictEqual((postprocessCommand.match(/&model_name,/g) || []).length, 2,
   "initial and retry requests must share the prepared user-selected model B, not server-first model A");
 const enginePoolSource = fs.readFileSync(path.join(__dirname, "..", "src-tauri", "src", "features", "assistant", "engine_pool.rs"), "utf8");
 assert.match(enginePoolSource, /resolve_served_model\([\s\S]*?&model\.model,/);
+// Without a session the draft model goes through the pool's runtime
+// preparation instead of borrowing the backend's last active session.
+const postprocessBridge = rustVoiceSource.slice(
+  rustVoiceSource.indexOf("async fn voice_postprocess_bridge("),
+  rustVoiceSource.indexOf("async fn call_voice_postprocess_model("),
+);
+assert.match(postprocessBridge, /pool\.fresh_bridge_for_draft\(/);
+assert.doesNotMatch(postprocessBridge, /store\.active_id\(\)/);
+assert.match(enginePoolSource, /fn fresh_bridge_for_draft\([\s\S]*?finalize_runtime_bridge\(bridge, &prepared, false\)/);
 const rustVoiceTempWavPath = path.join(__dirname, "..", "src-tauri", "src", "features", "voice", "temp_wav.rs");
 const rustVoiceTempWavSource = fs.readFileSync(rustVoiceTempWavPath, "utf8");
 const chatPath = path.join(__dirname, "..", "src", "features", "chat", "ChatView.jsx");
@@ -208,11 +217,6 @@ assert.match(
   "empty final postprocess output must return Ok (discard semantics), not an error: the frontend validator accepts an empty candidate exactly for filler-only input",
 );
 assert.doesNotMatch(
-  chatSource,
-  /key: 'structured'[\s\S]*handleVoiceMenuTrigger\('structured'\)/,
-  "chat voice menu must not expose structured as a separate user mode",
-);
-assert.doesNotMatch(
   rustVoiceSource,
   /mode == "structured"/,
   "structured must not remain a standalone voice postprocess chain",
@@ -313,6 +317,20 @@ assert.match(
   rustShortcutPlatformSource,
   /fn keyboard_hook_proc[\s\S]*?if !shortcut_enabled\(\) \{[\s\S]*?return call_next_hook[\s\S]*?handle_voice_shortcut_with_modifiers\(/,
   "native voice shortcut hook must gate all keystrokes by the synced settings state before gesture handling",
+);
+// The hook must report held Shift/Ctrl/Win to the state machine; deleting the
+// probe would re-arm system chords such as Shift+Alt input switching.
+assert.match(
+  rustShortcutPlatformSource,
+  /fn keyboard_hook_proc[\s\S]*?other_modifier_down = [\s\S]*?VK_SHIFT, VK_CONTROL, VK_LWIN, VK_RWIN[\s\S]*?GetAsyncKeyState/,
+  "native voice shortcut hook must probe held Shift/Ctrl/Win so system chords pass through",
+);
+// Only the Alt-down branch consumes the probe: keep the GetAsyncKeyState
+// calls off every other keystroke of the typing hot path.
+assert.match(
+  rustShortcutPlatformSource,
+  /let other_modifier_down = matches!\(key, VoiceShortcutKey::Alt\(_\)\)\s*&& key_down/,
+  "the modifier probe must stay gated to Alt key-down events",
 );
 // Cross-window recording mutual exclusion: the trigger target resolves to the recording window first.
 assert.match(

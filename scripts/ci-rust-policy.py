@@ -40,8 +40,9 @@ RELEASE_VERSION_TARGETS = {
     ),
     "pinvou-cli/Cargo.lock": (
         "cargo-lock",
-        ("pinvou-knowledge", "pinvou3-tauri"),
+        ("pinvou-cli", "pinvou-knowledge", "pinvou3-tauri"),
     ),
+    "pinvou-cli/crates/cli/Cargo.toml": ("cargo", ("pinvou-cli",)),
     "pinvou3-app/package.json": ("json", ("version",)),
     "pinvou3-app/package-lock.json": (
         "json",

@@ -26,6 +26,8 @@ pub struct SessionModeStateView {
     state: SessionModeState,
     /// Whether the product-level multi-agent mode is available for this session.
     /// This is resolved by SessionPolicy instead of inferred by the frontend.
+    /// Swarm-regime scope (scheduled sessions excluded) so the toggle hides
+    /// where the engine would never honor the lifted caps.
     multi_agent_available: bool,
 }
 
@@ -37,7 +39,7 @@ pub async fn get_mode_state(
 ) -> Result<SessionModeStateView, String> {
     Ok(SessionModeStateView {
         state: store.mode_state(&session_id),
-        multi_agent_available: pool.multi_agent_mode_available(&session_id),
+        multi_agent_available: pool.swarm_mode_available(&session_id),
     })
 }
 
@@ -123,7 +125,7 @@ pub async fn exit_plan_to_yolo(
 /// 模型列表下方的会话级开关。开启：装配专家名册，并让下一次发送按多智能体
 /// 资源边界重建引擎；关闭：让下一次发送恢复普通对话的底座资源配置。切换时
 /// 回收空闲旧引擎，避免旧 hook / 深度 / 并发配置泄漏到新模式；正在生成时拒绝
-/// 切换。工具面不随开关变化——与主线完全一致：`workflow` 保持可用（委派提醒
+/// 切换。工具面不随开关变化——与主线完全一致：`workflow` 保持可用（蜂群契约
 /// 不教学不推荐），裸 `agent` 本就对所有会话可用。
 #[tauri::command]
 pub async fn set_multi_agent_mode(
@@ -153,30 +155,6 @@ pub async fn set_multi_agent_mode(
 /// 必须裹住方案全文 + 带明确"立即执行"信号,否则切了 Yolo 但 AI 收到空指令不知道干嘛。
 pub(super) fn accept_plan_instruction(plan_markdown: &str) -> String {
     format!("用户已批准方案,立即开始执行。方案:\n\n{plan_markdown}")
-}
-
-/// 「未成活」快照作废（发送前任何早退共用，按 id 精确删除；残留快照会抢占
-/// 重试时同号 turn 的 first-wins 对齐锚——评审 M5）。
-async fn drop_unsent_turn_checkpoint(
-    ledger: Option<std::path::PathBuf>,
-    snapshot_id: Option<String>,
-    session_id: &str,
-    caller: &str,
-) {
-    if let (Some(ledger), Some(snapshot_id)) = (ledger, snapshot_id) {
-        let sid = session_id.to_string();
-        let caller = caller.to_string();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            if let Err(error) =
-                crate::features::code_checkpoints::drop_checkpoint(&ledger, &snapshot_id)
-            {
-                log::warn!(
-                    "[pinvou3][{caller}] drop unsent-turn checkpoint failed sid={sid}: {error:#}"
-                );
-            }
-        })
-        .await;
-    }
 }
 
 /// 用户点 plan_card [✅ 就这么干]：接受 plan，切 YOLO 执行(对齐底座 accept-yolo)。
@@ -267,7 +245,7 @@ pub async fn accept_plan(
     let plan_claim = match store.claim_pending_plan(&session_id, &plan_id) {
         Ok(claim) => claim,
         Err(error) => {
-            drop_unsent_turn_checkpoint(
+            super::checkpoints::drop_unsent_turn_checkpoint(
                 checkpoint_ledger_root.clone(),
                 created_snapshot_id.clone(),
                 &session_id,
@@ -282,7 +260,7 @@ pub async fn accept_plan(
         plan_id.clone(),
         accepted_mode_state.clone(),
     )) {
-        drop_unsent_turn_checkpoint(
+        super::checkpoints::drop_unsent_turn_checkpoint(
             checkpoint_ledger_root.clone(),
             created_snapshot_id.clone(),
             &session_id,
@@ -291,17 +269,21 @@ pub async fn accept_plan(
         .await;
         return Err(format!("prepare accept_plan admission: {error:#}"));
     }
+    // 候选专家只从计划正文（plan_markdown）匹配，不加 accept 前缀——与快照同源；
+    // 实际发送内容仍是包装后的 accept 指令。蜂群契约在 spawn 级 instructions，
+    // 这里不再改写消息内容。
     let prepared_delegation = super::multiagent::prepare_delegation_turn(
         pool.inner(),
         &session_id,
         accepted_mode_state.multi_agent,
-        &plan_markdown,
         accept_plan_instruction(&plan_markdown),
+        super::multiagent::MatchSource(&plan_markdown),
     );
     let display_content = display_message
         .map(|message| message.trim().to_string())
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| "✅ 就这么干".to_string());
+    crate::features::assistant::timing::start_turn(&session_id);
     if let Err(error) = pool
         .send_reserved_user_message(
             &session_id,
@@ -310,12 +292,18 @@ pub async fn accept_plan(
             SerializableMode::Yolo.to_app_mode(),
             false,
             prepared_delegation.expert_snapshot,
+            prepared_delegation.expert_candidates,
             reservation,
         )
         .await
     {
+        crate::features::assistant::timing::finish_turn(
+            &session_id,
+            "send_error",
+            Some(&format!("{error:#}")),
+        );
         // 发送失败：作废「未成活」快照（与 chat.rs 同款，按 id 精确删除）。
-        drop_unsent_turn_checkpoint(
+        super::checkpoints::drop_unsent_turn_checkpoint(
             checkpoint_ledger_root,
             created_snapshot_id,
             &session_id,
@@ -391,43 +379,6 @@ pub async fn set_super_permission(
     // channel as the connector/skill toggles.
     pool.refresh_permission_rulesets().await;
     Ok(crate::platform::super_permission::is_enabled())
-}
-
-/// 读 pinvou3 内置 skill 的 body(去掉 frontmatter)。
-/// 用途:前端 autoTriggerPinvouReview 把完整 SKILL.md 内容塞进 user message,
-/// 不依赖本地 Qwen3.6 主动 read_file —— 弱模型不会主动用 progressive disclosure。
-/// 设计依据:docs/Pinvou-品悟设计.md §10.5 (即将补)
-#[tauri::command]
-pub async fn read_skill_body(name: String) -> Result<String, String> {
-    use crate::platform::paths;
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe_name != name || safe_name.is_empty() {
-        return Err(format!("invalid skill name: {name}"));
-    }
-    // 市场技能按包聚合（bundles/<pkg>/skills/）优先，旧扁平布局回退由
-    // find_skill_dir 内置（迁移过渡容错，下个版本删除回退）。
-    let path = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
-        .find_skill_dir(&safe_name)
-        .unwrap_or_else(|| paths::bundle_skills_dir().join(&safe_name))
-        .join("SKILL.md");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read SKILL.md ({}): {e}", path.display()))?;
-    // 剥 frontmatter ---\n...\n---\n
-    let body = if let Some(rest) = content.strip_prefix("---\n") {
-        if let Some(end) = rest.find("\n---\n") {
-            rest[end + 5..].trim_start().to_string()
-        } else if let Some(end) = rest.find("\n---") {
-            rest[end + 4..].trim_start().to_string()
-        } else {
-            content
-        }
-    } else {
-        content
-    };
-    Ok(body)
 }
 
 // 修法 D 删除了 revise_plan 命令.
@@ -512,20 +463,6 @@ pub async fn get_pending_user_inputs(
         busy: pool.is_turn_active(&session_id),
         pending: crate::features::assistant::pending_user_input::list(&session_id),
     })
-}
-
-#[tauri::command]
-pub async fn restart_engine(
-    pool: State<'_, EnginePool>,
-    store: State<'_, SessionStore>,
-) -> Result<(), String> {
-    // 多 session 并发:重启 = evict 当前 active session 的 engine(取消在跑 turn +
-    // Shutdown + abort forwarder),下次 chat 时 EnginePool 重新 spawn 干净的并从磁盘
-    // rehydrate 历史。也是 engine-busy 卡死时的恢复路径。
-    if let Some(sid) = store.active_id() {
-        pool.evict(&sid).await;
-    }
-    Ok(())
 }
 
 // ===================== Pinvou v4 召唤式检阅 =====================

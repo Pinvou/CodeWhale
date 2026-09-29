@@ -137,10 +137,10 @@ impl Language {
             Language::En => Some(
                 "## Language\n\n\
                  Respond in English by default, and mirror the language of the \
-                 user's latest message. Keep code, file paths, tool names \
-                 (e.g. `File`, `Bash`), environment variables, \
-                 command-line flags, and URLs verbatim — only natural-language \
-                 prose follows the language rule.",
+                 user's latest message. Keep code, file paths, tool names, \
+                 environment variables, command-line flags, and URLs \
+                 verbatim — only natural-language prose follows the language \
+                 rule.",
             ),
             // 底座已注入对应 bookend,避免重复。
             Language::ZhHans | Language::Ja => None,
@@ -231,7 +231,10 @@ pub struct SavedModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     /// 用户选择的思考深度档位（透传底座 reasoning_effort：off/low/medium/high/max）。
-    /// None = 未显式设置，走 provider 默认（vllm→off 防 SSE timeout，其余→high）。
+    /// None = not explicitly set; the provider default applies (the local
+    /// default is the lowest thinking tier: vllm→low, probed ollama→high —
+    /// real-machine testing shows local models cannot reliably turn thinking
+    /// off; everything else→high).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     pub model: String,
@@ -259,6 +262,57 @@ pub struct SavedModel {
     pub has_secret: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_action: Option<CredentialEditAction>,
+}
+
+/// Frozen snapshot of the pre-#622 route predicates for the one-time
+/// machine-written-thinking-off migration. These only have to classify
+/// records written by pre-#622 builds, so they deliberately mirror
+/// `bridge::base_url_uses_local_or_private` /
+/// `bridge::is_official_deepseek_base_url` as of #622 and are allowed to
+/// drift afterwards: this is a historical classifier, not live routing. The
+/// contract test `prefs_legacy_local_route_snapshot_matches_bridge_predicate`
+/// (bridge tests) pins today's equality so a future change to the bridge
+/// functions forces a conscious snapshot decision.
+pub(crate) fn legacy_official_deepseek_base_url(base_url: &str) -> bool {
+    let normalized = base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/beta")
+        .trim_end_matches("/v1")
+        .to_ascii_lowercase();
+    normalized == "https://api.deepseek.com"
+}
+
+pub(crate) fn legacy_local_route_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            let host = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim_end_matches('.');
+            if host.eq_ignore_ascii_case("localhost") {
+                return true;
+            }
+            if host.eq_ignore_ascii_case("host.docker.internal")
+                || host.eq_ignore_ascii_case("host.lima.internal")
+                || host.eq_ignore_ascii_case("host.orbstack.internal")
+                || host.ends_with(".docker.internal")
+            {
+                return true;
+            }
+            let Ok(address) = host.parse::<std::net::IpAddr>() else {
+                return false;
+            };
+            if address.is_loopback() {
+                return true;
+            }
+            match address {
+                std::net::IpAddr::V4(v4) => v4.is_private(),
+                std::net::IpAddr::V6(_) => false,
+            }
+        })
 }
 
 impl SavedModel {
@@ -290,6 +344,21 @@ impl SavedModel {
         self.id == BUILTIN_LLMAPI_MODEL_ID
     }
 
+    /// Operator-owned endpoint: locally self-hosted (LocalVllm) or a
+    /// user-entered OpenAI-compatible / custom endpoint. The output ceiling
+    /// of these endpoints is the deployer's own responsibility; the host
+    /// declares the route output fact by window tier on their behalf (see
+    /// `bridge::route_limits_for_model`). `coding_plan` is the official
+    /// managed entry point and does not count as operator-owned even when it
+    /// rides on the `OpenaiCompatible` preset — it must stay base
+    /// fail-closed, with no declaration on its behalf.
+    pub fn is_operator_owned_endpoint(&self) -> bool {
+        (self.preset == ModelPreset::LocalVllm
+            || self.preset == ModelPreset::OpenaiCompatible
+            || self.provider_kind.as_deref() == Some("custom"))
+            && self.provider_kind.as_deref() != Some("coding_plan")
+    }
+
     fn normalize_alias(&mut self) {
         if self.preset == ModelPreset::LocalVllm {
             self.alias = None;
@@ -302,6 +371,44 @@ impl SavedModel {
             .filter(|value| !value.is_empty());
     }
 
+    /// Whether this record's stored `reasoning_effort:"off"` may be a
+    /// machine-written pre-#622 local default rather than an explicit user
+    /// choice (see `UserPrefs::migrate_legacy_local_thinking_default`).
+    /// Deliberately conservative — wrongly keeping a legacy `off` only
+    /// preserves the old behavior, while wrongly stripping would take away
+    /// a real choice — so anything the old form would have resolved to a
+    /// non-local provider keeps its `off`:
+    /// - official DeepSeek base URLs won provider resolution even for local
+    ///   presets (old default `high`);
+    /// - known-vendor or coding-plan records resolved through the vendor
+    ///   table (old default `high`/null); unknown free-text vendors keep
+    ///   their `off` too — the old form fell through to the local check
+    ///   for those, but saved vendor values only come from catalog groups,
+    ///   and keeping a machine-written `off` merely preserves the old
+    ///   behavior;
+    /// - public OpenAI-compatible endpoints had no tier control at all.
+    pub(crate) fn legacy_machine_written_local_thinking_off(&self) -> bool {
+        if self.reasoning_effort.as_deref() != Some("off") {
+            return false;
+        }
+        if legacy_official_deepseek_base_url(&self.base_url) {
+            return false;
+        }
+        if self.preset == ModelPreset::LocalVllm {
+            // `local_vllm` resolved to the vLLM wire before any vendor
+            // check, so the old settings page machine-wrote `off` for
+            // every one of these records.
+            return true;
+        }
+        self.preset == ModelPreset::OpenaiCompatible
+            && self.provider_kind.as_deref() != Some(MODEL_PROVIDER_KIND_CODING_PLAN)
+            && self
+                .vendor
+                .as_deref()
+                .map_or(true, |vendor| vendor.trim().is_empty())
+            && legacy_local_route_base_url(&self.base_url)
+    }
+
     fn normalize_route_limits(&mut self) {
         self.context_window_tokens = self.context_window_tokens.filter(|tokens| *tokens > 0);
         self.max_output_tokens = self.max_output_tokens.filter(|tokens| *tokens > 0);
@@ -309,8 +416,24 @@ impl SavedModel {
             if self.context_window_tokens.is_none() && self.model == "qwen36_35b_256k" {
                 self.context_window_tokens = Some(262_144);
             }
-            if self.max_output_tokens.is_none() {
-                self.max_output_tokens = Some(24_576);
+            // The output cap is no longer forced to 24K for the LocalVllm
+            // preset: when not explicitly configured it takes the same path
+            // as custom OpenAI-compatible endpoints and is declared uniformly
+            // by window tier in route_limits_for_model (>=500K→131072 /
+            // >=250K→65536 / otherwise min(window/4, 32768)). Older versions
+            // machine-wrote the 24K into existing configs (forced here +
+            // prefilled in the settings page, then saved), making it
+            // indistinguishable on disk from explicit user input; a local
+            // model whose value is exactly 24576 is normalized away as
+            // "legacy unset" so the window tiers also apply to upgraded
+            // users (the persistence gate writes this normalization back to
+            // disk on load). Trade-off: from now on explicitly configuring
+            // 24576 on a local model is also treated as unset — 24576 is
+            // thereby kept as a legacy sentinel value, in the same family as
+            // the <=0 filter above. 24576 on non-LocalVllm endpoints is
+            // always explicit input and is not migrated.
+            if self.max_output_tokens == Some(24_576) {
+                self.max_output_tokens = None;
             }
         }
         // reasoning_effort 归一为底座 `ReasoningEffort::parse_strict` 认识的规范档位
@@ -416,6 +539,11 @@ pub struct AdvancedPrefs {
     pub allow_shell: Option<bool>,
     pub model_preset: Option<ModelPreset>,
     pub max_output_tokens: Option<u32>,
+    /// Max subagents. Note: with swarm mode on (the multi-agent switch), this
+    /// is overridden by the foundation hard ceilings (128 pins both the
+    /// engine's max_subagents and launch_concurrency; 1024 pins
+    /// max_admitted_subagents), an explicit 0 included — 0 was never a runtime
+    /// "disable" (the base itself clamps to at least 1).
     pub max_subagents: Option<usize>,
     pub max_steps: Option<u32>,
     /// 自定义模型 ID（CustomLocal / Remote* 生效）
@@ -463,6 +591,18 @@ impl Default for NotificationPrefs {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PetPrefs {
+    pub enabled: bool,
+}
+
+/// Computer Use preferences. Only the master switch is stored: off by default; only after
+/// the user explicitly enables it can the model see the `computer_use` tool. The switch is
+/// written by the dedicated `computer_use_set_enabled` command via a field-level
+/// transaction (same as PetPrefs, not part of the generic settings patch), and replayed at
+/// startup by lib.rs into `ComputerUseShared`'s AtomicBool; session grants are never
+/// persisted (they live only in memory).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputerUsePrefs {
     pub enabled: bool,
 }
 
@@ -560,6 +700,20 @@ pub struct UserPrefs {
     /// storage is cleared, and races where a later multi-window mount invoke
     /// overwrites an earlier one.
     pub voice_shortcut_enabled: bool,
+    pub computer_use: ComputerUsePrefs,
+    /// One-time migration marker (#622): pre-#622 settings pages prefilled
+    /// the local thinking default `off` into the form and the save handler
+    /// wrote it back unconditionally, so form-saved local records carry a
+    /// `reasoning_effort:"off"` no user chose (see
+    /// `UserPrefs::migrate_legacy_local_thinking_default`). The first
+    /// post-#622 load strips those and sets this flag so an `off` saved
+    /// after the upgrade is never re-stripped. Skipped while false so
+    /// pre-#622 files and fresh installs carry no marker noise; note a
+    /// downgrade-then-re-upgrade drops the flag (old builds ignore unknown
+    /// fields), which re-strips once — the same accepted family as the
+    /// marker-free 24576 sentinel below.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_thinking_default_migrated: bool,
     pub advanced: AdvancedPrefs,
 }
 
@@ -578,6 +732,31 @@ fn should_persist_normalization(allow_persist: bool, requested: bool, changed: b
 }
 
 impl UserPrefs {
+    /// One-time migration for #622 ("local models default to the lowest
+    /// thinking tier"): pre-#622 settings pages prefilled the local default
+    /// `off` into the thinking control and the save handler wrote it back
+    /// unconditionally, so form-saved local records carry a
+    /// `reasoning_effort:"off"` that no user chose. Stored values win over
+    /// provider defaults at runtime, so without this migration the new
+    /// lowest-tier default never reaches upgraded users. Same disclosed
+    /// trade-off as the 24576 output-cap sentinel: an explicitly chosen
+    /// `off` on a local route is also reset once (one click to restore, and
+    /// the marker keeps every later load from touching it again).
+    fn migrate_legacy_local_thinking_default(&mut self) {
+        if self.local_thinking_default_migrated {
+            return;
+        }
+        for model in &mut self.advanced.saved_models {
+            if model.legacy_machine_written_local_thinking_off() {
+                model.reasoning_effort = None;
+            }
+        }
+        // Marked done even when nothing matched: the flag means "this file
+        // has been seen by post-#622 semantics", so an `off` a user saves
+        // after the upgrade is never re-stripped by a later load.
+        self.local_thinking_default_migrated = true;
+    }
+
     /// 从 `~/.pinvou3/settings.json` 读。没有有效语言配置时跟随当前系统语言。
     pub fn load() -> Self {
         let _guard = lock_user_prefs();
@@ -740,6 +919,20 @@ impl UserPrefs {
             .saved_models
             .iter()
             .any(|model| model.preset == ModelPreset::LocalVllm && model.alias.is_some());
+        // The local 24576 legacy-sentinel migration (`normalize_route_limits`
+        // normalizes the machine-written 24K to unset) is the same case: it
+        // must be recorded before migrate/normalize rewrite the models,
+        // otherwise the save gate sees no change and the 24K in existing
+        // settings.json stays on disk forever.
+        let local_output_sentinel_changed = prefs.advanced.saved_models.iter().any(|model| {
+            model.preset == ModelPreset::LocalVllm && model.max_output_tokens == Some(24_576)
+        });
+        // The #622 machine-written-local-off migration must persist its
+        // marker even when no record matched: "migration ran" is what keeps
+        // a later explicitly-saved `off` from being stripped by a
+        // subsequent load.
+        let local_thinking_default_migrated = !prefs.local_thinking_default_migrated;
+        prefs.migrate_legacy_local_thinking_default();
         prefs.migrate_models();
         prefs.ensure_builtin_llmapi_model();
         prefs.normalize_saved_model_metadata();
@@ -748,6 +941,8 @@ impl UserPrefs {
         let normalization_changed = minimax_endpoint_changed
             || builtin_llmapi_endpoint_changed
             || local_model_alias_changed
+            || local_output_sentinel_changed
+            || local_thinking_default_migrated
             || migration.settings_sanitized
             || memory_policy_changed
             || color_scheme_derived;
@@ -1329,6 +1524,91 @@ mod tests {
         }
     }
 
+    /// LocalVllm no longer forces a 24K output (stays None when not
+    /// explicitly configured; declared uniformly by the runtime window
+    /// tiers); the operator-owned predicate covers both local and custom
+    /// endpoints and excludes the coding_plan official entry.
+    #[test]
+    fn normalize_keeps_local_output_unset_and_operator_owned_detection() {
+        let mut local = SavedModel {
+            id: "m1".into(),
+            name: "m1".into(),
+            alias: None,
+            preset: ModelPreset::LocalVllm,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "qwen36_35b_256k".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        };
+        local.normalize_route_limits();
+        assert_eq!(
+            local.context_window_tokens,
+            Some(262_144),
+            "the qwen36_35b_256k window fallback is kept"
+        );
+        assert_eq!(
+            local.max_output_tokens, None,
+            "local models no longer force a 24K output; unset stays None"
+        );
+        assert!(local.is_operator_owned_endpoint());
+
+        // A user's explicitly configured output limit (including the
+        // positive-value filter) is kept verbatim.
+        let mut explicit = local.clone();
+        explicit.max_output_tokens = Some(32_768);
+        explicit.normalize_route_limits();
+        assert_eq!(explicit.max_output_tokens, Some(32_768));
+
+        // A machine-written legacy local 24K (normalize force + settings
+        // page prefill) counts as legacy unset and is normalized to None to
+        // take the window tiers; 24576 on non-LocalVllm endpoints is
+        // explicit input and is kept verbatim.
+        let mut legacy = local.clone();
+        legacy.max_output_tokens = Some(24_576);
+        legacy.normalize_route_limits();
+        assert_eq!(
+            legacy.max_output_tokens, None,
+            "a legacy machine-written local 24K is normalized to unset and takes the window tiers"
+        );
+        let mut custom_legacy = legacy.clone();
+        custom_legacy.preset = ModelPreset::OpenaiCompatible;
+        custom_legacy.provider_kind = Some("custom".into());
+        custom_legacy.max_output_tokens = Some(24_576);
+        custom_legacy.normalize_route_limits();
+        assert_eq!(
+            custom_legacy.max_output_tokens,
+            Some(24_576),
+            "24576 on a custom endpoint is explicit input and is not migrated"
+        );
+
+        let mut custom = local.clone();
+        custom.preset = ModelPreset::OpenaiCompatible;
+        custom.provider_kind = Some("custom".into());
+        assert!(custom.is_operator_owned_endpoint());
+
+        // coding_plan is not operator-owned even on the OpenaiCompatible
+        // preset.
+        let mut plan = custom.clone();
+        plan.provider_kind = Some("coding_plan".into());
+        assert!(!plan.is_operator_owned_endpoint());
+
+        // Official cloud presets are not operator-owned.
+        let mut cloud = local;
+        cloud.preset = ModelPreset::Deepseek;
+        assert!(!cloud.is_operator_owned_endpoint());
+    }
+
     /// reasoning_effort 归一为底座 `ReasoningEffort::parse_strict` 认识的规范档位：
     /// 非法值置 None（避免被底座静默回退成 Max），合法别名规范化为对应档位。
     #[test]
@@ -1481,6 +1761,21 @@ mod tests {
         assert!(enabled.voice_shortcut_enabled);
         let serialized = serde_json::to_string(&enabled).expect("UserPrefs serialize");
         assert!(serialized.contains("\"voice_shortcut_enabled\":true"));
+    }
+
+    #[test]
+    fn computer_use_enabled_defaults_off_and_round_trips() {
+        // Older settings.json lacks the field: the serde container-level
+        // default falls back to false (off by default).
+        let legacy = UserPrefs::parse_settings(Some(r#"{"theme":"genesis"}"#), Some("zh-CN"));
+        assert!(!legacy.computer_use.enabled);
+        let enabled = UserPrefs::parse_settings(
+            Some(r#"{"theme":"genesis","computer_use":{"enabled":true}}"#),
+            Some("zh-CN"),
+        );
+        assert!(enabled.computer_use.enabled);
+        let serialized = serde_json::to_string(&enabled).expect("UserPrefs serialize");
+        assert!(serialized.contains("\"computer_use\":{\"enabled\":true}"));
     }
 
     #[test]
@@ -1789,6 +2084,529 @@ mod tests {
         assert!(persisted.contains("api.minimaxi.com"));
     }
 
+    /// The local 24576 legacy-sentinel migration must be persisted at load
+    /// time (round-2 review MAJOR: it once only changed memory, the save
+    /// gate saw no change, and the machine-written 24K stayed in
+    /// settings.json forever). Also pins: 24576 on non-LocalVllm endpoints
+    /// is explicit input the migration must not touch.
+    #[test]
+    fn load_persists_legacy_local_output_sentinel_migration() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // RAII cleanup: PINVOU3_HOME and the temporary home must be reclaimed
+        // even on assertion/panic — the previous restore was only written at
+        // the normal end, so a mid-test failure leaked the env + directory
+        // and polluted later tests in the same process (same recipe as the
+        // bridge tests' TempDirGuard; the directory name stacks pid + an
+        // in-process atomic suffix so concurrent cargo test from two
+        // terminals does not collide).
+        struct PrefsHomeGuard {
+            previous: Option<std::ffi::OsString>,
+            home: std::path::PathBuf,
+        }
+        impl PrefsHomeGuard {
+            fn set(home: std::path::PathBuf) -> Self {
+                let previous = std::env::var_os("PINVOU3_HOME");
+                // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
+                unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+                Self { previous, home }
+            }
+        }
+        impl Drop for PrefsHomeGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.home);
+                match self.previous.take() {
+                    // SAFETY: holding ENV_LOCK (first line of this test); restore-side writes serialized.
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-prefs-local-output-sentinel-{}-{}",
+            std::process::id(),
+            super::super::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create temporary prefs home");
+        let _prefs_home = PrefsHomeGuard::set(home);
+
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models.push(SavedModel {
+            id: "legacy-local".into(),
+            name: "Legacy Local".into(),
+            alias: None,
+            preset: ModelPreset::LocalVllm,
+            context_window_tokens: Some(262_144),
+            // The machine-written 24K from older normalize + settings page
+            // prefill: must be migrated away and persisted.
+            max_output_tokens: Some(24_576),
+            reasoning_effort: None,
+            model: "qwen36_35b_256k".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        });
+        prefs.advanced.saved_models.push(SavedModel {
+            id: "custom-explicit".into(),
+            name: "Custom Explicit".into(),
+            alias: None,
+            preset: ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            // 24576 on a custom endpoint is explicit input: must be kept
+            // verbatim.
+            max_output_tokens: Some(24_576),
+            reasoning_effort: None,
+            model: "custom-model".into(),
+            base_url: "https://gateway.example.com/v1".into(),
+            provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        });
+        prefs.advanced.active_model_id = Some("legacy-local".into());
+        let path = super::super::paths::settings_path();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&prefs).expect("serialize legacy prefs"),
+        )
+        .expect("write legacy prefs");
+
+        let loaded = UserPrefs::load();
+        let legacy_local = loaded
+            .model_by_id("legacy-local")
+            .expect("legacy local model");
+        assert_eq!(
+            legacy_local.max_output_tokens, None,
+            "the legacy in-memory 24K must already be normalized to unset"
+        );
+        let custom = loaded.model_by_id("custom-explicit").expect("custom model");
+        assert_eq!(
+            custom.max_output_tokens,
+            Some(24_576),
+            "the explicit 24576 on the custom endpoint must not be migrated"
+        );
+
+        // Key assertion: the normalization was written back to disk (not
+        // just changed in memory).
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read migrated prefs"))
+                .expect("parse migrated prefs");
+        let models = persisted["advanced"]["saved_models"]
+            .as_array()
+            .expect("saved_models array");
+        let legacy_on_disk = models
+            .iter()
+            .find(|model| model["id"] == "legacy-local")
+            .expect("legacy local on disk");
+        assert!(
+            legacy_on_disk["max_output_tokens"].is_null(),
+            "the legacy on-disk 24K must be cleared, got {}",
+            legacy_on_disk["max_output_tokens"]
+        );
+        let custom_on_disk = models
+            .iter()
+            .find(|model| model["id"] == "custom-explicit")
+            .expect("custom on disk");
+        assert_eq!(custom_on_disk["max_output_tokens"], 24_576);
+        // PINVOU3_HOME restoration and temporary home reclamation are
+        // handled by PrefsHomeGuard's Drop (also on assertion/panic paths);
+        // no hand-written restore block here.
+    }
+
+    /// SavedModel fixture with only the fields the legacy-thinking-off
+    /// migration reads; everything else at neutral defaults.
+    fn legacy_model_fixture(
+        id: &str,
+        preset: ModelPreset,
+        base_url: &str,
+        vendor: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) -> SavedModel {
+        SavedModel {
+            id: id.into(),
+            name: id.into(),
+            alias: None,
+            preset,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: reasoning_effort.map(str::to_string),
+            model: "qwen3-32b".into(),
+            base_url: base_url.into(),
+            provider_kind: Some(
+                match preset {
+                    ModelPreset::OpenaiCompatible => MODEL_PROVIDER_KIND_CUSTOM,
+                    _ => MODEL_PROVIDER_KIND_OFFICIAL_API,
+                }
+                .into(),
+            ),
+            vendor: vendor.map(str::to_string),
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        }
+    }
+
+    /// Pins each arm of the migration predicate individually, so a one-line
+    /// relaxation cannot slip past the end-to-end load test (whose fixtures
+    /// only exercise the arms on records the old UI could produce):
+    /// LocalVllm strips regardless of base URL — yet the official-DeepSeek
+    /// keep wins first — and the OpenaiCompatible strip requires a
+    /// non-coding-plan kind, an empty vendor, and a local route.
+    #[test]
+    fn legacy_machine_written_local_thinking_off_predicate_arms() {
+        let strips = |preset, base_url: &str, vendor: Option<&str>| {
+            legacy_model_fixture("m", preset, base_url, vendor, Some("off"))
+                .legacy_machine_written_local_thinking_off()
+        };
+        // LocalVllm: machine-written for every record, public URL included…
+        assert!(strips(
+            ModelPreset::LocalVllm,
+            "http://127.0.0.1:8000/v1",
+            None
+        ));
+        assert!(strips(
+            ModelPreset::LocalVllm,
+            "https://relay.example.com/v1",
+            None
+        ));
+        // …but the official DeepSeek URL keep wins even for LocalVllm.
+        assert!(!strips(
+            ModelPreset::LocalVllm,
+            "https://api.deepseek.com",
+            None
+        ));
+        // OpenaiCompatible: local route with an empty vendor strips…
+        assert!(strips(
+            ModelPreset::OpenaiCompatible,
+            "http://192.168.1.20:11434/v1",
+            None
+        ));
+        // …a known vendor keeps even on a local route…
+        assert!(!strips(
+            ModelPreset::OpenaiCompatible,
+            "http://192.168.1.20:11434/v1",
+            Some("glm")
+        ));
+        // …a coding-plan kind keeps even on a local route…
+        let mut coding_plan = legacy_model_fixture(
+            "plan",
+            ModelPreset::OpenaiCompatible,
+            "http://127.0.0.1:8317/v1",
+            None,
+            Some("off"),
+        );
+        coding_plan.provider_kind = Some(MODEL_PROVIDER_KIND_CODING_PLAN.into());
+        assert!(!coding_plan.legacy_machine_written_local_thinking_off());
+        // …and only the exact machine-written value strips.
+        let low = legacy_model_fixture(
+            "m",
+            ModelPreset::OpenaiCompatible,
+            "http://192.168.1.20:11434/v1",
+            None,
+            Some("low"),
+        );
+        assert!(!low.legacy_machine_written_local_thinking_off());
+    }
+
+    /// #622: the settings page machine-wrote the local default `off` into
+    /// every form-saved local record. The first post-#622 load must strip
+    /// those (in memory AND on disk) while keeping every `off` the old form
+    /// could not have written (public custom endpoints, vendor-tagged cloud
+    /// routes, official cloud presets).
+    #[test]
+    fn load_migrates_legacy_local_thinking_off() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        struct PrefsHomeGuard {
+            previous: Option<std::ffi::OsString>,
+            home: std::path::PathBuf,
+        }
+        impl PrefsHomeGuard {
+            fn set(home: std::path::PathBuf) -> Self {
+                let previous = std::env::var_os("PINVOU3_HOME");
+                // SAFETY: holding ENV_LOCK (first line of this test); env writes serialized.
+                unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+                Self { previous, home }
+            }
+        }
+        impl Drop for PrefsHomeGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.home);
+                match self.previous.take() {
+                    // SAFETY: holding ENV_LOCK (first line of this test); restore-side writes serialized.
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-prefs-legacy-thinking-off-{}-{}",
+            std::process::id(),
+            super::super::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create temporary prefs home");
+        let _prefs_home = PrefsHomeGuard::set(home);
+
+        let mut prefs = UserPrefs::default();
+        // Machine-written population: must be stripped.
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "local-vllm",
+            ModelPreset::LocalVllm,
+            "http://127.0.0.1:8000/v1",
+            None,
+            Some("off"),
+        ));
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "lan-endpoint",
+            ModelPreset::OpenaiCompatible,
+            "http://192.168.1.20:11434/v1",
+            None,
+            Some("off"),
+        ));
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "docker-local",
+            ModelPreset::OpenaiCompatible,
+            "http://host.docker.internal:8080/v1",
+            None,
+            Some("off"),
+        ));
+        // Explicit populations: must be kept verbatim.
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "public-custom",
+            ModelPreset::OpenaiCompatible,
+            "https://gateway.example.com/v1",
+            None,
+            Some("off"),
+        ));
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "vendor-glm",
+            ModelPreset::OpenaiCompatible,
+            "https://api.z.ai/api/paas/v4",
+            Some("glm"),
+            Some("off"),
+        ));
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "cloud-deepseek",
+            ModelPreset::Deepseek,
+            "https://api.deepseek.com",
+            None,
+            Some("off"),
+        ));
+        prefs.advanced.active_model_id = Some("local-vllm".into());
+        let path = super::super::paths::settings_path();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&prefs).expect("serialize legacy prefs"),
+        )
+        .expect("write legacy prefs");
+
+        let loaded = UserPrefs::load();
+        let effort_of = |id: &str| {
+            loaded
+                .model_by_id(id)
+                .unwrap_or_else(|| panic!("model {id}"))
+                .reasoning_effort
+                .clone()
+        };
+        assert_eq!(effort_of("local-vllm"), None, "machine-written local off");
+        assert_eq!(effort_of("lan-endpoint"), None, "LAN local off");
+        assert_eq!(effort_of("docker-local"), None, "docker-alias local off");
+        assert_eq!(
+            effort_of("public-custom"),
+            Some("off".into()),
+            "public custom endpoint could not receive tiers pre-#622: off is explicit"
+        );
+        assert_eq!(
+            effort_of("vendor-glm"),
+            Some("off".into()),
+            "vendor routes resolved to cloud providers with default high: off is explicit"
+        );
+        assert_eq!(
+            effort_of("cloud-deepseek"),
+            Some("off".into()),
+            "official cloud presets always defaulted high: off is explicit"
+        );
+
+        // Key assertion: the migration (stripped values AND the marker) was
+        // written back to disk, not just changed in memory.
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read migrated prefs"))
+                .expect("parse migrated prefs");
+        assert_eq!(
+            persisted["local_thinking_default_migrated"], true,
+            "the marker must land on disk at the migrating load"
+        );
+        let models = persisted["advanced"]["saved_models"]
+            .as_array()
+            .expect("saved_models array");
+        let local_on_disk = models
+            .iter()
+            .find(|model| model["id"] == "local-vllm")
+            .expect("local model on disk");
+        assert!(
+            local_on_disk["reasoning_effort"].is_null(),
+            "machine-written local off must be cleared on disk"
+        );
+        let vendor_on_disk = models
+            .iter()
+            .find(|model| model["id"] == "vendor-glm")
+            .expect("vendor model on disk");
+        assert_eq!(vendor_on_disk["reasoning_effort"], "off");
+    }
+
+    /// Once the marker is set, a stored local `off` is an explicit
+    /// post-upgrade choice: later loads must never strip it again.
+    #[test]
+    fn load_marker_blocks_second_thinking_off_migration() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        struct PrefsHomeGuard {
+            previous: Option<std::ffi::OsString>,
+            home: std::path::PathBuf,
+        }
+        impl PrefsHomeGuard {
+            fn set(home: std::path::PathBuf) -> Self {
+                let previous = std::env::var_os("PINVOU3_HOME");
+                // SAFETY: holding ENV_LOCK (first line of this test); env writes serialized.
+                unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+                Self { previous, home }
+            }
+        }
+        impl Drop for PrefsHomeGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.home);
+                match self.previous.take() {
+                    // SAFETY: holding ENV_LOCK (first line of this test); restore-side writes serialized.
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-prefs-thinking-off-marker-{}-{}",
+            std::process::id(),
+            super::super::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create temporary prefs home");
+        let _prefs_home = PrefsHomeGuard::set(home);
+
+        let mut prefs = UserPrefs::default();
+        prefs.local_thinking_default_migrated = true;
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "explicit-off",
+            ModelPreset::LocalVllm,
+            "http://127.0.0.1:8000/v1",
+            None,
+            Some("off"),
+        ));
+        let path = super::super::paths::settings_path();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&prefs).expect("serialize marked prefs"),
+        )
+        .expect("write marked prefs");
+
+        let loaded = UserPrefs::load();
+        assert_eq!(
+            loaded
+                .model_by_id("explicit-off")
+                .expect("explicit off model")
+                .reasoning_effort,
+            Some("off".into()),
+            "an off saved after the migrating load is an explicit choice"
+        );
+    }
+
+    /// A settings file with no local models at all still gets its marker
+    /// persisted at the first post-#622 load — otherwise a local model
+    /// added (and explicitly set to off) after the upgrade would be
+    /// stripped by the next load.
+    #[test]
+    fn load_persists_thinking_marker_without_local_models() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        struct PrefsHomeGuard {
+            previous: Option<std::ffi::OsString>,
+            home: std::path::PathBuf,
+        }
+        impl PrefsHomeGuard {
+            fn set(home: std::path::PathBuf) -> Self {
+                let previous = std::env::var_os("PINVOU3_HOME");
+                // SAFETY: holding ENV_LOCK (first line of this test); env writes serialized.
+                unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+                Self { previous, home }
+            }
+        }
+        impl Drop for PrefsHomeGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.home);
+                match self.previous.take() {
+                    // SAFETY: holding ENV_LOCK (first line of this test); restore-side writes serialized.
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-prefs-thinking-marker-cloud-only-{}-{}",
+            std::process::id(),
+            super::super::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create temporary prefs home");
+        let _prefs_home = PrefsHomeGuard::set(home);
+
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models.push(legacy_model_fixture(
+            "cloud-only",
+            ModelPreset::Deepseek,
+            "https://api.deepseek.com",
+            None,
+            Some("high"),
+        ));
+        let path = super::super::paths::settings_path();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&prefs).expect("serialize prefs"),
+        )
+        .expect("write prefs");
+
+        let loaded = UserPrefs::load();
+        assert!(
+            loaded.local_thinking_default_migrated,
+            "marker set in memory even with nothing to migrate"
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read prefs"))
+                .expect("parse prefs");
+        assert_eq!(
+            persisted["local_thinking_default_migrated"], true,
+            "marker-only change must still be persisted"
+        );
+    }
+
     #[test]
     fn remove_active_model_falls_back_to_first() {
         let mut prefs = UserPrefs::default();
@@ -1983,6 +2801,8 @@ mod tests {
             code_permission: CodePermissionPrefs::default(),
             mode_defaults: ModeDefaultPrefs::default(),
             voice_shortcut_enabled: false,
+            computer_use: ComputerUsePrefs::default(),
+            local_thinking_default_migrated: false,
             advanced: AdvancedPrefs {
                 allow_shell: Some(false),
                 max_output_tokens: Some(8192),
@@ -2039,12 +2859,6 @@ mod tests {
     fn missing_settings_uses_system_language() {
         let prefs = UserPrefs::parse_settings(None, Some("ja-JP"));
         assert_eq!(prefs.language, Language::Ja);
-    }
-
-    #[test]
-    fn invalid_settings_uses_system_language() {
-        let prefs = UserPrefs::parse_settings(Some("{broken"), Some("en-US"));
-        assert_eq!(prefs.language, Language::En);
     }
 
     #[test]

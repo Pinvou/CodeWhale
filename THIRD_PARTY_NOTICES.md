@@ -8,19 +8,23 @@ Their original licenses remain in effect.
 | Component | Version or baseline | Included form | License | Upstream |
 |---|---|---|---|---|
 | CodeWhale | `pinvou-v0.9.5-r10` | Public Git submodule and linked Rust crates | MIT | https://github.com/Pinvou/CodeWhale |
-| DingTalk Workspace CLI (`dws`) and skills | 1.0.58 | Apache-2.0 skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | Apache-2.0 | https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli |
-| Lark CLI and skills | 1.0.87 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/larksuite/cli |
-| WeCom CLI and skills | 1.1.0 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/WecomTeam/wecom-cli |
-| Tencent Meeting CLI (`tmeet`) and skills | 1.0.15 | MIT skill sources bundled from the upstream `skills/tmeet-skill/`; official CLI installed from npm (`@tencentcloud/tmeet`, version pinned in `tmeet.rs`) | MIT | https://github.com/TencentCloud/tencentmeeting-cli |
+| DingTalk Workspace CLI (`dws`) and skills | 1.0.61 | Apache-2.0 skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | Apache-2.0 | https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli |
+| Lark CLI and skills | 1.0.95 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/larksuite/cli |
+| WeCom CLI and skills | 1.2.1 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/WecomTeam/wecom-cli |
+| Tencent Meeting CLI (`tmeet`) and skills | 1.0.18 | MIT skill sources bundled from the upstream `skills/tmeet-skill/`; official CLI installed from npm (`@tencentcloud/tmeet`, version pinned in `tmeet.rs`) | MIT | https://github.com/TencentCloud/tencentmeeting-cli |
 | agency-agents-zh | bundle schema `agency-1.0`, 268-role snapshot imported 2026-08-18 (upstream main@6e158d9c; one telemetry example in a persona body normalized from `web_search` to `search` to satisfy the retired-tool-name lint; the marketing-carousel-growth-engine, marketing-multi-platform-publisher and accounts-payable-agent cards rewritten 2026-09-13/14 to drop promises of image-generation/publishing toolchains and payment execution the product does not bundle, with card names aligned to the rewritten identities) | Normalized Chinese persona data and retained upstream license | MIT | https://github.com/jnMetaCode/agency-agents-zh |
 | SenseVoice.cpp | `6503f51c2357034e1443c86dabeb24ad026c4b45` (project version 1.4.0) | Built from the pinned source for each Linux release architecture or on user setup; no executable stored in Git | MIT | https://github.com/lovemefan/SenseVoice.cpp |
 | marked | 14.1.4 | npm dependency bundled by Vite (`pinvou3-app/package.json`; highest major whose browser output stays free of Safari 15.4+ runtime APIs) | MIT | https://github.com/markedjs/marked |
 | DOMPurify | 3.4.14 | npm dependency bundled by Vite (`pinvou3-app/package.json`) | Apache-2.0 OR MPL-2.0 | https://github.com/cure53/DOMPurify |
 | chrome-devtools-mcp | 1.7.0 | Self-contained Windows build vendored at build time into `pinvou3-app/src-tauri/resources/platforms/windows/chrome-devtools-mcp/` (shipped under `runtime/chrome-devtools-mcp`); npm tarball SHA-512-verified; package-internal `build/src/third_party/THIRD_PARTY_NOTICES` preserved | Apache-2.0 | https://github.com/ChromeDevTools/chrome-devtools-mcp |
-| Tailwind CSS Play CDN runtime | 3.4.17 | Vendored browser script | MIT | https://github.com/tailwindlabs/tailwindcss |
+| Tailwind CSS | 3.4.17 | npm development dependency; compiled into application CSS by Vite/PostCSS | MIT | https://github.com/tailwindlabs/tailwindcss |
 | Material Icon Theme | Iconify snapshot exported 2026-07-29 | 13 SVG file-type glyphs inlined in `pinvou3-app/src/shared/artifact-utils.js` | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
 | Material Icon Theme (file/folder icon subset) | Upstream `main` snapshot downloaded 2026-07-30 | 43 SVG file/folder icons vendored in `pinvou3-app/src/file-icons/theme/` | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
 | cc-switch (provider preset data) | Public preset list (trimmed 2026-08-05) | Base URL / protocol presets in `pinvou3-app/src/features/settings/acp-provider-catalog.js` | MIT | https://github.com/farion1231/cc-switch |
+| Qwen3.8-Flash-Next-NVFP4-DGX-Spark (MegaCube delivery package) | `1.0.0-rc3` | Card delivery package vendored under `pinvou3-app/src-tauri/src/features/model_store/data/test-store/qwen38fn-nvfp4-single/package/`; its text files are compiled into the Linux binary with `include_str!`. Upstream `LICENSE.upstream`, `NOTICE.upstream` and `runtime/patch/upstream-overlays/PROVENANCE.md` are preserved verbatim; changes are recorded in `SOURCE.md`. No model weights or container images are stored in Git. | Apache-2.0 | https://github.com/vllm-project/vllm (redistributed with modifications by Tony DeAngelo / Tech2Wild) |
+| MiniMax-H3 single-node video delivery package | Sources pinned in `package/sources/SOURCE_LOCKS.json` (ComfyUI 0.35.0 and ComfyUI-MiniMax-H3-Turbo source archives SHA-256-locked; the two model repositories pinned by commit; the Real-ESRGAN transport file tracks a `main` alias and is pinned by content hash instead) | Card delivery package vendored under `.../test-store/minimax-h3-int8-single/package/`; its own scripts and workflows are compiled into the Linux binary with `include_str!`. The ComfyUI and ComfyUI-MiniMax-H3-Turbo **source archives are not in this repository** — they are binaries, which the store channel cannot carry, so `minimax-h3-int8-single/install_engine.sh` extracts them on the device from the research team's delivery archive (or reuses copies already under `package/sources/`) and SHA-256-verifies them against `SOURCE_LOCKS.json`; with no delivery archive present the install stops with an error rather than downloading a substitute. | **Not declared in the package — to be confirmed with the card author** (ComfyUI upstream is GPL-3.0; the Turbo node archive and the model weights carry their own upstream terms) | https://github.com/comfyanonymous/ComfyUI |
+| DeepSeek-V4-Flash-Vision dual-node delivery package | Unpublished; package retained for the dual-node path | Card delivery package vendored under `.../test-store/deepseek-v4-flash-vision-dual/package/`; `runtime/LICENSE.upstream` preserved verbatim. One local modification: `controller.py` skips empty RDMA GID slots (marked temporary in the file), and `SHA256SUMS` was recomputed to match. | MIT | Upstream package by Tony Deangelo |
+| Qwen3.8-27B-NVFP4 × SGLang deployment package | No version declared in the package; targets the official `lmsysorg/sglang:v0.5.19` image | Five vendor files (`DEPLOYMENT.md`, `deploy.sh`, `start.sh`, `stop.sh`, `uninstall.sh`) vendored under `.../test-store/qwen38-27b-sglang0519/package/` and compiled into the Linux binary with `include_str!` (delivered to the device under `vendor/`). The package carries no license file and no checksum manifest. | **Not declared in the package — to be confirmed with the card author** (`DEPLOYMENT.md` records the served model `unsloth/Qwen3.8-27B-NVFP4` as Apache-2.0; the engine image is pulled, not redistributed) | Research-team package; engine upstream https://github.com/sgl-project/sglang |
 
 Vendored script attribution:
 
@@ -32,6 +36,55 @@ Vendored script attribution:
   `build/src/McpResponse.js` adds the `target_id` field to structured page
   entries so the host can enforce conversation and tab ownership. The adapted
   output is pinned by SHA-256.
+- Model store card delivery packages: four of the six test-store cards vendor a
+  third-party research deliverable under
+  `pinvou3-app/src-tauri/src/features/model_store/data/test-store/<card-id>/package/`
+  — `qwen38fn-nvfp4-single`, `deepseek-v4-flash-vision-dual`,
+  `minimax-h3-int8-single` and `qwen38-27b-sglang0519`. They are listed here
+  because the Linux build compiles their text files into the binary with
+  `include_str!` (see
+  `pinvou3-app/src-tauri/src/features/model_store/platform/linux/test_store_data.rs`),
+  which makes the app a redistributor. What the four packages carry is not
+  uniform, so it is recorded per package rather than in one sentence:
+  - Upstream license and provenance files: `qwen38fn-nvfp4-single` keeps
+    `runtime/LICENSE.upstream`, `runtime/NOTICE.upstream`,
+    `runtime/patch/upstream-overlays/PROVENANCE.md` and `SOURCE.md`;
+    `deepseek-v4-flash-vision-dual` keeps `runtime/LICENSE.upstream` only;
+    `minimax-h3-int8-single` and `qwen38-27b-sglang0519` carry none.
+  - Checksum manifests: only `qwen38fn-nvfp4-single` (22 files) and
+    `deepseek-v4-flash-vision-dual` (39 files) ship a `SHA256SUMS`, and only
+    those two re-verify themselves against it on the device before each
+    operation (`package/controller.py`). `minimax-h3-int8-single` deliberately
+    omits the vendor's manifest, which lists two binaries the store channel
+    cannot deliver — their digests are kept in `package/sources/SOURCE_LOCKS.json`
+    instead. `qwen38-27b-sglang0519` was delivered without a manifest.
+  - Modifications: the packages are vendored as delivered, with one exception
+    noted in the table above — a local patch in
+    `deepseek-v4-flash-vision-dual/package/controller.py`.
+  The other two cards, Ornith-1.5-35B-A3B (`ornith15-bf16`) and the
+  Qwen3.8-27B NVFP4 + MTP card (`qwen38-27b-nvfp4-mtp`), ship entry scripts only
+  and vendor no upstream sources, so they are not listed in the table above.
+- Open item — unresolved card licences: the MiniMax-H3 (`minimax-h3-int8-single`)
+  and Qwen3.8-27B × SGLang (`qwen38-27b-sglang0519`) packages carry no licence
+  file of their own. For MiniMax-H3, `SOURCE_LOCKS.json` pins what gets loaded but
+  says nothing about terms, and the ComfyUI archive it points at is GPL-3.0
+  upstream. The licence column above therefore records what is verifiable rather
+  than an assumption; both need confirming with the card authors before these
+  packages ship outside internal validation.
+
+  Note what is and is not at stake here. Neither package vendors any upstream
+  source: both are a handful of shell scripts plus a 750-byte `SOURCE_LOCKS.json`
+  of hashes and revisions (136 KB and 98 KB respectively). The GPL-3.0 ComfyUI
+  archive is fetched onto the user's device at install time — it is not
+  redistributed by us. What is unresolved is narrower: the card authors' own
+  scripts are vendored byte-for-byte into this repository and shipped in the
+  `.deb`, and no terms have been stated for them.
+
+  **This paragraph is load-bearing.** The card ids above are asserted by
+  `test_store_data.rs::vendored_packages_either_carry_a_licence_or_stay_declared`,
+  which fails if a package gains a licence file without this list shrinking, if a
+  new package arrives without one, or if an id here stops matching a real card.
+  Do not reword the ids out of it — resolve the item instead.
 - Tailwind CSS: Copyright (c) Tailwind Labs, Inc.
 - Material Icon Theme: Copyright (c) 2025 Material Extensions. The glyphs
   were exported from the

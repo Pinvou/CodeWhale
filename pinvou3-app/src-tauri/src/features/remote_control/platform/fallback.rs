@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct WorkspaceIdentity(u64);
+pub(in crate::features::remote_control) struct WorkspaceIdentity(u64);
 
 pub(super) fn configure_private_open_options(_options: &mut OpenOptions) {}
 
@@ -45,6 +45,9 @@ pub(super) fn workspace_identity(_path: &Path) -> std::io::Result<WorkspaceIdent
     ))
 }
 
+// The platform/mod.rs #[cfg(test)] forwarders call these through `imp` on
+// every target, so the fallback must provide them too or `cargo test`
+// stops compiling on targets outside unix/windows.
 #[cfg(test)]
 pub(super) fn test_workspace_identity(seed: u64) -> WorkspaceIdentity {
     WorkspaceIdentity(seed)

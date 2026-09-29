@@ -196,3 +196,61 @@ for (const [lang, dict] of [['zh', dictZh], ['en', dictEn], ['ja', dictJa]]) {
     `${lang}.uiToolStore.sso.previousFlow 必须存在（等旧流程退出的占位文案）`,
   );
 }
+
+// ── 8. 启动闸门：busy 期间拒绝重叠启动，防止 setBusyId(id) 抢占他人槽位 ──────
+// （回流社区 pinvou-agent#548 不变量②：释放侧已由上文 1-4 节钉住，这里钉住
+// 启动侧。）EIP/知道走后端 busy 门闩的"稍后重试"语义，不适用 busyRef 闸门。
+// 禁令扫描剥掉行注释只看代码行；正向钉住用原始源码。
+function stripTrailingLineComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === "\\") { i += 1; continue; }
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+    } else if (ch === "/" && line[i + 1] === "/") {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+const toolStoreCode = toolStoreSource.split("\n")
+  .filter((line) => { const t = line.trimStart(); return !t.startsWith("//") && !t.startsWith("*"); })
+  .map(stripTrailingLineComment)
+  .join("\n");
+
+// 全文件禁裸清空（上文 2-4 节按块扫描，这里兜底整文件）。
+assert.doesNotMatch(
+  toolStoreCode,
+  /setBusyId\(null\)/,
+  '裸 setBusyId(null) 全文件禁止：所有释放必须走 releaseBusy 归属检查',
+);
+
+// flowDeps 把 busyRef 送进连接器四件套，connect/disconnect 占槽前拒绝重叠启动
+// （retry 复用 connect，同获保护）。
+assert.match(
+  toolStoreSource,
+  /const flowDeps = \{ setBusyId, busyRef, storeCopy, detailCopy, loadBackendState, setAlert, beginToolConfiguration, finishToolConfiguration, findLocalizedTool \};/,
+  'flowDeps 必须把 busyRef 送进连接器流程工厂',
+);
+const startGuards = toolStoreSource.match(/if \(busyRef\.current\) return;/g) || [];
+assert.ok(
+  startGuards.length >= 3,
+  `连接器 connect/disconnect（+handleAction 连接器/卸载分支）必须在忙碌期拒绝启动，实际 ${startGuards.length}`,
+);
+
+// 无守卫历史重灾区：五个直接启动的操作入口必须在能力闸门同一行里拒绝忙碌期
+// 启动（安装 / 技能安装卸载 / zip 导入 / ima 连接 / ima 断开）；更新确认走
+// !updateConfirm 同款闸门。
+const entryGuards = toolStoreSource.match(/if \(!canMutateToolStore \|\| busyRef\.current\) return;/g) || [];
+assert.ok(
+  entryGuards.length >= 5,
+  `doInstall/handleSkillAction/doImportSkillZip/connectIma/disconnectIma 必须在忙碌期拒绝启动，实际 ${entryGuards.length}`,
+);
+assert.match(
+  toolStoreSource,
+  /if \(!updateConfirm \|\| busyRef\.current\) return;/,
+  'doSkillUpdate 必须在忙碌期拒绝启动',
+);

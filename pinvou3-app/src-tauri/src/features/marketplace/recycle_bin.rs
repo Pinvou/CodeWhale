@@ -30,11 +30,11 @@ use crate::platform::paths;
 const SCHEMA_VERSION: u32 = 1;
 
 /// 回收站条目 kind：纯 MCP 包。
-pub const KIND_MCP: &str = "mcp";
+pub(crate) const KIND_MCP: &str = "mcp";
 /// 回收站条目 kind：纯技能包。
-pub const KIND_SKILL: &str = "skill";
+pub(crate) const KIND_SKILL: &str = "skill";
 /// 回收站条目 kind：组合包（mcp/ + skills/）。
-pub const KIND_BUNDLE: &str = "bundle";
+pub(crate) const KIND_BUNDLE: &str = "bundle";
 
 /// recycle-bin.json 读-改-写的进程内串行化（与 BUNDLES_FILE_LOCK 同一范式）。
 static RECYCLE_BIN_FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -405,6 +405,24 @@ pub(crate) fn package_kind(pkg_dir: &Path) -> &'static str {
         (true, false) => KIND_MCP,
         _ => KIND_SKILL,
     }
+}
+
+/// Shared core for recycling whole Upload packages (three recycle call sites: MCP uninstall, Python repair downgrade,
+/// skill uninstall): the display name comes from the record's zip source name (non-Upload falls back to the package id, see
+/// `store::upload_display_name`) plus the `recycle_package` move.
+///
+/// `kind` is passed in by the caller — the two MCP paths compute it from the package directory (`package_kind`), while the skill
+/// path pins `KIND_SKILL` (the record id is the skill name; the directory layout plays no part in the decision). On failure,
+/// `recycle_package` has already rolled the directory back in place; failure policies such as writing the registry back (fail loud) or keeping it
+/// (warn + skipping companion cleanup) are up to the caller and out of this core's scope.
+pub(crate) fn recycle_upload_package(
+    bin: &RecycleBin,
+    id: &str,
+    record: &BundleRecord,
+    kind: &'static str,
+) -> Result<(), String> {
+    let display_name = super::store::upload_display_name(record, id);
+    bin.recycle_package(id, kind, &display_name, record.clone())
 }
 
 // ---------------------------------------------------------------------------

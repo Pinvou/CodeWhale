@@ -143,6 +143,12 @@ test("behavior analytics views render alongside the device dashboard", async () 
     assert.match(statsHtml, /模型质量排行榜/);
     assert.match(statsHtml, /row\.success_confidence/);
     assert.match(statsHtml, /metrics\.explicit_value_confidence/);
+    assert.match(statsHtml, /metrics\.explicit_value_sample_size/);
+    assert.match(statsHtml, /metrics\.explicit_value_ineligible_installations/);
+    assert.match(statsHtml, /row\.explicit_value_confidence/);
+    assert.match(statsHtml, /metrics\.turn_mismatch_value_signal_count/);
+    assert.match(statsHtml, /explicit_value_join_key_missing/);
+    assert.match(statsHtml, /explicit_value_signal_turn_mismatch/);
     document.querySelector('[data-view="behavior"]').click();
     assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
     document.querySelector('[data-view="commercial"]').click();
@@ -169,8 +175,10 @@ test("behavior analyst role never requests or exposes device-level views", async
             generated_at: Date.now(),
             range: "30",
             data_status: "tracking_not_enabled",
-            data_quality: { confidence: "low", warnings: [] },
+            data_quality: { confidence: "low", warnings: ["explicit_value_join_key_missing", "explicit_value_signal_turn_mismatch"] },
             metrics: {
+              explicit_value_ineligible_installations: 2,
+              turn_mismatch_value_signal_count: 3,
               task_first_output_p50_ms: null,
               task_first_output_p90_ms: null,
               task_total_duration_p50_ms: null,
@@ -194,6 +202,9 @@ test("behavior analyst role never requests or exposes device-level views", async
     assert.equal(requested.some(url => url.endsWith("/overview") && !url.includes("/behavior/")), false);
     assert.match(document.querySelector("#taskLatency").textContent, /—/);
     assert.doesNotMatch(document.querySelector("#taskLatency").textContent, /0 ms/);
+    assert.match(document.querySelector("#valueSignalQuality").textContent, /疑似回合标识不一致 3 条/);
+    assert.match(document.querySelector("#behaviorQuality").textContent, /缺少会话或回合标识.*2 台/);
+    assert.match(document.querySelector("#behaviorQuality").textContent, /价值信号疑似关联了错误回合/);
   } finally {
     dom.window.close();
   }
@@ -231,6 +242,7 @@ test("behavior ranges refresh only the selected overview or table section", asyn
                 weekly_successful_task_installations: 900,
                 wevta_installations: 800,
                 wevta_rate: 0.8,
+                explicit_value_sample_size: 850,
                 explicit_value_confidence: "sufficient",
                 positive_feedback_installations: 700,
                 response_copied_installations: 600,

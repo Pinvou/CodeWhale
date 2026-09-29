@@ -7,6 +7,7 @@ mod engine_support;
 pub(crate) mod eval;
 pub(crate) mod expert_roster;
 pub(crate) mod image_capability;
+pub(crate) mod mcp_inventory;
 pub(crate) mod pending_user_input;
 pub mod platform;
 #[cfg(any(feature = "benchmark-hooks", test))]
@@ -17,6 +18,7 @@ pub(crate) mod safety_deny_rules;
 pub mod session_policy;
 pub(crate) mod shell_output;
 pub(crate) mod skill_materialization;
+pub(crate) mod swarm;
 pub(crate) mod timing;
 pub(crate) mod tool_policy;
 pub(crate) mod turn_shell_tasks;

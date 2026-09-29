@@ -65,6 +65,7 @@ pub struct PlatformCapabilities {
     /// Windows-only desktop dual-end remote control (A control / B controlled).
     /// Every other target reports `false` and hides the entry points.
     pub desktop_remote_control_supported: bool,
+    pub paste_image_clipboard_read: bool,
 }
 
 impl PlatformCapabilities {
@@ -100,6 +101,7 @@ impl PlatformCapabilities {
             browser_cdp: capabilities.browser_cdp,
             voice_shortcut_native: capabilities.voice_shortcut_native,
             desktop_remote_control_supported: capabilities.desktop_remote_control_supported,
+            paste_image_clipboard_read: capabilities.paste_image_clipboard_read,
         }
     }
 }
@@ -176,6 +178,10 @@ mod platform_capability_tests {
         assert_eq!(
             capabilities.voice_shortcut_native,
             expected.voice_shortcut_native
+        );
+        assert_eq!(
+            capabilities.paste_image_clipboard_read,
+            expected.paste_image_clipboard_read
         );
     }
 

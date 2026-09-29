@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::expert_roster::ExpertRosterSnapshot;
-use super::tool_policy::is_pinvou3_allowed;
+use super::tool_policy::{PINVOU3_ALWAYS_LOADED_TOOLS, is_pinvou3_allowed};
 use crate::features::assistant::platform::bridge::Pinvou3Bridge;
 use crate::features::personas::PersonaCard;
 use deepseek_tui::AppMode;
@@ -402,9 +402,9 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
         "probe persona must be projected into [fleet.profiles]"
     );
     let mut engine_config =
-        bridge.build_engine_config_for_multi_agent("code-a", roots_a.clone(), &snapshot);
+        bridge.build_engine_config_for_multi_agent("code-a", roots_a.clone(), &snapshot, true);
     let second_config =
-        bridge.build_engine_config_for_multi_agent("code-b", roots_b.clone(), &snapshot);
+        bridge.build_engine_config_for_multi_agent("code-b", roots_b.clone(), &snapshot, true);
     assert_eq!(
         engine_config.subagent_state_root.as_ref(),
         Some(&roots_a.ledger)
@@ -464,6 +464,7 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
             false,
             &project,
             &snapshot,
+            &[],
         )
         .expect("build multi-agent turn");
     handle.send(op).await.expect("send multi-agent turn");
@@ -535,6 +536,21 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
         catalog_names.iter().all(|name| is_pinvou3_allowed(name)),
         "the bridge admitted tools outside the Pinvou allowlist: {catalog_names:?}"
     );
+    // The TurnComplete catalog carries the full surface including deferred
+    // entries, so membership alone proves nothing about first-turn visibility.
+    // Every always-loaded name that the static instructions promise must
+    // actually ship non-deferred, or the text names a first-turn-absent tool.
+    for always_loaded in PINVOU3_ALWAYS_LOADED_TOOLS {
+        if let Some(tool) = parent_tool_catalog
+            .iter()
+            .find(|tool| tool.name == *always_loaded)
+        {
+            assert!(
+                tool.defer_loading != Some(true),
+                "always-loaded tool {always_loaded} is still deferred on the live catalog: static text would name an absent tool"
+            );
+        }
+    }
     for expected in [
         "bash",
         "read",
@@ -552,6 +568,11 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
         "terminal/reset",
         "agent",
         "load_skill",
+        // Conditionally registered tools: pinning presence here catches the
+        // registration half going away, which the always-loaded loop above
+        // cannot (it iterates the constant and skips absent names).
+        "registry_sync",
+        "start_registry_mcp_server",
         "request_user_input",
         "revert_turn",
         "todo_write",
@@ -560,7 +581,7 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
     ] {
         assert!(
             catalog_names.contains(expected),
-            "allowlisted native tool {expected} no longer resolves through the live v0.9.12 registry: {catalog_names:?}"
+            "allowlisted tool {expected} missing from the live model-visible catalog: {catalog_names:?}"
         );
     }
     for replay_only in ["Bash", "File", "work_update", "update_plan"] {
@@ -569,6 +590,15 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
             "hidden replay alias {replay_only} leaked into the model-visible catalog"
         );
     }
+    // In this fixture the ima package is uninstalled, so the native-tool
+    // ownership gate must keep `ima_openapi` out of the live catalog at
+    // construction time (deny wins — the tool must not even ship deferred).
+    // This is the end-to-end half of the gate: the marketplace unit tests
+    // only cover the name-mapping function.
+    assert!(
+        !catalog_names.contains("ima_openapi"),
+        "native tool ima_openapi leaked into the live catalog while its owning package is uninstalled"
+    );
     assert!(
         errors
             .iter()
@@ -585,6 +615,39 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
             .any(|body| body.contains(EXPERT_PROMPT_SENTINEL)),
         "child request did not receive the selected expert instructions"
     );
+    // 蜂群契约（本测试以 swarm=true 构造引擎配置）必须只出现在父会话系统提示：
+    // 子代理请求体由底座 FleetRole 提示 + 任务说明构造，结构性不携带父引擎
+    // instructions——在此用真实引擎端到端钉死该隔离，底座改动即红。
+    {
+        let bodies = probe.request_bodies.lock().expect("probe request lock");
+        let parent_bodies: Vec<&String> = bodies
+            .iter()
+            .filter(|body| body.contains("蜂群模式"))
+            .collect();
+        assert!(
+            !parent_bodies.is_empty(),
+            "swarm contract must ride the parent session system prompt"
+        );
+        // 契约必须渲染为父会话的 <instructions source="pinvou3:swarm">
+        // 系统块（spawn 级注入），而不是拼进某轮用户消息或 system-reminder
+        // 信封。只断 `instructions source=` 是空转——常驻的
+        // `pinvou3:instructions` 源让每个父请求体都含该子串；因此同时断
+        // 蜂群源名 `pinvou3:swarm`（契约块唯一的携带者）。捕获体是原始
+        // HTTP 请求，JSON 引号转义不影响这两个子串。
+        assert!(
+            parent_bodies
+                .iter()
+                .all(|body| body.contains("instructions source=") && body.contains("pinvou3:swarm")),
+            "swarm contract must render as the parent <instructions source=\"pinvou3:swarm\"> block, never a per-turn reminder"
+        );
+        assert!(
+            bodies
+                .iter()
+                .filter(|body| body.contains(EXPERT_PROMPT_SENTINEL))
+                .all(|body| !body.contains("蜂群模式")),
+            "swarm contract must never reach the subagent system prompt"
+        );
+    }
     assert!(
         !project.join(".codewhale").exists(),
         "real spawn must keep all control-plane state out of the user project"
@@ -604,6 +667,7 @@ async fn code_session_real_spawn_refresh_resolves_config_expert_without_project_
         .expect("engine shutdown timeout")
         .expect("engine task failed");
     server_task.abort();
-    crate::features::personas::delete_user_persona(&created.id).expect("delete probe persona");
+    crate::features::personas::delete_user_persona_with(&created.id, || ())
+        .expect("delete probe persona");
     let _ = std::fs::remove_dir_all(root);
 }

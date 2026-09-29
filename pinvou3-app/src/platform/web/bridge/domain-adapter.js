@@ -13,7 +13,7 @@
 
   const fields = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
-    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
+    sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedCollectionsRevision"],
@@ -24,6 +24,7 @@
     llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
+    computerUse: ["computerUse"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
@@ -67,26 +68,28 @@
     return result;
   }
 
-  // Subscriber callbacks pick a fresh outer object on every
-  // notification: any state change anywhere (e.g. a streaming token)
-  // hands every domain subscriber a new reference and a full re-render.
-  // Cache the last (full, slice) per subscriber: when full keeps its
-  // reference, reuse the last slice to keep identity stable. Note this
-  // is whole-snapshot granularity (the web transport only reuses the
-  // same full reference when nothing at all changed), weaker than the
-  // desktop bridge's per-domain revision cache: a change in any domain
-  // still swaps the outer object of unchanged domains' slices (inner
-  // field references remain shared with flat subscribers; the identity
-  // sharing contract lives in the web_bridge_domain_contract test and
-  // is unaffected). full is rebuilt by the notifier per change, so the
-  // same full reference implies this domain's field set cannot have
-  // changed.
-  function stablePick() {
-    var lastFull = null;
+  // The Web transport structurally shares unchanged subtrees between its
+  // immutable snapshots. Compare only this domain's registered fields so a
+  // chat publication does not hand settings/models subscribers a fresh outer
+  // object and force an unrelated React render. Callbacks still run for every
+  // transport publication, matching the desktop bridge contract; React can
+  // bail out through the stable snapshot identity.
+  function stablePick(domainName) {
+    var names = fields[domainName];
+    if (!names) throw new Error("Unknown Tauri bridge state slice: " + domainName);
     var lastSlice = null;
-    return function (full, domainName) {
-      if (full === lastFull) return lastSlice;
-      lastFull = full;
+    return function (full) {
+      if (lastSlice) {
+        var isUnchanged = true;
+        for (var fieldIndex = 0; fieldIndex < names.length; fieldIndex++) {
+          var name = names[fieldIndex];
+          if (!Object.is(full[name], lastSlice[name])) {
+            isUnchanged = false;
+            break;
+          }
+        }
+        if (isUnchanged) return lastSlice;
+      }
       lastSlice = Object.freeze(pick(full, domainName));
       return lastSlice;
     };
@@ -106,32 +109,32 @@
 
   function subscribe(domainName, callback) {
     get(domainName);
-    var stable = stablePick();
+    var stable = stablePick(domainName);
     return flat.subscribe(function (full) {
-      callback(stable(full, domainName));
+      callback(stable(full));
     });
   }
 
   function subscribeMany(domains, callback) {
     getMany(domains);
-    // One stable cache per domain: the stablePick closure memoizes a
-    // single (lastFull,lastSlice) slot; sharing one instance across
-    // domains would make them overwrite each other.
     var stables = {};
-    domains.forEach(function (domainName) { stables[domainName] = stablePick(); });
-    // The combined outer object is likewise memoized on the full
-    // reference in a single slot: a React setState subscriber can only
-    // bail out on whole-object identity, and rebuilding the combined
-    // object every round would make even no-change notifications trigger
-    // full re-renders, cancelling out the inner slices' identity
-    // stability (see useBridge.js's subscribeMany for the consumer).
-    var lastFull = null;
+    domains.forEach(function (domainName) { stables[domainName] = stablePick(domainName); });
+    var lastSlices = [];
     var lastResult = null;
     return flat.subscribe(function (full) {
-      if (full !== lastFull) {
+      var hasChanged = !lastResult;
+      domains.forEach(function (domainName, index) {
+        var slice = stables[domainName](full);
+        if (slice !== lastSlices[index]) {
+          lastSlices[index] = slice;
+          hasChanged = true;
+        }
+      });
+      if (hasChanged) {
         var result = {};
-        domains.forEach(function (domainName) { Object.assign(result, stables[domainName](full, domainName)); });
-        lastFull = full;
+        for (var sliceIndex = 0; sliceIndex < lastSlices.length; sliceIndex++) {
+          Object.assign(result, lastSlices[sliceIndex]);
+        }
         lastResult = Object.freeze(result);
       }
       callback(lastResult);
@@ -151,6 +154,16 @@
   function unsupportedTeamRelay() {
     return Promise.reject(new Error("Team Relay is only available in the Pinvou desktop app"));
   }
+  // Computer use controls the desktop's own screen, mouse and keyboard, so it
+  // must never be driven from the remote web client (the desktop RPC funnel
+  // keeps the commands off the access-policy allowlist as well). The domain
+  // still exists with rejecting stubs so shared UI code can feature-detect it.
+  function computerUseUnsupported() {
+    return Promise.reject(new Error("computer use is not supported on the web client"));
+  }
+  const computerUseStubs = {};
+  ["getStatus", "refreshStatus", "grant", "revoke", "stop", "confirm", "deny", "setEnabled", "requestPermissions"]
+    .forEach(function (name) { computerUseStubs[name] = computerUseUnsupported; });
 
   window.TauriBridge = {
     available: true,
@@ -158,17 +171,17 @@
     state: { get: get, getMany: getMany, subscribe: subscribe, subscribeMany: subscribeMany },
     platform: {},
     chat: domain(["sendMessage", "sendMessageToSession", "getComposerDraft", "setComposerDraft", "retryFirstTurn", "prefillComposer", "restoreTaskDraft", "removeQueued", "prioritizeQueued", "editQueued", "cancelGeneration", "cancelShellTask"]),
-    voice: domain(["startVoiceInput", "installVoiceAsr", "cancelVoiceAsrSetup", "closeVoiceAsrSetup", "cancelVoiceInput", "clearVoiceInput", "abandonVoiceResult", "appendVoiceText", "runVoiceInputDebugAssertions", "getVoiceOperationId", "beginVoiceSubmission", "completeVoiceSubmission", "dismissVoiceInput"]),
+    voice: domain(["startVoiceInput", "installVoiceAsr", "cancelVoiceAsrSetup", "closeVoiceAsrSetup", "cancelVoiceInput", "clearVoiceInput", "abandonVoiceResult", "appendVoiceText", "getVoiceOperationId", "beginVoiceSubmission", "completeVoiceSubmission", "dismissVoiceInput"]),
     knowledge: domain(["downloadKbModel", "cancelKbModel", "mountCollection", "setCollectionEnabled", "removeCollection", "unmountCollection", "listCollections", "kbModelStatus"]),
     scheduled: domain(["loadScheduledTasks", "readScheduledTask", "loadScheduledTaskRuns", "loadScheduledTaskRecentRuns", "selectScheduledTask", "refreshScheduledTaskData", "clearScheduledTaskSelection", "dismissScheduledTaskError", "createScheduledTask", "updateScheduledTask", "pauseScheduledTask", "resumeScheduledTask", "toggleScheduledTaskPinned", "deleteScheduledTask", "runScheduledTaskNow", "pickFolder", "startScheduledTaskChat", "confirmScheduledTaskDraft", "clearScheduledTaskDraft", "openScheduledRunChat", "exitScheduledRunChat"]),
-    sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession"]),
+    sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession", "getSessionWorkspaceBinding"]),
     monitor: domain(["startMonitorPolling", "stopMonitorPolling", "clearMonitorStats"]),
     settings: domain(["loadBehaviorTelemetryStatus", "setBehaviorTelemetryEnabled", "setSelectedPet", "saveSettings", "saveSettingsAndRestart", "saveSearchSettings", "saveSearchSettingsAndRestart", "testSearchProvider"]),
     feedback: domain(["submitFeedback"]),
     llmapi: {},
     vllm: domain(["discoverLocalVllm"]),
     models: domain(["getEffectiveModelConfig", "loadModels", "saveModel", "revealModelApiKey", "deleteModel", "setActiveModel", "loadSessionModel", "switchModel", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
-    interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn", "compactNow"]),
+    interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn", "compactNow"]),
     rendering: domain(["renderMarkdown"]),
     remoteControl: domain(["getWebRelaySettings", "setWebRelayAddress", "resetWebRelayAddress"], {
       startRemoteControl: "enableWebAccess",
@@ -179,7 +192,7 @@
     artifacts: domain(["artifactInfo", "readArtifactText", "writeArtifactText", "readArtifactImageB64", "readArtifactThumbnail", "renderArtifactVisual", "openContainingFolder", "revealSessionFolder", "openScheduledTaskFolder", "openInSystem", "openArtifactExternal", "downloadArtifact", "listDeliverableIndex", "openExternalUrl", "openUserExternalUrl"]),
     attachments: domain(["addAttachmentByPath", "addPasteImage", "removeAttachment", "clearAttachments", "pickAndAttach", "uploadDeviceFiles", "resolveConversationAttachment", "openConversationAttachment", "revealConversationAttachment"]),
     resolutions: domain(["markResolved"]),
-    files: domain(["pickFiles", "pickFolders", "pickFeedbackFiles"]),
+    files: domain(["pickFiles", "pickFolders", "pickRebindFolder", "pickFeedbackFiles"]),
     personas: domain(["loadPersonas", "getPersonas", "readPersonaBody", "equipPersona", "unequipPersona", "postCardCreatorIntro", "createPersona", "updatePersona", "deletePersona"]),
     memory: domain(["loadMemoryOverview", "saveMemoryProfilePatch", "deleteMemoryPreference", "updateMemoryItem", "deleteMemoryItem", "archiveRecentWorkMemory", "confirmMemoryCandidate", "ignoreMemoryCandidate", "neverMemoryCandidate", "organizeMemory", "loadOrganizeHistory"]),
     updater: domain(["checkForUpdate", "downloadAndInstallUpdate", "cancelUpdate", "restartApp"]),
@@ -223,6 +236,7 @@
       openPreparedMaterial: unsupportedTeamRelay,
       revealPreparedMaterial: unsupportedTeamRelay,
       disconnect: unsupportedTeamRelay
-    }
+    },
+    computerUse: computerUseStubs
   };
 })();

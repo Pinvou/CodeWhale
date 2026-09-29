@@ -33,6 +33,16 @@ const I = ({size=24,className='',children}) => (
     const Mic = (p) => <I {...p}><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></I>;
     const Send = (p) => <I {...p}><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></I>;
     const Store = (p) => <I {...p}><path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/></I>;
+    /* 模型商店专用的店铺图标。
+       为什么不直接用上面那个 Store：它跟 Trash2 是同一副骨架——顶部一条长横线
+       (`M2 7h20` 对 `M3 6h18`) 加一个圆角收窄的身子。24px 下还看得出雨棚的斜边，
+       18px 描边下那点斜度糊掉，侧栏里一眼看过去就是个垃圾桶（用户原话）。
+       三处改动，每一处都在消掉跟垃圾桶的共同特征：
+         1. 下摆做成扇贝形（四段 q 曲线）——桶盖不会是波浪边，这是最强的区分；
+         2. 身子两侧竖直、不收窄——收窄是桶的特征，房子不收窄；
+         3. 底部留一个明确的门。
+       路径数跟原版一样 4 条，18px 下墨量没增加。 */
+    const StoreFront = (p) => <I {...p}><path d="M3 8V5a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v3"/><path d="M3 8q2.25 2.5 4.5 0 2.25 2.5 4.5 0 2.25 2.5 4.5 0 2.25 2.5 4.5 0"/><path d="M5 11v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-8"/><path d="M10 20v-4h4v4"/></I>;
     const Terminal = (p) => <I {...p}><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></I>;
     const ChevronDown = (p) => <I {...p}><path d="m6 9 6 6 6-6"/></I>;
     const IconGrid = (p) => <I {...p}><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></I>;
@@ -63,6 +73,8 @@ const I = ({size=24,className='',children}) => (
     const Wrench = (p) => <I {...p}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76Z"/></I>;
     const User = (p) => <I {...p}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></I>;
     const Users = (p) => <I {...p}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></I>;
+    /* 模型商店的 API Key 入口用;lucide key-round 同形。 */
+    const KeyRound = (p) => <I {...p}><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></I>;
     const Layers = (p) => <I {...p}><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.5-9.17 4.17a2 2 0 0 1-1.66 0L2 12.5"/><path d="m22 17.5-9.17 4.17a2 2 0 0 1-1.66 0L2 17.5"/></I>;
     const MessageSquare = (p) => <I {...p}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></I>;
     const X = (p) => <I {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></I>;
@@ -90,7 +102,7 @@ const I = ({size=24,className='',children}) => (
     const Server = (p) => <I {...p}><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></I>;
     const Globe = (p) => <I {...p}><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></I>;
     const ChevronLeft = (p) => <I {...p}><path d="m15 18-6-6 6-6"/></I>;
-    const XIcon = (p) => <I {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></I>;
+    const XIcon = X;
     const CloudSun = (p) => <I {...p}><path d="M12 2v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="M20 12h2"/><path d="m19.07 4.93-1.41 1.41"/><path d="M15.947 12.65a4 4 0 0 0-5.925-4.128"/><path d="M13 22H7a5 5 0 1 1 4.9-6H13a3 3 0 0 1 0 6Z"/></I>;
     const TrendingUp = (p) => <I {...p}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></I>;
     const TrendingDown = (p) => <I {...p}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></I>;
@@ -108,4 +120,4 @@ const I = ({size=24,className='',children}) => (
        i18n dictionary — 1:1 from 前端.html
        ========================================== */
 
-export { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Search, Lock, Play, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, IconList, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, Share2, FolderPlus, Award, Feather, AppWindow, Maximize2, Minimize2, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, FolderOpen, ExternalLink, Link, BookOpen, Code, FileText, Newspaper, ClipboardCheck, FileChartLine, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PinIcon, PinOffIcon, PetPawIcon, Users, GitBranch };
+export { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, Search, Lock, Play, Upload, Lightbulb, Paperclip, Mic, Send, Store, StoreFront, Terminal, ChevronDown, IconGrid, IconList, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, Share2, FolderPlus, Award, Feather, AppWindow, Maximize2, Minimize2, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, FolderOpen, ExternalLink, Link, BookOpen, Code, FileText, Newspaper, ClipboardCheck, FileChartLine, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PinIcon, PinOffIcon, PetPawIcon, Users, GitBranch, KeyRound };

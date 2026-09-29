@@ -140,7 +140,6 @@ pub struct ScheduledTaskDto {
 pub struct DeletedScheduledTaskDto {
     #[serde(flatten)]
     pub task: ScheduledTaskDto,
-    pub deleted_session_ids: Vec<String>,
 }
 
 pub type ScheduledTaskDetailDto = ScheduledTaskDto;
@@ -280,12 +279,7 @@ fn scheduled_history_archive_path() -> std::path::PathBuf {
     scheduled_automation_root().join("history-archive.json")
 }
 
-fn open_scheduled_automation_manager(root: PathBuf) -> Result<AutomationManager> {
-    AutomationManager::open(root)
-}
-
-#[allow(dead_code)]
-pub fn scheduled_task_data_root() -> std::path::PathBuf {
+fn scheduled_task_data_root() -> std::path::PathBuf {
     crate::platform::paths::pinvou3_home().join("tasks")
 }
 
@@ -303,7 +297,7 @@ impl ScheduledTaskState {
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())?;
         let history_archive = ScheduledHistoryArchiveStore::open(scheduled_history_archive_path())?;
         let fallback_model = default_automation_model(Some(bridge));
-        let manager = open_scheduled_automation_manager(scheduled_automation_root())?;
+        let manager = AutomationManager::open(scheduled_automation_root())?;
         let allow_shell = bridge.allow_shell();
         let automations = Arc::new(tokio::sync::Mutex::new(manager));
         let task_cfg = TaskManagerConfig {
@@ -444,11 +438,13 @@ impl ScheduledTaskState {
                 return Err(format!("Failed to save scheduled task kind: {error:#}"));
             }
         }
-        Ok(map_scheduled_task_with_bindings(
+        Ok(map_scheduled_task_with_run_state(
             created,
-            Some(&self.model_bindings),
-            Some(&self.task_kinds),
-            Some(&self.ui_metadata),
+            false,
+            false,
+            &self.model_bindings,
+            &self.task_kinds,
+            &self.ui_metadata,
         ))
     }
 
@@ -459,14 +455,14 @@ impl ScheduledTaskState {
     ) -> Result<ScheduledTaskDto, String> {
         let _operation = self.lock_operation(&id).await;
         let manager = self.automations.lock().await;
-        let current = manager
+        let _current_exists = manager
             .get_automation(&id)
             .map_err(|err| format!("Failed to update scheduled task '{id}': {err}"))?;
         let requested_model_update = input.model.clone();
         let requested_model_id = input.model_id.clone();
         let requires_model_binding = requested_model_id.is_some();
         let updated = manager
-            .update_automation(&id, build_update_request(input, &current)?)
+            .update_automation(&id, build_update_request(input)?)
             .map_err(|err| format!("Failed to update scheduled task '{id}': {err}"))?;
         let updated = ensure_automation_workspace(&manager, updated)
             .map_err(|err| format!("Failed to update scheduled task workspace '{id}': {err:#}"))?;
@@ -829,13 +825,14 @@ impl ScheduledTaskState {
             // Build the DTO before clearing the kind: the delete receipt keeps the kind so
             // the frontend can render the template marker.
             let deleted = DeletedScheduledTaskDto {
-                task: map_scheduled_task_with_bindings(
+                task: map_scheduled_task_with_run_state(
                     deleted,
-                    Some(&self.model_bindings),
-                    Some(&self.task_kinds),
-                    Some(&self.ui_metadata),
+                    false,
+                    false,
+                    &self.model_bindings,
+                    &self.task_kinds,
+                    &self.ui_metadata,
                 ),
-                deleted_session_ids: Vec::new(),
             };
             if let Err(error) = self.task_kinds.remove(id) {
                 log::warn!(
@@ -990,61 +987,6 @@ fn ensure_scheduled_run_can_be_marked_viewed(
     ensure_scheduled_run_is_viewable(record, sessions)
 }
 
-fn owned_scheduled_sessions(
-    automation_id: &str,
-    runs: &[AutomationRunRecord],
-    sessions: &SessionStore,
-) -> Result<Vec<(String, String)>> {
-    let mut seen = HashSet::new();
-    let mut owned = Vec::new();
-    for run in runs {
-        if run.automation_id != automation_id {
-            bail!(
-                "scheduled run {} belongs to automation {}, not {automation_id}",
-                run.id,
-                run.automation_id
-            );
-        }
-        let Some(thread_id) = run.thread_id.as_deref() else {
-            continue;
-        };
-        let Some(profile) = sessions.scheduled_profile(thread_id) else {
-            continue;
-        };
-        if profile.task_id != automation_id {
-            bail!(
-                "scheduled session {thread_id} belongs to automation {}, not {automation_id}",
-                profile.task_id
-            );
-        }
-        if seen.insert(thread_id.to_string()) {
-            owned.push((thread_id.to_string(), profile.task_id));
-        }
-    }
-    // A crash can create the scheduled session and persist its profile before
-    // the base run record receives ThreadLinked. Recover those sessions via
-    // stable automation ownership rather than relying only on run links.
-    for session_id in sessions.scheduled_session_ids_for_task(automation_id) {
-        if seen.insert(session_id.clone()) {
-            owned.push((session_id, automation_id.to_string()));
-        }
-    }
-    owned.sort();
-    Ok(owned)
-}
-
-#[cfg(test)]
-fn delete_owned_scheduled_session(
-    sessions: &SessionStore,
-    session_id: &str,
-    task_id: &str,
-) -> Result<String> {
-    sessions
-        .delete_scheduled_run(session_id, task_id)
-        .with_context(|| format!("delete scheduled session {session_id}"))?;
-    Ok(session_id.to_string())
-}
-
 async fn wait_for_task_terminal(
     task_manager: &SharedTaskManager,
     task_id: &str,
@@ -1154,38 +1096,20 @@ async fn prune_scheduled_history(
     Ok(())
 }
 
-fn map_scheduled_task_with_bindings(
-    record: AutomationRecord,
-    model_bindings: Option<&ScheduledTaskModelBindingStore>,
-    task_kinds: Option<&ScheduledTaskKindStore>,
-    ui_metadata: Option<&ScheduledTaskUiMetadataStore>,
-) -> ScheduledTaskDto {
-    map_scheduled_task_with_run_state(
-        record,
-        false,
-        false,
-        model_bindings,
-        task_kinds,
-        ui_metadata,
-    )
-}
-
 fn map_scheduled_task_with_run_state(
     record: AutomationRecord,
     has_unread_runs: bool,
     is_running: bool,
-    model_bindings: Option<&ScheduledTaskModelBindingStore>,
-    task_kinds: Option<&ScheduledTaskKindStore>,
-    ui_metadata: Option<&ScheduledTaskUiMetadataStore>,
+    model_bindings: &ScheduledTaskModelBindingStore,
+    task_kinds: &ScheduledTaskKindStore,
+    ui_metadata: &ScheduledTaskUiMetadataStore,
 ) -> ScheduledTaskDto {
     let model_id = record
         .model
         .as_deref()
-        .and_then(|model| model_bindings.and_then(|store| store.model_id_for(&record.id, model)));
-    let kind = task_kinds.and_then(|store| store.kind_for(&record.id));
-    let (pinned, pinned_at) = ui_metadata
-        .map(|store| store.metadata_for(&record.id))
-        .unwrap_or((false, None));
+        .and_then(|model| model_bindings.model_id_for(&record.id, model));
+    let kind = task_kinds.kind_for(&record.id);
+    let (pinned, pinned_at) = ui_metadata.metadata_for(&record.id);
     ScheduledTaskDto {
         id: record.id,
         name: record.name,
@@ -1337,9 +1261,9 @@ fn map_scheduled_task_from_manager(
         record,
         has_unread_runs,
         is_running,
-        Some(model_bindings),
-        Some(task_kinds),
-        Some(ui_metadata),
+        model_bindings,
+        task_kinds,
+        ui_metadata,
     ))
 }
 
@@ -1432,7 +1356,7 @@ fn build_create_request(
         .model
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(default_model);
-    canonical_scheduled_mode(input.mode, None)?;
+    canonical_scheduled_mode(input.mode)?;
     // Kind is allow-listed at creation time (create_task owns the normalized result and
     // persists it to the sidecar).
     canonical_scheduled_kind(input.kind)?;
@@ -1463,7 +1387,6 @@ fn build_create_request(
 
 fn build_update_request(
     input: UpdateScheduledTaskInput,
-    _current: &AutomationRecord,
 ) -> Result<UpdateAutomationRequest, String> {
     let _ = (
         &input.cwds,
@@ -1474,7 +1397,7 @@ fn build_update_request(
     // The kind is a one-time property decided at creation: the update contract has no
     // kind (UpdateScheduledTaskInput lacks the field, and serde silently drops an extra
     // "kind" in the JSON), so the sidecar is never rewritten.
-    canonical_scheduled_mode(input.mode, None)?;
+    canonical_scheduled_mode(input.mode)?;
     let status = input.paused.map(paused_to_status);
     Ok(UpdateAutomationRequest {
         name: input.name,
@@ -1498,18 +1421,15 @@ fn build_update_request(
     })
 }
 
-fn canonical_scheduled_mode(
-    mode: Option<String>,
-    default: Option<&str>,
-) -> Result<Option<String>, String> {
-    let Some(mode) = mode.or_else(|| default.map(str::to_string)) else {
-        return Ok(None);
-    };
-    let mode = mode.trim();
-    match mode {
-        "agent" | "plan" | "yolo" => Ok(Some(mode.to_string())),
-        _ => Err(format!(
-            "Scheduled task mode must be exactly one of agent|plan|yolo, got '{mode}'"
+/// 定时任务恒以 YOLO 运行（见 `SCHEDULED_EXECUTION_MODE`，创建/更新请求里的
+/// `mode` 一律被下游覆盖为该值），本函数只做输入校验：空/缺省或显式 `"yolo"`
+/// 放行，其余拒绝。历史上的 `agent`/`plan` 接受臂没有意义——下游无差别覆盖
+/// 成 yolo，用户输入被静默丢弃，不如显式报错。
+fn canonical_scheduled_mode(mode: Option<String>) -> Result<(), String> {
+    match mode.as_deref().map(str::trim) {
+        None | Some("") | Some(SCHEDULED_EXECUTION_MODE) => Ok(()),
+        Some(other) => Err(format!(
+            "Scheduled tasks always run in '{SCHEDULED_EXECUTION_MODE}' mode, got '{other}'"
         )),
     }
 }
@@ -2477,8 +2397,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let automations: SharedAutomationManager = Arc::new(tokio::sync::Mutex::new(manager));
         let task_manager = TaskManager::start_with_executor(
             TaskManagerConfig {
@@ -2676,7 +2595,6 @@ mod tests {
             .delete_for_test(fixture.automation_id.clone())
             .await
             .expect("delete task while retaining history");
-        assert!(deleted.deleted_session_ids.is_empty());
         {
             let manager = fixture.state.automations.lock().await;
             assert!(
@@ -3050,8 +2968,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3078,7 +2995,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3096,18 +3013,10 @@ mod tests {
 
         let deleted = state.delete_for_test(created.id).await.expect("delete");
         assert_eq!(deleted.task.name, "测试计划");
-        assert!(deleted.deleted_session_ids.is_empty());
         let serialized = serde_json::to_value(&deleted).expect("delete response json");
         assert_eq!(
             serialized.get("name").and_then(serde_json::Value::as_str),
             Some("测试计划")
-        );
-        assert_eq!(
-            serialized
-                .get("deletedSessionIds")
-                .and_then(serde_json::Value::as_array)
-                .map(Vec::len),
-            Some(0)
         );
         match previous {
             // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
@@ -3140,8 +3049,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3240,8 +3148,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3377,8 +3284,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3530,8 +3436,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3615,56 +3520,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn owned_session_delete_reports_id_only_after_successful_removal() {
-        let _guard = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = temp_home();
-        let previous = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        let sessions = SessionStore::boot().expect("sessions");
-        let create_session = |task_id: &str| {
-            sessions
-                .create_scheduled_run(crate::features::sessions::ScheduledRunProfile {
-                    task_id: task_id.to_string(),
-                    model: "model-1".to_string(),
-                    model_id: None,
-                    workspace: dir.join("workspace"),
-                    mode: crate::features::sessions::ScheduledRunMode::Agent,
-                    allow_shell: false,
-                    trust_mode: false,
-                    auto_approve: false,
-                })
-                .expect("scheduled session")
-                .metadata
-                .id
-        };
-        let deleted_id = create_session("task-delete-success");
-
-        let reported =
-            delete_owned_scheduled_session(&sessions, &deleted_id, "task-delete-success")
-                .expect("successful deletion");
-
-        assert_eq!(reported, deleted_id);
-        assert!(!sessions.scheduled_session_exists(&reported));
-
-        let retained_id = create_session("task-delete-retained");
-        assert!(
-            delete_owned_scheduled_session(&sessions, &retained_id, "wrong-task-owner").is_err()
-        );
-        assert!(sessions.scheduled_session_exists(&retained_id));
-
-        match previous {
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
-            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     #[tokio::test]
     async fn update_and_resume_round_trip() {
         let _guard = crate::platform::paths::tests::ENV_LOCK
@@ -3687,8 +3542,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3717,7 +3571,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3737,7 +3591,7 @@ mod tests {
                     cwds: Some(vec!["/tmp/workspace-b".to_string()]),
                     model: None,
                     model_id: None,
-                    mode: Some("plan".to_string()),
+                    mode: Some("yolo".to_string()),
                     allow_shell: Some(!expected_allow_shell),
                     trust_mode: Some(false),
                     auto_approve: Some(false),
@@ -3776,8 +3630,18 @@ mod tests {
 
     #[test]
     fn task_dto_does_not_expose_legacy_source_session_binding() {
+        let dir = temp_home();
+        // Empty stores: the DTO must render the same as when nothing is bound
+        // (kind null, no model id, not pinned).
+        let model_bindings =
+            ScheduledTaskModelBindingStore::open(dir.join("dto-model-bindings.json"))
+                .expect("model bindings");
+        let task_kinds =
+            ScheduledTaskKindStore::open(dir.join("dto-task-kinds.json")).expect("task kinds");
+        let ui_metadata = ScheduledTaskUiMetadataStore::open(dir.join("dto-ui-metadata.json"))
+            .expect("ui metadata");
         let now = chrono::Utc::now();
-        let dto = map_scheduled_task_with_bindings(
+        let dto = map_scheduled_task_with_run_state(
             AutomationRecord {
                 schema_version: 1,
                 id: "automation-1".to_string(),
@@ -3788,7 +3652,7 @@ mod tests {
                 model: Some("model-1".to_string()),
                 model_provider: None,
                 model_provider_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3799,10 +3663,13 @@ mod tests {
                 next_run_at: None,
                 last_run_at: None,
             },
-            None,
-            None,
-            None,
+            false,
+            false,
+            &model_bindings,
+            &task_kinds,
+            &ui_metadata,
         );
+        let _ = std::fs::remove_dir_all(dir);
 
         let value = serde_json::to_value(dto).expect("serialize task dto");
         assert!(
@@ -3812,7 +3679,7 @@ mod tests {
         assert_eq!(
             value.get("kind"),
             Some(&serde_json::Value::Null),
-            "chat tasks serialize kind as null when no kind store is consulted"
+            "chat tasks serialize kind as null when the kind store has no entry"
         );
         assert_eq!(
             value.get("isRunning"),
@@ -3863,7 +3730,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("plan".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: Some(false),
                 trust_mode: Some(false),
                 auto_approve: Some(false),
@@ -3908,8 +3775,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -3945,7 +3811,7 @@ mod tests {
             })
             .await
             .expect_err("planner is not a canonical scheduled mode");
-        assert!(error.contains("agent|plan|yolo"), "{error}");
+        assert!(error.contains("'yolo'"), "{error}");
         assert!(
             state
                 .automations
@@ -3987,8 +3853,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4015,7 +3880,7 @@ mod tests {
                 kind: None,
                 model: None,
                 model_id: None,
-                mode: Some("agent".to_string()),
+                mode: Some("yolo".to_string()),
                 allow_shell: None,
                 trust_mode: None,
                 auto_approve: None,
@@ -4043,7 +3908,10 @@ mod tests {
             )
             .await
             .expect_err("planner is not a canonical scheduled mode");
-        assert!(error.contains("agent|plan|yolo"), "{error}");
+        assert!(
+            error.contains("Scheduled tasks always run in 'yolo' mode"),
+            "{error}"
+        );
         assert_eq!(
             state
                 .automations
@@ -4137,17 +4005,6 @@ mod tests {
             mismatched
                 .get("sessionId")
                 .is_some_and(serde_json::Value::is_null)
-        );
-
-        let unlinked_run = AutomationRunRecord {
-            thread_id: None,
-            ..owned_run.clone()
-        };
-        let recovered = owned_scheduled_sessions("automation-1", &[unlinked_run], &store)
-            .expect("recover session from durable task ownership");
-        assert_eq!(
-            recovered,
-            vec![(saved.metadata.id.clone(), "automation-1".to_string())]
         );
 
         std::fs::remove_file(
@@ -4403,8 +4260,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4492,8 +4348,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let mut state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4589,8 +4444,7 @@ mod tests {
             ScheduledTaskKindStore::open(scheduled_task_kinds_path()).expect("task kinds");
         let ui_metadata = ScheduledTaskUiMetadataStore::open(scheduled_task_ui_metadata_path())
             .expect("ui metadata");
-        let manager =
-            open_scheduled_automation_manager(scheduled_automation_root()).expect("automations");
+        let manager = AutomationManager::open(scheduled_automation_root()).expect("automations");
         let state = ScheduledTaskState {
             automations: Arc::new(tokio::sync::Mutex::new(manager)),
             task_manager: None,
@@ -4616,7 +4470,7 @@ mod tests {
             kind,
             model: None,
             model_id: None,
-            mode: Some("agent".to_string()),
+            mode: Some("yolo".to_string()),
             allow_shell: Some(false),
             trust_mode: Some(false),
             auto_approve: Some(false),

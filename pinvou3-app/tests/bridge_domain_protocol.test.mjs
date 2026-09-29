@@ -80,12 +80,45 @@ const protocolSources = {
   multiAgent: ['bridge/multiagent.js'],
   teamRelay: ['bridge/team-relay.js'],
   projects: ['bridge/projects.js'],
+  computerUse: ['bridge/computer_use.js'],
 };
 
 const expectedProtocolHashes = {
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
   orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
-  artifacts: 'e188b39659ef1f17996807f0effa49fdd6fb6d0b8f7d233121ad529f6579633a',
+  // Recomputed for artifact export telemetry after a successful external open;
+  // attribution is now isolated to the explicitly targeted session.
+  // Recomputed again for the Linux clipboard-image paste fallback (community
+  // #578 backflow): artifacts.js gains the addPasteImageFromClipboard invoke
+  // wrapping the paste_clipboard_image command (the native layer reads the
+  // WebKitGTK-invisible clipboard image and saves it server-side; web lane
+  // intentionally has no such backend).
+  artifacts: 'bb1974a6cff526075dc98813ee75dd7253ec970203ef59cb133d2c443ec5ed71',
+// New domain: computer-use consent commands/events (desktop-only; the web
+  // RPC allowlist excludes them, same policy as browser:*).
+  // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
+  // only closes its own dialog and fresh requests re-prompt immediately (no
+  // invoke/listen call-set change; comment wording is part of the digest).
+  // Recomputed when the deny()/grant_required handler comments were updated
+  // for the mainstream narrowing (no deny-cooldown memory, no idle-expired
+  // grant re-arm; comment wording inside the listen callback span is part of
+  // the digest). Recomputed again when the confirm_required handler's
+  // type-preview comment was corrected to the shipped contract (full text
+  // rides for every non-password Type action, short texts included).
+  // Recomputed for the fresh-review fixes: the grant/confirm_required inert branches
+  // now re-read authoritative status (other-window enable gap) and sameRequest compares
+  // the typed-text preview (comment and expression wording inside the callback spans
+  // is part of the digest; no invoke/listen call-set change).
+  // Recomputed for the structured confirm payload: confirm_required builds the
+  // request via buildConfirmRequest (action/button/click_count/point/text_preview/
+  // text_preview_truncated passthrough + summary fallback) and dismissConfirm was
+  // removed (no invoke/listen call-set change; listener body wording is part of
+  // the digest).
+  // Recomputed for the round-15 fix wave: secure-target chord masking (the
+  // chord_masked_chars passthrough in buildConfirmRequest), the
+  // background-session refresh guard, and the inert-branch optional chaining
+  // inside the listener callback spans (no invoke/listen call-set change).
+  computerUse: '9d0bad5bab784eb784a92b8df52ff7e83adef94cc0f6cb7bdbb99f913217e5b8',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
@@ -112,10 +145,13 @@ const expectedProtocolHashes = {
   // again for the backflowed memory-footprint reduction (Community #442):
   // streaming-render trailing-edge timers, terminal toolMeta sweep, monitor
   // display-equality gate — listener body-internal edits only, no new invoke
-  // or listen entries (capture-text refresh).
-  chat: 'd2c249c71e5c8da65d9020d547be38fa70ae7c377a0a702a5cf9253730698842',
+  // or listen entries (capture-text refresh). Recomputed for per-frame stream
+  // notification coalescing; event names and invoke shapes remain unchanged.
+  chat: 'cad6c1cb471c97240673b9706fc6d799c81e64224f4fbaf56f5f44b3698cdc1e',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
-  interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
+  // Recomputed for #445: the YOLO gate threads an adjudicated session id
+  // through exitPlanToYolo and planStuckGo.
+  interaction: 'b62238d0404da126673ed75d74887bae4088861f46f893083c29412fa03d5636',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
   // memory recomputed for the backflowed memory-maintenance feature
   // (Community #419): organize_memory + get_memory_organize_history invokes
@@ -125,12 +161,23 @@ const expectedProtocolHashes = {
   personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
   remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
-  sessions: '43be5b929743f00818492d51d7a725860c71b9a52e7fdcbe72606426472409c0',
+  // Recomputed for the combined session archive and #445 workspace binding
+  // surfaces while retaining Official's materialization behavior.
+  sessions: '24c9d103bfa90094b02200441222d387d86131836d0c7029d96c5ec28d071ddc',
   settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
-  updater: 'f48c27f765bd2dce06cc71299f18348fc734f6390667b20820169e3179cb455b',
+  updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
+  // Official's bridge/voice.js is untouched by this backflow, so the hash
+  // stays at the Official base value (the community value differs only via
+  // comment differences inside its own voice.js; no invoke/listen surface).
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
+  // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
-  projects: '4f0737d9a074629208d6a01e6b027907ad6f0676ef2ae456c95cc37350d8ca76',
+  // Recomputed for the rebind carryover feed-back (review #463 F-Major):
+  // rebind_workspace_root gains the optional previousPostBusySessionIds
+  // payload — the dialog's previous report fed back on retry, honored by the
+  // backend only as a reporting reclassification inside its own to-lane
+  // retry population. Same command surface, no new invoke or listen entries.
+  projects: '90c12ab7494aba3975ac4ece4b23594f4a4fcf309f6252b721ce15575b245979',
 };
 
 for (const [domain, files] of Object.entries(protocolSources)) {

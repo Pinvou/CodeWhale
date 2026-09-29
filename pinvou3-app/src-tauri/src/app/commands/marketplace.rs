@@ -174,11 +174,11 @@ pub async fn install_marketplace_tool(
         mgr.requires_remote_connection_validation(&tool_id)
     };
     if should_validate {
-        let validation_result = {
+        // Only consumes the validation outcome: on failure, roll back the installed tool and surface a user-readable error.
+        if let Err(err) = {
             let mgr = crate::features::marketplace::MarketplaceManager::new();
             mgr.validate_remote_connection(&tool_id).await
-        };
-        if let Err(err) = validation_result {
+        } {
             let rollback_tool_id = tool_id.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let mgr = crate::features::marketplace::MarketplaceManager::new();
@@ -217,7 +217,21 @@ pub async fn install_marketplace_tool(
     // 联动安装的 companion 技能影响两个 scope 的启用集：重写在线会话组合目录
     // （下一轮 prompt 即生效，与 uninstall_marketplace_tool 对称，skill 双 scope
     // 治理事件驱动时机 §2.3.2）。
+    // mcp.json 可能新增了 server：递增修订号让在线引擎下一轮 get_or_spawn
+    // 安全重建并重新发现工具（mark_mcp_config_updated 契约）。plain 会话的
+    // 引擎读按会话派生的 mcp 配置（仅 spawn 时从全局 mcp.json 重写），不递增
+    // 则中途安装的 server 对活跃引擎永不可见（PPT 场景实测：自动装完 pptx 后
+    // 同会话 mcp_pptx_make_pptx 仍不可见）。code 会话读全局文件、底座每轮
+    // mtime+hash 自愈，此时重建是冗余但无害的一次性开销（与 mark_model_updated
+    // 同粒度的取舍）。
+    pool.mark_mcp_config_updated();
     pool.refresh_live_sessions_skills().await;
+    // Install state flows into the deny snapshot in both directions (the
+    // NATIVE_PACKAGE_TOOLS ownership gate and the DenyAll scope syncs above
+    // read it): without this refresh live engines keep the pre-install
+    // admission — a package's native tool stays denied, and a newly installed
+    // connector's tools stay admitted — until respawn.
+    pool.refresh_disallowed_tools().await;
     // 新装包的 CLI/技能脚本纳入/移出 deny 规则集（M-6：install 路径热刷）。
     pool.refresh_permission_rulesets().await;
     telemetry_install.success();
@@ -438,10 +452,19 @@ pub async fn uninstall_marketplace_tool(
     })
     .await
     .map_err(|error| format!("卸载工具后台任务失败: {error}"))??;
+    // mcp.json 可能移除了 server：递增修订号让在线引擎下一轮 get_or_spawn
+    // 安全重建（同 install 路径，mark_mcp_config_updated 契约），残留的已卸
+    // 连接器工具不再出现在模型目录。
+    pool.mark_mcp_config_updated();
+
     // 联动卸载的 companion 技能影响两个 scope 的启用集：重写在线会话组合目录
     // （async 命令必须用 async 版：blocking 版的 blocking_lock 在 tokio runtime
     // 线程上必 panic）。
     pool.refresh_live_sessions_skills().await;
+    // Keep the native-tool deny list uniform with the skill uninstall path
+    // (no live effect today: no current MCP manifest owns a native tool, but
+    // the uninstall postcondition must not depend on that accident).
+    pool.refresh_disallowed_tools().await;
     // 卸载包的 CLI/技能脚本移出 deny 规则集（M-6：uninstall 路径热刷）。
     pool.refresh_permission_rulesets().await;
     Ok(())
@@ -476,6 +499,13 @@ pub(super) fn uninstall_marketplace_tool_sync(tool_id: &str) -> Result<(), Strin
     // sessions with its scripts outside the execpolicy deny rules. Abort on
     // failure (same discipline as the install path's abort-on-delete-failure):
     // the MCP stays installed, the claim stays stable, and the user can retry.
+    //
+    // Teardown policy twin: this is the **eager pre-uninstall, abort-on-failure**
+    // companion teardown. The post-commit best-effort twin lives in
+    // features/marketplace::cleanup_uninstalled_tool_state (runs after the
+    // uninstall transaction commits and swallows per-skill failures). Keep the
+    // two policies distinct and the cross references intact when touching
+    // either side.
     //
     // Upload 组合包例外（B1）：companion 技能在 bundles.json 无独立登记，此时
     // MCP 未卸、`skill_owner_package` 仍判归本包 —— 走技能物理删除会把用户唯一
@@ -546,6 +576,10 @@ pub async fn install_marketplace_skill(
     // code scope 已初始化时新装技能默认仍关闭（sync 进 code 禁用集，见下面
     // install_marketplace_skill_sync），plain 会话立即可见。
     pool.refresh_live_sessions_skills().await;
+    // The native-tool ownership gate (NATIVE_PACKAGE_TOOLS) reads install
+    // state: without this refresh a package owning a native tool (ima) stays
+    // denied in live engines until respawn.
+    pool.refresh_disallowed_tools().await;
     // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
     pool.refresh_permission_rulesets().await;
     telemetry_install.success();
@@ -624,52 +658,10 @@ pub async fn update_bundle_display_meta(
     result
 }
 
-/// 弹文件选择框选 zip 技能包并导入。前端无法用 plugin-dialog 的 JS API
-/// (单 HTML 无 bundler 引不进),所以选文件走 Rust 端 dialog。
-/// 返回 true=已导入,false=用户取消。
-#[tauri::command]
-pub async fn import_skill_package(
-    app: tauri::AppHandle,
-    pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
-) -> Result<bool, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let Some(picked) = app
-        .dialog()
-        .file()
-        .add_filter("技能包 (zip)", &["zip"])
-        .blocking_pick_file()
-    else {
-        return Ok(false); // 用户取消
-    };
-    let path = picked
-        .into_path()
-        .map_err(|e| format!("解析文件路径: {e}"))?;
-    tokio::task::spawn_blocking(move || {
-        let mgr = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new();
-        let name = mgr.import_package(&path.to_string_lossy())?;
-        // 与商店安装同语义：上传技能默认加入 DenyAll scope（当前 code）禁用集
-        // （外部能力显式开启）。
-        crate::features::marketplace::skill_scope::sync_deny_all_scopes_after_skill_install(&name);
-        Ok::<String, String>(name)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {e}"))??;
-    // 重写在线会话组合目录（下一轮 prompt 生效）。
-    pool.refresh_live_sessions_skills().await;
-    // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
-    pool.refresh_permission_rulesets().await;
-    Ok(true)
-}
-
-/// FNV-1a 64 位（确定性、跨平台稳定）：中文文件名 md 导入的无 frontmatter 兜底
-/// id 派生。与 DefaultHasher 不同，不依赖进程内随机种子，重导/跨进程 id 一致。
+/// 中文文件名 md 导入的无 frontmatter 兜底 id 派生。与 DefaultHasher 不同，
+/// 不依赖进程内随机种子，重导/跨进程 id 一致。
 fn stable_stem_hash(stem: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in stem.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    format!("{h:016x}")
+    format!("{:016x}", crate::platform::paths::fnv1a64(stem.as_bytes()))
 }
 
 /// 把单个 `.md`/`.markdown` 技能文件的内容包装成「根放 SKILL.md 的裸 skill 包」走
@@ -776,9 +768,12 @@ pub async fn import_plugin_package_cmd(
     .await
     .map_err(|e| format!("任务执行失败: {e}"))??;
     // 上传安全默认：插件包导入后加入 DenyAll 禁用集，需用户在前端开关显式开启。
-    // 与 `install_marketplace_tool` / `import_skill_package_bytes` 同口径。
+    // 与 `install_marketplace_tool` 同口径。
     crate::features::marketplace::sync_deny_all_scopes_after_install(&report.id);
     // 新装包进入供给：mcp/spanner 热刷工具白名单 + skills 热刷会话组合目录。
+    // 导入包含本地 MCP 时 mcp.json 已变，同样要递增修订号触发在线引擎下轮
+    // 重建（与 install_marketplace_tool 同口径，mark_mcp_config_updated 契约）。
+    pool.mark_mcp_config_updated();
     pool.refresh_disallowed_tools().await;
     pool.refresh_live_sessions_skills().await;
     // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
@@ -844,6 +839,9 @@ pub async fn import_plugin_package_bytes_cmd(
     // 上传安全默认：拖放导入插件包后加入 DenyAll 禁用集，需用户开关显式开启。
     crate::features::marketplace::sync_deny_all_scopes_after_install(&report.id);
     // 新装包进入供给：mcp/spanner 热刷工具白名单 + skills 热刷会话组合目录。
+    // 导入包含本地 MCP 时 mcp.json 已变，同样要递增修订号触发在线引擎下轮
+    // 重建（与 install_marketplace_tool 同口径，mark_mcp_config_updated 契约）。
+    pool.mark_mcp_config_updated();
     pool.refresh_disallowed_tools().await;
     pool.refresh_live_sessions_skills().await;
     // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
@@ -883,71 +881,16 @@ pub async fn import_skill_md_bytes(
         tokio::task::spawn_blocking(move || import_skill_md_content(md, &filename_for_import))
             .await
             .map_err(|e| format!("任务执行失败: {e}"))??;
-    // 上传安全默认：与 `import_skill_package_bytes` 同口径，加入 DenyAll scope。
+    // 上传安全默认：与插件包导入同口径，加入 DenyAll scope。
     crate::features::marketplace::skill_scope::sync_deny_all_scopes_after_skill_install(&report.id);
     pool.refresh_live_sessions_skills().await;
+    // An imported id can collide with a package owning a native tool
+    // (NATIVE_PACKAGE_TOOLS keys on package ids), so the deny snapshot must
+    // follow the same install postcondition as the marketplace paths.
+    pool.refresh_disallowed_tools().await;
     // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
     pool.refresh_permission_rulesets().await;
     Ok(report.id)
-}
-
-/// 拖放导入:Windows WebView2 的 HTML5 文件拖放拿不到源文件路径
-/// (`dragDropEnabled=false`,契约测试锁定,附件系统同走字节通道),所以前端把
-/// zip 读成 base64 传这里,临时落盘后走 `import_package_named`。
-/// 与 `import_skill_package`(原生文件对话框)返回语义一致:true=已导入。
-#[tauri::command]
-pub async fn import_skill_package_bytes(
-    filename: String,
-    data_base64: String,
-    pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
-) -> Result<bool, String> {
-    use base64::Engine as _;
-    if !filename.to_ascii_lowercase().ends_with(".zip") {
-        return Err("仅支持 .zip 技能包".to_string());
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&data_base64)
-        .map_err(|e| format!("解码 zip 数据失败: {e}"))?;
-    use crate::features::marketplace::skill_marketplace::MAX_SKILL_SIZE_BYTES;
-    if bytes.len() as u64 > MAX_SKILL_SIZE_BYTES {
-        return Err(format!(
-            "技能包超过 {} MiB 上限",
-            MAX_SKILL_SIZE_BYTES / 1024 / 1024
-        ));
-    }
-    // 展示名净化(仅写 .installed-from 标记用):去路径分隔符/控制字符,截 128
-    let safe_name: String = filename
-        .chars()
-        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
-        .take(128)
-        .collect();
-    let tmp = std::env::temp_dir().join(format!(
-        "pinvou3-skill-{}-{}.zip",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("写临时文件: {e}"))?;
-    let tmp_for_import = tmp.clone();
-    let name = tokio::task::spawn_blocking(move || {
-        let mgr = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new();
-        let name = mgr.import_package_named(&tmp_for_import.to_string_lossy(), &safe_name)?;
-        // 与商店安装同语义：上传技能默认加入 DenyAll scope（当前 code）禁用集
-        // （外部能力显式开启）。
-        crate::features::marketplace::skill_scope::sync_deny_all_scopes_after_skill_install(&name);
-        Ok::<String, String>(name)
-    })
-    .await
-    .map_err(|e| format!("任务执行失败: {e}"))?;
-    let _ = std::fs::remove_file(&tmp); // 清理临时文件(含失败路径)
-    name?;
-    // 与对话框导入一致:重写在线会话组合目录(下一轮 prompt 生效)。
-    pool.refresh_live_sessions_skills().await;
-    // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
-    pool.refresh_permission_rulesets().await;
-    Ok(true)
 }
 
 #[tauri::command]
@@ -960,6 +903,11 @@ pub async fn uninstall_marketplace_skill(
         .map_err(|e| format!("任务执行失败: {e}"))??;
     // 卸载影响两个 scope 的启用集：重写在线会话的组合目录。
     pool.refresh_live_sessions_skills().await;
+    // The deny list is snapshot state in live engines, and uninstall (unlike
+    // ima_logout) keeps the package's keyring credentials: a skill owning a
+    // native tool (ima) would stay admitted and executable until respawn
+    // without this refresh.
+    pool.refresh_disallowed_tools().await;
     // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
     pool.refresh_permission_rulesets().await;
     Ok(())
@@ -996,6 +944,10 @@ pub async fn restore_recycled_plugin(
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))??;
+    // mcp.json 可能重新写入了 server：递增修订号让在线引擎下一轮 get_or_spawn
+    // 安全重建（与 install/import 同口径，mark_mcp_config_updated 契约），否则
+    // 恢复的插件 server 对活跃 plain 引擎不可见。
+    pool.mark_mcp_config_updated();
     // 恢复 = 重新进入供给：mcp 热刷工具白名单 + skills 热刷会话组合目录 +
     // 包脚本纳入 deny 规则集（与 import/uninstall 同一时机语义）。
     pool.refresh_disallowed_tools().await;

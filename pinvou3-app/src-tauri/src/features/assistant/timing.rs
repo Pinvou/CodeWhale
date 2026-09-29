@@ -25,9 +25,37 @@ static ACTIVE_TURNS: OnceLock<Mutex<HashMap<String, VecDeque<ActiveTurnTiming>>>
 #[cfg(any(feature = "benchmark-hooks", test))]
 static EVAL_OBSERVATION_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// Fixed-schema, content-free breakdown of one Engine acquisition.
+///
+/// These numbers are stored in the existing local timing sidecar so cold and
+/// warm startup can be compared without sending diagnostics elsewhere. Keep
+/// this schema numeric and bounded: session content, paths, model names and
+/// raw errors must never be added here.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct EngineAcquireTiming {
+    pub kind: &'static str,
+    pub total_ms: u64,
+    pub runtime_lock_ms: u64,
+    pub prepare_model_ms: u64,
+    pub reclaim_ms: u64,
+    pub finalize_bridge_ms: u64,
+    pub tool_setup_ms: u64,
+    pub materialize_skills_ms: u64,
+    pub spawn_engine_ms: u64,
+    pub load_session_ms: u64,
+    pub sync_session_ms: u64,
+}
+
 #[derive(Debug)]
 struct ActiveTurnTiming {
     turn_id: String,
+    /// Authoritative engine turn id used by behavior telemetry. The timing id
+    /// remains stable for the local timeline, while value signals must join
+    /// the task lifecycle on the engine-provided id.
+    behavior_turn_id: Option<String>,
+    engine_acquire: Option<EngineAcquireTiming>,
+    engine_ready_timestamp: Option<i64>,
+    first_output_timestamp: Option<i64>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     recorded_first_events: HashSet<&'static str>,
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -40,6 +68,10 @@ impl ActiveTurnTiming {
     fn new(turn_id: String) -> Self {
         Self {
             turn_id,
+            behavior_turn_id: None,
+            engine_acquire: None,
+            engine_ready_timestamp: None,
+            first_output_timestamp: None,
             #[cfg(any(feature = "benchmark-hooks", test))]
             recorded_first_events: HashSet::new(),
             #[cfg(any(feature = "benchmark-hooks", test))]
@@ -168,6 +200,29 @@ pub fn start_turn(session_id: &str) -> String {
         }),
     );
     turn_id
+}
+
+/// Bind the local timing record to the authoritative engine turn id.
+///
+/// The engine publishes this id only after submission. Keeping it alongside
+/// the pre-submit timing id lets the UI retain its existing lifecycle pairing
+/// while response-value telemetry joins the matching `task_finished` event.
+/// Selecting the queue tail relies on the per-session turn lock keeping at most
+/// one admitted turn in flight; if that invariant changes, callers must bind by
+/// the local timing id instead.
+pub fn bind_behavior_turn_id(session_id: &str, behavior_turn_id: &str) -> bool {
+    if behavior_turn_id.is_empty() {
+        return false;
+    }
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let active = map.get_mut(session_id)?.back_mut()?;
+            active.behavior_turn_id = Some(behavior_turn_id.to_string());
+            Some(())
+        })
+        .is_some()
 }
 
 /// On session deletion, clear its residual unpaired turn queues (map keys
@@ -320,7 +375,7 @@ fn finish_turn_internal(
     // serialization), so the finishing turn is always the last one queued;
     // take from the tail. Earlier entries can only be stale ids left by the
     // "canceled before submit" path (start_turn followed by
-    // emit_unsubmitted_interrupted_terminal, no assistant_done) — popping
+    // emit_unsubmitted_interrupted_terminal_for_epoch, no assistant_done) — popping
     // FIFO would attribute assistant_done to the stale turn and leave the
     // real id stuck in the queue forever. Clear the whole queue here;
     // stale turns produce no terminal event.
@@ -343,6 +398,16 @@ fn finish_turn_internal(
         "status": status,
         "error": error,
     });
+    if let Some(behavior_turn_id) = active_turn.behavior_turn_id {
+        entry["behavior_turn_id"] = json!(behavior_turn_id);
+    }
+    if let Some(engine_acquire) = active_turn.engine_acquire {
+        entry["engine_startup"] = json!({
+            "engine_ready_timestamp": active_turn.engine_ready_timestamp,
+            "first_output_timestamp": active_turn.first_output_timestamp,
+            "engine_acquire": engine_acquire,
+        });
+    }
     if let Some(u) = usage {
         entry["usage"] = json!({
             "input_tokens": u.input_tokens,
@@ -393,11 +458,37 @@ fn record_first_event(session_id: &str, event: &'static str, tool_name: Option<&
     );
 }
 
+/// Record Engine readiness once for the currently admitted turn. Calls made
+/// outside a turn (for example an eval prepare step) intentionally stay out of
+/// the interactive startup sample.
+pub fn record_engine_ready(session_id: &str, timing: EngineAcquireTiming) {
+    if let Ok(mut map) = active_turns().lock()
+        && let Some(active) = map.get_mut(session_id).and_then(VecDeque::back_mut)
+        && active.engine_acquire.is_none()
+    {
+        active.engine_acquire = Some(timing);
+        active.engine_ready_timestamp = Some(now_ms());
+    }
+}
+
 #[cfg(any(feature = "benchmark-hooks", test))]
 pub fn record_engine_turn_started(session_id: &str) {
     record_first_event(session_id, "engine_turn_started", None);
 }
 
+/// Capture the first user-visible text delta for startup diagnostics. Empty
+/// deltas are intentionally excluded from this production metric.
+pub fn record_first_output(session_id: &str) {
+    if let Ok(mut map) = active_turns().lock()
+        && let Some(active) = map.get_mut(session_id).and_then(VecDeque::back_mut)
+        && active.first_output_timestamp.is_none()
+    {
+        active.first_output_timestamp = Some(now_ms());
+    }
+}
+
+/// Preserve the benchmark milestone's historical "first MessageDelta event"
+/// semantics, including an empty delta.
 #[cfg(any(feature = "benchmark-hooks", test))]
 pub fn record_first_message_delta(session_id: &str) {
     record_first_event(session_id, "first_message_delta", None);
@@ -459,6 +550,8 @@ pub fn record_milestone_meta(session_id: &str, milestone: &str, meta: serde_json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEvent {
     pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_turn_id: Option<String>,
     pub event: String,  // "user_start" | "assistant_done" | "context_snapshot"
     pub timestamp: i64, // ms epoch
     pub ts: String,     // RFC3339
@@ -603,6 +696,11 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
         });
     Some(TimelineEvent {
         turn_id: turn_id.to_string(),
+        behavior_turn_id: v
+            .get("behavior_turn_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         event: event.to_string(),
         timestamp,
         ts: ts.to_string(),
@@ -778,6 +876,44 @@ mod tests {
         assert_eq!(done["turn_id"].as_str(), Some(turn_id.as_str()));
         // 老路径(无 usage):事件里不应有 usage 字段
         assert!(done.get("usage").is_none() || done["usage"].is_null());
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn behavior_turn_id_is_bound_without_replacing_timeline_identity() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-behavior-turn-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-behavior-turn";
+        let timeline_turn_id = start_turn(sid);
+        assert!(bind_behavior_turn_id(sid, "engine-turn-authoritative"));
+        finish_turn(sid, "completed", None);
+
+        let timeline = read_timeline(sid).unwrap();
+        let start = timeline
+            .iter()
+            .find(|event| event.event == "user_start")
+            .unwrap();
+        let done = timeline
+            .iter()
+            .find(|event| event.event == "assistant_done")
+            .unwrap();
+        assert_eq!(start.turn_id, timeline_turn_id);
+        assert_eq!(done.turn_id, timeline_turn_id);
+        assert_eq!(start.behavior_turn_id, None);
+        assert_eq!(
+            done.behavior_turn_id.as_deref(),
+            Some("engine-turn-authoritative")
+        );
 
         let _ = std::fs::remove_dir_all(tmp);
     }
@@ -1409,6 +1545,88 @@ mod tests {
             "stale unsubmitted-cancel residue must not receive a terminal"
         );
 
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn engine_startup_observation_is_folded_into_existing_terminal_write() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-engine-startup-timing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "engine-startup-observation";
+        start_turn(sid);
+        record_engine_ready(
+            sid,
+            EngineAcquireTiming {
+                kind: "cold",
+                total_ms: 321,
+                runtime_lock_ms: 1,
+                prepare_model_ms: 2,
+                reclaim_ms: 0,
+                finalize_bridge_ms: 3,
+                tool_setup_ms: 4,
+                materialize_skills_ms: 5,
+                spawn_engine_ms: 300,
+                load_session_ms: 2,
+                sync_session_ms: 4,
+            },
+        );
+        record_engine_ready(
+            sid,
+            EngineAcquireTiming {
+                kind: "reused",
+                total_ms: 1,
+                runtime_lock_ms: 1,
+                prepare_model_ms: 0,
+                reclaim_ms: 0,
+                finalize_bridge_ms: 0,
+                tool_setup_ms: 0,
+                materialize_skills_ms: 0,
+                spawn_engine_ms: 0,
+                load_session_ms: 0,
+                sync_session_ms: 0,
+            },
+        );
+        record_first_output(sid);
+        record_first_message_delta(sid);
+        finish_turn(sid, "Completed", None);
+
+        let raw = std::fs::read_to_string(crate::platform::paths::session_timing_events(sid))
+            .expect("timing sidecar");
+        let events = raw
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events.len(),
+            3,
+            "test builds also retain the eval first-delta row"
+        );
+        let terminal = events
+            .iter()
+            .find(|event| event["event"] == "assistant_done")
+            .expect("terminal event");
+        assert_eq!(terminal["engine_startup"]["engine_acquire"]["kind"], "cold");
+        assert_eq!(
+            terminal["engine_startup"]["engine_acquire"]["total_ms"],
+            321
+        );
+        assert!(terminal["engine_startup"]["engine_ready_timestamp"].is_i64());
+        assert!(terminal["engine_startup"]["first_output_timestamp"].is_i64());
+        assert!(
+            !raw.contains("workspace") && !raw.contains("model_name"),
+            "fixed schema must not grow content-bearing fields"
+        );
+
+        unsafe { std::env::remove_var("PINVOU3_HOME") };
         let _ = std::fs::remove_dir_all(tmp);
     }
 

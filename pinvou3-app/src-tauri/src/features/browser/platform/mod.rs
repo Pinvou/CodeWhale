@@ -40,41 +40,6 @@ pub(crate) struct NativeWorkspaceRestore {
     pub(crate) active_index: usize,
 }
 
-/// BrowserCore's platform-neutral input vocabulary. The browser feature maps
-/// DOM uids to page-local coordinates; the selected platform adapter decides
-/// whether it can dispatch a trusted event to that task-owned WebView.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum NativeInput {
-    MouseMove {
-        x: f64,
-        y: f64,
-    },
-    MouseClick {
-        x: f64,
-        y: f64,
-        button: u32,
-        click_count: u8,
-    },
-    Drag {
-        from_x: f64,
-        from_y: f64,
-        to_x: f64,
-        to_y: f64,
-    },
-    Key {
-        key: String,
-    },
-    Text {
-        text: String,
-    },
-    Scroll {
-        x: f64,
-        y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    },
-}
-
 /// BrowserCore evaluations are read-only unless the caller explicitly marks
 /// them as capable of mutating page state. A mutating script that has already
 /// crossed the system-WebView dispatch boundary must never surface as an
@@ -103,6 +68,52 @@ fn evaluation_authorization(
 
 pub(crate) const ACTION_COMMIT_UNKNOWN_SCRIPT_INTERRUPTION: &str =
     "browser/action-commit-unknown-after-script-interruption";
+// Commit-boundary error codes shared by core.rs and the platform adapters.
+// The JS contract tests and browser-wrapper.mjs match these strings literally;
+// never reword them locally.
+pub(crate) const ACTION_COMMIT_UNKNOWN_WEBDRIVER: &str = "browser/action-commit-unknown-webdriver";
+pub(crate) const ACTION_COMMITTED_FOCUS_RESTORE_FAILED: &str =
+    "browser/action-committed-focus-restore-failed";
+pub(crate) const ACTION_COMMIT_UNKNOWN_FOCUS_RESTORE_FAILED: &str =
+    "browser/action-commit-unknown-focus-restore-failed";
+pub(crate) const ACTION_COMMIT_UNKNOWN_INPUT_INTERRUPTION: &str =
+    "browser/action-commit-unknown-after-input-interruption";
+pub(crate) const ACTION_PARTIALLY_COMMITTED: &str = "browser/action-partially-committed";
+pub(crate) const ACTION_COMMIT_UNKNOWN_NAVIGATION_DISPATCH: &str =
+    "browser/action-commit-unknown-after-navigation-dispatch";
+pub(crate) const ACTION_COMMIT_UNKNOWN_TAB_CLOSE: &str =
+    "browser/action-commit-unknown-after-tab-close";
+
+/// Host-owned internal about:blank fragment markers, shared by host.rs and
+/// linux_automation.rs. Rust writes the plain `#` form; WebKit serializes the
+/// fragment delimiter in opaque `about:` URLs as `%23`, so both spellings are
+/// recognized. These prefixes are reserved and never user-visible content.
+pub(crate) const HOST_BLANK_MARKER_SESSION_PREFIX: &str = "about:blank#pinvou-session-";
+pub(crate) const HOST_BLANK_MARKER_TAB_PREFIX: &str = "about:blank#pinvou-tab-";
+pub(crate) const HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX: &str =
+    "about:blank#pinvou-webdriver-bind-";
+pub(crate) const HOST_BLANK_MARKER_SESSION_PREFIX_ENCODED: &str = "about:blank%23pinvou-session-";
+pub(crate) const HOST_BLANK_MARKER_TAB_PREFIX_ENCODED: &str = "about:blank%23pinvou-tab-";
+pub(crate) const HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX_ENCODED: &str =
+    "about:blank%23pinvou-webdriver-bind-";
+/// Every reserved marker spelling; used to detect reserved (never user-visible)
+/// blank URLs regardless of which WebView serialization produced them.
+pub(crate) const HOST_BLANK_MARKER_RESERVED_PREFIXES: [&str; 6] = [
+    HOST_BLANK_MARKER_SESSION_PREFIX,
+    HOST_BLANK_MARKER_TAB_PREFIX,
+    HOST_BLANK_MARKER_SESSION_PREFIX_ENCODED,
+    HOST_BLANK_MARKER_TAB_PREFIX_ENCODED,
+    HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX,
+    HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX_ENCODED,
+];
+/// The session/tab bootstrap markers in both spellings; host-owned token
+/// extraction strips exactly these.
+pub(crate) const HOST_BLANK_MARKER_TOKEN_PREFIXES: [&str; 4] = [
+    HOST_BLANK_MARKER_SESSION_PREFIX,
+    HOST_BLANK_MARKER_TAB_PREFIX,
+    HOST_BLANK_MARKER_SESSION_PREFIX_ENCODED,
+    HOST_BLANK_MARKER_TAB_PREFIX_ENCODED,
+];
 
 const ASYNC_DISPATCH_PENDING: u8 = 0;
 const ASYNC_DISPATCH_RUNNING: u8 = 1;
@@ -454,26 +465,8 @@ pub(crate) async fn evaluate_browser_core_json(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) async fn dispatch_browser_core_input(
-    webview: &tauri::Webview,
-    authorization: &state::NativeTabLease,
-    input: NativeInput,
-) -> Result<(), String> {
-    linux::dispatch_input(webview, authorization, input).await
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) async fn dispatch_browser_core_input(
-    webview: &tauri::Webview,
-    authorization: &state::NativeTabLease,
-    input: NativeInput,
-) -> Result<(), String> {
-    macos::dispatch_input(webview, authorization, input).await
-}
-
-#[cfg(target_os = "linux")]
 pub(crate) async fn wait_browser_core_ready() -> Result<(), String> {
-    linux::wait_until_ready().await
+    linux_automation::wait_until_ready().await
 }
 
 #[cfg(target_os = "macos")]
@@ -488,7 +481,7 @@ pub(crate) async fn wait_browser_core_ready() -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn bind_browser_core_webview(webview: &tauri::Webview) -> Result<(), String> {
-    linux::bind_webview(webview).await
+    linux_automation::bind_webview(webview).await
 }
 
 #[cfg(target_os = "macos")]
@@ -508,7 +501,7 @@ pub(crate) async fn click_browser_core_element(
     uid: &str,
     click_count: u8,
 ) -> Result<(), String> {
-    linux::click_element(webview, authorization, uid, click_count).await
+    linux_automation::click_element(webview, authorization, uid, click_count).await
 }
 
 #[cfg(target_os = "macos")]
@@ -538,7 +531,7 @@ pub(crate) async fn fill_browser_core_element(
     uid: &str,
     value: &str,
 ) -> Result<(), String> {
-    linux::fill_element(webview, authorization, uid, value).await
+    linux_automation::fill_element(webview, authorization, uid, value).await
 }
 
 #[cfg(target_os = "macos")]
@@ -568,7 +561,7 @@ pub(crate) async fn type_browser_core_text(
     text: &str,
     submit_key: Option<&str>,
 ) -> Result<(), String> {
-    linux::type_text(webview, authorization, text, submit_key).await
+    linux_automation::type_text(webview, authorization, text, submit_key).await
 }
 
 #[cfg(target_os = "macos")]
@@ -597,7 +590,7 @@ pub(crate) async fn press_browser_core_key(
     authorization: &state::NativeTabLease,
     key: &str,
 ) -> Result<(), String> {
-    linux::press_key(webview, authorization, key).await
+    linux_automation::press_key(webview, authorization, key).await
 }
 
 #[cfg(target_os = "macos")]
@@ -625,7 +618,7 @@ pub(crate) async fn handle_browser_core_dialog(
     action: &str,
     prompt_text: Option<&str>,
 ) -> Result<String, String> {
-    linux::handle_dialog(webview, authorization, action, prompt_text).await
+    linux_automation::handle_dialog(webview, authorization, action, prompt_text).await
 }
 
 #[cfg(target_os = "macos")]
@@ -672,15 +665,6 @@ pub(crate) fn begin_browser_core_process_shutdown() {
 pub(crate) fn shutdown_browser_core_for_exit() {
     #[cfg(target_os = "linux")]
     linux_automation::shutdown_for_exit();
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) async fn dispatch_browser_core_input(
-    _webview: &tauri::Webview,
-    _authorization: &state::NativeTabLease,
-    _input: NativeInput,
-) -> Result<(), String> {
-    Err("browser/trusted-input-backend-unavailable".to_string())
 }
 
 impl NativeSurfaceCapabilities {

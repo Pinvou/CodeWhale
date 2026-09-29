@@ -12,7 +12,7 @@ import {
   assistantExportFilename,
   buildAssistantResponseExport,
 } from '../src/features/conversation/assistant-response-export.js';
-import { dict } from '../src/shared/i18n-all.js'; // 三语全量断言:浏览器入口用 i18n.js 惰性装载,测试用聚合 shim
+import { dict } from './helpers/i18n-all.js'; // full three-language dict: browser entry lazy-loads via i18n.js, tests use the aggregate shim
 import { renderMarkdownMarkup } from '../src/shared/markdown-renderer.js';
 
 const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
@@ -415,15 +415,17 @@ assert.doesNotMatch(chatView, /data-assistant-copy-source/);
 assert.match(actions, /data-testid="assistant-message-footer"/);
 assert.match(actions, /className="!mt-0 flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 pt-2"/);
 assert.match(actions, /data-testid="assistant-message-actions"/);
-assert.match(actions, /typeof resolveText === 'function' \? await resolveText\(\) : text/);
 assert.match(actions, /copyClipboardText\(value\)/);
 assert.match(actions, /aria-live="polite"/);
 assert.match(actions, /data-testid="assistant-message-export"/);
 assert.match(actions, /data-testid="assistant-message-share"/);
 assert.match(actions, /data-testid="assistant-feedback-positive"/);
 assert.match(actions, /data-testid="assistant-feedback-negative"/);
+assert.match(actions, /const canSubmitFeedback = Boolean\(feedbackKey && telemetryTurnId\)/);
+assert.match(actions, /\{canSubmitFeedback && <>/);
+assert.match(actions, /if \(!canSubmitFeedback\) return/);
 assert.match(actions, /data-testid="assistant-message-retry"/);
-assert.match(actions, /if \(copied && sessionId && turnId\)/);
+assert.match(actions, /if \(copied && sessionId && telemetryTurnId\)/);
 assert.match(actions, /eventName: 'response_copied'/);
 assert.match(actions, /eventName: 'response_feedback_changed'/);
 assert.match(actions, /data-testid="assistant-export-md"/);
@@ -444,5 +446,6 @@ assert.doesNotMatch(clipboard, /querySelectorAll|data-assistant-copy-source/);
 // The legacy codex Turn footer was removed along with the old timeline; the completed-response actions contract is carried solely by the unified timeline (codex renders through the same ConversationTimeline).
 assert.match(timeline, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions[\s\S]*?resolveText=\{\(\) => assistantResponseText\(turn\)\}[\s\S]*?copy=\{c\}/);
 assert.match(timeline, /<AssistantMessageActions[\s\S]*?sessionId=\{sessionId\}[\s\S]*?turnId=\{turn\.lifecycleKnown \? turn\.id : null\}/);
+assert.match(timeline, /<AssistantMessageActions[\s\S]*?telemetryTurnId=\{turn\.lifecycleKnown \? turn\.behaviorTurnId : null\}/);
 
 console.log('assistant message actions tests passed');
