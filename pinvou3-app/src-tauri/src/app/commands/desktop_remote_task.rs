@@ -37,6 +37,7 @@ use crate::features::remote_control::controller::protocol::MAX_TASK_INPUT_TEXT_B
 use crate::features::remote_control::controller::protocol::{
     LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
+use crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis;
 #[cfg(test)]
 use crate::features::remote_control::controller::task::RemoteTaskEvent;
 use crate::features::remote_control::controller::task::{
@@ -81,13 +82,6 @@ fn capability_allows_skills(
                     skill.skill_id == *skill_id && skill.scopes.iter().any(|scope| scope == mode)
                 })
         })
-}
-
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Creates B-authoritative sessions for remote tasks. Only the local session
@@ -461,7 +455,9 @@ impl DesktopRemoteTaskRuntime {
     }
 
     pub(crate) fn recover_after_restart(&self) -> usize {
-        self.service.recover_after_restart(monotonic_millis()).len()
+        self.service
+            .recover_after_restart(controlled_monotonic_millis())
+            .len()
     }
 }
 
@@ -874,7 +870,7 @@ pub fn desktop_remote_controlled_task_stop(
     let service = runtime.service();
     let outcome = controlled
         .with_local_cancel_lease(|lease| {
-            service.prepare_local_cancel(lease, &task_id, monotonic_millis())
+            service.prepare_local_cancel(lease, &task_id, controlled_monotonic_millis())
         })
         .map_err(|error| error.code.to_owned())?
         .map_err(|error| error.code.to_owned())?;
@@ -1000,7 +996,7 @@ fn submit_prepared_bound_task_inner(
         &capabilities,
         &models,
         service,
-        monotonic_millis(),
+        controlled_monotonic_millis(),
         local_attachments,
         local_attachment_cleanup,
     )
@@ -1228,7 +1224,7 @@ fn admit_and_dispatch(
                 Ok(ready) => ready,
                 Err(reason) => {
                     service
-                        .fail_admitted(&task_id, reason, monotonic_millis())
+                        .fail_admitted(&task_id, reason, controlled_monotonic_millis())
                         .map_err(|error| error.code.to_owned())?;
                     return service
                         .status_payload(&task_id)
@@ -1286,7 +1282,7 @@ fn admit_and_dispatch(
                         attachments,
                         events,
                         CancellationToken::new(),
-                        monotonic_millis(),
+                        controlled_monotonic_millis(),
                     )
                     .await
                 {
@@ -1389,7 +1385,7 @@ fn cancel_and_project(
     task_id: &str,
 ) -> Result<Value, String> {
     let outcome = service
-        .cancel(task_id, monotonic_millis())
+        .cancel(task_id, controlled_monotonic_millis())
         .map_err(|error| error.code.to_owned())?;
     let payload = service
         .status_payload(task_id)
@@ -2618,8 +2614,8 @@ mod tests {
 
     #[test]
     fn monotonic_clock_never_moves_backwards() {
-        let first = monotonic_millis();
-        let second = monotonic_millis();
+        let first = controlled_monotonic_millis();
+        let second = controlled_monotonic_millis();
         assert!(second >= first);
     }
 
