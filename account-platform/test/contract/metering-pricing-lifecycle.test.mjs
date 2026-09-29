@@ -44,7 +44,8 @@ test('gateway reserves the request maximum and authorizes final overage before s
   assert.match(proxy, /maximumCost, err := Cost\(price, maximumUsage\)/);
   assert.match(proxy, /MaximumCost: maximumCost/);
   assert.match(proxy, /client\.Extend\(/);
-  assert.match(proxy, /return actual, walletInsufficient\(err\), true/);
+  assert.match(proxy, /return actual, "WALLET_INSUFFICIENT", true/);
+  assert.match(proxy, /return actual, "MEMBER_QUOTA_INSUFFICIENT", true/);
   assert.match(proxyTests, /TestProxyStreamDoesNotChargeSSEEnvelopeBytesBeyondReservedOutput/);
   assert.match(proxyTests, /TestProxyStreamAuthorizesAdditionalUsageBeforeDone/);
   assert.match(proxyTests, /TestProxyStreamCommitsTrustedUsageAndWarnsWhenAdditionalAuthorizationIsInsufficient/);
@@ -60,9 +61,10 @@ test('wallet insufficient notice freezes organization purchase routing', async (
   const notice = contract.components.schemas.BillingNotice;
   assert.deepEqual(notice.properties.action.enum, ['OPEN_RECHARGE', 'OPEN_ORGANIZATION_RECHARGE', 'CONTACT_ORG_ADMIN']);
   assert.equal(notice.properties.organization_id.format, 'uuid');
-  assert.deepEqual(notice.allOf[0].then.required, ['organization_id']);
-  assert.deepEqual(notice.allOf[0].then.properties.action.enum, ['OPEN_ORGANIZATION_RECHARGE', 'CONTACT_ORG_ADMIN']);
-  assert.equal(notice.allOf[0].else.properties.action.const, 'OPEN_RECHARGE');
+  const contextRule = notice.allOf.find(rule => rule.if?.properties?.context_type?.const === 'ORGANIZATION');
+  assert.deepEqual(contextRule.then.required, ['organization_id']);
+  assert.deepEqual(contextRule.then.properties.action.enum, ['OPEN_ORGANIZATION_RECHARGE', 'CONTACT_ORG_ADMIN']);
+  assert.equal(contextRule.else.properties.action.const, 'OPEN_RECHARGE');
 });
 
 test('response-only settlement recovery distinguishes evidence and safe rejection release', async () => {

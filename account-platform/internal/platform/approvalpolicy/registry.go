@@ -125,6 +125,7 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_REGISTRATION_RETRY":      "platform.registrations.repair",
 		"ACCOUNT_REGISTRATION_COMPENSATE": "platform.registrations.repair", "ACCOUNT_PROFILE_CHANGE_RETRY": "platform.profile-changes.repair",
 		"ACCOUNT_CLOSURE_RETRY":                 "platform.account-closures.repair",
+		"ACCOUNT_SMS_CONFIGURATION_UPDATE":       "platform.sms-config.manage",
 		"ACCOUNT_AUDIT_EXPORT_CREATE":           "platform.audit.export",
 		"ACCOUNT_AUDIT_EXPORT_DOWNLOAD_TICKET":  "platform.audit.export",
 		"BILLING_PRICE_DRAFT_CREATE":            "platform.pricing.manage",

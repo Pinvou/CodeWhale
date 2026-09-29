@@ -71,6 +71,7 @@
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/usage-requests/:usage_request_id", "scope": "active", "permissions": ["personal.usage.read", "org.usage.read.self"], "strategy": "domain.active-context" },
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "POST", "path": "/v1/usage-requests/:usage_request_id/cancel", "scope": "personal", "permissions": ["personal.usage.cancel"], "strategy": "domain.stable-user-usage" },
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/me/usage-requests", "scope": "active", "permissions": ["personal.usage.read", "org.usage.read.self"], "strategy": "domain.active-context" },
+    { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/me/usage-turns", "scope": "active", "permissions": ["personal.usage.read", "org.usage.read.self"], "strategy": "domain.active-context" },
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/model-protocols", "scope": "active", "permissions": ["personal.models.read", "org.models.read"], "strategy": "domain.active-context" },
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/models", "scope": "active", "permissions": ["personal.models.read", "org.models.read"], "strategy": "domain.active-context" },
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/organizations/:organization_id/model-policy", "scope": "organization", "permissions": ["org.models.read"], "strategy": "domain.organization-object" },
@@ -150,6 +151,7 @@
     { "source": "account-platform/cmd/billing-service/main.go", "name": "manual-review-sla", "permission": "internal.job.manual-review-sla" },
     { "source": "account-platform/cmd/billing-service/main.go", "name": "admin-pagination-cleanup", "permission": "internal.job.admin-pagination-cleanup" },
     { "source": "account-platform/cmd/billing-service/main.go", "name": "daily-payment-reconciliation", "permission": "internal.job.daily-payment-reconciliation" },
+    { "source": "account-platform/cmd/billing-service/main.go", "name": "archive-blind-recovery", "permission": "internal.job.archive-blind-recovery" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "usage-reconciliation", "permission": "internal.job.usage-reconciliation" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "manual-review-sla", "permission": "internal.job.manual-review-sla" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "replay-retention", "permission": "internal.job.replay-retention" },
@@ -159,7 +161,8 @@
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "route-health-probe", "permission": "internal.job.route-health-probe" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "token-governance-supervisor", "permission": "internal.job.token-governance-supervisor" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "admin-pagination-cleanup", "permission": "internal.job.admin-pagination-cleanup" },
-    { "source": "account-platform/cmd/token-gateway/main.go", "name": "model-emergency-cancellation", "permission": "internal.job.model-emergency-cancellation" }
+    { "source": "account-platform/cmd/token-gateway/main.go", "name": "model-emergency-cancellation", "permission": "internal.job.model-emergency-cancellation" },
+    { "source": "account-platform/cmd/token-gateway/main.go", "name": "usage-history-projection", "permission": "internal.job.usage-history-projection" }
   ],
   "events": [
     { "source": "account-platform/internal/token/approval_consumer_supervisor.go", "durable": "token-model-lifecycle-executor-v1", "subject": "account.approval-command.authorized.v1", "permission": "internal.event.consume.account-approval-command-authorized" },

@@ -51,7 +51,7 @@ release_lock() {
   [[ "$(kubectl -n "$namespace" get lease "$lock_name" -o jsonpath='{.metadata.resourceVersion}')" == "$lock_resource_version" ]]
   local proxy_log proxy_pid proxy_port body
   proxy_log=$(mktemp)
-  kubectl proxy --port=0 --accept-hosts='^127\.0\.0\.1$' >"$proxy_log" 2>&1 & proxy_pid=$!
+  command timeout --signal=TERM --kill-after=10 45 kubectl --request-timeout=30s proxy --port=0 --accept-hosts='^127\.0\.0\.1$' >"$proxy_log" 2>&1 & proxy_pid=$!
   proxy_port=
   for _ in {1..50}; do proxy_port=$(sed -nE 's/.*127\.0\.0\.1:([0-9]+).*/\1/p' "$proxy_log" | head -1); [[ -n "$proxy_port" ]] && break; sleep 0.1; done
   [[ -n "$proxy_port" ]] || { kill "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true; rm -f "$proxy_log"; return 1; }
@@ -125,7 +125,7 @@ verify_pods() {
   while read -r _ _ pod; do
     renew_lock
     forward_log=$(mktemp)
-    kubectl -n "$namespace" port-forward "pod/$pod" ":8080" --address=127.0.0.1 >"$forward_log" 2>&1 & forward_pid=$!
+    command timeout --signal=TERM --kill-after=10 45 kubectl --request-timeout=30s -n "$namespace" port-forward "pod/$pod" ":8080" --address=127.0.0.1 >"$forward_log" 2>&1 & forward_pid=$!
     port=
     for _ in {1..50}; do port=$(sed -nE 's/.*127\.0\.0\.1:([0-9]+).*/\1/p' "$forward_log" | head -1); [[ -n "$port" ]] && break; sleep 0.1; done
     if [[ -z "$port" ]]; then cat "$forward_log" >&2; kill "$forward_pid" 2>/dev/null || true; wait "$forward_pid" 2>/dev/null || true; rm -f "$forward_log"; return 1; fi

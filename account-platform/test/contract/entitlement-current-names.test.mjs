@@ -51,8 +51,9 @@ test('Billing projects and Token/Portal preserve current names without mutating 
     read('internal/token/service.go'), read('internal/portal/service.go'),
   ]);
   for (const field of ['current_plan_name_zh_cn', 'current_plan_name_en', 'current_plan_name_ja']) assert.match(model, new RegExp(field));
-  assert.match(packages, /ep\.plan_name,COALESCE\(catalog\.display_name_zh_cn/);
+  assert.match(packages, /ep\.plan_name,COALESCE\(system_product\.display_name_zh_cn,catalog\.display_name_zh_cn/);
   assert.match(packages, /LEFT JOIN recharge_product_catalog_items catalog ON catalog\.product_id=ep\.product_id/);
+  assert.match(packages, /system_product\.product_id=ep\.product_id/);
   assert.match(tokenClient, /return c\.raw\(ctx, http\.MethodGet, "\/internal\/v1\/entitlement-packages"\+query/);
   assert.match(tokenService, /writeRawNoStore\(w, http\.StatusOK, payload\)/);
   assert.match(portal, /"\/v1\/me\/entitlement-packages"/);

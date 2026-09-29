@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -17,7 +17,8 @@ test('Kubernetes runbook executes Lease lifecycle and restores false after phase
   if (!existsSync(bash)) return;
   const temp = mkdtempSync(join(tmpdir(), 'lineage-k8s-')); const bin = join(temp, 'bin'); const state = join(temp, 'state');
   t.after(() => rmSync(temp, { recursive: true, force: true }));
-  execFileSync(bash, ['-lc', `mkdir -p '${bin}' '${state}'`], { timeout: 10_000, killSignal: 'SIGKILL' });
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(state, { recursive: true });
   executable(bin, 'node', 'exec "$NODE_BIN" "$@"');
   executable(bin, 'sleep', 'exit 0');
   executable(bin, 'timeout', 'while [[ "$1" == --* || "$1" =~ ^[0-9]+$ ]]; do shift; done; exec "$@"');
@@ -72,7 +73,7 @@ enabled=$(cat "$MOCK_STATE/enabled"); [[ "${'$'}{MOCK_FLAG_TRUE:-}" == 1 ]] && e
   executable(bin, 'flock', 'exit 0'); writeFileSync(join(state, 'enabled'), 'false');
   const args = [resolve(root, 'account-platform/deploy/runbooks/session-lineage-rollout.sh'), 'phase2', 'ns', 'rel', 'repo', 'tag', 'sha256:abc'];
   try { run(args[0], args.slice(1), { cwd: root, env: envFor(bin, state), stdio: 'pipe' }); } catch (error) {
-    error.message += `\nhelm=${existsSync(join(state, 'helm.log')) ? readFileSync(join(state, 'helm.log'), 'utf8') : 'missing'}\nkubectl=${readFileSync(join(state, 'kubectl.log'), 'utf8')}\nlease=${existsSync(join(state, 'lease.json')) ? readFileSync(join(state, 'lease.json'), 'utf8') : 'missing'}`;
+    error.message += `\nhelm=${existsSync(join(state, 'helm.log')) ? readFileSync(join(state, 'helm.log'), 'utf8') : 'missing'}\nkubectl=${existsSync(join(state, 'kubectl.log')) ? readFileSync(join(state, 'kubectl.log'), 'utf8') : 'missing'}\nlease=${existsSync(join(state, 'lease.json')) ? readFileSync(join(state, 'lease.json'), 'utf8') : 'missing'}`;
     throw error;
   }
   assert.equal(existsSync(join(state, 'lease.json')), false);
@@ -107,7 +108,9 @@ test('Compose runbook verifies RepoDigests, persists phase evidence, and restore
   if (!existsSync(bash)) return;
   const temp = mkdtempSync(join(tmpdir(), 'lineage-compose-')); const bin = join(temp, 'bin'); const state = join(temp, 'state'); const evidence = join(temp, 'evidence');
   t.after(() => rmSync(temp, { recursive: true, force: true }));
-  execFileSync(bash, ['-lc', `mkdir -p '${bin}' '${state}' '${evidence}'`], { timeout: 10_000, killSignal: 'SIGKILL' });
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(state, { recursive: true });
+  mkdirSync(evidence, { recursive: true });
   executable(bin, 'node', 'exec "$NODE_BIN" "$@"');
   executable(bin, 'timeout', 'while [[ "$1" == --* || "$1" =~ ^[0-9]+$ ]]; do shift; done; exec "$@"');
   executable(bin, 'flock', 'exit 0');

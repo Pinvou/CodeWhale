@@ -49,14 +49,15 @@ test('public and operations contracts expose progress and bounded retry but no d
 });
 
 test('user and administrator interfaces expose closure progress, blockers, and retry in all languages', async () => {
-  const [view, adminView, userCopy, adminCopy] = await Promise.all([
+  const [view, closureFlow, adminView, userCopy, adminCopy] = await Promise.all([
     read('../pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
+    read('../pinvou3-app/src/features/account-platform/account-closure-flow.js'),
     read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
     read('../pinvou3-app/src/shared/account-platform-i18n.js'),
     read('../pinvou3-app/src/shared/admin-platform-i18n.js'),
   ]);
   assert.match(view, /function AccountClosure/);
-  assert.match(view, /CLOSE_MY_ACCOUNT/);
+  assert.match(closureFlow, /CLOSE_MY_ACCOUNT/);
   assert.match(adminView, /retryAccountClosure/);
   for (const copy of [userCopy, adminCopy]) {
     assert.match(copy, /accountPlatformCopy\.zh|adminPlatformCopy\.zh/);

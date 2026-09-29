@@ -53,7 +53,7 @@ test('finance payment product and approval actions use validated structured pane
   assert.match(product, /if\(\[\.\.\.reason\]\.length<10\)/);
   assert.match(product, /command\(path,body,pendingAction\.idempotencyKey\)/);
   assert.match(product, /pendingAction\.idempotencyKey=draft\.idempotencyKey/);
-  assert.match(product, /__idempotency_key:createIdempotencyKey/);
+  assert.match(product, /command\(request\.path,request\.body,createIdempotencyKey,request\.method\)/);
   assert.match(product, /actionSubmit\.disabled\|\|pendingAction\?\.outcomeUnknown/);
   assert.match(product, /setActionCloseLocked\(true\)/);
   assert.match(product, /if\(pendingAction\.outcomeUnknown\)/);
