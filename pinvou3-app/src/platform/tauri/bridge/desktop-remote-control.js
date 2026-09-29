@@ -287,7 +287,7 @@
     function controlledRefresh() {
       ensureAvailable();
       subscribe();
-      var intent = controlledIntent();
+      var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });

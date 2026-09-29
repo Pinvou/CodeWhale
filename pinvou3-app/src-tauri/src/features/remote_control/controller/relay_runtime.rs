@@ -272,7 +272,8 @@ fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: 
     if let Some(operation) = operation {
         let _ = writeln!(
             file,
-            "ts_ms={timestamp_ms} [{}] stage={} operation={} detail={}",
+            "ts_ms={timestamp_ms} pid={} [{}] stage={} operation={} detail={}",
+            std::process::id(),
             log_scope(scope),
             log_stage(stage),
             log_remote_action_operation(operation),
@@ -281,7 +282,8 @@ fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: 
     } else {
         let _ = writeln!(
             file,
-            "ts_ms={timestamp_ms} [{}] stage={} detail={}",
+            "ts_ms={timestamp_ms} pid={} [{}] stage={} detail={}",
+            std::process::id(),
             log_scope(scope),
             log_stage(stage),
             log_detail(detail)
@@ -389,6 +391,7 @@ fn log_stage(value: &str) -> &'static str {
         "web_session_operation_failed",
         "web_workspace_operation_failed",
         "web_acp_operation_failed",
+        "lifecycle_checkpoint",
     ];
     STAGES
         .iter()
@@ -456,6 +459,27 @@ fn log_detail(value: &str) -> &'static str {
         "transfer_chunk_invalid",
         "transfer_chunk_out_of_order",
         "artifact_unavailable",
+        "runtime_started",
+        "start_requested",
+        "refresh_requested",
+        "refresh_retiring",
+        "refresh_connection_cleanup_begin",
+        "refresh_connection_cleanup_done",
+        "refresh_relay_stop_begin",
+        "refresh_relay_stop_done",
+        "refresh_state_rotation_begin",
+        "refresh_state_rotation_done",
+        "refresh_worker_start_begin",
+        "refresh_worker_start_done",
+        "refresh_registration_wait_begin",
+        "refresh_registration_wait_done",
+        "refresh_registration_wait_failed",
+        "refresh_completed",
+        "refresh_failed",
+        "stop_requested",
+        "stop_completed",
+        "disconnect_requested",
+        "disconnect_completed",
     ];
     if let Some(value) = DETAILS.iter().copied().find(|detail| *detail == value) {
         return value;
@@ -2340,6 +2364,16 @@ mod tests {
             log_remote_action_operation("artifact_index"),
             "artifact_index"
         );
+        assert_eq!(log_stage("lifecycle_checkpoint"), "lifecycle_checkpoint");
+        for detail in [
+            "runtime_started",
+            "refresh_requested",
+            "refresh_state_rotation_begin",
+            "refresh_registration_wait_done",
+            "refresh_failed",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
     }
 
     #[test]
