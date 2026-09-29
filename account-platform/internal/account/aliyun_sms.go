@@ -71,32 +71,45 @@ func (e *SMSDeliveryRejectedError) Error() string { return e.Cause.Error() }
 func (e *SMSDeliveryRejectedError) Unwrap() error { return e.Cause }
 
 type AliyunSMSConfig struct {
-	AccessKeyID      string
-	AccessKeySecret  string
-	SignName         string
-	RegisterTemplate string
-	LoginTemplate    string
-	Endpoint         string
+	AccessKeyID           string
+	AccessKeySecret       string
+	SignName              string
+	RegisterTemplate      string
+	LoginTemplate         string
+	ProfileMobileTemplate string
+	PasswordResetTemplate string
+	Endpoint              string
 }
 
 type AliyunSMSProvider struct {
-	config AliyunSMSConfig
-	client *http.Client
-	now    func() time.Time
+	config     AliyunSMSConfig
+	descriptor SMSProviderDescriptor
+	client     *http.Client
+	now        func() time.Time
 }
 
-func (*AliyunSMSProvider) Descriptor() SMSProviderDescriptor {
-	return SMSProviderDescriptor{ID: "aliyun-managed", AdapterVersion: "v1"}
-}
+func (p *AliyunSMSProvider) Descriptor() SMSProviderDescriptor { return p.descriptor }
 
 func (*AliyunSMSProvider) DeliveryRetryPolicy() SMSDeliveryRetryPolicy { return SMSDeliveryAtMostOnce }
 
 func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
+	return newAliyunSMSProvider(config, SMSProviderDescriptor{ID: "aliyun-managed", AdapterVersion: "v1"})
+}
+
+func newAliyunSMSProvider(config AliyunSMSConfig, descriptor SMSProviderDescriptor) (*AliyunSMSProvider, error) {
 	config.AccessKeyID = strings.TrimSpace(config.AccessKeyID)
 	config.AccessKeySecret = strings.TrimSpace(config.AccessKeySecret)
 	config.SignName = strings.TrimSpace(config.SignName)
 	config.RegisterTemplate = strings.TrimSpace(config.RegisterTemplate)
 	config.LoginTemplate = strings.TrimSpace(config.LoginTemplate)
+	config.ProfileMobileTemplate = strings.TrimSpace(config.ProfileMobileTemplate)
+	config.PasswordResetTemplate = strings.TrimSpace(config.PasswordResetTemplate)
+	if config.ProfileMobileTemplate == "" {
+		config.ProfileMobileTemplate = config.LoginTemplate
+	}
+	if config.PasswordResetTemplate == "" {
+		config.PasswordResetTemplate = config.LoginTemplate
+	}
 	config.Endpoint = strings.TrimSpace(config.Endpoint)
 	if config.Endpoint == "" {
 		config.Endpoint = "https://dypnsapi.aliyuncs.com"
@@ -105,16 +118,21 @@ func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("ALIYUN_SMS_ENDPOINT must be an absolute HTTPS URL")
 	}
-	if config.AccessKeyID == "" || config.AccessKeySecret == "" || config.SignName == "" || config.RegisterTemplate == "" || config.LoginTemplate == "" {
+	if descriptor.ID != "aliyun-managed" || descriptor.AdapterVersion == "" || config.AccessKeyID == "" || config.AccessKeySecret == "" || config.SignName == "" || config.RegisterTemplate == "" || config.LoginTemplate == "" || config.ProfileMobileTemplate == "" || config.PasswordResetTemplate == "" {
 		return nil, errors.New("Aliyun SMS credentials, sign name, and templates are required")
 	}
-	return &AliyunSMSProvider{config: config, client: observability.NewHTTPClient(10 * time.Second), now: func() time.Time { return time.Now().UTC() }}, nil
+	return &AliyunSMSProvider{config: config, descriptor: descriptor, client: observability.NewHTTPClient(10 * time.Second), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
 	template := p.config.LoginTemplate
-	if purpose == SMSPurposeRegister {
+	switch purpose {
+	case SMSPurposeRegister:
 		template = p.config.RegisterTemplate
+	case SMSPurposeProfileMobile:
+		template = p.config.ProfileMobileTemplate
+	case SMSPurposePasswordReset:
+		template = p.config.PasswordResetTemplate
 	}
 	parameters := url.Values{
 		"PhoneNumber":      {strings.TrimPrefix(mobile, "+86")},

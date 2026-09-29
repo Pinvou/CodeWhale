@@ -200,19 +200,59 @@ func main() {
 		if decodeErr != nil {
 			log.Fatal("SMS_VERIFICATION_HMAC_KEY_BASE64 must be unpadded standard Base64")
 		}
-		sms, err := account.NewSMSProvider(account.SMSProviderConfig{
-			Mode: os.Getenv("SMS_PROVIDER"),
-			Aliyun: account.AliyunSMSConfig{
-				AccessKeyID: os.Getenv("ALIYUN_SMS_ACCESS_KEY_ID"), AccessKeySecret: os.Getenv("ALIYUN_SMS_ACCESS_KEY_SECRET"),
-				SignName: os.Getenv("ALIYUN_SMS_SIGN_NAME"), RegisterTemplate: os.Getenv("ALIYUN_SMS_REGISTER_TEMPLATE"),
-				LoginTemplate: os.Getenv("ALIYUN_SMS_LOGIN_TEMPLATE"), Endpoint: os.Getenv("ALIYUN_SMS_ENDPOINT"),
-			},
-			HTTPGenerated: account.HTTPGeneratedSMSConfig{Endpoint: os.Getenv("SMS_HTTP_ENDPOINT"), BearerToken: os.Getenv("SMS_HTTP_BEARER_TOKEN"), VerificationKey: verificationKey, AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"},
+		mode := strings.ToLower(strings.TrimSpace(os.Getenv("SMS_PROVIDER")))
+		aliyunConfig := account.AliyunSMSConfig{
+			AccessKeyID: os.Getenv("ALIYUN_SMS_ACCESS_KEY_ID"), AccessKeySecret: os.Getenv("ALIYUN_SMS_ACCESS_KEY_SECRET"),
+			SignName: os.Getenv("ALIYUN_SMS_SIGN_NAME"), RegisterTemplate: os.Getenv("ALIYUN_SMS_REGISTER_TEMPLATE"),
+			LoginTemplate: os.Getenv("ALIYUN_SMS_LOGIN_TEMPLATE"), ProfileMobileTemplate: os.Getenv("ALIYUN_SMS_PROFILE_MOBILE_TEMPLATE"),
+			PasswordResetTemplate: os.Getenv("ALIYUN_SMS_PASSWORD_RESET_TEMPLATE"), Endpoint: os.Getenv("ALIYUN_SMS_ENDPOINT"),
+		}
+		if strings.TrimSpace(aliyunConfig.ProfileMobileTemplate) == "" {
+			aliyunConfig.ProfileMobileTemplate = aliyunConfig.LoginTemplate
+		}
+		if strings.TrimSpace(aliyunConfig.PasswordResetTemplate) == "" {
+			aliyunConfig.PasswordResetTemplate = aliyunConfig.LoginTemplate
+		}
+		httpSMSConfig := account.HTTPGeneratedSMSConfig{Endpoint: os.Getenv("SMS_HTTP_ENDPOINT"), BearerToken: os.Getenv("SMS_HTTP_BEARER_TOKEN"), VerificationKey: verificationKey, AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"}
+		sms, err := account.NewSMSProvider(account.SMSProviderConfig{Mode: mode, Aliyun: aliyunConfig, HTTPGenerated: httpSMSConfig})
+		if err != nil {
+			log.Fatal(err)
+		}
+		defaultSMSConfiguration := account.SMSConfiguration{Enabled: true, ProviderID: mode, AdapterVersion: "v1"}
+		if mode == "aliyun-managed" {
+			defaultSMSConfiguration.CredentialProfile = "aliyun-default"
+			defaultSMSConfiguration.SignName = aliyunConfig.SignName
+			defaultSMSConfiguration.Templates = account.SMSPurposeTemplates{Register: aliyunConfig.RegisterTemplate, Login: aliyunConfig.LoginTemplate, ProfileMobile: aliyunConfig.ProfileMobileTemplate, PasswordReset: aliyunConfig.PasswordResetTemplate}
+		} else {
+			defaultSMSConfiguration.CredentialProfile = "http-default"
+		}
+		aliyunProfileProbe := aliyunConfig
+		if strings.TrimSpace(aliyunProfileProbe.SignName) == "" {
+			aliyunProfileProbe.SignName = "readiness-probe"
+		}
+		if strings.TrimSpace(aliyunProfileProbe.RegisterTemplate) == "" {
+			aliyunProfileProbe.RegisterTemplate = "readiness-probe"
+		}
+		if strings.TrimSpace(aliyunProfileProbe.LoginTemplate) == "" {
+			aliyunProfileProbe.LoginTemplate = "readiness-probe"
+		}
+		if strings.TrimSpace(aliyunProfileProbe.ProfileMobileTemplate) == "" {
+			aliyunProfileProbe.ProfileMobileTemplate = "readiness-probe"
+		}
+		if strings.TrimSpace(aliyunProfileProbe.PasswordResetTemplate) == "" {
+			aliyunProfileProbe.PasswordResetTemplate = "readiness-probe"
+		}
+		_, aliyunProfileErr := account.NewAliyunSMSProvider(aliyunProfileProbe)
+		_, httpProfileErr := account.NewHTTPGeneratedSMSProvider(httpSMSConfig)
+		resolver, err := account.NewVersionedSMSProviderResolver(repository, sms, defaultSMSConfiguration, []account.SMSProviderProfile{
+			{ID: "aliyun-default", ProviderID: "aliyun-managed", Configured: aliyunProfileErr == nil, Aliyun: aliyunConfig},
+			{ID: "http-default", ProviderID: "http-generated", Configured: httpProfileErr == nil, HTTPGenerated: httpSMSConfig},
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
-		auth, err := account.NewMobileAuthService(repository, sms, identities, os.Getenv("OIDC_ISSUER"), registrationTokens)
+		service.WithSMSConfiguration(resolver)
+		auth, err := account.NewMobileAuthService(repository, resolver, identities, os.Getenv("OIDC_ISSUER"), registrationTokens)
 		if err != nil {
 			log.Fatal(err)
 		}

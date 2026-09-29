@@ -153,6 +153,7 @@
     "test:admin-model-operations-overview-ui": "node tests/admin_model_operations_overview_ui_smoke.mjs",
     "test:admin-model-token-page-overviews-ui": "node tests/admin_model_token_page_overviews_ui_smoke.mjs",
     "test:admin-token-account-detail-ui": "node tests/admin_token_account_detail_ui_gate.mjs",
+    "test:admin-sms-configuration-ui": "node tests/admin_sms_configuration_ui_smoke.mjs",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",
     "test:user-journey": "../scripts/run-user-journey-tests.sh",

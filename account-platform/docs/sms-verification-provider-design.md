@@ -1,6 +1,6 @@
 # 短信验证后端可替换设计
 
-> 状态：基础双模式 Adapter、配置注入、Provider 版本留痕和业务状态机隔离已实现；用途扩展由后续任务继续
+> 状态：双模式 Adapter、版本化运行配置、Provider 版本留痕、四类用途和后台运维配置已实现
 >
 > 日期：2026-08-22
 >
@@ -26,7 +26,9 @@ SMSProvider.SendCode(...) -> message_id + opaque_verification_data
 SMSProvider.VerifyCode(...)
 ```
 
-`SMS_PROVIDER` 在启动时选择 `aliyun-managed` 或 `http-generated`，核心挑战状态机不判断厂商。前者由阿里云生成并核验验证码；后者使用密码学安全随机源在 Adapter 中生成验证码，通过通用 HTTPS 发送端点投递，并向 Account 返回带独立密钥的 HMAC 校验数据。`sms_challenges` 保存创建时的 Provider ID 和 Adapter 版本，`sms_send_attempts` 只保存手机号、来源和设备的单向摘要用于限流审计。当前用途仍只有注册和登录；改手机号、找回密码由 ACC-06～ACC-09 的后续任务接入同一端口。
+`SMS_PROVIDER` 提供首次部署默认值；上线后，具备 `platform.sms-config.read/manage` 权限的运维人员可在管理后台启停发送、选择已经由部署准备好的 Provider Profile，并配置阿里云签名与四类用途模板。每次变更生成不可变 revision，新挑战把 `provider_id + v1-c<revision>` 固定到挑战记录；切换后旧挑战仍按其原 revision 核验。前者由阿里云生成并核验验证码；后者使用密码学安全随机源在 Adapter 中生成验证码，通过通用 HTTPS 发送端点投递，并向 Account 返回带独立密钥的 HMAC 校验数据。核心挑战状态机不判断厂商，`sms_send_attempts` 只保存手机号、来源和设备的单向摘要用于限流审计。
+
+后台只管理非敏感配置。Endpoint、AccessKey、AccessKey Secret、Bearer Token 和验证码 HMAC Key 始终由部署 Secret 注入，既不写入配置版本表，也不通过管理 API 或 UI 返回。启用一个未由部署准备好凭据的 Profile 会失败关闭。
 
 ## 3. 分层架构
 
@@ -132,7 +134,7 @@ VerificationBackend.Verify(VerifyChallenge) -> PASS | REJECT | UNAVAILABLE
 ```text
 REGISTER
 LOGIN
-PHONE_CHANGE
+PROFILE_MOBILE
 PASSWORD_RESET
 ```
 
@@ -176,7 +178,9 @@ SMS_TEMPLATE_PASSWORD_RESET=<secret/config reference>
 SMS_OTP_PEPPER_KEY_ID=<secret-manager key reference>
 ```
 
-具体 AccessKey、Secret、签名和 Endpoint 由对应 Adapter 的 Secret 配置读取。业务层只接收已经构造完成的 `VerificationBackend`。
+具体 AccessKey、Secret 和 Endpoint 由对应 Adapter 的 Secret 配置读取。签名、用途模板、启停状态和预注册 Profile 选择由版本化后台配置控制；业务层只接收已经构造完成的 `VerificationBackend`。
+
+管理 API 使用 `GET|PUT /account/admin/v1/sms-configuration`。写入要求 16～128 字符的 `Idempotency-Key`、当前 revision CAS、10～500 字符原因和近期认证；每个成功版本记录操作者与审计事件。配置停用后不再创建/发送新挑战，但既有挑战仍可按创建时版本核验，避免切换或紧急停用破坏用户已经收到的验证码。
 
 推荐目录边界：
 

@@ -852,6 +852,16 @@
         "file": "000085_password_reset_recovery.up.sql",
         "version": 85,
         "sha256": "0208d0e94e4b232da9660994186978e118f6a4dd1bc16dc4c559918cc44cf437"
+      },
+      {
+        "file": "000086_admin_sms_configuration.down.sql",
+        "version": 86,
+        "sha256": "cff4b1845a2f2f6f6d2920874a0c7dd4a75eba7c505716161f72c99abc18a945"
+      },
+      {
+        "file": "000086_admin_sms_configuration.up.sql",
+        "version": 86,
+        "sha256": "a4051a8c700f1d6871787ec09cce6a7f5c9a4757527cd7d67aa7864fd0ae8aac"
       }
     ],
     "billing": [

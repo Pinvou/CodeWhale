@@ -238,7 +238,11 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 		// strongly prove the personal security permission and lifecycle state.
 		passwordResetAllowed, _ = s.repository.AuthorizeMobilePersonalSecurity(ctx, s.issuer, mobile)
 	}
-	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device), Provider: s.sms.Descriptor()}
+	provider, err := activeSMSProvider(ctx, s.sms)
+	if err != nil {
+		return SMSChallenge{}, ErrSMSUnavailable
+	}
+	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device), Provider: provider.Descriptor()}
 	if purpose == SMSPurposeRegister {
 		operationID := uuid.Must(uuid.NewV7())
 		if err := s.identities.ValidateMobileUser(ctx, operationID, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
@@ -299,7 +303,11 @@ func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile s
 	if err != nil {
 		return false, err
 	}
-	verified, err := s.sms.VerifyCode(ctx, mobile, challengeID, verificationData, code)
+	provider, providerErr := smsProviderForVerification(ctx, s.sms, verificationData.Provider)
+	if providerErr != nil {
+		return false, ErrSMSUnavailable
+	}
+	verified, err := provider.VerifyCode(ctx, mobile, challengeID, verificationData, code)
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
 	}
@@ -323,7 +331,11 @@ func (s *MobileAuthService) VerifyProfileMobile(ctx context.Context, rawMobile s
 	if err != nil {
 		return false, err
 	}
-	verified, err := s.sms.VerifyCode(ctx, mobile, challengeID, verificationData, code)
+	provider, providerErr := smsProviderForVerification(ctx, s.sms, verificationData.Provider)
+	if providerErr != nil {
+		return false, ErrSMSUnavailable
+	}
+	verified, err := provider.VerifyCode(ctx, mobile, challengeID, verificationData, code)
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
 	}
@@ -335,7 +347,11 @@ func registrationFingerprint(username, mobile string, challengeID uuid.UUID, pol
 }
 
 func (s *MobileAuthService) deliverSMS(ctx context.Context, challenge SMSChallenge) error {
-	delivery, err := s.sms.SendCode(ctx, challenge.Mobile, challenge.Purpose, challenge.ID)
+	provider, err := smsProviderForSend(ctx, s.sms, challenge.Provider)
+	if err != nil {
+		return ErrSMSUnavailable
+	}
+	delivery, err := provider.SendCode(ctx, challenge.Mobile, challenge.Purpose, challenge.ID)
 	if err != nil {
 		_ = s.repository.MarkSMSChallengeFailed(context.WithoutCancel(ctx), challenge.ID)
 		return fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
@@ -405,7 +421,11 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 		if readyErr != nil {
 			return RegistrationResult{}, readyErr
 		}
-		verified, verifyErr := s.sms.VerifyCode(ctx, operation.Mobile, operation.ChallengeID, verificationData, strings.TrimSpace(code))
+		provider, providerErr := smsProviderForVerification(ctx, s.sms, verificationData.Provider)
+		if providerErr != nil {
+			return RegistrationResult{}, ErrSMSUnavailable
+		}
+		verified, verifyErr := provider.VerifyCode(ctx, operation.Mobile, operation.ChallengeID, verificationData, strings.TrimSpace(code))
 		if verifyErr != nil {
 			return RegistrationResult{}, fmt.Errorf("%w: %v", ErrSMSUnavailable, verifyErr)
 		}
@@ -544,11 +564,42 @@ func (s *MobileAuthService) verifyChallengeAccepted(ctx context.Context, challen
 	if err != nil {
 		return err
 	}
-	verified, err := s.sms.VerifyCode(ctx, mobile, challengeID, verificationData, code)
+	provider, providerErr := smsProviderForVerification(ctx, s.sms, verificationData.Provider)
+	if providerErr != nil {
+		return ErrSMSUnavailable
+	}
+	verified, err := provider.VerifyCode(ctx, mobile, challengeID, verificationData, code)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
 	}
 	return s.repository.ConsumeSMSChallenge(ctx, challengeID, mobile, purpose, verified)
+}
+
+func activeSMSProvider(ctx context.Context, provider SMSProvider) (SMSProvider, error) {
+	if routed, ok := provider.(routedSMSProvider); ok {
+		return routed.ActiveProvider(ctx)
+	}
+	return provider, nil
+}
+
+func smsProviderForSend(ctx context.Context, provider SMSProvider, descriptor SMSProviderDescriptor) (SMSProvider, error) {
+	if routed, ok := provider.(routedSMSProvider); ok {
+		return routed.ProviderForSend(ctx, descriptor)
+	}
+	if provider.Descriptor() != descriptor {
+		return nil, ErrSMSUnavailable
+	}
+	return provider, nil
+}
+
+func smsProviderForVerification(ctx context.Context, provider SMSProvider, descriptor SMSProviderDescriptor) (SMSProvider, error) {
+	if routed, ok := provider.(routedSMSProvider); ok {
+		return routed.ProviderForVerification(ctx, descriptor)
+	}
+	if provider.Descriptor() != descriptor {
+		return nil, ErrSMSUnavailable
+	}
+	return provider, nil
 }
 
 func (r *PostgresRepository) MobileExists(ctx context.Context, mobile string) (bool, error) {

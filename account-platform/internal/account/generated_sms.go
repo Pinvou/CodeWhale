@@ -29,12 +29,11 @@ type HTTPGeneratedSMSProvider struct {
 	endpoint        *url.URL
 	bearerToken     string
 	verificationKey []byte
+	descriptor      SMSProviderDescriptor
 	client          *http.Client
 }
 
-func (*HTTPGeneratedSMSProvider) Descriptor() SMSProviderDescriptor {
-	return SMSProviderDescriptor{ID: "http-generated", AdapterVersion: "v1"}
-}
+func (p *HTTPGeneratedSMSProvider) Descriptor() SMSProviderDescriptor { return p.descriptor }
 
 func (*HTTPGeneratedSMSProvider) DeliveryRetryPolicy() SMSDeliveryRetryPolicy {
 	return SMSDeliveryIdempotent
@@ -45,14 +44,18 @@ func (p *HTTPGeneratedSMSProvider) PrepareVerification(challengeID uuid.UUID) ([
 }
 
 func NewHTTPGeneratedSMSProvider(config HTTPGeneratedSMSConfig) (*HTTPGeneratedSMSProvider, error) {
+	return newHTTPGeneratedSMSProvider(config, SMSProviderDescriptor{ID: "http-generated", AdapterVersion: "v1"})
+}
+
+func newHTTPGeneratedSMSProvider(config HTTPGeneratedSMSConfig, descriptor SMSProviderDescriptor) (*HTTPGeneratedSMSProvider, error) {
 	parsed, err := url.Parse(strings.TrimSpace(config.Endpoint))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Scheme != "https" && !(config.AllowInsecure && parsed.Scheme == "http")) {
 		return nil, errors.New("SMS_HTTP_ENDPOINT must be an absolute HTTPS URL without credentials, query, or fragment")
 	}
-	if len(config.VerificationKey) < 32 {
+	if descriptor.ID != "http-generated" || descriptor.AdapterVersion == "" || len(config.VerificationKey) < 32 {
 		return nil, errors.New("SMS verification key must contain at least 32 bytes")
 	}
-	return &HTTPGeneratedSMSProvider{endpoint: parsed, bearerToken: strings.TrimSpace(config.BearerToken), verificationKey: append([]byte(nil), config.VerificationKey...), client: observability.NewHTTPClient(10 * time.Second)}, nil
+	return &HTTPGeneratedSMSProvider{endpoint: parsed, bearerToken: strings.TrimSpace(config.BearerToken), verificationKey: append([]byte(nil), config.VerificationKey...), descriptor: descriptor, client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
 func (p *HTTPGeneratedSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {

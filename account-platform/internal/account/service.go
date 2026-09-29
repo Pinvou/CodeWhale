@@ -41,6 +41,12 @@ type Service struct {
 	recoveryResults             ApprovalRecoveryResultReader
 	approvalPrechecks           ApprovalPrecheckSource
 	recoveryEffects             approvaleffect.Reader
+	smsConfiguration            *VersionedSMSProviderResolver
+}
+
+func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
+	s.smsConfiguration = configuration
+	return s
 }
 
 func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
@@ -219,6 +225,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsUnitsManage), approvalpolicy.Require("ACCOUNT_UNIT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	admin.GET("/sms-configuration", s.requirePermission(PermissionPlatformSMSConfigRead), httpserver.AdaptFunc(s.adminSMSConfiguration))
+	admin.PUT("/sms-configuration", s.requirePermission(PermissionPlatformSMSConfigManage), httpserver.AdaptFunc(s.adminUpdateSMSConfiguration))
 	if s.auditExports != nil {
 		admin.POST("/audit-exports", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.createAuditExport))
 		admin.GET("/audit-exports/:export_id", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.getAuditExport))

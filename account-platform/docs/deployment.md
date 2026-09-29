@@ -213,11 +213,13 @@ Compose 单实例使用同一可执行编排入口；它要求 Docker Compose v2
 - `ALIYUN_SMS_SIGN_NAME`
 - `ALIYUN_SMS_REGISTER_TEMPLATE`
 - `ALIYUN_SMS_LOGIN_TEMPLATE`
+- `ALIYUN_SMS_PROFILE_MOBILE_TEMPLATE`（可选；未设置时兼容使用登录模板）
+- `ALIYUN_SMS_PASSWORD_RESET_TEMPLATE`（可选；未设置时兼容使用登录模板）
 - `ALIYUN_SMS_ENDPOINT`
 - `SMS_VERIFICATION_HMAC_KEY_BASE64`（仅平台生成验证码模式，独立密钥）
 - `SMS_HTTP_ENDPOINT`、`SMS_HTTP_BEARER_TOKEN`（仅平台生成验证码的通用发送 Adapter）
 
-`aliyun-managed` 由供应商生成并核验验证码；`http-generated` 由 Adapter 使用密码学安全随机源生成六位验证码，Account 只持久化带服务端密钥的校验数据，再通过通用 HTTPS 发送端点投递。两种模式由启动配置和依赖注入选择，Account 挑战状态机不包含厂商判断。RAM 用户只授予所选模式所需的最小权限。AccessKey、Bearer Token 和 HMAC 密钥不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
+`aliyun-managed` 由供应商生成并核验验证码；`http-generated` 由 Adapter 使用密码学安全随机源生成六位验证码，Account 只持久化带服务端密钥的校验数据，再通过通用 HTTPS 发送端点投递。启动配置提供默认 Provider 和两个固定 Profile 的 Secret；上线后的启停、Profile 选择、短信签名及四类模板通过后台版本化配置切换。后台不会读取或返回 Endpoint、AccessKey、Bearer Token、验证码 HMAC 密钥，数据库也不得保存这些 Secret。切换前必须先确认目标 Profile 在后台显示“已就绪”；新挑战使用新 revision，旧挑战在有效期内继续由原 revision 核验。Account 挑战状态机不包含厂商判断。RAM 用户只授予所选模式所需的最小权限。AccessKey、Bearer Token 和 HMAC 密钥不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
 
 当前 Identity Adapter 的注册密码引用及操作 ID 到密码 HMAC 的短期绑定只存在于单进程内存，Helm 固定 `identityService: 1`；Identity 创建前滚动重启会使尚未完成的引用失效，持久注册 Saga 会安全补偿并要求客户端重新预检。Identity 已创建后，Account 可通过 Keycloak 中的稳定注册操作属性恢复，不依赖内存引用。不得通过普通 Redis/业务数据库复制原始密码来扩副本；Identity 高可用需要专门的受保护短期材料方案和安全评审。
 

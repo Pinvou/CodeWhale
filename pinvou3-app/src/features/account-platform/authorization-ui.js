@@ -27,6 +27,7 @@ export const adminSectionPermissions = Object.freeze({
     'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'],
   system: ['platform.system.status.read', 'platform.users.identity.repair'],
   audit: ['platform.audit.read'],
+  settings: ['platform.sms-config.read'],
 });
 
 export const adminSectionMutationPermissions = Object.freeze({
@@ -46,7 +47,7 @@ export const adminSectionMutationPermissions = Object.freeze({
     'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'],
   system: ['platform.users.identity.repair'],
   audit: ['platform.audit.export'],
-  settings: [],
+  settings: ['platform.sms-config.manage'],
 });
 
 export function permissionSet(snapshot, scope = 'active') {
@@ -103,7 +104,7 @@ export function adminVisibleSections(snapshot, { modelTokenIAEnabled = false } =
   const visible = Object.keys(adminSectionPermissions).filter((section) => hasAnyPermission(snapshot, adminSectionPermissions[section]));
   const hidden = modelTokenIAEnabled ? new Set(['tokens']) : new Set(['models', 'tokenResources', 'modelOperations']);
   const filtered = visible.filter((section) => !hidden.has(section));
-  if (filtered.length > 0) filtered.push('settings');
+  if (filtered.length > 0 && !filtered.includes('settings')) filtered.push('settings');
   return filtered;
 }
 

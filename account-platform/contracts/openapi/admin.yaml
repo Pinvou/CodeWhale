@@ -28,6 +28,45 @@ paths:
         "200": { $ref: "#/components/responses/AccountOverview" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/sms-configuration:
+    get:
+      operationId: getAdminSMSConfiguration
+      summary: Read the active redacted SMS delivery configuration and deployment readiness
+      description: Requires platform.sms-config.read. Credentials, endpoints, bearer tokens, verification keys, and provider responses are never returned.
+      responses:
+        "200":
+          description: Active non-secret SMS configuration and redacted deployment profiles
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SMSConfigurationProjection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateAdminSMSConfiguration
+      summary: Activate a new immutable non-secret SMS delivery configuration revision
+      description: Requires platform.sms-config.manage and recent authentication. Existing challenges remain bound to the provider revision captured when they were created.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SMSConfigurationUpdate" }
+      responses:
+        "200":
+          description: Updated configuration projection or the original idempotent result
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SMSConfigurationProjection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/users:
     get:
       operationId: listAdminUsers
@@ -3049,6 +3088,56 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    SMSPurposeTemplates:
+      type: object
+      additionalProperties: false
+      required: [REGISTER, LOGIN, PROFILE_MOBILE, PASSWORD_RESET]
+      properties:
+        REGISTER: { type: string, maxLength: 120 }
+        LOGIN: { type: string, maxLength: 120 }
+        PROFILE_MOBILE: { type: string, maxLength: 120 }
+        PASSWORD_RESET: { type: string, maxLength: 120 }
+    SMSProviderProfile:
+      type: object
+      additionalProperties: false
+      required: [profile_id, provider_id, configured]
+      properties:
+        profile_id: { type: string, enum: [aliyun-default, http-default] }
+        provider_id: { type: string, enum: [aliyun-managed, http-generated] }
+        configured: { type: boolean }
+    SMSConfigurationProjection:
+      type: object
+      additionalProperties: false
+      required: [revision, source, enabled, provider_id, adapter_version, credential_profile, templates, configuration_fingerprint, deployment_capability, readiness, available_profiles]
+      properties:
+        revision: { type: integer, format: int64, minimum: 0 }
+        source: { type: string, enum: [DEPLOYMENT_DEFAULT, ADMIN] }
+        enabled: { type: boolean }
+        provider_id: { type: string, enum: [aliyun-managed, http-generated] }
+        adapter_version: { type: string, const: v1 }
+        credential_profile: { type: string, enum: [aliyun-default, http-default] }
+        sign_name: { type: string, maxLength: 100 }
+        templates: { $ref: "#/components/schemas/SMSPurposeTemplates" }
+        configuration_fingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
+        updated_at: { type: string, format: date-time }
+        deployment_capability: { type: boolean }
+        readiness: { type: string, enum: [READY, DISABLED, PROFILE_UNAVAILABLE] }
+        available_profiles:
+          type: array
+          maxItems: 2
+          items: { $ref: "#/components/schemas/SMSProviderProfile" }
+    SMSConfigurationUpdate:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, enabled, provider_id, credential_profile, sign_name, templates, reason]
+      properties:
+        expected_revision: { type: integer, format: int64, minimum: 0 }
+        enabled: { type: boolean }
+        provider_id: { type: string, enum: [aliyun-managed, http-generated] }
+        credential_profile: { type: string, enum: [aliyun-default, http-default] }
+        sign_name: { type: string, maxLength: 100 }
+        templates: { $ref: "#/components/schemas/SMSPurposeTemplates" }
+        reason: { type: string, minLength: 10, maxLength: 500 }
     TokenUsageReconciliationCommandReadiness:
       type: object
       additionalProperties: false

@@ -1414,7 +1414,7 @@ EXECUTION_FAILED -> EXECUTING | INVALIDATED
 | NFR-11 | 当前单机部署不得宣称高可用；正式高可用形态需要独立容量、故障切换和恢复验收。 |
 | NFR-12 | 内部服务凭据可轮换；每个 HTTP 方法/路由、任务、事件 Subject 和 CLI 映射到精确 `internal.*` 权限，禁止以宽路径或共享 Token 获得整个服务权限；涉及人类授权的内部命令使用 Account 签发的短期不可篡改委托，不能信任请求体自报 actor，后台任务不能获得人类审批权限。 |
 | NFR-13 | 注销后个人信息去标识化；账本、订单、退款、对账和审计按不可逆主体 ID 保留三年，法律保全除外。 |
-| NFR-14 | 短信业务可通过配置和依赖注入替换 Provider，核心挑战状态机不包含厂商条件分支。 |
+| NFR-14 | 短信业务可通过版本化后台配置和依赖注入替换 Provider，核心挑战状态机不包含厂商条件分支；切换后旧挑战按创建时 revision 核验。后台只管理启停、预注册 Profile、签名和用途模板，Endpoint、AccessKey、Token 与 HMAC Key 必须留在部署 Secret，禁止写入数据库或管理 API。 |
 | NFR-15 | Identity Provider 只证明身份，Account 权限系统决定业务授权；业务路由不直接依赖厂商角色 Claim。 |
 | NFR-16 | Commerce Provider Mapping、商品映射和订单引用使用供应商中立模型，厂商 SKU、签名和状态只在 Adapter。 |
 | NFR-17 | 支付状态查询、历史保留、最小查询间隔、最晚支付/确认窗口、权威终态、渠道、关单、退款、回调和账单能力可发现，UI、API 与后台任务使用同一 capabilities 结果和降级规则。 |

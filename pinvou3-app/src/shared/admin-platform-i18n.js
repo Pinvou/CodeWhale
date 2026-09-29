@@ -264,6 +264,14 @@ export const adminPlatformCopy = {
       title: '界面偏好',
       language: '界面语言',
       boundary: '这里只显示已实际实现且可持久化的界面偏好；未接入接口的设置不会展示。',
+      sms: {
+        title: '短信发送服务', boundary: '这里只管理非敏感运行配置；Endpoint、AccessKey、密钥和 Token 继续由部署 Secret 提供，不会在后台展示或保存。',
+        revision: '配置版本', source: '配置来源', readiness: '运行状态', enabled: '启用短信发送', provider: '发送服务', profile: '部署凭据配置', configured: '已就绪', notConfigured: '未配置',
+        signName: '短信签名', templateLabels: { REGISTER: '注册模板', LOGIN: '登录模板', PROFILE_MOBILE: '修改手机号模板', PASSWORD_RESET: '重置密码模板' },
+        reason: '变更原因', reasonPlaceholder: '至少 10 个字符，说明此次配置变更原因', save: '保存短信配置', saving: '保存中…', saved: '短信配置已更新，新挑战将使用新版本。', readOnly: '当前账号只有短信配置查看权限。',
+        loadFailed: '无法加载短信配置，请稍后重试。', saveFailed: '短信配置保存失败，请核对输入后重试。', conflict: '配置已被其他管理员更新，请刷新后重新提交。', profileUnavailable: '所选服务的部署凭据尚未就绪，不能启用。', recentAuthenticationRequired: '该操作要求近期认证，请重新登录后再试。',
+        sources: { ADMIN: '后台配置', DEPLOYMENT_DEFAULT: '部署默认值' }, readinessValues: { READY: '可用', DISABLED: '已停用', PROFILE_UNAVAILABLE: '部署凭据不可用' }, providers: { 'aliyun-managed': '阿里云短信', 'http-generated': '通用 HTTP 短信' },
+      },
     },
     billing: {
       title: '账户与计费',
@@ -761,6 +769,14 @@ export const adminPlatformCopy = {
       title: 'Interface preferences',
       language: 'Interface language',
       boundary: 'Only implemented, persistent interface preferences are shown; settings without a real integration stay hidden.',
+      sms: {
+        title: 'SMS delivery service', boundary: 'Only non-secret runtime settings are managed here. Endpoints, access keys, secrets, and tokens remain deployment secrets and are never displayed or stored by the console.',
+        revision: 'Revision', source: 'Source', readiness: 'Readiness', enabled: 'Enable SMS delivery', provider: 'Delivery service', profile: 'Deployment credential profile', configured: 'Ready', notConfigured: 'Not configured',
+        signName: 'SMS signature', templateLabels: { REGISTER: 'Registration template', LOGIN: 'Login template', PROFILE_MOBILE: 'Mobile-change template', PASSWORD_RESET: 'Password-reset template' },
+        reason: 'Change reason', reasonPlaceholder: 'At least 10 characters describing why this configuration is changing', save: 'Save SMS configuration', saving: 'Saving…', saved: 'SMS configuration updated. New challenges will use the new revision.', readOnly: 'This account has read-only access to SMS configuration.',
+        loadFailed: 'Could not load SMS configuration.', saveFailed: 'Could not save SMS configuration. Check the input and retry.', conflict: 'Another administrator updated this configuration. Reload and submit again.', profileUnavailable: 'The selected deployment credential profile is not ready and cannot be enabled.', recentAuthenticationRequired: 'Recent authentication is required. Sign in again and retry.',
+        sources: { ADMIN: 'Admin configuration', DEPLOYMENT_DEFAULT: 'Deployment default' }, readinessValues: { READY: 'Ready', DISABLED: 'Disabled', PROFILE_UNAVAILABLE: 'Deployment profile unavailable' }, providers: { 'aliyun-managed': 'Alibaba Cloud SMS', 'http-generated': 'Generic HTTP SMS' },
+      },
     },
     billing: {
       title: 'Accounts & billing',
@@ -1254,6 +1270,14 @@ export const adminPlatformCopy = {
       title: 'インターフェース設定',
       language: '表示言語',
       boundary: '実装済みで永続化できる設定のみ表示し、実際の連携がない設定は表示しません。',
+      sms: {
+        title: 'SMS 送信サービス', boundary: 'ここでは機密情報を含まない実行設定だけを管理します。Endpoint、AccessKey、秘密鍵、Token は引き続きデプロイ Secret で管理し、画面表示も保存もしません。',
+        revision: '設定リビジョン', source: '設定元', readiness: '稼働状態', enabled: 'SMS 送信を有効化', provider: '送信サービス', profile: 'デプロイ資格情報プロファイル', configured: '準備完了', notConfigured: '未設定',
+        signName: 'SMS 署名', templateLabels: { REGISTER: '登録テンプレート', LOGIN: 'ログインテンプレート', PROFILE_MOBILE: '携帯番号変更テンプレート', PASSWORD_RESET: 'パスワード再設定テンプレート' },
+        reason: '変更理由', reasonPlaceholder: '10 文字以上で変更理由を入力してください', save: 'SMS 設定を保存', saving: '保存中…', saved: 'SMS 設定を更新しました。新しいチャレンジには新しいリビジョンが使われます。', readOnly: 'このアカウントは SMS 設定を閲覧のみ可能です。',
+        loadFailed: 'SMS 設定を読み込めませんでした。', saveFailed: 'SMS 設定を保存できませんでした。入力を確認して再試行してください。', conflict: '別の管理者が設定を更新しました。再読み込み後にもう一度送信してください。', profileUnavailable: '選択したデプロイ資格情報が未準備のため有効化できません。', recentAuthenticationRequired: '再認証が必要です。もう一度ログインして再試行してください。',
+        sources: { ADMIN: '管理画面設定', DEPLOYMENT_DEFAULT: 'デプロイ既定値' }, readinessValues: { READY: '利用可能', DISABLED: '停止中', PROFILE_UNAVAILABLE: 'デプロイ資格情報が利用不可' }, providers: { 'aliyun-managed': 'Alibaba Cloud SMS', 'http-generated': '汎用 HTTP SMS' },
+      },
     },
     billing: {
       title: 'アカウントと請求',

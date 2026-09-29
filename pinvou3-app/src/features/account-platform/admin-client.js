@@ -227,6 +227,12 @@ export class AdminPlatformClient {
   accountOverview(signal) {
     return this.request('account', '/admin/v1/overview', signal);
   }
+  smsConfiguration(signal) {
+    return this.request('account', '/admin/v1/sms-configuration', signal);
+  }
+  updateSMSConfiguration(input, idempotencyKey = `sms-configuration-${secureRequestID()}`, signal) {
+    return this.mutate('account', '/admin/v1/sms-configuration', 'PUT', input, idempotencyKey, signal);
+  }
   roles(signal) {
     return this.request('account', '/admin/v1/roles', signal);
   }

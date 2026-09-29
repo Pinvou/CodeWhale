@@ -146,12 +146,16 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 	if change.Field != "MOBILE" || change.Status != "PENDING" {
 		return SMSChallenge{}, ErrProfileChangeConflict
 	}
+	provider, err := activeSMSProvider(ctx, s.auth.sms)
+	if err != nil {
+		return SMSChallenge{}, ErrSMSUnavailable
+	}
 	candidate := SMSChallenge{
 		ID: uuid.Must(uuid.NewV7()), Mobile: change.NewValue, Purpose: SMSPurposeProfileMobile,
 		ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device),
-		Provider: s.auth.sms.Descriptor(),
+		Provider: provider.Descriptor(),
 	}
-	verificationData, err := s.auth.sms.PrepareVerification(candidate.ID)
+	verificationData, err := provider.PrepareVerification(candidate.ID)
 	if err != nil {
 		return SMSChallenge{}, ErrSMSUnavailable
 	}
@@ -160,13 +164,14 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 	if err != nil {
 		return SMSChallenge{}, err
 	}
-	if challenge.Provider != s.auth.sms.Descriptor() {
+	provider, err = smsProviderForSend(ctx, s.auth.sms, challenge.Provider)
+	if err != nil {
 		return SMSChallenge{}, ErrSMSUnavailable
 	}
 	if challenge.Status == "SENT" {
 		return challenge, nil
 	}
-	policy := s.auth.sms.DeliveryRetryPolicy()
+	policy := provider.DeliveryRetryPolicy()
 	if challenge.Status == "UNCERTAIN" {
 		return challenge, nil
 	}
@@ -185,7 +190,7 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 		challenge.Status = "SENDING"
 		return challenge, nil
 	}
-	delivery, err := s.auth.sms.SendCode(ctx, challenge.Mobile, challenge.Purpose, challenge.ID)
+	delivery, err := provider.SendCode(ctx, challenge.Mobile, challenge.Purpose, challenge.ID)
 	if err != nil {
 		var rejected *SMSDeliveryRejectedError
 		if errors.As(err, &rejected) {

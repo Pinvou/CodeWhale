@@ -1187,6 +1187,9 @@ func portalClientSource(r *http.Request) string {
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v1/sms-configuration" && (method == http.MethodGet || method == http.MethodPut) {
+		return true
+	}
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations", "/admin/v1/profile-change-requests", "/admin/v1/account-closure-requests", "/admin/v1/approval-policies", "/admin/v1/approval-requests") {
 		return true
 	}
