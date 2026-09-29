@@ -118,6 +118,8 @@ fn resolve_endpoint(
         saved_provider_model: None,
         base_url_override: Some(base_url.clone()),
         limit_overrides: Vec::new(),
+
+        wire_override: None,
     })?;
     let model = route.wire_model_id().as_str().to_string();
 

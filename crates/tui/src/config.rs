@@ -9702,7 +9702,7 @@ fn xiaomi_mimo_env_api_key_for_runtime(
     xiaomi_mimo_env_var(TOKEN_PLAN_ENV_VARS).or_else(|| xiaomi_mimo_env_var(STANDARD_ENV_VARS))
 }
 
-fn wire_config_prefers_anthropic(wire: Option<&str>) -> bool {
+pub(crate) fn wire_config_prefers_anthropic(wire: Option<&str>) -> bool {
     let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
         return false;
     };
@@ -9718,7 +9718,7 @@ fn wire_config_prefers_anthropic(wire: Option<&str>) -> bool {
     )
 }
 
-fn wire_config_prefers_responses(wire: Option<&str>) -> bool {
+pub(crate) fn wire_config_prefers_responses(wire: Option<&str>) -> bool {
     let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
         return false;
     };

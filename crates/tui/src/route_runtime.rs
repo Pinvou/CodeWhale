@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use codewhale_config::provider::WireFormat;
 use codewhale_config::route::{
     LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteLimits, RouteRequest,
     RouteResolver, SourcedLimitOverride, WireModelId,
@@ -10,7 +11,7 @@ use crate::codex_model_cache::{CodexModelCacheFreshness, model_roster};
 use crate::config::{
     ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL, KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS,
     ProviderIdentity, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_bare_k3_route,
-    validate_kimi_code_api_model_id,
+    validate_kimi_code_api_model_id, wire_config_prefers_anthropic, wire_config_prefers_responses,
 };
 use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 
@@ -443,7 +444,31 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
         context_window_override,
         provider_reported_context,
         None,
+        // Config-free convenience wrapper: callers here resolve non-Custom
+        // routes (or want the static policy), so no wire override.
+        None,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Wire-format override a `Custom` route's named table asks for via its
+/// per-config `wire = "responses" | "anthropic" | "chat"` dialect.
+///
+/// The Custom descriptor's static policy stays Chat Completions for backward
+/// compatibility; the override must flow into the resolver so the minted
+/// candidate is wire-true (receipts, preflight, and the per-turn
+/// `from_candidate` binding all read `candidate.protocol()`). `None` means
+/// "no preference" — the static policy applies, matching
+/// `provider_wire_format_for_config` and `provider_capability_with_wire`.
+pub(crate) fn custom_wire_override_for(config: &Config) -> Option<WireFormat> {
+    let wire = config.provider_wire_dialect(ApiProvider::Custom)?;
+    if wire_config_prefers_responses(Some(wire)) {
+        Some(WireFormat::Responses)
+    } else if wire_config_prefers_anthropic(Some(wire)) {
+        Some(WireFormat::AnthropicMessages)
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -455,6 +480,7 @@ fn resolve_route_candidate_with_context_metadata_and_host_limits(
     context_window_override: Option<u32>,
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
     host_limits: Option<RouteLimits>,
+    custom_wire_override: Option<WireFormat>,
 ) -> Result<RouteCandidateResolution, String> {
     let effective_base_url = base_url_override
         .as_deref()
@@ -470,6 +496,7 @@ fn resolve_route_candidate_with_context_metadata_and_host_limits(
             .map(|model| WireModelId::from(model.to_string())),
         base_url_override,
         limit_overrides: Vec::new(),
+        wire_override: custom_wire_override,
     };
     // First pass: resolve the route without overrides to learn the effective
     // endpoint, wire model id, and catalog limits. Candidates are immutable, so
@@ -783,6 +810,7 @@ fn resolve_runtime_route_for_identity_with_limits(
         route_config.context_window_for_provider_config(provider),
         None,
         host_limits,
+        custom_wire_override_for(config),
     )?;
     let candidate = resolution.candidate;
     let model = candidate.wire_model_id().as_str().to_string();
@@ -1775,5 +1803,85 @@ mod tests {
             .filter(|item| item.source == OverrideSource::EmbeddingHost)
             .count();
         assert_eq!(host_overrides, 3);
+    }
+}
+
+/// The named-custom table's per-config `wire` dialect must reach the runtime
+/// route candidate: `resolve_runtime_route` is the per-turn authority, and
+/// the client it binds reads `candidate.protocol()`. A `wire = "responses"`
+/// table therefore resolves a Responses candidate (Pinvou PR #625), an
+/// `anthropic` table a Messages candidate, and absent/`chat` keep the
+/// backward-compatible Chat Completions default.
+#[cfg(test)]
+mod custom_wire_override_tests {
+    use super::*;
+    use crate::config::{ProviderConfig, ProvidersConfig};
+
+    fn custom_table_config(wire: Option<&str>, base_url: &str, model: &str) -> Config {
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "pinvou_responses".to_string(),
+            ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some(base_url.to_string()),
+                model: Some(model.to_string()),
+                api_key: Some("test-key".to_string()),
+                wire: wire.map(str::to_string),
+                ..ProviderConfig::default()
+            },
+        );
+        Config {
+            provider: Some("pinvou_responses".to_string()),
+            providers: Some(ProvidersConfig {
+                custom,
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn forkguard_named_table_wire_responses_reaches_the_runtime_candidate() {
+        let config =
+            custom_table_config(Some("responses"), "https://api.openai.com/v1", "gpt-6-sol");
+        let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("gpt-6-sol"))
+            .expect("named table resolves");
+        assert_eq!(
+            route.candidate.protocol(),
+            WireFormat::Responses,
+            "the per-turn candidate must carry the table's Responses wire"
+        );
+        assert_eq!(
+            route.candidate.endpoint().base_url,
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(route.candidate.wire_model_id().as_str(), "gpt-6-sol");
+        assert_eq!(route.candidate.endpoint().endpoint_key, "responses");
+    }
+
+    #[test]
+    fn forkguard_named_table_wire_anthropic_reaches_the_runtime_candidate() {
+        let config = custom_table_config(
+            Some("anthropic"),
+            "https://relay.example.test/v1",
+            "claude-sonnet",
+        );
+        let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("claude-sonnet"))
+            .expect("named table resolves");
+        assert_eq!(route.candidate.protocol(), WireFormat::AnthropicMessages);
+    }
+
+    #[test]
+    fn forkguard_named_table_without_wire_keeps_the_chat_default() {
+        for wire in [None, Some("chat")] {
+            let config = custom_table_config(wire, "https://relay.example.test/v1", "vendor-model");
+            let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("vendor-model"))
+                .expect("named table resolves");
+            assert_eq!(
+                route.candidate.protocol(),
+                WireFormat::ChatCompletions,
+                "wire {wire:?} keeps the static Chat default"
+            );
+        }
     }
 }

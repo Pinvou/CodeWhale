@@ -1441,6 +1441,12 @@ impl DeepSeekClient {
                 saved_provider_model: None,
                 base_url_override: Some(self.base_url.clone()),
                 limit_overrides: Vec::new(),
+                // Engine-internal rebinds keep this client's own wire: the
+                // transport is endpoint-scoped, and a fresh config-aware
+                // resolution would only reproduce it (both read the same
+                // named-table `wire`).
+                wire_override: (self.api_provider == ApiProvider::Custom)
+                    .then_some(self.wire_format),
             })
             .map_err(anyhow::Error::msg)?;
         let candidate_limits = crate::route_budget::known_route_limits(candidate.limits());
@@ -1493,6 +1499,10 @@ impl DeepSeekClient {
                 saved_provider_model: None,
                 base_url_override: Some(self.base_url.clone()),
                 limit_overrides: Vec::new(),
+                // Same-client request routing: keep this transport's own wire
+                // (endpoint-scoped, mirrors `rebound_for_model_protocol`).
+                wire_override: (self.api_provider == ApiProvider::Custom)
+                    .then_some(self.wire_format),
             }) {
             Ok(candidate) => candidate,
             Err(error) if model_aware => return Err(anyhow::Error::msg(error)),
@@ -2224,6 +2234,8 @@ impl DeepSeekClient {
                     saved_provider_model: None,
                     base_url_override: Some(self.base_url.clone()),
                     limit_overrides: Vec::new(),
+                    wire_override: (self.api_provider == ApiProvider::Custom)
+                        .then_some(self.wire_format),
                 })
                 .ok()
                 .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits()))
@@ -11825,5 +11837,105 @@ mod tests {
             "https://api.example.com/v1"
         );
         assert_eq!(route.candidate.wire_model_id().as_str(), "custom-model-v1");
+    }
+
+    /// The per-turn client for a `wire = "responses"` Custom table must POST
+    /// the generic `/responses` endpoint: the turn path is
+    /// resolve_runtime_route → from_candidate, so the candidate's protocol —
+    /// not the ambient spawn-time client — decides the wire (Pinvou PR #625).
+    #[tokio::test]
+    async fn forkguard_custom_responses_route_turn_client_posts_to_the_responses_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(concentrate_sse_fixture("gpt-6-sol")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = Config {
+            provider: Some("pinvou_responses".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: [(
+                    "pinvou_responses".to_string(),
+                    ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        wire: Some("responses".to_string()),
+                        base_url: Some(format!("{}/v1", server.uri())),
+                        api_key: Some("custom-responses-key".to_string()),
+                        model: Some("gpt-6-sol".to_string()),
+                        ..ProviderConfig::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Custom,
+            Some("gpt-6-sol"),
+        )
+        .expect("named table resolves");
+        let client = DeepSeekClient::from_candidate(&config, &route.candidate)
+            .expect("per-turn client builds");
+        assert_eq!(
+            client.wire_format,
+            WireFormat::Responses,
+            "from_candidate binds the wire-true candidate protocol"
+        );
+        assert_eq!(client.api_provider, ApiProvider::Custom);
+
+        let mut stream = client
+            .create_message_stream(minimal_zen_request("gpt-6-sol"))
+            .await
+            .expect("Custom Responses request should start");
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::ContentBlockDelta {
+                delta: Delta::TextDelta { text: piece },
+                ..
+            } = event.expect("Custom stream event")
+            {
+                text.push_str(&piece);
+            }
+        }
+        assert_eq!(text, "ok from stub");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(
+            request.url.path(),
+            "/v1/responses",
+            "the turn must hit the Responses endpoint, not /chat/completions"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer custom-responses-key")
+        );
+        let body: Value = serde_json::from_slice(&request.body).expect("Responses JSON body");
+        assert_eq!(body["model"], "gpt-6-sol", "model id verbatim: {body}");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false, "stateless Custom route: {body}");
+        assert_eq!(
+            body["include"],
+            json!(["reasoning.encrypted_content"]),
+            "encrypted reasoning replay stays available on this route: {body}"
+        );
+        assert!(
+            body.get("messages").is_none(),
+            "Responses body, not Chat: {body}"
+        );
     }
 }

@@ -3385,6 +3385,8 @@ impl ConfigToml {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.clone()),
                 limit_overrides: Vec::new(),
+
+                wire_override: None,
             })
             .ok();
 

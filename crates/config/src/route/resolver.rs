@@ -40,7 +40,7 @@ use super::errors::RouteError;
 use super::ids::{LogicalModelRef, ModelId, ProviderId, WireModelId};
 use super::offering::{ProviderModelOffering, RouteLimits, bundled_offerings};
 use crate::catalog::{CatalogOffering, bundled_catalog_offerings};
-use crate::provider::WirePolicy;
+use crate::provider::{WireFormat, WirePolicy};
 use crate::{ProviderKind, opencode_go_chat_model_id, provider_preserves_custom_base_url_model};
 
 /// A request to resolve into an executable route.
@@ -62,6 +62,15 @@ pub struct RouteRequest {
     /// for adjusting a route's effective limits: the candidate itself is
     /// immutable once minted.
     pub limit_overrides: Vec<SourcedLimitOverride>,
+    /// Explicit wire-format override for `ProviderKind::Custom` routes.
+    ///
+    /// The Custom descriptor's static policy is Chat Completions for backward
+    /// compatibility; a per-config `[providers.<name>] wire = "responses" |
+    /// "anthropic" | "chat"` table must mint a wire-true candidate so the
+    /// billing receipt, preflight, and the per-turn client binding all read
+    /// the same protocol. Ignored for every other kind: built-ins keep their
+    /// descriptor policy.
+    pub wire_override: Option<WireFormat>,
 }
 
 /// Resolves [`RouteRequest`]s into [`ReadyRouteCandidate`]s.
@@ -251,6 +260,23 @@ impl RouteResolver {
             selected.capabilities = RouteCapabilities::default();
             selected.pricing = PricingSku::UnknownOrStale;
         }
+        if provider_kind == ProviderKind::Custom {
+            // A per-config `wire` override names the endpoint the custom
+            // table actually serves; the static descriptor policy stays Chat
+            // Completions for backward compatibility, so the candidate's
+            // endpoint key and protocol must come from the override (the
+            // tui route layer reads `[providers.<name>] wire` into the
+            // request; see `route_runtime::custom_wire_override_for`).
+            match req.wire_override {
+                Some(WireFormat::Responses) => {
+                    selected.endpoint_key = "responses".to_string();
+                }
+                Some(WireFormat::AnthropicMessages) => {
+                    selected.endpoint_key = "messages".to_string();
+                }
+                Some(WireFormat::ChatCompletions) | None => {}
+            }
+        }
         if provider_kind == ProviderKind::Zai {
             let effective_base_url = req
                 .base_url_override
@@ -274,8 +300,10 @@ impl RouteResolver {
             );
         }
 
-        let protocol = descriptor
-            .protocol_for_endpoint(&selected.endpoint_key)
+        let protocol = (provider_kind == ProviderKind::Custom)
+            .then_some(req.wire_override)
+            .flatten()
+            .or_else(|| descriptor.protocol_for_endpoint(&selected.endpoint_key))
             .ok_or_else(|| RouteError::UnsupportedModelProtocol {
                 provider: provider_id.clone(),
                 model: selected.wire_model_id.as_str().to_string(),

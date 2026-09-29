@@ -397,6 +397,8 @@ pub(crate) fn route_is_valid_for_model(
                 .map(str::to_string)
         },
         limit_overrides: Vec::new(),
+
+        wire_override: None,
     };
     RouteResolver::new()
         .resolve(&request)
