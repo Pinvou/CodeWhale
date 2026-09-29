@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
 };
+use crate::features::remote_control::controller::ports::RemotePortError;
 use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
@@ -245,7 +246,134 @@ pub(crate) fn log_remote_action_event(scope: &str, stage: &str, operation: &str,
     write_relay_event(scope, stage, Some(operation), detail);
 }
 
+// Closed diagnostic projection for the controlled task admission boundary.
+// Keep this list synchronized with the stable codes accepted by
+// `desktop_remote_controller_business::submit_error`. Unknown static codes
+// remain private and collapse to `other` at the sink.
+const CONTROLLED_PORT_LOG_ERROR_CODES: &[&str] = &[
+    "capability_admission_capacity",
+    "capability_descriptor_capacity",
+    "capability_descriptor_duplicate",
+    "capability_display_invalid",
+    "capability_expiry_overflow",
+    "capability_id_invalid",
+    "capability_revision_exhausted",
+    "capability_snapshot_expired",
+    "capability_snapshot_missing",
+    "capability_snapshot_stale",
+    "capability_workspace_capacity",
+    "capability_workspace_duplicate",
+    "capability_workspace_not_authorized",
+    "controlled_session_projection_failed",
+    "desktop_remote_not_connected",
+    "lease_unavailable",
+    "model_binding_invalid",
+    "model_binding_stale",
+    "model_credential_invalid",
+    "model_credential_kind_unsupported",
+    "model_display_name_invalid",
+    "model_endpoint_insecure",
+    "model_endpoint_invalid",
+    "model_endpoint_local",
+    "model_endpoint_mode_unsupported",
+    "model_endpoint_private",
+    "model_endpoint_unresolved",
+    "model_image_override_unsupported",
+    "model_not_exportable",
+    "model_package_capacity",
+    "model_package_field_invalid",
+    "model_package_id_invalid",
+    "model_package_invalid",
+    "model_package_missing",
+    "model_package_missing_field",
+    "model_package_schema_unsupported",
+    "model_package_too_large",
+    "model_package_unknown_field",
+    "model_preset_unsupported",
+    "model_provider_kind_unsupported",
+    "model_reasoning_effort_unsupported",
+    "model_route_invalid",
+    "model_secret_invalid",
+    "model_secret_too_large",
+    "model_vendor_unsupported",
+    "model_wire_api_mismatch",
+    "model_wire_api_unsupported",
+    "model_wire_name_invalid",
+    "task_binding_stale",
+    "task_input_digest_invalid",
+    "task_input_invalid",
+    "task_lease_mismatch",
+    "task_ledger_capacity",
+    "task_ledger_corrupt",
+    "task_ledger_persist_failed",
+    "task_ledger_serialize_failed",
+    "task_ledger_unreadable",
+    "task_ledger_version_unsupported",
+    "task_ledger_write_failed",
+    "task_mode_invalid",
+    "task_mode_unsupported",
+    "task_model_source_invalid",
+    "task_model_source_unsupported",
+    "task_not_found",
+    "task_payload_invalid_enum",
+    "task_payload_invalid_field",
+    "task_payload_invalid_json",
+    "task_payload_invalid_message",
+    "task_payload_invalid_type",
+    "task_payload_length_mismatch",
+    "task_payload_message_too_large",
+    "task_payload_missing_field",
+    "task_payload_replay",
+    "task_payload_role_mismatch",
+    "task_payload_stale_context",
+    "task_payload_unknown_field",
+    "task_payload_unknown_message_type",
+    "task_payload_unsupported_capability",
+    "task_payload_unsupported_version",
+    "task_request_conflict",
+    "task_request_invalid",
+    "task_result_digest_invalid",
+    "task_session_backend_bind_failed",
+    "task_session_binding_mismatch",
+    "task_session_busy",
+    "task_session_create_failed",
+    "task_session_generation_conflict",
+    "task_session_generation_stale",
+    "task_session_lane_conflict",
+    "task_session_lane_mismatch",
+    "task_session_lane_unknown",
+    "task_session_lookup_failed",
+    "task_session_map_conflict",
+    "task_session_not_found",
+    "task_session_provisioner_unavailable",
+    "task_skill_invalid",
+    "task_state_conflict",
+    "task_status_binding_invalid",
+    "task_workspace_capacity",
+    "task_workspace_not_authorized",
+    "task_workspace_required",
+    "task_workspace_unexpected",
+    "temporary_model_capability_required",
+];
+
+/// Log a stable application-boundary error without collapsing its code to
+/// `other` when it belongs to the explicit controlled-task diagnostic set.
+/// User input, identifiers and infrastructure error strings never reach the
+/// sink, and future port errors remain private until deliberately reviewed.
+pub(crate) fn log_controlled_port_error(stage: &str, error: RemotePortError) {
+    write_relay_event_inner("controlled", stage, None, log_port_error_detail(error));
+}
+
 fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: &str) {
+    write_relay_event_inner(scope, stage, operation, log_detail(detail));
+}
+
+fn write_relay_event_inner(
+    scope: &str,
+    stage: &str,
+    operation: Option<&str>,
+    detail: &'static str,
+) {
     use std::io::Write as _;
     static LOG_WRITE_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
 
@@ -277,7 +405,7 @@ fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: 
             log_scope(scope),
             log_stage(stage),
             log_remote_action_operation(operation),
-            log_detail(detail)
+            detail
         );
     } else {
         let _ = writeln!(
@@ -286,7 +414,7 @@ fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: 
             std::process::id(),
             log_scope(scope),
             log_stage(stage),
-            log_detail(detail)
+            detail
         );
     }
 }
@@ -325,10 +453,25 @@ fn log_stage(value: &str) -> &'static str {
         "liveness_attestation",
         "liveness_direct",
         "task_submit_frame_received",
+        "task_submit_endpoint_received",
+        "task_submit_socket_written",
+        "task_submit_socket_write_failed",
         "task_submit_decrypted",
         "task_submit_dispatched",
         "task_submit_dispatch_failed",
         "task_submit_status_sent",
+        "task_submit_business_entered",
+        "task_submit_business_accepted",
+        "task_submit_business_rejected",
+        "task_submit_context_validated",
+        "task_submit_payload_validated",
+        "task_submit_identity_validated",
+        "task_submit_capability_validated",
+        "task_submit_mapping_ready",
+        "task_submit_mapping_projected",
+        "task_submit_prepared",
+        "controlled_submission_admission_entered",
+        "task_model_source_received",
         "business_frame_dropped",
         "business_frame_rejected",
         "business_dispatch_failed",
@@ -426,6 +569,12 @@ fn log_detail(value: &str) -> &'static str {
         "channel_ready",
         "opening",
         "dispatching",
+        "forwarding_to_worker",
+        "validating",
+        "admitted",
+        "transport_error",
+        "controlled_device",
+        "controller_temporary",
         "no_live_lease",
         "relay_rejected",
         "projection_failed",
@@ -488,6 +637,14 @@ fn log_detail(value: &str) -> &'static str {
         .iter()
         .copied()
         .find(|code| *code == value)
+        .unwrap_or("other")
+}
+
+fn log_port_error_detail(error: RemotePortError) -> &'static str {
+    CONTROLLED_PORT_LOG_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == error.code())
         .unwrap_or("other")
 }
 
@@ -2360,6 +2517,40 @@ mod tests {
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
         assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
+        for stage in [
+            "task_submit_endpoint_received",
+            "task_submit_socket_written",
+            "task_submit_business_entered",
+            "task_submit_business_rejected",
+            "task_submit_context_validated",
+            "task_submit_payload_validated",
+            "task_submit_identity_validated",
+            "task_submit_capability_validated",
+            "task_submit_mapping_ready",
+            "task_submit_mapping_projected",
+            "task_submit_prepared",
+            "controlled_submission_admission_entered",
+            "task_model_source_received",
+        ] {
+            assert_eq!(log_stage(stage), stage);
+        }
+        for detail in ["forwarding_to_worker", "validating", "admitted"] {
+            assert_eq!(log_detail(detail), detail);
+        }
+        assert_eq!(
+            log_port_error_detail(RemotePortError::new("task_workspace_required", false)),
+            "task_workspace_required"
+        );
+        for code in CONTROLLED_PORT_LOG_ERROR_CODES {
+            assert_eq!(
+                log_port_error_detail(RemotePortError::new(code, false)),
+                *code
+            );
+        }
+        assert_eq!(
+            log_port_error_detail(RemotePortError::new("internal_token_like_literal", false)),
+            "other"
+        );
         assert_eq!(
             log_remote_action_operation("artifact_index"),
             "artifact_index"

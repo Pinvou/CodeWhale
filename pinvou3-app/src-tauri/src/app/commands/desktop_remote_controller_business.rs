@@ -24,7 +24,7 @@ use crate::features::remote_control::controller::protocol::{
     validate_controller_runtime_payload_json,
 };
 use crate::features::remote_control::controller::relay_runtime::{
-    ControlledBusinessPort, controlled_monotonic_millis,
+    ControlledBusinessPort, controlled_monotonic_millis, log_controlled_port_error,
 };
 use crate::features::remote_control::controller::task::{
     RemoteTaskLedger, RemoteTaskState, TaskLeaseBinding,
@@ -146,6 +146,9 @@ fn submit_error(code: &str) -> UseCaseError {
         "task_session_provisioner_unavailable" => {
             UseCaseError::new("task_session_provisioner_unavailable", true)
         }
+        "task_session_backend_bind_failed" => {
+            UseCaseError::new("task_session_backend_bind_failed", true)
+        }
         "task_session_create_failed" => UseCaseError::new("task_session_create_failed", true),
         "task_session_lookup_failed" => UseCaseError::new("task_session_lookup_failed", true),
         "task_request_conflict" => UseCaseError::new("task_request_conflict", false),
@@ -194,6 +197,9 @@ fn submit_error(code: &str) -> UseCaseError {
         "model_package_missing" => UseCaseError::new("model_package_missing", false),
         "model_not_exportable" => UseCaseError::new("model_not_exportable", false),
         "task_workspace_required" => UseCaseError::new("task_workspace_required", false),
+        "task_workspace_not_authorized" => {
+            UseCaseError::new("task_workspace_not_authorized", false)
+        }
         "task_workspace_unexpected" => UseCaseError::new("task_workspace_unexpected", false),
         "task_mode_invalid" => UseCaseError::new("task_mode_invalid", false),
         "task_model_source_invalid" => UseCaseError::new("task_model_source_invalid", false),
@@ -273,6 +279,7 @@ fn submit_error(code: &str) -> UseCaseError {
         "task_payload_stale_context" => UseCaseError::new("task_payload_stale_context", true),
         "task_payload_role_mismatch" => UseCaseError::new("task_payload_role_mismatch", false),
         "task_payload_replay" => UseCaseError::new("task_payload_replay", false),
+        "task_status_binding_invalid" => UseCaseError::new("task_status_binding_invalid", false),
         _ => UseCaseError::new("task_request_invalid", false),
     }
 }
@@ -304,6 +311,12 @@ fn validated_local_text(text: &str) -> Result<&str, UseCaseError> {
         return Err(UseCaseError::new("task_input_invalid", false));
     }
     Ok(trimmed)
+}
+
+fn log_task_submit_boundary(stage: &str) {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        stage, "ready",
+    );
 }
 
 struct DesktopControlledSubmitBackend {
@@ -471,6 +484,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         // claiming a B Session. Final admission repeats this under a snapshot
         // consistency token; this preflight is only the cheap early boundary.
         self.validate_task_capability(&task, &lease, controlled_monotonic_millis())?;
+        log_task_submit_boundary("task_submit_capability_validated");
         let service = self
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
@@ -478,6 +492,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         let b_session_id = service
             .ensure_authenticated_task_session(&task, &lease, &input.title)
             .map_err(|error| submit_error(error.code))?;
+        log_task_submit_boundary("task_submit_mapping_ready");
         // Mirror the controlled lifecycle guard used by the existing open
         // path. A disconnect between reading the lease and creating the
         // mapping must not leave an old-generation binding available.
@@ -495,6 +510,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             &lease,
         )
         .map_err(|code| submit_error(&code))?;
+        log_task_submit_boundary("task_submit_mapping_projected");
         Ok(b_session_id)
     }
 
@@ -539,6 +555,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         let request = RemoteTaskRequest::from_payload(&validated)
             .map_err(|error| submit_error(error.code))?;
         self.validate_task_capability(&request, &lease, controlled_monotonic_millis())?;
+        log_task_submit_boundary("task_submit_prepared");
         Ok(PreparedControlledTask {
             remote_ref: input.remote_ref,
             b_session_id: b_session_id.to_owned(),
@@ -629,6 +646,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
 
     fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
         Box::pin(async move {
+            log_task_submit_boundary("controlled_submission_admission_entered");
             super::desktop_remote_task::submit_prepared_local_bound_task(
                 &self.app,
                 &prepared.b_session_id,
@@ -659,6 +677,7 @@ async fn submit_prevalidated_remote<P: ControlledSubmissionPort>(
     {
         return Err(UseCaseError::new("task_request_invalid", false));
     }
+    log_task_submit_boundary("task_submit_identity_validated");
     input.payload = validated;
     ControlledSubmission::new(port)
         .submit(ControlledInput::Remote(input))
@@ -683,9 +702,11 @@ impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
             if lease.remote_control_generation != request.generation {
                 return Err(RemotePortError::new("task_session_generation_stale", true));
             }
+            log_task_submit_boundary("task_submit_context_validated");
             let validated = backend
                 .validate_payload(&request.payload, &lease, &caps)
                 .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))?;
+            log_task_submit_boundary("task_submit_payload_validated");
             submit_prevalidated_remote(backend, request, validated)
                 .await
                 .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))
@@ -1118,11 +1139,7 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         let port = self
             .app
             .state::<crate::app::desktop_remote_composition::DesktopControlledExecutionPort>();
-        let result = port
-            .execute_controlled(request)
-            .await
-            .map(|outcome| outcome.status)
-            .map_err(|error| error.code().to_owned());
+        let result = port.execute_controlled(request).await;
         match &result {
             Ok(_) => {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -1130,14 +1147,11 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                     "admitted",
                 )
             }
-            Err(error) => {
-                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                    "task_submit_business_rejected",
-                    error,
-                )
-            }
+            Err(error) => log_controlled_port_error("task_submit_business_rejected", *error),
         }
         result
+            .map(|outcome| outcome.status)
+            .map_err(|error| error.code().to_owned())
     }
 
     async fn cancel_task(
@@ -1595,7 +1609,10 @@ mod submit_boundary_tests {
             ("task_binding_stale", true),
             ("task_ledger_capacity", true),
             ("task_ledger_persist_failed", true),
+            ("task_session_backend_bind_failed", true),
+            ("task_status_binding_invalid", false),
             ("task_workspace_unexpected", false),
+            ("task_workspace_not_authorized", false),
             ("task_session_binding_mismatch", false),
             ("task_mode_invalid", false),
             ("task_model_source_invalid", false),
