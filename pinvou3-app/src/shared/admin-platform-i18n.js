@@ -30,6 +30,8 @@ export const adminPlatformCopy = {
     items: (value) => `${value} 条`,
     skipToContent: '跳到主要内容',
     primaryNavigation: '管理后台主导航',
+    pageNavigation: '当前页面位置',
+    detailPage: '详情',
     navGroups: {
       workbench: '工作台',
       identity: '身份与组织',
@@ -540,6 +542,8 @@ export const adminPlatformCopy = {
     items: (value) => `${value} items`,
     skipToContent: 'Skip to main content',
     primaryNavigation: 'Administration navigation',
+    pageNavigation: 'Current page location',
+    detailPage: 'Details',
     navGroups: {
       workbench: 'Workspace',
       identity: 'Identity & organizations',
@@ -1045,6 +1049,8 @@ export const adminPlatformCopy = {
     items: (value) => `${value} 件`,
     skipToContent: 'メインコンテンツへ移動',
     primaryNavigation: '管理コンソールのメインナビゲーション',
+    pageNavigation: '現在のページ位置',
+    detailPage: '詳細',
     navGroups: {
       workbench: 'ワークスペース',
       identity: 'ID と組織',

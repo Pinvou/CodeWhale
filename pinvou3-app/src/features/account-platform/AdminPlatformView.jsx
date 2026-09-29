@@ -173,6 +173,30 @@ function PageHeader({ eyebrow, title, subtitle, updatedAt, canRefresh, busy, cop
   );
 }
 
+function PageBreadcrumbs({ copy, groupLabel, groupTarget, section, sectionLabel, detailLabel, onNavigate }) {
+  return (
+    <nav className="adm-breadcrumbs" aria-label={copy.pageNavigation}>
+      <ol>
+        <li>
+          {groupTarget && groupTarget !== section
+            ? <button type="button" onClick={() => onNavigate(groupTarget)}>{groupLabel}</button>
+            : <span>{groupLabel}</span>}
+        </li>
+        <li aria-hidden="true" className="adm-breadcrumb-separator">/</li>
+        <li>
+          {detailLabel
+            ? <button type="button" onClick={() => onNavigate(section)}>{sectionLabel}</button>
+            : <span aria-current="page">{sectionLabel}</span>}
+        </li>
+        {detailLabel && <>
+          <li aria-hidden="true" className="adm-breadcrumb-separator">/</li>
+          <li><span aria-current="page">{detailLabel}</span></li>
+        </>}
+      </ol>
+    </nav>
+  );
+}
+
 function DetailDrawer({ label, onClose, children }) {
   const drawerRef = useRef(null);
   useEffect(() => {
@@ -384,10 +408,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
 	const [credentialOrigin, setCredentialOrigin] = useState('');
   const [modelTokenActionsEnabled, setModelTokenActionsEnabled] = useState(false);
   const [modelTokenRouteNotice, setModelTokenRouteNotice] = useState('');
+  const [breadcrumbDetail, setBreadcrumbDetail] = useState({ routeKey: '', label: '' });
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
   const financeRequestTrackerRef = useRef(null);
   if (!financeRequestTrackerRef.current) financeRequestTrackerRef.current = createFinanceTabRequestTracker();
+  const updateBreadcrumbDetail = useCallback((routeKey, label) => {
+    setBreadcrumbDetail((current) => (current.routeKey === routeKey && current.label === label ? current : { routeKey, label }));
+  }, []);
 
   const load = useCallback(
     async (target, signal, granted = authorizationRef.current) => {
@@ -708,6 +736,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       audit_resource: null,
       organization_id: null,
       organization_tab: null,
+      ...(key === 'organizations' ? {} : { organization_q: null, organization_status: null, organization_cursor: null }),
       user_id: null,
       finance_tab: null,
       ...clearAdminFinanceQueryUpdates(),
@@ -776,8 +805,22 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     setModelTokenRouteNotice('');
     setRouteVersion((value) => value + 1);
   };
-  const currentPageTitle = copy.nav[section];
+  const currentPageTitle = copy.nav[section] || copy.modelToken?.forbiddenTitle || copy.title;
   const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
+  const currentGroupLabel = copy.navGroups[currentGroup?.key || (section === 'forbidden' ? 'models' : '')] || copy.product;
+  const currentGroupTarget = currentGroup?.sections[0] || section;
+  const organizationBreadcrumb = organizationRoute.organizationID
+    ? (data.organizations || []).find((item) => item.organization_id === organizationRoute.organizationID)?.name || copy.accounts.organizationManagement
+    : '';
+  const breadcrumbUser = userRoute.userID ? (data.users || []).find((item) => item.user_id === userRoute.userID) : null;
+  const userBreadcrumb = userRoute.userID
+    ? (breadcrumbUser ? userLabel(breadcrumbUser) : copy.detailPage)
+    : '';
+  const detailRouteKey = organizationRoute.organizationID
+    ? `organizations:${organizationRoute.organizationID}`
+    : userRoute.userID ? `users:${userRoute.userID}` : '';
+  const loadedDetailBreadcrumb = breadcrumbDetail.routeKey === detailRouteKey ? breadcrumbDetail.label : '';
+  const detailBreadcrumb = loadedDetailBreadcrumb || organizationBreadcrumb || userBreadcrumb;
 
   return (
     <div className="adm-shell">
@@ -818,7 +861,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         <header className="adm-topbar">
           <div>
             <span className="adm-eyebrow">{copy.product}</span>
-            <h1>{copy.nav[section]}</h1>
+            <h1>{copy.title}</h1>
           </div>
           <div className="adm-actions">
             <div className="adm-admin">
@@ -832,8 +875,17 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         </header>
         {busy && <div className="adm-progress" role="progressbar" aria-label={copy.loading} />}
         <div className="adm-page">
+          <PageBreadcrumbs
+            copy={copy}
+            groupLabel={currentGroupLabel}
+            groupTarget={currentGroupTarget}
+            section={section}
+            sectionLabel={currentPageTitle}
+            detailLabel={detailBreadcrumb}
+            onNavigate={navigate}
+          />
           {!organizationRoute.organizationID && !userRoute.userID && <PageHeader
-            eyebrow={copy.navGroups[currentGroup?.key || (section === 'forbidden' ? 'models' : '')] || copy.product}
+            eyebrow={currentGroupLabel}
             title={currentPageTitle}
             subtitle={currentPageLead}
             updatedAt={['billing', 'payments', 'products', 'approvals', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section) ? null : updatedAt}
@@ -856,9 +908,9 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </div>
           )}
           {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} modelTokenIAEnabled={modelTokenIAEnabled} onNavigate={navigate} />}
-          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} organizationRoute={organizationRoute} organizationDirectory={organizationDirectory} routeVersion={routeVersion} />}
+          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} onBreadcrumbDetailChange={updateBreadcrumbDetail} organizationRoute={organizationRoute} organizationDirectory={organizationDirectory} routeVersion={routeVersion} />}
           {section === 'users' && (
-            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} userRoute={userRoute} />
+            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} onBreadcrumbDetailChange={updateBreadcrumbDetail} userRoute={userRoute} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} requestTracker={financeRequestTrackerRef.current} />}
@@ -1028,7 +1080,7 @@ function OverviewFacts({ rows }) {
   return <dl className="adm-overview-facts">{rows.map(([label, value, formatter = formatNumber]) => <div key={label}><dt>{label}</dt><dd>{formatter(value)}</dd></div>)}</dl>;
 }
 
-function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID, onNavigate, userRoute }) {
+function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID, onNavigate, onBreadcrumbDetailChange, userRoute }) {
   const permissionSet = new Set(permissions || []);
   const repairCount = (data.registrationRepairs || []).length + (data.profileChangeRepairs || []).length + (data.accountClosures || []).length;
   const repairUnavailable = Object.values(data.userRepairAvailability || {}).includes('error');
@@ -1042,7 +1094,7 @@ function UsersWorkspace({ copy, data, client, setData, permissions, currentUserI
           <Metric label={copy.userManagement.pendingRepairs} value={repairUnavailable ? '—' : repairCount} formatter={(value) => value} tone={!repairUnavailable && repairCount ? 'warning' : ''} />
         </section>
       )}
-      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} onNavigate={onNavigate} userRoute={userRoute} />}
+      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} onNavigate={onNavigate} onBreadcrumbDetailChange={onBreadcrumbDetailChange} userRoute={userRoute} />}
       {!userRoute.userID && <UserRepairWorkspace copy={copy} data={data} client={client} setData={setData} permissions={permissions} />}
     </div>
   );
@@ -1140,7 +1192,7 @@ const DEFAULT_DIRECTORY_ROUTE = Object.freeze({ organizationID: '', tab: 'overvi
 const DEFAULT_DIRECTORY_QUERY = Object.freeze({ q: '', status: '', cursor: '' });
 const DEFAULT_USER_ROUTE = Object.freeze({ userID: '' });
 
-function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = DEFAULT_DIRECTORY_ROUTE, organizationDirectory = DEFAULT_DIRECTORY_QUERY, userRoute = DEFAULT_USER_ROUTE, routeVersion = 0 }) {
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, onBreadcrumbDetailChange, organizationRoute = DEFAULT_DIRECTORY_ROUTE, organizationDirectory = DEFAULT_DIRECTORY_QUERY, userRoute = DEFAULT_USER_ROUTE, routeVersion = 0 }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
   const [userMode, setUserMode] = useState('directory');
@@ -1174,6 +1226,13 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
     ? items.find((item) => item.user_id === userRoute.userID) || (routeUser?.user_id === userRoute.userID ? routeUser : null)
     : null;
   const selectedOrganization = !isUserSection && organizationRoute.organizationID ? items.find((item) => item.organization_id === organizationRoute.organizationID) || routeOrganization : null;
+  const breadcrumbRouteKey = isUserSection && userRoute.userID
+    ? `users:${userRoute.userID}`
+    : !isUserSection && organizationRoute.organizationID ? `organizations:${organizationRoute.organizationID}` : '';
+  const breadcrumbRouteLabel = selectedUser ? userLabel(selectedUser) : selectedOrganization?.name || '';
+  useEffect(() => {
+    if (breadcrumbRouteKey) onBreadcrumbDetailChange?.(breadcrumbRouteKey, breadcrumbRouteLabel);
+  }, [breadcrumbRouteKey, breadcrumbRouteLabel, onBreadcrumbDetailChange]);
   useEffect(() => {
     if (!isUserSection || !userRoute.userID) {
       setRouteUser(null);

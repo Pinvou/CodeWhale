@@ -65,7 +65,9 @@ try {
   await page.evaluateOnNewDocument(() => localStorage.setItem('pinvou.admin.language', 'zh'));
   await page.goto(`http://127.0.0.1:${port}/admin.html?section=roles`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('.adm-role-workspace');
-  assert.equal(await page.$eval('.adm-topbar h1', (node) => node.textContent.trim()), '角色与权限');
+  assert.equal(await page.$eval('.adm-topbar h1', (node) => node.textContent.trim()), '平台管理台');
+  assert.deepEqual(await page.$$eval('.adm-breadcrumbs li:not(.adm-breadcrumb-separator)', (nodes) => nodes.map((node) => node.textContent.trim())), ['身份与组织', '角色与权限']);
+  assert.equal(await page.$eval('.adm-breadcrumbs [aria-current="page"]', (node) => node.textContent.trim()), '角色与权限');
   assert.deepEqual(await page.$$eval('.adm-role-summary strong', (nodes) => nodes.map((node) => node.textContent.trim())), ['1', '1', '2']);
   assert.equal(await page.$eval('.adm-role-detail code', (node) => node.textContent.trim()), 'PERSONAL_USER');
   assert.equal(await page.$('#role-bindings-root'), null);
