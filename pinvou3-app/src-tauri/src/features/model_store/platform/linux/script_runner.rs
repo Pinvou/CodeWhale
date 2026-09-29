@@ -306,6 +306,18 @@ pub fn sha256_hex(content: &str) -> String {
 /// 「下载脚本失败：error decoding response body」，把跑到一半的下载整个打断。
 const SCRIPT_FETCH_ATTEMPTS: u32 = 3;
 
+/// 脚本 / 附属文件正文的体积上限。
+///
+/// 上一轮只给 `store_client::get_json` 加了上限，这里漏了，而两处的威胁模型完全
+/// 一样：商店地址是用户可配的，无界 `.text()` 等于把「往我的内存里灌多少」这个
+/// 决定权交给对端。这一处其实更要紧——正文是在 `sha256_hex` 校验**之前**整体进
+/// 内存的，哈希拦得住伪造，拦不住 OOM。
+///
+/// 64 MiB 与 `store_client::MAX_STORE_RESPONSE_BYTES`、
+/// `features/marketplace/python_dependencies.rs` 的 `MAX_WHEEL_BYTES` 同一个量级，
+/// 免得仓库里三处各定一个数。真实脚本是几 KB 到几十 KB，离这条线很远。
+const MAX_SCRIPT_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// 这一跳重定向要不要拒绝。
 ///
 /// 两条：目标必须仍然是 https，跳数不超过 10（reqwest 默认上限，照抄
@@ -349,13 +361,40 @@ fn http_get_text(url: &str) -> Result<String, ScriptError> {
 
     let mut last_err = String::new();
     for attempt in 1..=SCRIPT_FETCH_ATTEMPTS {
-        match client
-            .get(url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.text())
-        {
-            Ok(text) => return Ok(text),
+        match client.get(url).send().and_then(|r| r.error_for_status()) {
+            Ok(resp) => {
+                // 这里刻意不用 `.text()`：它是无界的。判据和两道防线的写法见
+                // `store_client::read_capped_body`，两处共用同一份实现。
+                let declared = resp.content_length();
+                match super::store_client::read_capped_body(
+                    declared,
+                    resp,
+                    MAX_SCRIPT_RESPONSE_BYTES,
+                ) {
+                    // `.text()` 在没有 charset 时按 UTF-8 且遇到坏字节做替换，
+                    // 这里用 `from_utf8_lossy` 与之对齐：脚本正文的 sha256 算的是
+                    // **网络上的原始字节**（`fetch_script_content` 拿到的是这个
+                    // String，再交给 sha256_hex），换成严格 UTF-8 报错会把原先
+                    // 能跑的边缘情况变成硬失败，不在这一条的范围里。
+                    Ok(body) => return Ok(String::from_utf8_lossy(&body).into_owned()),
+                    // 超限：对端下次还会给同样大的东西，重试只是把内存压力乘以
+                    // 次数。立刻报错。
+                    Err(super::store_client::CappedReadError::TooLarge(max)) => {
+                        return Err(ScriptError::new(format!(
+                            "下载脚本失败：正文超过 {} MiB 上限，已中止",
+                            max / 1024 / 1024
+                        )));
+                    }
+                    // 读到一半断了：这正是 SCRIPT_FETCH_ATTEMPTS 存在的理由
+                    // （真机上的 `error decoding response body`），照旧重试。
+                    Err(super::store_client::CappedReadError::Io(e)) => {
+                        last_err = e;
+                        if attempt < SCRIPT_FETCH_ATTEMPTS {
+                            std::thread::sleep(Duration::from_secs(2 * attempt as u64));
+                        }
+                    }
+                }
+            }
             Err(e) => {
                 // 4xx 是商店真的没有这个脚本，重试多少次结果都一样，立刻报错。
                 if e.status().map(|s| s.is_client_error()).unwrap_or(false) {

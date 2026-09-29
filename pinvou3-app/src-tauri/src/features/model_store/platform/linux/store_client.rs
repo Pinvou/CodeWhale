@@ -211,6 +211,65 @@ const STORE_API_ATTEMPTS: u32 = 3;
 /// 保持同一个量级，免得两处各定一个数。卡片列表实际是几十 KB 量级，离这条线很远。
 const MAX_STORE_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// 按上限读响应体时的两种失败。分成两支不是为了好看：**「超限」绝不能重试**
+/// （对端下一次还会给同样大的东西，重试只是把内存压力乘以次数），而「读到一半
+/// 断了」恰恰是这条链路上最常见的瞬时故障（见 script_runner 的
+/// `SCRIPT_FETCH_ATTEMPTS`：真机上就是被一句 `error decoding response body`
+/// 打断过），必须能重试。只返回一个 `AppError` 的话调用方分不出来。
+pub(super) enum CappedReadError {
+    /// 超过上限，带上当时用的上限（调用方拼错误文案要用）。
+    TooLarge(u64),
+    /// 读取过程本身失败，带底层原文。
+    Io(String),
+}
+
+/// 把一个 HTTP 响应体按上限读进内存。
+///
+/// 为什么要有上限：商店地址是**用户在设置里自己填的**，无界的 `.json()` /
+/// `.text()` 等于把「往我的内存里灌多少」这个决定权交给对端——一个填错的地址或
+/// 一台被改过的商店，回一条几个 G 的 body 就能把应用打到 OOM。而脚本正文更要紧：
+/// 它是在 sha256 校验**之前**整体进内存的，校验拦不住 OOM。
+///
+/// 两道一起来：
+/// 1. 先信 header 声明的长度，能在读任何字节之前就退出；
+/// 2. header 可以不声明（chunked 就没有 Content-Length）、也可以撒谎，所以照样
+///    用 `take(max+1)` 截断读。多读 1 字节是为了把「正好等于上限」和「超了」
+///    区分开——少了这一字节就是个 off-by-one，正好卡在线上的响应会被误杀。
+///
+/// 抽成独立函数有两个理由：`store_client::get_json` 和
+/// `script_runner::http_get_text` 要的是同一套判据，一份实现比抄两遍安全；而且
+/// 这段逻辑原先整段没有测试（删掉它套件依旧全绿），抽出来之后可以拿任意
+/// `Read` 直测边界，**包括 chunked 那种不声明长度、第一道预检完全盖不住的情况**。
+///
+/// `max_bytes` 做成参数只是为了测试能用小上限跑真实边界；生产调用方都传
+/// `MAX_STORE_RESPONSE_BYTES`。
+pub(super) fn read_capped_body(
+    declared_length: Option<u64>,
+    reader: impl std::io::Read,
+    max_bytes: u64,
+) -> Result<Vec<u8>, CappedReadError> {
+    if declared_length.is_some_and(|len| len > max_bytes) {
+        return Err(CappedReadError::TooLarge(max_bytes));
+    }
+    let mut capped = std::io::Read::take(reader, max_bytes + 1);
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut capped, &mut body)
+        .map_err(|e| CappedReadError::Io(e.to_string()))?;
+    if body.len() as u64 > max_bytes {
+        return Err(CappedReadError::TooLarge(max_bytes));
+    }
+    Ok(body)
+}
+
+/// 这一跳重定向要不要拒绝。
+///
+/// 两条：目标必须仍然是 https（上面那道 https 门只管得住首跳，见 `get_json`），
+/// 跳数不超过 10（reqwest 默认上限）。抽成具名纯函数只是为了能直测——照同域
+/// `script_runner::redirect_is_refused` 的先例，判据本身一字未改。
+fn redirect_is_refused(url: &reqwest::Url, previous_hops: usize) -> bool {
+    previous_hops >= 10 || url.scheme() != "https"
+}
+
 pub struct StoreClient {
     base_url: String,
 }
@@ -254,7 +313,7 @@ impl StoreClient {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(API_TIMEOUT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
+                if redirect_is_refused(attempt.url(), attempt.previous().len()) {
                     let redirect_url = attempt.url().clone();
                     attempt.error(format!("商店把请求重定向到了不该跟的地址：{redirect_url}"))
                 } else {
@@ -290,33 +349,22 @@ impl StoreClient {
                             status.as_u16()
                         )));
                     }
-                    // 商店地址是**用户可配**的，所以这份响应体不能无界读进内存：
-                    // 一个写错的地址或被改过的商店，返回一条几个 G 的 body 就能把
-                    // 应用打到 OOM。照仓库既有的做法两道一起来——先看 header 声明
-                    // 的长度，再用 `take(MAX+1)` 兜住不声明或声明得小的那种。
-                    let too_big = || {
-                        StoreError::new(format!(
-                            "模型商店返回的数据超过 {} MiB 上限，已中止",
-                            MAX_STORE_RESPONSE_BYTES / 1024 / 1024
-                        ))
+                    // 这份响应体不能无界读进内存，理由与两道防线的写法见
+                    // `read_capped_body`。这里不重试：超限重试没意义，读失败也
+                    // 已经消耗掉了一次完整的请求预算。
+                    let declared = resp.content_length();
+                    let body = match read_capped_body(declared, resp, MAX_STORE_RESPONSE_BYTES) {
+                        Ok(body) => body,
+                        Err(CappedReadError::TooLarge(max)) => {
+                            return Err(StoreError::new(format!(
+                                "模型商店返回的数据超过 {} MiB 上限，已中止",
+                                max / 1024 / 1024
+                            )));
+                        }
+                        Err(CappedReadError::Io(e)) => {
+                            return Err(StoreError::new(format!("读取商店返回数据失败：{e}")));
+                        }
                     };
-                    // 第一道：信 header 声明的长度，能在读任何字节之前就退出。
-                    if resp
-                        .content_length()
-                        .is_some_and(|len| len > MAX_STORE_RESPONSE_BYTES)
-                    {
-                        return Err(too_big());
-                    }
-                    // 第二道：header 可以不声明、也可以撒谎，所以照样按上限截断读。
-                    // 多读 1 字节是为了把"正好等于上限"和"超了"区分开。
-                    let mut capped = std::io::Read::take(resp, MAX_STORE_RESPONSE_BYTES + 1);
-                    let mut body = Vec::new();
-                    if let Err(e) = std::io::Read::read_to_end(&mut capped, &mut body) {
-                        return Err(StoreError::new(format!("读取商店返回数据失败：{e}")));
-                    }
-                    if body.len() as u64 > MAX_STORE_RESPONSE_BYTES {
-                        return Err(too_big());
-                    }
                     return serde_json::from_slice::<T>(&body)
                         .map_err(|e| StoreError::new(format!("解析商店返回数据失败：{e}")));
                 }
@@ -587,5 +635,117 @@ mod tests {
                  判断不了它的强度，不能替用户打包票"
             );
         }
+    }
+
+    // ------------------------------------------------ 重定向判据与响应体上限
+    //
+    // 这两段是这个文件里唯一的**行为**逻辑，而在补这些用例之前它们零测试覆盖：
+    // 把上限那几行或 `is_redirect` 那一支整段删掉，套件依旧全绿。以下用例的
+    // 存在意义就是让那种删除变红。
+
+    /// 重定向判据。照同域 `script_runner::redirect_is_refused` 的直测先例来。
+    ///
+    /// 盯的是两件不能松的事：明文 http 一律拒（`get_json` 开头那道 https 门只管
+    /// 得住首跳，卡片 JSON 是脚本哈希的载体，第二跳走明文等于校验白做），
+    /// 以及跳数有上限（否则一个重定向环能把请求挂死）。
+    #[test]
+    fn redirect_policy_refuses_plaintext_and_long_chains() {
+        let https = reqwest::Url::parse("https://store.example/api/v1/cards").unwrap();
+        let http = reqwest::Url::parse("http://store.example/api/v1/cards").unwrap();
+        let ftp = reqwest::Url::parse("ftp://store.example/api/v1/cards").unwrap();
+
+        assert!(!redirect_is_refused(&https, 0), "正常的 https 跳转被拦了");
+        assert!(redirect_is_refused(&http, 0), "302 → 明文 http 被放行了");
+        assert!(redirect_is_refused(&ftp, 0), "302 → 非 http(s) 被放行了");
+
+        // 跳数边界：第 10 跳（前面已经走过 10 次）必须拒，第 9 跳还得放行。
+        // 差一位就是要么提前掐掉正常的多跳 CDN，要么根本没有上限。
+        assert!(!redirect_is_refused(&https, 9));
+        assert!(redirect_is_refused(&https, 10), "重定向环没有上限");
+    }
+
+    /// 上限的行为级验证：**不声明 Content-Length** 的响应（chunked 就是这样）
+    /// 第一道预检完全盖不住，只能靠第二道的 `take(max+1)` 截断。
+    ///
+    /// 边界逐字节验：正好等于上限必须过（少读那 1 字节就会把它误杀），
+    /// 超一字节必须拒。上限做成参数就是为了能在这里用小数值跑真实边界，
+    /// 而不是真的造一份 64 MiB。
+    #[test]
+    fn capped_read_enforces_limit_without_content_length() {
+        // 正好等于上限：放行，且内容一字不少。
+        let exact = vec![b'a'; 8];
+        let body = read_capped_body(None, exact.as_slice(), 8).expect("正好等于上限的响应被误杀了");
+        assert_eq!(body, exact);
+
+        // 超一字节：必须拒，而且带回当时用的上限（调用方要拿它拼文案）。
+        let over = vec![b'a'; 9];
+        match read_capped_body(None, over.as_slice(), 8) {
+            Err(CappedReadError::TooLarge(max)) => assert_eq!(max, 8),
+            Ok(_) => panic!("不声明 Content-Length 的超限响应被整条读进内存了"),
+            Err(CappedReadError::Io(e)) => panic!("应当报超限，却报了读取失败：{e}"),
+        }
+
+        // 空响应体也得是正常的 Ok（后面 serde 会自己报解析失败，不该在这里变成
+        // 「超限」这种误导性的错误）。
+        assert!(
+            read_capped_body(None, b"".as_slice(), 8)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// 第一道预检：header 声明的长度超限时，**一个字节都不该读**。
+    ///
+    /// 用一个读到就 panic 的 Read 来证明这件事——只断言返回 Err 的话，实现把
+    /// 预检整段删掉、靠第二道兜住，测试照样绿，而那恰恰丢掉了「不用把几个 G
+    /// 拉下来才知道太大」这个全部价值。
+    #[test]
+    fn capped_read_rejects_oversized_content_length_without_reading() {
+        struct Exploding;
+        impl std::io::Read for Exploding {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                panic!("声明了超限长度，却还是去读了响应体");
+            }
+        }
+        match read_capped_body(Some(9), Exploding, 8) {
+            Err(CappedReadError::TooLarge(max)) => assert_eq!(max, 8),
+            _ => panic!("header 声明超限时没有拒绝"),
+        }
+        // 声明的长度正好等于上限：这是合法响应，预检不能拦（拦了就是 off-by-one）。
+        assert_eq!(
+            read_capped_body(Some(8), vec![b'a'; 8].as_slice(), 8)
+                .unwrap()
+                .len(),
+            8
+        );
+    }
+
+    /// 读到一半断了要报 `Io` 而不是 `TooLarge`。
+    ///
+    /// 这个区分是有后果的：`script_runner::http_get_text` 按它决定要不要重试，
+    /// 判错了的话一次瞬时的传输中断会被当成「商店给的东西太大」直接放弃，
+    /// 把一次跑到一半的部署打断。
+    #[test]
+    fn capped_read_reports_transport_failure_separately() {
+        struct Truncated;
+        impl std::io::Read for Truncated {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection reset",
+                ))
+            }
+        }
+        match read_capped_body(None, Truncated, 8) {
+            Err(CappedReadError::Io(e)) => assert!(e.contains("connection reset"), "丢了原文：{e}"),
+            _ => panic!("传输中断被报成了别的东西，调用方的重试判断会跟着错"),
+        }
+    }
+
+    /// 生产上限就是 64 MiB，跟 `marketplace/python_dependencies.rs` 同一个量级。
+    /// 上面的边界用例都用小上限跑，这条负责把真实取值本身钉住。
+    #[test]
+    fn production_cap_is_64_mib() {
+        assert_eq!(MAX_STORE_RESPONSE_BYTES, 64 * 1024 * 1024);
     }
 }
