@@ -50,18 +50,18 @@ ALTER TABLE public.member_quota_grant_audits ADD CONSTRAINT member_quota_grant_a
 -- status, expiry, and existing Hold allocations are left untouched.
 CREATE TEMP TABLE member_quota_version_reconciled ON COMMIT DROP AS
 WITH reconciled AS (
-    UPDATE public.member_quota_grants grant
+    UPDATE public.member_quota_grants quota_grant
        SET membership_version=lifecycle.membership_version,
-           allocation_version=grant.allocation_version+1,
+           allocation_version=quota_grant.allocation_version+1,
            updated_at=transaction_timestamp()
       FROM public.organization_member_lifecycle_states lifecycle
-     WHERE lifecycle.organization_id=grant.organization_id
-       AND lifecycle.user_id=grant.member_user_id
+     WHERE lifecycle.organization_id=quota_grant.organization_id
+       AND lifecycle.user_id=quota_grant.member_user_id
        AND lifecycle.status='ACTIVE'
-       AND grant.status='ACTIVE'
-       AND grant.expires_at>transaction_timestamp()
-       AND grant.membership_version<>lifecycle.membership_version
-    RETURNING grant.*
+       AND quota_grant.status='ACTIVE'
+       AND quota_grant.expires_at>transaction_timestamp()
+       AND quota_grant.membership_version<>lifecycle.membership_version
+    RETURNING quota_grant.*
 )
 SELECT * FROM reconciled;
 
@@ -69,16 +69,16 @@ INSERT INTO public.member_quota_grant_audits(
     id,grant_id,organization_id,member_user_id,action,actor_user_id,
     amount_microcredits,snapshot,occurred_at
 )
-SELECT gen_random_uuid(),grant.id,grant.organization_id,grant.member_user_id,
-       'MEMBERSHIP_VERSION_ADVANCED',NULL,0,to_jsonb(grant),transaction_timestamp()
-FROM member_quota_version_reconciled grant;
+SELECT gen_random_uuid(),reconciled_grant.id,reconciled_grant.organization_id,reconciled_grant.member_user_id,
+       'MEMBERSHIP_VERSION_ADVANCED',NULL,0,to_jsonb(reconciled_grant),transaction_timestamp()
+FROM member_quota_version_reconciled reconciled_grant;
 
 INSERT INTO public.outbox_events(
     event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at
 )
 SELECT gen_random_uuid(),'billing.member-quota.membership-version-advanced.v1',
-       grant.id,grant.allocation_version,to_jsonb(grant),
-       'member-quota:'||grant.id::text,transaction_timestamp()
-FROM member_quota_version_reconciled grant;
+       reconciled_grant.id,reconciled_grant.allocation_version,to_jsonb(reconciled_grant),
+       'member-quota:'||reconciled_grant.id::text,transaction_timestamp()
+FROM member_quota_version_reconciled reconciled_grant;
 
 SET ROLE billing_service;

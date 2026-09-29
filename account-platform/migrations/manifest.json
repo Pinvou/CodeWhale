@@ -1643,7 +1643,7 @@
       {
         "file": "000078_member_quota_membership_version_audit.up.sql",
         "version": 78,
-        "sha256": "7bfd7954dcafb71ee711f8cd41df7e0b9b406c9fb88d3e6afd905382da907d5c"
+        "sha256": "41991f0324e9843021fb89f62721ad2eb2e76f45f3eb67321298fbafe8617a2d"
       },
       {
         "file": "000079_registration_bonus.down.sql",

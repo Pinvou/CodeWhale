@@ -75,5 +75,7 @@ test('member quota reconciliation migration locks grants before audit DDL', asyn
   assert.ok(auditLock < auditDDL);
   assert.ok(auditDDL < lifecycleRead);
   assert.ok(lifecycleRead < outboxWrite);
+  assert.match(migration, /UPDATE public\.member_quota_grants quota_grant/);
+  assert.doesNotMatch(migration, /\b(?:UPDATE|FROM)\s+public\.member_quota_grants\s+grant\b/);
   assert.doesNotMatch(migration, /LOCK TABLE public\.(?:organization_member_lifecycle_states|outbox_events)/);
 });
