@@ -12,7 +12,7 @@
 | 软件 | A/B 使用同一已签名安装包；记录版本、SHA-256、Authenticode 证书指纹和匿名机器身份摘要；受保护构建 provenance/SBOM 必须把安装包绑定当前 commit |
 | Enrollment | 官方环境完成既有 endpoint 认领，自托管完成 dry-run/批量 allowlist 或 re-enroll；覆盖率为 100%；生产 `official`/`self_hosted` 且 TOFU=false |
 | 回滚 | 提供真实旧 Relay 二进制；只允许在 registry-aware gateway 后、loopback 监听；裸 v2 必须被预检拒绝 |
-| 功能开关 | Relay、A、B 都使用 `PINVOU_DESKTOP_CONTROLLER_ENABLED`；开时必须精确为 `1`，关时入口隐藏、底层拒绝、Relay 拒绝，registry/tombstone 保留 |
+| 功能开关 | Windows A/B 客户端默认开启，显式设为 `0` 时入口隐藏且底层拒绝；非法值失败关闭。Relay 仍须由部署环境将 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 精确设为 `1` 才接受桌面控制流量。关闭任一侧均保留 registry/tombstone |
 | 自动化 | 使用 `scripts/run-windows-remote-control-e2e.ps1`；驱动器必须是有效签名的真实应用驱动，不接受 mock Relay、假状态或手填 pass |
 | UI | 已启动的真实 Tauri WebView2 开启仅 loopback CDP，通过 `npm --prefix pinvou3-app run test:remote-control-ui -- --cdp-url ... --output ...` 执行真实渲染/交互冒烟 |
 
