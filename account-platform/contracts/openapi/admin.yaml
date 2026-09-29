@@ -1586,6 +1586,15 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "410": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-resources/readiness:
+    get:
+      operationId: getAdminTokenResourceReadiness
+      summary: Get authoritative Token resource read capabilities
+      description: Requires platform.tokens.read. Reports whether Token Accounts use actor-bound snapshot pagination or the bounded legacy latest-100 projection, and whether the manual recovery queue can be read safely. The recovery queue never falls back to a non-snapshot query.
+      responses:
+        "200": { description: Authoritative no-store Token resource readiness, content: { application/json: { schema: { $ref: "#/components/schemas/TokenResourceReadiness" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}:
     get:
       operationId: getAdminTokenAccount
@@ -4946,6 +4955,19 @@ components:
         recovery_epoch: { type: integer, minimum: 1 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    TokenResourceReadiness:
+      type: object
+      additionalProperties: false
+      required: [schema_version, token_accounts_mode, pagination_enabled, authorization_version_available, governance_state, governance_epoch, recovery_queue_available]
+      properties:
+        schema_version: { type: integer, enum: [1] }
+        token_accounts_mode: { type: string, enum: [SNAPSHOT, LEGACY_BOUNDED, BLOCKED] }
+        pagination_enabled: { type: boolean }
+        authorization_version_available: { type: boolean }
+        governance_state: { type: string, enum: [UNAVAILABLE, PRE_ACTIVATION, ACTIVE, SAFE_ROLLBACK] }
+        governance_epoch: { type: integer, format: int64, minimum: 0 }
+        recovery_queue_available: { type: boolean }
+        recovery_unavailable_reason: { type: string, enum: [AUTHORIZATION_VERSION_INVALID, PAGINATION_DISABLED, PAGINATION_UNAVAILABLE, GOVERNANCE_UNAVAILABLE, GOVERNANCE_INACTIVE] }
     TokenAccountRecoveryQueuePage:
       allOf:
         - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }

@@ -31,13 +31,14 @@ let accountStatus = 'ACTIVE';
 let accountCreateMode = 'success';
 let persistedQueue = false;
 let queueFailure = false;
+let readinessMode = 'snapshot';
 const statusCommandID = '0199a100-0001-7000-8000-000000000108';
 const recoveryActionID = '0199a100-0001-7000-8000-000000000109';
 const recoveryAuditID = '0199a100-0001-7000-8000-000000000110';
 const routeCommandID = '0199a100-0001-7000-8000-000000000111';
 const routeResults = new Map();
 let lastRouteResult;
-const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routePrechecks: [], routeCalls: [], directRouteCalls: [], routeResultCalls: [], commandCalls: [], recoveryCalls: [], queueCalls: [] };
+const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routePrechecks: [], routeCalls: [], directRouteCalls: [], routeResultCalls: [], commandCalls: [], recoveryCalls: [], queueCalls: [], tokenAccountCalls: [] };
 
 function envelope(items) {
   return { items, next_cursor: '', has_more: false, limit: 50, as_of: '2026-09-04T12:00:00Z', snapshot_expires_at: '2026-09-04T12:15:00Z', request_id: 'request-test' };
@@ -145,12 +146,27 @@ const server = createServer(async (request, response) => {
     if (url.searchParams.has('account-create-mode')) accountCreateMode = url.searchParams.get('account-create-mode');
     if (url.searchParams.has('queue')) persistedQueue = url.searchParams.get('queue') === '1';
     if (url.searchParams.has('queue-failure')) queueFailure = url.searchParams.get('queue-failure') === '1';
+    if (url.searchParams.has('readiness')) readinessMode = url.searchParams.get('readiness');
     return json(response, { permissions, formsEnabled, actionsEnabled, routeMode, accountStatus, accountCreateMode });
   }
   if (url.pathname === '/__test__/state') return json(response, observations);
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test', feature_flags: { admin_model_token_ia: true, admin_token_resource_forms: formsEnabled, admin_model_token_actions: actionsEnabled } });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: ownerID, platform_permissions: permissions });
-  if (url.pathname === '/api/admin/token/admin/v1/token-accounts') return json(response, envelope([{ ...account, status: accountStatus }]));
+  if (url.pathname === '/api/admin/token/admin/v1/token-resources/readiness' && readinessMode === 'failure') return json(response, { code: 'PAGINATION_SNAPSHOT_UNAVAILABLE', request_id: 'readiness-failure' }, 503);
+  if (url.pathname === '/api/admin/token/admin/v1/token-resources/readiness') return json(response, {
+    schema_version: 1,
+    token_accounts_mode: readinessMode === 'blocked' ? 'BLOCKED' : readinessMode === 'legacy' ? 'LEGACY_BOUNDED' : 'SNAPSHOT',
+    pagination_enabled: readinessMode === 'snapshot',
+    authorization_version_available: readinessMode !== 'blocked',
+    governance_state: 'ACTIVE',
+    governance_epoch: 3,
+    recovery_queue_available: readinessMode === 'snapshot',
+    ...(readinessMode === 'snapshot' ? {} : { recovery_unavailable_reason: readinessMode === 'legacy' ? 'PAGINATION_DISABLED' : 'AUTHORIZATION_VERSION_INVALID' }),
+  });
+  if (url.pathname === '/api/admin/token/admin/v1/token-accounts') {
+    observations.tokenAccountCalls.push(url.search);
+    return json(response, envelope([{ ...account, status: accountStatus }]));
+  }
   if (url.pathname === '/api/admin/token/admin/v1/commands/recovery-queue') {
     observations.queueCalls.push(url.search);
     if (queueFailure) return json(response, { code: 'SOURCE_UNAVAILABLE', request_id: 'recovery-queue-failure' }, 503);
@@ -399,6 +415,45 @@ try {
   assert.ok(await page.$eval('.adm-source-card tbody', node => node.textContent.includes('Production account')), 'queue failure leaves account list usable');
   await configure(page, 'queue-failure=0');
   await page.click(`${queueSelector} [role="alert"] button`);
+  await page.waitForSelector(`${queueSelector} tbody tr`);
+  await page.click(`${queueSelector} tbody button`);
+  await page.waitForSelector('[aria-labelledby="token-account-recovery-title"]');
+  const recoveryCallsBeforeDowngrade = (await state(page)).recoveryCalls.length;
+  await configure(page, 'readiness=legacy');
+  await page.$eval('[aria-labelledby="token-accounts-title"] .adm-source-head .adm-row-actions button:last-child', (button) => button.click());
+  await page.waitForFunction(() => !document.querySelector('[aria-labelledby="token-account-recovery-title"]') && document.querySelector('main')?.textContent.includes('Snapshot pagination is disabled'));
+  assert.equal((await state(page)).recoveryCalls.length, recoveryCallsBeforeDowngrade, 'readiness downgrade closes the recovery dialog without submitting');
+  await configure(page, 'readiness=snapshot');
+  await page.click('[aria-labelledby="token-accounts-title"] .adm-source-head .adm-row-actions button:last-child');
+  await page.waitForSelector(`${queueSelector} tbody tr`);
+  const sourceCallsBeforeReadinessFailure = await state(page);
+  await configure(page, 'readiness=failure');
+  await page.click('[aria-labelledby="token-accounts-title"] .adm-source-head .adm-row-actions button:last-child');
+  await page.waitForFunction(() => document.querySelector('[aria-labelledby="token-accounts-title"] [role="alert"]')?.textContent.includes('Pagination snapshot unavailable'));
+  assert.equal((await state(page)).tokenAccountCalls.length, sourceCallsBeforeReadinessFailure.tokenAccountCalls.length, 'failed readiness refresh starts no account request from stale capability');
+  assert.equal((await state(page)).queueCalls.length, sourceCallsBeforeReadinessFailure.queueCalls.length, 'failed readiness refresh starts no recovery request from stale capability');
+  assert.equal(await page.$$eval(`${queueSelector}`, (nodes) => nodes.length), 0, 'failed readiness refresh removes the stale recovery capability');
+  assert.equal(await page.$$eval('[aria-labelledby="token-accounts-title"] tbody', (nodes) => nodes.length), 0, 'failed readiness refresh hides stale account rows');
+  const tokenAccountCallsBeforeRecovery = (await state(page)).tokenAccountCalls.length;
+  await configure(page, 'readiness=snapshot');
+  await page.click('[aria-labelledby="token-accounts-title"] [role="alert"] button');
+  await page.waitForSelector(`${queueSelector} tbody tr`);
+  assert.equal((await state(page)).tokenAccountCalls.length, tokenAccountCallsBeforeRecovery + 1, 'one successful readiness recovery starts exactly one account request');
+  const queueCallsBeforeLegacy = (await state(page)).queueCalls.length;
+  await configure(page, 'readiness=legacy');
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => document.querySelector('main')?.textContent.includes('Snapshot pagination is disabled'));
+  assert.match((await state(page)).tokenAccountCalls.at(-1), /limit=100/, 'legacy mode uses the existing bounded latest-100 account query');
+  assert.equal((await state(page)).queueCalls.length, queueCallsBeforeLegacy, 'legacy mode never issues the unsafe recovery queue query');
+  assert.equal(await page.$$eval('.adm-model-token-filters', (nodes) => nodes.filter((node) => node.closest('[aria-labelledby="token-accounts-title"]')).length), 0, 'legacy mode hides unsupported account filters');
+  const tokenAccountCallsBeforeBlocked = (await state(page)).tokenAccountCalls.length;
+  await configure(page, 'readiness=blocked');
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => document.querySelector('main')?.textContent.includes('authorization version is unavailable'));
+  assert.equal((await state(page)).tokenAccountCalls.length, tokenAccountCallsBeforeBlocked, 'blocked mode performs no Token Account data request');
+  assert.equal((await state(page)).queueCalls.length, queueCallsBeforeLegacy, 'blocked mode performs no recovery queue request');
+  await configure(page, 'readiness=snapshot');
+  await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector(`${queueSelector} tbody tr`);
   await configure(page, 'permissions=no-owner');
   await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));

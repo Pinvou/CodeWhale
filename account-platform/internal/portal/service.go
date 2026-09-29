@@ -1389,6 +1389,9 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v1/token-resources/readiness" {
+		return method == http.MethodGet
+	}
 	if resource == "/admin/v1/commands/TOKEN_USAGE_RECONCILIATION_RETRY/readiness" {
 		return method == http.MethodGet
 	}

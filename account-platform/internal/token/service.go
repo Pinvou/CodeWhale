@@ -264,6 +264,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/operations-overview", s.authorizer.RequireAnyAnd([]string{"platform.models.read"}, []string{"platform.tokens.read", "platform.usage.read"}), httpserver.AdaptFunc(s.adminTokenOperationsOverview))
 		admin.GET("/overviews/model-catalog", s.authorizer.RequireAny("platform.models.read"), httpserver.AdaptFunc(s.adminModelCatalogOverview))
 		admin.GET("/overviews/token-resources", s.authorizer.RequireAny("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenResourcesOverview))
+		admin.GET("/token-resources/readiness", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenResourceReadiness))
 		admin.GET("/overviews/model-operations", s.authorizer.RequireAny("platform.tokens.read", "platform.usage.read"), httpserver.AdaptFunc(s.adminModelOperationsPageOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
 		admin.POST("/token-accounts", s.requireTokenAccountCreateCapability(), s.authorizer.RequireAnyAnd(nil, []string{"platform.tokens.manage", "platform.tokens.owner-candidates.read"}), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))

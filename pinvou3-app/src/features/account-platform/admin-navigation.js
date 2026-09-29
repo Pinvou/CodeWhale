@@ -62,7 +62,7 @@ const adminModelTokenTabParameters = Object.freeze({
 });
 const adminModelTokenSectionParameters = Object.freeze({
   models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', 'model_overview_result', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelHistory', 'modelProvisionings', 'modelLifecyclePlans', 'modelLifecycleCandidates'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
-  tokenResources: Object.freeze(['token_account_id', 'token_detail_tab', 'token_overview_result', ...['tokenAccounts', 'ownerCandidates', 'tokenAudit', 'tokenProvisionings', 'tokenCredentials', 'tokenRoutes'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  tokenResources: Object.freeze(['token_account_id', 'token_detail_tab', 'token_overview_result', ...['tokenAccounts', 'accountRecovery', 'ownerCandidates', 'tokenAudit', 'tokenProvisionings', 'tokenCredentials', 'tokenRoutes'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
   modelOperations: Object.freeze(['operations_tab', 'provisioning_id', 'usage_request_id', 'operations_overview_result', ...['provisionings', 'usage', 'reconciliation', 'provisioningAttempts', 'usageEvidence'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
 });
 const adminModelTokenOverviewResultParameters = Object.freeze({ models: 'model_overview_result', tokenResources: 'token_overview_result', modelOperations: 'operations_overview_result' });

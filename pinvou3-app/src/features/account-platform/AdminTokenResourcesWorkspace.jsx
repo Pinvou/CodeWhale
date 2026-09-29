@@ -33,7 +33,7 @@ function Status({ value, copy }) {
 }
 
 function Feedback({ state, copy, onRetry }) {
-  if (state.error) return <div className="adm-source-error" role="alert"><strong>{state.error.status === 410 ? copy.cursorExpired : copy.sourceUnavailable}</strong>{state.error.requestID && <span>{copy.requestID}: {state.error.requestID}</span>}<button type="button" onClick={onRetry}>{copy.retry}</button></div>;
+  if (state.error) return <div className="adm-source-error" role="alert"><strong>{state.error.status === 410 ? copy.cursorExpired : copy.tokenResourceSourceErrors?.[state.error.code] || copy.sourceUnavailable}</strong>{state.error.requestID && <span>{copy.requestID}: {state.error.requestID}</span>}<button type="button" onClick={onRetry}>{copy.retry}</button></div>;
   if (state.loading && !state.items.length) return <div className="adm-source-state" role="status">{copy.loading}</div>;
   if (!state.loading && !state.items.length) return <div className="adm-source-state">{copy.noResults}</div>;
   return null;
@@ -267,12 +267,13 @@ function RouteHealth({ client, copy, accountID, access, onClose }) {
   </section>;
 }
 
-function AccountRecoveryQueue({ client, copy, routeVersion, onQueryChange, histories }) {
+function AccountRecoveryQueue({ client, copy, routeVersion, onQueryChange, histories, enabled, unavailableReason }) {
   const query = useMemo(() => readAdminModelTokenQuery('accountRecovery'), [routeVersion]);
   const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState(null);
   const load = useMemo(() => (filters, signal) => client.tokenAccountRecoveryQueue(filters, signal), [client]);
-  const state = useSource(load, query, true, refresh);
+  const state = useSource(load, query, enabled, refresh);
+  useEffect(() => { if (!enabled) setSelected(null); }, [enabled]);
   const retry = () => {
     if (state.error?.status === 410) {
       delete histories.current.accountRecovery;
@@ -280,16 +281,17 @@ function AccountRecoveryQueue({ client, copy, routeVersion, onQueryChange, histo
     } else setRefresh((value) => value + 1);
   };
   return <section className="adm-card adm-source-card" aria-labelledby="account-recovery-queue-title">
-    <div className="adm-source-head"><div><h2 id="account-recovery-queue-title">{copy.accountRecoveryQueue}</h2><p>{copy.accountRecoveryQueueLead}</p></div><button type="button" disabled={state.loading} onClick={retry}>{state.loading ? copy.loading : copy.refreshSource}</button></div>
-    <form key={query.q} className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); const values = new globalThis.FormData(event.currentTarget); onQueryChange('accountRecovery', { q: values.get('q'), cursor: '' }); }}>
+    <div className="adm-source-head"><div><h2 id="account-recovery-queue-title">{copy.accountRecoveryQueue}</h2><p>{copy.accountRecoveryQueueLead}</p></div><button type="button" disabled={!enabled || state.loading} onClick={retry}>{state.loading ? copy.loading : copy.refreshSource}</button></div>
+    {!enabled && <div className="adm-inline-message info" role="status">{copy.tokenResourceUnavailableReasons?.[unavailableReason] || copy.sourceUnavailable}</div>}
+    {enabled && <form key={query.q} className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); const values = new globalThis.FormData(event.currentTarget); onQueryChange('accountRecovery', { q: values.get('q'), cursor: '' }); }}>
       <label><span>{copy.commandReference}</span><input type="search" name="q" defaultValue={query.q} maxLength="36" placeholder={copy.accountRecoverySearch} /></label><button type="submit">{copy.search}</button><button type="button" onClick={() => onQueryChange('accountRecovery', { q: '', cursor: '' })}>{copy.clear}</button>
-    </form>
-    <Feedback state={state} copy={copy} onRetry={retry} />
-    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.commandReference}</th><th>{copy.status}</th><th>{copy.accountRecoveryEpoch}</th><th>{copy.lastUpdated}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.command_reference}>
+    </form>}
+    {enabled && <Feedback state={state} copy={copy} onRetry={retry} />}
+    {enabled && state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.commandReference}</th><th>{copy.status}</th><th>{copy.accountRecoveryEpoch}</th><th>{copy.lastUpdated}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.command_reference}>
       <td data-label={copy.commandReference}><span className="adm-secondary-id">{item.command_reference}</span></td><td data-label={copy.status}>{copy.accountRecoveryRequired}</td><td data-label={copy.accountRecoveryEpoch}>{item.recovery_epoch}</td><td data-label={copy.lastUpdated}>{new Date(item.updated_at).toLocaleString()}</td><td data-label={copy.actions}><button type="button" onClick={() => setSelected(item)}>{copy.accountRecoveryHandle}</button></td>
     </tr>)}</tbody></table></div>}
-    <Paging source="accountRecovery" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('accountRecovery', next)} />
-    {selected && <TokenAccountRecoveryDialog client={client} copy={copy} command={selected} onClose={() => setSelected(null)} onCompleted={() => { delete histories.current.accountRecovery; onQueryChange('accountRecovery', { ...query, cursor: '' }, 'replace'); setRefresh((value) => value + 1); }} />}
+    {enabled && <Paging source="accountRecovery" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('accountRecovery', next)} />}
+    {enabled && selected && <TokenAccountRecoveryDialog client={client} copy={copy} command={selected} onClose={() => setSelected(null)} onCompleted={() => { delete histories.current.accountRecovery; onQueryChange('accountRecovery', { ...query, cursor: '' }, 'replace'); setRefresh((value) => value + 1); }} />}
   </section>;
 }
 
@@ -299,24 +301,34 @@ export function AdminTokenResourcesWorkspace({ client, copy, permissions, formsE
   const query = useMemo(() => readAdminModelTokenQuery('tokenAccounts'), [routeVersion]);
   const ownerQuery = useMemo(() => readAdminModelTokenQuery('ownerCandidates'), [routeVersion]);
   const selectedAccountID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('token_account_id') || '', [routeVersion]);
+  const [readinessRefresh, setReadinessRefresh] = useState(0);
   const [refresh, setRefresh] = useState(0);
-  const load = useMemo(() => (filters, signal) => client.tokenAccounts(filters, signal), [client]);
-  const state = useSource(load, query, true, refresh);
+  const readinessLoad = useMemo(() => async (_query, signal) => ({ items: [await client.tokenResourceReadiness(signal)] }), [client]);
+  const readinessState = useSource(readinessLoad, {}, true, readinessRefresh);
+  const readiness = readinessState.loading || readinessState.error ? null : readinessState.items[0] || null;
+  const snapshotMode = readiness?.token_accounts_mode === 'SNAPSHOT';
+  const accountsEnabled = Boolean(readiness) && readiness.token_accounts_mode !== 'BLOCKED';
+  const load = useMemo(() => (filters, signal) => snapshotMode ? client.tokenAccounts(filters, signal) : client.tokenAccounts(signal), [client, snapshotMode]);
+  const state = useSource(load, query, accountsEnabled, refresh);
   const retry = () => {
     if (state.error?.status === 410) { delete histories.current.tokenAccounts; onQueryChange('tokenAccounts', { ...query, cursor: '' }, 'replace'); }
-    else setRefresh((value) => value + 1);
+    else setReadinessRefresh((value) => value + 1);
   };
   const closeOwner = () => onQueryChange('ownerCandidates', { q: '', owner_type: '', status: '', organization_id: '', cursor: '' }, 'push');
 	if (selectedAccountID && !detailsEnabled) return <RouteHealth client={client} copy={copy} accountID={selectedAccountID} access={actionAccess} onClose={() => onRouteChange({ token_account_id: null, token_detail_tab: null }, 'push')} />;
   return <>
     {access.explainCreateBlocked && <div className="adm-inline-message info" role="status">{copy.ownerCandidatePermissionRequired}</div>}
-    <section className="adm-card adm-source-card" aria-labelledby="token-accounts-title"><div className="adm-source-head"><div><h2 id="token-accounts-title">{copy.tokenAccounts}</h2><p>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</p></div><div className="adm-row-actions">{access.showCreate && <button type="button" onClick={() => onQueryChange('ownerCandidates', { q: '', owner_type: 'USER', status: 'ACTIVE', organization_id: '', cursor: '' }, 'push')}>{copy.createTokenAccount}</button>}<button type="button" disabled={state.loading} onClick={retry}>{state.loading ? copy.loading : copy.refreshSource}</button></div></div>
-      <form key={JSON.stringify(query)} className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); const values = new globalThis.FormData(event.currentTarget); onQueryChange('tokenAccounts', { ...query, q: values.get('q'), owner_type: values.get('owner_type'), status: values.get('status'), health_status: values.get('health_status'), cursor: '' }); }}><label><span>{copy.tokenSearch}</span><input name="q" type="search" defaultValue={query.q} placeholder={copy.tokenSearchPlaceholder} /></label><label><span>{copy.ownerType}</span><select name="owner_type" defaultValue={query.owner_type}><option value="">{copy.all}</option><option value="USER">{copy.enumLabels.USER}</option><option value="ORG">{copy.enumLabels.ORG}</option><option value="ORG_UNIT">{copy.enumLabels.ORG_UNIT}</option></select></label><label><span>{copy.status}</span><select name="status" defaultValue={query.status}><option value="">{copy.all}</option>{['ACTIVE', 'DISABLED', 'FROZEN'].map((value) => <option key={value} value={value}>{copy.enumLabels[value]}</option>)}</select></label><label><span>{copy.health}</span><select name="health_status" defaultValue={query.health_status}><option value="">{copy.all}</option>{['UNKNOWN', 'PROBING', 'HEALTHY', 'DEGRADED', 'UNHEALTHY', 'STALE'].map((value) => <option key={value} value={value}>{copy.enumLabels[value]}</option>)}</select></label><button type="submit">{copy.search}</button><button type="button" onClick={() => onQueryChange('tokenAccounts', { q: '', owner_type: '', owner_id: '', status: '', health_status: '', credential_status: '', cursor: '' })}>{copy.clear}</button></form>
-      <Feedback state={state} copy={copy} onRetry={retry} />
-			{state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccount}</th><th>{copy.owner}</th><th>{copy.status}</th><th>{copy.credentials}</th><th>{copy.routes}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.token_account_id}><td data-label={copy.tokenAccount}><strong>{item.name}</strong><small className="adm-secondary-id">{item.token_account_id}</small></td><td data-label={copy.owner}>{copy.enumLabels[item.owner_type] || item.owner_type}<small className="adm-secondary-id">{item.owner_id}</small></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.credentials}>{item.active_credential_count}</td><td data-label={copy.routes}>{item.route_count}</td><td data-label={copy.actions}><button type="button" onClick={() => onRouteChange({ token_account_id: item.token_account_id, token_detail_tab: detailsEnabled ? 'overview' : 'routes' }, 'push')}>{detailsEnabled ? copy.viewDetail : copy.viewRouteHealth}</button></td></tr>)}</tbody></table></div>}
-      <Paging source="tokenAccounts" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('tokenAccounts', next)} />
+    <section className="adm-card adm-source-card" aria-labelledby="token-accounts-title"><div className="adm-source-head"><div><h2 id="token-accounts-title">{copy.tokenAccounts}</h2><p>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</p></div><div className="adm-row-actions">{access.showCreate && <button type="button" onClick={() => onQueryChange('ownerCandidates', { q: '', owner_type: 'USER', status: 'ACTIVE', organization_id: '', cursor: '' }, 'push')}>{copy.createTokenAccount}</button>}<button type="button" disabled={state.loading || readinessState.loading} onClick={retry}>{state.loading || readinessState.loading ? copy.loading : copy.refreshSource}</button></div></div>
+      {readinessState.error && <Feedback state={readinessState} copy={copy} onRetry={retry} />}
+      {readinessState.loading && !readiness && <div className="adm-source-state" role="status">{copy.loading}</div>}
+      {readiness?.token_accounts_mode === 'BLOCKED' && <div className="adm-inline-message error" role="alert">{copy.tokenResourceUnavailableReasons?.[readiness.recovery_unavailable_reason] || copy.sourceUnavailable}</div>}
+      {readiness?.token_accounts_mode === 'LEGACY_BOUNDED' && <div className="adm-inline-message info" role="status">{copy.tokenAccountsLegacyMode}</div>}
+      {snapshotMode && <form key={JSON.stringify(query)} className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); const values = new globalThis.FormData(event.currentTarget); onQueryChange('tokenAccounts', { ...query, q: values.get('q'), owner_type: values.get('owner_type'), status: values.get('status'), health_status: values.get('health_status'), cursor: '' }); }}><label><span>{copy.tokenSearch}</span><input name="q" type="search" defaultValue={query.q} placeholder={copy.tokenSearchPlaceholder} /></label><label><span>{copy.ownerType}</span><select name="owner_type" defaultValue={query.owner_type}><option value="">{copy.all}</option><option value="USER">{copy.enumLabels.USER}</option><option value="ORG">{copy.enumLabels.ORG}</option><option value="ORG_UNIT">{copy.enumLabels.ORG_UNIT}</option></select></label><label><span>{copy.status}</span><select name="status" defaultValue={query.status}><option value="">{copy.all}</option>{['ACTIVE', 'DISABLED', 'FROZEN'].map((value) => <option key={value} value={value}>{copy.enumLabels[value]}</option>)}</select></label><label><span>{copy.health}</span><select name="health_status" defaultValue={query.health_status}><option value="">{copy.all}</option>{['UNKNOWN', 'PROBING', 'HEALTHY', 'DEGRADED', 'UNHEALTHY', 'STALE'].map((value) => <option key={value} value={value}>{copy.enumLabels[value]}</option>)}</select></label><button type="submit">{copy.search}</button><button type="button" onClick={() => onQueryChange('tokenAccounts', { q: '', owner_type: '', owner_id: '', status: '', health_status: '', credential_status: '', cursor: '' })}>{copy.clear}</button></form>}
+      {accountsEnabled && <Feedback state={state} copy={copy} onRetry={retry} />}
+			{accountsEnabled && state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccount}</th><th>{copy.owner}</th><th>{copy.status}</th><th>{copy.credentials}</th><th>{copy.routes}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.token_account_id}><td data-label={copy.tokenAccount}><strong>{item.name}</strong><small className="adm-secondary-id">{item.token_account_id}</small></td><td data-label={copy.owner}>{copy.enumLabels[item.owner_type] || item.owner_type}<small className="adm-secondary-id">{item.owner_id}</small></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.credentials}>{item.active_credential_count}</td><td data-label={copy.routes}>{item.route_count}</td><td data-label={copy.actions}><button type="button" onClick={() => onRouteChange({ token_account_id: item.token_account_id, token_detail_tab: detailsEnabled ? 'overview' : 'routes' }, 'push')}>{detailsEnabled ? copy.viewDetail : copy.viewRouteHealth}</button></td></tr>)}</tbody></table></div>}
+      {snapshotMode && <Paging source="tokenAccounts" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('tokenAccounts', next)} />}
     </section>
-    {actionsEnabled && access.manage && access.ownerCandidates && <AccountRecoveryQueue client={client} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} />}
+    {actionsEnabled && access.manage && access.ownerCandidates && readiness && <AccountRecoveryQueue client={client} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} enabled={readiness.recovery_queue_available} unavailableReason={readiness.recovery_unavailable_reason} />}
     {access.requestOwnerCandidates && ownerQuery.owner_type && <OwnerDialog client={client} copy={copy} query={ownerQuery} histories={histories} onQueryChange={onQueryChange} onClose={closeOwner} onCreated={async () => setRefresh((value) => value + 1)} />}
   </>;
 }

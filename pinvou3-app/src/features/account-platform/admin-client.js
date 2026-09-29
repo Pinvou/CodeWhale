@@ -813,6 +813,9 @@ export class AdminPlatformClient {
   tokenResourcesPageOverview(signal) {
     return this.request('token', '/admin/v1/overviews/token-resources', signal);
   }
+  tokenResourceReadiness(signal) {
+    return this.request('token', '/admin/v1/token-resources/readiness', signal);
+  }
   tokenModelOperationsPageOverview(window = '', signal) {
     const suffix = window ? `?${new URLSearchParams({ window })}` : '';
     return this.request('token', `/admin/v1/overviews/model-operations${suffix}`, signal);
