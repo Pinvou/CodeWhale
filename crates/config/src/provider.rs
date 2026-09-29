@@ -1718,12 +1718,70 @@ impl Provider for Custom {
     fn wire_policy(&self) -> WirePolicy {
         // Static default remains Chat Completions for backward compatibility.
         // Per-config `wire = "responses" | "anthropic" | "chat"` overrides are
-        // honored in `crates/tui/src/client.rs::provider_wire_format_for_config`
-        // and `crates/tui/src/config.rs::provider_capability`, which read
-        // `ProviderConfig::wire` for the `Custom` catalog identity. This keeps
+        // parsed by [`wire_dialect_override`] here in the config crate and
+        // honored by every consumer that reads `ProviderConfig::wire` for the
+        // `Custom` catalog identity (the tui wire-format/capability readers
+        // and the route resolver's `RouteRequest::wire_override`). This keeps
         // the `Provider` trait `Fixed` while giving custom endpoints the same
         // three-way switch (`responses` / `anthropic` / `chat`) as built-ins.
         WirePolicy::Fixed(WireFormat::ChatCompletions)
+    }
+}
+
+/// Whether a per-config `wire` dialect string names the Anthropic Messages
+/// endpoint. Canonical parse shared by the tui wire-format/capability readers,
+/// the route resolver, and the app-server pass-through, so one alias list
+/// cannot drift from another.
+#[must_use]
+pub fn wire_dialect_prefers_anthropic(wire: Option<&str>) -> bool {
+    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
+    matches!(
+        normalized.as_str(),
+        "anthropic"
+            | "anthropic-messages"
+            | "messages"
+            | "claude"
+            | "anthropic-compatible"
+            | "anthropic-compat"
+    )
+}
+
+/// Whether a per-config `wire` dialect string names the OpenAI Responses
+/// endpoint. See [`wire_dialect_prefers_anthropic`] for the sharing contract.
+#[must_use]
+pub fn wire_dialect_prefers_responses(wire: Option<&str>) -> bool {
+    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
+    matches!(
+        normalized.as_str(),
+        "responses"
+            | "responses-api"
+            | "openai-responses"
+            | "openai-responses-api"
+            | "response"
+            | "response-api"
+            | "openai-responses-compat"
+            | "responses-compat"
+    )
+}
+
+/// The wire override a per-config `wire` dialect asks for: `Some(Responses)` /
+/// `Some(AnthropicMessages)` when the string names that endpoint, `None` for
+/// `chat` / absent / unrecognized values (the static descriptor policy
+/// applies). The resolver honors the override only for `ProviderKind::Custom`.
+#[must_use]
+pub fn wire_dialect_override(wire: Option<&str>) -> Option<WireFormat> {
+    if wire_dialect_prefers_responses(wire) {
+        Some(WireFormat::Responses)
+    } else if wire_dialect_prefers_anthropic(wire) {
+        Some(WireFormat::AnthropicMessages)
+    } else {
+        None
     }
 }
 

@@ -1897,6 +1897,15 @@ fn custom_wire_override_mints_a_wire_true_candidate() {
     assert_eq!(anthropic.protocol(), RequestProtocol::AnthropicMessages);
     assert_eq!(anthropic.endpoint().endpoint_key, "messages");
 
+    // An explicit `chat` override is the third arm of the dialect: it must
+    // resolve exactly like the absent case (the static Chat policy), not fall
+    // out of the override block with a stale endpoint key.
+    let explicit_chat = resolver
+        .resolve(&base(Some(RequestProtocol::ChatCompletions)))
+        .expect("explicit chat override resolves");
+    assert_eq!(explicit_chat.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(explicit_chat.endpoint().endpoint_key, "chat");
+
     // No override keeps the documented backward-compatible default.
     let chat = resolver.resolve(&base(None)).expect("default resolves");
     assert_eq!(chat.protocol(), RequestProtocol::ChatCompletions);

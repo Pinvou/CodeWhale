@@ -19,7 +19,7 @@ use codewhale_agent::ModelRegistry;
 use codewhale_config::{
     ConfigApiKeyValueKind, ConfigToml, ProviderKind, auth_mode_disables_api_key,
     classify_config_api_key_value, is_upstream_auth_header,
-    provider::WireFormat,
+    provider::{WireFormat, wire_dialect_override},
     provider_base_url_is_official, provider_preserves_custom_base_url_model,
     route::{LogicalModelRef, RouteError, RouteRequest, RouteResolver},
 };
@@ -118,8 +118,14 @@ fn resolve_endpoint(
         saved_provider_model: None,
         base_url_override: Some(base_url.clone()),
         limit_overrides: Vec::new(),
-
-        wire_override: None,
+        // The wire dialect rides the same provider_cfg that supplied the
+        // endpoint and key, so a `wire = "responses"` table cannot be silently
+        // served as chat here: the resolver mints a Responses candidate and
+        // the handler's ChatCompletions-only guard rejects it (fail closed)
+        // instead of forwarding to `{base}/chat/completions`.
+        wire_override: (provider_kind == ProviderKind::Custom)
+            .then(|| wire_dialect_override(provider_cfg.wire.as_deref()))
+            .flatten(),
     })?;
     let model = route.wire_model_id().as_str().to_string();
 
@@ -1044,6 +1050,39 @@ api_key = {provider_api_key:?}
             resolve_endpoint(&config, &registry, Some("gemini-3.1-pro")),
             Err(RouteError::UnsupportedModelProtocol { .. })
         ));
+    }
+
+    /// A `wire = "responses"` custom table must reach this pass-through's
+    /// resolution: the endpoint then carries the Responses wire and the
+    /// handler's ChatCompletions-only guard rejects the request (fail closed)
+    /// instead of silently forwarding a chat body to `{base}/chat/completions`
+    /// — the same mis-route the runtime-route fix removed from per-turn
+    /// clients.
+    #[test]
+    fn custom_table_wire_override_reaches_the_app_route() {
+        let mut config = ConfigToml {
+            provider: ProviderKind::Custom,
+            ..ConfigToml::default()
+        };
+        config.providers.custom.base_url = Some("https://relay.example.test/v1".to_string());
+        config.providers.custom.model = Some("gpt-6-sol".to_string());
+        config.providers.custom.wire = Some("responses".to_string());
+
+        let endpoint = resolve_endpoint(&config, &ModelRegistry::default(), Some("gpt-6-sol"))
+            .expect("custom responses table resolves");
+        assert_eq!(endpoint.provider, ProviderKind::Custom);
+        assert_eq!(endpoint.model, "gpt-6-sol");
+        assert_eq!(
+            endpoint.wire_format,
+            WireFormat::Responses,
+            "the table's wire dialect rides the same provider_cfg as its endpoint"
+        );
+
+        // An ordinary chat table keeps the forwardable Chat wire.
+        config.providers.custom.wire = None;
+        let endpoint = resolve_endpoint(&config, &ModelRegistry::default(), Some("gpt-6-sol"))
+            .expect("custom chat table resolves");
+        assert_eq!(endpoint.wire_format, WireFormat::ChatCompletions);
     }
 
     #[test]

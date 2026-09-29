@@ -3385,8 +3385,12 @@ impl ConfigToml {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.clone()),
                 limit_overrides: Vec::new(),
-
-                wire_override: None,
+                // provider_cfg above is the active custom table (named or
+                // legacy); its dialect is the same fact the tui route layer
+                // threads, so this receipt cannot disagree with the turn.
+                wire_override: (provider == ProviderKind::Custom)
+                    .then(|| provider::wire_dialect_override(provider_cfg.wire.as_deref()))
+                    .flatten(),
             })
             .ok();
 
