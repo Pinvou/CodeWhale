@@ -300,7 +300,7 @@ const jaBase = {
         modelContextWindow: 'コンテキスト長（tokens）',
         modelMaxOutput: '最大出力（tokens）',
         customApiKey: 'API Key',
-        credEnvOverride: '環境変数で上書き', credUnavailable: '資格情報が利用不可', credConfigured: '設定済み', credNotConfigured: '未設定', credEnterNewKey: '置き換える新しいキーを入力', credKeep: '保持', credReplace: '置換', credDeleteKey: 'キー削除', clearSearch: '検索をクリア', clearInput: '入力をクリア', sendMsg: '送信', apiKeyGateTitle: 'API Key の設定が必要です', apiKeyGateDesc: '現在のモデルはクラウドモデルです。チャットを開始するには API Key を設定してください。', apiKeyGateBtn: '設定する',
+        credEnvOverride: '環境変数で上書き', credUnavailable: '資格情報が利用不可', credConfigured: '設定済み', credNotConfigured: '未設定', credEnterNewKey: '置き換える新しいキーを入力', credKeep: '保持', credReplace: '置換', credDeleteKey: 'キー削除', clearSearch: '検索をクリア', clearInput: '入力をクリア', sendMsg: '送信', modelAccessTitle: 'PINVOU へようこそ', modelAccessDesc: 'PINVOU アカウントでログインしてプラットフォームモデルを利用するか、ローカル／外部モデルを接続できます。', modelAccessLogin: 'ログイン', modelAccessExternal: 'ローカル／外部モデルを使用',
         detectLocalVllm: 'ローカルモデルサービスを検出',
         detectingLocalVllm: '検出中…',
         useVllmConfig: 'この設定を使用',

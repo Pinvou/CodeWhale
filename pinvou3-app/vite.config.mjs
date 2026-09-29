@@ -441,7 +441,7 @@ export const lazyChunkContracts = {
   pinvouSummon: ['features/tools/PinvouSummonCard.jsx', 'PinvouSummonModal'],
   updateNotice: ['features/updater/UpdateNoticeButton.jsx', 'UpdateNoticeButton'],
   savedPersonaConfirmDialog: ['features/personas/SavedPersonaConfirmDialog.jsx', 'SavedPersonaConfirmDialog'],
-  apiKeyGateDialog: ['features/settings/ApiKeyGateDialog.jsx', 'ApiKeyGateDialog'],
+  modelAccessGate: ['features/settings/ModelAccessGate.jsx', 'ModelAccessGate'],
   archiveConfirmDialog: ['features/sessions/ArchiveConfirmDialog.jsx', 'ArchiveConfirmDialog'],
 };
 

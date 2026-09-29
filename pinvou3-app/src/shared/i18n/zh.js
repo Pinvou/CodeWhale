@@ -301,7 +301,7 @@ export const dictZh = {
         modelContextWindow: '上下文窗口（tokens）',
         modelMaxOutput: '最大输出（tokens）',
         customApiKey: 'API Key',
-        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送', apiKeyGateTitle: '需要配置 API Key', apiKeyGateDesc: '当前模型为云端模型，需要先配置 API Key 才能开始对话。', apiKeyGateBtn: '去配置',
+        credEnvOverride: '环境变量覆盖', credUnavailable: '凭证不可用', credConfigured: '已配置', credNotConfigured: '未配置', credEnterNewKey: '输入新 Key 替换', credKeep: '保留', credReplace: '替换', credDeleteKey: '删除 Key', clearSearch: '清除搜索', clearInput: '清除输入', sendMsg: '发送', modelAccessTitle: '欢迎使用 PINVOU', modelAccessDesc: '登录品悟账号即可使用平台模型，或连接你自己的本地与第三方模型。', modelAccessLogin: '登录', modelAccessExternal: '使用本地/第三方模型',
         detectLocalVllm: '检测本机模型服务',
         detectingLocalVllm: '检测中…',
         useVllmConfig: '使用此配置',

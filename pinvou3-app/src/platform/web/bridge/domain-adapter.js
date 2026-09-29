@@ -20,7 +20,7 @@
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet"],
-    models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels"],
+    models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels", "modelsLoaded"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     computerUse: ["computerUse"],

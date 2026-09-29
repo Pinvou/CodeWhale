@@ -254,6 +254,7 @@
     },
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
     defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
@@ -1625,7 +1626,7 @@
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
-    models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels"],
+    models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels", "modelsLoaded"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     computerUse: ["computerUse"],

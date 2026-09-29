@@ -46,7 +46,7 @@ test('rare global overlays stay out of the startup module graph', () => {
   assert.match(mainSource, /LazyPinvouSummonModal/u);
   assert.match(mainSource, /LazyUpdateNoticeButton/u);
   assert.match(mainSource, /LazySavedPersonaConfirmDialog/u);
-  assert.match(mainSource, /LazyApiKeyGateDialog/u);
+  assert.match(mainSource, /LazyModelAccessGate/u);
   assert.match(mainSource, /LazyArchiveConfirmDialog/u);
   assert.match(mainSource, /LazyArchiveToast/u);
 });
@@ -66,19 +66,19 @@ test('new lazy global mounts contain chunk failures without exposing protected c
   // it must cover chat not only while the chunk loads but also after a chunk
   // failure (React.lazy caches the rejection, so the boundary's in-flow error
   // card must not be able to expose chat either).
-  const gateMountAt = mainSource.indexOf('apiKeyGateOpen && browserOverlayPublicationReady && (');
-  assert.ok(gateMountAt >= 0, 'the API key gate mount must exist');
-  const gateMount = mainSource.slice(gateMountAt, gateMountAt + 900);
-  const backdropAt = gateMount.indexOf('fixed inset-0 z-[57]');
+  const gateMountAt = mainSource.indexOf('modelAccessGateOpen && browserOverlayPublicationReady && (');
+  assert.ok(gateMountAt >= 0, 'the model access gate mount must exist');
+  const gateMount = mainSource.slice(gateMountAt, gateMountAt + 3600);
+  const backdropAt = gateMount.indexOf('fixed inset-0 z-[97]');
   const boundaryAt = gateMount.indexOf('<ViewErrorBoundary t={t}>');
   const suspenseAt = gateMount.indexOf('<Suspense fallback={null}>');
   assert.ok(
     backdropAt >= 0 && boundaryAt > backdropAt && suspenseAt > boundaryAt,
-    'the API key gate backdrop must wrap the error boundary and Suspense, so it survives chunk failures',
+    'the model access layer must wrap the error boundary and Suspense, so it survives chunk failures',
   );
   assert.ok(
-    gateMount.includes('aria-busy="true"'),
-    'the API key gate backdrop must announce its busy state',
+    gateMount.includes("background: activeTheme === 'dark' ? '#111416' : '#F7FAF9'"),
+    'the model access layer must use an opaque theme background',
   );
 });
 

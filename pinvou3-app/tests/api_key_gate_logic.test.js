@@ -22,12 +22,12 @@ vm.runInContext(
   `${source.slice(start, end)}
 this.baseUrlIsLoopback = baseUrlIsLoopback;
 this.isLocalModel = isLocalModel;
-this.shouldShowApiKeyGate = shouldShowApiKeyGate;`,
+this.shouldShowModelAccessGate = shouldShowModelAccessGate;`,
   context,
   { filename: sourcePath },
 );
 
-const { baseUrlIsLoopback, isLocalModel, shouldShowApiKeyGate } = context;
+const { baseUrlIsLoopback, isLocalModel, shouldShowModelAccessGate } = context;
 const state = (credentialState, config = {}) => ({
   effectiveModelConfig: {
     preset: 'deepseek',
@@ -49,11 +49,29 @@ assert.strictEqual(isLocalModel({ preset: 'local_vllm', base_url: '' }), true);
 assert.strictEqual(isLocalModel({ preset: 'openai_compatible', base_url: 'http://localhost:11434/v1' }), true);
 assert.strictEqual(isLocalModel({ preset: 'openai_compatible', base_url: 'https://api.openai.com/v1' }), false);
 
-assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'chat', true), true);
-assert.strictEqual(shouldShowApiKeyGate(state('unavailable'), 'chat', true), true);
-assert.strictEqual(shouldShowApiKeyGate(state('configured'), 'chat', true), false);
+assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'chat', true), true);
+assert.strictEqual(shouldShowModelAccessGate(state('unavailable'), 'chat', true), true);
+assert.strictEqual(shouldShowModelAccessGate(state('configured'), 'chat', true), false);
 assert.strictEqual(
-  shouldShowApiKeyGate(state('missing', {
+  shouldShowModelAccessGate({ savedModels: [], modelsLoaded: false, effectiveModelConfig: null }, 'chat', true),
+  false,
+  'the gate must wait until the model catalog has loaded successfully',
+);
+assert.strictEqual(
+  shouldShowModelAccessGate({ savedModels: [], modelsLoaded: true, effectiveModelConfig: null }, 'chat', true),
+  true,
+);
+assert.strictEqual(shouldShowModelAccessGate({
+  savedModels: [],
+  modelsLoaded: true,
+  effectiveModelConfig: {
+    model: 'platform-default',
+    credential_state: 'configured',
+    requires_user_api_key: false,
+  },
+}, 'chat', true), false, 'a usable platform model must dismiss the access gate');
+assert.strictEqual(
+  shouldShowModelAccessGate(state('missing', {
     credential_mode: 'backend_managed',
     requires_user_api_key: false,
   }), 'chat', true),
@@ -61,7 +79,7 @@ assert.strictEqual(
   'runtime-managed credentials must not open the user API Key gate',
 );
 assert.strictEqual(
-  shouldShowApiKeyGate(state('unavailable', {
+  shouldShowModelAccessGate(state('unavailable', {
     credential_mode: 'backend_managed',
     requires_user_api_key: false,
   }), 'chat', true),
@@ -69,30 +87,30 @@ assert.strictEqual(
   'temporary backend credential failures must stay in the backend-managed flow',
 );
 assert.strictEqual(
-  shouldShowApiKeyGate(state('unavailable', {
+  shouldShowModelAccessGate(state('unavailable', {
     credential_mode: 'none',
     requires_user_api_key: false,
   }), 'chat', true),
   false,
   'no-auth models must not open the user API Key gate',
 );
-assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'settings', true), false);
-assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'chat', false), false);
+assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'settings', true), false);
+assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'chat', false), false);
 assert.strictEqual(
-  shouldShowApiKeyGate(state('missing', {
+  shouldShowModelAccessGate(state('missing', {
     preset: 'openai_compatible',
     base_url: 'http://127.0.0.1:11434/v1',
   }), 'chat', true),
   false,
 );
 assert.strictEqual(
-  shouldShowApiKeyGate({
+  shouldShowModelAccessGate({
     ...state('missing'),
     scheduledRunContext: { id: 'run-1' },
   }, 'scheduled', true),
   true,
 );
-assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'scheduled', true), false);
+assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'scheduled', true), false);
 
 // 会话切换/热切模型必须把 sessionId 传给后端重新解析真正生效的模型，不能继续沿用全局默认。
 assert.match(

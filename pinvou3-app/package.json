@@ -99,6 +99,7 @@
     "test:team-relay-ui": "node tests/team_relay_action_smoke.mjs",
     "test:web-bootstrap": "node tests/web_bootstrap_transport.test.mjs",
     "test:api-key-gate": "node tests/api_key_gate_logic.test.js",
+    "test:model-access-gate": "node tests/api_key_gate_logic.test.js && node --test tests/model_access_gate_contract.test.mjs",
     "test:artifact-deliverable": "node tests/artifact_deliverable_logic.test.js",
     "test:canonical-tools": "node tests/canonical_tool_contract.test.js",
     "test:artifact-preview": "node tests/artifact_preview_navigation.test.mjs",

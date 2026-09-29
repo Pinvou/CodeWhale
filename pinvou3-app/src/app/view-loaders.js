@@ -23,7 +23,7 @@ export const VIEW_LOADERS = {
   pinvouSummon: () => import('../features/tools/PinvouSummonCard.jsx'),
   updateNotice: () => import('../features/updater/UpdateNoticeButton.jsx'),
   savedPersonaConfirmDialog: () => import('../features/personas/SavedPersonaConfirmDialog.jsx'),
-  apiKeyGateDialog: () => import('../features/settings/ApiKeyGateDialog.jsx'),
+  modelAccessGate: () => import('../features/settings/ModelAccessGate.jsx'),
   archiveConfirmDialog: () => import('../features/sessions/ArchiveConfirmDialog.jsx'),
   // chat is not here: the main window renders ChatView at startup and imports
   // it statically in main.jsx; a dynamic import would not produce a separate

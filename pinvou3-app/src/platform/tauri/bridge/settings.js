@@ -216,9 +216,11 @@
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
       state.defaultModelRef = (v && v.default_model_ref) || null;
+      state.modelsLoaded = true;
     } catch (e) {
       if (seq !== modelsLoadSeq) return;
       state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
+      state.modelsLoaded = false;
     }
     notify();
   }

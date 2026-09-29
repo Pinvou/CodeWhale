@@ -335,7 +335,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
   );
 }
 
-export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, requestedView, onClose }) {
+export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, requestedView, presentation = 'popover', onClose }) {
   const panelRef = useRef(null);
   const requestRef = useRef({ generation: 0, controller: null });
   const contextSyncRef = useRef({
@@ -379,6 +379,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [rechargeError, setRechargeError] = useState('');
   const [rechargeNotice, setRechargeNotice] = useState('');
   const isDark = theme === 'dark';
+  const isScreen = presentation === 'screen';
 
   useEffect(() => {
     setPassword('');
@@ -649,7 +650,12 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const access = personalSurfaceAccess(me);
   const displayName = accountDisplayLabel(me, copy.user);
   const panelPosition = collapsed ? 'left-full bottom-0 ml-3' : 'left-0 bottom-full mb-2';
-  const panelTheme = isDark ? 'bg-[#202124]/95 border-white/10 text-[#E3E3E3]' : 'bg-white/95 border-black/10 text-[#1F1F1F]';
+  const panelTheme = isDark
+    ? `${isScreen ? 'bg-[#1B1C1F]' : 'bg-[#202124]/95'} border-white/10 text-[#E3E3E3]`
+    : `${isScreen ? 'bg-white' : 'bg-white/95'} border-black/10 text-[#1F1F1F]`;
+  const panelLayout = isScreen
+    ? 'relative max-h-[calc(100vh-48px)] w-[380px] max-w-[calc(100vw-32px)] overflow-y-auto rounded-[24px] border p-4 shadow-[0_24px_72px_rgba(15,23,42,.16)]'
+    : `absolute ${panelPosition} z-[90] max-h-[calc(100vh-24px)] w-[336px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-[22px] border p-3 shadow-2xl backdrop-blur-xl`;
   const cardTheme = isDark ? 'bg-[#131314] border-white/10' : 'bg-[#F8FAFD] border-black/5';
   const mutedText = isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]';
   const controlTheme = isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]';
@@ -885,7 +891,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   };
 
   return (
-    <div ref={panelRef} data-testid="account-platform-popover" className={`absolute ${panelPosition} z-[90] max-h-[calc(100vh-24px)] w-[336px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-[22px] border p-3 shadow-2xl backdrop-blur-xl ${panelTheme}`}>
+    <div ref={panelRef} data-testid="account-platform-popover" data-presentation={presentation} className={`${panelLayout} ${panelTheme}`}>
       <div className="flex items-center gap-3 px-1.5 pb-3">
         {view === 'recharge' && auth === 'ready' ? (
           <button type="button" onClick={() => setView('account')} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`} title={copy.backToAccount}>

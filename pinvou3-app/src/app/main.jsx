@@ -15,7 +15,7 @@ import { AcpAgentLogo } from '../features/codex/AcpAgentLogo.jsx';
 import { CodexAcpView } from '../features/codex/LazyCodexAcpView.jsx';
 import { PinvouLogo } from '../components/PinvouLogo.jsx';
 import { MobileMoreSheet, MobileTabBar, MobileTopBar } from '../components/layout/MobileShell.jsx';
-import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
+import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
@@ -116,7 +116,7 @@ const LazyRebindFolderDialog = lazy(() => VIEW_LOADERS.rebindFolderDialog().then
 const LazyPinvouSummonModal = lazy(() => VIEW_LOADERS.pinvouSummon().then(m => ({ default: m.PinvouSummonModal })));
 const LazyUpdateNoticeButton = lazy(() => VIEW_LOADERS.updateNotice().then(m => ({ default: m.UpdateNoticeButton })));
 const LazySavedPersonaConfirmDialog = lazy(() => VIEW_LOADERS.savedPersonaConfirmDialog().then(m => ({ default: m.SavedPersonaConfirmDialog })));
-const LazyApiKeyGateDialog = lazy(() => VIEW_LOADERS.apiKeyGateDialog().then(m => ({ default: m.ApiKeyGateDialog })));
+const LazyModelAccessGate = lazy(() => VIEW_LOADERS.modelAccessGate().then(m => ({ default: m.ModelAccessGate })));
 const LazyArchiveConfirmDialog = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m => ({ default: m.ArchiveConfirmDialog })));
 const LazyArchiveToast = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m => ({ default: m.ArchiveToast })));
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
@@ -320,6 +320,7 @@ const NAV_PREFETCH = {
       const activeTheme = resolveTheme(colorScheme, systemDark);
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [accountPopoverRequest, setAccountPopoverRequest] = useState(null);
+      const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
       // that chat's WebView2. The login profile remains globally shared by the
@@ -3348,14 +3349,17 @@ const NAV_PREFETCH = {
         setSearchOverlayOpen(true);
       }, []);
       const handleNavNewChat = useCallback(() => { handleNewChat(); }, [handleNewChat]);
-      const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
+      const modelAccessGateOpen = shouldShowModelAccessGate(bs, currentView, bridge.available);
+      useEffect(() => {
+        if (!modelAccessGateOpen) setModelAccessLoginOpen(false);
+      }, [modelAccessGateOpen]);
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
         personaEditor ? 'persona-editor' : '',
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
-        apiKeyGateOpen ? 'api-key' : '',
+        modelAccessGateOpen ? 'model-access' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
@@ -4360,24 +4364,46 @@ const NAV_PREFETCH = {
               </ViewErrorBoundary>
             )}
 
-            {apiKeyGateOpen && browserOverlayPublicationReady && (
-              // The gate must cover chat in every state of its lazy chunk:
-              // while loading (Suspense fallback) AND after a chunk failure
-              // (ViewErrorBoundary's in-flow error card). Both layers sit
-              // inside this outer backdrop, so React.lazy's cached rejection
-              // can never leave the composer interactable.
+            {modelAccessGateOpen && browserOverlayPublicationReady && (
+              // The opaque shell stays outside the lazy boundary: the chat
+              // surface remains fully covered while either the landing page or
+              // the in-window account screen loads, and also after a chunk error.
               <div
-                className="fixed inset-0 z-[57] flex items-center justify-center overflow-auto p-6"
-                style={{ background: 'rgba(0,0,0,.5)' }}
-                aria-busy="true"
+                data-testid="model-access-layer"
+                className="fixed inset-0 z-[97] flex items-center justify-center overflow-auto p-4 sm:p-6"
+                style={{ background: activeTheme === 'dark' ? '#111416' : '#F7FAF9' }}
+                role="dialog"
+                aria-modal="true"
+                aria-label={t.modelAccessTitle}
               >
                 <ViewErrorBoundary t={t}>
-                  <Suspense fallback={null}>
-                    <LazyApiKeyGateDialog
-                      theme={activeTheme}
-                      t={t}
-                      onOpenModelSettings={() => openSettingsSection('model')}
-                    />
+                  <Suspense fallback={<div role="status" className="text-[13px] opacity-60">{t.loading}</div>}>
+                    {modelAccessLoginOpen ? (
+                      accountPlatformClient ? (
+                        <AccountPlatformPopover
+                          open
+                          presentation="screen"
+                          client={accountPlatformClient}
+                          copy={t.uiAccountPlatform}
+                          language={language}
+                          theme={activeTheme}
+                          requestedView={null}
+                          onClose={() => setModelAccessLoginOpen(false)}
+                        />
+                      ) : (
+                        <div role="status" className="text-[13px] opacity-60">{t.uiAccountPlatform.loading}</div>
+                      )
+                    ) : (
+                      <LazyModelAccessGate
+                        theme={activeTheme}
+                        t={t}
+                        onLogin={() => setModelAccessLoginOpen(true)}
+                        onUseExternalModels={() => {
+                          setModelAccessLoginOpen(false);
+                          openSettingsSection('model');
+                        }}
+                      />
+                    )}
                   </Suspense>
                 </ViewErrorBoundary>
               </div>

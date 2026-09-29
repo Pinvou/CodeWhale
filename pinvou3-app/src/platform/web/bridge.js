@@ -221,6 +221,7 @@
     },
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
+    modelsLoaded: false,
     activeModelId: null,
     defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
@@ -7609,9 +7610,11 @@
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
       state.defaultModelRef = (v && v.default_model_ref) || null;
+      state.modelsLoaded = true;
     } catch (e) {
       if (seq !== modelsLoadSeq) return;
       state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
+      state.modelsLoaded = false;
     }
     notify();
   }
