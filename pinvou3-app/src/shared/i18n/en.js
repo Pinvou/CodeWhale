@@ -2178,6 +2178,7 @@ dictEn["remoteConversation"] = {
   modelSourceDevice: "Device models",
   modelSourceMine: "My models",
   modelPickerTitle: "Model source",
+  modelRequired: "Model is required",
   modelNotExportable: "This model cannot be used remotely",
   modeChat: "Chat mode",
   modeCode: "Code mode",

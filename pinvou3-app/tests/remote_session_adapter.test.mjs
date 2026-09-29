@@ -7,6 +7,7 @@ import {
   newRemoteTaskIntent,
   remoteProxyHandshakeBinding,
   remoteProxyLeaseIdentity,
+  remoteProxyModelSelectionIdentity,
   remoteProxyPresentationState,
   remoteProxyChatItems,
   remoteProxyForSession,
@@ -141,6 +142,10 @@ test('B model intent is ID-free while A temporary intent requires selected allow
   ] };
   const selected = { key: listing.key, modelId: 'exportable-1' };
   assert.equal(selectedExportableRemoteModelId(listing.key, listing, selected), 'exportable-1');
+  assert.equal(selectedExportableRemoteModelId(listing.key, listing, { key: '', modelId: '' }, 'exportable-1'), 'exportable-1');
+  assert.equal(selectedExportableRemoteModelId(listing.key, listing, { key: '', modelId: '' }, null), null);
+  assert.equal(selectedExportableRemoteModelId(listing.key, listing, { key: listing.key, modelId: '' }, 'exportable-1'), null,
+    'an explicit empty selection must not silently restore the configured default');
   assert.deepEqual(newRemoteTaskIntent('hello', 'controlled_device', null), {
     kind: 'new', text: 'hello', mode: 'chat', workspaceId: null, skillIds: [],
     modelSource: 'controlled_device', selectedModelId: null,
@@ -162,6 +167,61 @@ test('B model intent is ID-free while A temporary intent requires selected allow
   assert.equal(selectedExportableRemoteModelId('remote-local-2:lease-1', listing, selected), null,
     'switching local RemoteProxy cannot reuse the previous model selection');
   assert.equal(selectedExportableRemoteModelId(listing.key, listing, { key: 'remote-local-2:lease-1', modelId: 'exportable-1' }), null);
+});
+
+test('model selection survives capability renewal but resets to the configured default for a new lease', () => {
+  const connection = {
+    sessionRef: 'ref-1', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1', capabilityRevision: 3,
+  };
+  const bindingKey = remoteProxyModelSelectionIdentity('remote-local-1', connection);
+  const renewedKey = remoteProxyModelSelectionIdentity('remote-local-1', {
+    ...connection, capabilityRevision: 4,
+  });
+  assert.equal(renewedKey, bindingKey, 'capability renewal is not a new model-selection owner');
+  for (const [field, localSessionId, changed] of [
+    ['local session', 'remote-local-2', {}],
+    ['session ref', 'remote-local-1', { sessionRef: 'ref-2' }],
+    ['connection', 'remote-local-1', { connectionId: 'connection-2' }],
+    ['controller lease', 'remote-local-1', { controllerLeaseId: 'lease-2' }],
+    ['lease epoch', 'remote-local-1', { leaseEpoch: '3' }],
+    ['relay epoch', 'remote-local-1', { relayEpoch: 'relay-2' }],
+    ['generation', 'remote-local-1', { generation: 'generation-2' }],
+  ]) {
+    assert.notEqual(
+      remoteProxyModelSelectionIdentity(localSessionId, { ...connection, ...changed }),
+      bindingKey,
+      `${field} must be part of the model-selection owner`,
+    );
+  }
+
+  const listing = { key: bindingKey, models: [
+    { modelId: 'configured-default', exportable: true },
+    { modelId: 'explicit-model', exportable: true },
+  ] };
+  assert.equal(selectedExportableRemoteModelId(
+    bindingKey, listing, { key: '', modelId: '' }, 'configured-default',
+  ), 'configured-default', 'temporary-model availability initializes from the A-side configured model');
+  assert.equal(selectedExportableRemoteModelId(
+    renewedKey, listing, { key: bindingKey, modelId: 'explicit-model' }, 'configured-default',
+  ), 'explicit-model');
+  assert.equal(selectedExportableRemoteModelId(
+    renewedKey, listing, { key: bindingKey, modelId: '' }, 'configured-default',
+  ), null, 'capability renewal must preserve an explicit empty selection');
+
+  for (const [label, changed] of [
+    ['connection', { connectionId: 'connection-2', capabilityRevision: 1 }],
+    ['lease', { controllerLeaseId: 'lease-2', capabilityRevision: 1 }],
+  ]) {
+    const nextKey = remoteProxyModelSelectionIdentity('remote-local-1', {
+      ...connection, ...changed,
+    });
+    const nextListing = { ...listing, key: nextKey };
+    assert.notEqual(nextKey, bindingKey);
+    assert.equal(selectedExportableRemoteModelId(
+      nextKey, nextListing, { key: bindingKey, modelId: '' }, 'configured-default',
+    ), 'configured-default', `a new ${label} initializes from the A-side configured model`);
+  }
 });
 
 test('late send failure cannot restore text or error across session, lease or capability revision', () => {

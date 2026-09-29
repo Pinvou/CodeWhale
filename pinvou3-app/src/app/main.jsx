@@ -1391,10 +1391,10 @@ const NAV_PREFETCH = {
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
       const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
-      const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
-      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}`;
-      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
+      const [remoteModelSource, setRemoteModelSource] = useState('controller_temporary');
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
+      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
+      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
       const controlledDeviceAutoOpenRef = useRef(null);
       const controlledDeviceAutoOpenInFlightRef = useRef(null);
       const controlledSessionAutoOpenRef = useRef(null);

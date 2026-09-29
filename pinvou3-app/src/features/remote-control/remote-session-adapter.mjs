@@ -162,8 +162,8 @@ export function remoteProxyPresentationState(localSessionId, history, connection
   return liveRemoteProxyBinding(localSessionId, history, connection) ? 'ready' : 'preparing';
 }
 
-// The same complete lease identity scopes model selection, send errors and
-// composer recovery. An old async completion cannot write into a new lease.
+// Dispatch state includes the exact capability revision. An old async
+// completion therefore cannot write into a renewed snapshot or lease.
 export function remoteProxyLeaseIdentity(localSessionId, connection) {
   if (!localSessionId) return '';
   return JSON.stringify([
@@ -178,14 +178,35 @@ export function remoteProxyLeaseIdentity(localSessionId, connection) {
   ]);
 }
 
+// A model choice belongs to the authenticated connection/lease, not to one
+// short-lived capability snapshot. Snapshot renewal must preserve both an
+// explicit model and an explicit empty selection.
+/**
+ * @param {string | null | undefined} localSessionId
+ * @param {{sessionRef?: string, connectionId?: string, controllerLeaseId?: string,
+ *   leaseEpoch?: string | number, relayEpoch?: string, generation?: string} | null | undefined} connection
+ */
+export function remoteProxyModelSelectionIdentity(localSessionId, connection) {
+  if (!localSessionId) return '';
+  return JSON.stringify([
+    localSessionId,
+    connection?.sessionRef || '',
+    connection?.connectionId || '',
+    connection?.controllerLeaseId || '',
+    connection?.leaseEpoch || '',
+    connection?.relayEpoch || '',
+    connection?.generation || '',
+  ]);
+}
+
 export function sameRemoteComposerOwner(sentSessionId, sentIdentity, currentSessionId, currentIdentity) {
   return !!sentSessionId && sentSessionId === currentSessionId
     && !!sentIdentity && sentIdentity === currentIdentity;
 }
 
-export function selectedExportableRemoteModelId(bindingKey, listing, selection) {
-  if (!bindingKey || listing?.key !== bindingKey || selection?.key !== bindingKey) return null;
-  const modelId = selection.modelId;
+export function selectedExportableRemoteModelId(bindingKey, listing, selection, defaultModelId = null) {
+  if (!bindingKey || listing?.key !== bindingKey) return null;
+  const modelId = selection?.key === bindingKey ? selection.modelId : defaultModelId;
   return Array.isArray(listing.models) && listing.models.some(model => (
     model?.exportable === true && model.modelId === modelId
   )) ? modelId : null;

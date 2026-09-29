@@ -2146,6 +2146,7 @@ dictZh["remoteConversation"] = {
   modelSourceDevice: "被控端模型",
   modelSourceMine: "我的模型",
   modelPickerTitle: "模型来源",
+  modelRequired: "模型不能为空",
   modelNotExportable: "该模型不可远程使用",
   modeChat: "普通模式",
   modeCode: "代码模式",

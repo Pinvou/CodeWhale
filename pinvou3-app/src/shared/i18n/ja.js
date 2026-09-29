@@ -2178,6 +2178,7 @@ dictJa["remoteConversation"] = {
   modelSourceDevice: "相手のモデル",
   modelSourceMine: "自分のモデル",
   modelPickerTitle: "モデル",
+  modelRequired: "モデルを選択してください",
   modelNotExportable: "このモデルは遠隔では使用できません",
   modeChat: "通常モード",
   modeCode: "コードモード",
