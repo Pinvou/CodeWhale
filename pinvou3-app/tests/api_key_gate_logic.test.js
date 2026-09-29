@@ -79,6 +79,30 @@ assert.strictEqual(
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'settings', true), false);
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'chat', false), false);
 assert.strictEqual(
+  shouldShowApiKeyGate({
+    ...state('missing'),
+    controlledDevice: { status: 'connected', generation: 'generation-1' },
+  }, 'chat', true),
+  false,
+  'a connected controlled device must not show the local API Key gate after opening chat',
+);
+assert.strictEqual(
+  shouldShowApiKeyGate({
+    ...state('unavailable'),
+    controlledDevice: { status: 'reconnecting', generation: 'generation-1' },
+  }, 'chat', true),
+  false,
+  'a reconnecting controlled device must not flash the local API Key gate',
+);
+assert.strictEqual(
+  shouldShowApiKeyGate({
+    ...state('missing'),
+    controlledDevice: { status: 'stopped', generation: null },
+  }, 'chat', true),
+  true,
+  'the local API Key gate must resume after controlled mode stops',
+);
+assert.strictEqual(
   shouldShowApiKeyGate(state('missing', {
     preset: 'openai_compatible',
     base_url: 'http://127.0.0.1:11434/v1',
