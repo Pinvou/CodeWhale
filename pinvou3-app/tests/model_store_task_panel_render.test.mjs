@@ -122,3 +122,51 @@ test('对照：已取消的卡片显示「已取消」，且不该有任何红�
   assert.match(html, /已取消/);
   assert.doesNotMatch(html, /取消没有生效/);
 });
+
+// ---------------------------------------------------------------- 阶段化进度与简化日志
+
+test('副标题优先给阶段名，不再拿最后一行日志去填', () => {
+  // 原来算不出百分比就把最后一行日志顶上来。装引擎时那一行是 docker 的层进度，
+  // 十几层并行、每层每秒重绘，副标题在原地乱跳——用户的原话是「我看到都一脸懵逼」。
+  const html = render(task({ stage: '正在拉取引擎镜像', lines: ['7014a14111a1: Downloading [==>] 1GB/4GB'] }));
+  assert.match(html, /正在拉取引擎镜像/);
+  assert.doesNotMatch(html, /7014a14111a1/, '层进度又爬回副标题了');
+});
+
+test('估算进度必须标出来——它的分母会往上长，百分比会往回跳', () => {
+  const layers = { aaaaaaaaaaaa: { status: 'Downloading', done: 1000, total: 4000, complete: false } };
+  const html = render(task({ stage: '正在拉取引擎镜像', layers }));
+  assert.match(html, /估算/, '估算没标出来，用户会以为进度条坏了');
+  assert.match(html, /data-progress-estimated="true"/);
+  // 脚本自己报了真分母时不许出现「估算」
+  const real = render(task({ progress: { done: 1, total: 4 } }));
+  assert.doesNotMatch(real, /估算/);
+  assert.match(real, /data-progress-kind="bytes"/);
+});
+
+test('拿不到字节分母时给粗粒度步骤，不假装有字节级进度', () => {
+  const html = render(task({ stage: '正在安装依赖', step: { index: 2, total: 4 } }));
+  assert.match(html, /第 2 步 \/ 共 4 步/);
+  assert.match(html, /data-progress-kind="step"/);
+});
+
+test('展开后：docker 的几十层聚合成一行，且给出「复制详情」', () => {
+  const layers = {
+    aaaaaaaaaaaa: { status: 'Download complete', done: 4000, total: 4000, complete: true },
+    bbbbbbbbbbbb: { status: 'Downloading', done: 1000, total: 4000, complete: false },
+  };
+  const html = render(task({ expanded: true, layers }));
+  assert.match(html, /model-store-task-layers/);
+  assert.match(html, /镜像层 1\/2/);
+  // 「复制详情」是撤简日志的前提：面板上现在只剩阶段化的少量人话，用户要把排查
+  // 信息交给别人时不该靠在一个 160px 高的框里手选。
+  assert.match(html, /model-store-task-copy-log/);
+  assert.match(html, /复制详情/);
+  // 面板上只留最后 500 行、而且过滤过；盘上那份是完整的。
+  assert.match(html, /model-store-task-open-log-dir/);
+});
+
+test('收起状态下不出「复制详情」——没有日志可看，多一个按钮只是噪声', () => {
+  assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-copy-log/);
+});
+

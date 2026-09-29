@@ -10,9 +10,8 @@ import {
   selectedDeployProfile,
   deployProfileLabel,
   MAX_LOG_LINES,
-  UNLOCK_CLICKS,
-  UNLOCK_CLICK_GAP_MS,
-  advanceUnlockClicks,
+  canStopRetainedProcess,
+  lifecycleTaskKey,
   computeSpeed,
   etaSeconds,
   filterStoreCards,
@@ -20,13 +19,18 @@ import {
   libraryStatusOf,
   storeGuideState,
   missingFormFields,
+  applyLayerUpdate,
+  layerSummary,
   operationErrorText,
   operationWarningText,
-  weightVerificationNotice,
-  weightVerificationOf,
+  parseDockerLayerLine,
+  parseDockerSize,
   parseProgressLine,
   parsePromptLine,
+  parseStageLine,
+  parseStepLine,
   progressPercent,
+  taskProgressView,
   reduceLogChunk,
   splitDuration,
   uninstallDoneText,
@@ -39,6 +43,22 @@ import { dictEn } from '../src/shared/i18n/en.js';
 import { dictJa } from '../src/shared/i18n/ja.js';
 
 const emptyState = () => ({ lines: [], progress: null, speed: null, prompt: null, samples: [] });
+
+test('残留实例标记独立于截断日志保留，只对失败启用提供明确停用入口', () => {
+  let state = reduceLogChunk(emptyState(), ['LMM_RETAINED_NATIVE_PROCESS=1'], 0);
+  assert.equal(state.retainedNativeProcess, true);
+  assert.deepEqual(state.lines, []);
+  state = reduceLogChunk(state, Array.from({ length: MAX_LOG_LINES + 10 }, (_, i) => `line ${i}`), 1);
+  assert.equal(state.retainedNativeProcess, true);
+  const failed = { ...state, kind: 'enable', status: 'error', key: lifecycleTaskKey('card-a') };
+  assert.equal(canStopRetainedProcess(failed), true);
+  for (const change of [{ kind: 'download' }, { status: 'running' }, { status: 'success' }, { key: '' }, { retainedNativeProcess: false }]) {
+    assert.equal(canStopRetainedProcess({ ...failed, ...change }), false);
+  }
+  for (const line of ['example LMM_RETAINED_NATIVE_PROCESS=1', 'LMM_RETAINED_NATIVE_PROCESS=0', 'LMM_RETAINED_NATIVE_PROCESS=1 trailing']) {
+    assert.equal(reduceLogChunk(emptyState(), [line], 0).retainedNativeProcess, false);
+  }
+});
 
 test('deployment selection uses the backend default and keeps valid saved choices', () => {
   const record = {
@@ -64,7 +84,6 @@ test('formatBytes：按 1024 进位，B 取整、其余保留一位小数', () =
   assert.equal(formatBytes(1024 ** 3 * 1.5), '1.5GB');
   assert.equal(formatBytes(null), '0B');
 });
-
 test('parseProgressLine：识别进度行，并把已下载夹到总量以内', () => {
   assert.deepEqual(parseProgressLine('LMM_PROGRESS_BYTES=100/200'), { done: 100, total: 200 });
   // 真机上出现过「51.0GB / 30.6GB」：并发下载留下的孤儿临时块被重复统计了
@@ -191,34 +210,6 @@ test('missingFormFields：required 默认为真，空白串不算填了', () => 
   assert.equal(missingFormFields([], {}).length, 0);
 });
 
-test('advanceUnlockClicks：连点够 7 次才算数，计数随即归零', () => {
-  let state = null;
-  for (let i = 1; i < UNLOCK_CLICKS; i += 1) {
-    state = advanceUnlockClicks(state, i * 100);
-    assert.equal(state.reached, false, `第 ${i} 下不该触发`);
-    assert.equal(state.count, i);
-  }
-  state = advanceUnlockClicks(state, UNLOCK_CLICKS * 100);
-  assert.equal(state.reached, true);
-  // 归零：口令框关掉或输错之后，再连点七次应该还能再叫出来一次
-  assert.equal(state.count, 0);
-});
-
-test('advanceUnlockClicks：间隔超过时间窗就重新计数，这一下算新一轮的第一下', () => {
-  let state = { count: 6, lastAt: 1000 };
-  state = advanceUnlockClicks(state, 1000 + UNLOCK_CLICK_GAP_MS + 1);
-  assert.equal(state.reached, false);
-  assert.equal(state.count, 1);
-  // 卡在窗口边界上的那一下仍然算连点（> 才重置，不是 >=）
-  state = { count: 6, lastAt: 1000 };
-  assert.equal(advanceUnlockClicks(state, 1000 + UNLOCK_CLICK_GAP_MS).reached, true);
-});
-
-test('advanceUnlockClicks：第一次点击没有历史状态，也不会把 NaN 带进计数', () => {
-  assert.deepEqual(advanceUnlockClicks(null, 0), { count: 1, lastAt: 0, reached: false });
-  assert.deepEqual(advanceUnlockClicks(undefined, 500), { count: 1, lastAt: 500, reached: false });
-});
-
 // —— 卸载完成文案：必须按服务端回的实际结果说话 ——
 //
 // 这几条测的是一个真实踩过的坑：卸载脚本退出 0、库记录已删，但权重目录其实没删掉
@@ -306,55 +297,212 @@ test('uninstallOptionsFor：只下载过、没部署过时只给「删除」', (
   assert.equal(uninstallOptionsFor(null), 'delete-only');
 });
 
-// ---------------------------------------------- 权重校验档位
-//
-// 这一档管的是「用户凭什么相信下下来的权重就是卡片声称的那份」。内置卡之间差着
-// 两个数量级（有的逐文件比官方 sha256，有的只查文件存不存在），而详情页在加这条
-// 黄条之前长得一模一样。
-//
-// 所以这里最要紧的不是三个取值分得清，而是**认不出来时落在哪一档**：落错方向的
-// 话，所有没声明的卡都会静默地被摆成"已校验"，这条提示从上线第一天起就只对
-// "记得填的人"生效。
-test('weightVerificationOf：认识的三档原样返回', () => {
-  assert.equal(weightVerificationOf({ weight_verification: 'sha256sums' }), 'sha256sums');
-  assert.equal(weightVerificationOf({ weight_verification: 'manifest' }), 'manifest');
-  assert.equal(weightVerificationOf({ weight_verification: 'none' }), 'none');
-});
-
-test('weightVerificationOf：字段缺失 / 认不出来一律按最不安全那一档', () => {
-  // 老后台不下发、卡片作者忘了填
-  assert.equal(weightVerificationOf({}), 'none');
-  assert.equal(weightVerificationOf({ weight_verification: null }), 'none');
-  // 商店列表还没拉回来、或这张卡已经下架
-  assert.equal(weightVerificationOf(null), 'none');
-  assert.equal(weightVerificationOf(undefined), 'none');
-  // 将来某个版本新增的档位名，这个版本判断不了它的强度，不能替用户打包票
-  assert.equal(weightVerificationOf({ weight_verification: 'signed' }), 'none');
-  // 大小写不算数：Rust 侧下发的就是 snake_case 小写，别在这儿自作主张放宽
-  assert.equal(weightVerificationOf({ weight_verification: 'SHA256SUMS' }), 'none');
-});
-
-test('weightVerificationNotice：达标卡不出黄条，不达标的两档各有各的说法', () => {
-  assert.equal(weightVerificationNotice({ weight_verification: 'sha256sums' }), null);
-  assert.deepEqual(
-    weightVerificationNotice({ weight_verification: 'manifest' }),
-    { bodyKey: 'weightVerifyManifest' }
-  );
-  assert.deepEqual(
-    weightVerificationNotice({ weight_verification: 'none' }),
-    { bodyKey: 'weightVerifyNone' }
-  );
-  // manifest 不能跟 none 合并成一句「未校验」：它确实逐文件比对过摘要，只是参照
-  // 跟权重同源。说成没校验是不实的，用户照着那句话重下一遍也解决不了任何问题。
-  assert.notDeepEqual(
-    weightVerificationNotice({ weight_verification: 'manifest' }),
-    weightVerificationNotice({ weight_verification: 'none' })
+test('uninstallOptionsFor：删不干净的模型只能继续清理，不能伪装成重新下载', () => {
+  assert.equal(
+    uninstallOptionsFor({ status: 'cleanup_required', running: false, weights_ready_at: '2026-10-12T00:00:00Z' }),
+    'cleanup-only'
   );
 });
 
-test('weightVerificationNotice：没声明的卡出黄条，而且出的是最狠那一句', () => {
-  assert.deepEqual(weightVerificationNotice({}), { bodyKey: 'weightVerifyNone' });
-  assert.deepEqual(weightVerificationNotice(null), { bodyKey: 'weightVerifyNone' });
+// ---------------------------------------------------------------- 阶段化进度
+
+test('parseProgressLine：吃得下宿主加的阶段前缀——这个正则刻意没有 ^ 锚定', () => {
+  // 🔴 这条是**回归守卫**，不是补充覆盖。给 parseProgressLine 的正则"顺手"加上 `^`
+  // 之后，进度条会**静默**全灭：没有报错、没有异常，只是永远不出现进度。
+  // 宿主给日志行加过 `[下载模型] ` / `[安装引擎] ` 前缀（Rust 侧
+  // script_runner::prefix_log_line 现在放协议行原样通过，但设备上跑着的旧版本会加），
+  // 不锚定是这条链路唯一的容错点。
+  assert.deepEqual(parseProgressLine('[下载模型] LMM_PROGRESS_BYTES=1/2'), { done: 1, total: 2 });
+  assert.deepEqual(parseProgressLine('[安装引擎] LMM_PROGRESS_BYTES=3/4'), { done: 3, total: 4 });
+});
+
+test('parseStageLine / parseStepLine：阶段名与粗粒度步骤', () => {
+  assert.equal(parseStageLine('LMM_STAGE=正在拉取引擎镜像'), '正在拉取引擎镜像');
+  assert.equal(parseStageLine('[安装引擎] LMM_STAGE=正在安装依赖'), '正在安装依赖');
+  // 空阶段名等于没说，别把副标题变成一个空位
+  assert.equal(parseStageLine('LMM_STAGE='), null);
+  assert.equal(parseStageLine('普通日志'), null);
+
+  assert.deepEqual(parseStepLine('LMM_STEP=2/4'), { index: 2, total: 4 });
+  // 步数超过总数就夹住，界面不该出现「第 9 步 / 共 4 步」
+  assert.deepEqual(parseStepLine('LMM_STEP=9/4'), { index: 4, total: 4 });
+  assert.equal(parseStepLine('LMM_STEP=1/0'), null);
+  assert.equal(parseStepLine('普通日志'), null);
+  // 同组的 progress / stage / docker 三个都有带前缀的回归测试，这个也要有：
+  // 这一组正则刻意都不锚定，好吃得下宿主加的 `[安装引擎] ` 前缀。加上 `^` 的话
+  // 失效是**静默的**——界面上不报错，只是步骤进度永远不出现。
+  assert.deepEqual(parseStepLine('[安装引擎] LMM_STEP=2/4'), { index: 2, total: 4 });
+});
+
+test('parseDockerSize：1000 进位的 GB 与 1024 进位的 GiB 是两回事', () => {
+  // 把 4.07GB 当成 1024 进位会让分母凭空大 7%，而这个分母正是进度条的分母。
+  assert.equal(parseDockerSize('4.07GB'), 4.07 * 1000 ** 3);
+  assert.equal(parseDockerSize('1GiB'), 1024 ** 3);
+  assert.equal(parseDockerSize('512kB'), 512 * 1000);
+  assert.equal(parseDockerSize('说不清'), 0);
+});
+
+test('parseDockerLayerLine：认出 docker 的逐层刷屏，含前缀也认', () => {
+  assert.deepEqual(parseDockerLayerLine('[安装引擎] ae5a106b6076: Pulling fs layer'), {
+    id: 'ae5a106b6076',
+    status: 'Pulling fs layer',
+    done: 0,
+    total: 0,
+    complete: false,
+  });
+  const downloading = parseDockerLayerLine('[安装引擎] 7014a14111a1: Downloading [====>    ]  1.967GB/4.07GB');
+  assert.equal(downloading.id, '7014a14111a1');
+  assert.equal(downloading.done, 1.967 * 1000 ** 3);
+  assert.equal(downloading.total, 4.07 * 1000 ** 3);
+  assert.equal(downloading.complete, false);
+  assert.equal(parseDockerLayerLine('ae5a106b6076: Download complete').complete, true);
+  assert.equal(parseDockerLayerLine('abcdef123456: Already exists').complete, true);
+  // 普通日志、以及没有层 id 的 docker 行不该被吞掉
+  assert.equal(parseDockerLayerLine('Status: Downloaded newer image for vllm/vllm-openai:v0.8.5'), null);
+  assert.equal(parseDockerLayerLine('正在下载 …'), null);
+});
+
+test('applyLayerUpdate：记住已知总量，别让分母在最后一刻塌掉', () => {
+  let layers = applyLayerUpdate(null, parseDockerLayerLine('aaaaaaaaaaaa: Downloading [==>  ] 1GB/4GB'));
+  // Verifying Checksum / Download complete 都不带 x/y。不记住总量的话，
+  // 这一层的分母会归零，进度条在最后一秒跳回 0%。
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('aaaaaaaaaaaa: Download complete'));
+  assert.equal(layers.aaaaaaaaaaaa.total, 4 * 1000 ** 3);
+  assert.equal(layers.aaaaaaaaaaaa.done, 4 * 1000 ** 3);
+  assert.equal(layers.aaaaaaaaaaaa.complete, true);
+});
+
+test('layerSummary：层数、完成数、字节汇总', () => {
+  let layers = applyLayerUpdate(null, parseDockerLayerLine('aaaaaaaaaaaa: Downloading [=> ] 1GB/4GB'));
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('bbbbbbbbbbbb: Download complete'));
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('cccccccccccc: Pulling fs layer'));
+  const summary = layerSummary(layers);
+  assert.equal(summary.count, 3);
+  assert.equal(summary.complete, 1);
+  assert.equal(summary.done, 1 * 1000 ** 3);
+  assert.equal(summary.total, 4 * 1000 ** 3);
+  assert.equal(layerSummary(null), null);
+});
+
+test('reduceLogChunk：docker 的逐层刷屏不进日志，聚合进层表', () => {
+  // 用户的原话：「不要滚动的闪日志，这样很乱」。截图上刷的就是这些行。
+  const next = reduceLogChunk(
+    { lines: [], progress: null, speed: null, prompt: null, samples: [] },
+    [
+      '[安装引擎] 正在拉取镜像 vllm/vllm-openai:v0.8.5',
+      '[安装引擎] ae5a106b6076: Pulling fs layer',
+      '[安装引擎] 7014a14111a1: Pulling fs layer',
+      '[安装引擎] 7014a14111a1: Waiting',
+      '[安装引擎] 7014a14111a1: Downloading [====>  ]  1GB/4GB',
+      '[安装引擎] ae5a106b6076: Download complete',
+    ],
+    1000,
+  );
+  assert.deepEqual(next.lines, ['[安装引擎] 正在拉取镜像 vllm/vllm-openai:v0.8.5']);
+  const summary = layerSummary(next.layers);
+  assert.equal(summary.count, 2);
+  assert.equal(summary.complete, 1);
+  assert.equal(summary.done, 1 * 1000 ** 3);
+});
+
+test('reduceLogChunk：紧挨着的重复行只留一条', () => {
+  // 脚本用 \r 原地重绘时宿主按 \r 切行，同一句话会来几百遍，把真正有用的报错刷没。
+  const next = reduceLogChunk(
+    { lines: [], progress: null, speed: null, prompt: null, samples: [] },
+    ['正在校验 …', '正在校验 …', '正在校验 …', '校验通过', '正在校验 …'],
+    0,
+  );
+  assert.deepEqual(next.lines, ['正在校验 …', '校验通过', '正在校验 …']);
+});
+
+test('reduceLogChunk：换阶段要把上一阶段的进度和测速采样一起清掉', () => {
+  const first = reduceLogChunk(
+    { lines: [], progress: null, speed: null, prompt: null, samples: [] },
+    ['LMM_STAGE=正在拉取引擎镜像', 'LMM_PROGRESS_BYTES=900/1000'],
+    0,
+  );
+  assert.equal(first.stage, '正在拉取引擎镜像');
+  assert.deepEqual(first.progress, { done: 900, total: 1000 });
+  const second = reduceLogChunk(first, ['LMM_STAGE=正在安装依赖'], 5000);
+  // 留着上一阶段的分母会让新阶段一开始就显示 90%；留着采样会把"上一阶段的总量除以
+  // 两次采样的间隔"当成网速报出来。
+  assert.equal(second.stage, '正在安装依赖');
+  assert.equal(second.progress, null);
+  assert.equal(second.speed, null);
+  assert.deepEqual(second.samples, []);
+});
+
+test('taskProgressView：三档按可信度排，绝不编假分母', () => {
+  // 第一档：脚本上报的真实字节
+  const bytes = taskProgressView({ progress: { done: 50, total: 200 } });
+  assert.equal(bytes.kind, 'bytes');
+  assert.equal(bytes.percent, 25);
+  assert.equal(bytes.estimated, false);
+
+  // 第二档：只有 docker 层聚合。分母会随 pull 推进往上长，必须标成估算。
+  let layers = applyLayerUpdate(null, parseDockerLayerLine('aaaaaaaaaaaa: Downloading [=> ] 1GB/4GB'));
+  const estimated = taskProgressView({ progress: null, layers });
+  assert.equal(estimated.kind, 'bytes');
+  assert.equal(estimated.estimated, true);
+  assert.equal(estimated.percent, 25);
+  // 脚本自己报了就以它为准，不拿估算去盖真值
+  layers = applyLayerUpdate(layers, parseDockerLayerLine('bbbbbbbbbbbb: Downloading [=> ] 0GB/100GB'));
+  assert.equal(taskProgressView({ progress: { done: 1, total: 2 }, layers }).estimated, false);
+
+  // 第三档：连字节都没有（pip 的依赖总量要等解析完才知道）
+  const step = taskProgressView({ progress: null, layers: null, step: { index: 2, total: 4 } });
+  assert.equal(step.kind, 'step');
+  assert.equal(step.percent, 50);
+
+  // 三档都不成立就说没有，界面退化成不确定态——这也是诚实的
+  assert.equal(taskProgressView({ progress: null, layers: null, step: null }), null);
+  assert.equal(taskProgressView(null), null);
+});
+
+test('达到字节上限不代表任务完成；仅后端成功才退出等待态', () => {
+  const progress = { done: 100, total: 100 };
+  assert.equal(taskProgressView({ status: 'running', progress }).awaitingCompletion, true);
+  assert.equal(taskProgressView({ status: 'done', progress }).awaitingCompletion, false);
+  assert.equal(taskProgressView({ status: 'running', step: { index: 4, total: 4 } }).awaitingCompletion, true);
+  assert.equal(taskProgressView({ status: 'running', progress: { done: 90, total: 100 } }).awaitingCompletion, false);
+  assert.equal(taskProgressView({ status: 'running', progress: { done: 99999, total: 100000 } }).awaitingCompletion, true, 'rounding must not resurrect 100.0%');
+});
+
+// 进度分母可疑时降为 estimated + 0%（客户反馈 728K/2.4TB · 0%）。
+test('taskProgressView 分母可疑（0 或 >1.5TB）时 percent=0 + estimated=true', async () => {
+  const { taskProgressView } = await import('../src/features/model-store/model-store-logic.js');
+  // total=0
+  let v = taskProgressView({ progress: { done: 728000, total: 0 }, status: 'running' });
+  assert.equal(v.kind, 'bytes');
+  assert.equal(v.percent, 0);
+  assert.equal(v.estimated, true);
+  assert.equal(v.done, 728000);
+  // total > 1.5TB
+  v = taskProgressView({ progress: { done: 728000, total: 2.4e12 }, status: 'running' });
+  assert.equal(v.percent, 0);
+  assert.equal(v.estimated, true);
+  // 正常 total
+  v = taskProgressView({ progress: { done: 50e9, total: 168e9 }, status: 'running' });
+  assert.ok(v.percent > 0);
+  assert.equal(v.estimated, false);
+});
+
+// r33 P2-3：done 态短路——完成卡不被可疑分母拖回 2% 估算条。
+test('taskProgressView 分母可疑但任务已 done 时不降级为 2% 估算条', async () => {
+  const { taskProgressView } = await import('../src/features/model-store/model-store-logic.js');
+  // done + total=0：不走 estimated 降级，落到 percent=null → null（完成卡不渲染进度条）
+  let v = taskProgressView({ progress: { done: 728000, total: 0 }, status: 'done' });
+  assert.equal(v, null);
+  // done + 分母量大但数值自洽（done=total）：短路后走正常百分比臂，满条 100%，
+  // 不再被拖回 estimated 2% 条（r33 P2-3 的实机回归场景：2.4TB 下完那一刻倒退）
+  v = taskProgressView({ progress: { done: 2.4e12, total: 2.4e12 }, status: 'done' });
+  assert.equal(v.percent, 100);
+  assert.equal(v.estimated, false);
+  assert.equal(v.awaitingCompletion, false);
+  // 对照：running + 可疑分母仍走降级（原修复行为不变）
+  v = taskProgressView({ progress: { done: 728000, total: 0 }, status: 'running' });
+  assert.equal(v.estimated, true);
+  assert.equal(v.percent, 0);
 });
 
 test('operationWarningText：警告码按语言渲染，未知字符串原样回退', () => {
