@@ -97,6 +97,12 @@ Nginx 的 `client_max_body_size` 设为 `4224m`，为 4 GiB 安装器之外的 m
    `curl -fsS https://pinvou.com/pinvou3/latest.json >/dev/null` 验证公网清单可读。
 5. 打开 `https://pinvou.com/pinvou3/release-console/`，输入管理令牌。
 
+> **双服务器拓扑**：发布台容器只写它所在机器的 `/var/www/pinvou3`（volume 挂载，
+> 见 `deploy/compose.yaml`），落盘机即清单生效机。`pinvou.com` 的 DNS 指向
+> nginx-edge（8.138.39.140），与发布源站 8.218.49.20 无自动同步——部署前须确认
+> 发布台放在哪台、另一台如何保持一致，按
+> [应用内升级-设计](应用内升级-设计.md)「服务端现状」执行，否则公网可能读到旧清单。
+
 如果服务器不是 `pinvou.com`，先同步修改 Compose 中的 `PINVOU_UPDATE_PUBLIC_BASE_URL` 和
 Nginx 路径。不要把管理服务端口绑定到公网地址。
 
