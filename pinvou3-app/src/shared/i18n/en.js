@@ -2218,6 +2218,7 @@ dictEn["remoteConversation"] = {
   draftCapacityExceeded: "This draft could not be kept across conversations because the temporary draft limit was reached. Copy it before switching away.",
   sessionBusy: "This remote session is running a task. Try again shortly; your message was kept.",
   temporaryModelCapabilityRequired: "The other device does not support using your model yet. Update both clients and reconnect, or use the controlled device's model.",
+  controlledModelCredentialUnavailable: "The controlled device's current model has no credentials. Configure the model there, or retry using your model.",
   errorGeneric: "The operation failed. Please try again.",
   attachmentOnlyPrompt: "Process the attachments submitted with this task.",
   addAttachment: "Add remote attachment",

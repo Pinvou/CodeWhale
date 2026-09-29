@@ -2462,7 +2462,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           ? t.remoteConversation.temporaryModelCapabilityRequired
           : (currentRemoteSendError === 'remote_model_required'
             ? t.remoteConversation.modelRequired
-            : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null)));
+            : (currentRemoteSendError === 'model_credential_unavailable'
+              ? t.remoteConversation.controlledModelCredentialUnavailable
+              : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null))));
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');

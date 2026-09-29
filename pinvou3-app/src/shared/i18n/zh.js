@@ -2186,6 +2186,7 @@ dictZh["remoteConversation"] = {
   draftCapacityExceeded: "临时草稿容量已满，切换会话后无法保留此草稿。请先复制正文。",
   sessionBusy: "当前远程会话正在执行任务，请稍后重试；消息已保留。",
   temporaryModelCapabilityRequired: "对方版本暂不支持使用你的模型。请升级双方客户端并重新连接，或改用被控端模型。",
+  controlledModelCredentialUnavailable: "被控端当前模型尚未配置凭据。请在被控端完成模型配置，或改用你的模型后重试。",
   errorGeneric: "操作失败，请稍后重试。",
   attachmentOnlyPrompt: "请处理随任务提交的附件。",
   addAttachment: "添加远程附件",

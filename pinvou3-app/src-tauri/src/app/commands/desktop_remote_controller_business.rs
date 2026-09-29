@@ -213,6 +213,7 @@ fn submit_error(code: &str) -> UseCaseError {
         "lease_unavailable" => UseCaseError::new("lease_unavailable", true),
         "model_binding_invalid" => UseCaseError::new("model_binding_invalid", false),
         "model_binding_stale" => UseCaseError::new("model_binding_stale", true),
+        "model_credential_unavailable" => UseCaseError::new("model_credential_unavailable", false),
         "model_credential_invalid" => UseCaseError::new("model_credential_invalid", false),
         "model_credential_kind_unsupported" => {
             UseCaseError::new("model_credential_kind_unsupported", false)
@@ -247,6 +248,7 @@ fn submit_error(code: &str) -> UseCaseError {
             UseCaseError::new("model_reasoning_effort_unsupported", false)
         }
         "model_route_invalid" => UseCaseError::new("model_route_invalid", false),
+        "model_runtime_unavailable" => UseCaseError::new("model_runtime_unavailable", true),
         "model_secret_invalid" => UseCaseError::new("model_secret_invalid", false),
         "model_secret_too_large" => UseCaseError::new("model_secret_too_large", false),
         "model_vendor_unsupported" => UseCaseError::new("model_vendor_unsupported", false),
