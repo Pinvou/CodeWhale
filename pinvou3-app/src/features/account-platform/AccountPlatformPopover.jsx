@@ -8,6 +8,7 @@ import { effectivePaymentChannel, hasSelectablePaymentChannels, isPayablePayment
 import { localizedAccountPlatformError } from './error-localization.js';
 import { PasswordInput } from './PasswordInput.jsx';
 import { accountDisplayLabel } from './account-display-label.js';
+import { createAuthenticatedRefreshCoordinator } from './authenticated-refresh.js';
 import {
   createRechargeForTarget,
   loadRechargeTarget,
@@ -335,8 +336,11 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
   );
 }
 
-export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, requestedView, presentation = 'popover', onClose }) {
+export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, requestedView, presentation = 'popover', onAuthenticated, onClose }) {
   const panelRef = useRef(null);
+  const authenticatedRefreshRef = useRef(null);
+  if (!authenticatedRefreshRef.current) authenticatedRefreshRef.current = createAuthenticatedRefreshCoordinator();
+  const authenticatedRefreshOpenRef = useRef(false);
   const requestRef = useRef({ generation: 0, controller: null });
   const contextSyncRef = useRef({
     versions: {},
@@ -381,6 +385,11 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const isDark = theme === 'dark';
   const isScreen = presentation === 'screen';
 
+  const refreshAuthenticatedModelAccess = useCallback(() => {
+    if (!isScreen || typeof onAuthenticated !== 'function') return Promise.resolve(false);
+    return authenticatedRefreshRef.current.run(onAuthenticated);
+  }, [isScreen, onAuthenticated]);
+
   useEffect(() => {
     setPassword('');
     setPasswordConfirmation('');
@@ -408,6 +417,11 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         if (session.errorCode && session.errorCode !== 'account_platform_disabled') setError(localizedError(copy, session.errorCode));
         return;
       }
+      // The screen can open with an existing authenticated desktop session.
+      // Refresh model authority once per open before showing account details;
+      // submitLogin reaches the same single-flight path through loadAccount.
+      await refreshAuthenticatedModelAccess();
+      if (!isCurrent()) return;
       const nextAccount = await client.bootstrap(controller.signal);
       if (!isCurrent()) return;
       contextSyncRef.current.versions = authorizationVersions(nextAccount);
@@ -441,7 +455,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         }
       }
     }
-  }, [client, copy]);
+  }, [client, copy, refreshAuthenticatedModelAccess]);
 
   const loadRecharge = useCallback(async (target = rechargeTarget) => {
     rechargeRequestRef.current.controller?.abort();
@@ -467,10 +481,16 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
   useEffect(() => {
     if (open) {
+      if (!authenticatedRefreshOpenRef.current) {
+        authenticatedRefreshOpenRef.current = true;
+        authenticatedRefreshRef.current.reset();
+      }
       setView('account');
       setAuth('loading');
       void loadAccount();
     } else {
+      authenticatedRefreshOpenRef.current = false;
+      authenticatedRefreshRef.current.invalidate();
       requestRef.current.controller?.abort();
       requestRef.current.generation += 1;
       rechargeRequestRef.current.controller?.abort();
@@ -891,7 +911,22 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   };
 
   return (
-    <div ref={panelRef} data-testid="account-platform-popover" data-presentation={presentation} className={`${panelLayout} ${panelTheme}`}>
+    <div
+      ref={panelRef}
+      data-testid="account-platform-popover"
+      data-presentation={presentation}
+      className={`${panelLayout} ${panelTheme}`}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        if (captcha && !busy) {
+          setCaptcha(null);
+          setCaptchaOffset(0);
+          return;
+        }
+        onClose?.();
+      }}
+    >
       <div className="flex items-center gap-3 px-1.5 pb-3">
         {view === 'recharge' && auth === 'ready' ? (
           <button type="button" onClick={() => setView('account')} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`} title={copy.backToAccount}>
@@ -969,6 +1004,8 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               placeholder={loginMode === 'register' ? copy.registrationUsername : copy.mobileOrAccount}
               aria-label={loginMode === 'register' ? copy.username : copy.mobileOrAccount}
               autoComplete="username"
+              autoFocus={isScreen && (loginMode === 'password' || loginMode === 'register')}
+              data-modal-initial-focus={isScreen && (loginMode === 'password' || loginMode === 'register') ? 'true' : undefined}
               className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`}
             />
           )}
@@ -988,6 +1025,8 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               aria-label={copy.mobile}
               inputMode="tel"
               autoComplete="tel-national"
+              autoFocus={isScreen && (loginMode === 'sms' || loginMode === 'forgot')}
+              data-modal-initial-focus={isScreen && (loginMode === 'sms' || loginMode === 'forgot') ? 'true' : undefined}
               className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`}
             />
           )}

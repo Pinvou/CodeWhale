@@ -2963,6 +2963,7 @@
     },
     models: {
       getEffectiveModelConfig: getEffectiveModelConfig,
+      loadEffectiveModelConfig: loadEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,

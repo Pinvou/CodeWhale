@@ -16,8 +16,10 @@ import { CodexAcpView } from '../features/codex/LazyCodexAcpView.jsx';
 import { PinvouLogo } from '../components/PinvouLogo.jsx';
 import { MobileMoreSheet, MobileTabBar, MobileTopBar } from '../components/layout/MobileShell.jsx';
 import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
+import { useModalIsolation } from '../hooks/useModalIsolation.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
+import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
@@ -321,6 +323,8 @@ const NAV_PREFETCH = {
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [accountPopoverRequest, setAccountPopoverRequest] = useState(null);
       const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
+      const modelAccessLayerRef = useRef(null);
+      const modelAccessSettingsFocusPendingRef = useRef(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
       // that chat's WebView2. The login profile remains globally shared by the
@@ -3350,9 +3354,29 @@ const NAV_PREFETCH = {
       }, []);
       const handleNavNewChat = useCallback(() => { handleNewChat(); }, [handleNewChat]);
       const modelAccessGateOpen = shouldShowModelAccessGate(bs, currentView, bridge.available);
+      const refreshModelAccess = useCallback(
+        () => refreshModelAccessAfterAuthentication(bridge.models),
+        [],
+      );
       useEffect(() => {
         if (!modelAccessGateOpen) setModelAccessLoginOpen(false);
       }, [modelAccessGateOpen]);
+      useEffect(() => {
+        if (currentView !== 'settings' || !modelAccessSettingsFocusPendingRef.current) return undefined;
+        const focusSettings = () => {
+          const target = document.querySelector('[data-testid="settings-close"]');
+          if (!(target instanceof HTMLElement)) return false;
+          modelAccessSettingsFocusPendingRef.current = false;
+          target.focus({ preventScroll: true });
+          return true;
+        };
+        if (focusSettings()) return undefined;
+        const observer = new MutationObserver(() => {
+          if (focusSettings()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        return () => observer.disconnect();
+      }, [currentView]);
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
@@ -3367,6 +3391,9 @@ const NAV_PREFETCH = {
       ].filter(Boolean).join('|');
       const browserOverlayPublicationReady = !!browserOverlayIntent
         && publishedBrowserOverlayIntent === browserOverlayIntent;
+      // Keep this hook unconditional, but only activate isolation after the
+      // native-surface publication barrier has committed the blocking layer.
+      useModalIsolation(modelAccessGateOpen && browserOverlayPublicationReady, modelAccessLayerRef);
       // Keep the surface hidden while one already-published overlay hands off to
       // another. The replacement itself is still withheld until its own barrier
       // attempt has settled.
@@ -4369,12 +4396,15 @@ const NAV_PREFETCH = {
               // surface remains fully covered while either the landing page or
               // the in-window account screen loads, and also after a chunk error.
               <div
+                ref={modelAccessLayerRef}
                 data-testid="model-access-layer"
-                className="fixed inset-0 z-[97] flex items-center justify-center overflow-auto p-4 sm:p-6"
+                className="fixed inset-0 z-[2147483647] flex items-center justify-center overflow-auto p-4 sm:p-6"
                 style={{ background: activeTheme === 'dark' ? '#111416' : '#F7FAF9' }}
                 role="dialog"
                 aria-modal="true"
                 aria-label={t.modelAccessTitle}
+                tabIndex={-1}
+                onKeyDown={(event) => event.stopPropagation()}
               >
                 <ViewErrorBoundary t={t}>
                   <Suspense fallback={<div role="status" className="text-[13px] opacity-60">{t.loading}</div>}>
@@ -4388,6 +4418,7 @@ const NAV_PREFETCH = {
                           language={language}
                           theme={activeTheme}
                           requestedView={null}
+                          onAuthenticated={refreshModelAccess}
                           onClose={() => setModelAccessLoginOpen(false)}
                         />
                       ) : (
@@ -4400,6 +4431,7 @@ const NAV_PREFETCH = {
                         onLogin={() => setModelAccessLoginOpen(true)}
                         onUseExternalModels={() => {
                           setModelAccessLoginOpen(false);
+                          modelAccessSettingsFocusPendingRef.current = true;
                           openSettingsSection('model');
                         }}
                       />

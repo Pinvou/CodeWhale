@@ -36,6 +36,7 @@ export function ModelAccessGate({ onLogin, onUseExternalModels, t, theme }) {
         <button
           type="button"
           data-testid="model-access-login"
+          data-modal-initial-focus="true"
           onClick={onLogin}
           className="flex h-12 w-full items-center justify-center gap-2 rounded-[14px] bg-[#0F766E] px-5 text-[15px] font-semibold text-white transition-colors hover:bg-[#0B655E] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#14B8A6] focus-visible:ring-offset-2 dark:bg-[#2DD4BF] dark:text-[#073B37] dark:hover:bg-[#5EEAD4] dark:focus-visible:ring-offset-[#111416]"
         >

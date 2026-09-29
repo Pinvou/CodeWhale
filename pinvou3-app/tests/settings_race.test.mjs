@@ -61,6 +61,62 @@ function loadSettingsFeature() {
   return loadFeature('settings.js', state, { listen() {} });
 }
 
+test('model refresh loaders return explicit success and preserve the last authority on swallowed failures', async () => {
+  const success = loadSettingsFeature();
+  assert.equal(await success.api.loadModels(), true);
+  assert.equal(await success.api.loadEffectiveModelConfig(), true);
+  assert.equal(success.state.modelsLoaded, true);
+
+  const modelFailure = loadSettingsFeature();
+  modelFailure.state.savedModels = [{ id: 'known-model' }];
+  modelFailure.state.activeModelId = 'known-model';
+  modelFailure.state.modelsLoaded = true;
+  const failedModels = modelFailure.defer('list_models');
+  const modelResult = modelFailure.api.loadModels();
+  failedModels.reject(new Error('catalog unavailable'));
+  assert.equal(await modelResult, false);
+  assert.equal(modelFailure.state.modelsLoaded, true);
+  assert.equal(modelFailure.state.savedModels[0].id, 'known-model');
+
+  const configFailure = loadSettingsFeature();
+  configFailure.state.effectiveModelConfig = { credential_state: 'missing' };
+  const failedConfig = configFailure.defer('get_effective_model_config');
+  const configResult = configFailure.api.loadEffectiveModelConfig();
+  failedConfig.reject(new Error('effective config unavailable'));
+  assert.equal(await configResult, false);
+  assert.equal(configFailure.state.effectiveModelConfig.credential_state, 'missing');
+});
+
+test('loadEffectiveModelConfig is last-request-wins for the same active session', async () => {
+  const rt = loadSettingsFeature();
+  const first = rt.defer('get_effective_model_config');
+  const firstLoad = rt.api.loadEffectiveModelConfig();
+  const second = rt.defer('get_effective_model_config');
+  const secondLoad = rt.api.loadEffectiveModelConfig();
+  second.resolve({ model: 'new-model', credential_state: 'available' });
+  assert.equal(await secondLoad, true);
+  first.resolve({ model: 'stale-model', credential_state: 'missing' });
+  assert.equal(await firstLoad, false);
+  assert.equal(rt.state.effectiveModelConfig.model, 'new-model');
+  assert.equal(rt.state.effectiveModelConfig.credential_state, 'available');
+});
+
+test('loadSessionModel cannot overwrite a newer authenticated effective-config refresh', async () => {
+  const rt = loadSettingsFeature();
+  rt.state.activeSessionId = 'session-1';
+  const staleSessionConfig = rt.defer('get_effective_model_config');
+  const sessionLoad = rt.api.loadSessionModel('session-1');
+  const authenticatedConfig = rt.defer('get_effective_model_config');
+  const authenticatedLoad = rt.api.loadEffectiveModelConfig('session-1');
+
+  authenticatedConfig.resolve({ model: 'platform-model', credential_state: 'available' });
+  assert.equal(await authenticatedLoad, true);
+  staleSessionConfig.resolve({ model: 'old-model', credential_state: 'missing' });
+  assert.equal(await sessionLoad, false);
+  assert.equal(rt.state.effectiveModelConfig.model, 'platform-model');
+  assert.equal(rt.state.effectiveModelConfig.credential_state, 'available');
+});
+
 test('loadModels 后发者胜（旧列表不得覆盖新列表）', async () => {
   const rt = loadSettingsFeature();
   const d1 = rt.defer('list_models');

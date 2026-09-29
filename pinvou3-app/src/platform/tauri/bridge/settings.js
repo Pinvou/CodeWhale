@@ -119,16 +119,23 @@
   async function setSelectedPet(id) {
     return await invoke("set_selected_pet", { id: id });
   }
+  var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    var seq = ++effectiveModelLoadSeq;
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      if (requestedSessionId !== (state.activeSessionId || null)) return;
+      if (seq !== effectiveModelLoadSeq || requestedSessionId !== (state.activeSessionId || null)) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      state.effectiveModelConfig = null;
+      if (seq !== effectiveModelLoadSeq || requestedSessionId !== (state.activeSessionId || null)) return false;
+      // Preserve the last authoritative snapshot. Callers can observe the
+      // explicit false result without a transient failure erasing a known
+      // missing/available credential state.
+      return false;
     }
     notify();
+    return true;
   }
   var settingsWriteQueue = Promise.resolve();
   function enqueueSettingsWrite(write) {
@@ -212,17 +219,18 @@
     var seq = ++modelsLoadSeq;
     try {
       var v = await invoke("list_models");
-      if (seq !== modelsLoadSeq) return;
+      if (seq !== modelsLoadSeq) return false;
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
       state.defaultModelRef = (v && v.default_model_ref) || null;
       state.modelsLoaded = true;
     } catch (e) {
-      if (seq !== modelsLoadSeq) return;
-      state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
-      state.modelsLoaded = false;
+      if (seq !== modelsLoadSeq) return false;
+      // Keep the previous authoritative catalog on transport failure.
+      return false;
     }
     notify();
+    return true;
   }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
@@ -305,6 +313,7 @@
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
+    var effectiveSeq = ++effectiveModelLoadSeq;
     var requestedSessionId = sessionId || null;
     var results = await Promise.all([
       requestedSessionId
@@ -313,13 +322,17 @@
       requestedSessionId
         ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
         : Promise.resolve(null),
-      invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
+      invoke("get_effective_model_config", { sessionId: requestedSessionId })
+        .then(function (value) { return { ok: true, value: value }; })
+        .catch(function () { return { ok: false, value: null }; }),
     ]);
-    if (requestedSessionId !== (state.activeSessionId || null)) return;
+    if (requestedSessionId !== (state.activeSessionId || null)) return false;
     state.currentSessionModelId = results[0];
     state.currentSessionModelRef = results[1];
-    state.effectiveModelConfig = results[2];
+    var effectiveCurrent = effectiveSeq === effectiveModelLoadSeq;
+    if (effectiveCurrent && results[2].ok) state.effectiveModelConfig = results[2].value;
     notify();
+    return effectiveCurrent && results[2].ok;
   }
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
   async function switchModelRef(sessionId, modelRef) {

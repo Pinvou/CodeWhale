@@ -29,6 +29,8 @@ this.shouldShowModelAccessGate = shouldShowModelAccessGate;`,
 
 const { baseUrlIsLoopback, isLocalModel, shouldShowModelAccessGate } = context;
 const state = (credentialState, config = {}) => ({
+  modelsLoaded: true,
+  savedModels: [{ id: 'active-model' }],
   effectiveModelConfig: {
     preset: 'deepseek',
     base_url: 'https://api.deepseek.com',
@@ -52,10 +54,11 @@ assert.strictEqual(isLocalModel({ preset: 'openai_compatible', base_url: 'https:
 assert.strictEqual(shouldShowModelAccessGate(state('missing'), 'chat', true), true);
 assert.strictEqual(shouldShowModelAccessGate(state('unavailable'), 'chat', true), true);
 assert.strictEqual(shouldShowModelAccessGate(state('configured'), 'chat', true), false);
+assert.strictEqual(shouldShowModelAccessGate(state('available'), 'chat', true), false);
 assert.strictEqual(
   shouldShowModelAccessGate({ savedModels: [], modelsLoaded: false, effectiveModelConfig: null }, 'chat', true),
   false,
-  'the gate must wait until the model catalog has loaded successfully',
+  'initial unknown state must not flash a misleading model gate',
 );
 assert.strictEqual(
   shouldShowModelAccessGate({ savedModels: [], modelsLoaded: true, effectiveModelConfig: null }, 'chat', true),

@@ -7501,18 +7501,22 @@
   async function setBehaviorTelemetryEnabled() {
     throw new Error("behavior telemetry is unsupported by the Web host");
   }
+  var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    var seq = ++effectiveModelLoadSeq;
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
       // 快速切会话时，旧请求可能晚于新请求返回；禁止旧会话配置覆盖当前遮罩状态。
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
-      state.effectiveModelConfig = null;
+      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
+      // Preserve the last authoritative snapshot across transient failures.
+      return false;
     }
     notify();
+    return true;
   }
   var settingsWriteQueue = Promise.resolve();
   function enqueueSettingsWrite(write) {
@@ -7606,17 +7610,18 @@
     var seq = ++modelsLoadSeq;
     try {
       var v = await invoke("list_models");
-      if (seq !== modelsLoadSeq) return;
+      if (seq !== modelsLoadSeq) return false;
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
       state.defaultModelRef = (v && v.default_model_ref) || null;
       state.modelsLoaded = true;
     } catch (e) {
-      if (seq !== modelsLoadSeq) return;
-      state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
-      state.modelsLoaded = false;
+      if (seq !== modelsLoadSeq) return false;
+      // Keep the previous authoritative catalog on transport failure.
+      return false;
     }
     notify();
+    return true;
   }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
@@ -7640,10 +7645,11 @@
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
+    var effectiveSeq = ++effectiveModelLoadSeq;
     var requestedSessionId = sessionId || null;
     var modelId = null;
     var modelRef = null;
-    var config = null;
+    var configResult = { ok: false, value: null };
     try {
       var results = await Promise.all([
         requestedSessionId
@@ -7652,22 +7658,26 @@
         requestedSessionId
           ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
           : Promise.resolve(null),
-        invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
+        invoke("get_effective_model_config", { sessionId: requestedSessionId })
+          .then(function (value) { return { ok: true, value: value }; })
+          .catch(function () { return { ok: false, value: null }; }),
       ]);
       modelId = results[0];
       modelRef = results[1];
-      config = results[2];
+      configResult = results[2];
     } catch (e) {
       modelId = null;
       modelRef = null;
-      config = null;
+      configResult = { ok: false, value: null };
     }
     // ChatView effect 可能并发加载相邻两个会话；只提交仍为当前会话的结果。
-    if ((state.activeSessionId || null) !== requestedSessionId) return;
+    if ((state.activeSessionId || null) !== requestedSessionId) return false;
     state.currentSessionModelId = modelId;
     state.currentSessionModelRef = modelRef;
-    state.effectiveModelConfig = config;
+    var effectiveCurrent = effectiveSeq === effectiveModelLoadSeq;
+    if (effectiveCurrent && configResult.ok) state.effectiveModelConfig = configResult.value;
     notify();
+    return effectiveCurrent && configResult.ok;
   }
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
   async function switchModelRef(sessionId, modelRef) {
@@ -10714,6 +10724,7 @@
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
     getEffectiveModelConfig: getEffectiveModelConfig,
+    loadEffectiveModelConfig: loadEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,

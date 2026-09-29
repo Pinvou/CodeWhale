@@ -69,9 +69,9 @@ test('new lazy global mounts contain chunk failures without exposing protected c
   const gateMountAt = mainSource.indexOf('modelAccessGateOpen && browserOverlayPublicationReady && (');
   assert.ok(gateMountAt >= 0, 'the model access gate mount must exist');
   const gateMount = mainSource.slice(gateMountAt, gateMountAt + 3600);
-  const backdropAt = gateMount.indexOf('fixed inset-0 z-[97]');
+  const backdropAt = gateMount.indexOf('fixed inset-0 z-[2147483647]');
   const boundaryAt = gateMount.indexOf('<ViewErrorBoundary t={t}>');
-  const suspenseAt = gateMount.indexOf('<Suspense fallback={null}>');
+  const suspenseAt = gateMount.indexOf('<Suspense fallback={<div role="status"');
   assert.ok(
     backdropAt >= 0 && boundaryAt > backdropAt && suspenseAt > boundaryAt,
     'the model access layer must wrap the error boundary and Suspense, so it survives chunk failures',
