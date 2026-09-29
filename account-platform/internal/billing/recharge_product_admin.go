@@ -242,17 +242,89 @@ func (s *Service) adminCreateRechargeProduct(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, err)
 		return
 	}
+	body.CreateRechargeProduct.Command = &RechargeProductCreateCommandMeta{
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+		RequestHash:    hash,
+		Actor:          principal.Subject,
+		Reason:         body.Reason,
+	}
 	item, err := s.catalog.CreateRechargeProduct(r.Context(), body.CreateRechargeProduct)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	after := item.Version
-	if err = s.saveCatalogCommand(r, "BILLING_RECHARGE_PRODUCT_CREATE", hash, principal.Subject, body.Reason, &item.CatalogItemID, 0, nil, &after, http.StatusCreated, item); err != nil {
+	api.WriteJSON(w, http.StatusCreated, item)
+}
+
+type updateRechargeProductDraftRequest struct {
+	DisplayNameZhCN      string                      `json:"display_name_zh_cn"`
+	DisplayNameEN        string                      `json:"display_name_en"`
+	DisplayNameJA        string                      `json:"display_name_ja"`
+	DisplayOrder         int                         `json:"display_order"`
+	BasePoints           int64                       `json:"base_points"`
+	BonusPoints          int64                       `json:"bonus_points"`
+	CreditMicrocredits   *int64                      `json:"credit_microcredits,omitempty"`
+	ValidityDays         int                         `json:"validity_days"`
+	InvoiceProductName   string                      `json:"invoice_product_name"`
+	Mapping              RechargeProductMappingDraft `json:"mapping"`
+	ExpectedVersion      int64                       `json:"expected_version"`
+	ExpectedDraftVersion int64                       `json:"expected_draft_version"`
+	Reason               string                      `json:"reason"`
+}
+
+func (s *Service) adminUpdateRechargeProductDraft(w http.ResponseWriter, r *http.Request) {
+	catalogID, _, pathErr := catalogPathIDs(r)
+	if pathErr != nil {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	var body updateRechargeProductDraftRequest
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	body.Reason = strings.TrimSpace(body.Reason)
+	principal, _, actorOK := catalogActor(r)
+	if !actorOK || body.ExpectedVersion < 1 || body.ExpectedDraftVersion < 1 || body.Reason == "" {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	selection := CreateRechargeProduct{
+		ProductID: "draft-update-validation", DisplayNameZhCN: body.DisplayNameZhCN, DisplayNameEN: body.DisplayNameEN, DisplayNameJA: body.DisplayNameJA,
+		DisplayOrder: body.DisplayOrder, BasePoints: body.BasePoints, BonusPoints: body.BonusPoints, CreditMicrocredits: body.CreditMicrocredits,
+		ValidityDays: body.ValidityDays, InvoiceProductName: body.InvoiceProductName, Mapping: body.Mapping,
+	}
+	if _, err := normalizeRechargeProductMicrocredits(&selection); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusCreated, item)
+	body.CreditMicrocredits = selection.CreditMicrocredits
+	hash := catalogResourceRequestHash("BILLING_RECHARGE_PRODUCT_DRAFT_UPDATE", catalogID, body)
+	if replay, replayErr := s.replayCatalogCommand(w, r, hash); replay || replayErr != nil {
+		if replayErr != nil {
+			s.writeError(w, r, replayErr)
+		}
+		return
+	}
+	options, err := s.rechargeProductCreateOptions(r)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err = validateRechargeProductCreateSelection(selection, options); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := s.catalog.ExecuteRechargeProductDraftUpdate(r.Context(), RechargeProductDraftCommand{
+		CatalogItemID: catalogID, ExpectedVersion: body.ExpectedVersion, ExpectedDraftVersion: body.ExpectedDraftVersion,
+		DisplayNameZhCN: body.DisplayNameZhCN, DisplayNameEN: body.DisplayNameEN, DisplayNameJA: body.DisplayNameJA, DisplayOrder: body.DisplayOrder,
+		BasePoints: body.BasePoints, BonusPoints: body.BonusPoints, ValidityDays: body.ValidityDays, InvoiceProductName: body.InvoiceProductName, Mapping: body.Mapping,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")), RequestHash: hash, Actor: principal.Subject, Reason: body.Reason,
+	})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
 }
 
 type catalogTransitionRequest struct {

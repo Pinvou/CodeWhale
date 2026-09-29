@@ -64,7 +64,7 @@ func TestRechargeProductCreateHashCanonicalizesLegacyMicrocredits(t *testing.T) 
 
 func TestRechargeProductCreateSelectionUsesAuthoritativeOptions(t *testing.T) {
 	options := rechargeProductCreateOptions{
-		Adapters: []rechargeProductAdapterOption{{ProviderID: "provider-a", ProviderVersion: "adapter-v2", Channels: []string{"ALIPAY", "WECHAT"}}},
+		Adapters:            []rechargeProductAdapterOption{{ProviderID: "provider-a", ProviderVersion: "adapter-v2", Channels: []string{"ALIPAY", "WECHAT"}}},
 		InvoiceProductNames: []string{"AI service"},
 	}
 	valid := CreateRechargeProduct{InvoiceProductName: "AI service", Mapping: RechargeProductMappingDraft{ProviderID: "provider-a", ProviderVersion: "adapter-v2", Channels: []string{"ALIPAY", "wechat"}}}
@@ -120,5 +120,49 @@ func TestCatalogResourceRequestHashBindsCatalogItem(t *testing.T) {
 	right := catalogResourceRequestHash("BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE", uuid.MustParse("22222222-2222-4222-8222-222222222222"), body)
 	if left == right {
 		t.Fatal("resource identity is missing from request fingerprint")
+	}
+}
+
+func validRechargeProductForEditTests() CreateRechargeProduct {
+	return CreateRechargeProduct{
+		ProductID: "PRODUCT_V2", DisplayNameZhCN: "中文", DisplayNameEN: "English", DisplayNameJA: "日本語",
+		BasePoints: 100, BonusPoints: 10, ValidityDays: 30, InvoiceProductName: "AI service",
+		Mapping: RechargeProductMappingDraft{ProviderID: "provider", ProviderVersion: "v1", ExternalSKUBOM: "SKU-V2", AmountFen: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, AdmissionClass: "TEST_ONLY"},
+	}
+}
+
+func TestReplacementCreateRequiresDistinctPublishedSourceVersionBeforeDatabaseAccess(t *testing.T) {
+	repository := &PostgresRepository{}
+	for _, fixture := range []struct {
+		name      string
+		configure func(*CreateRechargeProduct)
+	}{
+		{name: "missing source version", configure: func(value *CreateRechargeProduct) { source := "PRODUCT_V1"; value.ReplacementProduct = &source }},
+		{name: "self replacement", configure: func(value *CreateRechargeProduct) {
+			source, version := value.ProductID, int64(1)
+			value.ReplacementProduct, value.ReplacementExpectedVersion = &source, &version
+		}},
+		{name: "version without source", configure: func(value *CreateRechargeProduct) { version := int64(1); value.ReplacementExpectedVersion = &version }},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			input := validRechargeProductForEditTests()
+			fixture.configure(&input)
+			if _, err := repository.CreateRechargeProduct(t.Context(), input); !errors.Is(err, ErrConflict) {
+				t.Fatalf("err=%v, want ErrConflict before database access", err)
+			}
+		})
+	}
+}
+
+func TestDraftUpdateRequiresBothCatalogAndDraftVersionsBeforeDatabaseAccess(t *testing.T) {
+	repository := &PostgresRepository{}
+	input := validRechargeProductForEditTests()
+	command := RechargeProductDraftCommand{
+		CatalogItemID: uuid.New(), ExpectedVersion: 1, DisplayNameZhCN: input.DisplayNameZhCN, DisplayNameEN: input.DisplayNameEN, DisplayNameJA: input.DisplayNameJA,
+		BasePoints: input.BasePoints, BonusPoints: input.BonusPoints, ValidityDays: input.ValidityDays, InvoiceProductName: input.InvoiceProductName, Mapping: input.Mapping,
+		IdempotencyKey: "draft-update-test-key", RequestHash: "hash", Actor: "actor", Reason: "update draft",
+	}
+	if _, err := repository.ExecuteRechargeProductDraftUpdate(t.Context(), command); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err=%v, want ErrConflict before database access", err)
 	}
 }

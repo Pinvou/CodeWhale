@@ -24,6 +24,10 @@ type RechargeProductCatalogItem struct {
 	DisplayNameJA      string                      `json:"display_name_ja"`
 	DisplayOrder       int                         `json:"display_order"`
 	ReplacementProduct *string                     `json:"replacement_product_id,omitempty"`
+	BasePoints         int64                       `json:"base_points"`
+	BonusPoints        int64                       `json:"bonus_points"`
+	ValidityDays       int                         `json:"validity_days"`
+	InvoiceProductName string                      `json:"invoice_product_name"`
 	LifecycleStatus    string                      `json:"lifecycle_status"`
 	Version            int64                       `json:"version"`
 	AdmissionVersion   int64                       `json:"admission_version"`
@@ -124,18 +128,27 @@ type RechargeProductMappingDraft struct {
 }
 
 type CreateRechargeProduct struct {
-	ProductID          string                      `json:"product_id"`
-	DisplayNameZhCN    string                      `json:"display_name_zh_cn"`
-	DisplayNameEN      string                      `json:"display_name_en"`
-	DisplayNameJA      string                      `json:"display_name_ja"`
-	DisplayOrder       int                         `json:"display_order"`
-	ReplacementProduct *string                     `json:"replacement_product_id,omitempty"`
-	BasePoints         int64                       `json:"base_points"`
-	BonusPoints        int64                       `json:"bonus_points"`
-	CreditMicrocredits *int64                      `json:"credit_microcredits,omitempty"`
-	ValidityDays       int                         `json:"validity_days"`
-	InvoiceProductName string                      `json:"invoice_product_name"`
-	Mapping            RechargeProductMappingDraft `json:"mapping"`
+	ProductID                  string                            `json:"product_id"`
+	DisplayNameZhCN            string                            `json:"display_name_zh_cn"`
+	DisplayNameEN              string                            `json:"display_name_en"`
+	DisplayNameJA              string                            `json:"display_name_ja"`
+	DisplayOrder               int                               `json:"display_order"`
+	ReplacementProduct         *string                           `json:"replacement_product_id,omitempty"`
+	ReplacementExpectedVersion *int64                            `json:"replacement_expected_version,omitempty"`
+	BasePoints                 int64                             `json:"base_points"`
+	BonusPoints                int64                             `json:"bonus_points"`
+	CreditMicrocredits         *int64                            `json:"credit_microcredits,omitempty"`
+	ValidityDays               int                               `json:"validity_days"`
+	InvoiceProductName         string                            `json:"invoice_product_name"`
+	Mapping                    RechargeProductMappingDraft       `json:"mapping"`
+	Command                    *RechargeProductCreateCommandMeta `json:"-"`
+}
+
+type RechargeProductCreateCommandMeta struct {
+	IdempotencyKey string
+	RequestHash    string
+	Actor          string
+	Reason         string
 }
 
 type ProductAdmissionVerification struct {
@@ -143,6 +156,8 @@ type ProductAdmissionVerification struct {
 	CatalogItemID      uuid.UUID  `json:"catalog_item_id"`
 	RetryOf            *uuid.UUID `json:"retry_of,omitempty"`
 	PublishFingerprint string     `json:"publish_fingerprint"`
+	Current            bool       `json:"current"`
+	Active             bool       `json:"active"`
 	Status             string     `json:"status"`
 	FailureCode        *string    `json:"failure_code,omitempty"`
 	RequestedAt        time.Time  `json:"requested_at"`
@@ -159,6 +174,7 @@ type RechargeProductCatalogRepository interface {
 	EvidenceIDForVerification(context.Context, uuid.UUID, uuid.UUID) (uuid.UUID, error)
 	CompleteProductAdmissionVerification(context.Context, uuid.UUID, string, string, string, time.Time) (uuid.UUID, error)
 	TransitionRechargeProduct(context.Context, uuid.UUID, int64, string, *uuid.UUID) (RechargeProductCatalogItem, error)
+	ExecuteRechargeProductDraftUpdate(context.Context, RechargeProductDraftCommand) (RechargeProductCatalogItem, error)
 	ExecuteRechargeProductDisplayNamesUpdate(context.Context, RechargeProductDisplayNamesCommand) (RechargeProductCatalogItem, error)
 	RevokeProductAdmission(context.Context, uuid.UUID, string, string, string) error
 	RechargeProductCommand(context.Context, string, string) (int, json.RawMessage, bool, error)
@@ -194,6 +210,131 @@ type RechargeProductDisplayNamesCommand struct {
 	ExpectedVersion                               int64
 	DisplayNameZhCN, DisplayNameEN, DisplayNameJA string
 	IdempotencyKey, RequestHash, Actor, Reason    string
+}
+
+type RechargeProductDraftCommand struct {
+	CatalogItemID                                 uuid.UUID
+	ExpectedVersion                               int64
+	ExpectedDraftVersion                          int64
+	DisplayNameZhCN, DisplayNameEN, DisplayNameJA string
+	DisplayOrder                                  int
+	BasePoints, BonusPoints                       int64
+	ValidityDays                                  int
+	InvoiceProductName                            string
+	Mapping                                       RechargeProductMappingDraft
+	IdempotencyKey, RequestHash, Actor, Reason    string
+}
+
+// ExecuteRechargeProductDraftUpdate changes an unpublished draft in place.
+// Once a product has ever been published, callers must create a new draft with
+// replacement_product_id instead so payment, order, and entitlement history
+// continue to reference the immutable original product facts.
+func (r *PostgresRepository) ExecuteRechargeProductDraftUpdate(ctx context.Context, command RechargeProductDraftCommand) (RechargeProductCatalogItem, error) {
+	command.DisplayNameZhCN, command.DisplayNameEN, command.DisplayNameJA = strings.TrimSpace(command.DisplayNameZhCN), strings.TrimSpace(command.DisplayNameEN), strings.TrimSpace(command.DisplayNameJA)
+	command.InvoiceProductName = strings.TrimSpace(command.InvoiceProductName)
+	command.Mapping.ProviderID, command.Mapping.ProviderVersion = strings.TrimSpace(command.Mapping.ProviderID), strings.TrimSpace(command.Mapping.ProviderVersion)
+	command.Mapping.ExternalSKUBOM = strings.TrimSpace(command.Mapping.ExternalSKUBOM)
+	command.Mapping.Currency = strings.ToUpper(strings.TrimSpace(command.Mapping.Currency))
+	command.Mapping.AdmissionClass = strings.ToUpper(strings.TrimSpace(command.Mapping.AdmissionClass))
+	command.IdempotencyKey, command.RequestHash, command.Actor, command.Reason = strings.TrimSpace(command.IdempotencyKey), strings.TrimSpace(command.RequestHash), strings.TrimSpace(command.Actor), strings.TrimSpace(command.Reason)
+	if command.CatalogItemID == uuid.Nil || command.ExpectedVersion < 1 || command.ExpectedDraftVersion < 1 || command.DisplayNameZhCN == "" || command.DisplayNameEN == "" || command.DisplayNameJA == "" || command.InvoiceProductName == "" || command.ValidityDays <= 0 || command.Mapping.ProviderID == "" || command.Mapping.ProviderVersion == "" || command.Mapping.ExternalSKUBOM == "" || command.Mapping.AmountFen <= 0 || command.Mapping.Currency != "CNY" || len(command.Mapping.Channels) == 0 || (command.Mapping.AdmissionClass != "FORMAL" && command.Mapping.AdmissionClass != "TEST_ONLY") || len(command.IdempotencyKey) < 16 || len(command.IdempotencyKey) > 128 || command.RequestHash == "" || command.Actor == "" || command.Reason == "" {
+		return RechargeProductCatalogItem{}, ErrConflict
+	}
+	if command.BasePoints < 0 || command.BonusPoints < 0 || command.BasePoints > math.MaxInt64-command.BonusPoints {
+		return RechargeProductCatalogItem{}, ErrConflict
+	}
+	totalPoints := command.BasePoints + command.BonusPoints
+	if totalPoints <= 0 || totalPoints > math.MaxInt64/10000 {
+		return RechargeProductCatalogItem{}, ErrConflict
+	}
+	seenChannels := make(map[string]bool, len(command.Mapping.Channels))
+	for index, channel := range command.Mapping.Channels {
+		channel = strings.ToUpper(strings.TrimSpace(channel))
+		if channel == "" || seenChannels[channel] || !validPaymentChannel(channel) {
+			return RechargeProductCatalogItem{}, ErrConflict
+		}
+		seenChannels[channel] = true
+		command.Mapping.Channels[index] = channel
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockTransactionKey(ctx, tx, "catalog.command", command.IdempotencyKey); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	var existingHash string
+	var existingBody []byte
+	err = tx.QueryRow(ctx, `SELECT request_hash,response_body FROM recharge_product_command_records WHERE idempotency_key=$1 AND expires_at>now()`, command.IdempotencyKey).Scan(&existingHash, &existingBody)
+	if err == nil {
+		if existingHash != command.RequestHash {
+			return RechargeProductCatalogItem{}, ErrConflict
+		}
+		var replay RechargeProductCatalogItem
+		if err = json.Unmarshal(existingBody, &replay); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+		return replay, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return RechargeProductCatalogItem{}, err
+	}
+	if err = lockTransactionKey(ctx, tx, "catalog.admission", command.CatalogItemID.String()); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	var productID, lifecycle string
+	var version, draftVersion int64
+	var everPublished bool
+	if err = tx.QueryRow(ctx, `SELECT item.product_id,item.lifecycle_status,item.version,item.ever_published,draft.draft_version FROM recharge_product_catalog_items item JOIN recharge_product_mapping_drafts draft USING(catalog_item_id) WHERE item.catalog_item_id=$1 FOR UPDATE OF item,draft`, command.CatalogItemID).Scan(&productID, &lifecycle, &version, &everPublished, &draftVersion); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RechargeProductCatalogItem{}, ErrNotFound
+		}
+		return RechargeProductCatalogItem{}, err
+	}
+	if version != command.ExpectedVersion || draftVersion != command.ExpectedDraftVersion || lifecycle != "DRAFT" || everPublished {
+		return RechargeProductCatalogItem{}, ErrConflict
+	}
+	if err = lockTransactionKey(ctx, tx, "catalog.sku", command.Mapping.ProviderID+"|"+command.Mapping.ProviderVersion+"|"+command.Mapping.ExternalSKUBOM); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	now := r.now()
+	nextVersion := version + 1
+	if _, err = tx.Exec(ctx, `UPDATE product_admission_verifications SET status='FAILED',failure_code='DRAFT_CHANGED',completed_at=$2 WHERE catalog_item_id=$1 AND status='PENDING'`, command.CatalogItemID, now); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE recharge_products SET amount_fen=$2,credit_microcredits=$3,display_points=$4,currency=$5,channels=$6,catalog_version=$7,plan_name=$8,base_points=$9,bonus_points=$10,validity_days=$11,price_status=$12,invoice_product_name=$13 WHERE product_id=$1`, productID, command.Mapping.AmountFen, totalPoints*10000, totalPoints, command.Mapping.Currency, command.Mapping.Channels, nextVersion, command.DisplayNameZhCN, command.BasePoints, command.BonusPoints, command.ValidityDays, map[bool]string{true: "FROZEN", false: "UAT_TENTATIVE"}[command.Mapping.AdmissionClass == "FORMAL"], command.InvoiceProductName); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE recharge_product_catalog_items SET display_name_zh_cn=$2,display_name_en=$3,display_name_ja=$4,display_order=$5,version=$6,updated_at=$7 WHERE catalog_item_id=$1`, command.CatalogItemID, command.DisplayNameZhCN, command.DisplayNameEN, command.DisplayNameJA, command.DisplayOrder, nextVersion, now); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	mappingResult, err := tx.Exec(ctx, `UPDATE recharge_product_mapping_drafts SET draft_version=draft_version+1,provider_id=$3,provider_version=$4,external_sku_bom=$5,amount_fen=$6,currency=$7,channels=$8,admission_class=$9,updated_at=$10 WHERE catalog_item_id=$1 AND draft_version=$2 AND released_at IS NULL`, command.CatalogItemID, command.ExpectedDraftVersion, command.Mapping.ProviderID, command.Mapping.ProviderVersion, command.Mapping.ExternalSKUBOM, command.Mapping.AmountFen, command.Mapping.Currency, command.Mapping.Channels, command.Mapping.AdmissionClass, now)
+	if err != nil || mappingResult.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return RechargeProductCatalogItem{}, err
+	}
+	item, err := rechargeProductCatalogItem(ctx, tx, command.CatalogItemID)
+	if err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	body, err := json.Marshal(item)
+	if err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO recharge_product_command_records(idempotency_key,command_type,request_hash,catalog_item_id,actor_subject,reason,expected_version,response_status,response_body,created_at,expires_at) VALUES($1,'BILLING_RECHARGE_PRODUCT_DRAFT_UPDATE',$2,$3,$4,$5,$6,200,$7,$8,$9)`, command.IdempotencyKey, command.RequestHash, command.CatalogItemID, command.Actor, command.Reason, command.ExpectedVersion, body, now, now.Add(24*time.Hour)); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO recharge_product_audits(audit_id,command_type,catalog_item_id,actor_subject,reason,idempotency_key,request_hash,expected_version,before_version,after_version,result,occurred_at) VALUES($1,'BILLING_RECHARGE_PRODUCT_DRAFT_UPDATE',$2,$3,$4,$5,$6,$7,$7,$8,'SUCCEEDED',$9)`, uuid.Must(uuid.NewV7()), command.CatalogItemID, command.Actor, command.Reason, command.IdempotencyKey, command.RequestHash, command.ExpectedVersion, nextVersion, now); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	return item, nil
 }
 
 // ExecuteRechargeProductDisplayNamesUpdate changes only the governed catalogue names.
@@ -304,9 +445,9 @@ func (r *PostgresRepository) ListRechargeProducts(ctx context.Context, lifecycle
 		limit = 200
 	}
 	lifecycle = strings.ToUpper(strings.TrimSpace(lifecycle))
-	rows, err := r.pool.Query(ctx, `SELECT item.catalog_item_id,item.product_id,item.display_name_zh_cn,item.display_name_en,item.display_name_ja,item.display_order,item.replacement_product_id,item.lifecycle_status,item.version,item.admission_version,item.ever_published,item.deleted_at,item.updated_at,
+	rows, err := r.pool.Query(ctx, `SELECT item.catalog_item_id,item.product_id,item.display_name_zh_cn,item.display_name_en,item.display_name_ja,item.display_order,item.replacement_product_id,product.base_points,product.bonus_points,product.validity_days,product.invoice_product_name,item.lifecycle_status,item.version,item.admission_version,item.ever_published,item.deleted_at,item.updated_at,
 draft.draft_version,draft.provider_id,draft.provider_version,draft.external_sku_bom,draft.amount_fen,draft.currency,draft.channels,draft.admission_class
-FROM recharge_product_catalog_items item JOIN recharge_product_mapping_drafts draft USING(catalog_item_id)
+FROM recharge_product_catalog_items item JOIN recharge_product_mapping_drafts draft USING(catalog_item_id) JOIN recharge_products product USING(product_id)
 WHERE ($1='' OR item.lifecycle_status=$1) AND ($2 OR item.lifecycle_status<>'DELETED')
   AND ($3::timestamptz IS NULL OR (item.updated_at,item.catalog_item_id)<($3,$4))
 ORDER BY item.updated_at DESC,item.catalog_item_id DESC LIMIT $5`, lifecycle, includeDeleted, cursorTime, cursorID, limit)
@@ -317,7 +458,7 @@ ORDER BY item.updated_at DESC,item.catalog_item_id DESC LIMIT $5`, lifecycle, in
 	items := make([]RechargeProductCatalogItem, 0)
 	for rows.Next() {
 		var item RechargeProductCatalogItem
-		if err := rows.Scan(&item.CatalogItemID, &item.ProductID, &item.DisplayNameZhCN, &item.DisplayNameEN, &item.DisplayNameJA, &item.DisplayOrder, &item.ReplacementProduct, &item.LifecycleStatus, &item.Version, &item.AdmissionVersion, &item.EverPublished, &item.DeletedAt, &item.UpdatedAt, &item.Mapping.DraftVersion, &item.Mapping.ProviderID, &item.Mapping.ProviderVersion, &item.Mapping.ExternalSKUBOM, &item.Mapping.AmountFen, &item.Mapping.Currency, &item.Mapping.Channels, &item.Mapping.AdmissionClass); err != nil {
+		if err := rows.Scan(&item.CatalogItemID, &item.ProductID, &item.DisplayNameZhCN, &item.DisplayNameEN, &item.DisplayNameJA, &item.DisplayOrder, &item.ReplacementProduct, &item.BasePoints, &item.BonusPoints, &item.ValidityDays, &item.InvoiceProductName, &item.LifecycleStatus, &item.Version, &item.AdmissionVersion, &item.EverPublished, &item.DeletedAt, &item.UpdatedAt, &item.Mapping.DraftVersion, &item.Mapping.ProviderID, &item.Mapping.ProviderVersion, &item.Mapping.ExternalSKUBOM, &item.Mapping.AmountFen, &item.Mapping.Currency, &item.Mapping.Channels, &item.Mapping.AdmissionClass); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -326,7 +467,10 @@ ORDER BY item.updated_at DESC,item.catalog_item_id DESC LIMIT $5`, lifecycle, in
 }
 
 func (r *PostgresRepository) ListProductAdmissionVerifications(ctx context.Context, catalogItemID uuid.UUID) ([]ProductAdmissionVerification, error) {
-	rows, err := r.pool.Query(ctx, `SELECT verification.verification_id,verification.catalog_item_id,verification.retry_of,verification.publish_fingerprint,verification.status,verification.failure_code,verification.requested_at,verification.completed_at,evidence.evidence_id FROM product_admission_verifications verification LEFT JOIN product_admission_evidence evidence USING(verification_id) WHERE verification.catalog_item_id=$1 ORDER BY verification.requested_at DESC,verification.verification_id DESC`, catalogItemID)
+	rows, err := r.pool.Query(ctx, `SELECT verification.verification_id,verification.catalog_item_id,verification.retry_of,verification.publish_fingerprint,verification.status,verification.failure_code,verification.requested_at,verification.completed_at,evidence.evidence_id,
+EXISTS(SELECT 1 FROM product_admission_bindings binding WHERE binding.evidence_id=evidence.evidence_id AND binding.effective_to IS NULL)
+FROM product_admission_verifications verification LEFT JOIN product_admission_evidence evidence USING(verification_id)
+WHERE verification.catalog_item_id=$1 ORDER BY verification.requested_at DESC,verification.verification_id DESC`, catalogItemID)
 	if err != nil {
 		return nil, err
 	}
@@ -334,12 +478,30 @@ func (r *PostgresRepository) ListProductAdmissionVerifications(ctx context.Conte
 	items := make([]ProductAdmissionVerification, 0)
 	for rows.Next() {
 		var item ProductAdmissionVerification
-		if err := rows.Scan(&item.VerificationID, &item.CatalogItemID, &item.RetryOf, &item.PublishFingerprint, &item.Status, &item.FailureCode, &item.RequestedAt, &item.CompletedAt, &item.EvidenceID); err != nil {
+		if err := rows.Scan(&item.VerificationID, &item.CatalogItemID, &item.RetryOf, &item.PublishFingerprint, &item.Status, &item.FailureCode, &item.RequestedAt, &item.CompletedAt, &item.EvidenceID, &item.Active); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	current, err := r.RechargeProductCatalogItem(ctx, catalogItemID)
+	if err != nil {
+		return nil, err
+	}
+	currentFingerprint := catalogFingerprint(current, Product{
+		ProductID:          current.ProductID,
+		BasePoints:         current.BasePoints,
+		BonusPoints:        current.BonusPoints,
+		ValidityDays:       current.ValidityDays,
+		InvoiceProductName: current.InvoiceProductName,
+	})
+	for index := range items {
+		items[index].Current = items[index].PublishFingerprint == currentFingerprint
+	}
+	return items, nil
 }
 
 func (r *PostgresRepository) RechargeProductCommand(ctx context.Context, idempotencyKey, requestHash string) (int, json.RawMessage, bool, error) {
@@ -400,6 +562,19 @@ func (r *PostgresRepository) CreateRechargeProduct(ctx context.Context, input Cr
 	input.Mapping.ExternalSKUBOM = strings.TrimSpace(input.Mapping.ExternalSKUBOM)
 	input.Mapping.Currency = strings.ToUpper(strings.TrimSpace(input.Mapping.Currency))
 	input.Mapping.AdmissionClass = strings.ToUpper(strings.TrimSpace(input.Mapping.AdmissionClass))
+	if input.ReplacementProduct != nil {
+		replacement := strings.TrimSpace(*input.ReplacementProduct)
+		input.ReplacementProduct = &replacement
+	}
+	if input.Command != nil {
+		input.Command.IdempotencyKey = strings.TrimSpace(input.Command.IdempotencyKey)
+		input.Command.RequestHash = strings.TrimSpace(input.Command.RequestHash)
+		input.Command.Actor = strings.TrimSpace(input.Command.Actor)
+		input.Command.Reason = strings.TrimSpace(input.Command.Reason)
+		if len(input.Command.IdempotencyKey) < 16 || len(input.Command.IdempotencyKey) > 128 || input.Command.RequestHash == "" || input.Command.Actor == "" || input.Command.Reason == "" {
+			return RechargeProductCatalogItem{}, ErrConflict
+		}
+	}
 	derivedCreditMicrocredits, err := normalizeRechargeProductMicrocredits(&input)
 	if err != nil {
 		return RechargeProductCatalogItem{}, err
@@ -407,7 +582,9 @@ func (r *PostgresRepository) CreateRechargeProduct(ctx context.Context, input Cr
 	if input.ProductID == "" || input.DisplayNameZhCN == "" || input.DisplayNameEN == "" || input.DisplayNameJA == "" ||
 		input.InvoiceProductName == "" || input.ValidityDays <= 0 || input.Mapping.ProviderID == "" || input.Mapping.ProviderVersion == "" ||
 		input.Mapping.ExternalSKUBOM == "" || input.Mapping.AmountFen <= 0 || input.Mapping.Currency != "CNY" || len(input.Mapping.Channels) == 0 ||
-		(input.Mapping.AdmissionClass != "FORMAL" && input.Mapping.AdmissionClass != "TEST_ONLY") {
+		(input.Mapping.AdmissionClass != "FORMAL" && input.Mapping.AdmissionClass != "TEST_ONLY") ||
+		(input.ReplacementProduct == nil && input.ReplacementExpectedVersion != nil) ||
+		(input.ReplacementProduct != nil && (*input.ReplacementProduct == "" || *input.ReplacementProduct == input.ProductID || input.ReplacementExpectedVersion == nil || *input.ReplacementExpectedVersion < 1)) {
 		return RechargeProductCatalogItem{}, ErrConflict
 	}
 	displayPoints := input.BasePoints + input.BonusPoints
@@ -422,8 +599,53 @@ func (r *PostgresRepository) CreateRechargeProduct(ctx context.Context, input Cr
 		return RechargeProductCatalogItem{}, err
 	}
 	defer tx.Rollback(ctx)
+	if input.Command != nil {
+		if err = lockTransactionKey(ctx, tx, "catalog.command", input.Command.IdempotencyKey); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+		var existingHash string
+		var existingBody []byte
+		err = tx.QueryRow(ctx, `SELECT request_hash,response_body FROM recharge_product_command_records WHERE idempotency_key=$1 AND expires_at>now()`, input.Command.IdempotencyKey).Scan(&existingHash, &existingBody)
+		if err == nil {
+			if existingHash != input.Command.RequestHash {
+				return RechargeProductCatalogItem{}, ErrConflict
+			}
+			var replay RechargeProductCatalogItem
+			if err = json.Unmarshal(existingBody, &replay); err != nil {
+				return RechargeProductCatalogItem{}, err
+			}
+			return replay, tx.Commit(ctx)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return RechargeProductCatalogItem{}, err
+		}
+	}
 	if err := lockTransactionKey(ctx, tx, "catalog.product", input.ProductID); err != nil {
 		return RechargeProductCatalogItem{}, err
+	}
+	if input.ReplacementProduct != nil {
+		if err := lockTransactionKey(ctx, tx, "catalog.replacement", *input.ReplacementProduct); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+		var sourceLifecycle string
+		var sourceVersion int64
+		var sourceEverPublished bool
+		if err := tx.QueryRow(ctx, `SELECT lifecycle_status,version,ever_published FROM recharge_product_catalog_items WHERE product_id=$1 FOR UPDATE`, *input.ReplacementProduct).Scan(&sourceLifecycle, &sourceVersion, &sourceEverPublished); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return RechargeProductCatalogItem{}, ErrNotFound
+			}
+			return RechargeProductCatalogItem{}, err
+		}
+		if sourceVersion != *input.ReplacementExpectedVersion || !sourceEverPublished || (sourceLifecycle != "ON_SALE" && sourceLifecycle != "OFF_SALE") {
+			return RechargeProductCatalogItem{}, ErrConflict
+		}
+		var existingReplacement bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM recharge_product_catalog_items WHERE replacement_product_id=$1 AND lifecycle_status<>'DELETED')`, *input.ReplacementProduct).Scan(&existingReplacement); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+		if existingReplacement {
+			return RechargeProductCatalogItem{}, ErrConflict
+		}
 	}
 	if err := lockTransactionKey(ctx, tx, "catalog.sku", input.Mapping.ProviderID+"|"+input.Mapping.ProviderVersion+"|"+input.Mapping.ExternalSKUBOM); err != nil {
 		return RechargeProductCatalogItem{}, err
@@ -444,10 +666,26 @@ VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`, itemID, input.Mapping.ProviderID, inpu
 	if err != nil {
 		return RechargeProductCatalogItem{}, err
 	}
+	item, err := rechargeProductCatalogItem(ctx, tx, itemID)
+	if err != nil {
+		return RechargeProductCatalogItem{}, err
+	}
+	if input.Command != nil {
+		body, marshalErr := json.Marshal(item)
+		if marshalErr != nil {
+			return RechargeProductCatalogItem{}, marshalErr
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO recharge_product_command_records(idempotency_key,command_type,request_hash,catalog_item_id,actor_subject,reason,expected_version,response_status,response_body,created_at,expires_at) VALUES($1,'BILLING_RECHARGE_PRODUCT_CREATE',$2,$3,$4,$5,0,201,$6,$7,$8)`, input.Command.IdempotencyKey, input.Command.RequestHash, itemID, input.Command.Actor, input.Command.Reason, body, now, now.Add(24*time.Hour)); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO recharge_product_audits(audit_id,command_type,catalog_item_id,actor_subject,reason,idempotency_key,request_hash,expected_version,before_version,after_version,result,occurred_at) VALUES($1,'BILLING_RECHARGE_PRODUCT_CREATE',$2,$3,$4,$5,$6,0,NULL,1,'SUCCEEDED',$7)`, uuid.Must(uuid.NewV7()), itemID, input.Command.Actor, input.Command.Reason, input.Command.IdempotencyKey, input.Command.RequestHash, now); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return RechargeProductCatalogItem{}, err
 	}
-	return r.RechargeProductCatalogItem(ctx, itemID)
+	return item, nil
 }
 
 func normalizeRechargeProductMicrocredits(input *CreateRechargeProduct) (int64, error) {
@@ -482,10 +720,10 @@ type catalogQueryRower interface {
 
 func rechargeProductCatalogItem(ctx context.Context, query catalogQueryRower, catalogItemID uuid.UUID) (RechargeProductCatalogItem, error) {
 	var item RechargeProductCatalogItem
-	err := query.QueryRow(ctx, `SELECT item.catalog_item_id,item.product_id,item.display_name_zh_cn,item.display_name_en,item.display_name_ja,item.display_order,item.replacement_product_id,item.lifecycle_status,item.version,item.admission_version,item.ever_published,item.deleted_at,item.updated_at,
+	err := query.QueryRow(ctx, `SELECT item.catalog_item_id,item.product_id,item.display_name_zh_cn,item.display_name_en,item.display_name_ja,item.display_order,item.replacement_product_id,product.base_points,product.bonus_points,product.validity_days,product.invoice_product_name,item.lifecycle_status,item.version,item.admission_version,item.ever_published,item.deleted_at,item.updated_at,
 draft.draft_version,draft.provider_id,draft.provider_version,draft.external_sku_bom,draft.amount_fen,draft.currency,draft.channels,draft.admission_class
-FROM recharge_product_catalog_items item JOIN recharge_product_mapping_drafts draft USING(catalog_item_id)
-WHERE item.catalog_item_id=$1`, catalogItemID).Scan(&item.CatalogItemID, &item.ProductID, &item.DisplayNameZhCN, &item.DisplayNameEN, &item.DisplayNameJA, &item.DisplayOrder, &item.ReplacementProduct, &item.LifecycleStatus, &item.Version, &item.AdmissionVersion, &item.EverPublished, &item.DeletedAt, &item.UpdatedAt, &item.Mapping.DraftVersion, &item.Mapping.ProviderID, &item.Mapping.ProviderVersion, &item.Mapping.ExternalSKUBOM, &item.Mapping.AmountFen, &item.Mapping.Currency, &item.Mapping.Channels, &item.Mapping.AdmissionClass)
+FROM recharge_product_catalog_items item JOIN recharge_product_mapping_drafts draft USING(catalog_item_id) JOIN recharge_products product USING(product_id)
+WHERE item.catalog_item_id=$1`, catalogItemID).Scan(&item.CatalogItemID, &item.ProductID, &item.DisplayNameZhCN, &item.DisplayNameEN, &item.DisplayNameJA, &item.DisplayOrder, &item.ReplacementProduct, &item.BasePoints, &item.BonusPoints, &item.ValidityDays, &item.InvoiceProductName, &item.LifecycleStatus, &item.Version, &item.AdmissionVersion, &item.EverPublished, &item.DeletedAt, &item.UpdatedAt, &item.Mapping.DraftVersion, &item.Mapping.ProviderID, &item.Mapping.ProviderVersion, &item.Mapping.ExternalSKUBOM, &item.Mapping.AmountFen, &item.Mapping.Currency, &item.Mapping.Channels, &item.Mapping.AdmissionClass)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, ErrNotFound
 	}
@@ -532,12 +770,13 @@ func (r *PostgresRepository) StartProductAdmissionVerification(ctx context.Conte
 	var existing ProductAdmissionVerification
 	err = tx.QueryRow(ctx, `SELECT verification_id,catalog_item_id,retry_of,publish_fingerprint,status,failure_code,requested_at,completed_at FROM product_admission_verifications WHERE catalog_item_id=$1 AND publish_fingerprint=$2 AND status='PENDING'`, catalogItemID, fingerprint).Scan(&existing.VerificationID, &existing.CatalogItemID, &existing.RetryOf, &existing.PublishFingerprint, &existing.Status, &existing.FailureCode, &existing.RequestedAt, &existing.CompletedAt)
 	if err == nil {
+		existing.Current = true
 		return existing, false, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return existing, false, err
 	}
-	verification := ProductAdmissionVerification{VerificationID: uuid.Must(uuid.NewV7()), CatalogItemID: catalogItemID, RetryOf: retryOf, PublishFingerprint: fingerprint, Status: "PENDING", RequestedAt: r.now()}
+	verification := ProductAdmissionVerification{VerificationID: uuid.Must(uuid.NewV7()), CatalogItemID: catalogItemID, RetryOf: retryOf, PublishFingerprint: fingerprint, Current: true, Status: "PENDING", RequestedAt: r.now()}
 	var targetMappingID *uuid.UUID
 	var targetDraftVersion *int64
 	if item.LifecycleStatus == "DRAFT" {
@@ -569,11 +808,21 @@ func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Co
 	}
 	defer tx.Rollback(ctx)
 	var catalogID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT catalog_item_id FROM product_admission_verifications WHERE verification_id=$1`, verificationID).Scan(&catalogID); err != nil {
+		return uuid.Nil, err
+	}
+	if err = lockTransactionKey(ctx, tx, "catalog.admission", catalogID.String()); err != nil {
+		return uuid.Nil, err
+	}
 	var targetMappingID *uuid.UUID
 	var fingerprint, status string
-	err = tx.QueryRow(ctx, `SELECT catalog_item_id,target_mapping_id,publish_fingerprint,status FROM product_admission_verifications WHERE verification_id=$1 FOR UPDATE`, verificationID).Scan(&catalogID, &targetMappingID, &fingerprint, &status)
+	var lockedCatalogID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT catalog_item_id,target_mapping_id,publish_fingerprint,status FROM product_admission_verifications WHERE verification_id=$1 FOR UPDATE`, verificationID).Scan(&lockedCatalogID, &targetMappingID, &fingerprint, &status)
 	if err != nil {
 		return uuid.Nil, err
+	}
+	if lockedCatalogID != catalogID {
+		return uuid.Nil, ErrConflict
 	}
 	if status == "VERIFIED" {
 		var id uuid.UUID
@@ -582,9 +831,6 @@ func (r *PostgresRepository) CompleteProductAdmissionVerification(ctx context.Co
 	}
 	if status != "PENDING" {
 		return uuid.Nil, ErrConflict
-	}
-	if err = lockTransactionKey(ctx, tx, "catalog.admission", catalogID.String()); err != nil {
-		return uuid.Nil, err
 	}
 	item, err := rechargeProductCatalogItem(ctx, tx, catalogID)
 	if err != nil {

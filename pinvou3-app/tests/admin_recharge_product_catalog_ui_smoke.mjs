@@ -13,16 +13,16 @@ const browserPath = [
 assert.ok(browserPath, 'Chromium or Edge is required');
 
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
-const observations = { createOptionsReads: 0, catalogQueries: [], createPosts: 0, actionPosts: 0 };
+const observations = { createOptionsReads: 0, catalogQueries: [], createPosts: 0, actionPosts: 0, draftUpdates: [], replacementCreates: [] };
 let permissions = ['platform.products.read', 'platform.products.create', 'platform.products.publish', 'platform.products.unpublish', 'platform.products.delete'];
 let authorizationDelay = 0;
 let createOptionsFailure = false;
 let managementFailure = false;
 let createMode = 'success';
 const products = [
-  { catalog_item_id: '0199a100-0001-7000-8000-000000000101', product_id: 'ON_SALE_100', display_name_zh_cn: '在售一百积分', display_name_en: 'On-sale 100 points', display_name_ja: '販売中100ポイント', lifecycle_status: 'ON_SALE', version: 3, admission_version: 2, mapping: { provider_id: 'test-provider', provider_version: 'v1', sku_bom: 'ON-100', amount_fen: 100, currency: 'CNY' } },
-  { catalog_item_id: '0199a100-0001-7000-8000-000000000102', product_id: 'DRAFT_200', display_name_zh_cn: '草稿二百积分', display_name_en: 'Draft 200 points', display_name_ja: '下書き200ポイント', lifecycle_status: 'DRAFT', version: 1, admission_version: 1, mapping: { provider_id: 'test-provider', provider_version: 'v1', sku_bom: 'DRAFT-200', amount_fen: 200, currency: 'CNY' } },
-  { catalog_item_id: '0199a100-0001-7000-8000-000000000103', product_id: 'OFF_SALE_300', display_name_zh_cn: '下架三百积分', display_name_en: 'Off-sale 300 points', display_name_ja: '非公開300ポイント', lifecycle_status: 'OFF_SALE', version: 4, admission_version: 2, mapping: { provider_id: 'test-provider', provider_version: 'v1', sku_bom: 'OFF-300', amount_fen: 300, currency: 'CNY' } },
+  { catalog_item_id: '0199a100-0001-7000-8000-000000000101', product_id: 'ON_SALE_100', display_name_zh_cn: '在售一百积分', display_name_en: 'On-sale 100 points', display_name_ja: '販売中100ポイント', display_order: 1, base_points: 100, bonus_points: 0, validity_days: 30, invoice_product_name: '信息服务费', lifecycle_status: 'ON_SALE', version: 3, admission_version: 2, ever_published: true, mapping: { draft_version: 2, provider_id: 'test-provider', provider_version: 'v1', sku_bom: 'ON-100', amount_fen: 100, currency: 'CNY', channels: ['ALIPAY'], admission_class: 'FORMAL' } },
+  { catalog_item_id: '0199a100-0001-7000-8000-000000000102', product_id: 'DRAFT_200', display_name_zh_cn: '草稿二百积分', display_name_en: 'Draft 200 points', display_name_ja: '下書き200ポイント', display_order: 2, base_points: 180, bonus_points: 20, validity_days: 30, invoice_product_name: '信息服务费', lifecycle_status: 'DRAFT', version: 1, admission_version: 1, ever_published: false, mapping: { draft_version: 1, provider_id: 'test-provider', provider_version: 'v1', sku_bom: 'DRAFT-200', amount_fen: 200, currency: 'CNY', channels: ['ALIPAY'], admission_class: 'TEST_ONLY' } },
+  { catalog_item_id: '0199a100-0001-7000-8000-000000000103', product_id: 'OFF_SALE_300', display_name_zh_cn: '下架三百积分', display_name_en: 'Off-sale 300 points', display_name_ja: '非公開300ポイント', display_order: 3, base_points: 300, bonus_points: 0, validity_days: 30, invoice_product_name: '信息服务费', lifecycle_status: 'OFF_SALE', version: 4, admission_version: 2, ever_published: true, mapping: { draft_version: 2, provider_id: 'test-provider', provider_version: 'v1', sku_bom: 'OFF-300', amount_fen: 300, currency: 'CNY', channels: ['ALIPAY'], admission_class: 'FORMAL' } },
 ];
 
 function json(response, payload, status = 200) {
@@ -34,6 +34,11 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
   if (url.pathname === '/__test__/configure') {
     const mode = url.searchParams.get('mode');
+    if (mode === 'concurrent-draft') {
+      const draft = products.find((item) => item.product_id === 'DRAFT_200');
+      draft.version += 1;
+      draft.mapping = { ...draft.mapping, draft_version: draft.mapping.draft_version + 1 };
+    }
     if (mode === 'readonly') {
       permissions = ['platform.products.read'];
       authorizationDelay = 250;
@@ -73,13 +78,26 @@ const server = createServer(async (request, response) => {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      const created = { catalog_item_id: `0199a100-0001-7000-8000-${String(products.length + 100).padStart(12, '0')}`, product_id: body.product_id, display_name_zh_cn: body.display_name_zh_cn, display_name_en: body.display_name_en, display_name_ja: body.display_name_ja, lifecycle_status: 'DRAFT', version: 1, admission_version: 1, mapping: { ...body.mapping, external_sku_bom: body.mapping.sku_bom } };
+      if (body.replacement_product_id) observations.replacementCreates.push(body);
+      const created = { catalog_item_id: `0199a100-0001-7000-8000-${String(products.length + 100).padStart(12, '0')}`, product_id: body.product_id, display_name_zh_cn: body.display_name_zh_cn, display_name_en: body.display_name_en, display_name_ja: body.display_name_ja, display_order: body.display_order, base_points: body.base_points, bonus_points: body.bonus_points, validity_days: body.validity_days, invoice_product_name: body.invoice_product_name, replacement_product_id: body.replacement_product_id, lifecycle_status: 'DRAFT', version: 1, admission_version: 0, ever_published: false, mapping: { draft_version: 1, ...body.mapping, external_sku_bom: body.mapping.sku_bom } };
       products.push(created);
       return json(response, created, 201);
     }
     const status = url.searchParams.get('lifecycle_status');
     if (managementFailure && !status) return json(response, { code: 'BILLING_UNAVAILABLE', message: 'catalog unavailable' }, 503);
     return json(response, { items: status ? products.filter((item) => item.lifecycle_status === status) : products, next_cursor: '' });
+  }
+  const draftUpdate = url.pathname.match(/^\/api\/admin\/billing\/admin\/v1\/recharge-products\/([^/]+)\/draft$/);
+  if (draftUpdate && request.method === 'PUT') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    observations.draftUpdates.push(body);
+    if (createMode === 'stepup') return json(response, { code: 'RECENT_AUTHENTICATION_REQUIRED', message: 'reauthenticate' }, 401);
+    const item = products.find((value) => value.catalog_item_id === draftUpdate[1]);
+    if (!item || item.lifecycle_status !== 'DRAFT' || item.ever_published || item.version !== body.expected_version || item.mapping.draft_version !== body.expected_draft_version) return json(response, { code: 'BILLING_CONFLICT' }, 409);
+    Object.assign(item, { display_name_zh_cn: body.display_name_zh_cn, display_name_en: body.display_name_en, display_name_ja: body.display_name_ja, display_order: body.display_order, base_points: body.base_points, bonus_points: body.bonus_points, validity_days: body.validity_days, invoice_product_name: body.invoice_product_name, version: item.version + 1, mapping: { draft_version: item.mapping.draft_version + 1, ...body.mapping } });
+    return json(response, item);
   }
   if (url.pathname === '/auth/login') {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -157,6 +175,50 @@ try {
   assert.match(managedText, /在售一百积分/);
   assert.match(managedText, /草稿二百积分/);
   assert.match(managedText, /下架三百积分/);
+
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll('#product-list .product-item')].find((node) => node.textContent.includes('草稿二百积分'));
+    item?.querySelector('button[data-edit-mode="draft"]')?.click();
+  });
+  await page.waitForSelector('#product-create-dialog[open]');
+  assert.equal(await page.$eval('#product-form input[name="product_id"]', (node) => node.readOnly), true);
+  assert.equal(await page.$eval('#product-form input[name="product_id"]', (node) => node.value), 'DRAFT_200');
+  await page.evaluate(() => {
+    const form = document.querySelector('#product-form');
+    form.elements.display_name_zh_cn.value = '已编辑草稿二百积分';
+    form.elements.reason.value = '编辑未发布充值商品草稿用于验证';
+  });
+  await page.click('#product-editor-submit');
+  await page.waitForFunction(() => document.querySelector('#product-manage-message')?.textContent.includes('草稿已更新'));
+  assert.match(await page.$eval('#product-list', (node) => node.textContent), /已编辑草稿二百积分/);
+  assert.equal(observations.draftUpdates.length, 1);
+  assert.equal(observations.draftUpdates[0].expected_version, 1);
+  assert.equal(observations.draftUpdates[0].expected_draft_version, 1);
+  assert.equal(observations.draftUpdates[0].product_id, undefined);
+
+  await page.select('#product-filter select[name="lifecycle_status"]', 'ON_SALE');
+  await page.click('#product-filter button:not([type])');
+  await page.waitForFunction(() => document.querySelector('#product-list')?.textContent.includes('在售一百积分'));
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll('#product-list .product-item')].find((node) => node.textContent.includes('在售一百积分'));
+    item?.querySelector('button[data-edit-mode="replacement"]')?.click();
+  });
+  await page.waitForSelector('#product-create-dialog[open]');
+  assert.equal(await page.$eval('#product-form input[name="product_id"]', (node) => node.readOnly), false);
+  assert.equal(await page.$eval('#product-form input[name="product_id"]', (node) => node.value), '');
+  assert.match(await page.$eval('#product-editor-help', (node) => node.textContent), /历史事实不可原地修改/);
+  await page.evaluate(() => {
+    const form = document.querySelector('#product-form');
+    form.elements.product_id.value = 'ON_SALE_100_V2';
+    form.elements.sku_bom.value = 'ON-100-V2';
+    form.elements.reason.value = '为已发布充值商品创建替代草稿';
+  });
+  await page.click('#product-editor-submit');
+  await page.waitForFunction(() => document.querySelector('#product-manage-message')?.textContent.includes('草稿已创建'));
+  assert.equal(observations.replacementCreates.length, 1);
+  assert.equal(observations.replacementCreates[0].replacement_product_id, 'ON_SALE_100');
+  assert.equal(observations.replacementCreates[0].replacement_expected_version, 3);
+  assert.match(await page.$eval('#product-list', (node) => node.textContent), /ON_SALE_100_V2/);
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !document.querySelector('#product-manage-dialog')?.open);
   assert.equal(await page.evaluate(() => document.activeElement?.id), 'product-manage-open');
@@ -288,7 +350,59 @@ try {
   await page.click('[data-product-create-close]');
 
   await configure('stepup');
-  await page.click('#product-manage-open');
+  if (!await page.$eval('#product-manage-dialog', (node) => node.open)) await page.click('#product-manage-open');
+  await page.waitForSelector('#product-manage-dialog[open] #product-list .product-item');
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll('#product-list .product-item')].find((node) => node.textContent.includes('已编辑草稿二百积分'));
+    item?.querySelector('button[data-edit-mode="draft"]')?.click();
+  });
+  await page.waitForSelector('#product-create-dialog[open]');
+  await page.evaluate(() => {
+    const form = document.querySelector('#product-form');
+    form.elements.display_name_en.value = 'Restored draft edit';
+    form.elements.reason.value = '重新认证后继续编辑未发布商品草稿';
+  });
+  const draftUpdatesBeforeStepup = observations.draftUpdates.length;
+  await page.click('#product-editor-submit');
+  await page.waitForFunction(() => location.pathname === '/auth/login');
+  const draftReturnTo = new URL(page.url()).searchParams.get('return_to');
+  assert.equal(observations.draftUpdates.length, draftUpdatesBeforeStepup + 1);
+  await configure('full');
+  await page.goto(`http://127.0.0.1:${port}${draftReturnTo}`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('#product-create-dialog[open]');
+  assert.equal(await page.$eval('#product-form input[name="display_name_en"]', (node) => node.value), 'Restored draft edit');
+  assert.equal(await page.$eval('#product-form input[name="reason"]', (node) => node.value), '重新认证后继续编辑未发布商品草稿');
+  assert.match(await page.$eval('#product-create-message', (node) => node.textContent), /不会自动提交/);
+  assert.equal(observations.draftUpdates.length, draftUpdatesBeforeStepup + 1, 'restoring a draft edit must not replay PUT');
+  await page.click('[data-product-create-close]');
+
+  await configure('stepup');
+  if (!await page.$eval('#product-manage-dialog', (node) => node.open)) await page.click('#product-manage-open');
+  await page.waitForSelector('#product-manage-dialog[open] #product-list .product-item');
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll('#product-list .product-item')].find((node) => node.textContent.includes('DRAFT_200'));
+    item?.querySelector('button[data-edit-mode="draft"]')?.click();
+  });
+  await page.waitForSelector('#product-create-dialog[open]');
+  await page.evaluate(() => {
+    const form = document.querySelector('#product-form');
+    form.elements.display_name_en.value = 'Stale restored draft edit';
+    form.elements.reason.value = 'Do not overwrite a concurrent administrator update';
+  });
+  const staleDraftUpdates = observations.draftUpdates.length;
+  await page.click('#product-editor-submit');
+  await page.waitForFunction(() => location.pathname === '/auth/login');
+  const staleReturnTo = new URL(page.url()).searchParams.get('return_to');
+  assert.equal(observations.draftUpdates.length, staleDraftUpdates + 1);
+  await configure('concurrent-draft');
+  await page.goto(`http://127.0.0.1:${port}${staleReturnTo}`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('#product-manage-dialog[open]');
+  assert.equal(await page.$eval('#product-create-dialog', (node) => node.open), false, 'a stale restored edit must not reopen against newer versions');
+  assert.ok((await page.$eval('#product-manage-message', (node) => node.textContent)).length > 0);
+  assert.equal(observations.draftUpdates.length, staleDraftUpdates + 1, 'a stale restored edit must not replay PUT');
+
+  await configure('stepup');
+  if (!await page.$eval('#product-manage-dialog', (node) => node.open)) await page.click('#product-manage-open');
   await page.waitForSelector('#product-manage-dialog[open] #product-list .product-item');
   await page.evaluate(() => {
     const item = [...document.querySelectorAll('#product-list .product-item')].find((node) => node.textContent.includes('草稿二百积分'));

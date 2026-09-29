@@ -15,7 +15,7 @@ test('recharge product commands use atomic permissions, recent OIDC authenticati
     assert.match(permissions, new RegExp(`platform\\.products\\.${permission}`));
     assert.match(service, new RegExp(`platform\\.products\\.${permission}`));
   }
-  for (const command of ['CREATE', 'ADMISSION_VERIFY', 'ADMISSION_REVOKE', 'PUBLISH', 'UNPUBLISH', 'DELETE', 'DISPLAY_NAMES_UPDATE']) {
+  for (const command of ['CREATE', 'DRAFT_UPDATE', 'ADMISSION_VERIFY', 'ADMISSION_REVOKE', 'PUBLISH', 'UNPUBLISH', 'DELETE', 'DISPLAY_NAMES_UPDATE']) {
     assert.match(policies, new RegExp(`BILLING_RECHARGE_PRODUCT_${command}`));
   }
   assert.match(handlers, /principal\.AuthenticatedAt/);
@@ -27,6 +27,8 @@ test('recharge product commands use atomic permissions, recent OIDC authenticati
   assert.match(service, /display-names.*platform\.products\.publish/);
   assert.match(handlers, /adminUpdateRechargeProductDisplayNames/);
   assert.match(handlers, /strings\.TrimSpace\(body\.DisplayNameZhCN\)/);
+  assert.match(service, /recharge-products\/:catalog_item_id\/draft.*platform\.products\.create/);
+  assert.match(handlers, /replayCatalogCommand\(w, r, hash\)[\s\S]*rechargeProductCreateOptions/);
 });
 
 test('portal proxy and OpenAPI expose only the exact product lifecycle', async () => {
@@ -38,6 +40,7 @@ test('portal proxy and OpenAPI expose only the exact product lifecycle', async (
   for (const path of [
     '/billing/admin/v1/recharge-products',
     '/billing/admin/v1/recharge-product-create-options',
+    '/billing/admin/v1/recharge-products/{catalog_item_id}/draft',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/publish',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/unpublish',
     '/billing/admin/v1/recharge-products/{catalog_item_id}/delete',
@@ -50,6 +53,39 @@ test('portal proxy and OpenAPI expose only the exact product lifecycle', async (
   assert.equal(createSchema.properties.credit_microcredits.deprecated, true);
   assert.equal(createSchema.properties.credit_microcredits.minimum, 1);
   assert.ok(!createSchema.required.includes('credit_microcredits'));
+  assert.equal(createSchema.properties.replacement_expected_version.minimum, 1);
+  const updateSchema = openapi.components.schemas.RechargeProductDraftUpdate;
+  assert.ok(updateSchema.required.includes('expected_version'));
+  assert.ok(updateSchema.required.includes('expected_draft_version'));
+  assert.equal(updateSchema.additionalProperties, false);
+});
+
+test('draft edits use dual CAS and published edits create constrained replacement drafts', async () => {
+  const [catalog, admin, openapiText] = await Promise.all([
+    read('internal/billing/recharge_product_catalog.go'),
+    read('internal/billing/recharge_product_admin.go'),
+    read('contracts/openapi/admin.yaml'),
+  ]);
+  assert.match(catalog, /lifecycle != "DRAFT" \|\| everPublished/);
+  assert.match(catalog, /version != command\.ExpectedVersion \|\| draftVersion != command\.ExpectedDraftVersion/);
+  assert.match(catalog, /failure_code='DRAFT_CHANGED'/);
+  assert.match(catalog, /mappingResult\.RowsAffected\(\) != 1/);
+  assert.match(catalog, /sourceVersion != \*input\.ReplacementExpectedVersion/);
+  assert.match(catalog, /!sourceEverPublished/);
+  assert.match(catalog, /sourceLifecycle != "ON_SALE" && sourceLifecycle != "OFF_SALE"/);
+  assert.match(catalog, /catalog\.replacement/);
+  assert.match(catalog, /replacement_product_id=\$1 AND lifecycle_status<>'DELETED'/);
+  assert.match(catalog, /lockTransactionKey\(ctx, tx, "catalog\.admission"[\s\S]*product_admission_verifications WHERE verification_id=\$1 FOR UPDATE/);
+  const createStart = catalog.indexOf('func (r *PostgresRepository) CreateRechargeProduct');
+  const createBlock = catalog.slice(createStart, catalog.indexOf('func normalizeRechargeProductMicrocredits', createStart));
+  const createCommit = createBlock.lastIndexOf('tx.Commit(ctx)');
+  assert.ok(createBlock.indexOf('INSERT INTO recharge_product_command_records') < createCommit);
+  assert.ok(createBlock.indexOf('INSERT INTO recharge_product_audits') < createCommit);
+  assert.match(admin, /CreateRechargeProduct\.Command = &RechargeProductCreateCommandMeta/);
+  assert.doesNotMatch(admin.slice(admin.indexOf('func (s *Service) adminCreateRechargeProduct'), admin.indexOf('type updateRechargeProductDraftRequest')), /saveCatalogCommand/);
+  assert.match(catalog, /Current:\s+true/);
+  assert.match(catalog, /binding\.effective_to IS NULL/);
+  assert.match(openapiText, /required: \[verification_id, catalog_item_id, publish_fingerprint, current, active, status, requested_at\]/);
 });
 
 test('admin product UI is permission driven, tri-lingual, and never auto-replays after step-up', async () => {
@@ -75,6 +111,15 @@ test('admin product UI is permission driven, tri-lingual, and never auto-replays
   assert.match(ui, /id="product-manage-dialog"/);
   assert.match(ui, /lifecycle_status:"ON_SALE"/);
   assert.match(ui, /Manage drafts and history/);
+  assert.match(ui, /data-edit-mode="draft"/);
+  assert.match(ui, /data-edit-mode="replacement"/);
+  assert.match(ui, /expected_draft_version:editorItem\.mapping\.draft_version/);
+  assert.match(ui, /replacement_product_id:editorItem\.product_id/);
+  assert.match(ui, /replacement_expected_version:editorItem\.version/);
+  assert.match(ui, /__expected_version:editorItem\?\.version/);
+  assert.match(ui, /__expected_draft_version:editorItem\?\.mapping\?\.draft_version/);
+  assert.match(ui, /staleRestore/);
+  assert.match(ui, /item\.current\|\|item\.active/);
   assert.doesNotMatch(ui, /if\(canCreate\)await loadCreateOptions\(\)/);
   assert.match(portal, /prompt", "login"/);
   assert.match(portal, /max_age", "900"/);

@@ -974,6 +974,17 @@ paths:
         "200": { description: Authoritative create options, content: { application/json: { schema: { $ref: "#/components/schemas/RechargeProductCreateOptions" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/recharge-products/{catalog_item_id}/draft:
+    put:
+      operationId: updateRechargeProductDraft
+      summary: Update a never-published recharge product draft in place; previously published products require a replacement draft
+      parameters: [{ $ref: "#/components/parameters/CatalogItemID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RechargeProductDraftUpdate" } } } }
+      responses:
+        "200": { description: Never-published draft updated, content: { application/json: { schema: { $ref: "#/components/schemas/RechargeProduct" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/recharge-products/{catalog_item_id}/publish:
     post:
       operationId: publishRechargeProduct
@@ -4668,7 +4679,7 @@ components:
         admission_class: { type: string, enum: [FORMAL, TEST_ONLY] }
     RechargeProduct:
       type: object
-      required: [catalog_item_id, product_id, display_name_zh_cn, display_name_en, display_name_ja, lifecycle_status, version, admission_version, mapping]
+      required: [catalog_item_id, product_id, display_name_zh_cn, display_name_en, display_name_ja, display_order, base_points, bonus_points, validity_days, invoice_product_name, lifecycle_status, version, admission_version, ever_published, mapping]
       properties:
         catalog_item_id: { type: string, format: uuid }
         product_id: { type: string }
@@ -4677,9 +4688,14 @@ components:
         display_name_ja: { type: string }
         display_order: { type: integer }
         replacement_product_id: { type: string }
+        base_points: { type: integer, minimum: 0 }
+        bonus_points: { type: integer, minimum: 0 }
+        validity_days: { type: integer, minimum: 1 }
+        invoice_product_name: { type: string, minLength: 1 }
         lifecycle_status: { type: string, enum: [DRAFT, ON_SALE, OFF_SALE, DELETED] }
         version: { type: integer, minimum: 1 }
         admission_version: { type: integer, minimum: 0 }
+        ever_published: { type: boolean }
         mapping: { $ref: "#/components/schemas/RechargeProductMapping" }
     RechargeProductPage:
       type: object
@@ -4697,7 +4713,8 @@ components:
         display_name_en: { type: string, minLength: 1 }
         display_name_ja: { type: string, minLength: 1 }
         display_order: { type: integer }
-        replacement_product_id: { type: string }
+        replacement_product_id: { type: string, description: "Product ID of the published source that this new draft replaces. Requires replacement_expected_version." }
+        replacement_expected_version: { type: integer, minimum: 1, description: "Compare-and-swap version of replacement_product_id when creating a replacement draft." }
         base_points: { type: integer, minimum: 0 }
         bonus_points: { type: integer, minimum: 0 }
         credit_microcredits: { type: integer, minimum: 1, deprecated: true, description: "Deprecated compatibility field. When present it must equal (base_points + bonus_points) * 10000." }
@@ -4726,6 +4743,24 @@ components:
           type: array
           uniqueItems: true
           items: { type: string, minLength: 1 }
+    RechargeProductDraftUpdate:
+      type: object
+      additionalProperties: false
+      required: [display_name_zh_cn, display_name_en, display_name_ja, display_order, base_points, bonus_points, validity_days, invoice_product_name, mapping, expected_version, expected_draft_version, reason]
+      properties:
+        display_name_zh_cn: { type: string, minLength: 1 }
+        display_name_en: { type: string, minLength: 1 }
+        display_name_ja: { type: string, minLength: 1 }
+        display_order: { type: integer }
+        base_points: { type: integer, minimum: 0 }
+        bonus_points: { type: integer, minimum: 0 }
+        credit_microcredits: { type: integer, minimum: 1, deprecated: true, description: "Deprecated compatibility field. When present it must equal (base_points + bonus_points) * 10000." }
+        validity_days: { type: integer, minimum: 1 }
+        invoice_product_name: { type: string, minLength: 1 }
+        mapping: { $ref: "#/components/schemas/RechargeProductMappingCreate" }
+        expected_version: { type: integer, minimum: 1 }
+        expected_draft_version: { type: integer, minimum: 1 }
+        reason: { type: string, minLength: 1 }
     RechargeProductMappingCreate:
       type: object
       additionalProperties: false
@@ -4757,12 +4792,14 @@ components:
         reason: { type: string, minLength: 1 }
     ProductAdmissionVerification:
       type: object
-      required: [verification_id, catalog_item_id, publish_fingerprint, status, requested_at]
+      required: [verification_id, catalog_item_id, publish_fingerprint, current, active, status, requested_at]
       properties:
         verification_id: { type: string, format: uuid }
         catalog_item_id: { type: string, format: uuid }
         retry_of: { type: string, format: uuid }
         publish_fingerprint: { type: string }
+        current: { type: boolean, description: Whether the verification matches the current catalog draft fingerprint. }
+        active: { type: boolean, description: Whether the evidence is bound to the currently effective admission. }
         status: { type: string, enum: [PENDING, VERIFIED, FAILED] }
         failure_code: { type: string }
         requested_at: { type: string, format: date-time }

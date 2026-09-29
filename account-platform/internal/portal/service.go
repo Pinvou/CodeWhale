@@ -1336,6 +1336,9 @@ func billingAdminPathAllowed(method, resource string) bool {
 			return false
 		}
 		if len(parts) == 5 {
+			if parts[4] == "draft" {
+				return method == http.MethodPut
+			}
 			if parts[4] == "admission-verifications" {
 				return method == http.MethodGet || method == http.MethodPost
 			}
