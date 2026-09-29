@@ -166,6 +166,27 @@ test('both ChatViews refresh the exact capability binding before its 30 second e
     'B refresh failure must expose a retry path instead of permanently wedging send');
 });
 
+test('B capability readiness blocks sending without keeping a completed turn running', () => {
+  const busyState = sourceSection(
+    chat, 'const busy = remoteChatActive', '// 停止按钮 single-flight',
+  );
+  assert.match(busyState,
+    /controlledChatActive[\s\S]*?localBusy \|\| controlledCapabilityBusy \|\| !controlledCapabilityBound/,
+    'B capability refresh and binding readiness must continue to protect the send path');
+  assert.match(busyState,
+    /const conversationBusy = remoteChatActive\s*\? !!currentRemoteTaskId\s*: \(controlledChatActive \? localBusy : busy\);/,
+    'B timeline activity must follow only the actual local generation state');
+
+  const projection = sourceSection(
+    chat, 'const conversationProjection = projectDeepSeekConversation({',
+    'const { latestArtifactIds, latestArtifactIdsKey',
+  );
+  assert.match(projection, /busy: conversationBusy,/,
+    'the projected active turn must not consume B capability-loading state');
+  assert.match(projection, /\[displayChatItems, conversationBusy,/,
+    'the projection must recompute when the actual conversation busy state changes');
+});
+
 test('only the Rust-verified remote projection renders the single ChatView timeline', () => {
   assert.match(chat, /remoteProxyChatItems\(activeSessionId, remoteProxyHistory\)/);
   assert.match(chat, /if \(item\.remoteProxy && item\.type === 'system'\) \{[\s\S]*?data-testid="chat-remote-projection-entry"/);
@@ -178,7 +199,7 @@ test('only the Rust-verified remote projection renders the single ChatView timel
     'remote user text cannot be interpreted as a local attachment action');
   assert.match(chat, /<ToolCard item=\{item\.legacyItem\} sessionId=\{activeSessionId\} t=\{t\} variant="timeline" \/>/,
     'remote tool items must reuse the ordinary B-side timeline tool renderer');
-  assert.match(chat, /busy: remoteChatActive \? !!currentRemoteTaskId : busy/,
+  assert.match(chat, /const conversationBusy = remoteChatActive\s*\? !!currentRemoteTaskId/,
     'hidden remote task status must still drive the ordinary turn lifecycle');
   assert.equal(remoteProjectionLabelKey('approval'), 'projectionApproval');
   assert.equal(remoteProjectionLabelKey('error'), 'projectionError');

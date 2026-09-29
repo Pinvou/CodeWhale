@@ -1285,6 +1285,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         : (controlledChatActive
           ? (localBusy || controlledCapabilityBusy || !controlledCapabilityBound)
           : localBusy);
+      // Capability refresh/readiness may block sending without representing an
+      // active turn. A follows its authenticated remote task; B follows only
+      // the actual local generation state so completed turns stay done.
+      const conversationBusy = remoteChatActive
+        ? !!currentRemoteTaskId
+        : (controlledChatActive ? localBusy : busy);
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
       // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
       // **对应 session** 的按钮（按 session 集合记录而非全局布尔或单个 sid：
@@ -1664,7 +1670,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         for (let i = displayChatItems.length - 1; i >= 0; i--) { if (displayChatItems[i].type === 'user') { lastUserId = displayChatItems[i].id; break; } }
         const conversationProjection = projectDeepSeekConversation({
           chatItems: conversationItemsForMode(visibleChatItems),
-          busy: remoteChatActive ? !!currentRemoteTaskId : busy,
+          busy: conversationBusy,
           thinking: chatThinking,
           tokens: ctxTokens,
           sessionId: activeSessionId,
@@ -1681,7 +1687,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           if (turns[i].status === 'running') { activeConversationTurn = turns[i]; break; }
         }
         return { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn };
-      }, [displayChatItems, busy, currentRemoteTaskId, remoteChatActive, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
+      }, [displayChatItems, conversationBusy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
       const { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn } = derivedConversation;
 
 
