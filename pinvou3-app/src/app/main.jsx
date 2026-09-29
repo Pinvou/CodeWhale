@@ -59,7 +59,10 @@ import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRou
 import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
-import { openControlledDeviceChatWithRetry } from '../features/remote-control/remote-control-logic.mjs';
+import {
+  isControlledDeviceChatActive,
+  openControlledDeviceChatWithRetry,
+} from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
 import { mergeSessionStoreHistory } from '../features/remote-control/remote-session-adapter.mjs';
 import {
@@ -3376,7 +3379,13 @@ const NAV_PREFETCH = {
       }), [t, beginTearOff]);
       const openSearchOverlay = useCallback(() => setSearchOverlayOpen(true), []);
       const handleNavNewChat = useCallback(() => { handleNewChat(); }, [handleNewChat]);
-      const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
+      const isControlledChatActive = isControlledDeviceChatActive(bs?.controlledDevice);
+      const apiKeyGateOpen = shouldShowApiKeyGate(
+        bs,
+        currentView,
+        bridge.available,
+        isControlledChatActive,
+      );
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',

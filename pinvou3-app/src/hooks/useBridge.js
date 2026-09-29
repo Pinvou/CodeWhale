@@ -70,19 +70,14 @@ function activeModelIsLocal(bs) {
   return isLocalModel(m);
 }
 
-function controlledDeviceOwnsChat(bs) {
-  return ['connected', 'reconnecting'].includes(bs?.controlledDevice?.status);
-}
-
 // API Key gate 只覆盖正在交互的聊天页。设置页必须始终可达，否则首次启动时
 // “去配置”按钮会把用户送到仍被 gate 盖住的设置页，形成无法录入 Key 的死锁。
-function shouldShowApiKeyGate(bs, currentView, bridgeAvailable) {
+function shouldShowApiKeyGate(bs, currentView, bridgeAvailable, isControlledChatActive = false) {
   const inChat = currentView === 'chat'
     || (currentView === 'scheduled' && !!(bs && bs.scheduledRunContext));
   // 被控端连接后，聊天页承载的是远端任务和稍后创建的权威 Session，不能再用
   // 当前本机普通会话的模型配置弹出 API Key 门控。重连期间也保持这一语义，避免
   // 链路短暂抖动时弹窗盖住仍在恢复的被控对话；连接终止后则自然恢复本机门控。
-  const isControlledChatActive = controlledDeviceOwnsChat(bs);
   const config = bs && bs.effectiveModelConfig;
   const missingCredential = config
     && (config.credential_state === 'missing' || config.credential_state === 'unavailable');
