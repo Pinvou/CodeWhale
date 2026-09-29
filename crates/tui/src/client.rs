@@ -1492,6 +1492,10 @@ impl DeepSeekClient {
             rebound.route_limits = candidate_limits;
             return Ok(Some(rebound));
         }
+        // A Custom client never reaches this rebuild/error tail: its pinned
+        // wire override makes `candidate.protocol() == self.wire_format` by
+        // construction, so only built-in model-aware kinds can demand a
+        // protocol the bound transport cannot speak.
         let config = config.ok_or_else(|| {
             anyhow::anyhow!(
                 "{} model {:?} uses {:?}, but this client is bound to {:?} and no configuration is available to rebuild it",

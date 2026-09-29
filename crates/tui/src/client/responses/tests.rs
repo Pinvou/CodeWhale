@@ -1554,6 +1554,29 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         "{switched_table}"
     );
 
+    // State minted by a DIFFERENT provider (Codex) must not replay on a
+    // Custom route even with the same model and api shape: the tag is exact.
+    request.model = "gpt-6-sol".to_string();
+    request.messages[0].content = vec![ContentBlock::Thinking {
+        thinking: SENTINEL.to_string(),
+        signature: None,
+        state: Some(OpaqueReasoningState {
+            provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+            api: "openai-responses".to_string(),
+            model: "gpt-6-sol".to_string(),
+            id: Some("rs_codex".to_string()),
+            encrypted_content: "enc_codex_payload".to_string(),
+        }),
+    }];
+    let codex_state_on_custom =
+        build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);
+    let codex_state_wire = codex_state_on_custom.to_string();
+    assert!(!codex_state_wire.contains(SENTINEL));
+    assert!(
+        !codex_state_wire.contains("enc_codex_payload"),
+        "foreign-provider state must not replay onto a Custom route: {codex_state_on_custom}"
+    );
+
     request.model = "gpt-6-luna".to_string();
     let switched_model =
         build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);

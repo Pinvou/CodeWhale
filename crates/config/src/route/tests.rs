@@ -1934,3 +1934,70 @@ fn wire_override_is_ignored_for_builtin_kinds() {
         "the builtin openai policy stays Chat Completions"
     );
 }
+
+/// The override's edges: it mints the wire even with the descriptor's
+/// placeholder base URL, it never resurrects unowned offering facts on a
+/// custom endpoint, and a Responses-descriptor built-in ignores a Chat
+/// override exactly like the Chat-policy kind ignores a Responses override.
+#[test]
+fn custom_wire_override_edges_stay_fail_closed() {
+    let resolver = RouteResolver::new();
+
+    // No base_url_override: the wire still comes from the override while the
+    // endpoint stays the Custom descriptor's loopback placeholder — failing
+    // closed locally instead of guessing a public host.
+    let placeholder = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Custom),
+            model_selector: Some(LogicalModelRef::from("gpt-6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: None,
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::Responses),
+        })
+        .expect("override resolves without a base URL override");
+    assert_eq!(placeholder.protocol(), RequestProtocol::Responses);
+    assert_eq!(placeholder.endpoint().endpoint_key, "responses");
+    assert_eq!(placeholder.endpoint().base_url, "http://localhost/v1");
+
+    // A wire-true custom candidate must not restore capability or pricing
+    // facts the custom endpoint never proved, even when the override makes
+    // the route look first-party Responses.
+    let wire_true = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Custom),
+            model_selector: Some(LogicalModelRef::from("gpt-6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: Some("https://api.openai.com/v1".to_string()),
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::Responses),
+        })
+        .expect("wire-true custom candidate resolves");
+    assert_eq!(
+        wire_true.capabilities(),
+        RouteCapabilities::default(),
+        "the override must not resurrect capability facts"
+    );
+    assert!(matches!(
+        wire_true.pricing(),
+        Some(super::candidate::PricingSku::UnknownOrStale)
+    ));
+
+    // Demotion is structurally impossible: a built-in whose descriptor
+    // already serves Responses keeps its protocol under a Chat override.
+    let zen = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::OpencodeZen),
+            model_selector: Some(LogicalModelRef::from("gpt-5.6-sol".to_string())),
+            saved_provider_model: None,
+            base_url_override: None,
+            limit_overrides: Vec::new(),
+            wire_override: Some(RequestProtocol::ChatCompletions),
+        })
+        .expect("zen route resolves");
+    assert_eq!(
+        zen.protocol(),
+        RequestProtocol::Responses,
+        "a Chat override cannot demote a Responses-descriptor builtin"
+    );
+}
