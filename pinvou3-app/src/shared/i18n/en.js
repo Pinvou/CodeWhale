@@ -431,7 +431,7 @@ export const dictEn = {
           copy:'Copy', copied:'Copied to clipboard', copyFailed:'Copy failed — select and copy manually',
           notRunningHint:'This model is not enabled, so agents calling it now will get "model not enabled".',
           tasksTitle:'In progress', taskRunning:'Working…', taskCancelling:'Cancelling…', taskCancelled: 'Cancelled', taskWaitingInput:'Waiting for your input…',
-          taskCancel:'Cancel', taskClose:'Close', taskExpand:'Show log', taskCollapse:'Hide log', taskNoOutput:'(No output)',
+          taskCancel:'Cancel', taskClose:'Close', taskExpand:'Show log', taskCollapse:'Hide log', taskNoOutput:'(No output)', taskCancelFailed:(m)=>`Cancel did not take effect: ${m}`, taskAnswerFailed:(m)=>`That answer did not get through: ${m}`,
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`${d} left`,
           etaSec:n=>`${n}s`, etaMin:n=>`${n} min`, etaHour:(h,m)=>`${h} h ${m} min`,
           promptTitle:'A few details are needed', promptSubmit:'OK', promptCancel:'Cancel', promptYes:'Yes', promptNo:'No',

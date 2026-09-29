@@ -181,6 +181,12 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [task.lines, task.expanded]);
 
+  // 要显示的错误文本。`errorKey` 是 useLmmTasks 回灌的结构化错误（那个模块按本
+  // feature 的分层约定不拼文案，只给键和原文），在这里过词典；`task.error` 是
+  // 轮询循环写进来的后端原文，照旧直接显示。
+  const errorText = task.errorKey && copy[task.errorKey]
+    ? copy[task.errorKey](task.errorDetail || '')
+    : task.error;
   const isError = task.status === 'error';
   // 终态 = 不会再变了。取消完成的任务也留在面板上（用户要看得见自己停了什么），
   // 它和失败一样需要一个「关闭」按钮，也一样不该再显示进度条——只判 isError
@@ -202,7 +208,11 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         {task.status === 'running' ? <Spinner size={14} tone="brand" className="mt-1" /> : null}
         <div className="min-w-0 flex-1">
           <div className={`truncate text-[13px] font-medium ${TEXT_PRIMARY}`}>{task.title}</div>
-          {isError ? (
+          {/* 终态失败、以及「还在跑但有错要说」的情况，都走这一条红字。
+              后者是取消/作答的 IPC 自己失败时回灌的：任务其实还在跑、状态是
+              running，但用户必须看见「取消没有生效」，否则按钮恢复可点却不知道
+              为什么。原先只判 isError，那条错误写进了 state 却没有任何出口。 */}
+          {errorText ? (
             <div className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{task.error.split('\n')[0]}</div>
           ) : (
             <div className={`mt-0.5 truncate text-[11px] ${TEXT_SECONDARY}`}>{taskSubtitle(task, copy)}</div>
@@ -249,7 +259,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           data-testid="model-store-task-log"
           className="mx-4 mt-2 h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-[#202124] p-2.5 text-[11px] leading-4 text-[#E3E3E3] dark:bg-[#131314]"
         >
-          {(isError ? [...task.lines, '', task.error] : task.lines).join('\n') || copy.taskNoOutput}
+          {(errorText ? [...task.lines, '', errorText] : task.lines).join('\n') || copy.taskNoOutput}
         </pre>
       ) : null}
 

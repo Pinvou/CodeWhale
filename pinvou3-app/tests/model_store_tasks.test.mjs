@@ -305,7 +305,7 @@ test('取消命令自己失败时要浮出来，不能让卡片顶着「正在�
   await waitFor(
     () => {
       const t = getTasks().find((x) => x.id === id);
-      return t && t.status === 'running' && typeof t.error === 'string' && t.error.includes('IPC 通道没了');
+      return t && t.status === 'running' && t.errorKey === 'taskCancelFailed' && String(t.errorDetail).includes('IPC 通道没了');
     },
     '取消失败既没有回灌错误、也没有把状态退回 running——用户会一直看着「正在取消」',
   );
@@ -338,8 +338,42 @@ test('作答没送达时把提示放回去，别让输入框凭空消失', async
   await waitFor(
     () => {
       const t = getTasks().find((x) => x.id === id);
-      return t && t.prompt && typeof t.error === 'string' && t.error.includes('后端连接断了');
+      return t && t.prompt && t.errorKey === 'taskAnswerFailed' && String(t.errorDetail).includes('后端连接断了');
     },
     '作答失败后提示没有放回去、或者错误没有浮出来',
+  );
+});
+
+test('run_id 还没落地就点取消：补发失败也要回灌', async () => {
+  // **这条盖的是第三处**（pumpRun 里 run_id 落地后补发 cancelWanted 的那次）。
+  //
+  // 上面两条测试都走不到这里：`startNeverEndingTask` 的 start() 是同步 resolve 的，
+  // `runTask` 的续体（内含 runIds.set）在微任务里先于测试续体执行，所以 cancelTask
+  // 时 runIds 必有值，直达路径就返回了。要覆盖补发路径，start() 必须挂起——用本文件
+  // :183 那条测试的门控写法。
+  let releaseStart = null;
+  const started = new Promise((resolve) => { releaseStart = resolve; });
+  scripts.set('run-late', (from) => idleChunk(from));
+  failCommands.set('model_store_cancel_run', '补发时通道也断了');
+
+  const before = new Set(getTasks().map((t) => t.id));
+  runTask({ title: '下载「晚到的卡」', kind: 'download', key: 'download:late', start: () => started });
+  await waitFor(() => getTasks().some((t) => !before.has(t.id)), '任务卡没建起来');
+  const id = getTasks().find((t) => !before.has(t.id)).id;
+
+  // run_id 还在路上就点取消 —— 意图记进 cancelWanted，等落地再补发
+  cancelTask(id);
+  await waitFor(() => getTasks().find((t) => t.id === id)?.status === 'cancelling', '没进入取消中');
+
+  releaseStart({ run_id: 'run-late' });
+
+  // 补发的那次 cancelRun 失败，同样要回灌：状态退回 running、错误看得见
+  await waitFor(
+    () => {
+      const t = getTasks().find((x) => x.id === id);
+      return t && t.status === 'running' && t.errorKey === 'taskCancelFailed'
+        && String(t.errorDetail).includes('补发时通道也断了');
+    },
+    '补发取消失败后没有回灌——卡片会一直停在「取消中」，而这正是那段注释自己警告的事',
   );
 });
