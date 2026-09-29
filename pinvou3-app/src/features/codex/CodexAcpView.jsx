@@ -900,6 +900,7 @@ export function CodexAcpView({
   // error notice copy needs the current UI language and model config;
   // the latest values are threaded through a ref so closures never hold a
   // stale bridge state snapshot (same pattern as activeIdRef).
+  // Assigned below, once the native session's own model context is known.
   const nativeEventContextRef = useRef({ language: null, modelServiceState: null });
   useLayoutEffect(() => {
     // loadSession may optimistically point this ref at a just-created session before
@@ -1063,9 +1064,9 @@ export function CodexAcpView({
   const nativeProjection = useMemo(
     () => (isNativeAgent ? projectNativeLane(activeNativeLane, activeId, {
       // Same as the main chat ChatView: the timeline error card's friendly
-      // copy is built in the UI language, with the provider label derived
-      // from bridge state (internally, a provider signal in the error text
-      // still wins).
+      // copy is built in the UI language; the provider label comes from the
+      // native session's own controls (nativeModelServiceState above), and a
+      // provider signal in the error text itself still wins.
       language: nativeModelServiceLanguage,
       modelServiceState: nativeModelServiceState,
     }) : null),

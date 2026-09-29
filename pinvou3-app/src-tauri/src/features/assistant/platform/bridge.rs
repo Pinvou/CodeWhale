@@ -3940,12 +3940,11 @@ mod tests {
                 .iter()
                 .all(|entry| entry["enabled"] == true)
         );
-        // §3.2: the store is the installed-truth source — mutating the store
-        // moves the inventory; rewriting installed.json alone no longer does.
-        let store = crate::features::marketplace::store::BundleStore::new();
-        store.remove("weather").unwrap();
+        // MarketplaceManager::list_tools still reads installed.json for MCP
+        // installation state; bundles.json supplies source and display metadata.
+        std::fs::write(&installed, r#"["qcc"]"#).unwrap();
         assert_eq!(inventory("plain").as_array().unwrap().len(), 1);
-        store.remove("qcc").unwrap();
+        std::fs::write(&installed, "[]").unwrap();
         assert!(inventory("plain").as_array().unwrap().is_empty());
         let Op::SendMessage { content, .. } = bridge
             .build_send_message_op(
