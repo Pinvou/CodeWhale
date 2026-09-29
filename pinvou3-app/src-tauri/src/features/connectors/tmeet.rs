@@ -112,10 +112,52 @@ fn safe_auth_log_line(line: &str) -> Option<String> {
 }
 
 fn install_tmeet_cli() -> Result<bool, String> {
-    let mut c = TMEET_CTX.base_cmd("npm");
-    cc::apply_user_npm_prefix(&mut c);
-    c.args(["install", "-g", TMEET_NPM_SPEC]);
-    cc::run_with_timeout(c, 180)
+    // registry.npmjs.org is often unreachable on China networks: after the
+    // default registry fails outright, retry this invocation once via
+    // npmmirror (only appending --registry, never reading or writing the
+    // user's npm config), the same policy as the codex/claude npm upgrade
+    // mirror retry; both attempts' output is separated by marker lines and
+    // appended in order to cli-install.log, so the first failure's cause is
+    // not lost.
+    let attempt = |registry: Option<&str>| -> Result<bool, String> {
+        let mut c = TMEET_CTX.base_cmd("npm");
+        cc::apply_user_npm_prefix(&mut c);
+        c.args(["install", "-g", TMEET_NPM_SPEC]);
+        if let Some(registry) = registry {
+            c.arg(format!("--registry={registry}"));
+        }
+        // run_with_timeout only returns a success boolean; output is
+        // uniformly appended to cli-install.log for diagnosis.
+        cc::run_with_timeout(c, 180)
+    };
+    cc::append_cli_install_log("── npm install @tencentcloud/tmeet (default npm registry) ──");
+    let first = attempt(None);
+    if first.as_ref().is_ok_and(|ok| *ok) {
+        return Ok(true);
+    }
+    cc::append_cli_install_log("── default registry failed, retrying via npmmirror ──");
+    let second = attempt(Some(crate::platform::download::NPM_MIRROR_REGISTRY));
+    if second.as_ref().is_ok_and(|ok| *ok) {
+        return Ok(true);
+    }
+    // When both attempts fail, preserve the causal chain starting from the
+    // first error: reporting only the retry error would bury a first failure
+    // unrelated to the network (EACCES / disk full etc.) in the log.
+    let mut causes: Vec<String> = Vec::new();
+    if let Err(primary) = &first {
+        causes.push(format!("default registry error: {primary}"));
+    }
+    if let Err(retry) = &second {
+        causes.push(format!("npmmirror retry error: {retry}"));
+    }
+    let detail = if causes.is_empty() {
+        "both the default registry and the npmmirror mirror failed".to_string()
+    } else {
+        causes.join("; ")
+    };
+    Err(format!(
+        "Tencent Meeting CLI install failed: {detail}; see ~/.pinvou3/cli-install.log for details"
+    ))
 }
 
 /// Bootstrap: ensure the tmeet CLI is installed and at least 1.0.18.

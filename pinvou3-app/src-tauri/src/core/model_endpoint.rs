@@ -433,8 +433,8 @@ pub enum LocalServerKind {
 /// `bearer` is a credential from the same origin as the endpoint's real
 /// inference requests (see [`apply_bearer`]): probing an authenticated
 /// endpoint (vLLM `--api-key`) without credentials always 401s into a
-/// Generic misclassification, losing default-off thinking and the real
-/// effort tiers. Pass `None` for endpoints without auth.
+/// Generic misclassification, losing the local default thinking tier and
+/// the real effort tiers. Pass `None` for endpoints without auth.
 ///
 /// Results are cached by base_url for `PROBE_CACHE_TTL`: even with parallel
 /// probes a hung endpoint still costs one ~3s,
@@ -1608,7 +1608,7 @@ mod tests {
                     .as_deref()
                     .is_some_and(|expected| authorization != Some(expected));
                 let (status, body) = match routes.iter().find(|(p, _)| path.starts_with(p)) {
-                    Some((_, b)) if unauthorized => (401, r#"{"error":"unauthorized"}"#),
+                    Some((_, _b)) if unauthorized => (401, r#"{"error":"unauthorized"}"#),
                     Some((_, b)) => (200, *b),
                     None => (404, r#"{"error":"not found"}"#),
                 };
