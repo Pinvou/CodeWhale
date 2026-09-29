@@ -34,7 +34,11 @@ pub(super) const CODEX_RESPONSES_PATH: &str = "/codex/responses";
 /// Build the Responses API request body from a `MessageRequest`.
 #[cfg(test)]
 pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
-    build_responses_body_for_provider(request, ApiProvider::OpenaiCodex)
+    build_responses_body_for_provider(
+        request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    )
 }
 
 /// Build a provider-aware Responses API request body.
@@ -43,9 +47,16 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
 /// and exposes plain reasoning text rather than OpenAI encrypted summaries.
 /// Keep those exact-route differences here instead of leaking them into the
 /// provider-neutral message model.
+///
+/// `reasoning_provider_tag` is the tag the caller's capture side mints into
+/// [`OpaqueReasoningState`] (see `DeepSeekClient::reasoning_provider_tag`);
+/// the replay gate below only reattaches reasoning items whose state carries
+/// that exact tag, so encrypted reasoning minted by one endpoint — a named
+/// Custom table — is never replayed to another.
 pub(super) fn build_responses_body_for_provider(
     request: &MessageRequest,
     provider: ApiProvider,
+    reasoning_provider_tag: &str,
 ) -> Value {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     // Concentrate documents `model`, `input`, `stream`, `max_output_tokens`,
@@ -92,7 +103,7 @@ pub(super) fn build_responses_body_for_provider(
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
 
     // Convert messages to Responses input items.
-    let mut input = convert_messages_to_responses_input(request, provider);
+    let mut input = convert_messages_to_responses_input(request, provider, reasoning_provider_tag);
     if is_concentrate {
         input.insert(
             0,
@@ -137,10 +148,11 @@ pub(super) fn build_responses_body_for_provider(
         };
     }
 
-    // OpenAI Codex and `wire = "responses"` Custom tables can replay
-    // encrypted reasoning (mirrors the capture gate in
-    // `handle_responses_stream`). DeepSeek exposes plain `reasoning_text`
-    // and does not support `include`.
+    // Every Responses route that receives this builder can replay encrypted
+    // reasoning — OpenAI Codex, OpenCode Zen's Responses roster, and
+    // `wire = "responses"` Custom tables (mirrors the capture gate in
+    // `handle_responses_stream`, so include and capture stay in lockstep).
+    // DeepSeek exposes plain `reasoning_text` and does not support `include`.
     if !is_deepseek && !is_concentrate {
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
@@ -166,15 +178,16 @@ impl DeepSeekClient {
         // at this layer.
         let wire_model = prepared.wire_model.clone();
         // Encrypted-reasoning capture applies to every Responses route whose
-        // request carries `include: ["reasoning.encrypted_content"]` and
-        // replays by provider tag: the Codex OAuth backend, and any
-        // wire = "responses" Custom table (the same include is sent there).
-        // Chat-wire Custom tables and DeepSeek (plain reasoning_text) stay
-        // excluded.
+        // request carries `include: ["reasoning.encrypted_content"]` — the
+        // Codex OAuth backend, OpenCode Zen's Responses roster, and any
+        // wire = "responses" Custom table — and replays by the endpoint-scoped
+        // provider tag from `reasoning_provider_tag`. Chat-wire Custom tables
+        // and DeepSeek (plain reasoning_text) stay excluded.
         let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex
+            || self.api_provider == ApiProvider::OpencodeZen
             || (self.api_provider == ApiProvider::Custom
                 && self.wire_format == WireFormat::Responses))
-            .then(|| (self.api_provider.as_str().to_string(), wire_model.clone()));
+            .then(|| (self.reasoning_provider_tag(), wire_model.clone()));
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -722,9 +735,13 @@ pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Valu
 }
 
 /// Convert Codewhale messages to Responses API input items.
+///
+/// `reasoning_provider_tag` scopes opaque-reasoning replay to the endpoint
+/// that minted the state; see [`build_responses_body_for_provider`].
 pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
+    reasoning_provider_tag: &str,
 ) -> Vec<Value> {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     let mut items = Vec::new();
@@ -819,7 +836,11 @@ pub(super) fn convert_messages_to_responses_input(
                             thinking, state, ..
                         } => {
                             if let Some(state) = state {
-                                if state.provider == provider.as_str()
+                                // Endpoint-scoped replay: the tag must match
+                                // the endpoint this request is bound to
+                                // (provider slug, plus the table identity for
+                                // Custom), alongside api shape and exact model.
+                                if state.provider == reasoning_provider_tag
                                     && state.api == "openai-responses"
                                     && state.model == request.model
                                 {

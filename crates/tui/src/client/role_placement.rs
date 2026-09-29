@@ -377,6 +377,7 @@ mod adapter_agreement_tests {
         let items = responses::convert_messages_to_responses_input(
             &request(transcript()),
             ApiProvider::Openai,
+            ApiProvider::Openai.as_str(),
         );
         assert_eq!(
             roles(&items),

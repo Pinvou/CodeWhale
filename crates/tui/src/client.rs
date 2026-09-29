@@ -23,7 +23,9 @@ use codewhale_config::catalog::{
     CatalogOffering, CatalogRefreshError, CatalogSnapshot, CatalogSource, CatalogStatus,
     ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
-use codewhale_config::provider::WireFormat;
+use codewhale_config::provider::{
+    WireFormat, wire_dialect_prefers_anthropic, wire_dialect_prefers_responses,
+};
 use codewhale_config::route::{
     LogicalModelRef, ReadyRouteCandidate, RouteLimits, RouteRequest, RouteResolver,
 };
@@ -1421,6 +1423,30 @@ impl DeepSeekClient {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
 
+    /// The wire override that pins this transport's own endpoint on internal
+    /// re-resolutions: Custom clients are endpoint-scoped, so a fresh
+    /// config-aware resolution must reproduce — never downgrade — the wire
+    /// they were built with. Non-Custom transports resolve by descriptor
+    /// policy (`None`).
+    fn pinned_wire_override(&self) -> Option<WireFormat> {
+        (self.api_provider == ApiProvider::Custom).then_some(self.wire_format)
+    }
+
+    /// Provider tag minted into captured [`OpaqueReasoningState`] and required
+    /// by the replay gate. Non-Custom backends are single-endpoint, so the
+    /// provider slug suffices; every named Custom table shares the `custom`
+    /// slug, so the tag carries the frozen table identity — encrypted
+    /// reasoning captured for one table must never replay onto another.
+    pub(super) fn reasoning_provider_tag(&self) -> String {
+        if self.api_provider != ApiProvider::Custom {
+            return self.api_provider.as_str().to_string();
+        }
+        match self.provider_identity.as_str() {
+            "custom" | "" => ApiProvider::Custom.as_str().to_string(),
+            table => format!("custom/{table}"),
+        }
+    }
+
     /// Resolve `model` through the central route resolver and rebuild this
     /// client whenever its exact wire identity, limits, or protocol differs
     /// from the route bound at construction (#5042). `Ok(None)` means the
@@ -1445,8 +1471,7 @@ impl DeepSeekClient {
                 // transport is endpoint-scoped, and a fresh config-aware
                 // resolution would only reproduce it (both read the same
                 // named-table `wire`).
-                wire_override: (self.api_provider == ApiProvider::Custom)
-                    .then_some(self.wire_format),
+                wire_override: self.pinned_wire_override(),
             })
             .map_err(anyhow::Error::msg)?;
         let candidate_limits = crate::route_budget::known_route_limits(candidate.limits());
@@ -1501,8 +1526,7 @@ impl DeepSeekClient {
                 limit_overrides: Vec::new(),
                 // Same-client request routing: keep this transport's own wire
                 // (endpoint-scoped, mirrors `rebound_for_model_protocol`).
-                wire_override: (self.api_provider == ApiProvider::Custom)
-                    .then_some(self.wire_format),
+                wire_override: self.pinned_wire_override(),
             }) {
             Ok(candidate) => candidate,
             Err(error) if model_aware => return Err(anyhow::Error::msg(error)),
@@ -1773,7 +1797,7 @@ fn provider_wire_format_for_config(
             | ApiProvider::MinimaxAnthropic
             | ApiProvider::ModelstudioTokenPlanAnthropic
             | ApiProvider::ModelstudioCodingPlanAnthropic
-    ) || wire_config_prefers_anthropic(wire);
+    ) || wire_dialect_prefers_anthropic(wire);
 
     if prefers_anthropic
         && matches!(
@@ -1799,10 +1823,10 @@ fn provider_wire_format_for_config(
     //   anthropic: "anthropic" | "messages" | "claude" | "anthropic-messages" | ...
     //   responses: "responses" | "responses-api" | "openai-responses" | "openai_responses" | ...
     if api_provider == ApiProvider::Custom {
-        if wire_config_prefers_anthropic(wire) {
+        if wire_dialect_prefers_anthropic(wire) {
             return WireFormat::AnthropicMessages;
         }
-        if wire_config_prefers_responses(wire) {
+        if wire_dialect_prefers_responses(wire) {
             return WireFormat::Responses;
         }
     }
@@ -1821,40 +1845,6 @@ fn provider_wire_format_for_config(
                 WireFormat::ChatCompletions
             }
         })
-}
-
-fn wire_config_prefers_anthropic(wire: Option<&str>) -> bool {
-    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
-    matches!(
-        normalized.as_str(),
-        "anthropic"
-            | "anthropic-messages"
-            | "messages"
-            | "claude"
-            | "anthropic-compatible"
-            | "anthropic-compat"
-    )
-}
-
-fn wire_config_prefers_responses(wire: Option<&str>) -> bool {
-    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
-    matches!(
-        normalized.as_str(),
-        "responses"
-            | "responses-api"
-            | "openai-responses"
-            | "openai-responses-api"
-            | "response"
-            | "response-api"
-            | "openai-responses-compat"
-            | "responses-compat"
-    )
 }
 
 fn api_provider_skips_models_probe(api_provider: ApiProvider) -> bool {
@@ -2157,8 +2147,11 @@ impl DeepSeekClient {
                 ))
             }
             WireFormat::Responses => {
-                let body =
-                    responses::build_responses_body_for_provider(&request, self.api_provider);
+                let body = responses::build_responses_body_for_provider(
+                    &request,
+                    self.api_provider,
+                    &self.reasoning_provider_tag(),
+                );
                 let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
                 let url = if is_codex {
                     format!("{}{}", self.base_url, responses::CODEX_RESPONSES_PATH)
@@ -2234,8 +2227,7 @@ impl DeepSeekClient {
                     saved_provider_model: None,
                     base_url_override: Some(self.base_url.clone()),
                     limit_overrides: Vec::new(),
-                    wire_override: (self.api_provider == ApiProvider::Custom)
-                        .then_some(self.wire_format),
+                    wire_override: self.pinned_wire_override(),
                 })
                 .ok()
                 .and_then(|candidate| crate::route_budget::known_route_limits(candidate.limits()))
@@ -6808,6 +6800,54 @@ mod tests {
         assert_eq!(body.get("model").and_then(Value::as_str), Some("gpt-5.5"));
         assert!(body.get("input").is_some(), "Responses body: {body}");
         assert!(body.get("messages").is_none(), "Responses body: {body}");
+    }
+
+    /// Zen's Responses roster sends `include: ["reasoning.encrypted_content"]`
+    /// and `store: false`, so multi-turn tool continuations replay only if the
+    /// stream captured the encrypted reasoning items — the same discipline as
+    /// the Codex backend, tagged with the Zen provider slug.
+    #[tokio::test]
+    async fn opencode_zen_responses_stream_captures_encrypted_reasoning() {
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_zen\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_zen\",\"summary\":[],\"encrypted_content\":\"enc_zen_state\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "gpt-5.5");
+        assert_eq!(client.wire_format, WireFormat::Responses);
+        let mut stream = client
+            .create_message_stream(minimal_zen_request("gpt-5.5"))
+            .await
+            .expect("Zen Responses request should start");
+        let mut captured = None;
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::ContentBlockDelta {
+                delta: Delta::ReasoningStateDelta { state },
+                ..
+            } = event.expect("Zen Responses stream event")
+            {
+                captured = Some(state);
+            }
+        }
+
+        let state = captured.expect("encrypted reasoning state delta on the Zen route");
+        assert_eq!(state.provider, ApiProvider::OpencodeZen.as_str());
+        assert_eq!(state.api, "openai-responses");
+        assert_eq!(state.id.as_deref(), Some("rs_zen"));
+        assert_eq!(state.encrypted_content, "enc_zen_state");
+        assert_eq!(state.model, "gpt-5.5");
     }
 
     #[tokio::test]

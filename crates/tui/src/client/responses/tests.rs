@@ -568,7 +568,11 @@ fn concentrate_responses_body_sends_only_documented_fields() {
         cache_control: None,
     }]);
 
-    let body = build_responses_body_for_provider(&request, ApiProvider::Concentrate);
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Concentrate,
+        ApiProvider::Concentrate.as_str(),
+    );
     let documented = [
         "model",
         "input",
@@ -617,7 +621,11 @@ fn concentrate_responses_body_sends_only_documented_fields() {
 
     // The same request on the generic Responses path still carries the
     // OpenAI-only fields, so the Concentrate branch is a deliberate subset.
-    let generic = build_responses_body_for_provider(&request, ApiProvider::Openai);
+    let generic = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Openai,
+        ApiProvider::Openai.as_str(),
+    );
     assert!(
         generic.get("store").is_some()
             && generic.get("include").is_some()
@@ -644,7 +652,11 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
         },
     );
 
-    let body = build_responses_body_for_provider(&request, ApiProvider::Deepseek);
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+    );
 
     assert_eq!(body["model"], "deepseek-v4-flash");
     assert_eq!(body["max_output_tokens"], 128);
@@ -677,7 +689,11 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
     let mut request = minimal_responses_request();
     request.max_tokens = 4_096;
 
-    let codex = build_responses_body_for_provider(&request, ApiProvider::OpenaiCodex);
+    let codex = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
     assert!(
         codex.get("max_output_tokens").is_none(),
         "Codex Responses body names a parameter its backend rejects: {codex}"
@@ -687,7 +703,11 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
         "no alternate output-cap spelling may sneak onto the Codex wire: {codex}"
     );
 
-    let deepseek = build_responses_body_for_provider(&request, ApiProvider::Deepseek);
+    let deepseek = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+    );
     assert_eq!(deepseek["max_output_tokens"], json!(4_096));
 }
 
@@ -714,7 +734,11 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         },
     );
 
-    let exact = build_responses_body_for_provider(&request, ApiProvider::OpenaiCodex);
+    let exact = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
     let exact_wire = exact.to_string();
     assert!(!exact_wire.contains(SENTINEL), "{exact}");
     assert_eq!(exact.pointer("/input/0/type"), Some(&json!("reasoning")));
@@ -726,7 +750,11 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
     );
 
     request.model = "gpt-5.6".to_string();
-    let switched_model = build_responses_body_for_provider(&request, ApiProvider::OpenaiCodex);
+    let switched_model = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
     assert!(!switched_model.to_string().contains(SENTINEL));
     assert!(
         switched_model
@@ -736,7 +764,11 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         "{switched_model}"
     );
 
-    let switched_provider = build_responses_body_for_provider(&request, ApiProvider::Deepseek);
+    let switched_provider = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+    );
     let switched_wire = switched_provider.to_string();
     assert!(!switched_wire.contains(SENTINEL), "{switched_provider}");
     assert!(
@@ -1090,7 +1122,11 @@ fn responses_input_includes_user_role_tool_results() {
         top_p: None,
     };
 
-    let input = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
+    let input = convert_messages_to_responses_input(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
 
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["call_id"], "call_abc");
@@ -1126,7 +1162,11 @@ fn responses_input_encodes_tool_call_names() {
         top_p: None,
     };
 
-    let input = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
+    let input = convert_messages_to_responses_input(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
 
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["name"], to_api_tool_name("web.run"));
@@ -1253,7 +1293,11 @@ fn user_image_becomes_an_input_image_item() {
         },
     });
 
-    let items = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
+    let items = convert_messages_to_responses_input(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
 
     let user = items
         .iter()
@@ -1305,7 +1349,11 @@ fn tool_result_image_becomes_native_function_output_content() {
         },
     ];
 
-    let items = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
+    let items = convert_messages_to_responses_input(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
     let output = items
         .iter()
         .find(|item| item["type"] == "function_call_output")
@@ -1343,7 +1391,11 @@ fn responses_input_keeps_system_role_history_messages() {
         },
     );
 
-    let items = convert_messages_to_responses_input(&request, ApiProvider::OpenaiCodex);
+    let items = convert_messages_to_responses_input(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+    );
 
     let system = items
         .iter()
@@ -1431,20 +1483,29 @@ async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaqu
     }
 
     let state = captured.expect("encrypted reasoning state delta on the Custom route");
-    assert_eq!(state.provider, ApiProvider::Custom.as_str());
+    assert_eq!(
+        state.provider, "custom/pinvou_responses",
+        "the tag must carry the minting table, not the shared `custom` slug"
+    );
     assert_eq!(state.api, "openai-responses");
     assert_eq!(state.id.as_deref(), Some("rs_custom"));
     assert_eq!(state.encrypted_content, "enc_custom_state");
+    assert_eq!(
+        state.model, "gpt-5.5",
+        "the captured wire model is the replay gate's other key"
+    );
 }
 
-/// The replay gate matches Custom-tagged reasoning state by provider string
-/// and exact model: an exact match replays the encrypted item, a model
-/// switch or a different provider must not.
+/// The replay gate matches Custom-tagged reasoning state by endpoint-scoped
+/// provider tag and exact model: an exact table+model match replays the
+/// encrypted item, while a model switch, a different table, or a different
+/// provider must not — table A's encrypted reasoning never rides to table B.
 #[test]
 fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() {
     const SENTINEL: &str = "readable private reasoning must not be replayed";
+    const MINTING_TABLE: &str = "custom/pinvou_responses";
     let state = OpaqueReasoningState {
-        provider: ApiProvider::Custom.as_str().to_string(),
+        provider: MINTING_TABLE.to_string(),
         api: "openai-responses".to_string(),
         model: "gpt-6-sol".to_string(),
         id: Some("rs_custom".to_string()),
@@ -1464,7 +1525,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         },
     );
 
-    let exact = build_responses_body_for_provider(&request, ApiProvider::Custom);
+    let exact = build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);
     let exact_wire = exact.to_string();
     assert!(!exact_wire.contains(SENTINEL), "{exact}");
     assert_eq!(exact.pointer("/input/0/type"), Some(&json!("reasoning")));
@@ -1475,8 +1536,27 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         Some(&json!("enc_custom_payload"))
     );
 
+    // Same model on a DIFFERENT named table: the shared `custom` slug must
+    // not match, so table A's opaque state never rides table B's wire.
+    let switched_table =
+        build_responses_body_for_provider(&request, ApiProvider::Custom, "custom/other_relay");
+    let switched_table_wire = switched_table.to_string();
+    assert!(!switched_table_wire.contains(SENTINEL));
+    assert!(
+        !switched_table_wire.contains("enc_custom_payload"),
+        "cross-table replay must drop the foreign encrypted item: {switched_table}"
+    );
+    assert!(
+        switched_table
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{switched_table}"
+    );
+
     request.model = "gpt-6-luna".to_string();
-    let switched_model = build_responses_body_for_provider(&request, ApiProvider::Custom);
+    let switched_model =
+        build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);
     assert!(!switched_model.to_string().contains(SENTINEL));
     assert!(
         switched_model
