@@ -110,6 +110,8 @@ test('password reset recovery is fenced, bounded, and migration-safe', async () 
   assert.match(runtimeGate, /pinvou_identity_security_operation_id/);
   assert.match(runtimeGate, /IDENTITY_SECURITY_FENCE_CONFLICT/);
   assert.match(image, /COPY .*provision-mobile-auth\.sh \/opt\/keycloak\/bin\/pinvou-provision-mobile-auth\.sh/);
+  assert.match(provisioner, /KCADM_CONFIG=\$\{KCADM_CONFIG:-\/tmp\/pinvou-kcadm\.config\}/);
+  assert.match(provisioner, /"\$KCADM_BINARY" "\$@" --config "\$KCADM_CONFIG"/);
   assert.match(productionCompose, /keycloak-realm-upgrade:[\s\S]*pinvou-provision-mobile-auth\.sh/);
   assert.match(productionCompose, /KEYCLOAK_REALM_UPGRADE_SECRET_DIRECTORY/);
   assert.match(productionCompose, /PINVOU_OIDC_CLIENT_ID: pinvou-desktop/);

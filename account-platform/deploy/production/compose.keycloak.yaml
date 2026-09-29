@@ -56,6 +56,7 @@ services:
     networks:
       data:
         aliases: [keycloak]
+      business-egress: {}
   keycloak-realm-upgrade:
     image: ${KEYCLOAK_IMAGE:?set verified Pinvou Keycloak 26.7.0 image digest}
     pull_policy: never
@@ -92,3 +93,6 @@ networks:
   data:
     external: true
     name: ${KEYCLOAK_DATA_NETWORK:?set independently verified internal dependency network}
+  business-egress:
+    external: true
+    name: pinvou-production-business-egress

@@ -65,6 +65,7 @@ services:
       IDENTITY_HTTP_URL: "http://identity-service:8080"
       MANUAL_REVIEW_ON_CALL_USER_IDS: "${MANUAL_REVIEW_ON_CALL_USER_IDS:?set verified MANUAL_REVIEW_ON_CALL_USER_IDS}"
       MOBILE_AUTH_ENABLED: "true"
+      REGISTRATION_BONUS_FINGERPRINT_KEY_ID: "registration-bonus-v1"
       SMS_PROVIDER: "aliyun-managed"
       ALIYUN_SMS_ENDPOINT: "https://dypnsapi.aliyuncs.com"
       ALIYUN_SMS_SIGN_NAME: "${ALIYUN_SMS_SIGN_NAME:?set verified ALIYUN_SMS_SIGN_NAME}"
