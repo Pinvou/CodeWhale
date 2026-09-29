@@ -11,6 +11,7 @@ import time
 
 ROOT = Path("/opt/pinvou-security")
 IMAGE = "quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641"
+IMAGE_ID = IMAGE.rsplit("@", 1)[1]
 
 
 def require(condition):
@@ -20,7 +21,9 @@ def require(condition):
 
 def validate_target(data, root):
     config = data["Config"]
-    require(data["State"]["Running"] and config["Image"] == IMAGE and config["User"] == "65532:65532")
+    # Docker inspect may expose either the pinned reference or its immutable
+    # content-addressed image ID. Both identify the exact reviewed image.
+    require(data["State"]["Running"] and config["Image"] in {IMAGE, IMAGE_ID} and config["User"] == "65532:65532")
     require(config["Labels"]["com.docker.compose.project"] == "pinvou-security"
             and config["Labels"]["com.docker.compose.service"] == "openbao")
     require(config["Entrypoint"] == ["/usr/bin/bao"] and config["Cmd"] == ["server", "-config=/bao/config/server.hcl"])

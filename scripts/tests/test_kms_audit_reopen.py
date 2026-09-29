@@ -19,6 +19,9 @@ class AuditReopenTests(unittest.TestCase):
                            "Labels": {"com.docker.compose.project": "pinvou-security", "com.docker.compose.service": "openbao"}},
                 "Mounts": [{"Destination": "/bao/audit", "Source": str(root / "openbao/audit"), "Type": "bind", "RW": True}]}
         self.assertEqual(MOD.validate_target(good, root), "a"*64)
+        image_id = copy.deepcopy(good)
+        image_id["Config"]["Image"] = MOD.IMAGE_ID
+        self.assertEqual(MOD.validate_target(image_id, root), "a"*64)
         for field, value in (("Image", "unapproved"), ("User", "root"), ("Cmd", ["agent"]),
                              ("Labels", {"com.docker.compose.project": "other", "com.docker.compose.service": "openbao"})):
             bad = copy.deepcopy(good)
