@@ -1494,7 +1494,7 @@ mod tests {
                     .as_deref()
                     .is_some_and(|expected| authorization != Some(expected));
                 let (status, body) = match routes.iter().find(|(p, _)| path.starts_with(p)) {
-                    Some((_, b)) if unauthorized => (401, r#"{"error":"unauthorized"}"#),
+                    Some((_, _b)) if unauthorized => (401, r#"{"error":"unauthorized"}"#),
                     Some((_, b)) => (200, *b),
                     None => (404, r#"{"error":"not found"}"#),
                 };
