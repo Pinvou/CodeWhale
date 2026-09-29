@@ -46,7 +46,7 @@ test('recharge product lazy loader ignores an older failure after a newer succes
     const value = String(url);
     if (value === '/api/session') return response({ authenticated: true, csrf_token: 'csrf' });
     if (value === '/api/account/v1/me/authorization-context') return response({ platform_permissions: ['platform.products.read'] });
-    if (value.includes('/admin/v1/recharge-products?limit=50')) {
+    if (value.includes('/admin/v1/recharge-products?limit=200') && value.includes('lifecycle_status=ON_SALE')) {
       catalogCalls += 1;
       if (catalogCalls === 1 || catalogCalls === 3 || catalogCalls === 5) return response({ items: [] });
       if (catalogCalls === 2) return oldCatalog.promise;
@@ -72,20 +72,20 @@ test('recharge product lazy loader ignores an older failure after a newer succes
   vm.runInNewContext(source, context, { filename: 'product-admin.js' });
 
   listeners.get('pinvou-admin-extension-visibility')({ detail: { visible: true, authorizationVersion: 'v1' } });
-  await waitFor(() => catalogCalls === 1 && element('product-list').innerHTML.includes('暂无商品'));
+  await waitFor(() => catalogCalls === 1 && element('product-current-list').innerHTML.includes('暂无商品'));
 
   const older = element('product-refresh').onclick();
   await waitFor(() => catalogCalls === 2);
   const newer = element('product-refresh').onclick();
   await newer;
   assert.equal(catalogCalls, 3);
-  assert.match(element('product-list').innerHTML, /暂无商品/);
+  assert.match(element('product-current-list').innerHTML, /暂无商品/);
 
   oldCatalog.reject(new Error('older request failed'));
   await older;
   assert.equal(element('product-message').textContent, '');
   assert.equal(element('product-load-message').textContent, '');
-  assert.match(element('product-list').innerHTML, /暂无商品/);
+  assert.match(element('product-current-list').innerHTML, /暂无商品/);
 
   await element('product-refresh').onclick();
   assert.equal(catalogCalls, 4);
@@ -96,7 +96,7 @@ test('recharge product lazy loader ignores an older failure after a newer succes
   assert.equal(catalogCalls, 5);
   assert.equal(element('product-load-message').textContent, '');
   assert.equal(element('product-message').textContent, '');
-  assert.match(element('product-list').innerHTML, /暂无商品/);
+  assert.match(element('product-current-list').innerHTML, /暂无商品/);
 });
 
 test('recharge product cursor, filters, and previous-page history stay in the URL contract', async () => {
@@ -105,7 +105,11 @@ test('recharge product cursor, filters, and previous-page history stay in the UR
   const windowListeners = new Map();
   const elements = new Map();
   const element = (id) => {
-    if (!elements.has(id)) elements.set(id, { id, hidden: false, disabled: false, innerHTML: '', textContent: '', className: '', reset() {} });
+    if (!elements.has(id)) {
+      const value = { id, hidden: false, disabled: false, open: false, innerHTML: '', textContent: '', className: '', reset() {}, focus() {}, addEventListener() {}, showModal() { this.open = true; }, close() { this.open = false; } };
+      if (id === 'product-filter') value.elements = { lifecycle_status: { value: '' }, include_deleted: { checked: false }, limit: { value: '50' } };
+      elements.set(id, value);
+    }
     return elements.get(id);
   };
   const root = element('product-admin-root');
@@ -113,13 +117,16 @@ test('recharge product cursor, filters, and previous-page history stay in the UR
   root.addEventListener = (name, listener) => rootListeners.set(name, listener);
   root.closest = () => null;
   const catalogURLs = [];
+  let managementCalls = 0;
   const fetch = async (url) => {
     const value = String(url);
     if (value === '/api/session') return response({ authenticated: true, csrf_token: 'csrf' });
     if (value === '/api/account/v1/me/authorization-context') return response({ platform_permissions: ['platform.products.read'] });
     if (value.includes('/admin/v1/recharge-products?')) {
       catalogURLs.push(value);
-      return response({ items: [], next_cursor: catalogURLs.length === 1 || catalogURLs.length === 3 ? 'cursor-next' : '' });
+      if (value.includes('lifecycle_status=ON_SALE') && value.includes('limit=200')) return response({ items: [], next_cursor: '' });
+      managementCalls += 1;
+      return response({ items: [], next_cursor: managementCalls === 1 || managementCalls === 3 ? 'cursor-next' : '' });
     }
     throw new Error(`unexpected fetch: ${value}`);
   };
@@ -149,25 +156,29 @@ test('recharge product cursor, filters, and previous-page history stay in the UR
 
   rootListeners.get('pinvou-admin-extension-visibility')({ detail: { visible: true, authorizationVersion: 'v1' } });
   await waitFor(() => catalogURLs.length === 1);
-  assert.match(catalogURLs[0], /limit=25/);
-  assert.match(catalogURLs[0], /lifecycle_status=OFF_SALE/);
-  assert.match(catalogURLs[0], /include_deleted=true/);
+  assert.match(catalogURLs[0], /limit=200/);
+  assert.match(catalogURLs[0], /lifecycle_status=ON_SALE/);
+
+  await element('product-manage-open').onclick();
+  assert.match(catalogURLs[1], /limit=25/);
+  assert.match(catalogURLs[1], /lifecycle_status=OFF_SALE/);
+  assert.match(catalogURLs[1], /include_deleted=true/);
   assert.equal(element('product-next').disabled, false);
   assert.equal(element('product-previous').disabled, true);
 
   await element('product-next').onclick();
-  assert.match(catalogURLs[1], /cursor=cursor-next/);
+  assert.match(catalogURLs[2], /cursor=cursor-next/);
   assert.match(historyURLs[0], /product_cursor=cursor-next/);
   assert.equal(element('product-previous').disabled, false);
 
   await element('product-previous').onclick();
-  assert.doesNotMatch(catalogURLs[2], /cursor=/);
+  assert.doesNotMatch(catalogURLs[3], /cursor=/);
   assert.equal(element('product-previous').disabled, true);
 
   location.search = '?section=products&finance_tab=catalog&product_limit=50&product_lifecycle_status=DRAFT';
   windowListeners.get('popstate')();
-  await waitFor(() => catalogURLs.length === 4);
-  assert.match(catalogURLs[3], /limit=50/);
-  assert.match(catalogURLs[3], /lifecycle_status=DRAFT/);
-  assert.doesNotMatch(catalogURLs[3], /include_deleted=true/);
+  await waitFor(() => catalogURLs.length === 5);
+  assert.match(catalogURLs[4], /limit=50/);
+  assert.match(catalogURLs[4], /lifecycle_status=DRAFT/);
+  assert.doesNotMatch(catalogURLs[4], /include_deleted=true/);
 });

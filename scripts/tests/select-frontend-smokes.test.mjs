@@ -64,6 +64,9 @@ test("account platform changes select its production browser smokes", () => {
     [
       "npm:test:ui-smoke",
       "node:tests/admin_roles_ui_smoke.mjs",
+      "node:tests/admin_approval_workspace_ui_smoke.mjs",
+      "node:tests/admin_financial_repair_ui_smoke.mjs",
+      "npm:test:admin-recharge-product-ui",
       "npm:test:admin-finance-overview-ui",
       "npm:test:admin-token-resources-ui",
       "npm:test:admin-model-actions-ui",

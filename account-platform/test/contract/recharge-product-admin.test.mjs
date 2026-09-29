@@ -70,6 +70,12 @@ test('admin product UI is permission driven, tri-lingual, and never auto-replays
   assert.match(ui, /name="channels" value=/);
   assert.match(ui, /recharge-product-create-options/);
   assert.doesNotMatch(ui, /name="provider_version" placeholder|channels\.split\(/);
+  assert.match(ui, /id="product-current-list"/);
+  assert.match(ui, /id="product-create-dialog"/);
+  assert.match(ui, /id="product-manage-dialog"/);
+  assert.match(ui, /lifecycle_status:"ON_SALE"/);
+  assert.match(ui, /Manage drafts and history/);
+  assert.doesNotMatch(ui, /if\(canCreate\)await loadCreateOptions\(\)/);
   assert.match(portal, /prompt", "login"/);
   assert.match(portal, /max_age", "900"/);
 });

@@ -155,6 +155,7 @@
     "test:admin-token-account-detail-ui": "node tests/admin_token_account_detail_ui_gate.mjs",
     "test:admin-sms-configuration-ui": "node tests/admin_sms_configuration_ui_smoke.mjs",
     "test:admin-navigation-ui": "node tests/admin_navigation_bar_ui_smoke.mjs",
+    "test:admin-recharge-product-ui": "node tests/admin_recharge_product_catalog_ui_smoke.mjs",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",
     "test:user-journey": "../scripts/run-user-journey-tests.sh",

@@ -54,9 +54,10 @@ test('finance child tabs load, cache, fail, and refresh independently', async ()
   assert.match(products, /activationPromise/);
   assert.match(products, /loadGeneration/);
   assert.match(products, /generation!==loadGeneration/);
-  assert.match(products, /catch\(error\)\{if\(generation!==loadGeneration\)return false;loadMessage/);
+  assert.match(products, /catch\(error\)\{if\(generation!==loadGeneration\)return false;managementLoaded=false;manageMessage/);
   assert.match(products, /id="product-load-message"/);
-  assert.match(products, /loaded=true;loadMessage\(""\);syncQueryUI\(\);if\(restoredAction\)/);
+  assert.match(products, /renderCurrent\(collected\);loaded=true;loadMessage\(""\)/);
+  assert.match(products, /managementLoaded=true;loadedManagementQuery=snapshot;manageMessage\(""\);syncQueryUI\(\);if\(restoredAction\)/);
   assert.match(products, /sessionStorage\.removeItem\(actionDraftKey\)\}\}return true/);
   assert.match(products, /version!==activeAuthorizationVersion/);
   assert.match(products, /globalThis\.location\.reload\(\)/);
