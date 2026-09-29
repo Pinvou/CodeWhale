@@ -235,6 +235,17 @@ const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// endpoint_id/lease/token/连接码），便于用户把文件直接发给支持而不担心泄漏。
 /// 写失败一律忽略，绝不影响主流程。
 pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
+    write_relay_event(scope, stage, None, detail);
+}
+
+/// Remote-action diagnostics add only the closed operation name to the common
+/// log envelope. Request/session identifiers and action bodies never reach the
+/// sink, while A/B traces can still be correlated by operation and timestamp.
+pub(crate) fn log_remote_action_event(scope: &str, stage: &str, operation: &str, detail: &str) {
+    write_relay_event(scope, stage, Some(operation), detail);
+}
+
+fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: &str) {
     use std::io::Write as _;
     static LOG_WRITE_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
 
@@ -258,13 +269,24 @@ pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     else {
         return;
     };
-    let _ = writeln!(
-        file,
-        "ts_ms={timestamp_ms} [{}] stage={} detail={}",
-        log_scope(scope),
-        log_stage(stage),
-        log_detail(detail)
-    );
+    if let Some(operation) = operation {
+        let _ = writeln!(
+            file,
+            "ts_ms={timestamp_ms} [{}] stage={} operation={} detail={}",
+            log_scope(scope),
+            log_stage(stage),
+            log_remote_action_operation(operation),
+            log_detail(detail)
+        );
+    } else {
+        let _ = writeln!(
+            file,
+            "ts_ms={timestamp_ms} [{}] stage={} detail={}",
+            log_scope(scope),
+            log_stage(stage),
+            log_detail(detail)
+        );
+    }
 }
 
 fn log_scope(value: &str) -> &'static str {
@@ -327,8 +349,13 @@ fn log_stage(value: &str) -> &'static str {
         "journal_event_sent",
         "journal_snapshot_sent",
         "remote_action_received",
+        "remote_action_requested",
+        "remote_action_validation_failed",
         "remote_action_failed",
         "remote_action_sent",
+        "remote_action_result_received",
+        "remote_action_completed",
+        "remote_action_timeout",
         "relay_reset_enqueue_failed",
         "relay_frame_oversized",
         "relay_frame_rejected",
@@ -413,6 +440,22 @@ fn log_detail(value: &str) -> &'static str {
         "permission_denied",
         "task_conflict",
         "missing",
+        "remote_binding_mismatch",
+        "controller_not_connected",
+        "remote_session_unavailable",
+        "remote_proxy_not_found",
+        "remote_mapping_unconfirmed",
+        "remote_action_invalid",
+        "remote_action_capacity",
+        "remote_action_failed",
+        "remote_encrypt_failed",
+        "remote_send_uncertain",
+        "task_session_not_found",
+        "task_binding_stale",
+        "transfer_unknown",
+        "transfer_chunk_invalid",
+        "transfer_chunk_out_of_order",
+        "artifact_unavailable",
     ];
     if let Some(value) = DETAILS.iter().copied().find(|detail| *detail == value) {
         return value;
@@ -421,6 +464,14 @@ fn log_detail(value: &str) -> &'static str {
         .iter()
         .copied()
         .find(|code| *code == value)
+        .unwrap_or("other")
+}
+
+fn log_remote_action_operation(value: &str) -> &'static str {
+    super::protocol::REMOTE_ACTION_OPERATIONS
+        .iter()
+        .copied()
+        .find(|operation| *operation == value)
         .unwrap_or("other")
 }
 
@@ -479,6 +530,21 @@ pub(crate) fn controlled_log_line(stage: &str, detail: &str) -> String {
 /// 测试/内联断言用：A 端日志行格式。
 pub(crate) fn controller_log_line(stage: &str, detail: &str) -> String {
     relay_log_line("controller", stage, detail)
+}
+
+pub(crate) fn remote_action_log_line(
+    scope: &str,
+    stage: &str,
+    operation: &str,
+    detail: &str,
+) -> String {
+    format!(
+        "[{}] stage={} operation={} detail={}",
+        log_scope(scope),
+        log_stage(stage),
+        log_remote_action_operation(operation),
+        log_detail(detail)
+    )
 }
 const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1474,11 +1540,29 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
                 .ok_or_else(|| "remote_action_invalid".to_owned())?;
             let fingerprint =
                 remote_action_fingerprint(lease, session_ref, request_id, operation, body);
+            log_remote_action_event(
+                "controlled",
+                "remote_action_received",
+                operation,
+                "requested",
+            );
             match action_results.lookup(request_id, fingerprint) {
                 RemoteActionCacheLookup::Hit(response) => {
+                    log_remote_action_event(
+                        "controlled",
+                        "remote_action_completed",
+                        operation,
+                        "duplicate",
+                    );
                     return Ok(vec![("remote_action_result", response)]);
                 }
                 RemoteActionCacheLookup::Conflict => {
+                    log_remote_action_event(
+                        "controlled",
+                        "remote_action_failed",
+                        operation,
+                        "result_unknown",
+                    );
                     return Ok(vec![(
                         "remote_action_result",
                         remote_action_response(
@@ -1495,6 +1579,20 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             let action = port
                 .remote_action(lease, session_ref, operation, body)
                 .await;
+            match &action {
+                Ok(_) => log_remote_action_event(
+                    "controlled",
+                    "remote_action_completed",
+                    operation,
+                    "ok",
+                ),
+                Err(code) => log_remote_action_event(
+                    "controlled",
+                    "remote_action_failed",
+                    operation,
+                    public_remote_action_error(code),
+                ),
+            }
             let response =
                 remote_action_response(lease, session_ref, request_id, operation, action);
             action_results.insert(request_id.to_owned(), fingerprint, response.clone());
@@ -2211,6 +2309,15 @@ mod tests {
             controller_log_line("connect_failed", "pairing_code_invalid"),
             "[controller] stage=connect_failed detail=pairing_code_invalid"
         );
+        assert_eq!(
+            remote_action_log_line(
+                "controller",
+                "remote_action_validation_failed",
+                "artifact_index",
+                "unsupported_capability"
+            ),
+            "[controller] stage=remote_action_validation_failed operation=artifact_index detail=unsupported_capability"
+        );
     }
 
     #[test]
@@ -2225,9 +2332,14 @@ mod tests {
             assert_eq!(log_scope(sentinel), "unknown");
             assert_eq!(log_stage(sentinel), "other");
             assert_eq!(log_detail(sentinel), "other");
+            assert_eq!(log_remote_action_operation(sentinel), "other");
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
         assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
+        assert_eq!(
+            log_remote_action_operation("artifact_index"),
+            "artifact_index"
+        );
     }
 
     #[test]
@@ -2270,6 +2382,7 @@ mod tests {
         let raw_path = std::path::Path::new(&raw);
         let raw_error = std::io::Error::other(raw.clone());
         log_attachment_cleanup_failure(raw_path, &raw_error);
+        log_remote_action_event("controller", &raw, &raw, &raw);
         let written =
             std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
         for sentinel in sentinels {

@@ -19,6 +19,7 @@ use crate::features::remote_control::controller::encrypted_lane::ControllingLane
 use crate::features::remote_control::controller::protocol::{
     LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
+use crate::features::remote_control::controller::relay_runtime::log_remote_action_event;
 use crate::features::sessions::SessionStore;
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 
@@ -304,6 +305,12 @@ impl DesktopRemoteActionState {
                 .unwrap_or("remote_action_failed")
                 .to_owned())
         };
+        log_remote_action_event(
+            "controller",
+            "remote_action_result_received",
+            &pending.operation,
+            result.as_ref().map(|_| "ok").unwrap_or_else(|code| code),
+        );
         let _ = pending.reply.send(result);
         true
     }
@@ -545,7 +552,17 @@ pub async fn desktop_remote_action_a(
     request_id: String,
     intent: RemoteActionIntent,
 ) -> Result<Value, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    let operation = intent.operation();
+    log_remote_action_event(
+        "controller",
+        "remote_action_requested",
+        operation,
+        "requested",
+    );
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled().map_err(|code| {
+        log_remote_action_event("controller", "remote_action_failed", operation, &code);
+        code
+    })?;
     let started = std::time::Instant::now();
     let metric = match &intent {
         RemoteActionIntent::AttachmentChunk { .. } => Some(RemoteStage::Attachment),
@@ -584,7 +601,7 @@ pub async fn desktop_remote_action_a(
         {
             return Err("remote_action_invalid".to_owned());
         }
-        let operation = intent.operation().to_owned();
+        let operation = operation.to_owned();
         let payload = json!({"v":1,"type":"remote_action_request",
         "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
         "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
@@ -599,7 +616,15 @@ pub async fn desktop_remote_action_a(
                 negotiated_capabilities: capabilities.clone(),
             }),
         )
-        .map_err(|_| "remote_action_invalid".to_owned())?;
+        .map_err(|error| {
+            log_remote_action_event(
+                "controller",
+                "remote_action_validation_failed",
+                &operation,
+                error.code,
+            );
+            "remote_action_invalid".to_owned()
+        })?;
         let receiver = with_current_dispatch_binding(&app, &live, || {
             store
                 .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
@@ -620,17 +645,34 @@ pub async fn desktop_remote_action_a(
         let result = send_action_encrypted(&app, &live, &payload);
         if result.is_err() {
             state.detach_uncertain(&request_id);
+            log_remote_action_event(
+                "controller",
+                "remote_action_failed",
+                &operation,
+                "remote_send_uncertain",
+            );
             return Err("result_unknown".to_owned());
         }
+        log_remote_action_event("controller", "remote_action_sent", &operation, "sent");
         match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
             Ok(Ok(result)) => result,
             _ => {
                 state.detach_uncertain(&request_id);
+                log_remote_action_event(
+                    "controller",
+                    "remote_action_timeout",
+                    &operation,
+                    "result_unknown",
+                );
                 Err("result_unknown".to_owned())
             }
         }
     }
     .await;
+    match &result {
+        Ok(_) => log_remote_action_event("controller", "remote_action_completed", operation, "ok"),
+        Err(code) => log_remote_action_event("controller", "remote_action_failed", operation, code),
+    }
     if let Some(stage) = metric {
         let completed = match (stage, &result) {
             (RemoteStage::Attachment, Ok(body)) => {
