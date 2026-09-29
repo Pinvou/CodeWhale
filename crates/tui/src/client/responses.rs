@@ -8,6 +8,7 @@
 //! (`client/chat.rs`) to avoid protocol hacks.
 
 use anyhow::{Context, Result};
+use codewhale_config::provider::WireFormat;
 use serde_json::{Value, json};
 
 use crate::config::ApiProvider;
@@ -136,8 +137,10 @@ pub(super) fn build_responses_body_for_provider(
         };
     }
 
-    // OpenAI Codex can replay encrypted reasoning. DeepSeek exposes plain
-    // `reasoning_text` and does not support `include`.
+    // OpenAI Codex and `wire = "responses"` Custom tables can replay
+    // encrypted reasoning (mirrors the capture gate in
+    // `handle_responses_stream`). DeepSeek exposes plain `reasoning_text`
+    // and does not support `include`.
     if !is_deepseek && !is_concentrate {
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
@@ -162,7 +165,15 @@ impl DeepSeekClient {
         // remapping — rather than borrowing the request that no longer exists
         // at this layer.
         let wire_model = prepared.wire_model.clone();
-        let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex)
+        // Encrypted-reasoning capture applies to every Responses route whose
+        // request carries `include: ["reasoning.encrypted_content"]` and
+        // replays by provider tag: the Codex OAuth backend, and any
+        // wire = "responses" Custom table (the same include is sent there).
+        // Chat-wire Custom tables and DeepSeek (plain reasoning_text) stay
+        // excluded.
+        let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex
+            || (self.api_provider == ApiProvider::Custom
+                && self.wire_format == WireFormat::Responses))
             .then(|| (self.api_provider.as_str().to_string(), wire_model.clone()));
 
         // The bearer Authorization header is already installed as a default

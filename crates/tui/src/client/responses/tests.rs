@@ -1358,3 +1358,131 @@ fn responses_input_keeps_system_role_history_messages() {
         })
     );
 }
+
+/// A `wire = "responses"` Custom table captures encrypted reasoning exactly
+/// like the Codex backend: the stream yields an opaque reasoning-state delta
+/// tagged with the Custom provider string, so the replay gate
+/// (`state.provider == provider.as_str()`) matches on the next turn
+/// (Pinvou PR #625).
+#[tokio::test]
+async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_custom\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_custom\",\"summary\":[],\"encrypted_content\":\"enc_custom_state\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = Config {
+            provider: Some("pinvou_responses".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: [(
+                    "pinvou_responses".to_string(),
+                    ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        wire: Some("responses".to_string()),
+                        base_url: Some(format!("{}/v1", server.uri())),
+                        api_key: Some("custom-responses-key".to_string()),
+                        model: Some("gpt-6-sol".to_string()),
+                        ..ProviderConfig::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        DeepSeekClient::new(&config).expect("Custom responses client should resolve")
+        // `DeepSeekClient::new` reads the table's `wire` dialect
+        // (`provider_wire_format_for_config`), so this ambient client speaks
+        // Responses; after the runtime-route fix the per-turn
+        // `from_candidate` client carries the same wire.
+    };
+    assert_eq!(client.wire_format, WireFormat::Responses);
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .unwrap();
+    let mut captured = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::ContentBlockDelta {
+            delta: Delta::ReasoningStateDelta { state },
+            ..
+        } = event.unwrap()
+        {
+            captured = Some(state);
+        }
+    }
+
+    let state = captured.expect("encrypted reasoning state delta on the Custom route");
+    assert_eq!(state.provider, ApiProvider::Custom.as_str());
+    assert_eq!(state.api, "openai-responses");
+    assert_eq!(state.id.as_deref(), Some("rs_custom"));
+    assert_eq!(state.encrypted_content, "enc_custom_state");
+}
+
+/// The replay gate matches Custom-tagged reasoning state by provider string
+/// and exact model: an exact match replays the encrypted item, a model
+/// switch or a different provider must not.
+#[test]
+fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() {
+    const SENTINEL: &str = "readable private reasoning must not be replayed";
+    let state = OpaqueReasoningState {
+        provider: ApiProvider::Custom.as_str().to_string(),
+        api: "openai-responses".to_string(),
+        model: "gpt-6-sol".to_string(),
+        id: Some("rs_custom".to_string()),
+        encrypted_content: "enc_custom_payload".to_string(),
+    };
+    let mut request = minimal_responses_request();
+    request.model = "gpt-6-sol".to_string();
+    request.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: SENTINEL.to_string(),
+                signature: None,
+                state: Some(state),
+            }],
+        },
+    );
+
+    let exact = build_responses_body_for_provider(&request, ApiProvider::Custom);
+    let exact_wire = exact.to_string();
+    assert!(!exact_wire.contains(SENTINEL), "{exact}");
+    assert_eq!(exact.pointer("/input/0/type"), Some(&json!("reasoning")));
+    assert_eq!(exact.pointer("/input/0/id"), Some(&json!("rs_custom")));
+    assert_eq!(exact.pointer("/input/0/summary"), Some(&json!([])));
+    assert_eq!(
+        exact.pointer("/input/0/encrypted_content"),
+        Some(&json!("enc_custom_payload"))
+    );
+
+    request.model = "gpt-6-luna".to_string();
+    let switched_model = build_responses_body_for_provider(&request, ApiProvider::Custom);
+    assert!(!switched_model.to_string().contains(SENTINEL));
+    assert!(
+        switched_model
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{switched_model}"
+    );
+}
