@@ -129,7 +129,12 @@ function createTask({ key, kind, title, reattached = false }) {
       reattached,
       lines: [],
       status: 'running',
+      // `error` 是后端原文,`errorKey`/`errorDetail` 是前端这边回灌的结构化错误
+      // (由面板过 i18n 词典)。两套都在初始态列出来,免得「字段不存在」和
+      // 「字段被清成 null」在下游看起来是两回事。
       error: null,
+      errorKey: null,
+      errorDetail: null,
       progress: null,
       speed: null,
       prompt: null,
@@ -272,7 +277,12 @@ function settleTask(id, outcome) {
   // 用户点的取消在底层也是一个 Err,但对用户是两回事:一个是"你自己停的",
   // 一个是"它炸了"。界面不该把两者显示成一样,更不该把取消的任务展开日志吓唬人。
   if (outcome.cancelled) {
-    patch(id, () => ({ status: 'cancelled', error: null, prompt: null }));
+    // 三个错误字段一起清。`errorKey`/`errorDetail` 是取消 / 作答那次 IPC 自己
+    // 失败时回灌的**临时**错误(见 cancelTask、answerTask):它说的是「那一条命令
+    // 没送到」,不是这次运行的结局。只清 `error` 的话,终态卡会挂着一条陈旧的
+    // 「取消没有生效」红字——而这会儿恰恰是真取消成功了——顺带把「已取消」这个
+    // 副标题顶掉,用户看到的是自相矛盾的两句话。
+    patch(id, () => ({ status: 'cancelled', error: null, errorKey: null, errorDetail: null, prompt: null }));
     const result = { ok: false, cancelled: true };
     notifySettled(task, result);
     return result;
@@ -286,7 +296,9 @@ function settleTask(id, outcome) {
   }
   const message = outcome.error ? String(outcome.error) : '';
   // 失败的任务留在面板上并自动展开日志,用户可以看清原因再手动关掉。
-  patch(id, () => ({ status: 'error', error: message, prompt: null, expanded: true }));
+  // 同样要清掉临时的 `errorKey`:真正的失败原因已经写进 `error` 了,残留的
+  // 「取消没有生效」会在词典优先级下盖掉它,让红字行和展开日志各说一套。
+  patch(id, () => ({ status: 'error', error: message, errorKey: null, errorDetail: null, prompt: null, expanded: true }));
   const result = { ok: false, error: message };
   notifySettled(task, result);
   return result;
@@ -301,7 +313,8 @@ function settleTask(id, outcome) {
 function failTask(id, error) {
   const message = String(error?.message || error);
   const task = findTask(id);
-  patch(id, () => ({ status: 'error', error: message, prompt: null, expanded: true }));
+  // 与 settleTask 的失败分支同理:临时的 `errorKey` 不能盖住真正的失败原因。
+  patch(id, () => ({ status: 'error', error: message, errorKey: null, errorDetail: null, prompt: null, expanded: true }));
   notifySettled(task, { ok: false, error: message });
   return message;
 }
@@ -434,20 +447,33 @@ function answerTask(id, value) {
   const pendingPrompt = findTask(id)?.prompt ?? null;
   patch(id, () => ({ prompt: null, status: value === null ? 'cancelling' : 'running' }));
   if (runId) {
-    answerRun(runId, value).catch((e) => {
-      // 答案没送到，而脚本还阻塞在它那次 `read` 上——600 秒后会被
-      // `PROMPT_TIMEOUT` 判死。上面已经把 `prompt` 清掉了，不回灌的话用户看到的
-      // 是「输入框消失了，然后十分钟后任务莫名失败」。
-      //
-      // 把提示原样放回去（让用户能再答一次）并显示原因。同样不走 `failTask`：
-      // 判死这张卡的权力属于轮询循环。
-      patch(id, (task) => ({
-        prompt: task.prompt ?? pendingPrompt,
-        status: task.status === 'cancelling' ? 'running' : task.status,
-        errorKey: 'taskAnswerFailed',
-        errorDetail: String(e?.message || e),
-      }));
-    });
+    // 成败两支都要落状态,所以用两参数的 `then` 而不是 `.then().catch()`——后者
+    // 会让成功支里的异常掉进失败支,把一张好卡渲染成「作答没送达」。
+    answerRun(runId, value).then(
+      () => {
+        // 重试成功了,把上一次「这次作答没有送达」的红字撤掉。没有这一步,一张
+        // 还在跑的卡会一路挂着那句已经不成立的话,直到终态才被清掉。
+        //
+        // **只在 key 仍然是它本人时才清**:这中间用户完全可能点过取消、而那次
+        // 取消又失败了(errorKey 已经变成 taskCancelFailed),无条件清会把那条
+        // 更晚、更要紧的错误一起抹掉。
+        patch(id, (task) => (task.errorKey === 'taskAnswerFailed' ? { errorKey: null, errorDetail: null } : {}));
+      },
+      (e) => {
+        // 答案没送到，而脚本还阻塞在它那次 `read` 上——600 秒后会被
+        // `PROMPT_TIMEOUT` 判死。上面已经把 `prompt` 清掉了，不回灌的话用户看到的
+        // 是「输入框消失了，然后十分钟后任务莫名失败」。
+        //
+        // 把提示原样放回去（让用户能再答一次）并显示原因。同样不走 `failTask`：
+        // 判死这张卡的权力属于轮询循环。
+        patch(id, (task) => ({
+          prompt: task.prompt ?? pendingPrompt,
+          status: task.status === 'cancelling' ? 'running' : task.status,
+          errorKey: 'taskAnswerFailed',
+          errorDetail: String(e?.message || e),
+        }));
+      }
+    );
   }
 }
 

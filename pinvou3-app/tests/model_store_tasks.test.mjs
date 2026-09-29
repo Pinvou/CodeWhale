@@ -23,6 +23,12 @@ const scripts = new Map();
 const callCounts = new Map();
 /** 命令名 -> 要抛的错误文本。用来模拟 IPC 自己失败。 */
 const failCommands = new Map();
+/**
+ * 命令名 -> 一个先要 await 的 Promise。用来把某个 IPC **按住**，好让用例排出
+ * 「上一次作答还悬在半空、用户已经点了取消而取消又失败了」这种真实的交错——
+ * 那正是「作答成功后清 errorKey」必须带条件的理由。
+ */
+const holdCommands = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -45,6 +51,8 @@ globalThis.__TAURI__ = {
         return chunk;
       }
       if (command === 'model_store_cancel_run' || command === 'model_store_answer_run') {
+        const hold = holdCommands.get(command);
+        if (hold) await hold;
         // 让用例能指定「取消/应答这个命令自己失败」——不是「运行已结束」那种正常
         // 落空，而是 IPC 真的没送达。这条路径原先被 `.catch(() => {})` 整个吃掉。
         const boom = failCommands.get(command);
@@ -97,6 +105,7 @@ const taskByRunId = (runId) => getTasks().find((task) => task.runId === runId) |
 afterEach(() => {
   for (const task of [...getTasks()]) dismissTask(task.id);
   failCommands.clear();
+  holdCommands.clear();
 });
 
 /**
@@ -376,4 +385,154 @@ test('run_id 还没落地就点取消：补发失败也要回灌', async () => {
     },
     '补发取消失败后没有回灌——卡片会一直停在「取消中」，而这正是那段注释自己警告的事',
   );
+});
+
+// ------------------------------------------- 回灌的 errorKey 必须在该清时清掉
+//
+// 上面那三条只证明了「IPC 自己失败时错误能浮出来」。反面同样要有守卫：那条错误
+// 是**临时**的，说的是「刚才那条命令没送到」，不是这次运行的结局。从来没有代码
+// 清它的话，会出三种自相矛盾的界面（都是渲染实证过的）：
+//   1. 取消失败后运行真的取消掉了 —— 终态卡挂着陈旧的「取消没有生效」，还把
+//      「已取消」这个副标题顶掉；
+//   2. 作答重试成功后 —— 卡片一路挂着「这次作答没有送达」直到终态；
+//   3. 真实失败落下来时 —— 红字行和展开日志各说一套（一个是真实原因，一个是
+//      陈旧的取消失败）。
+// 对应的清除点：settleTask 的两个终态分支、failTask、以及 answerRun 的成功支。
+
+/**
+ * 造一个「按 finish 标志决定要不要收尾」的日志脚本。
+ * @param {string} runId - 运行 ID。
+ * @param {()=>object|null} outcome - 返回终态字段；返回 null 表示还没结束。
+ * @returns {void} 无返回。
+ */
+function settleOnDemand(runId, outcome) {
+  scripts.set(runId, (from) => {
+    const done = outcome();
+    if (!done) return idleChunk(from);
+    return {
+      lines: [],
+      next: from,
+      done: true,
+      ok: false,
+      cancelled: false,
+      result: null,
+      error: null,
+      awaiting_input: false,
+      ...done,
+    };
+  });
+}
+
+test('取消失败留下的 errorKey，到了 cancelled 终态必须清掉', async () => {
+  let cancelled = false;
+  settleOnDemand('run-stale-cancel', () => (cancelled ? { cancelled: true } : null));
+  failCommands.set('model_store_cancel_run', 'IPC 通道没了');
+
+  const id = await startNeverEndingTask('run-stale-cancel', 'download');
+  cancelTask(id);
+  await waitFor(
+    () => getTasks().find((x) => x.id === id)?.errorKey === 'taskCancelFailed',
+    '取消失败没有回灌，后面这条断言就无从谈起',
+  );
+
+  // 取消其实生效了（或者运行自己跑完、服务端照样记了 cancelled 标记）。
+  cancelled = true;
+  await waitFor(() => getTasks().find((x) => x.id === id)?.status === 'cancelled', '没落到 cancelled 终态');
+
+  const t = getTasks().find((x) => x.id === id);
+  assert.equal(
+    t.errorKey,
+    null,
+    '终态卡还挂着「取消没有生效」——而这会儿恰恰是真取消成功了，红字还会把「已取消」顶掉',
+  );
+  assert.equal(t.errorDetail, null, 'errorDetail 留着，下次词典换个 key 就会把它再显示出来');
+  assert.equal(t.error, null);
+});
+
+test('取消失败留下的 errorKey，到了失败终态也要清 —— 否则真实原因被它盖住', async () => {
+  let failed = false;
+  settleOnDemand('run-stale-fail', () => (failed ? { error: '磁盘空间不足' } : null));
+  failCommands.set('model_store_cancel_run', 'IPC 通道没了');
+
+  const id = await startNeverEndingTask('run-stale-fail', 'download');
+  cancelTask(id);
+  await waitFor(() => getTasks().find((x) => x.id === id)?.errorKey === 'taskCancelFailed', '取消失败没有回灌');
+
+  failed = true;
+  await waitFor(() => getTasks().find((x) => x.id === id)?.status === 'error', '没落到失败终态');
+
+  const t = getTasks().find((x) => x.id === id);
+  assert.equal(t.error, '磁盘空间不足');
+  assert.equal(
+    t.errorKey,
+    null,
+    'errorKey 还在：面板的词典优先级会让红字显示「取消没有生效」，而展开日志里是真实原因，两处打架',
+  );
+  assert.equal(t.errorDetail, null);
+});
+
+test('作答重试成功后，「这次作答没有送达」要自己撤掉', async () => {
+  scripts.set('run-answer-retry', (from) => {
+    if (from === 0) return { lines: ['LMM_PROMPT=text|请输入从机 IP'], next: 1, done: false, awaiting_input: true };
+    return idleChunk(from, { awaiting_input: true });
+  });
+  failCommands.set('model_store_answer_run', '后端连接断了');
+
+  const id = await startNeverEndingTask('run-answer-retry', 'deploy');
+  await waitFor(() => getTasks().find((t) => t.id === id)?.prompt, '提示没出现');
+
+  answerTask(id, '10.0.0.2');
+  await waitFor(
+    () => getTasks().find((x) => x.id === id)?.errorKey === 'taskAnswerFailed',
+    '第一次作答失败没有回灌',
+  );
+
+  // 用户按回车再答一次，这次送到了。
+  failCommands.delete('model_store_answer_run');
+  await waitFor(() => getTasks().find((t) => t.id === id)?.prompt, '提示没放回来，用户没法重答');
+  answerTask(id, '10.0.0.2');
+
+  await waitFor(
+    () => {
+      const t = getTasks().find((x) => x.id === id);
+      return t && t.errorKey === null && t.errorDetail === null;
+    },
+    '作答已经送达了，卡片还挂着「这次作答没有送达」——这句话会一直挂到终态',
+  );
+});
+
+test('作答成功不能顺手抹掉更晚发生的取消失败', async () => {
+  // 这条守的是清除的**条件**：只在 errorKey 仍是 taskAnswerFailed 时才清。
+  // 交错顺序是真实的——作答那次 IPC 还悬着，用户等不及点了取消，取消失败，
+  // 然后作答那次才回来说「其实送到了」。无条件清的话，那条更晚、更要紧的
+  // 「取消没有生效」会被一起抹掉，用户以为取消成功了。
+  scripts.set('run-answer-then-cancel', (from) => {
+    if (from === 0) return { lines: ['LMM_PROMPT=text|请输入从机 IP'], next: 1, done: false, awaiting_input: true };
+    return idleChunk(from, { awaiting_input: true });
+  });
+  let releaseAnswer = null;
+  holdCommands.set('model_store_answer_run', new Promise((resolve) => { releaseAnswer = resolve; }));
+  failCommands.set('model_store_cancel_run', '取消通道断了');
+
+  const id = await startNeverEndingTask('run-answer-then-cancel', 'deploy');
+  await waitFor(() => getTasks().find((t) => t.id === id)?.prompt, '提示没出现');
+
+  answerTask(id, '10.0.0.2');            // 这次 IPC 被按住，还没回来
+  cancelTask(id);                        // 用户等不及，点了取消 —— 而取消失败
+  await waitFor(
+    () => getTasks().find((x) => x.id === id)?.errorKey === 'taskCancelFailed',
+    '取消失败没有回灌',
+  );
+
+  releaseAnswer();                       // 作答那次这才回来，而且是成功
+  // 给成功支的微任务留出执行机会：这里不能用 waitFor（要断言的是「什么都没变」）。
+  await sleep(20);
+
+  const t = getTasks().find((x) => x.id === id);
+  assert.equal(
+    t.errorKey,
+    'taskCancelFailed',
+    '作答成功把更晚的「取消没有生效」一起抹掉了——用户会以为取消生效了，而作业还在跑',
+  );
+  assert.equal(String(t.errorDetail), '取消通道断了');
 });

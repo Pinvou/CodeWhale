@@ -211,9 +211,16 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           {/* 终态失败、以及「还在跑但有错要说」的情况，都走这一条红字。
               后者是取消/作答的 IPC 自己失败时回灌的：任务其实还在跑、状态是
               running，但用户必须看见「取消没有生效」，否则按钮恢复可点却不知道
-              为什么。原先只判 isError，那条错误写进了 state 却没有任何出口。 */}
+              为什么。原先只判 isError，那条错误写进了 state 却没有任何出口。
+
+              渲染的必须是 `errorText` 而不是 `task.error`：上面那三处回灌只写
+              `errorKey`/`errorDetail`，`task.error` 此刻就是 `createTask` 给的
+              `null`。条件判 errorText、渲染体取 task.error 的话这里是一次
+              `null.split`，被 main.jsx 的 ViewErrorBoundary 兜住之后**整个模型
+              商店视图**会被替换成「页面加载失败」。守卫见
+              tests/model_store_task_panel_render.test.mjs。 */}
           {errorText ? (
-            <div className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{task.error.split('\n')[0]}</div>
+            <div className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
           ) : (
             <div className={`mt-0.5 truncate text-[11px] ${TEXT_SECONDARY}`}>{taskSubtitle(task, copy)}</div>
           )}
