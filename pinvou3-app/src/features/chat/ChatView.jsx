@@ -55,7 +55,7 @@ import {
 } from '../remote-control/chat-transcript-projection.mjs';
 import {
   liveRemoteProxyBinding,
-  activeRemoteTaskId,
+  activeLiveRemoteTaskId,
   remoteProxyHandshakeBinding,
   remoteProxyLeaseIdentity,
   remoteProxyModelSelectionIdentity,
@@ -124,13 +124,10 @@ const prefetchChatPanel = (key) => {
 // allowlist aligned with system projection kinds and render only that string;
 // never serialize the source entry, whose non-display fields are not UI data.
 const REMOTE_PROXY_SYSTEM_BODY_KINDS = new Set([
-  'tool',
   'approval',
-  'status',
   'error',
   'attachment',
   'artifact',
-  'snapshot_marker',
 ]);
 
 function remoteProxySystemBody(item) {
@@ -1055,8 +1052,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         ? pendingPermissionCoordinationIds[0]
         : (attachmentCoordinationIds.length === 1 ? attachmentCoordinationIds[0] : '');
       const currentRemoteTaskId = useMemo(
-        () => remoteChatActive ? activeRemoteTaskId(activeSessionId, remoteProxyHistory) : null,
-        [activeSessionId, remoteChatActive, remoteProxyHistory],
+        () => remoteChatActive
+          ? activeLiveRemoteTaskId(activeSessionId, remoteProxyHistory, scopedRemoteConnection)
+          : null,
+        [activeSessionId, remoteChatActive, remoteProxyHistory, scopedRemoteConnection],
       );
       const remoteModelListingRequestIdentity = remoteBinding ? remoteSendIdentity : '';
       const [remoteModelsForBinding, setRemoteModelsForBinding] = useState({ key: '', models: [] });
@@ -1665,7 +1664,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         for (let i = displayChatItems.length - 1; i >= 0; i--) { if (displayChatItems[i].type === 'user') { lastUserId = displayChatItems[i].id; break; } }
         const conversationProjection = projectDeepSeekConversation({
           chatItems: conversationItemsForMode(visibleChatItems),
-          busy,
+          busy: remoteChatActive ? !!currentRemoteTaskId : busy,
           thinking: chatThinking,
           tokens: ctxTokens,
           sessionId: activeSessionId,
@@ -1682,7 +1681,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           if (turns[i].status === 'running') { activeConversationTurn = turns[i]; break; }
         }
         return { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn };
-      }, [displayChatItems, busy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
+      }, [displayChatItems, busy, currentRemoteTaskId, remoteChatActive, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
       const { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn } = derivedConversation;
 
 

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { projectDeepSeekConversation } from '../src/features/conversation/deepseek-conversation.js';
 import {
+  activeLiveRemoteTaskId,
   activeRemoteTaskId,
   liveRemoteProxyBinding,
   mergeSessionStoreHistory,
@@ -70,17 +72,33 @@ test('streamed assistant deltas coalesce per task without crossing reasoning, to
     { journalEpoch: 'e1', sequence: 3, eventId: 'c', kind: 'reasoning', taskId: 'task-1', body: 'think ', attachments: [] },
     { journalEpoch: 'e1', sequence: 4, eventId: 'd', kind: 'reasoning', taskId: 'task-1', body: 'more', attachments: [] },
     { journalEpoch: 'e1', sequence: 5, eventId: 'e', kind: 'assistant_message', taskId: 'task-1', body: ' after reasoning', attachments: [] },
-    { journalEpoch: 'e1', sequence: 6, eventId: 'f', kind: 'tool', taskId: 'task-1', body: 'tool finished', attachments: [] },
-    { journalEpoch: 'e1', sequence: 7, eventId: 'g', kind: 'assistant_message', taskId: 'task-1', body: ' after tool', attachments: [] },
-    { journalEpoch: 'e1', sequence: 8, eventId: 'h', kind: 'error', taskId: 'task-1', body: 'recoverable error', attachments: [] },
-    { journalEpoch: 'e1', sequence: 9, eventId: 'i', kind: 'assistant_message', taskId: 'task-1', body: ' after error', attachments: [] },
+    {
+      journalEpoch: 'e1', sequence: 6, eventId: 'f', kind: 'tool', taskId: 'task-1', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call-1', toolName: 'weather',
+        toolState: 'running', output: null,
+      }),
+    },
+    {
+      journalEpoch: 'e1', sequence: 7, eventId: 'g', kind: 'tool', taskId: 'task-1', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call-1', toolName: 'weather',
+        toolState: 'completed', output: '{"temperature":30}',
+      }),
+    },
+    { journalEpoch: 'e1', sequence: 8, eventId: 'h', kind: 'assistant_message', taskId: 'task-1', body: ' after tool', attachments: [] },
+    { journalEpoch: 'e1', sequence: 9, eventId: 'i', kind: 'error', taskId: 'task-1', body: 'recoverable error', attachments: [] },
+    { journalEpoch: 'e1', sequence: 10, eventId: 'j', kind: 'assistant_message', taskId: 'task-1', body: ' after error', attachments: [] },
   ];
   const running = remoteProxyChatItems('remote-local-1', { localSessionId: 'remote-local-1', entries });
-  assert.deepEqual(running.map(item => [item.type, item.text]), [
+  assert.deepEqual(running.map(item => [
+    item.type,
+    item.type === 'tool' ? [item.name, item.state, item.output] : item.text,
+  ]), [
     ['assistant', 'Hello'],
     ['reasoning', 'think more'],
     ['assistant', ' after reasoning'],
-    ['system', 'tool finished'],
+    ['tool', ['weather', 'done', '{"temperature":30}']],
     ['assistant', ' after tool'],
     ['system', 'recoverable error'],
     ['assistant', ' after error'],
@@ -91,7 +109,7 @@ test('streamed assistant deltas coalesce per task without crossing reasoning, to
   const completed = remoteProxyChatItems('remote-local-1', {
     localSessionId: 'remote-local-1',
     entries: [...entries, {
-      journalEpoch: 'e1', sequence: 10, eventId: 'j', kind: 'status',
+      journalEpoch: 'e1', sequence: 11, eventId: 'k', kind: 'status',
       taskId: 'task-1', body: 'succeeded', attachments: [],
     }],
   });
@@ -99,13 +117,176 @@ test('streamed assistant deltas coalesce per task without crossing reasoning, to
     .every(item => !item.streaming), true, 'a terminal replay renders every response segment as complete');
 });
 
-test('only frozen projection kinds render; permission/tool/error never spoof an assistant reply', () => {
-  const entries = ['tool', 'approval', 'status', 'error', 'attachment', 'artifact', 'snapshot_marker', 'unrecognized']
-    .map((kind, index) => ({ journalEpoch: 'e1', sequence: index + 1, eventId: `event-${index}`, kind, body: kind, attachments: [] }));
+test('tool events reuse native tool items while lifecycle internals stay out of the transcript', () => {
+  const entries = [
+    {
+      journalEpoch: 'e1', sequence: 1, eventId: 'tool-start', kind: 'tool', taskId: 'task-1', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call-1', toolName: 'bash',
+        toolState: 'running', output: null,
+      }),
+    },
+    {
+      journalEpoch: 'e1', sequence: 2, eventId: 'tool-end', kind: 'tool', taskId: 'task-1', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call-1', toolName: 'bash',
+        toolState: 'failed', output: 'Command exited with code 6',
+      }),
+    },
+    ...['approval', 'status', 'error', 'attachment', 'artifact', 'snapshot_marker', 'unrecognized']
+      .map((kind, index) => ({
+        journalEpoch: 'e1', sequence: index + 3, eventId: `event-${index}`,
+        kind, taskId: 'task-1', body: kind, attachments: [],
+      })),
+    {
+      journalEpoch: 'e1', sequence: 10, eventId: 'legacy-tool', kind: 'tool', taskId: 'task-1',
+      body: 'legacy raw tool payload', attachments: [],
+    },
+  ];
   const items = remoteProxyChatItems('remote-local-1', { localSessionId: 'remote-local-1', entries });
-  assert.equal(items.length, 7);
-  assert.equal(items.every(item => item.type === 'system' && item.remoteProxy), true);
-  assert.ok(items.every(item => item.remoteKind !== 'unrecognized'));
+  assert.deepEqual(items.map(item => [item.type, item.remoteKind]), [
+    ['tool', 'tool'],
+    ['system', 'approval'],
+    ['system', 'error'],
+    ['system', 'attachment'],
+    ['system', 'artifact'],
+  ]);
+  assert.deepEqual(items[0], {
+    id: 'remote-proxy:remote-local-1:e1:1:tool-start',
+    type: 'tool',
+    name: 'bash',
+    args: null,
+    output: 'Command exited with code 6',
+    state: 'failed',
+    success: false,
+    remote: true,
+    remoteProxy: true,
+    remoteKind: 'tool',
+    remoteToolId: 'call-1',
+    remoteTaskId: 'task-1',
+    remoteJournalEpoch: 'e1',
+    remoteAttachments: [],
+    createdAt: 1,
+  });
+  assert.equal('taskId' in items[0], false,
+    'remote shell cards must stay read-only instead of exposing the local cancel action');
+  assert.ok(items.every(item => !['status', 'snapshot_marker', 'unrecognized'].includes(item.remoteKind)));
+});
+
+test('structured tool correlation cannot collide when identifiers contain colons', () => {
+  const entries = [
+    {
+      journalEpoch: 'epoch:a', sequence: 1, eventId: 'tool-a', kind: 'tool', taskId: 'task', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call', toolName: 'first',
+        toolState: 'running', output: null,
+      }),
+    },
+    {
+      journalEpoch: 'epoch', sequence: 2, eventId: 'tool-b', kind: 'tool', taskId: 'a:task', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call', toolName: 'second',
+        toolState: 'running', output: null,
+      }),
+    },
+    {
+      journalEpoch: 'epoch:a', sequence: 3, eventId: 'tool-a-end', kind: 'tool', taskId: 'task', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call', toolName: 'first',
+        toolState: 'completed', output: 'first output',
+      }),
+    },
+    {
+      journalEpoch: 'epoch:a', sequence: 4, eventId: 'terminal-a', kind: 'status', taskId: 'task',
+      body: 'succeeded', attachments: [],
+    },
+  ];
+  const tools = remoteProxyChatItems('remote-local-1', {
+    localSessionId: 'remote-local-1', entries,
+  });
+  assert.deepEqual(tools.map(tool => [
+    tool.name, tool.remoteJournalEpoch, tool.remoteTaskId, tool.state,
+  ]), [
+    ['first', 'epoch:a', 'task', 'done'],
+    ['second', 'epoch', 'a:task', 'running'],
+  ]);
+});
+
+test('legacy raw tool end stays hidden at every task terminal without inventing an outcome', () => {
+  for (const terminalState of ['succeeded', 'failed', 'cancelled', 'result_unknown']) {
+    const rawLegacyOutput = `SECRET ${terminalState} raw output that cannot be assigned`;
+    const entries = [
+      { journalEpoch: 'legacy:e1', sequence: 1, eventId: 'user', kind: 'user_message', taskId: 'task:1', body: 'run', attachments: [] },
+      {
+        journalEpoch: 'legacy:e1', sequence: 2, eventId: 'tool-start', kind: 'tool', taskId: 'task:1', attachments: [],
+        body: JSON.stringify({
+          schema: 'remote_tool_display/v1', toolId: 'call:1', toolName: 'bash',
+          toolState: 'running', output: null,
+        }),
+      },
+      {
+        journalEpoch: 'legacy:e1', sequence: 3, eventId: 'legacy-tool-end', kind: 'tool', taskId: 'task:1',
+        body: rawLegacyOutput, attachments: [],
+      },
+      {
+        journalEpoch: 'legacy:e1', sequence: 4, eventId: 'terminal', kind: 'status', taskId: 'task:1',
+        body: terminalState, attachments: [],
+      },
+    ];
+    const historyWithLegacyEnd = { localSessionId: 'remote-local-1', entries };
+    const items = remoteProxyChatItems('remote-local-1', historyWithLegacyEnd);
+    assert.equal(items.some(item => item.type === 'tool'), false, terminalState);
+    assert.doesNotMatch(JSON.stringify(items), new RegExp(rawLegacyOutput), terminalState);
+    assert.equal(activeRemoteTaskId('remote-local-1', historyWithLegacyEnd), null, terminalState);
+  }
+});
+
+test('journal activity keeps the native turn running without a nonterminal status and completes at terminal', () => {
+  const entries = [
+    { journalEpoch: 'e1', sequence: 1, eventId: 'user', kind: 'user_message', taskId: 'task-1', body: 'hello', attachments: [] },
+    { journalEpoch: 'e1', sequence: 2, eventId: 'assistant', kind: 'assistant_message', taskId: 'task-1', body: 'working', attachments: [] },
+    {
+      journalEpoch: 'e1', sequence: 3, eventId: 'tool', kind: 'tool', taskId: 'task-1', attachments: [],
+      body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call-1', toolName: 'search',
+        toolState: 'running', output: null,
+      }),
+    },
+  ];
+  const runningHistory = { localSessionId: 'remote-local-1', entries };
+  const connected = {
+    status: 'connected', localSessionId: 'remote-local-1', sessionRef: 'ref-1', sessionMode: 'chat',
+    connectionId: 'connection-1', controllerLeaseId: 'lease-1', leaseEpoch: 1,
+    relayEpoch: 'relay-1', generation: 'generation-1',
+  };
+  const activeTaskId = activeLiveRemoteTaskId('remote-local-1', runningHistory, connected);
+  assert.equal(activeTaskId, 'task-1');
+  assert.equal(activeLiveRemoteTaskId('remote-local-1', runningHistory, {
+    ...connected, status: 'disconnected',
+  }), null, 'stale incomplete history must not keep an offline conversation busy');
+  const runningItems = remoteProxyChatItems('remote-local-1', runningHistory);
+  const runningTurn = projectDeepSeekConversation({
+    chatItems: runningItems, busy: !!activeTaskId, sessionId: 'remote-local-1',
+  }).turns.at(-1);
+  assert.equal(runningTurn.status, 'running');
+  assert.equal(runningTurn.items.find(item => item.type === 'tool').status, 'in_progress');
+
+  const completedHistory = {
+    localSessionId: 'remote-local-1',
+    entries: [...entries, {
+      journalEpoch: 'e1', sequence: 4, eventId: 'terminal', kind: 'status', taskId: 'task-1',
+      body: 'succeeded', attachments: [],
+    }],
+  };
+  const completedTaskId = activeLiveRemoteTaskId('remote-local-1', completedHistory, connected);
+  assert.equal(completedTaskId, null);
+  const completedItems = remoteProxyChatItems('remote-local-1', completedHistory);
+  const completedTurn = projectDeepSeekConversation({
+    chatItems: completedItems, busy: !!completedTaskId, sessionId: 'remote-local-1',
+  }).turns.at(-1);
+  assert.equal(completedTurn.status, 'completed');
+  assert.equal(completedTurn.items.some(item => item.type === 'tool'), false,
+    'a running card with no recoverable end must not become a successful terminal card');
 });
 
 test('live dispatch needs the same local ID and remote ref; offline projection remains readable', () => {

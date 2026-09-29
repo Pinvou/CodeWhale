@@ -176,12 +176,16 @@ test('only the Rust-verified remote projection renders the single ChatView timel
     'remote Markdown cannot manufacture local persona or question actions');
   assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(item\.text\)/,
     'remote user text cannot be interpreted as a local attachment action');
+  assert.match(chat, /<ToolCard item=\{item\.legacyItem\} sessionId=\{activeSessionId\} t=\{t\} variant="timeline" \/>/,
+    'remote tool items must reuse the ordinary B-side timeline tool renderer');
+  assert.match(chat, /busy: remoteChatActive \? !!currentRemoteTaskId : busy/,
+    'hidden remote task status must still drive the ordinary turn lifecycle');
   assert.equal(remoteProjectionLabelKey('approval'), 'projectionApproval');
   assert.equal(remoteProjectionLabelKey('error'), 'projectionError');
   assert.equal(remoteProjectionLabelKey('unrecognized'), 'projectionEvent');
 });
 
-test('RemoteProxy system entries render only their Rust-sanitized display body', () => {
+test('RemoteProxy system entries exclude tool and lifecycle protocol rows', () => {
   const systemBranch = chat.slice(
     chat.indexOf("if (item.remoteProxy && item.type === 'system')"),
     chat.indexOf("if (item.type === 'artifact_card')"),
@@ -190,8 +194,11 @@ test('RemoteProxy system entries render only their Rust-sanitized display body',
     chat.indexOf('const REMOTE_PROXY_SYSTEM_BODY_KINDS'),
     chat.indexOf('function remoteProxySystemBody'),
   );
-  for (const kind of ['tool', 'approval', 'status', 'error', 'attachment', 'artifact', 'snapshot_marker']) {
+  for (const kind of ['approval', 'error', 'attachment', 'artifact']) {
     assert.match(bodyAllowlist, new RegExp(`'${kind}'`));
+  }
+  for (const kind of ['tool', 'status', 'snapshot_marker']) {
+    assert.doesNotMatch(bodyAllowlist, new RegExp(`'${kind}'`));
   }
   assert.match(systemBranch, /const systemBody = remoteProxySystemBody\(item\)/);
   assert.match(systemBranch, /data-testid="chat-remote-projection-body"[\s\S]*?\{systemBody\}/);
