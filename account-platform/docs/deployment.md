@@ -205,6 +205,11 @@ Compose 单实例使用同一可执行编排入口；它要求 Docker Compose v2
 - `IDENTITY_HTTP_URL`
 - `IDENTITY_PASSWORD_HMAC_KEY_BASE64`（Identity Adapter 专用、至少 32 随机字节的无填充标准 Base64）
 - `REGISTRATION_QUERY_HMAC_KEY_BASE64`（Account 专用、至少 32 随机字节，与密码和短信 HMAC 密钥隔离）
+- `REGISTRATION_BONUS_FINGERPRINT_KEY_ID` / `REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64`（新注册赠送资格专用；标准 Base64 编码的 32 随机字节。该密钥用于手机号终身去重，当前版本不支持直接轮换；不得删除或替换，轮换前必须先提供多密钥别名迁移）
+
+Account 启动时会先以该密钥回填仍可取得手机号的历史成功注册，再把权威状态冻结为 `READY` 或 `BLOCKED`。只有 `READY` 时 Billing 才允许启用策略或产生新赠送；同一 key ID 下替换密钥字节也会被 verifier 拒绝。若发现迁移前已经匿名化、无法恢复手机号的成功注册，严格的终身一次（A 方案）会永久冻结为 `BLOCKED`：管理员可查看不可恢复数量，但不能启用赠送；阻断期间完成的首次注册仍永久占用资格且不补赠。解除该阻断需要另行确认会改变业务语义的 waiver/cutoff 方案，当前实现不会自动放宽。
+
+迁移同时在 `users` 上安装 verified-mobile 写入围栏：只有会在同一 Account 事务写入永久资格事实的新版本注册路径才能提交，因此滚动发布期间仍存活的旧 Pod 会 fail closed，不能在回填扫描后制造漏记窗口。应先应用迁移，再滚动替换 Account；围栏可能让命中旧 Pod 的注册请求暂时失败，客户端可重试到新 Pod。不得在发布过程中移除该触发器。
 - `WALLET_PROVISIONING_POLICY_VERSION`
 - `WALLET_PROVISIONING_SLA_MINUTES`（默认 15 分钟，创建任务时快照）
 - `SMS_PROVIDER=aliyun-managed|http-generated`

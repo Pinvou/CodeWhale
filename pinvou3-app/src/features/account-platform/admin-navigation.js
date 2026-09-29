@@ -5,7 +5,7 @@ export const legacyAdminNavigationGroups = Object.freeze([
   { key: 'identity', sections: ['users', 'roles', 'organizations', 'myorg'] },
   { key: 'finance', sections: ['billing', 'payments', 'products'] },
   { key: 'models', sections: ['tokens'] },
-  { key: 'governance', sections: ['approvals', 'audit', 'system', 'settings'] },
+  { key: 'governance', sections: ['operations', 'approvals', 'audit', 'system', 'settings'] },
 ]);
 
 export const adminModelTokenSections = Object.freeze(['models', 'tokenResources', 'modelOperations']);

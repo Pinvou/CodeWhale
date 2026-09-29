@@ -575,6 +575,9 @@ func (r *PostgresRepository) CreateRechargeProduct(ctx context.Context, input Cr
 			return RechargeProductCatalogItem{}, ErrConflict
 		}
 	}
+	if strings.EqualFold(input.ProductID, registrationBonusProductID) {
+		return RechargeProductCatalogItem{}, ErrConflict
+	}
 	derivedCreditMicrocredits, err := normalizeRechargeProductMicrocredits(&input)
 	if err != nil {
 		return RechargeProductCatalogItem{}, err

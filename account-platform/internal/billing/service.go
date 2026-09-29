@@ -25,21 +25,23 @@ import (
 )
 
 type Service struct {
-	repository                  Repository
-	payments                    *PaymentCoordinator
-	authorizer                  *authorization.Client
-	approvalGate                ApprovalExecutionGate
-	closureStates               AccountClosureStateVerifier
-	callbackAuth                *paymentcallback.Authenticator
-	callbackProfiles            *paymentcallback.Profiles
-	humanDelegations            *humandelegation.Verifier
-	catalog                     RechargeProductCatalogRepository
-	catalogCreateOptions        RechargeProductCreateOptionsRepository
-	impactPricing               impactPriceRepository
-	modelPriceProjectionEnabled bool
-	modelPriceProjectionMetrics *modelPriceProjectionMetrics
-	approvalEffects             ApprovalEffectReader
-	now                         func() time.Time
+	repository                   Repository
+	payments                     *PaymentCoordinator
+	authorizer                   *authorization.Client
+	approvalGate                 ApprovalExecutionGate
+	closureStates                AccountClosureStateVerifier
+	callbackAuth                 *paymentcallback.Authenticator
+	callbackProfiles             *paymentcallback.Profiles
+	humanDelegations             *humandelegation.Verifier
+	catalog                      RechargeProductCatalogRepository
+	catalogCreateOptions         RechargeProductCreateOptionsRepository
+	impactPricing                impactPriceRepository
+	modelPriceProjectionEnabled  bool
+	modelPriceProjectionMetrics  *modelPriceProjectionMetrics
+	approvalEffects              ApprovalEffectReader
+	registrationBonuses          registrationBonusRepository
+	registrationBonusEligibility RegistrationBonusEligibilityVerifier
+	now                          func() time.Time
 }
 
 func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
@@ -52,6 +54,7 @@ func NewService(repository Repository) *Service {
 	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }, modelPriceProjectionMetrics: newModelPriceProjectionMetrics()}
 	service.impactPricing, _ = repository.(impactPriceRepository)
 	service.approvalEffects, _ = repository.(ApprovalEffectReader)
+	service.registrationBonuses, _ = repository.(registrationBonusRepository)
 	return service
 }
 
@@ -80,6 +83,11 @@ func (s *Service) WithAccountClosureStateVerifier(verifier AccountClosureStateVe
 	return s
 }
 
+func (s *Service) WithRegistrationBonusEligibilityVerifier(verifier RegistrationBonusEligibilityVerifier) *Service {
+	s.registrationBonusEligibility = verifier
+	return s
+}
+
 func (s *Service) WithPaymentCallbacks(authenticator *paymentcallback.Authenticator, profiles *paymentcallback.Profiles) *Service {
 	s.callbackAuth = authenticator
 	s.callbackProfiles = profiles
@@ -105,6 +113,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/internal/v1/approval-effects/:approval_request_id", serviceauth.Require("internal.billing.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	protected.GET("/internal/v1/approval-recovery/results/:approval_request_id", serviceauth.Require("internal.billing.approval-result.read"), httpserver.AdaptFunc(s.billingApprovalRecoveryResult))
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
+	protected.POST("/internal/v1/registration-bonus-grants", serviceauth.Require("internal.billing.registration-bonus.provision"), httpserver.AdaptFunc(s.internalProvisionRegistrationBonus))
 	protected.POST("/internal/v1/token-account-wallet-provisioning-receipts", serviceauth.Require("internal.billing.token-account-wallet-provision.execute"), httpserver.AdaptFunc(s.provisionTokenAccountWallet))
 	protected.GET("/internal/v1/token-account-wallet-provisioning-receipts/:command_reference", serviceauth.Require("internal.billing.token-account-wallet-provision.read"), httpserver.AdaptFunc(s.getTokenAccountWalletProvisioningReceipt))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
@@ -161,6 +170,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin := router.Group("/admin/v1")
 		admin.Use(identity.GinMiddleware(adminVerify[0]))
 		admin.GET("/overview", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.read"), httpserver.AdaptFunc(s.adminRegistrationBonusPolicy))
+		admin.PUT("/registration-bonus-policy", s.authorizer.Require("platform.registration-bonus.manage"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_REGISTRATION_BONUS_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRegistrationBonusPolicy))
 		admin.GET("/finance-overviews/accounts", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinanceAccountsOverview))
 		admin.GET("/finance-overviews/payments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinancePaymentsOverview))
 		admin.GET("/finance-overviews/pricing", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminFinancePricingOverview))

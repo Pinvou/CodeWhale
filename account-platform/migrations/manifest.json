@@ -862,6 +862,16 @@
         "file": "000086_admin_sms_configuration.up.sql",
         "version": 86,
         "sha256": "a4051a8c700f1d6871787ec09cce6a7f5c9a4757527cd7d67aa7864fd0ae8aac"
+      },
+      {
+        "file": "000087_registration_bonus_fingerprint.down.sql",
+        "version": 87,
+        "sha256": "51536cdba4eb470a6d3eb226a7e61e6e8f84a15dc57e11852bdba18c6a9e6ca9"
+      },
+      {
+        "file": "000087_registration_bonus_fingerprint.up.sql",
+        "version": 87,
+        "sha256": "1d76a6e9aa6b5fcee84e2eabe8912cbfb8fa53c79ba29ce2bb4c29852be070e1"
       }
     ],
     "billing": [
@@ -1634,6 +1644,16 @@
         "file": "000078_member_quota_membership_version_audit.up.sql",
         "version": 78,
         "sha256": "7bfd7954dcafb71ee711f8cd41df7e0b9b406c9fb88d3e6afd905382da907d5c"
+      },
+      {
+        "file": "000079_registration_bonus.down.sql",
+        "version": 79,
+        "sha256": "56c6319eb573db51e60cb8e8a1a91173b882b4a025c7d6a941f0b01833f027c6"
+      },
+      {
+        "file": "000079_registration_bonus.up.sql",
+        "version": 79,
+        "sha256": "27802b2d3e76e6a42c809d620d3d9833cfaa529d7d5517982318236a56719deb"
       }
     ],
     "payment-simulator": [

@@ -12,6 +12,7 @@ import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { AdminApprovalWorkspace } from './AdminApprovalWorkspace.jsx';
 import { AdminModelTokenWorkspace } from './AdminModelTokenWorkspace.jsx';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
+import { AdminOperationsWorkspace } from './AdminOperationsWorkspace.jsx';
 import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
 import { financeOverviewDrilldown, financeOverviewMetricTimeScope, formatFinanceOverviewValue } from './admin-finance-overview.js';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
@@ -34,6 +35,7 @@ const NAV_ICONS = {
   system: '◉',
   audit: '≡',
   settings: '⚙',
+  operations: '⌘',
 };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
 const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL', 'REPAIR_REQUIRED', 'RETRY', 'COMPENSATION_PENDING', 'BLOCKED']);
@@ -513,7 +515,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           };
         } else if (target === 'billing' || target === 'payments' || target === 'products' || target === 'models' || target === 'tokenResources' || target === 'modelOperations' || target === 'forbidden') {
           next = {};
-        } else if (target === 'approvals' || target === 'settings') {
+        } else if (target === 'approvals' || target === 'settings' || target === 'operations') {
           next = {};
         } else if (target === 'tokens') {
           const [accounts, usage, models, provisionings] = await Promise.all([read('platform.tokens.read', () => client.tokenAccounts(signal)), read('platform.usage.read', () => client.usageRequests(signal)), read('platform.models.read', () => client.catalogModels(signal)), read('platform.tokens.read', () => client.provisionings(signal))]);
@@ -779,7 +781,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     .map((group) => ({ ...group, sections: group.sections.filter((key) => visibleSections.includes(key)) }))
     .filter((group) => group.sections.length > 0);
   const platformPermissions = authorization?.platform_permissions || [];
-  const sectionIsReadOnly = section === 'settings' || section === 'overview' || section === 'forbidden' ? false : adminSectionReadOnly(authorization, section);
+  const sectionIsReadOnly = section === 'settings' || section === 'overview' || section === 'operations' || section === 'forbidden' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
   const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
   const userRoute = section === 'users' ? readAdminUserRoute() : { userID: '' };
@@ -888,8 +890,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             eyebrow={currentGroupLabel}
             title={currentPageTitle}
             subtitle={currentPageLead}
-            updatedAt={['billing', 'payments', 'products', 'approvals', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section) ? null : updatedAt}
-            canRefresh={!['billing', 'payments', 'products', 'approvals', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section)}
+            updatedAt={['billing', 'payments', 'products', 'approvals', 'operations', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section) ? null : updatedAt}
+            canRefresh={!['billing', 'payments', 'products', 'approvals', 'operations', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section)}
             busy={busy}
             copy={copy}
             onRefresh={() => {
@@ -927,6 +929,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'approvals' && <AdminApprovalWorkspace key={JSON.stringify(authorizationVersions(authorization))} client={client} copy={copy} language={language} currentUserID={authorization?.user_id || ''} routeVersion={routeVersion} onNavigate={navigate} visibleSections={visibleSections} modelDetailsEnabled={modelDetailsEnabled} tokenDetailsEnabled={tokenDetailsEnabled} />}
+          {section === 'operations' && <AdminOperationsWorkspace client={client} copy={copy} permissions={platformPermissions} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} client={client} permissions={platformPermissions} />}
           <AdminExtensionSlot section={section} financeTab={financeTab} authorization={authorization} />
         </div>

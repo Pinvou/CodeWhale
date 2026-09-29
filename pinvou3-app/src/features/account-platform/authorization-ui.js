@@ -27,6 +27,7 @@ export const adminSectionPermissions = Object.freeze({
     'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'],
   system: ['platform.system.status.read', 'platform.users.identity.repair'],
   audit: ['platform.audit.read'],
+  operations: ['platform.registration-bonus.read'],
   settings: ['platform.sms-config.read'],
 });
 
@@ -47,6 +48,7 @@ export const adminSectionMutationPermissions = Object.freeze({
     'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'],
   system: ['platform.users.identity.repair'],
   audit: ['platform.audit.export'],
+  operations: ['platform.registration-bonus.manage'],
   settings: ['platform.sms-config.manage'],
 });
 

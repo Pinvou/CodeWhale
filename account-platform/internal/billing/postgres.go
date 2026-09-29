@@ -75,12 +75,20 @@ func (r *PostgresRepository) EnsureWallet(ctx context.Context, ownerType string,
 		return Wallet{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	wallet, created, err := r.ensureWalletWithinTransaction(ctx, tx, ownerType, ownerID)
+	if err != nil {
+		return Wallet{}, false, err
+	}
+	return wallet, created, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) ensureWalletWithinTransaction(ctx context.Context, tx pgx.Tx, ownerType string, ownerID uuid.UUID) (Wallet, bool, error) {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, ownerType+":"+ownerID.String()); err != nil {
 		return Wallet{}, false, err
 	}
 	wallet, err := getWalletByOwner(ctx, tx, ownerType, ownerID)
 	if err == nil {
-		return wallet, false, tx.Commit(ctx)
+		return wallet, false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return Wallet{}, false, err
@@ -97,10 +105,7 @@ func (r *PostgresRepository) EnsureWallet(ctx context.Context, ownerType string,
 	if err == nil {
 		_, err = tx.Exec(ctx, `INSERT INTO ledger_accounts(id, wallet_id, code, account_type, created_at) VALUES ($1, $2, $3, 'WALLET_LIABILITY', $4)`, uuid.Must(uuid.NewV7()), wallet.ID, "wallet:"+wallet.ID.String(), now)
 	}
-	if err != nil {
-		return Wallet{}, false, err
-	}
-	return wallet, true, tx.Commit(ctx)
+	return wallet, err == nil, err
 }
 
 func (r *PostgresRepository) GetWallet(ctx context.Context, walletID uuid.UUID) (Wallet, error) {

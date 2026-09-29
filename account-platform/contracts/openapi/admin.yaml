@@ -672,6 +672,34 @@ paths:
         "200": { $ref: "#/components/responses/BillingOverview" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/registration-bonus-policy:
+    get:
+      operationId: getAdminRegistrationBonusPolicy
+      summary: Read the active new-registration points policy
+      description: Requires platform.registration-bonus.read. Mobile fingerprints and claim facts are never exposed.
+      responses:
+        "200":
+          description: Active immutable policy revision
+          content: { application/json: { schema: { $ref: "#/components/schemas/RegistrationBonusPolicy" } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateAdminRegistrationBonusPolicy
+      summary: Activate a new registration-points policy revision
+      description: Requires platform.registration-bonus.manage and recent authentication. Disabled and zero policies still consume lifetime mobile eligibility at first registration.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RegistrationBonusPolicyUpdate" } } }
+      responses:
+        "200":
+          description: Updated policy or stable idempotent replay
+          content: { application/json: { schema: { $ref: "#/components/schemas/RegistrationBonusPolicy" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/finance-overviews/accounts:
     get:
       operationId: getAdminFinanceAccountsOverview
@@ -3099,6 +3127,29 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    RegistrationBonusPolicy:
+      type: object
+      additionalProperties: false
+      required: [revision, enabled, amount_microcredits, validity_days, updated_at, eligibility_status, recoverable_registration_count, unrecoverable_registration_count]
+      properties:
+        revision: { type: integer, format: int64, minimum: 1 }
+        enabled: { type: boolean }
+        amount_microcredits: { type: integer, format: int64, minimum: 0, multipleOf: 10000 }
+        validity_days: { type: integer, minimum: 1, maximum: 3650 }
+        updated_at: { type: string, format: date-time }
+        eligibility_status: { type: string, enum: [PENDING, READY, BLOCKED, UNAVAILABLE] }
+        recoverable_registration_count: { type: integer, format: int64, minimum: 0 }
+        unrecoverable_registration_count: { type: integer, format: int64, minimum: 0 }
+    RegistrationBonusPolicyUpdate:
+      type: object
+      additionalProperties: false
+      required: [enabled, amount_points, validity_days, expected_revision, reason]
+      properties:
+        enabled: { type: boolean }
+        amount_points: { type: integer, format: int64, minimum: 0 }
+        validity_days: { type: integer, minimum: 1, maximum: 3650 }
+        expected_revision: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 10, maxLength: 500 }
     SMSPurposeTemplates:
       type: object
       additionalProperties: false

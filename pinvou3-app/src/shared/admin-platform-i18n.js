@@ -1590,6 +1590,56 @@ Object.assign(adminPlatformCopy.ja.billing, {
   capabilityLimitations: '現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
 });
 
+const registrationBonusOperationsCopy = {
+  zh: {
+    nav: '运维配置',
+    lead: '管理影响新注册用户的运行策略。策略变更只影响变更后完成的首次注册。',
+    title: '新注册用户赠送积分',
+    revision: '策略版本', updatedAt: '更新时间', enabled: '启用注册赠送', amount: '赠送积分（整数）', validityDays: '有效期（天）',
+    reason: '变更原因', reasonPlaceholder: '至少 10 个字符，说明本次策略变更原因', save: '保存赠送策略', saving: '保存中…', saved: '注册赠送策略已更新。', readOnly: '当前账号只有注册赠送策略查看权限。',
+    lifetimeWarning: '资格按手机号终身计算：首次注册即使策略关闭或赠送为 0，也会永久消耗资格，后续不会补赠。',
+    loadFailed: '无法加载注册赠送策略，请稍后重试。', saveFailed: '注册赠送策略保存失败，请核对输入后重试。', conflict: '策略已被其他管理员更新，请刷新后重新提交。', recentAuthenticationRequired: '该操作要求近期认证，请重新登录后再试。',
+  },
+  en: {
+    nav: 'Operations',
+    lead: 'Manage runtime policies that affect newly registered users. Changes apply only to first registrations completed afterward.',
+    title: 'New-registration points',
+    revision: 'Policy revision', updatedAt: 'Updated at', enabled: 'Enable registration bonus', amount: 'Bonus points (whole)', validityDays: 'Validity (days)',
+    reason: 'Change reason', reasonPlaceholder: 'At least 10 characters describing why this policy is changing', save: 'Save bonus policy', saving: 'Saving…', saved: 'Registration bonus policy updated.', readOnly: 'This account has read-only access to the registration bonus policy.',
+    lifetimeWarning: 'Eligibility is lifetime per mobile number. A first registration permanently consumes eligibility even while disabled or set to zero; no bonus is granted later.',
+    loadFailed: 'Could not load the registration bonus policy.', saveFailed: 'Could not save the registration bonus policy. Check the input and retry.', conflict: 'Another administrator updated this policy. Reload and submit again.', recentAuthenticationRequired: 'Recent authentication is required. Sign in again and retry.',
+  },
+  ja: {
+    nav: '運用設定',
+    lead: '新規登録ユーザーに影響する運用ポリシーを管理します。変更後に完了した初回登録にのみ適用されます。',
+    title: '新規登録ポイント特典',
+    revision: 'ポリシー版', updatedAt: '更新日時', enabled: '登録特典を有効化', amount: '特典ポイント（整数）', validityDays: '有効日数',
+    reason: '変更理由', reasonPlaceholder: '変更理由を10文字以上で入力してください', save: '特典ポリシーを保存', saving: '保存中…', saved: '登録特典ポリシーを更新しました。', readOnly: 'このアカウントは登録特典ポリシーを閲覧のみできます。',
+    lifetimeWarning: '資格は携帯番号ごとに生涯1回です。無効または0ポイントの期間でも初回登録で資格を消費し、後から付与されません。',
+    loadFailed: '登録特典ポリシーを読み込めませんでした。', saveFailed: '登録特典ポリシーを保存できませんでした。入力を確認して再試行してください。', conflict: '別の管理者がポリシーを更新しました。再読み込みして送信してください。', recentAuthenticationRequired: '再認証が必要です。再ログインしてから再試行してください。',
+  },
+};
+Object.assign(registrationBonusOperationsCopy.zh, {
+  eligibilityReady: '历史手机号资格回填已完成，可以启用注册赠送。',
+  eligibilityBlocked: '暂时禁止启用：资格回填未完成，或有 {count} 条已匿名注册记录无法安全恢复。',
+  eligibilityNotReady: '历史手机号资格尚未就绪，不能启用赠送，请先处理上方阻断原因。',
+});
+Object.assign(registrationBonusOperationsCopy.en, {
+  eligibilityReady: 'Historical mobile eligibility backfill is complete. Registration bonuses may be enabled.',
+  eligibilityBlocked: 'Activation is blocked: eligibility backfill is incomplete or {count} anonymized registrations cannot be reconstructed.',
+  eligibilityNotReady: 'The bonus cannot be enabled until historical mobile eligibility is ready. Review the blocker shown above.',
+});
+Object.assign(registrationBonusOperationsCopy.ja, {
+  eligibilityReady: '過去の携帯番号資格のバックフィルが完了しました。登録特典を有効化できます。',
+  eligibilityBlocked: '有効化できません。資格のバックフィルが未完了、または匿名化済み登録 {count} 件を安全に復元できません。',
+  eligibilityNotReady: '過去の携帯番号資格が準備できるまで特典を有効化できません。上記の阻害理由を確認してください。',
+});
+for (const [language, operations] of Object.entries(registrationBonusOperationsCopy)) {
+  adminPlatformCopy[language].nav.operations = operations.nav;
+  adminPlatformCopy[language].pageLeads.operations = operations.lead;
+  adminPlatformCopy[language].operations = operations;
+}
+
 Object.assign(adminPlatformCopy.zh.modelToken, {
   pageOverviews: {
     eyebrow: '分区概览', titles: { models: '模型目录概览', tokenResources: '路由健康概览', modelOperations: '运行与用量概览' },

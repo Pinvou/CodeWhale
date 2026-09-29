@@ -401,7 +401,7 @@ test('workload roles preserve existing permissions and narrowly register credent
 
 const billingWorkloadPermissions = {
   'account-service': [
-    'internal.billing.wallet.ensure', 'internal.billing.account-closure-assessment.read',
+    'internal.billing.wallet.ensure', 'internal.billing.registration-bonus.provision', 'internal.billing.account-closure-assessment.read',
     'internal.billing.account-closure-grants.isolate', 'internal.billing.organization.lifecycle',
     'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
     'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read', 'internal.billing.approval-result.read',

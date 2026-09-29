@@ -21,6 +21,13 @@ type PackageSummary struct {
 	NextExpiryMicrocredits     int64      `json:"next_expiry_microcredits"`
 }
 
+const (
+	registrationBonusProductID       = "REGISTRATION_BONUS"
+	registrationBonusDisplayNameZhCN = "新注册赠送积分"
+	registrationBonusDisplayNameEN   = "New-registration bonus points"
+	registrationBonusDisplayNameJA   = "新規登録特典ポイント"
+)
+
 func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID uuid.UUID, limit int) ([]EntitlementPackage, PackageSummary, error) {
 	if userID == uuid.Nil || walletID == uuid.Nil {
 		return nil, PackageSummary{}, ErrConflict
@@ -28,7 +35,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,ep.source_payment_transaction_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,COALESCE(catalog.display_name_zh_cn,''),COALESCE(catalog.display_name_en,''),COALESCE(catalog.display_name_ja,''),ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id LEFT JOIN recharge_product_catalog_items catalog ON catalog.product_id=ep.product_id WHERE ep.wallet_id=$2 AND (ep.user_id=$1 OR ep.user_id IS NULL) ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit)
+	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,ep.source_payment_transaction_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,COALESCE(system_product.display_name_zh_cn,catalog.display_name_zh_cn,''),COALESCE(system_product.display_name_en,catalog.display_name_en,''),COALESCE(system_product.display_name_ja,catalog.display_name_ja,''),ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id LEFT JOIN recharge_product_catalog_items catalog ON catalog.product_id=ep.product_id LEFT JOIN (VALUES($4::text,$5::text,$6::text,$7::text)) AS system_product(product_id,display_name_zh_cn,display_name_en,display_name_ja) ON system_product.product_id=ep.product_id WHERE ep.wallet_id=$2 AND (ep.user_id=$1 OR ep.user_id IS NULL) ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit, registrationBonusProductID, registrationBonusDisplayNameZhCN, registrationBonusDisplayNameEN, registrationBonusDisplayNameJA)
 	if err != nil {
 		return nil, PackageSummary{}, err
 	}

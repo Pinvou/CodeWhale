@@ -10,6 +10,27 @@ servers:
 security:
   - serviceToken: []
 paths:
+  /internal/v1/registration-bonus-grants:
+    post:
+      servers: [{ url: / }]
+      operationId: provisionRegistrationBonusInternal
+      summary: Atomically ensure a personal wallet and consume lifetime registration-bonus eligibility
+      description: Requires internal.billing.registration-bonus.provision. The caller supplies only a keyed pseudonymous HMAC fingerprint; a disabled or zero policy still consumes eligibility. registration_operation_id is the stable idempotency key and changed replays are rejected.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RegistrationBonusProvisionRequest" } } }
+      responses:
+        "200":
+          description: Stable terminal receipt
+          content: { application/json: { schema: { $ref: "#/components/schemas/RegistrationBonusReceipt" } } }
+        "201":
+          description: New terminal receipt created
+          content: { application/json: { schema: { $ref: "#/components/schemas/RegistrationBonusReceipt" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/approval-effects/{approval_request_id}:
     get:
       servers: [{ url: / }]
@@ -604,6 +625,28 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    RegistrationBonusProvisionRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id, registration_operation_id, fingerprint_key_id, mobile_fingerprint]
+      properties:
+        user_id: { type: string, format: uuid }
+        registration_operation_id: { type: string, format: uuid }
+        fingerprint_key_id: { type: string, minLength: 1, maxLength: 100 }
+        mobile_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+    RegistrationBonusReceipt:
+      type: object
+      additionalProperties: false
+      required: [registration_operation_id, user_id, wallet_id, claim_id, policy_revision, outcome, granted_microcredits, created_at]
+      properties:
+        registration_operation_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        claim_id: { type: string, format: uuid }
+        policy_revision: { type: integer, format: int64, minimum: 1 }
+        outcome: { type: string, enum: [GRANTED, NOT_GRANTED_DISABLED, NOT_GRANTED_ZERO, ALREADY_CLAIMED] }
+        granted_microcredits: { type: integer, format: int64, minimum: 0 }
+        created_at: { type: string, format: date-time }
     BillingApprovalEffectObservation:
       type: object
       additionalProperties: false

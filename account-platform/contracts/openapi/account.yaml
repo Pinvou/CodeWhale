@@ -10,6 +10,32 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/registration-bonus-eligibility/readiness:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: getRegistrationBonusEligibilityReadiness
+      summary: Read the fail-closed historical mobile eligibility backfill state
+      description: Requires internal.registration-bonus-eligibility.read. READY is the only state that permits Billing to enable or execute registration grants. BLOCKED records historical successful registrations whose anonymized mobiles cannot be reconstructed.
+      responses:
+        "200":
+          description: Authoritative Account-side readiness
+          headers: { Cache-Control: { required: true, schema: { type: string, const: no-store } } }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, recoverable_registration_count, unrecoverable_registration_count]
+                properties:
+                  status: { type: string, enum: [PENDING, READY, BLOCKED] }
+                  fingerprint_key_id: { type: string, minLength: 1, maxLength: 100 }
+                  recoverable_registration_count: { type: integer, format: int64, minimum: 0 }
+                  unrecoverable_registration_count: { type: integer, format: int64, minimum: 0 }
+                  completed_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /admin/v2/approval-capability:
     get:
       operationId: getApprovalCapabilityV2

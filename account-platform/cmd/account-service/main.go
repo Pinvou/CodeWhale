@@ -68,6 +68,23 @@ func main() {
 	if err := repository.ConfigureWalletProvisioning(walletPolicyVersion, walletSLA); err != nil {
 		log.Fatal(err)
 	}
+	if enabled("MOBILE_AUTH_ENABLED") {
+		registrationBonusKey, decodeErr := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64")))
+		if decodeErr != nil || len(registrationBonusKey) != 32 {
+			log.Fatal("REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64 must be standard Base64 encoding exactly 32 random bytes")
+		}
+		if err := repository.ConfigureRegistrationBonusFingerprint(valueOrDefault("REGISTRATION_BONUS_FINGERPRINT_KEY_ID", "registration-bonus-v1"), registrationBonusKey); err != nil {
+			log.Fatal(err)
+		}
+		clear(registrationBonusKey)
+		readiness, prepareErr := repository.PrepareRegistrationBonusEligibility(ctx)
+		if prepareErr != nil {
+			log.Fatal("registration bonus eligibility backfill failed: ", prepareErr)
+		}
+		if readiness.Status != "READY" {
+			log.Printf("registration bonus eligibility is %s; policy activation remains blocked (recoverable=%d unrecoverable=%d)", readiness.Status, readiness.RecoverableRegistrationCount, readiness.UnrecoverableRegistrationCount)
+		}
+	}
 	commerceProviderID := valueOrDefault("COMMERCE_PROVIDER_ID", "h3c_mall")
 	commerceAdapterVersion := valueOrDefault("COMMERCE_ADAPTER_VERSION", "h3c-mall-v1")
 	if err := repository.ConfigureCommerceProvider(commerceProviderID, commerceAdapterVersion); err != nil {

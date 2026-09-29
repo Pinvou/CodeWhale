@@ -197,3 +197,7 @@ type Repository interface {
 type WalletProvisioner interface {
 	EnsurePersonalWallet(context.Context, uuid.UUID) error
 }
+
+type RegistrationBonusWalletProvisioner interface {
+	ProvisionRegistrationWallet(context.Context, RegistrationWalletProvisionRequest) error
+}

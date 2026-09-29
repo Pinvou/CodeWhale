@@ -1,7 +1,9 @@
 package account
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -138,6 +140,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.POST("/token-account-authority/snapshot", serviceauth.Require("internal.account.token-owner-authority.check"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
+	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
 	internal.GET("/approval-recovery/plan", serviceauth.Require("internal.approval-recovery.plan"), httpserver.AdaptFunc(s.internalApprovalRecoveryPlan))
 	internal.POST("/approval-recovery/confirm", serviceauth.Require("internal.approval-recovery.confirm"), httpserver.AdaptFunc(s.internalConfirmApprovalRecovery))
 	internal.POST("/approval-recovery/zero-effect", serviceauth.Require("internal.approval-recovery.zero-effect"), httpserver.AdaptFunc(s.internalInvalidateApprovalRecoveryZeroEffect))
@@ -831,6 +834,33 @@ func (p *HTTPWalletProvisioner) EnsurePersonalWallet(ctx context.Context, userID
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("billing wallet provisioning returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (p *HTTPWalletProvisioner) ProvisionRegistrationWallet(ctx context.Context, input RegistrationWalletProvisionRequest) error {
+	endpoint := *p.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/internal/v1/registration-bonus-grants"
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if err := serviceauth.SetAuthorization(request, p.serviceToken); err != nil {
+		return err
+	}
+	request.Header.Set("Idempotency-Key", "registration-bonus:"+input.RegistrationOperationID.String())
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("billing registration wallet provisioning returned HTTP %d", response.StatusCode)
 	}
 	return nil
 }

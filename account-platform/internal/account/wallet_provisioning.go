@@ -2,6 +2,8 @@ package account
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -14,6 +16,16 @@ type WalletProvisioningJob struct {
 	PolicyVersion           string
 	SLAExpiresAt            time.Time
 	Attempts                int
+	RegistrationBonusMode   string
+	FingerprintKeyID        string
+	MobileFingerprint       []byte
+}
+
+type RegistrationWalletProvisionRequest struct {
+	UserID                  uuid.UUID `json:"user_id"`
+	RegistrationOperationID uuid.UUID `json:"registration_operation_id"`
+	FingerprintKeyID        string    `json:"fingerprint_key_id"`
+	MobileFingerprint       string    `json:"mobile_fingerprint"`
 }
 
 type WalletProvisioningRepository interface {
@@ -59,7 +71,18 @@ func (w *WalletProvisioningWorker) RunOnce(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
-		if err := w.wallets.EnsurePersonalWallet(ctx, job.UserID); err != nil {
+		var provisionErr error
+		if job.RegistrationBonusMode == "EVALUATE" {
+			provisioner, ok := w.wallets.(RegistrationBonusWalletProvisioner)
+			if !ok || job.RegistrationOperationID == nil || job.FingerprintKeyID == "" || len(job.MobileFingerprint) != 32 {
+				provisionErr = errors.New("registration bonus provisioning job is invalid")
+			} else {
+				provisionErr = provisioner.ProvisionRegistrationWallet(ctx, RegistrationWalletProvisionRequest{UserID: job.UserID, RegistrationOperationID: *job.RegistrationOperationID, FingerprintKeyID: job.FingerprintKeyID, MobileFingerprint: hex.EncodeToString(job.MobileFingerprint)})
+			}
+		} else {
+			provisionErr = w.wallets.EnsurePersonalWallet(ctx, job.UserID)
+		}
+		if provisionErr != nil {
 			if failErr := w.repository.FailWalletProvisioning(context.WithoutCancel(ctx), job.UserID, "BILLING_UNAVAILABLE"); failErr != nil {
 				return failErr
 			}
@@ -84,7 +107,7 @@ WITH candidates AS (
 )
 UPDATE wallet_provisioning_jobs j SET status='LEASED',lease_until=$1+$3::interval,updated_at=$1
 FROM candidates c WHERE j.user_id=c.user_id
-RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_at,j.attempts`, r.now(), limit, lease.String())
+RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_at,j.attempts,j.registration_bonus_mode,j.registration_bonus_fingerprint_key_id,j.registration_bonus_fingerprint`, r.now(), limit, lease.String())
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +115,7 @@ RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_a
 	jobs := make([]WalletProvisioningJob, 0, limit)
 	for rows.Next() {
 		var job WalletProvisioningJob
-		if err := rows.Scan(&job.UserID, &job.RegistrationOperationID, &job.PolicyVersion, &job.SLAExpiresAt, &job.Attempts); err != nil {
+		if err := rows.Scan(&job.UserID, &job.RegistrationOperationID, &job.PolicyVersion, &job.SLAExpiresAt, &job.Attempts, &job.RegistrationBonusMode, &job.FingerprintKeyID, &job.MobileFingerprint); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -114,7 +137,7 @@ func (r *PostgresRepository) CompleteWalletProvisioning(ctx context.Context, use
 	if _, err := tx.Exec(ctx, `UPDATE users SET status='ACTIVE',version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('PROVISIONING','REPAIR_REQUIRED')`, userID, now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE wallet_provisioning_jobs SET status='COMPLETED',lease_until=NULL,completed_at=$2,last_error_code=NULL,updated_at=$2 WHERE user_id=$1`, userID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE wallet_provisioning_jobs SET status='COMPLETED',lease_until=NULL,completed_at=$2,last_error_code=NULL,updated_at=$2,registration_bonus_mode='NOT_APPLICABLE',registration_bonus_fingerprint_key_id=NULL,registration_bonus_fingerprint=NULL WHERE user_id=$1`, userID, now); err != nil {
 		return err
 	}
 	if operationID != nil {

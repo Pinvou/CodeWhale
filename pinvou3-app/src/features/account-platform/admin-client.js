@@ -233,6 +233,12 @@ export class AdminPlatformClient {
   updateSMSConfiguration(input, idempotencyKey = `sms-configuration-${secureRequestID()}`, signal) {
     return this.mutate('account', '/admin/v1/sms-configuration', 'PUT', input, idempotencyKey, signal);
   }
+  registrationBonusPolicy(signal) {
+    return this.request('billing', '/admin/v1/registration-bonus-policy', signal);
+  }
+  updateRegistrationBonusPolicy(input, idempotencyKey = `registration-bonus-${secureRequestID()}`, signal) {
+    return this.mutate('billing', '/admin/v1/registration-bonus-policy', 'PUT', input, idempotencyKey, signal);
+  }
   roles(signal) {
     return this.request('account', '/admin/v1/roles', signal);
   }

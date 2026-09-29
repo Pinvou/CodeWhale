@@ -42,6 +42,8 @@ const (
 	PermissionPlatformBillingRepairsRequest      = "platform.billing.repairs.request"
 	PermissionPlatformSMSConfigRead              = "platform.sms-config.read"
 	PermissionPlatformSMSConfigManage            = "platform.sms-config.manage"
+	PermissionPlatformRegistrationBonusRead       = "platform.registration-bonus.read"
+	PermissionPlatformRegistrationBonusManage     = "platform.registration-bonus.manage"
 	PermissionPersonalSessionLogin               = "personal.session.login"
 	PermissionPersonalProfileRead                = "personal.profile.read"
 	PermissionPersonalProfileUpdate              = "personal.profile.update"

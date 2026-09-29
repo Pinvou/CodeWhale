@@ -45,9 +45,21 @@ type PostgresRepository struct {
 	// approvalPresenterReady remains nil until GSA-12 installs the closed
 	// command presenters. Directory entries fail closed instead of advertising
 	// a command whose versioned detail cannot yet be rendered safely.
-	approvalPresenterReady    func(approvalpolicy.Policy) bool
-	approvalPagination        approvalPaginationRuntime
-	approvalPaginationMetrics *ApprovalPaginationMetrics
+	approvalPresenterReady            func(approvalpolicy.Policy) bool
+	approvalPagination                approvalPaginationRuntime
+	approvalPaginationMetrics         *ApprovalPaginationMetrics
+	registrationBonusFingerprintKeyID string
+	registrationBonusFingerprintKey   []byte
+}
+
+func (r *PostgresRepository) ConfigureRegistrationBonusFingerprint(keyID string, key []byte) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" || len(keyID) > 100 || len(key) != 32 {
+		return errors.New("registration bonus fingerprint requires a key id and exactly 32 random bytes")
+	}
+	r.registrationBonusFingerprintKeyID = keyID
+	r.registrationBonusFingerprintKey = append(r.registrationBonusFingerprintKey[:0], key...)
+	return nil
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -96,6 +108,7 @@ func (r *PostgresRepository) WithApprovalProofSource(source ApprovalProofSource)
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
 func (r *PostgresRepository) Close() {
+	clear(r.registrationBonusFingerprintKey)
 	if r.approvalWriterPool != nil && r.approvalWriterPool != r.pool {
 		r.approvalWriterPool.Close()
 	}

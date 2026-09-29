@@ -6,7 +6,7 @@ import YAML from 'yaml';
 const read = name => readFile(new URL(`../../${name}`, import.meta.url), 'utf8');
 const consume = 'internal.approval-authorization.consume';
 const expected = {
-  'billing-service': ['internal.authorization.check', consume, 'internal.approval-execution.begin', 'internal.approval-execution.complete', 'internal.account-closure-state.read'],
+  'billing-service': ['internal.authorization.check', consume, 'internal.approval-execution.begin', 'internal.approval-execution.complete', 'internal.account-closure-state.read', 'internal.registration-bonus-eligibility.read'],
   'token-gateway': ['internal.authorization.check', 'internal.authorization.delegate', 'internal.client-compatibility.read', 'internal.token-owner-candidates.read', 'internal.account.token-owner-authority.check'],
   'token-command-executor': ['internal.authorization.check', consume, 'internal.approval-execution.begin', 'internal.approval-execution.complete'],
   'token-credential-portal': ['internal.authorization.check'],

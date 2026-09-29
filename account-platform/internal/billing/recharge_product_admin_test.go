@@ -154,6 +154,15 @@ func TestReplacementCreateRequiresDistinctPublishedSourceVersionBeforeDatabaseAc
 	}
 }
 
+func TestCreateRechargeProductRejectsReservedRegistrationBonusIDBeforeDatabaseAccess(t *testing.T) {
+	repository := &PostgresRepository{}
+	input := validRechargeProductForEditTests()
+	input.ProductID = "registration_bonus"
+	if _, err := repository.CreateRechargeProduct(t.Context(), input); !errors.Is(err, ErrConflict) {
+		t.Fatalf("err=%v, want ErrConflict before database access", err)
+	}
+}
+
 func TestDraftUpdateRequiresBothCatalogAndDraftVersionsBeforeDatabaseAccess(t *testing.T) {
 	repository := &PostgresRepository{}
 	input := validRechargeProductForEditTests()

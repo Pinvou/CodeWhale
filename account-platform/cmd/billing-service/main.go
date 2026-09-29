@@ -71,11 +71,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	registrationBonusEligibility, err := billing.NewHTTPRegistrationBonusEligibilityVerifier(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal(err)
+	}
 	modelPriceProjectionEnabled, err := optionalBooleanEnvironment("BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED", false)
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates).WithAdminModelPriceProjection(modelPriceProjectionEnabled)
+	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates).WithRegistrationBonusEligibilityVerifier(registrationBonusEligibility).WithAdminModelPriceProjection(modelPriceProjectionEnabled)
 	humanDelegationKeys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal(err)

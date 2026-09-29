@@ -302,6 +302,20 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	if mobileExists {
 		return RegistrationOperation{}, ErrMobileAlreadyRegistered
 	}
+	fingerprintKeyID, fingerprint, err := r.registrationBonusFingerprint(operation.Mobile)
+	if err != nil {
+		return RegistrationOperation{}, err
+	}
+	var eligibilityStatus, eligibilityKeyID string
+	if err = tx.QueryRow(ctx, `SELECT status,COALESCE(fingerprint_key_id,'') FROM registration_bonus_eligibility_state WHERE singleton=TRUE FOR SHARE`).Scan(&eligibilityStatus, &eligibilityKeyID); err != nil {
+		return RegistrationOperation{}, err
+	}
+	if eligibilityKeyID != "" && eligibilityKeyID != fingerprintKeyID {
+		return RegistrationOperation{}, errors.New("registration bonus eligibility fingerprint key mismatch")
+	}
+	if _, err = tx.Exec(ctx, `SELECT set_config('pinvou.registration_bonus_capable','1',true)`); err != nil {
+		return RegistrationOperation{}, err
+	}
 	rawUserCode, err := insertUserWithGeneratedCode(ctx, tx, func(database pgx.Tx, candidate string) error {
 		_, insertErr := database.Exec(ctx, `INSERT INTO users(id,user_code,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,$2,'PROVISIONING',$3,$3,$4,$5,$5,$5)`, operation.CandidateUserID, candidate, operation.Username, operation.Mobile, now)
 		return insertErr
@@ -318,9 +332,19 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	if err = enqueueCommerceCustomerSync(ctx, tx, "USER", operation.CandidateUserID, operation.Mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
 		return RegistrationOperation{}, err
 	}
+	eligibilityInsert, err := tx.Exec(ctx, `INSERT INTO registration_bonus_mobile_eligibility(mobile_fingerprint,fingerprint_key_id,first_user_id,source,created_at) VALUES($1,$2,$3,'REGISTRATION',$4) ON CONFLICT(mobile_fingerprint) DO NOTHING`, fingerprint, fingerprintKeyID, operation.CandidateUserID, now)
+	if err != nil {
+		return RegistrationOperation{}, err
+	}
+	bonusMode := registrationBonusMode(eligibilityStatus, eligibilityInsert.RowsAffected() == 1)
+	var jobFingerprintKeyID *string
+	var jobFingerprint []byte
+	if bonusMode == "EVALUATE" {
+		jobFingerprintKeyID, jobFingerprint = &fingerprintKeyID, fingerprint
+	}
 	if _, err = tx.Exec(ctx, `
-INSERT INTO wallet_provisioning_jobs(user_id,registration_operation_id,status,policy_version,sla_expires_at,next_attempt_at,created_at,updated_at)
-VALUES($1,$2,'PENDING',$3,$4,$5,$5,$5)`, operation.CandidateUserID, operation.ID, r.walletPolicyVersion, now.Add(r.walletProvisioningSLA), now); err != nil {
+INSERT INTO wallet_provisioning_jobs(user_id,registration_operation_id,status,policy_version,sla_expires_at,next_attempt_at,created_at,updated_at,registration_bonus_mode,registration_bonus_fingerprint_key_id,registration_bonus_fingerprint)
+VALUES($1,$2,'PENDING',$3,$4,$5,$5,$5,$6,$7,$8)`, operation.CandidateUserID, operation.ID, r.walletPolicyVersion, now.Add(r.walletProvisioningSLA), now, bonusMode, jobFingerprintKeyID, jobFingerprint); err != nil {
 		return RegistrationOperation{}, err
 	}
 	if err := appendOutbox(ctx, tx, "account.wallet.provisioning.requested.v1", operation.CandidateUserID, 1, map[string]any{"user_id": operation.CandidateUserID, "registration_operation_id": operation.ID, "policy_version": r.walletPolicyVersion}); err != nil {
