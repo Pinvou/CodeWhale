@@ -1496,6 +1496,151 @@ async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaqu
     );
 }
 
+/// A Chat-wire Custom table must not capture encrypted reasoning even if a
+/// Responses-shaped stream reaches `handle_responses_stream`: the capture
+/// gate keys on the transport's wire, not just on the stream's event shape.
+#[tokio::test]
+async fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_chat\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_chat\",\"summary\":[],\"encrypted_content\":\"enc_chat_state\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = Config {
+            provider: Some("pinvou_chat_table".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: [(
+                    "pinvou_chat_table".to_string(),
+                    ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        // No `wire`: the legacy table default is the Chat
+                        // transport.
+                        base_url: Some(format!("{}/v1", server.uri())),
+                        api_key: Some("custom-chat-key".to_string()),
+                        model: Some("vendor-model".to_string()),
+                        ..ProviderConfig::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        DeepSeekClient::new(&config).expect("Custom chat client should resolve")
+    };
+    assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("request prepares"),
+        )
+        .await
+        .unwrap();
+    let mut captured = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::ContentBlockDelta {
+            delta: Delta::ReasoningStateDelta { state },
+            ..
+        } = event.unwrap()
+        {
+            captured = Some(state);
+        }
+    }
+    assert!(
+        captured.is_none(),
+        "a Chat-wire Custom table must not mint opaque reasoning state: {captured:?}"
+    );
+}
+
+/// A reasoning item without (or with an empty) `encrypted_content` must not
+/// be captured — replaying an empty blob would poison every later turn —
+/// but the stream itself keeps flowing and closes the block.
+#[tokio::test]
+async fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted_content() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_missing\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_missing\",\"summary\":[]}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_empty\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_empty\",\"summary\":[],\"encrypted_content\":\"\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = Config {
+            provider: Some("pinvou_responses".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: [(
+                    "pinvou_responses".to_string(),
+                    ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        wire: Some("responses".to_string()),
+                        base_url: Some(format!("{}/v1", server.uri())),
+                        api_key: Some("custom-responses-key".to_string()),
+                        model: Some("gpt-6-sol".to_string()),
+                        ..ProviderConfig::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        DeepSeekClient::new(&config).expect("Custom responses client should resolve")
+    };
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .unwrap();
+    let mut captured = None;
+    let mut blocks_closed = 0;
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ReasoningStateDelta { state },
+                ..
+            } => captured = Some(state),
+            StreamEvent::ContentBlockStop { .. } => blocks_closed += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        captured.is_none(),
+        "missing or empty encrypted_content must not be captured: {captured:?}"
+    );
+    assert_eq!(blocks_closed, 2, "both reasoning blocks still close");
+}
+
 /// The replay gate matches Custom-tagged reasoning state by endpoint-scoped
 /// provider tag and exact model: an exact table+model match replays the
 /// encrypted item, while a model switch, a different table, or a different

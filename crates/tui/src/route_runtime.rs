@@ -1891,6 +1891,23 @@ mod custom_wire_override_tests {
         }
     }
 
+    /// A typo'd dialect (`wire = "respones"`) must degrade to the legacy
+    /// Chat default, not fail the config and not half-resolve to another
+    /// wire. Pinned so the silent-degrade contract in the shared dialect
+    /// parser stays deliberate.
+    #[test]
+    fn forkguard_named_table_unrecognized_wire_keeps_the_chat_default() {
+        let config = custom_table_config(
+            Some("respones"),
+            "https://relay.example.test/v1",
+            "vendor-model",
+        );
+        assert_eq!(custom_wire_override_for(&config), None);
+        let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("vendor-model"))
+            .expect("named table resolves");
+        assert_eq!(route.candidate.protocol(), WireFormat::ChatCompletions);
+    }
+
     /// Build one config carrying two named custom tables: the ambient
     /// selection (`config.provider`) and a second table a persisted identity
     /// can pin. Each table has a distinct base URL so the test can prove the

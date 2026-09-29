@@ -398,7 +398,15 @@ pub(crate) fn route_is_valid_for_model(
         },
         limit_overrides: Vec::new(),
 
-        wire_override: None,
+        // Validate the same wire the per-turn route would mint: read the
+        // validated provider's own table dialect, not the global selection.
+        wire_override: (kind == codewhale_config::ProviderKind::Custom)
+            .then(|| {
+                configured.and_then(|entry| {
+                    codewhale_config::provider::wire_dialect_override(entry.wire.as_deref())
+                })
+            })
+            .flatten(),
     };
     RouteResolver::new()
         .resolve(&request)
