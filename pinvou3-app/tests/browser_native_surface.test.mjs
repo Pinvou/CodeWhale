@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync as readFileRaw } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
+
+// 读进来就把行尾归一成 LF。
+//
+// 这个文件的断言靠换行锚定 Rust 源码结构（例如 `&str =` 后面紧跟换行再接字面量），
+// 而 core.autocrlf=true 的 Windows 检出里这些 .rs 是 CRLF——`=` 后跟的是 CR+LF，
+// 正则匹配不上，报出来却是「某某断言不成立」，读的人会去查一个不存在的问题。
+// CI 在 Linux 上全绿，所以这个坑只在本地显形。
+//
+// 归一放在读取这一层而不是逐个改正则：这个文件有多个读取点，以后新加的断言自动
+// 受益，不用每次都记得。（同款处理见 tauri_cross_build_gate.test.js。）
+const readFileSync = (...args) => readFileRaw(...args).replaceAll('\r\n', '\n');
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const browserView = readFileSync(

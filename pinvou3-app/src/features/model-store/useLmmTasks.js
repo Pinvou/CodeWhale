@@ -231,7 +231,8 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
     cancelRun(runId).catch((e) => {
       patch(id, (task) => ({
         status: task.status === 'cancelling' ? 'running' : task.status,
-        error: `取消没有生效：${String(e?.message || e)}`,
+        errorKey: 'taskCancelFailed',
+        errorDetail: String(e?.message || e),
       }));
     });
   }
@@ -413,7 +414,8 @@ function cancelTask(id) {
       // `running` 让按钮重新可点，并把原因显示出来。
       patch(id, (task) => ({
         status: task.status === 'cancelling' ? 'running' : task.status,
-        error: `取消没有生效：${String(e?.message || e)}`,
+        errorKey: 'taskCancelFailed',
+        errorDetail: String(e?.message || e),
       }));
     });
   } else {
@@ -445,7 +447,8 @@ function answerTask(id, value) {
       patch(id, (task) => ({
         prompt: task.prompt ?? pendingPrompt,
         status: task.status === 'cancelling' ? 'running' : task.status,
-        error: `这次作答没有送达：${String(e?.message || e)}`,
+        errorKey: 'taskAnswerFailed',
+        errorDetail: String(e?.message || e),
       }));
     });
   }
