@@ -3983,6 +3983,10 @@ impl AcpPool {
                             runtime.lifecycle.generation()
                         ),
                     );
+                    // 与卡死分支同理：回收侧事件先落盘，替代实例的 bridge 才能
+                    // 从 journal 尾部播种到正确的 seq。死亡实例的缓冲要等最后
+                    // 一个 bridge 克隆（stderr 任务）释放才隐式排空，不可依赖。
+                    runtime.bridge.flush_journal();
                 }
             }
             RuntimeLookup::Missing => {}
