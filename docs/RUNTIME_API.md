@@ -1136,13 +1136,18 @@ approval is resolved by a client decision, by interrupting the turn, or when
 the engine goes away. (Runtime shutdown can also resolve it via
 `RuntimeThreadManager::shutdown`, but no host invokes that API yet — it is
 exercised by tests until a host wires it into its exit path.) Every
-resolution is published as `approval.decided` so clients can clear pending
-UI. A resolution forced by an
+resolution of an approval whose `approval.required` event was published is
+itself published as `approval.decided` so clients can clear pending UI. (If
+the `approval.required` event itself fails to publish, the pending
+registration is rolled back, the tool call is denied, and the turn ends in
+error with no `approval.decided` — no client ever saw the request.) A
+resolution forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
 actually made never carries `interrupted`. `approval.decided` also carries
 `posture` when an execution-policy posture rather than a human forced the
-outcome; it is `null` for every other decision. A decision posted to
+outcome; it is absent for every other decision on the raw event stream, and
+the compat `/v1/stream` maps the absent field to `null`. A decision posted to
 `/v1/approvals/{id}` either resolves the approval (and is published as that
 decision) or is rejected with 404 — it is never accepted and then replaced by
 an interrupted deny. `approval.timeout` and the `timeout`

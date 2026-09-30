@@ -442,8 +442,10 @@ Per-server settings:
   finishes, so slow tools need this raised, not `read_timeout`. `read_timeout`
   bounds the response wait of quick requests (`resources/read`, discovery, …);
   a `tools/call` wait is automatically widened to at least its `execute_timeout`.
-  The budget applies per leg (send, then read): a server that drains its input
-  barely within the budget can push the total toward twice `execute_timeout`.
+  For stdio servers the budget applies per leg (send, then read): a server that
+  drains its input barely within the budget can push the total toward twice
+  `execute_timeout`. An HTTP server is bounded by a single total timeout of
+  `max(read_timeout, execute_timeout)` for the whole exchange.
 - `disabled` (bool, optional)
 - `enabled` (bool, optional, default `true`)
 - `required` (bool, optional): startup/connect validation fails if this server cannot initialize.
