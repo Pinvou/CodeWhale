@@ -407,6 +407,8 @@ command_protocol!(
         "web_access_status",
         "web_access_rotate",
         "web_access_relay_settings",
+        "desktop_remote_endpoint_profiles",
+        "desktop_remote_set_endpoint_profile",
         "web_access_set_relay",
         "web_access_reset_relay",
         "web_access_bridge_ready",

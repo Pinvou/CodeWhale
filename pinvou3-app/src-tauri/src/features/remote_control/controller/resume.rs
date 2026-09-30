@@ -348,9 +348,12 @@ impl ControllerResumeGate {
     }
 
     fn deadline_is_current(&self, now_b: u64, watchdog_deadline_b: Option<u64>) -> bool {
+        // The Relay-issued resume deadline is the immutable upper bound. A
+        // newer liveness proof may legitimately move the watchdog beyond it;
+        // that must neither invalidate the remaining resume budget nor extend
+        // the immutable bound.
         now_b < self.original_deadline_b
-            && watchdog_deadline_b
-                .is_none_or(|deadline| deadline <= self.original_deadline_b && now_b < deadline)
+            && watchdog_deadline_b.is_none_or(|deadline| now_b < deadline)
     }
 
     fn ensure_activation(&self, activation_id: &str) -> std::result::Result<(), ResumeStateError> {
@@ -699,6 +702,31 @@ mod tests {
             "controller_resume_phase_invalid"
         );
         assert_eq!(expired.phase(), ResumePhase::Terminated);
+    }
+
+    #[test]
+    fn a_later_watchdog_deadline_cannot_invalidate_or_extend_the_resume_budget() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease(),
+            [5; 32],
+            [6; 32],
+            30_000,
+        );
+
+        // A fresh liveness proof may move the watchdog beyond the immutable
+        // resume budget. It must not invalidate a disconnect that still falls
+        // inside that budget.
+        gate.disconnect(19_000, Some(48_000)).unwrap();
+        assert_eq!(gate.phase(), ResumePhase::Disconnected);
+
+        // The immutable Relay-issued budget remains the hard upper bound even
+        // when the watchdog would otherwise permit a later transition.
+        assert_eq!(
+            gate.prepare(30_000, Some(48_000)).unwrap_err().code,
+            "controller_resume_phase_invalid"
+        );
+        assert_eq!(gate.phase(), ResumePhase::Terminated);
     }
 
     #[test]

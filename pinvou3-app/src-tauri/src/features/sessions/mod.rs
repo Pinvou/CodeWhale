@@ -38,6 +38,7 @@
 //! modules. The pub surface is re-exported centrally in this file, keeping
 //! external call paths unchanged.
 
+pub(crate) mod application;
 pub(crate) mod diagnostics;
 mod injections;
 pub(crate) mod mode_state;

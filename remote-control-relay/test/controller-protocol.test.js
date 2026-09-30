@@ -36,6 +36,7 @@ import {
   controllerLogProjection,
   negotiateControllerCapabilities,
   parseControllerPairingTranscript,
+  parseControllerWireJson,
   parseSealedCodeV1,
   receiptCommitmentHex,
   validateControllerBaseUrl,
@@ -161,6 +162,29 @@ test("controller v1 fixture freezes registries and contract hash", () => {
   const changedFixture = structuredClone(fixture);
   changedFixture.legacy_web_v2.web_client_join.after_seq = 8;
   assert.notEqual(canonicalControllerContractHash(changedFixture), CONTROLLER_CONTRACT_SHA256);
+});
+
+test("protocol documentation anchors match the executable registries and digests", async () => {
+  const document = await readFile(new URL("../PROTOCOL.md", import.meta.url), "utf8");
+  const capabilityList = document.match(/The frozen capability values are ([\s\S]*?)\. Unknown capabilities/u)?.[1];
+  const errorList = document.match(/Controller error envelopes use only these codes: ([\s\S]*?)\.\r?\nMalformed schema/u)?.[1];
+  assert.ok(capabilityList);
+  assert.ok(errorList);
+  const quoted = (value) => [...value.matchAll(/`([^`]+)`/gu)].map((match) => match[1]);
+  assert.deepEqual(quoted(capabilityList), CONTROLLER_CAPABILITIES);
+  assert.deepEqual(quoted(errorList), CONTROLLER_ERROR_CODES);
+  assert.match(document, new RegExp("Its complete-v1 digest is\\s+`" + fixture.capability_vector.sha256 + "`"));
+  assert.match(document, new RegExp("The contract digest is\\s+`" + CONTROLLER_CONTRACT_SHA256 + "`"));
+  assert.match(document, /standalone declaration, so clients must not send it to the live router/u);
+  assert.match(document, /A's `controller_pairing_claim`\s+carry their capability lists/u);
+});
+
+test("raw controller JSON rejects duplicate keys before object construction", () => {
+  for (const item of fixture.duplicate_raw_json_examples) {
+    const validator = item.target === "message" ? validateControllerMessage : validateControllerPayload;
+    assertProtocolError(item.expected_error, () => parseControllerWireJson(item.raw_json), item.name);
+    assertProtocolError(item.expected_error, () => validator(item.raw_json, item.sender_role), item.name);
+  }
 });
 
 test("every outer message has an exhaustive transport-role matrix", () => {
@@ -591,7 +615,8 @@ test("controller v1 is explicitly gated beside the unchanged live v2 dispatcher"
   const server = await readFile(new URL("../server.js", import.meta.url), "utf8");
   assert.equal(server.includes("protocol-controller"), true);
   assert.equal(server.includes("PINVOU_DESKTOP_CONTROLLER_ENABLED"), true);
-  assert.equal(server.includes("msg.v === 1 && controllerRuntime"), true);
+  assert.equal(server.includes("msg.v === 1 && ws.protocol === CONTROLLER_SUBPROTOCOL"), true);
+  assert.equal(server.includes("ws.protocol !== CONTROLLER_SUBPROTOCOL"), true);
   assert.equal(server.includes("msg.v !== 2"), true);
   for (const type of ["desktop_endpoint_register", "desktop_endpoint_registered", "web_client_join", "web_client_joined"]) {
     assert.equal(server.includes(`\"${type}\"`), true, `live v2 contains ${type}`);

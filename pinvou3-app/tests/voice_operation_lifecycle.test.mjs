@@ -426,6 +426,10 @@ for (const lane of ['desktop', 'web']) {
           pendingModeScopeMigrationRef: { current: null }, pinvouModeStateRef: { current: null },
           hasReadyAttachment: false, visualPosterSceneActive: false, documentWritingSceneActive: preparing,
           personalWorkbenchSceneActive: false, dataVisualizationSceneActive: false, pptDesignSceneActive: false,
+          controlledChatActive: false, controlledLinkReady: false,
+          controlledSession: { sessionId: null },
+          remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
+          remoteSendIdentity: null, effectiveRemoteModelSource: null,
           createDocumentWritingMessageMeta: () => ({ pinvouScene: 'work:document-writing' }),
           requiredCapabilitiesForMeta, prepareSceneCapabilities, canPrepareSceneCapabilities: () => true,
           isWeb: lane === 'web', can: () => true, setSceneCapabilityStatus() {},
@@ -468,11 +472,12 @@ for (const lane of ['desktop', 'web']) {
         const setEnd = chat.indexOf('\n      const [artifactsOpen', setStart);
         const sendStart = chat.indexOf('      const sendChatMessage = useCallback(');
         const sendEnd = chat.indexOf('\n      // ConversationTimeline', sendStart);
+        const dispatchStart = chat.indexOf('      const dispatchChatMessage = useCallback(');
+        const dispatchEnd = chat.indexOf('      const openRemoteSession = useCallback(', dispatchStart);
         const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
         const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
         const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');
-        const dispatchStart = chat.indexOf('      const dispatchChatMessage = useCallback(');
-        vm.runInContext(`${chat.slice(setStart, setEnd)}\n${chat.slice(dispatchStart, sendStart)}\n${chat.slice(sendStart, sendEnd)}\n${task}\nthis.setInput = setInputText;`, ctx);
+        vm.runInContext(`${chat.slice(setStart, setEnd)}\n${chat.slice(dispatchStart, dispatchEnd)}\n${chat.slice(sendStart, sendEnd)}\n${task}\nthis.setInput = setInputText;`, ctx);
         ctx.adapterRef = { current: { targetId: 'chat-composer', setDraft: ctx.setInput,
           getDraft: () => ctx.inputTextRef.current, sendTask: ctx.voiceTask,
           onTaskAccepted: () => { accepted += 1; ctx.setInput(''); } } };
@@ -500,7 +505,8 @@ for (const lane of ['desktop', 'web']) {
         if (prefillPending) {
           ctx.prefill = h.state.composerPrefill.text;
           ctx.prefillAppend = h.state.composerPrefill.append;
-          const effectStart = chat.indexOf('      useEffect(() => {\n        if (prefill)');
+          const prefillCondition = chat.indexOf('        if (prefill)');
+          const effectStart = chat.lastIndexOf('      useEffect(() => {', prefillCondition);
           const effectEnd = chat.indexOf('}, [prefill, prefillAppend]);', effectStart) + '}, [prefill, prefillAppend]);'.length;
           vm.runInContext(chat.slice(effectStart, effectEnd), ctx);
         } else if (draftSyncPending) {

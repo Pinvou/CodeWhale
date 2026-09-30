@@ -34,6 +34,10 @@ const bridgeMessages = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'shared', 'bridge-messages.js'),
   'utf8'
 );
+const remoteControlState = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'features', 'remote-control', 'remote-control-state.js'),
+  'utf8'
+);
 const tauriBridge = [bridgeMessages]
   .concat(tauriBridgeFeatureNames.map(name => fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge', `${name}.js`), 'utf8')))
   .concat(fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge.js'), 'utf8'))
@@ -503,7 +507,7 @@ assert.ok(
   'an older autosave completion must not flash an error over newer pending edits'
 );
 assert.ok(
-  /editable=\{!busy && !isMultiAgentReadOnly && item\.id === lastUserId\}/.test(indexHtml) &&
+  /editable=\{!busy && !isMultiAgentReadOnly && !item\.remote && item\.id === lastUserId\}/.test(indexHtml) &&
     !/async function editLastTurn\(newText\)[\s\S]{0,420}isScheduledRunSession\(state\.activeSessionId\)\) return false/.test(tauriBridge) &&
     !indexHtml.includes('定时运行使用创建时锁定的模型'),
   'a scheduled run opened from history should use the ordinary chat editor and composer controls'
@@ -904,6 +908,9 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
     TextDecoder: TextDecoder,
     Uint8Array: Uint8Array,
   };
+  // Match index.html: the shared state reducer is installed before either
+  // platform bridge consumes the desktopRemoteControl domain.
+  vm.runInNewContext(remoteControlState, context, { filename: "remote-control-state.js" });
   vm.runInNewContext(
     bridgeKind === "web" ? webBridge : tauriBridge,
     context,
@@ -1146,6 +1153,10 @@ async function lostFirstWebSessionChunkStillHasCancellableLease() {
 async function subscriptionSnapshotsAvoidTranscriptDeepClone() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
+  // The desktop remote-control feature restores its authoritative controller
+  // status in a microtask when the bridge is installed. Let that startup
+  // publication settle so this assertion measures only createNewSession.
+  await tick();
   var chatUpdates = [];
   var combinedUpdates = [];
   var unsubscribeChat = bridge.state.subscribe("chat", function (snapshot) {
@@ -1265,6 +1276,7 @@ async function reentrantSubscriptionNotificationsStayOrdered() {
 async function persistentSubscriptionSnapshotsPreserveJsonEdges() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
+  await tick(); // settle the bridge's initial desktop controller-status publication
   var snapshots = [];
   var negativeZero = true;
   function settingsResult() {

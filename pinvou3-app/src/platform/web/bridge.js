@@ -295,11 +295,15 @@
     // 保证 getMany 不抛 unknown slice；真正的 UI 入口由 desktopRemoteControl
     // capability=false 隐藏。
     controlledDevice: null,
+    controlledSession: { sessionId: null, sessionRef: null, generation: null },
     controllerConnection: null,
     remoteCapabilities: null,
     remoteModels: [],
     remoteHistories: [],
     tasks: [],
+    transcript: [],
+    controlledTasks: [],
+    controlledTranscript: [],
     remotePermissions: [],
     // 依赖体检(设置页): deps = [{key, installed, apt}], null = 尚未检测
     deps: null,

@@ -1,16 +1,95 @@
 //! Frozen desktop-to-desktop controller protocol v1 model.
 //!
-//! DEV-00 deliberately keeps this module disconnected from the live Relay and
-//! Tauri command paths. Later tasks may consume these validators after their
-//! state machines and cryptography are implemented.
+//! DEV-00 defines the wire contract. Later controller tasks connect these
+//! validators through the feature-gated Relay and Tauri command paths.
 
 use std::collections::HashSet;
 use std::fmt;
 
 use base64::Engine as _;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
+struct UniqueJson(Value);
+
+impl<'de> Deserialize<'de> for UniqueJson {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct UniqueVisitor;
+        impl<'de> Visitor<'de> for UniqueVisitor {
+            type Value = UniqueJson;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("JSON with unique object keys")
+            }
+            fn visit_bool<E: de::Error>(self, value: bool) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::Bool(value)))
+            }
+            fn visit_i64<E: de::Error>(self, value: i64) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::Number(value.into())))
+            }
+            fn visit_u64<E: de::Error>(self, value: u64) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::Number(value.into())))
+            }
+            fn visit_f64<E: de::Error>(self, value: f64) -> std::result::Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|number| UniqueJson(Value::Number(number)))
+                    .ok_or_else(|| E::custom("invalid JSON number"))
+            }
+            fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::String(value.to_owned())))
+            }
+            fn visit_string<E: de::Error>(
+                self,
+                value: String,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::String(value)))
+            }
+            fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::Null))
+            }
+            fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+                Ok(UniqueJson(Value::Null))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element::<UniqueJson>()? {
+                    values.push(value.0);
+                }
+                Ok(UniqueJson(Value::Array(values)))
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut values = Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if values.contains_key(&key) {
+                        return Err(de::Error::custom("duplicate object key"));
+                    }
+                    values.insert(key, map.next_value::<UniqueJson>()?.0);
+                }
+                Ok(UniqueJson(Value::Object(values)))
+            }
+        }
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+}
+
+fn parse_unique_json(input: &str) -> Result<Value> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    let value = UniqueJson::deserialize(&mut deserializer)
+        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    deserializer
+        .end()
+        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    Ok(value.0)
+}
+
 pub(crate) const CONTROLLER_PROTOCOL_VERSION: u64 = 1;
+pub(crate) const CONTROLLER_SUBPROTOCOL: &str = "pinvou-desktop-controller-v1";
 pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ENCRYPTED_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_DECRYPTED_PAYLOAD_BYTES: usize = 512 * 1024;
@@ -25,7 +104,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
+    "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1465,8 +1544,7 @@ pub(crate) fn validate_controller_message_json_in_context(
     if input.len() > MAX_ENCRYPTED_WIRE_BYTES {
         return Err(ControllerProtocolError::new("message_too_large", "json"));
     }
-    let value: Value = serde_json::from_str(input)
-        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    let value = parse_unique_json(input)?;
     let object = as_object(&value, "message")?;
     let kind = message_kind(object, "message")?;
     let schema = message_schema(kind)
@@ -1521,8 +1599,7 @@ pub(crate) fn validate_controller_payload_json_in_context(
     if input.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
         return Err(ControllerProtocolError::new("message_too_large", "json"));
     }
-    let value: Value = serde_json::from_str(input)
-        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    let value = parse_unique_json(input)?;
     let object = as_object(&value, "payload")?;
     let kind = message_kind(object, "payload")?;
     let schema = payload_schema(kind)
@@ -1817,8 +1894,10 @@ pub(crate) fn validate_controller_registration_message_json(
     sender_role: SenderRole,
     context: &RegistrationValidationContext,
 ) -> Result<Value> {
-    let candidate: Value = serde_json::from_str(input)
-        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    if input.len() > MAX_CONTROL_MESSAGE_BYTES {
+        return Err(ControllerProtocolError::new("message_too_large", "json"));
+    }
+    let candidate = parse_unique_json(input)?;
     if candidate.get("type").and_then(Value::as_str) == Some("desktop_pairing_register")
         && candidate.get("registration_request_id")
             == context.request.get("registration_request_id")
@@ -3553,8 +3632,7 @@ pub(crate) fn validate_controller_liveness_payload_json(
     if input.len() > MAX_CONTROL_MESSAGE_BYTES {
         return Err(ControllerProtocolError::new("message_too_large", "json"));
     }
-    let value: Value = serde_json::from_str(input)
-        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    let value = parse_unique_json(input)?;
     let liveness_schema = nested_schema("controller_liveness_a");
     let object = exact_nested(
         &value,
@@ -3843,8 +3921,9 @@ mod tests {
         });
         json!({
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
-            "subprotocol": "pinvou-desktop-controller-v1",
+            "subprotocol": CONTROLLER_SUBPROTOCOL,
             "integer_wire_format": "canonical-u64-decimal-string",
+            "json_object_keys": "unique-after-unescape",
             "limits": {
                 "max_control_message_bytes": MAX_CONTROL_MESSAGE_BYTES,
                 "max_encrypted_frame_bytes": MAX_ENCRYPTED_FRAME_BYTES,
@@ -4878,6 +4957,21 @@ mod tests {
     #[test]
     fn roles_unknown_fields_and_size_limits_fail_closed() {
         let fixture = fixture();
+        for item in fixture["duplicate_raw_json_examples"].as_array().unwrap() {
+            let raw = item["raw_json"].as_str().unwrap();
+            let sender = role(item["sender_role"].as_str().unwrap());
+            let error = if item["target"] == "message" {
+                validate_controller_message_json(raw, sender).unwrap_err()
+            } else {
+                validate_controller_payload_json(raw, sender).unwrap_err()
+            };
+            assert_eq!(
+                error.code,
+                item["expected_error"].as_str().unwrap(),
+                "{}",
+                item["name"]
+            );
+        }
         for item in fixture["invalid_wire_examples"].as_array().unwrap() {
             let encoded = serde_json::to_string(&item["value"]).unwrap();
             let sender = role(item["sender_role"].as_str().unwrap());

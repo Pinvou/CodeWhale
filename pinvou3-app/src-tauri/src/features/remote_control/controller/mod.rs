@@ -12,6 +12,7 @@ pub(crate) mod history;
 pub(crate) mod journal;
 pub(crate) mod liveness;
 pub(crate) mod permission;
+pub(crate) mod ports;
 pub(crate) mod protocol;
 pub(crate) mod relay_transport;
 pub(crate) mod relay_runtime;

@@ -251,6 +251,7 @@ STAGE="本地检查"
 echo "── 本地检查 ──"
 node --check "$RELAY_DIR/server.js"
 node --check "$RELAY_DIR/telemetry-service.js"
+node --check "$RELAY_DIR/behavior-telemetry-schema.js"
 if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
   echo "构建共享 WebUI"
   (cd "$ROOT/pinvou3-app" && PINVOU_REMOTE_PUBLIC_BASE_PATH="$BASE_PATH" npm run build:web)
@@ -271,9 +272,16 @@ echo "── 上传 relay 代码到 $RELAY_SERVER:$TEST_DIR(暂存 + 整体替�
 # 注意:清单必须覆盖 relay 根目录的全部运行期模块——controller-*.js / enrollment-*.js /
 # pairing-*.js / relay-state-store.js 等是 server.js 按需动态 import 的运行时依赖,
 # 漏传会让启用 controller lane 的实例启动即 ERR_MODULE_NOT_FOUND(2026-09-19 实测踩坑)。
-relay_js_files="$(cd "$RELAY_DIR" && ls *.js)"
+# behavior-telemetry-schema.js 是 telemetry-service.js 的静态依赖，显式列入
+# artifact；其余根目录 JS 仍作为同一发布单元全量收集，避免后续新增模块漏传。
+relay_js_files=()
+while IFS= read -r relay_js_file; do
+  if [[ "$relay_js_file" != "behavior-telemetry-schema.js" ]]; then
+    relay_js_files+=("$relay_js_file")
+  fi
+done < <(cd "$RELAY_DIR" && printf '%s\n' *.js)
 tar -czf - -C "$RELAY_DIR" \
-  $relay_js_files package.json package-lock.json web/dist web/stats.html \
+  "${relay_js_files[@]}" behavior-telemetry-schema.js package.json package-lock.json web/dist web/stats.html \
   -C "$ROOT" docs/schemas/behavior-telemetry-v1.schema.json docs/schemas/behavior-telemetry-registries.json \
   | relay_ssh "cat > '$TEST_DIR.staging.tar.gz.tmp' && mv '$TEST_DIR.staging.tar.gz.tmp' '$TEST_DIR.staging.tar.gz'"
 

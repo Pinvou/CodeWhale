@@ -2687,6 +2687,11 @@ mod tests {
             paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
         let manager = ControlledDeviceManager::default();
         let operation = manager.start(None, Vec::new()).unwrap();
+        // `controlled_monotonic_millis` has a process-wide origin. Anchor the
+        // fixture to the current clock so a long-running/full test suite does
+        // not turn this otherwise-valid resume lease into an expired one.
+        let now_b = controlled_monotonic_millis();
+        let resume_deadline_b = now_b.saturating_add(30_000);
         // 租约的 generation 必须与本代一致（complete_connected 会据此校验）。
         let lease_context = LeaseContext {
             remote_control_generation: operation.generation().to_owned(),
@@ -2698,9 +2703,9 @@ mod tests {
                 ControlledRegistration {
                     pairing_code: "2345678".into(),
                     sealed_code_b64: "sealed".into(),
-                    expires_at_ms: 30_000,
+                    expires_at_ms: resume_deadline_b,
                 },
-                1_000,
+                now_b,
             )
             .unwrap();
         manager.mark_claimed(operation.clone()).unwrap();
@@ -2710,11 +2715,11 @@ mod tests {
                 ControlledLease {
                     context: lease_context.clone(),
                     liveness_epoch_a: "live-a-1".into(),
-                    resume_deadline_b: 30_000,
+                    resume_deadline_b,
                     resume_token: [1; 32],
                     transport_key_fingerprint: [2; 32],
                     controller_device_name: "Controller PC".into(),
-                    connected_at_b: 3_000,
+                    connected_at_b: now_b,
                     negotiated_capabilities: vec![
                         "encrypted_frames_v1".into(),
                         "resume_v1".into(),
